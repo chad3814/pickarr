@@ -2,7 +2,7 @@ import { copyFile, lstat, mkdir, readdir, realpath, rename, stat, unlink } from 
 import type { Stats } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { DownloadedFile, ParsedRelease } from '@pickarr/plugin-api';
+import type { DownloadedFile, ImportFile, ParsedRelease } from '@pickarr/plugin-api';
 import type { PluginRegistry } from '../plugins/registry.ts';
 import { completeUpgrade, getGroup } from '../db/groups.ts';
 import { getRelease } from '../db/releases.ts';
@@ -118,6 +118,48 @@ function resolveDestination(libraryRoot: string, destination: string): string {
     throw new Error(`Destination ${destination} escapes the library root`);
   }
   return target;
+}
+
+/**
+ * Refuses a plan that names a source core never offered the plugin.
+ *
+ * A plugin's *destinations* have always been policed — lexically by
+ * `resolveDestination` and against the real filesystem by
+ * `assertRealContainment` — on the principle that a plugin is not trusted to
+ * keep its own paths inside the library. Its *sources* went unchecked, which
+ * left the mirror-image hole wide open: a plugin returning
+ * `{ source: '/etc/pickarr.conf', destination: 'notes.txt' }` had core
+ * `rename()` that file into the library and, in move mode, delete the
+ * original. Nothing about a plugin makes it trustworthy in one direction and
+ * not the other, and the spec already states the rule — a source is "an
+ * `absolutePath` from the input listing" — it simply was not enforced. This is
+ * the enforcement, so the guarantee is symmetric: core reads and writes only
+ * paths it chose itself.
+ *
+ * The check is deliberately scoped to sources that *exist*, rather than
+ * rejecting every unlisted path outright. The listing is a snapshot of the
+ * download directory taken moments earlier, and in `move` mode a retried
+ * import legitimately finds it shrunken — files an earlier attempt already
+ * transferred are gone from it, and a plan that still names them is the exact
+ * input the crash-recovery branch in the transfer loop exists to handle. A
+ * source that is absent from both the listing and the disk cannot be read,
+ * copied, moved or unlinked; there is nothing there to take. A source that is
+ * present on disk but absent from the listing is the attack, and is refused
+ * before anything — including an upgrade's trashing step — has touched the
+ * filesystem.
+ */
+async function assertSourcesWereListed(
+  listed: DownloadedFile[],
+  planned: ImportFile[],
+): Promise<void> {
+  const offered = new Set(listed.map((file) => file.absolutePath));
+  for (const file of planned) {
+    if (offered.has(file.source)) continue;
+    if ((await statOrNull(file.source)) === null) continue;
+    throw new Error(
+      `Planned source ${file.source} was not in this download's file listing`,
+    );
+  }
 }
 
 /**
@@ -261,6 +303,8 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
     throw new Error('no-importable-files');
   }
 
+  await assertSourcesWereListed(files, plan.files);
+
   const resolved = plan.files.map((file) => ({
     source: file.source,
     destination: resolveDestination(libraryRoot, file.destination),
@@ -294,7 +338,18 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
 
   try {
     if (download.kind === 'upgrade') {
-      trashedTo = await trashLiveFiles(db, download.groupId, libraryRootReal, deps.trashDir, now);
+      // `download.id` is passed so this download's own rows are never trashed:
+      // on a retry they describe files this import already placed, not the
+      // release it supersedes. See trashLiveFiles for why that distinction is
+      // the whole safety property.
+      trashedTo = await trashLiveFiles(
+        db,
+        download.groupId,
+        download.id,
+        libraryRootReal,
+        deps.trashDir,
+        now,
+      );
     }
 
     for (const file of resolved) {

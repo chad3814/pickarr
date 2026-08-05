@@ -102,11 +102,25 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     untracked: deps.untrackedFor(deps.defaultClient.id),
   }));
 
+  // Retry is only ever meaningful for a `failed` row, and it is actively
+  // dangerous for the others. Resetting a row that is still `queued`,
+  // `downloading`, `completed` or `importing` races the reconcile tick that
+  // owns it; resetting an `imported` upgrade re-runs an import whose work is
+  // already done, which is the one operation in the system that starts by
+  // moving files out of the library. The SPA only offers the control on a
+  // failed row, but "the UI does not offer it" is not an access rule — the
+  // API is the boundary, so the check belongs here.
   server.post('/api/downloads/:id/retry', async (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Invalid id' });
-    if (getDownload(db, params.data.id) === null) {
+    const existing = getDownload(db, params.data.id);
+    if (existing === null) {
       return reply.code(404).send({ error: 'No such download' });
+    }
+    if (existing.status !== 'failed') {
+      return reply
+        .code(409)
+        .send({ error: `Only a failed download can be retried; this one is ${existing.status}` });
     }
 
     const download = resetForRetry(db, params.data.id, deps.now());

@@ -1,12 +1,24 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { createScheduler } from '../../src/pipeline/scheduler.ts';
+import { createScheduler, RECONCILE_INTERVAL_MS } from '../../src/pipeline/scheduler.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
-import type { UntrackedEntry } from '../../src/pipeline/reconcile.ts';
+import type { ReconcileResult, UntrackedEntry } from '../../src/pipeline/reconcile.ts';
 
 const UNTRACKED: UntrackedEntry[] = [
   { ref: 'foreign', name: 'Not Ours', state: 'downloading', percentage: 10 },
 ];
+
+const NO_RECONCILE_WORK: ReconcileResult = {
+  untracked: [],
+  advanced: 0,
+  failed: 0,
+  imported: 0,
+};
+
+/** Yields to the macrotask queue so already-scheduled promise work can run. */
+async function settle(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
 
 test('reconcileNow caches the untracked snapshot for later reads', async () => {
   const db = openTestDatabase();
@@ -51,6 +63,63 @@ test('a reconcile failure is logged and does not throw out of the tick', async (
   await scheduler.reconcileNow();
   assert.ok(logged.some((line) => line.includes('sab unreachable')));
   db.close();
+});
+
+// Imports run inside a reconcile tick and can take minutes. A fixed 10s timer
+// keeps firing throughout, and a queueing mutex would turn a five-minute
+// import into ~30 stacked ticks that all run back-to-back the moment it
+// finishes, each issuing its own pair of client requests. Ticks are samples,
+// not work items: one that lands on a busy mutex has nothing to contribute
+// that the next one won't, so it is dropped.
+test('a timer tick that lands while a reconcile is still running is dropped, not queued', async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  const db = openTestDatabase();
+  let calls = 0;
+  let finishFirstTick: () => void = () => {};
+  const inFlight = new Promise<void>((resolve) => {
+    finishFirstTick = resolve;
+  });
+
+  const scheduler = createScheduler({
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => {
+      calls += 1;
+      await inFlight;
+      return NO_RECONCILE_WORK;
+    },
+    clientIds: ['sab'],
+    log: () => {},
+  });
+
+  try {
+    scheduler.start();
+
+    mock.timers.tick(RECONCILE_INTERVAL_MS);
+    await settle();
+    assert.equal(calls, 1, 'the first tick starts a reconcile');
+
+    // Three more ticks while the first is still blocked.
+    for (let tick = 0; tick < 3; tick += 1) mock.timers.tick(RECONCILE_INTERVAL_MS);
+    await settle();
+    assert.equal(calls, 1, 'ticks arriving during a run must not start a second one');
+
+    finishFirstTick();
+    await settle();
+    assert.equal(calls, 1, 'and must not have queued up behind it either');
+
+    // Not wedged: the next tick after the run finishes still works.
+    mock.timers.tick(RECONCILE_INTERVAL_MS);
+    await settle();
+    assert.equal(calls, 2);
+  } finally {
+    scheduler.stop();
+    mock.timers.reset();
+    db.close();
+  }
 });
 
 test('an ingest failure on one feed does not stop the others', async () => {

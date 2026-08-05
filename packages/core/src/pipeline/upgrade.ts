@@ -5,7 +5,20 @@ import { liveFilesForGroup, markTrashed } from '../db/imported-files.ts';
 import { isContained, lstatOrNull } from './import.ts';
 
 /**
- * Moves a group's live imported files into the trash directory.
+ * Moves a group's live imported files into the trash directory — every one of
+ * them *except* those `importingDownloadId` itself recorded.
+ *
+ * That exclusion is what makes this operation safe to repeat. An import is
+ * retried whenever it is interrupted between its transfer loop and its final
+ * status write (a crash plus boot recovery, an operator retry), and on the
+ * second pass the rows the first pass inserted are indistinguishable, to a
+ * plain "live files of this group" query, from the rows of the old release
+ * being superseded. Trashing them moves this download's freshly imported files
+ * out of the library and leaves the transfer loop with nothing to re-place —
+ * the group ends up claiming a release whose files are all in trash. Scoping
+ * the query to *other* downloads' rows states the real rule: an upgrade
+ * supersedes what came before it, never its own output. No generation counter
+ * is needed because a download's id already is one.
  *
  * Trash-first ordering is required by the caller because the replacement
  * usually wants the same destination path as the file it supersedes: the old
@@ -73,11 +86,12 @@ import { isContained, lstatOrNull } from './import.ts';
 export async function trashLiveFiles(
   db: DatabaseSync,
   groupId: number,
+  importingDownloadId: number,
   libraryRootReal: string,
   trashDir: string,
   now: number,
 ): Promise<string | null> {
-  const live = liveFilesForGroup(db, groupId);
+  const live = liveFilesForGroup(db, groupId, importingDownloadId);
   if (live.length === 0) return null;
 
   const destinationDir = join(trashDir, String(groupId), String(now));

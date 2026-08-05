@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
+import type { DisplayFields, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { ingestEntries } from '../../src/ingest/ingest.ts';
 import { findGroup, getGroup } from '../../src/db/groups.ts';
@@ -196,6 +196,122 @@ test('a plugin that throws does not stop the batch', () => {
     ]),
     /boom/,
   );
+  db.close();
+});
+
+// --- Plugin misbehaviour beyond parse() -------------------------------------
+//
+// Everything a plugin hands back crosses a boundary the type system does not
+// police, so `parse` throwing is only one of the ways a plugin can be wrong.
+// Each case below used to abort the whole batch — rolling back the poison
+// entry's own feed_items row, so the same item re-threw on every subsequent
+// tick and every later entry in the feed was never reached. The spec's promise
+// is that plugin failures land in the worklist as a parse_error; these pin
+// that promise to the plugin as a whole, not to one method of it.
+
+/**
+ * Produces a value the compiler accepts as `DisplayFields` but that violates
+ * the shape at runtime — exactly what a third-party plugin can hand back,
+ * since nothing type-checks a plugin's return value at the boundary.
+ */
+function malformedDisplay(json: string): DisplayFields {
+  return JSON.parse(json) as DisplayFields;
+}
+
+test('a plugin whose score throws records a parse_error and lets later entries through', () => {
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = {
+    ...PLUGIN,
+    score(quality) {
+      if (quality.resolution === 666) throw new Error('score exploded');
+      return quality.resolution ?? 0;
+    },
+  };
+
+  const result = ingestEntries(
+    db,
+    plugin,
+    FEED,
+    [entry('g1', 'poison|666'), entry('g2', 'alpha|1080')],
+    1000,
+  );
+
+  assert.equal(result.parseErrors, 1);
+  assert.equal(result.releasesAdded, 1);
+  assert.match(
+    String(db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.[
+      'parse_error'
+    ]),
+    /score exploded/,
+  );
+  // The poison item is persisted, so the feed does not re-serve it forever.
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM feed_items').get()?.['n']), 2);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM releases').get()?.['n']), 1);
+  db.close();
+});
+
+test('a plugin returning a non-finite score records a parse_error rather than a failed insert', () => {
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = { ...PLUGIN, score: () => Number.NaN };
+
+  const result = ingestEntries(db, plugin, FEED, [entry('g1', 'alpha|1080')], 1000);
+
+  assert.equal(result.parseErrors, 1);
+  assert.equal(result.releasesAdded, 0);
+  assert.match(
+    String(db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.[
+      'parse_error'
+    ]),
+    /finite/,
+  );
+  db.close();
+});
+
+test('a plugin returning a display with no fields records a parse_error', () => {
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = {
+    ...PLUGIN,
+    parse: (name): ParsedRelease | null =>
+      name.startsWith('poison')
+        ? { identityKey: 'poison', display: malformedDisplay('{"title":"P"}'), quality: {} }
+        : PLUGIN.parse(name),
+  };
+
+  const result = ingestEntries(
+    db,
+    plugin,
+    FEED,
+    [entry('g1', 'poison|1080'), entry('g2', 'beta|1080')],
+    1000,
+  );
+
+  assert.equal(result.parseErrors, 1);
+  assert.equal(result.releasesAdded, 1);
+  assert.match(
+    String(db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.[
+      'parse_error'
+    ]),
+    /fields/,
+  );
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM feed_items').get()?.['n']), 2);
+  db.close();
+});
+
+test('a plugin returning an empty identity key records a parse_error', () => {
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = {
+    ...PLUGIN,
+    parse: (): ParsedRelease => ({
+      identityKey: '',
+      display: { title: 'Alpha', fields: [] },
+      quality: {},
+    }),
+  };
+
+  const result = ingestEntries(db, plugin, FEED, [entry('g1', 'alpha|1080')], 1000);
+
+  assert.equal(result.parseErrors, 1);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM media_groups').get()?.['n']), 0);
   db.close();
 });
 

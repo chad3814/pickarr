@@ -110,19 +110,53 @@ function toIsoDate(rawYear: string, rawMonth: string, rawDay: string): string | 
   return `${String(year).padStart(4, '0')}-${rawMonth}-${rawDay}`;
 }
 
+/**
+ * Rewrites a tail's underscores as dots before the quality tables read it.
+ *
+ * Every table above delimits its tokens with `\b`, and `_` is a *word*
+ * character to a JavaScript regex — so there is no word boundary between `_`
+ * and an alphanumeric, and `\b1080p\b` simply does not match inside
+ * `..._XXX_1080p_MP4-KTR`. The effect was total rather than partial: an
+ * underscore-separated name lost its resolution, source, codec and container
+ * all at once, scoring as if it carried no quality information, while its
+ * dotted twin scored normally. Both spellings collate into the same group by
+ * design, so that gap put two wildly different scores on one shelf: a 480p
+ * dotted release outranked an underscore 1080p and flagged as an upgrade over
+ * it (taking which trashes the better file), and a genuinely better underscore
+ * release never flagged at all.
+ *
+ * Normalizing the haystack once, here, fixes all four tables together —
+ * including `SOURCES` and `VIDEO_CODECS`, whose internal `[.\s_-]?` classes
+ * already tolerated `WEB_DL` and `H_265` but whose surrounding `\b` anchors
+ * did not. The alternative, replacing every `\b` with explicit
+ * `(?<![A-Za-z0-9])` / `(?![A-Za-z0-9])` guards, is the same fix written
+ * twenty times, and an earlier attempt at this bug fixed the tokenizer alone
+ * and left `extractQuality` broken precisely because the change had to be
+ * repeated in more than one place to be complete.
+ *
+ * Only `_` is rewritten: spaces and hyphens are already non-word characters,
+ * so `\b` behaves correctly around them, and the release-group tag is matched
+ * against the untouched tail below so its introducing `-` is unambiguous.
+ */
+function normalizeSeparators(tail: string): string {
+  return tail.replace(/_/g, '.');
+}
+
 function extractQuality(tail: string): QualityTokens {
+  const haystack = normalizeSeparators(tail);
+
   const extras: Record<string, QualityExtra> = {};
-  const container = firstMatch(CONTAINERS, tail);
+  const container = firstMatch(CONTAINERS, haystack);
   if (container !== undefined) extras['container'] = container;
 
   const groupMatch = /-([A-Za-z0-9]+)$/.exec(tail.trim());
 
   const quality: QualityTokens = { extras };
-  const resolution = firstMatch(RESOLUTIONS, tail);
+  const resolution = firstMatch(RESOLUTIONS, haystack);
   if (resolution !== undefined) quality.resolution = resolution;
-  const source = firstMatch(SOURCES, tail);
+  const source = firstMatch(SOURCES, haystack);
   if (source !== undefined) quality.source = source;
-  const videoCodec = firstMatch(VIDEO_CODECS, tail);
+  const videoCodec = firstMatch(VIDEO_CODECS, haystack);
   if (videoCodec !== undefined) quality.videoCodec = videoCodec;
   if (groupMatch?.[1] !== undefined) quality.releaseGroup = groupMatch[1];
 

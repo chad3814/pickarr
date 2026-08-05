@@ -210,6 +210,40 @@ const REFUSED = [
   'Site.23.04.15.Name.XXX.1080p.Uncut.MP4-G',
 ];
 
+/**
+ * One release, spelled with each separator the scene conventions allow. These
+ * collate into a single group by design, so they are compared against each
+ * other on *score inputs* too: two spellings of one release that disagree
+ * about resolution or source produce two wildly different scores inside one
+ * group, which is all it takes for a 480p release to read as an upgrade over
+ * a 1080p one — and for a genuinely better release to never flag at all.
+ */
+const SEPARATOR_SPELLINGS: string[][] = [
+  [
+    'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR',
+    'Brazzers_23_04_15_Alex_Coal_XXX_1080p_MP4-KTR',
+    'Brazzers 23 04 15 Alex Coal XXX 1080p MP4-KTR',
+  ],
+  [
+    'Site.23.01.01.Name.XXX.2160p.WEB-DL.H.265.MKV-G',
+    'Site_23_01_01_Name_XXX_2160p_WEB_DL_H_265_MKV-G',
+  ],
+  ['Site.23.01.01.Name.XXX.720p.WEBRip.x264.AVI-G', 'Site_23_01_01_Name_XXX_720p_WEBRip_x264_AVI-G'],
+];
+
+test('invariant: separator spelling never changes the quality tokens', () => {
+  for (const [canonical, ...variants] of SEPARATOR_SPELLINGS) {
+    const expected = parseSceneRelease(canonical ?? '');
+    assert.ok(expected, `expected ${canonical} to parse`);
+    for (const variant of variants) {
+      const parsed = parseSceneRelease(variant);
+      assert.ok(parsed, `expected ${variant} to parse`);
+      assert.equal(parsed.identityKey, expected.identityKey, variant);
+      assert.deepEqual(parsed.quality, expected.quality, variant);
+    }
+  }
+});
+
 test('invariant: no two distinct scenes ever share an identity key', () => {
   const seen = new Map<string, string>();
   for (const name of DISTINCT_SCENES) {

@@ -30,7 +30,15 @@ function registryFor(planImport: MediaTypePlugin['planImport'], root: string): P
   };
 }
 
-/** Group already owns release 1; release 2 is the flagged upgrade. */
+/**
+ * Group already owns release 1; release 2 is the flagged upgrade.
+ *
+ * Two downloads exist: id 9, the earlier `initial` download that put release 1
+ * in the library, and id 1, the in-flight `upgrade` download for release 2.
+ * The superseded file's `imported_files` row belongs to download 9 — never to
+ * download 1 — because that is the only shape production ever produces, and
+ * conflating the two is exactly what let an upgrade trash its own output.
+ */
 function seedUpgrade(db: DatabaseSync, storagePath: string): void {
   db.prepare(
     `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
@@ -49,7 +57,8 @@ function seedUpgrade(db: DatabaseSync, storagePath: string): void {
   db.prepare(
     `INSERT INTO downloads (id, release_id, group_id, client_id, client_ref, kind, status,
                             storage_path, created_at, updated_at)
-     VALUES (1, 2, 1, 'sab', 'nzo_2', 'upgrade', 'completed', ?, 1, 1)`,
+     VALUES (9, 1, 1, 'sab', 'nzo_1', 'initial', 'imported', '/old/complete', 1, 1),
+            (1, 2, 1, 'sab', 'nzo_2', 'upgrade', 'completed', ?, 1, 1)`,
   ).run(storagePath);
 }
 
@@ -76,10 +85,10 @@ test('an upgrade trashes the old file, writes the new one, and repoints the grou
 
     const db = openTestDatabase();
     seedUpgrade(db, downloadDir);
-    // The old file is on record as the group's live import.
+    // The old file is on record as the group's live import, from download 9.
     db.prepare(
       `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-       VALUES (1, 1, '/old/source', ?, 11, 1)`,
+       VALUES (9, 1, '/old/source', ?, 11, 1)`,
     ).run(join(library, 'scene.mp4'));
 
     const registry = registryFor(
@@ -111,6 +120,58 @@ test('an upgrade trashes the old file, writes the new one, and repoints the grou
   }
 });
 
+test('re-running the same upgrade import does not trash the files it just imported', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(library, { recursive: true });
+    await writeFile(join(library, 'scene.mp4'), 'old-version');
+
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    await writeFile(join(downloadDir, 'scene.mp4'), 'new-version');
+
+    const db = openTestDatabase();
+    seedUpgrade(db, downloadDir);
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (9, 1, '/old/source', ?, 11, 1)`,
+    ).run(join(library, 'scene.mp4'));
+
+    const registry = registryFor(
+      (): ImportPlan => ({
+        files: [{ source: join(downloadDir, 'scene.mp4'), destination: 'scene.mp4' }],
+      }),
+      library,
+    );
+
+    await importDownload(deps(db, registry, trash, { now: () => 2000 }), getDownload(db, 1)!);
+
+    // A crash between the successful transfer and the status write. Boot
+    // recovery puts an `importing` row back to `completed`, so the next tick
+    // runs this exact same import a second time.
+    db.prepare("UPDATE downloads SET status = 'completed' WHERE id = 1").run();
+
+    await importDownload(deps(db, registry, trash, { now: () => 3000 }), getDownload(db, 1)!);
+
+    // The second attempt is a no-op, not a self-destruct: the file this
+    // download imported is still in the library, not in trash.
+    assert.equal(await readFile(join(library, 'scene.mp4'), 'utf8'), 'new-version');
+    assert.deepEqual(await readdir(join(trash, '1')), ['2000']);
+
+    const live = liveFilesForGroup(db, 1);
+    assert.equal(live.length, 1);
+    assert.equal(live[0]?.destPath, join(library, 'scene.mp4'));
+    assert.equal(live[0]?.downloadId, 1);
+    assert.equal(getDownload(db, 1)?.status, 'imported');
+    assert.equal(getGroup(db, 1)?.pickedReleaseId, 2);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('trash paths are namespaced so repeated upgrades cannot collide', async () => {
   const root = await tempRoot();
   try {
@@ -132,7 +193,7 @@ test('trash paths are namespaced so repeated upgrades cannot collide', async () 
       db.prepare('DELETE FROM imported_files WHERE group_id = 1').run();
       db.prepare(
         `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-         VALUES (1, 1, '/old', ?, 5, 1)`,
+         VALUES (9, 1, '/old', ?, 5, 1)`,
       ).run(join(library, 'scene.mp4'));
       db.prepare("UPDATE downloads SET status = 'completed' WHERE id = 1").run();
 
@@ -168,7 +229,7 @@ test('a failure after trashing reports where the old file went', async () => {
     seedUpgrade(db, downloadDir);
     db.prepare(
       `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-       VALUES (1, 1, '/old', ?, 11, 1)`,
+       VALUES (9, 1, '/old', ?, 11, 1)`,
     ).run(join(library, 'scene.mp4'));
 
     // Plan a source that does not exist, so the transfer fails after trashing.
@@ -236,7 +297,10 @@ test('an initial import trashes nothing and leaves the pointer alone', async () 
 //
 // The tests above exercise trashLiveFiles only through importDownload, and
 // only ever with one live file per group. These call it directly, so each
-// can set up the exact row shape it needs without a full import plan.
+// can set up the exact row shape it needs without a full import plan. The
+// third argument is the id of the download doing the importing (1, the
+// in-flight upgrade); the rows below belong to download 9, so none of them is
+// excluded and every one is a genuine trash candidate.
 
 test('two live files sharing a basename in different library directories both survive in trash', async () => {
   const root = await tempRoot();
@@ -252,11 +316,11 @@ test('two live files sharing a basename in different library directories both su
     seedUpgrade(db, join(root, 'complete'));
     db.prepare(
       `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-       VALUES (1, 1, '/src/a', ?, 14, 1), (1, 1, '/src/b', ?, 14, 1)`,
+       VALUES (9, 1, '/src/a', ?, 14, 1), (9, 1, '/src/b', ?, 14, 1)`,
     ).run(join(library, 'A', 'scene.mp4'), join(library, 'B', 'scene.mp4'));
 
     const libraryRootReal = await realpath(library);
-    const trashedTo = await trashLiveFiles(db, 1, libraryRootReal, trash, 5000);
+    const trashedTo = await trashLiveFiles(db, 1, 1, libraryRootReal, trash, 5000);
     if (trashedTo === null) throw new Error('expected files to be trashed');
 
     // Both files survive, each under its own path, not overwriting the other.
@@ -291,12 +355,12 @@ test('a refusal partway through trashing still names where earlier files in the 
     seedUpgrade(db, join(root, 'complete'));
     db.prepare(
       `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-       VALUES (1, 1, '/src/a', ?, 14, 1), (1, 1, '/src/b', ?, 0, 1)`,
+       VALUES (9, 1, '/src/a', ?, 14, 1), (9, 1, '/src/b', ?, 0, 1)`,
     ).run(join(library, 'A', 'scene.mp4'), join(library, 'B', 'scene.mp4'));
 
     const libraryRootReal = await realpath(library);
 
-    await assert.rejects(trashLiveFiles(db, 1, libraryRootReal, trash, 6000), (error: Error) => {
+    await assert.rejects(trashLiveFiles(db, 1, 1, libraryRootReal, trash, 6000), (error: Error) => {
       assert.match(error.message, /not a regular file/);
       assert.match(error.message, /1[/\\]6000/);
       return true;
@@ -325,11 +389,11 @@ test('a live row whose file is already gone is trashed with no invented path', a
     seedUpgrade(db, join(root, 'complete'));
     db.prepare(
       `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-       VALUES (1, 1, '/src', ?, 11, 1)`,
+       VALUES (9, 1, '/src', ?, 11, 1)`,
     ).run(join(library, 'scene.mp4'));
 
     const libraryRootReal = await realpath(library);
-    const trashedTo = await trashLiveFiles(db, 1, libraryRootReal, trash, 9000);
+    const trashedTo = await trashLiveFiles(db, 1, 1, libraryRootReal, trash, 9000);
     assert.notEqual(trashedTo, null);
 
     const [row] = filesForGroup(db, 1);
@@ -352,13 +416,13 @@ test('a live row pointing at a directory is refused rather than trashed', async 
     seedUpgrade(db, join(root, 'complete'));
     db.prepare(
       `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-       VALUES (1, 1, '/src', ?, 0, 1)`,
+       VALUES (9, 1, '/src', ?, 0, 1)`,
     ).run(join(library, 'oops'));
 
     const libraryRootReal = await realpath(library);
 
     await assert.rejects(
-      trashLiveFiles(db, 1, libraryRootReal, trash, 7000),
+      trashLiveFiles(db, 1, 1, libraryRootReal, trash, 7000),
       /not a regular file/,
     );
 
@@ -384,13 +448,13 @@ test('a live row that resolves outside the library root is refused rather than t
     seedUpgrade(db, join(root, 'complete'));
     db.prepare(
       `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
-       VALUES (1, 1, '/src', ?, 19, 1)`,
+       VALUES (9, 1, '/src', ?, 19, 1)`,
     ).run(outside);
 
     const libraryRootReal = await realpath(library);
 
     await assert.rejects(
-      trashLiveFiles(db, 1, libraryRootReal, trash, 8000),
+      trashLiveFiles(db, 1, 1, libraryRootReal, trash, 8000),
       /resolves outside the library root/,
     );
 
