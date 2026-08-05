@@ -15,26 +15,83 @@ import type {
 
 const TIMEOUT_MS = 20_000;
 
-// A key must be at least this long before we substring-match it literally.
-// Below this length, matching by value is more likely to shred ordinary
-// text by coincidence than to catch a real leak, and a key this short can't
-// be meaningfully protected by substring matching anyway. 8 is comfortably
-// below any real api key (SABnzbd's are 32 hex characters) while still
-// ruling out single- or few-character test/placeholder keys.
-const MIN_LITERAL_REDACTION_LENGTH = 8;
+/**
+ * What a string becomes when redaction cannot produce a version of it that is
+ * *provably* free of the api key.
+ *
+ * This is the load-bearing idea in this file. Rewriting a secret out of text
+ * somebody else wrote is a blocklist, and a blocklist has to anticipate every
+ * shape the secret might take; three previous attempts at this each closed one
+ * shape and left another open. So the rewrite is no longer trusted on its own:
+ * whatever it produces is checked, and text that still yields the key under
+ * routine decoding is dropped whole rather than emitted. Failing to anticipate
+ * an encoding then costs a diagnostic, not the key.
+ */
+const WITHHELD = '[withheld: carried the api key in a form this client will not rewrite]';
+
+/**
+ * How many rounds of decoding a consumer is assumed to be willing to apply.
+ * Each round can percent-decode and/or form-decode, so this covers
+ * multiply-encoded text; four is far past anything a real client or log
+ * pipeline does and the search terminates as soon as decoding stops changing
+ * the string, which is after one round for ordinary text.
+ */
+const MAX_DECODE_ROUNDS = 4;
 
 /**
  * Strips the value of an `apikey` query parameter wherever one appears in a
- * string, regardless of how the value itself is encoded. This is the
- * primary defense, because it keys off the structural delimiters (`?`/`&`
- * before, `&`/whitespace/end-of-string after) rather than the literal
- * value — so it doesn't need to anticipate every encoding
- * (percent-encoding, `+` for space, etc.) the value might appear in. Takes
- * no config, so it's declared at module scope rather than recreated on
- * every createSabnzbdClient call.
+ * string, regardless of how the value itself is encoded. This is what keeps
+ * the common case (a URL echoed back at us) legible, because it keys off the
+ * structural delimiters (`?`/`&` before, `&`/whitespace/end-of-string after)
+ * rather than the literal value. It is not, on its own, a safety guarantee —
+ * it only fires where those delimiters survive.
  */
 function redactApiKeyParam(message: string): string {
   return message.replace(/([?&]apikey=)[^&\s]*/gi, '$1***');
+}
+
+/**
+ * Decodes each maximal run of `%XX` escapes, leaving anything undecodable
+ * alone. Deliberately not a plain `decodeURIComponent` on the whole string:
+ * that throws on a lone `%` (routine in stack traces and Windows paths), and a
+ * check that can be switched off by prefixing one `%` is not a check.
+ */
+function percentDecode(value: string): string {
+  return value.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+}
+
+/**
+ * Every reading of `value` that a consumer could arrive at with routine
+ * decoding — repeated percent-decoding, `+`-for-space form decoding (which
+ * `decodeURIComponent` does not do, and which `URLSearchParams` produces for
+ * any key containing a space), and any interleaving of the two.
+ *
+ * This is the definition of "recoverable" the safety check below is stated
+ * against. It does not cover an actively hostile peer that re-encodes the key
+ * in a scheme of its own invention (base64, a cipher); no in-band filter can.
+ */
+function decodings(value: string): Set<string> {
+  const views = new Set<string>([value]);
+  let frontier = [value];
+  for (let round = 0; round < MAX_DECODE_ROUNDS && frontier.length > 0; round += 1) {
+    const next: string[] = [];
+    for (const view of frontier) {
+      for (const candidate of [percentDecode(view), view.replaceAll('+', ' ')]) {
+        if (!views.has(candidate)) {
+          views.add(candidate);
+          next.push(candidate);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return views;
 }
 
 export function createSabnzbdClient(
@@ -50,21 +107,60 @@ export function createSabnzbdClient(
   }
 
   /**
-   * Secondary net: replaces literal occurrences of the api key anywhere a
-   * string carries it outside of an `apikey=` query parameter (which
-   * redactApiKeyParam already handles). Uses replaceAll, not a single
-   * replace, since the key can appear more than once. Skipped below
-   * MIN_LITERAL_REDACTION_LENGTH — see its comment — which also covers the
-   * empty-string case.
+   * The spellings of the key this client knows how to rewrite in place: as
+   * written, percent-encoded, and form-encoded (which differs from
+   * percent-encoding for a key containing a space — `+` versus `%20`, and
+   * `URLSearchParams` emits the former). Anything outside this set is caught
+   * by carriesSecret and costs the whole string, so this list exists for
+   * legibility, not for safety. An empty key is not a secret and is filtered
+   * out, which also stops `replaceAll('', ...)` splicing `***` between every
+   * character.
    */
-  function redactLiteralApiKey(message: string): string {
-    return config.apiKey.length < MIN_LITERAL_REDACTION_LENGTH
-      ? message
-      : message.replaceAll(config.apiKey, '***');
+  const spellings = [
+    ...new Set([
+      config.apiKey,
+      encodeURIComponent(config.apiKey),
+      new URLSearchParams({ apikey: config.apiKey }).toString().slice('apikey='.length),
+    ]),
+  ].filter((spelling) => spelling.length > 0);
+
+  /**
+   * Rewrites the spellings above wherever they appear, including outside a
+   * query string — inside an error's `name`, a bracketed URL, a sentence.
+   */
+  function redactKnownSpellings(message: string): string {
+    let out = message;
+    for (const spelling of spellings) out = out.replaceAll(spelling, '***');
+    return out;
   }
 
+  /**
+   * The safety predicate: can the key be read out of this text by anyone
+   * willing to decode it? Everything the client emits is checked against this
+   * *after* rewriting, so the guarantee does not depend on the rewrite having
+   * anticipated the right encoding.
+   */
+  function carriesSecret(message: string): boolean {
+    if (config.apiKey.length === 0) return false;
+    for (const view of decodings(message)) {
+      if (view.includes(config.apiKey)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The one door every string the client did not write itself passes through
+   * before it can reach a message, a return value, or a caller's log. Rewrite
+   * first for legibility, then verify; withhold if verification fails.
+   */
   function redact(message: string): string {
-    return redactLiteralApiKey(redactApiKeyParam(message));
+    const rewritten = redactKnownSpellings(redactApiKeyParam(message));
+    return carriesSecret(rewritten) ? WITHHELD : rewritten;
+  }
+
+  /** `asText`, but nothing comes out of a response body unredacted. */
+  function safeText(value: JsonValue | undefined): string {
+    return redact(text(value));
   }
 
   /**
@@ -119,7 +215,11 @@ export function createSabnzbdClient(
     async addUrl(url) {
       const body = asRecord(await call('addurl', { name: url, cat: config.category }));
       if (body === null || body['status'] !== true) {
-        const reason = body === null ? 'malformed response' : text(body['error']) || 'unknown error';
+        // `error` is SABnzbd's own wording and routinely quotes the request it
+        // rejected — request that SABnzbd built no part of, and whose query
+        // string is ours, api key included.
+        const reason =
+          body === null ? 'malformed response' : safeText(body['error']) || 'unknown error';
         throw new Error(`SABnzbd rejected the download: ${reason}`);
       }
 
@@ -128,7 +228,7 @@ export function createSabnzbdClient(
       if (typeof first !== 'string' || first.length === 0) {
         throw new Error('SABnzbd accepted the download but returned no nzo id');
       }
-      return first;
+      return redact(first);
     },
 
     async snapshot(): Promise<ClientSnapshot> {
@@ -137,16 +237,21 @@ export function createSabnzbdClient(
         call('history', { category: config.category }),
       ]);
 
+      // Everything below reads through safeText, never asText. These strings
+      // are *returned* rather than thrown, so none of the error-path defences
+      // apply to them, and a caller logging a snapshot would print them
+      // straight off the wire. SABnzbd's fail_message in particular quotes
+      // the failing request.
       const queue: ClientQueueEntry[] = [];
       for (const raw of asArray(asRecord(asRecord(queueBody)?.['queue'])?.['slots'])) {
         const slot = asRecord(raw);
         if (slot === null) continue;
-        const ref = text(slot['nzo_id']);
+        const ref = safeText(slot['nzo_id']);
         if (ref === '') continue;
         queue.push({
           ref,
-          name: text(slot['filename']),
-          percentage: Number.parseInt(text(slot['percentage']), 10) || 0,
+          name: safeText(slot['filename']),
+          percentage: Number.parseInt(safeText(slot['percentage']), 10) || 0,
         });
       }
 
@@ -154,20 +259,20 @@ export function createSabnzbdClient(
       for (const raw of asArray(asRecord(asRecord(historyBody)?.['history'])?.['slots'])) {
         const slot = asRecord(raw);
         if (slot === null) continue;
-        const ref = text(slot['nzo_id']);
+        const ref = safeText(slot['nzo_id']);
         if (ref === '') continue;
 
-        const status = text(slot['status']).toLowerCase();
+        const status = safeText(slot['status']).toLowerCase();
         // Anything not explicitly completed is a failure; sabnzbd uses several
         // terminal labels and treating an unknown one as success would import
         // a partial download.
         const outcome = status === 'completed' ? 'completed' : 'failed';
-        const storage = text(slot['storage']);
-        const failMessage = text(slot['fail_message']);
+        const storage = safeText(slot['storage']);
+        const failMessage = safeText(slot['fail_message']);
 
         history.push({
           ref,
-          name: text(slot['name']),
+          name: safeText(slot['name']),
           outcome,
           storagePath: outcome === 'completed' && storage !== '' ? storage : null,
           failMessage: failMessage === '' ? null : failMessage,

@@ -15,7 +15,7 @@ const VALID = {
       id: 'sab',
       type: 'sabnzbd',
       url: 'http://sabnzbd:8080',
-      apiKey: 'literal-key',
+      apiKey: '0f1e2d3c4b5a69788796a5b4c3d2e1f0',
       category: 'pickarr',
       importMode: 'move',
       pathMappings: [{ from: '/downloads', to: '/data/downloads' }],
@@ -46,7 +46,7 @@ test('loads a valid config', async () => {
     await writeFile(path, JSON.stringify(VALID));
     const config = await loadConfig(path);
     assert.equal(config.server.port, 8080);
-    assert.equal(config.downloadClients[0]?.apiKey, 'literal-key');
+    assert.equal(config.downloadClients[0]?.apiKey, '0f1e2d3c4b5a69788796a5b4c3d2e1f0');
     assert.equal(config.feeds[0]?.intervalSeconds, 900);
   });
 });
@@ -74,6 +74,41 @@ test('a missing secret file is fatal and names the path but not the contents', a
 
     await assert.rejects(loadConfig(path), (error: Error) => {
       assert.match(error.message, /absent/);
+      return true;
+    });
+  });
+});
+
+test('a literal api key below the minimum length is rejected', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    const broken = structuredClone(VALID);
+    broken.downloadClients[0]!.apiKey = 'sh0rtky';
+    await writeFile(path, JSON.stringify(broken));
+
+    await assert.rejects(loadConfig(path), (error: Error) => {
+      assert.match(error.message, /apiKey/);
+      assert.match(error.message, /16/);
+      return true;
+    });
+  });
+});
+
+// The schema sees `file:/path/to/secret`, not the secret, so the schema's
+// length rule cannot bind the value the client will actually be handed. This
+// pins the check that does.
+test('a file: secret resolving to a short key is rejected without printing it', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'sab_key');
+    await writeFile(secretPath, 'tinykey\n');
+    const path = join(dir, 'config.json');
+    const withSecret = structuredClone(VALID);
+    withSecret.downloadClients[0]!.apiKey = `file:${secretPath}`;
+    await writeFile(path, JSON.stringify(withSecret));
+
+    await assert.rejects(loadConfig(path), (error: Error) => {
+      assert.match(error.message, /apiKey/);
+      assert.doesNotMatch(error.message, /tinykey/);
       return true;
     });
   });
