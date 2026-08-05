@@ -38,10 +38,17 @@ function textOf(value: XmlValue | undefined): string | null {
   return null;
 }
 
-/** An element with no children (e.g. an empty <channel></channel>) parses to "". */
-function asNode(value: XmlValue | undefined): XmlNode {
-  if (value !== undefined && !Array.isArray(value) && typeof value === 'object') return value;
-  return {};
+/**
+ * An empty <channel></channel> parses to "" rather than {}, and that is the
+ * only non-object shape a well-formed channel can take. Anything else
+ * non-object (e.g. text content dropped straight into <channel>) means the
+ * feed is malformed, not merely empty, so it must throw rather than be
+ * silently treated as zero items.
+ */
+function asChannelNode(value: XmlValue): XmlNode {
+  if (!Array.isArray(value) && typeof value === 'object') return value;
+  if (value === '') return {};
+  throw new Error('Document is not an RSS 2.0 feed: malformed <channel> element');
 }
 
 function enclosureUrl(item: XmlNode): string | null {
@@ -64,7 +71,7 @@ export function parseRss(xml: string): FeedEntry[] {
   if (rawChannel === undefined) {
     throw new Error('Document is not an RSS 2.0 feed: no <channel> element');
   }
-  const channel = asNode(rawChannel);
+  const channel = asChannelNode(rawChannel);
 
   const entries: FeedEntry[] = [];
   for (const item of asArray(channel['item'])) {

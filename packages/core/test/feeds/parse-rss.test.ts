@@ -52,6 +52,13 @@ test('an empty channel yields no entries', () => {
   assert.deepEqual(parseRss('<rss version="2.0"><channel></channel></rss>'), []);
 });
 
+test('a channel containing bare text rather than elements throws', () => {
+  assert.throws(
+    () => parseRss('<rss version="2.0"><channel>garbage</channel></rss>'),
+    /not an RSS/i,
+  );
+});
+
 test('an unparseable pubDate becomes null rather than NaN', () => {
   const xml = `<rss version="2.0"><channel><item>
     <title>Bad Date</title><guid>g</guid><link>https://indexer.invalid/1.nzb</link>
