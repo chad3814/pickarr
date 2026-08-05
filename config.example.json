@@ -1,0 +1,27 @@
+{
+  "server": { "port": 8080 },
+  "database": { "path": "/config/pickarr.db" },
+  "trashDir": "/data/trash",
+  "plugins": {
+    "@pickarr/plugin-scenes": { "libraryRoot": "/media/scenes" }
+  },
+  "downloadClients": [
+    {
+      "id": "sab",
+      "type": "sabnzbd",
+      "url": "http://sabnzbd:8080",
+      "apiKey": "file:/run/secrets/sabnzbd_api_key",
+      "category": "pickarr",
+      "importMode": "move",
+      "pathMappings": [{ "from": "/downloads", "to": "/data/downloads" }]
+    }
+  ],
+  "feeds": [
+    {
+      "id": "primary",
+      "url": "https://your-indexer.example/rss?t=6000&apikey=...",
+      "plugin": "@pickarr/plugin-scenes",
+      "intervalSeconds": 900
+    }
+  ]
+}

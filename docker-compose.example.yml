@@ -1,0 +1,17 @@
+services:
+  pickarr:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/config
+      - /srv/downloads:/data/downloads
+      - /srv/media/scenes:/media/scenes
+      - /srv/trash:/data/trash
+    secrets:
+      - sabnzbd_api_key
+    restart: unless-stopped
+
+secrets:
+  sabnzbd_api_key:
+    file: ./secrets/sabnzbd_api_key
