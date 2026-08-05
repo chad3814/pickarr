@@ -297,6 +297,80 @@ test('a plugin returning a display with no fields records a parse_error', () => 
   db.close();
 });
 
+test('a plugin returning a malformed quality records a parse_error and lets later entries through', () => {
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = {
+    ...PLUGIN,
+    parse: (name): ParsedRelease | null =>
+      name.startsWith('poison')
+        ? {
+            identityKey: 'poison',
+            display: { title: 'Poison', fields: [] },
+            quality: undefined as unknown as ParsedRelease['quality'],
+          }
+        : PLUGIN.parse(name),
+    // Deliberately does not dereference `quality`, so a malformed value
+    // sails past `score` unnoticed — exactly how the real bug reaches
+    // `JSON.stringify` unvalidated.
+    score: () => 100,
+  };
+
+  const result = ingestEntries(
+    db,
+    plugin,
+    FEED,
+    [entry('g1', 'poison|1080'), entry('g2', 'alpha|1080')],
+    1000,
+  );
+
+  assert.equal(result.parseErrors, 1);
+  assert.equal(result.releasesAdded, 1);
+  assert.match(
+    String(db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.[
+      'parse_error'
+    ]),
+    /quality/,
+  );
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM feed_items').get()?.['n']), 2);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM releases').get()?.['n']), 1);
+  db.close();
+});
+
+test('a plugin returning a display field of null records a parse_error rather than persisting it', () => {
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = {
+    ...PLUGIN,
+    parse: (name): ParsedRelease | null =>
+      name.startsWith('poison')
+        ? {
+            identityKey: 'poison',
+            display: malformedDisplay('{"title":"P","fields":[null]}'),
+            quality: {},
+          }
+        : PLUGIN.parse(name),
+  };
+
+  const result = ingestEntries(
+    db,
+    plugin,
+    FEED,
+    [entry('g1', 'poison|1080'), entry('g2', 'beta|1080')],
+    1000,
+  );
+
+  assert.equal(result.parseErrors, 1);
+  assert.equal(result.releasesAdded, 1);
+  assert.match(
+    String(db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.[
+      'parse_error'
+    ]),
+    /fields/,
+  );
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM feed_items').get()?.['n']), 2);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM media_groups').get()?.['n']), 1);
+  db.close();
+});
+
 test('a plugin returning an empty identity key records a parse_error', () => {
   const db = openTestDatabase();
   const plugin: MediaTypePlugin = {

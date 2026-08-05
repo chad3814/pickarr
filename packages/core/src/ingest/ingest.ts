@@ -87,8 +87,25 @@ function prepareSafely(
     if (!Array.isArray(display.fields)) {
       return { error: 'invalid parse result: display.fields must be an array' };
     }
+    for (const field of display.fields) {
+      if (
+        field === null ||
+        typeof field !== 'object' ||
+        typeof field.label !== 'string' ||
+        typeof field.value !== 'string'
+      ) {
+        return {
+          error: 'invalid parse result: display.fields elements must have string label and value',
+        };
+      }
+    }
 
-    const score = plugin.score(parsed.quality);
+    const quality = parsed.quality;
+    if (quality === null || typeof quality !== 'object' || Array.isArray(quality)) {
+      return { error: 'invalid parse result: quality must be an object' };
+    }
+
+    const score = plugin.score(quality);
     if (typeof score !== 'number' || !Number.isFinite(score)) {
       return { error: `invalid score: ${String(score)} is not a finite number` };
     }
@@ -98,7 +115,7 @@ function prepareSafely(
         identityKey: parsed.identityKey,
         displayJson: JSON.stringify(display),
         searchText: searchTextFor(display),
-        qualityJson: JSON.stringify(parsed.quality),
+        qualityJson: JSON.stringify(quality),
         score,
       },
     };
