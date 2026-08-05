@@ -63,3 +63,26 @@ test('a destination can never escape the library root', () => {
   const plan = planSceneImport(media, [file('scene.mp4', 1_000)]);
   assert.doesNotMatch(plan?.files[0]?.destination ?? '', /\.\./);
 });
+
+test('two releases with the same identity key produce the same destination', () => {
+  const canonical = parseSceneRelease('Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB')!;
+  const variant = parseSceneRelease('brazzers 23 04 15 alex coal XXX 1080p MP4-WRB')!;
+  assert.equal(canonical.identityKey, variant.identityKey);
+
+  const canonicalPlan = planSceneImport(canonical, [file('scene.mp4', 1_000_000_000)]);
+  const variantPlan = planSceneImport(variant, [file('scene.mp4', 1_000_000_000)]);
+  assert.equal(canonicalPlan?.files[0]?.destination, variantPlan?.files[0]?.destination);
+});
+
+test('a nested larger video does not beat a top-level smaller one', () => {
+  const plan = planSceneImport(MEDIA, [
+    file('scene.mp4', 1_000_000_000),
+    file('extras/other-scene-full.mp4', 4_000_000_000),
+  ]);
+  assert.equal(plan?.files[0]?.source, '/downloads/release/scene.mp4');
+});
+
+test('a single junk-named video is imported rather than refused', () => {
+  const plan = planSceneImport(MEDIA, [file('trailer_of_love.mp4', 500_000_000)]);
+  assert.equal(plan?.files[0]?.source, '/downloads/release/trailer_of_love.mp4');
+});
