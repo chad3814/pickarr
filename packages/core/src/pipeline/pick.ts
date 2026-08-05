@@ -16,11 +16,19 @@ import {
 export interface PickRequest {
   groupId: number;
   releaseId: number;
-  kind: DownloadKind;
 }
 
 /**
  * Marks the group picked and starts the download.
+ *
+ * `kind` is derived here, not accepted from the caller: a group already in
+ * state 'picked' yields an upgrade, anything else yields an initial pick.
+ * Accepting `kind` as an input made correctness depend on every caller
+ * deriving it correctly — in particular, nothing stopped a second `initial`
+ * pick of a *different* release on an already-picked group from silently
+ * repointing picked_release_id and orphaning the first download. Deriving it
+ * from the group's own state removes that failure mode outright rather than
+ * adding a check for it.
  *
  * picked_release_id is written here rather than at import time because the
  * ingest rule compares incoming releases against it, and needs something to
@@ -50,15 +58,17 @@ export async function pickRelease(
     throw new Error(`Release ${request.releaseId} already has download ${existing.id}`);
   }
 
+  const kind: DownloadKind = group.state === 'picked' ? 'upgrade' : 'initial';
+
   let downloadId: number;
   db.exec('BEGIN');
   try {
-    if (request.kind === 'initial') markPicked(db, request.groupId, request.releaseId);
+    if (kind === 'initial') markPicked(db, request.groupId, request.releaseId);
     downloadId = insertDownload(db, {
       releaseId: request.releaseId,
       groupId: request.groupId,
       clientId: client.id,
-      kind: request.kind,
+      kind,
       createdAt: now,
     });
     db.exec('COMMIT');
@@ -73,14 +83,38 @@ export async function pickRelease(
   const link = feedItem === undefined ? null : str(feedItem as SqlRow, 'link');
   if (link === null) throw new Error(`Release ${request.releaseId} has no feed item link`);
 
+  // addUrl and the persist that follows it are recorded as distinguishable
+  // failure modes. If addUrl throws, nothing was submitted — the row stays
+  // exactly as an untried queued row looks, and a reconcile tick can safely
+  // retry addUrl. If addUrl succeeds but persisting the ref throws, the
+  // submission already happened; recording that identically to an addUrl
+  // failure would make a naive reconcile retry addUrl and double-submit the
+  // same nzb, so that case is recorded with a distinct message naming the
+  // ref that was already accepted.
+  let clientRef: string;
   try {
-    const clientRef = await client.addUrl(link);
-    setClientRef(db, downloadId, clientRef, now);
+    clientRef = await client.addUrl(link);
   } catch (error) {
     recordError(db, downloadId, (error as Error).message, now);
+    return mustGetDownload(db, downloadId);
   }
 
-  const stored = getDownload(db, downloadId);
-  if (stored === null) throw new Error(`Download ${downloadId} vanished immediately after insert`);
+  try {
+    setClientRef(db, downloadId, clientRef, now);
+  } catch (error) {
+    recordError(
+      db,
+      downloadId,
+      `Submitted to ${client.id} as ${clientRef} but failed to persist the reference: ${(error as Error).message}`,
+      now,
+    );
+  }
+
+  return mustGetDownload(db, downloadId);
+}
+
+function mustGetDownload(db: DatabaseSync, id: number): DownloadRow {
+  const stored = getDownload(db, id);
+  if (stored === null) throw new Error(`Download ${id} vanished immediately after insert`);
   return stored;
 }
