@@ -94,3 +94,22 @@ test('display fields carry site and performers', () => {
   const labels = parsed?.display.fields.map((field) => field.label);
   assert.deepEqual(labels, ['Site', 'Date', 'Scene']);
 });
+
+test('two scenes differing only by content after an in-title XXX get different identity keys', () => {
+  const a = parseSceneRelease('Site.23.04.15.Anniversary.XXX.1080p.MP4-G');
+  const b = parseSceneRelease('Site.23.04.15.Anniversary.XXX.Edition.XXX.1080p.MP4-G');
+  assert.ok(a && b);
+  assert.notEqual(a.identityKey, b.identityKey);
+});
+
+test('an in-title XXX scene keeps its full title instead of being truncated', () => {
+  const parsed = parseSceneRelease('Site.23.04.15.Anniversary.XXX.Edition.XXX.1080p.MP4-G');
+  assert.equal(parsed?.display.title, 'Anniversary XXX Edition');
+});
+
+test('two encodes of a scene with an XXX release group still share an identity key', () => {
+  const a = parseSceneRelease('TeamSkeet.24.01.02.Jane.Doe.XXX.1080p.MP4-XXX');
+  const b = parseSceneRelease('TeamSkeet.24.01.02.Jane.Doe.XXX.2160p.HEVC.MP4-XXX');
+  assert.ok(a && b);
+  assert.equal(a.identityKey, b.identityKey);
+});

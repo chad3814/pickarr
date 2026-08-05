@@ -2,7 +2,16 @@ import type { ParsedRelease, QualityExtra, QualityTokens } from '@pickarr/plugin
 
 const DATE_PATTERN = /(?:^|[.\s_-])((?:19|20)?\d{2})[.\s_-](\d{2})[.\s_-](\d{2})(?:[.\s_-]|$)/;
 const XXX_MARKER = /[.\s_-]XXX(?:[.\s_-]|$)/i;
-const QUALITY_START = /[.\s_-](?:\d{3,4}p|4K|8K|XXX|WEB-?DL|WEBRip|BluRay|SiteRip|HDTV)(?:[.\s_-]|$)/i;
+const QUALITY_START = /[.\s_-](?:\d{3,4}p|4K|8K|WEB-?DL|WEBRip|BluRay|SiteRip|HDTV)(?:[.\s_-]|$)/i;
+
+/**
+ * Matches encode-descriptive text (resolution, source, video codec, or
+ * container) anchored at the very start of a candidate string. Used to
+ * confirm that text following an `XXX` token is really encode information
+ * and not more of the scene title.
+ */
+const ENCODE_TOKEN_START =
+  /^(?:\d{3,4}p|4K|8K|UHD|WEB[.\s_-]?DL|WEBRip|BluRay|BDRip|SiteRip|HDTV|WEB|x264|x265|H[.\s_-]?264|H[.\s_-]?265|HEVC|AVC|AV1|XviD|MP4|MKV|WMV|AVI)\b/i;
 
 const RESOLUTIONS: [RegExp, number][] = [
   [/\b8K\b/i, 4320],
@@ -90,15 +99,41 @@ function extractQuality(tail: string): QualityTokens {
 }
 
 /**
+ * A release title can itself contain the literal word "XXX" (e.g. an
+ * "XXX Anniversary" scene). Taking the first `XXX` occurrence unconditionally
+ * would truncate the title and, worse, could silently collapse two different
+ * scenes into one identity when both happen to contain an in-title `XXX`
+ * before their real encode information.
+ *
+ * Instead, scan every `XXX` occurrence in order and return the first one that
+ * is genuinely followed by encode information (a resolution, source, codec,
+ * or container token) rather than more title text. That is the actual
+ * identity/encode boundary; anything before it — including any earlier,
+ * non-qualifying `XXX` tokens — is part of the title.
+ */
+function findEncodeBoundary(name: string): number | null {
+  const pattern = new RegExp(XXX_MARKER.source, 'gi');
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(name)) !== null) {
+    if (match.index > 0) {
+      const rest = name.slice(match.index + match[0].length);
+      if (ENCODE_TOKEN_START.test(rest)) return match.index;
+    }
+    if (match[0].length === 0) pattern.lastIndex += 1;
+  }
+  return null;
+}
+
+/**
  * Splits a scene release name at the boundary between identity and encode.
- * Everything before the XXX marker is stable across re-releases of the same
- * scene; everything after varies. When there is no XXX marker, the first
- * quality token serves as the boundary.
+ * Everything before the boundary is stable across re-releases of the same
+ * scene; everything after varies. When there is no qualifying XXX marker,
+ * the first quality token serves as the boundary.
  */
 function splitAtQualityBoundary(name: string): { head: string; tail: string } | null {
-  const xxx = XXX_MARKER.exec(name);
-  if (xxx !== null && xxx.index > 0) {
-    return { head: name.slice(0, xxx.index), tail: name.slice(xxx.index) };
+  const xxxIndex = findEncodeBoundary(name);
+  if (xxxIndex !== null) {
+    return { head: name.slice(0, xxxIndex), tail: name.slice(xxxIndex) };
   }
 
   const quality = QUALITY_START.exec(name);
