@@ -1,5 +1,5 @@
 import { copyFile, mkdir, realpath, rename, unlink } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { liveFilesForGroup, markTrashed } from '../db/imported-files.ts';
 import { isContained, lstatOrNull } from './import.ts';
@@ -10,8 +10,20 @@ import { isContained, lstatOrNull } from './import.ts';
  * Trash-first ordering is required by the caller because the replacement
  * usually wants the same destination path as the file it supersedes: the old
  * file has to move out of the way before anything new can be written there.
- * Trash paths are namespaced `<trashDir>/<groupId>/<now>/<basename>` so
- * repeated upgrades of the same group cannot collide with each other.
+ *
+ * Trash paths are `<trashDir>/<groupId>/<now>/<path-relative-to-the-library-
+ * root>` — the file's own path *inside the library*, replayed inside the
+ * timestamped trash directory, intermediate directories created as needed.
+ * This is collision-free by construction, not by convention: two distinct
+ * files can only collide here if they had the same path relative to the
+ * library root, which means they were the same destination path, which means
+ * they were the same file. A flat `basename(destPath)` scheme (an earlier
+ * version of this function used one) does not have this property —
+ * `library/A/scene.mp4` and `library/B/scene.mp4` both reduce to `scene.mp4`
+ * and one would silently overwrite the other in trash, with `imported_files`
+ * left recording an inaccurate `trash_path` for whichever lost the race. This
+ * scheme cannot do that: `relative(libraryRootReal, real)` is unique per real
+ * path within one library root, by definition of what "relative path" means.
  *
  * `imported_files` rows are the *only* record of what Pickarr wrote — this
  * function is the one place that turns a row into a filesystem move, so it
@@ -24,8 +36,12 @@ import { isContained, lstatOrNull } from './import.ts';
  *     is judged as a symlink, never silently followed to whatever it targets.
  *   - Nothing at `destPath` at all is not an error: a previous, interrupted
  *     attempt may have already moved it, or an operator may have removed it
- *     by hand. The row is still marked trashed (there is nothing live left
- *     to protect), but no filesystem operation is attempted.
+ *     by hand. The row is still marked trashed (there is nothing live left to
+ *     protect), but with a *null* `trash_path` — we do not know where the
+ *     file actually went (if anywhere), so recording this attempt's would-be
+ *     path would tell an operator to look in a specific place the file was
+ *     never at. A null is an honest "unknown; search `trashDir`", which is
+ *     strictly more useful than a specific, possibly wrong answer.
  *   - Only a plain regular file is ever moved. A directory or a symlink at
  *     `destPath` is refused outright — this is what makes the operation
  *     bounded no matter how a row got here: even a row corrupted by an old
@@ -40,14 +56,19 @@ import { isContained, lstatOrNull } from './import.ts';
  *     now points outside the library it claims to belong to is refused
  *     rather than moved.
  *
- * Refusing a row throws rather than skipping it silently: silently leaving
- * an unexpected occupant in place would let the transfer loop's own
- * collision check catch it moments later with a much less specific error, or
- * — worse — could be adopted there if a future change ever weakened that
- * check. Failing here, by name, is strictly safer.
+ * Refusing a row throws rather than skipping it silently: silently leaving an
+ * unexpected occupant in place would let the transfer loop's own collision
+ * check catch it moments later with a much less specific error, or — worse —
+ * could be adopted there if a future change ever weakened that check. Failing
+ * here, by name, is strictly safer. A throw here can happen *after* earlier
+ * rows in the same call already moved successfully — in that case the thrown
+ * message still names `destinationDir`, so a caller's failure report never
+ * omits the one fact that matters: some of this group's files really did
+ * move, and this is where.
  *
  * Returns the directory used, or null when the group had nothing live to
- * trash (the initial-import case).
+ * trash (the initial-import case, and the benign retry-of-a-failed-initial-
+ * pick case — see the Task 14 report).
  */
 export async function trashLiveFiles(
   db: DatabaseSync,
@@ -62,42 +83,58 @@ export async function trashLiveFiles(
   const destinationDir = join(trashDir, String(groupId), String(now));
   await mkdir(destinationDir, { recursive: true });
 
-  for (const file of live) {
-    const trashPath = join(destinationDir, basename(file.destPath));
-    const occupant = await lstatOrNull(file.destPath);
+  try {
+    for (const file of live) {
+      const occupant = await lstatOrNull(file.destPath);
 
-    if (occupant === null) {
-      // Already gone from disk (a prior, interrupted upgrade already moved
-      // it, or an operator removed it by hand): nothing to move, but the row
-      // no longer describes a live file either way.
+      if (occupant === null) {
+        // Already gone from disk (a prior, interrupted upgrade already moved
+        // it, or an operator removed it by hand): nothing to move, and — not
+        // having moved it ourselves — nowhere honest to point `trash_path`
+        // at. The row no longer describes a live file either way, so it is
+        // still marked trashed, just with no invented location.
+        markTrashed(db, file.id, null, now);
+        continue;
+      }
+
+      if (!occupant.isFile()) {
+        throw new Error(
+          `imported_files row ${file.id} for group ${groupId} points at ${file.destPath}, ` +
+            'which is not a regular file — refusing to trash a directory or symlink',
+        );
+      }
+
+      const real = await realpath(file.destPath);
+      if (!isContained(libraryRootReal, real, false)) {
+        throw new Error(
+          `imported_files row ${file.id} for group ${groupId} resolves outside the library ` +
+            `root (${file.destPath} -> ${real}) — refusing to trash it`,
+        );
+      }
+
+      const trashPath = join(destinationDir, relative(libraryRootReal, real));
+      await mkdir(dirname(trashPath), { recursive: true });
+
+      try {
+        await rename(file.destPath, trashPath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'EXDEV') throw error;
+        await copyFile(file.destPath, trashPath);
+        await unlink(file.destPath);
+      }
       markTrashed(db, file.id, trashPath, now);
-      continue;
     }
-
-    if (!occupant.isFile()) {
-      throw new Error(
-        `imported_files row ${file.id} for group ${groupId} points at ${file.destPath}, ` +
-          'which is not a regular file — refusing to trash a directory or symlink',
-      );
-    }
-
-    const real = await realpath(file.destPath);
-    if (!isContained(libraryRootReal, real, false)) {
-      throw new Error(
-        `imported_files row ${file.id} for group ${groupId} resolves outside the library ` +
-          `root (${file.destPath} -> ${real}) — refusing to trash it`,
-      );
-    }
-
-    try {
-      await rename(file.destPath, trashPath);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EXDEV') throw error;
-      await copyFile(file.destPath, trashPath);
-      await unlink(file.destPath);
-    }
-    markTrashed(db, file.id, trashPath, now);
+  } catch (error) {
+    // Some earlier row in this same call may already have been moved
+    // successfully before this one was refused or failed. The caller's own
+    // failure message (see import.ts) only gets to append this directory
+    // when trashing as a whole reports success — so if trashing itself is
+    // what's throwing, this is the one place left that can still say where
+    // any already-moved files ended up.
+    throw new Error(
+      `${(error as Error).message} — files already trashed for this group moved to ${destinationDir}`,
+    );
   }
 
   return destinationDir;

@@ -280,12 +280,23 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
   // — means a failure partway through the loop still leaves a fully
   // recoverable trail (the old files sitting in `trashedTo`), never a
   // half-deleted, half-written group.
-  const trashedTo =
-    download.kind === 'upgrade'
-      ? await trashLiveFiles(db, download.groupId, libraryRootReal, deps.trashDir, now)
-      : null;
+  //
+  // `trashLiveFiles` runs *inside* the same try block as the transfer loop,
+  // not before it: if trashing itself throws partway through (one file moved,
+  // a later one refused), `trashedTo` is never assigned, but the error
+  // trashLiveFiles throws already names its own destination directory (see
+  // upgrade.ts) — so the raw rethrow below still tells the caller where to
+  // look. If trashing instead completes and `trashedTo` is assigned, and the
+  // transfer loop is what fails, the catch below appends that directory to
+  // *that* failure instead. Either way, a failure after anything has been
+  // physically moved always names where.
+  let trashedTo: string | null = null;
 
   try {
+    if (download.kind === 'upgrade') {
+      trashedTo = await trashLiveFiles(db, download.groupId, libraryRootReal, deps.trashDir, now);
+    }
+
     for (const file of resolved) {
       const alreadyRecorded = findLiveByDest(db, download.groupId, file.destination);
       // `lstat`, not `stat`: a symlink at the destination must be seen as a
@@ -349,11 +360,16 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
       });
     }
   } catch (error) {
-    // Trashing already happened; a failure past this point must not read as
-    // "the old file is gone with nothing to show for it." Naming the trash
-    // location in the error is what lets the caller (reconcile.ts marks the
-    // download `failed` with this exact message) tell the user where to look
-    // to restore it by hand.
+    // `trashedTo` is only ever non-null once `trashLiveFiles` has *returned*
+    // successfully — so reaching this branch means trashing fully completed
+    // and it was the transfer loop that failed afterward. A failure here must
+    // not read as "the old file is gone with nothing to show for it." Naming
+    // the trash location in the error is what lets the caller (reconcile.ts
+    // marks the download `failed` with this exact message) tell the user
+    // where to look to restore it by hand. If `trashLiveFiles` itself threw
+    // instead, `trashedTo` was never assigned and this branch is skipped —
+    // but that thrown error already names its own destination directory
+    // (see upgrade.ts), so the raw rethrow below is not missing anything.
     if (trashedTo === null) throw error;
     throw new Error(
       `${(error as Error).message} — previous files were moved to ${trashedTo} and can be restored by hand`,
