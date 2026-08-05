@@ -11,6 +11,7 @@ export interface PluginRegistry {
   byPackage(packageName: string): MediaTypePlugin;
   byId(id: string): MediaTypePlugin | undefined;
   libraryRoot(packageName: string): string;
+  libraryRootById(id: string): string;
   all(): MediaTypePlugin[];
 }
 
@@ -30,6 +31,7 @@ export async function loadPlugins(
   const byPackage = new Map<string, MediaTypePlugin>();
   const byId = new Map<string, MediaTypePlugin>();
   const roots = new Map<string, string>();
+  const rootsById = new Map<string, string>();
   const idToPackage = new Map<string, string>();
 
   for (const [packageName, pluginConfig] of Object.entries(config.plugins)) {
@@ -62,6 +64,7 @@ export async function loadPlugins(
     byPackage.set(packageName, plugin);
     byId.set(plugin.id, plugin);
     roots.set(packageName, libraryRoot);
+    rootsById.set(plugin.id, libraryRoot);
     idToPackage.set(plugin.id, packageName);
   }
 
@@ -75,6 +78,11 @@ export async function loadPlugins(
     libraryRoot(packageName) {
       const root = roots.get(packageName);
       if (root === undefined) throw new Error(`No library root for package ${packageName}`);
+      return root;
+    },
+    libraryRootById(id) {
+      const root = rootsById.get(id);
+      if (root === undefined) throw new Error(`No library root for plugin id ${id}`);
       return root;
     },
     all: () => [...byPackage.values()],
