@@ -74,6 +74,15 @@ function toDownloadRow(row: SqlRow): DownloadRow {
  * fix rounds elsewhere (the scenes parser). Stable and derived from the
  * download's own id, so the same label is produced on every attempt without
  * needing to be stored anywhere new.
+ *
+ * This id is unique only within one Pickarr installation's own database — it
+ * carries no per-installation salt. Two Pickarr instances sharing one
+ * SABnzbd server *and* one category will eventually mint the same label for
+ * two different downloads, and reconcile's label-based recovery would then
+ * attach the wrong ref to a row rather than merely double-submitting.
+ * Avoiding this is a deployment constraint, not something this function
+ * enforces: each Pickarr instance must be configured with its own SABnzbd
+ * category (see the `category` field in config/schema.ts).
  */
 export function downloadLabel(id: number): string {
   return `pickarr-${id}`;
