@@ -113,3 +113,12 @@ test('two encodes of a scene with an XXX release group still share an identity k
   assert.ok(a && b);
   assert.equal(a.identityKey, b.identityKey);
 });
+
+test('two scenes differing only by content after an in-title XXX followed by an encode-like word get different identity keys', () => {
+  const a = parseSceneRelease('Site.23.04.15.Anniversary.XXX.Web.Party.XXX.1080p.MP4-G');
+  const b = parseSceneRelease('Site.23.04.15.Anniversary.XXX.Web.Bash.XXX.1080p.MP4-G');
+  assert.ok(a && b);
+  assert.notEqual(a.identityKey, b.identityKey);
+  assert.equal(a.display.title, 'Anniversary XXX Web Party');
+  assert.equal(b.display.title, 'Anniversary XXX Web Bash');
+});
