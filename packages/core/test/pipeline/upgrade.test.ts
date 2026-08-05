@@ -1,15 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { importDownload, type ImportDeps } from '../../src/pipeline/import.ts';
+import { trashLiveFiles } from '../../src/pipeline/upgrade.ts';
 import { getGroup } from '../../src/db/groups.ts';
 import { getDownload } from '../../src/db/downloads.ts';
-import { liveFilesForGroup } from '../../src/db/imported-files.ts';
+import { filesForGroup, liveFilesForGroup } from '../../src/db/imported-files.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 
 function registryFor(planImport: MediaTypePlugin['planImport'], root: string): PluginRegistry {
@@ -225,6 +226,175 @@ test('an initial import trashes nothing and leaves the pointer alone', async () 
     );
     assert.equal(getGroup(db, 1)?.pickedReleaseId, 1);
     assert.equal(getGroup(db, 1)?.upgradeReleaseId, 2);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// --- Direct unit tests against trashLiveFiles ---
+//
+// The tests above exercise trashLiveFiles only through importDownload, and
+// only ever with one live file per group. These call it directly, so each
+// can set up the exact row shape it needs without a full import plan.
+
+test('two live files sharing a basename in different library directories both survive in trash', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(join(library, 'A'), { recursive: true });
+    await mkdir(join(library, 'B'), { recursive: true });
+    await writeFile(join(library, 'A', 'scene.mp4'), 'FILE-A-CONTENT');
+    await writeFile(join(library, 'B', 'scene.mp4'), 'FILE-B-CONTENT');
+
+    const db = openTestDatabase();
+    seedUpgrade(db, join(root, 'complete'));
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (1, 1, '/src/a', ?, 14, 1), (1, 1, '/src/b', ?, 14, 1)`,
+    ).run(join(library, 'A', 'scene.mp4'), join(library, 'B', 'scene.mp4'));
+
+    const libraryRootReal = await realpath(library);
+    const trashedTo = await trashLiveFiles(db, 1, libraryRootReal, trash, 5000);
+    if (trashedTo === null) throw new Error('expected files to be trashed');
+
+    // Both files survive, each under its own path, not overwriting the other.
+    assert.equal(await readFile(join(trashedTo, 'A', 'scene.mp4'), 'utf8'), 'FILE-A-CONTENT');
+    assert.equal(await readFile(join(trashedTo, 'B', 'scene.mp4'), 'utf8'), 'FILE-B-CONTENT');
+
+    // The database record for each row names the path it actually moved to.
+    const rows = filesForGroup(db, 1);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(
+      rows.map((row) => row.trashPath).toSorted(),
+      [join(trashedTo, 'A', 'scene.mp4'), join(trashedTo, 'B', 'scene.mp4')].toSorted(),
+    );
+    assert.equal(liveFilesForGroup(db, 1).length, 0);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a refusal partway through trashing still names where earlier files in the same group went', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(join(library, 'A'), { recursive: true });
+    // A directory sitting where a file is recorded — the second row, refused.
+    await mkdir(join(library, 'B', 'scene.mp4'), { recursive: true });
+    await writeFile(join(library, 'A', 'scene.mp4'), 'FILE-A-CONTENT');
+
+    const db = openTestDatabase();
+    seedUpgrade(db, join(root, 'complete'));
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (1, 1, '/src/a', ?, 14, 1), (1, 1, '/src/b', ?, 0, 1)`,
+    ).run(join(library, 'A', 'scene.mp4'), join(library, 'B', 'scene.mp4'));
+
+    const libraryRootReal = await realpath(library);
+
+    await assert.rejects(trashLiveFiles(db, 1, libraryRootReal, trash, 6000), (error: Error) => {
+      assert.match(error.message, /not a regular file/);
+      assert.match(error.message, /1[/\\]6000/);
+      return true;
+    });
+
+    // The first row's file was already moved before the second was refused.
+    assert.equal(
+      await readFile(join(trash, '1', '6000', 'A', 'scene.mp4'), 'utf8'),
+      'FILE-A-CONTENT',
+    );
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a live row whose file is already gone is trashed with no invented path', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(library, { recursive: true });
+    // library/scene.mp4 deliberately never created.
+
+    const db = openTestDatabase();
+    seedUpgrade(db, join(root, 'complete'));
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (1, 1, '/src', ?, 11, 1)`,
+    ).run(join(library, 'scene.mp4'));
+
+    const libraryRootReal = await realpath(library);
+    const trashedTo = await trashLiveFiles(db, 1, libraryRootReal, trash, 9000);
+    assert.notEqual(trashedTo, null);
+
+    const [row] = filesForGroup(db, 1);
+    assert.equal(row?.trashedAt, 9000);
+    assert.equal(row?.trashPath, null);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a live row pointing at a directory is refused rather than trashed', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(join(library, 'oops'), { recursive: true });
+
+    const db = openTestDatabase();
+    seedUpgrade(db, join(root, 'complete'));
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (1, 1, '/src', ?, 0, 1)`,
+    ).run(join(library, 'oops'));
+
+    const libraryRootReal = await realpath(library);
+
+    await assert.rejects(
+      trashLiveFiles(db, 1, libraryRootReal, trash, 7000),
+      /not a regular file/,
+    );
+
+    // Nothing was moved — the directory is exactly where it was.
+    const stillThere = await stat(join(library, 'oops'));
+    assert.equal(stillThere.isDirectory(), true);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a live row that resolves outside the library root is refused rather than trashed', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(library, { recursive: true });
+    const outside = join(root, 'outside.txt');
+    await writeFile(outside, 'not-in-the-library');
+
+    const db = openTestDatabase();
+    seedUpgrade(db, join(root, 'complete'));
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (1, 1, '/src', ?, 19, 1)`,
+    ).run(outside);
+
+    const libraryRootReal = await realpath(library);
+
+    await assert.rejects(
+      trashLiveFiles(db, 1, libraryRootReal, trash, 8000),
+      /resolves outside the library root/,
+    );
+
+    assert.equal(await readFile(outside, 'utf8'), 'not-in-the-library');
     db.close();
   } finally {
     await rm(root, { recursive: true, force: true });

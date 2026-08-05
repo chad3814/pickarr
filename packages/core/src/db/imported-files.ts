@@ -77,10 +77,18 @@ export function findLiveByDest(
   return row === undefined ? null : toRow(row as SqlRow);
 }
 
+/**
+ * `trashPath` is nullable: when the file this row describes was already
+ * absent by the time it was checked, no filesystem move happened, and there
+ * is no location to record. Recording a guessed path (such as the path this
+ * attempt *would* have used) would tell an operator to look somewhere the
+ * file never was — which is worse than telling them, honestly, that its
+ * location is unknown and to search `trashDir` directly.
+ */
 export function markTrashed(
   db: DatabaseSync,
   id: number,
-  trashPath: string,
+  trashPath: string | null,
   now: number,
 ): void {
   db.prepare('UPDATE imported_files SET trashed_at = ?, trash_path = ? WHERE id = ?').run(
@@ -88,4 +96,12 @@ export function markTrashed(
     trashPath,
     id,
   );
+}
+
+/** Every row for a group, live or already trashed — for inspection/tests. */
+export function filesForGroup(db: DatabaseSync, groupId: number): ImportedFileRow[] {
+  return db
+    .prepare(`${SELECT} WHERE group_id = ? ORDER BY id`)
+    .all(groupId)
+    .map((row) => toRow(row as SqlRow));
 }
