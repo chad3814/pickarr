@@ -1,5 +1,27 @@
 import { z } from 'zod';
 
+/**
+ * Marks a config value as an indirection to a file holding the real value, so
+ * secrets can arrive as Docker Compose secrets. Resolved by loadConfig after
+ * this schema has run, which is why the length rule below has to let these
+ * through and be re-applied to the resolved value.
+ */
+export const SECRET_REFERENCE_PREFIX = 'file:';
+
+/**
+ * The shortest download-client api key the config will accept. SABnzbd issues
+ * 32 hex characters, so nothing legitimate is anywhere near this short.
+ *
+ * The reason for a floor is legibility, not safety. The client substring-matches
+ * its key against text it did not write; a two- or three-character key matches
+ * inside ordinary English and would turn every diagnostic the client emits into
+ * an unreadable smear. Refusing that configuration at boot is better than
+ * shipping a client whose error messages are useless. Confidentiality does not
+ * rest on this number — see the fail-closed check in clients/sabnzbd.ts, which
+ * holds for a key of any length.
+ */
+export const MIN_API_KEY_LENGTH = 16;
+
 export const pathMappingSchema = z.object({
   from: z.string().min(1),
   to: z.string().min(1),
@@ -9,7 +31,16 @@ export const downloadClientSchema = z.object({
   id: z.string().min(1),
   type: z.literal('sabnzbd'),
   url: z.string().url(),
-  apiKey: z.string().min(1),
+  // A `file:` reference is exempt here because the schema is looking at the
+  // path, not the key; loadConfig re-checks the length once it has resolved.
+  apiKey: z
+    .string()
+    .min(1)
+    .refine(
+      (value) =>
+        value.startsWith(SECRET_REFERENCE_PREFIX) || value.length >= MIN_API_KEY_LENGTH,
+      `apiKey must be at least ${MIN_API_KEY_LENGTH} characters, or a "${SECRET_REFERENCE_PREFIX}" reference to a file containing such a key`,
+    ),
   category: z.string().min(1),
   importMode: z.enum(['move', 'copy']),
   pathMappings: z.array(pathMappingSchema).default([]),

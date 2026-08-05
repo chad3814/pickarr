@@ -1,8 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import type { JsonValue } from '../json.ts';
-import { configSchema, type PickarrConfig } from './schema.ts';
-
-const SECRET_PREFIX = 'file:';
+import {
+  configSchema,
+  MIN_API_KEY_LENGTH,
+  SECRET_REFERENCE_PREFIX as SECRET_PREFIX,
+  type PickarrConfig,
+} from './schema.ts';
 
 /**
  * Resolves a `file:` indirection to the contents of that file, so secrets can
@@ -65,7 +68,16 @@ export async function loadConfig(path: string): Promise<PickarrConfig> {
   }
 
   for (const client of config.downloadClients) {
-    client.apiKey = await resolveSecret(client.apiKey, `downloadClients.${client.id}.apiKey`);
+    const field = `downloadClients.${client.id}.apiKey`;
+    client.apiKey = await resolveSecret(client.apiKey, field);
+    // The schema's length rule saw a `file:` path, not the key behind it, so
+    // this is the check that actually binds the value the client is handed.
+    // The message states the rule and never the value.
+    if (client.apiKey.length < MIN_API_KEY_LENGTH) {
+      throw new Error(
+        `${field} resolves to fewer than ${MIN_API_KEY_LENGTH} characters; SABnzbd api keys are 32 hex characters`,
+      );
+    }
   }
 
   const portOverride = process.env['PICKARR_PORT'];
