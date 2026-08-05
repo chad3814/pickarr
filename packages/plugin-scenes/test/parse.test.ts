@@ -122,3 +122,126 @@ test('two scenes differing only by content after an in-title XXX followed by an 
   assert.equal(a.display.title, 'Anniversary XXX Web Party');
   assert.equal(b.display.title, 'Anniversary XXX Web Bash');
 });
+
+// --- Invariants -------------------------------------------------------------
+// The three properties below are what collation quality actually depends on.
+// They are asserted over a corpus rather than one input each, so a new
+// boundary rule that happens to satisfy the named cases but breaks the class
+// still fails here.
+
+/** Names that are all genuinely different scenes. None may share a key. */
+const DISTINCT_SCENES = [
+  'Site.23.04.15.Anniversary.XXX.1080p.MP4-G',
+  'Site.23.04.15.Anniversary.XXX.Edition.XXX.1080p.MP4-G',
+  'Site.23.04.15.Anniversary.XXX.Web.Party.XXX.MP4-GRP1',
+  'Site.23.04.15.Anniversary.XXX.Web.Bash.XXX.MP4-GRP2',
+  'Site.23.04.15.Anniversary.XXX.4K.Party.XXX.MP4-GRP1',
+  'Site.23.04.15.Anniversary.XXX.4K.Bash.XXX.MP4-GRP2',
+  'Site.23.04.15.Gala.XXX.MP4.Madness.XXX.1080p.MP4-G',
+  'Site.23.04.15.Gala.XXX.MP4.Mayhem.XXX.1080p.MP4-G',
+  'Site.23.04.15.Triple.XXX.Threat.XXX.720p.MP4-GRP',
+  'Site.23.04.15.Triple.XXX.Tease.XXX.720p.MP4-GRP',
+  'Site.23.04.15.XXX.Anniversary.XXX.1080p.MP4-GRP',
+  'Site.23.04.15.XXXtreme.Makeover.XXX.1080p.MP4-GRP',
+  'Site.23.04.15.Miss.AVI.XXX.1080p.MP4-G',
+  'Site.23.04.15.Miss.MKV.XXX.1080p.MP4-G',
+  'Site.23.04.15.Girls.Of.Web.1080p.MP4-G',
+  'Site.23.04.15.Girls.Of.Print.1080p.MP4-G',
+  'Site.23.04.15.Agent.007.Undercover.XXX.1080p.MP4-G',
+  'Site.23.04.15.Agent.007.Overcover.XXX.1080p.MP4-G',
+  'TeamSkeet.24.01.02.Jane.Doe.XXX.1080p.MP4-XXX',
+  'TeamSkeet.24.01.02.John.Smith.XXX.1080p.MP4-XXX',
+];
+
+/** Each group is one scene, released at several encodes. */
+const ENCODE_GROUPS = [
+  [
+    'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB',
+    'Brazzers.23.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-GRP',
+    'Brazzers.23.04.15.Alex.Coal.XXX.2160p60.WEB-DL.H.265.10bit.HDR.DDP5.1.MP4-G',
+    'Brazzers.23.04.15.Alex.Coal.XXX.SD.480p.XviD.AVI-G',
+    'brazzers 23 04 15 alex coal XXX 1080p MP4-WRB',
+    'Brazzers_23_04_15_Alex_Coal_XXX_1080p_MP4-WRB',
+    'Brazzers-23-04-15-Alex-Coal-XXX-1080p-MP4-WRB',
+  ],
+  [
+    'TeamSkeet.24.01.02.Jane.Doe.XXX.1080p.MP4-XXX',
+    'TeamSkeet.24.01.02.Jane.Doe.XXX.2160p.HEVC.MP4-XXX',
+  ],
+  [
+    'Site.23.04.15.Alex.Coal.XXX.MP4-GRP',
+    'Site.23.04.15.Alex.Coal.XXX.MKV-GRP',
+    'Site.23.04.15.Alex.Coal.XXX.WMV',
+    'Site.23.04.15.Alex.Coal.XXX',
+  ],
+  [
+    'Site.23.04.15.Anniversary.XXX.Web.Party.XXX.MP4-GRP1',
+    'Site.23.04.15.Anniversary.XXX.Web.Party.XXX.1080p.MP4-GRP2',
+  ],
+];
+
+/** The full scene text each name carries, which must survive intact. */
+const FULL_TITLES: [string, string][] = [
+  ['Site.23.04.15.Anniversary.XXX.Web.Party.XXX.MP4-GRP1', 'Anniversary XXX Web Party'],
+  ['Site.23.04.15.Anniversary.XXX.4K.Party.XXX.MP4-GRP1', 'Anniversary XXX 4K Party'],
+  ['Site.23.04.15.Gala.XXX.MP4.Madness.XXX.1080p.MP4-G', 'Gala XXX MP4 Madness'],
+  ['Site.23.04.15.XXX.Anniversary.XXX.1080p.MP4-GRP', 'XXX Anniversary'],
+  ['Site.23.04.15.The.1080.Club.XXX.1080p.MP4-G', 'The 1080 Club'],
+  ['Site.23.04.15.Agent.007.Undercover.XXX.1080p.MP4-G', 'Agent 007 Undercover'],
+  ['Site.23.04.15.Girls.Of.Web.1080p.MP4-G', 'Girls Of Web'],
+  ['Site.23.04.15.Alex.Coal.XXX.MP4-GRP', 'Alex Coal'],
+];
+
+/**
+ * Inputs the parser deliberately refuses. Each is ambiguous in a way where a
+ * guess could merge two different scenes, so `null` (a visible parse_error)
+ * is the intended answer. Pinned so the refusal set cannot silently widen.
+ */
+const REFUSED = [
+  '',
+  'Some.Random.Movie.2023.1080p.BluRay-GRP',
+  '23.04.15.Alex.Coal.XXX.1080p.MP4-G',
+  'Site.23.13.45.Name.XXX.1080p.MP4-G',
+  'Site.23.02.30.Name.XXX.1080p.MP4-G',
+  'Site.23.04.15.Alex.Coal',
+  'Site.23.04.15.Alex.Coal.MP4-G',
+  'Site.23.04.15.Girls.Of.Web.MP4-G',
+  'Site.23.04.15.The.1080p.Club.MP4-G',
+  'Site.23.04.15.Name.XXX.1080p.Uncut.MP4-G',
+];
+
+test('invariant: no two distinct scenes ever share an identity key', () => {
+  const seen = new Map<string, string>();
+  for (const name of DISTINCT_SCENES) {
+    const parsed = parseSceneRelease(name);
+    assert.ok(parsed, `expected ${name} to parse`);
+    const clash = seen.get(parsed.identityKey);
+    assert.equal(clash, undefined, `${name} collided with ${clash} on ${parsed.identityKey}`);
+    seen.set(parsed.identityKey, name);
+  }
+});
+
+test('invariant: every encode of one scene collapses to a single identity key', () => {
+  for (const group of ENCODE_GROUPS) {
+    const keys = group.map((name) => {
+      const parsed = parseSceneRelease(name);
+      assert.ok(parsed, `expected ${name} to parse`);
+      return parsed.identityKey;
+    });
+    assert.equal(new Set(keys).size, 1, `group split into ${JSON.stringify(keys)}`);
+  }
+});
+
+test('invariant: a title is never silently truncated at an in-title marker or encode word', () => {
+  for (const [name, expected] of FULL_TITLES) {
+    const parsed = parseSceneRelease(name);
+    assert.ok(parsed, `expected ${name} to parse`);
+    assert.equal(parsed.display.title, expected, name);
+  }
+});
+
+test('invariant: ambiguous names are refused rather than guessed', () => {
+  for (const name of REFUSED) {
+    assert.equal(parseSceneRelease(name), null, `expected ${name || "''"} to be refused`);
+  }
+});

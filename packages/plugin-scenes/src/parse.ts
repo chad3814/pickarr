@@ -1,8 +1,45 @@
 import type { ParsedRelease, QualityExtra, QualityTokens } from '@pickarr/plugin-api';
 
 const DATE_PATTERN = /(?:^|[.\s_-])((?:19|20)?\d{2})[.\s_-](\d{2})[.\s_-](\d{2})(?:[.\s_-]|$)/;
-const XXX_MARKER = /[.\s_-]XXX(?:[.\s_-]|$)/i;
-const QUALITY_START = /[.\s_-](?:\d{3,4}p|4K|8K|WEB-?DL|WEBRip|BluRay|SiteRip|HDTV)(?:[.\s_-]|$)/i;
+
+/** The literal marker token that separates identity from encode information. */
+const MARKER_TOKEN = 'XXX';
+
+/**
+ * Tokens that can only plausibly be encode information, never title words.
+ * These are strong enough on their own to anchor a boundary when no marker
+ * token is present.
+ */
+const RESOLUTION_TOKEN = /^(?:\d{3,4}p(?:\d{2,3})?|4K|8K|UHD)$/i;
+const SOURCE_TOKEN =
+  /^(?:WEB[-_.]?DL|WEB[-_.]?Rip|SiteRip|Blu[-_.]?Ray|BD[-_.]?Rip|BR[-_.]?Rip|DVD[-_.]?Rip|HD[-_.]?TV)$/i;
+
+/**
+ * Tokens that routinely appear in an encode section but are too weak to
+ * anchor a boundary by themselves — several of them (`Web`, `HD`, `MP4`) are
+ * perfectly ordinary title words in this domain.
+ */
+const ANCILLARY_TOKEN =
+  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|\d)$/i;
+
+/**
+ * Encode tokens that are conventionally written with an internal separator.
+ * The tokenizer splits on every separator, so these are re-joined afterwards;
+ * the set is keyed on the separator-free uppercase form.
+ */
+const HYPHENATED_ENCODE_TOKENS = new Set([
+  'WEBDL',
+  'WEBRIP',
+  'BLURAY',
+  'BDRIP',
+  'BRRIP',
+  'DVDRIP',
+  'HDTV',
+  'H264',
+  'H265',
+  'X264',
+  'X265',
+]);
 
 const RESOLUTIONS: [RegExp, number][] = [
   [/\b8K\b/i, 4320],
@@ -54,7 +91,10 @@ function slug(value: string): string {
 }
 
 function prettify(value: string): string {
-  return value.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return value
+    .replace(/[._]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s-]+|[\s-]+$/g, '');
 }
 
 function toIsoDate(rawYear: string, rawMonth: string, rawDay: string): string | null {
@@ -89,65 +129,117 @@ function extractQuality(tail: string): QualityTokens {
   return quality;
 }
 
-/**
- * True when `tail` contains a substantive quality signal: a resolution, or
- * (failing that) a source or video codec token, found anywhere within it.
- * Container tokens (MP4, MKV, ...) deliberately don't count — they're common
- * enough as incidental text that they aren't reliable boundary evidence on
- * their own.
- */
-function hasQualitySignal(tail: string): boolean {
-  return (
-    firstMatch(RESOLUTIONS, tail) !== undefined ||
-    firstMatch(SOURCES, tail) !== undefined ||
-    firstMatch(VIDEO_CODECS, tail) !== undefined
-  );
+interface Token {
+  readonly text: string;
+  readonly start: number;
+}
+
+function isEncodeToken(text: string): boolean {
+  return RESOLUTION_TOKEN.test(text) || SOURCE_TOKEN.test(text) || ANCILLARY_TOKEN.test(text);
+}
+
+/** Encode tokens strong enough to mark a boundary without a marker token. */
+function isBoundaryAnchor(text: string): boolean {
+  return RESOLUTION_TOKEN.test(text) || SOURCE_TOKEN.test(text);
+}
+
+/** Splits on every separator, recording each token's offset in `name`. */
+function tokenize(name: string): Token[] {
+  const tokens: Token[] = [];
+  const pattern = /[^.\s_-]+/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(name)) !== null) {
+    tokens.push({ text: match[0], start: match.index });
+  }
+  return tokens;
+}
+
+/** Re-joins `WEB-DL`, `H.265`, `Blu-Ray` and friends into single tokens. */
+function joinHyphenatedEncodeTokens(tokens: Token[], name: string): Token[] {
+  const joined: Token[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const current = tokens[index];
+    const next = tokens[index + 1];
+    if (current === undefined) continue;
+    if (
+      next !== undefined &&
+      next.start - (current.start + current.text.length) === 1 &&
+      HYPHENATED_ENCODE_TOKENS.has((current.text + next.text).toUpperCase())
+    ) {
+      joined.push({
+        text: name.slice(current.start, next.start + next.text.length),
+        start: current.start,
+      });
+      index += 1;
+      continue;
+    }
+    joined.push(current);
+  }
+  return joined;
 }
 
 /**
- * A release title can itself contain the literal word "XXX" (e.g. an
- * "XXX Anniversary" scene, or a release group literally named "XXX"). A
- * single following token is not enough evidence that an `XXX` occurrence is
- * the real identity/encode boundary — ordinary title words ("Web", "MP4")
- * can coincidentally look like encode tokens too. Only the shape of the
- * whole remainder distinguishes the real boundary from an in-title `XXX`.
- *
- * Every suffix starting at an earlier `XXX` occurrence contains every suffix
- * starting at a later one, so if the true encode block (resolution, source,
- * or codec) appears anywhere after a candidate, that candidate "sees" it too.
- * That means every `XXX` occurrence at or before the real boundary will
- * qualify, while a trailing marker positioned *after* the real quality
- * information (e.g. a release group literally named "XXX") will not, because
- * by then the quality tokens are already behind it. Taking the LAST
- * qualifying candidate therefore lands exactly on the true boundary.
+ * Drops a trailing `-GROUP` tag. The release group is the only part of a
+ * scene name attached with a hyphen rather than the name's own separator, so
+ * a final token introduced by a lone `-` that is not itself encode
+ * information is a group tag — including one literally named `XXX`.
  */
-function findEncodeBoundary(name: string): number | null {
-  const pattern = new RegExp(XXX_MARKER.source, 'gi');
-  let boundary: number | null = null;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(name)) !== null) {
-    if (match.index > 0 && hasQualitySignal(name.slice(match.index))) {
-      boundary = match.index;
-    }
-  }
-  return boundary;
+function dropReleaseGroup(tokens: Token[], name: string): Token[] {
+  const last = tokens.at(-1);
+  const previous = tokens.at(-2);
+  if (last === undefined || previous === undefined) return tokens;
+  const separator = name.slice(previous.start + previous.text.length, last.start);
+  if (separator !== '-' || isEncodeToken(last.text)) return tokens;
+  return tokens.slice(0, -1);
 }
 
 /**
  * Splits a scene release name at the boundary between identity and encode.
- * Everything before the boundary is stable across re-releases of the same
- * scene; everything after varies. When there is no qualifying XXX marker,
- * the first quality token serves as the boundary.
+ *
+ * The encode section is, structurally, the *trailing run* of the name: every
+ * token after the boundary is encode information, and the run ends where the
+ * first non-encode token appears reading backwards from the end. That run is
+ * unique — there is no candidate to choose between — which is what makes this
+ * robust where "first XXX", "last XXX", and "the XXX whose tail looks like an
+ * encode" are not. Those rules test a local property of one marker, and an
+ * in-title `XXX` can satisfy any local test that the real marker satisfies.
+ *
+ * From the run, two cases:
+ *
+ * 1. The token immediately preceding the run is `XXX`. Because `XXX` is never
+ *    an encode token, the backward walk cannot pass through a marker, so the
+ *    token found there is necessarily the *last* marker in the name — and any
+ *    earlier, in-title `XXX` is protected from being chosen by the real marker
+ *    standing between it and the run. Equally, a release group named `XXX` has
+ *    already been removed as a group tag, so it cannot be mistaken for the
+ *    marker. The boundary is exact.
+ * 2. No marker sits there (the name omits it, or an unrecognised token
+ *    interrupts the encode section). Then fall back to the earliest
+ *    *boundary anchor* — a resolution or an explicit source, tokens that are
+ *    implausible as title words — that begins an all-encode suffix. Requiring
+ *    both properties means a title ending in a weak encode word ("...Of.Web")
+ *    is not silently eaten: it stays in the identity if an anchor follows it,
+ *    and yields `null` if no anchor exists at all.
+ *
+ * When neither case applies the name is ambiguous and the caller gets `null`,
+ * which surfaces as a parse error rather than a wrong collation.
  */
 function splitAtQualityBoundary(name: string): { head: string; tail: string } | null {
-  const xxxIndex = findEncodeBoundary(name);
-  if (xxxIndex !== null) {
-    return { head: name.slice(0, xxxIndex), tail: name.slice(xxxIndex) };
+  const tokens = dropReleaseGroup(joinHyphenatedEncodeTokens(tokenize(name), name), name);
+
+  let runStart = tokens.length;
+  while (runStart > 0 && isEncodeToken(tokens[runStart - 1]?.text ?? '')) runStart -= 1;
+
+  const marker = tokens[runStart - 1];
+  if (runStart >= 2 && marker !== undefined && marker.text.toUpperCase() === MARKER_TOKEN) {
+    return { head: name.slice(0, marker.start), tail: name.slice(marker.start) };
   }
 
-  const quality = QUALITY_START.exec(name);
-  if (quality !== null && quality.index > 0) {
-    return { head: name.slice(0, quality.index), tail: name.slice(quality.index) };
+  for (let index = Math.max(runStart, 1); index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token !== undefined && isBoundaryAnchor(token.text)) {
+      return { head: name.slice(0, token.start), tail: name.slice(token.start) };
+    }
   }
 
   return null;
