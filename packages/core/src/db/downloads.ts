@@ -246,3 +246,23 @@ export function resetMissingPolls(db: DatabaseSync, id: number): void {
     throw new Error(`resetMissingPolls: no download with id ${id}`);
   }
 }
+
+/**
+ * Resumes from the furthest point already reached: a row that has a storage
+ * path only needs its import redone, everything else restarts from queued.
+ */
+export function resetForRetry(db: DatabaseSync, id: number, now: number): DownloadRow | null {
+  const download = getDownload(db, id);
+  if (download === null) return null;
+
+  const status: DownloadStatus = download.storagePath === null ? 'queued' : 'completed';
+  db.prepare(
+    `UPDATE downloads
+     SET status = ?, error = NULL, attempts = 0, missing_polls = 0,
+         client_ref = CASE WHEN ? = 'queued' THEN NULL ELSE client_ref END,
+         updated_at = ?
+     WHERE id = ?`,
+  ).run(status, status, now, id);
+
+  return getDownload(db, id);
+}
