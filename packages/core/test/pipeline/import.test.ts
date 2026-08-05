@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -271,6 +271,152 @@ test('the file listing reaches the plugin with sizes and relative paths', async 
 
     assert.equal(seenRelative, join('nested', 'scene.mp4'));
     assert.equal(seenSize, 6);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a destination resolving to the library root itself is rejected, and the source survives', async () => {
+  for (const destination of ['.', '']) {
+    const root = await tempDir();
+    try {
+      const downloadDir = join(root, 'complete');
+      await mkdir(downloadDir, { recursive: true });
+      const source = join(downloadDir, 'scene.mp4');
+      await writeFile(source, 'the real download');
+
+      const db = openTestDatabase();
+      seed(db, downloadDir);
+      const registry = registryFor(
+        plugin((): ImportPlan => ({ files: [{ source, destination }] })),
+        join(root, 'library'),
+      );
+
+      await assert.rejects(
+        importDownload(deps(db, registry, join(root, 'trash')), getDownload(db, 1)!),
+        /escapes the library root/,
+        `destination ${JSON.stringify(destination)} should be rejected`,
+      );
+
+      assert.equal(
+        await stat(source).then(
+          () => true,
+          () => false,
+        ),
+        true,
+        `source should survive for destination ${JSON.stringify(destination)}`,
+      );
+      db.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a foreign regular file already at the destination fails the import and leaves the source untouched', async () => {
+  const root = await tempDir();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    const source = join(downloadDir, 'scene.mp4');
+    await writeFile(source, 'the real download');
+
+    const library = join(root, 'library');
+    await mkdir(library, { recursive: true });
+    const destination = join(library, 'scene.mp4');
+    await writeFile(destination, 'unrelated file that happened to already be there');
+
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+    const registry = registryFor(
+      plugin((): ImportPlan => ({ files: [{ source, destination: 'scene.mp4' }] })),
+      library,
+    );
+
+    await assert.rejects(
+      importDownload(deps(db, registry, join(root, 'trash')), getDownload(db, 1)!),
+      /occupied by something this download did not write/,
+    );
+
+    assert.equal(await readFile(source, 'utf8'), 'the real download');
+    assert.equal(
+      await readFile(destination, 'utf8'),
+      'unrelated file that happened to already be there',
+    );
+    assert.equal(liveFilesForGroup(db, 1).length, 0);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a symlink at the exact destination path is treated as a collision, not adopted', async () => {
+  const root = await tempDir();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    const source = join(downloadDir, 'scene.mp4');
+    await writeFile(source, 'the real download');
+
+    const library = join(root, 'library');
+    await mkdir(library, { recursive: true });
+    const elsewhere = join(root, 'elsewhere.mp4');
+    await writeFile(elsewhere, 'symlink target, not an import');
+    const destination = join(library, 'scene.mp4');
+    await symlink(elsewhere, destination);
+
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+    const registry = registryFor(
+      plugin((): ImportPlan => ({ files: [{ source, destination: 'scene.mp4' }] })),
+      library,
+    );
+
+    await assert.rejects(
+      importDownload(deps(db, registry, join(root, 'trash')), getDownload(db, 1)!),
+      /occupied by something this download did not write/,
+    );
+
+    assert.equal(await readFile(source, 'utf8'), 'the real download');
+    assert.equal(liveFilesForGroup(db, 1).length, 0);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a destination that already exists with no surviving source and no recorded row is adopted as crash recovery', async () => {
+  const root = await tempDir();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+
+    const library = join(root, 'library');
+    await mkdir(library, { recursive: true });
+    const destination = join(library, 'scene.mp4');
+    await writeFile(destination, 'already moved by an earlier attempt that crashed before recording it');
+    // The earlier attempt's move already removed the source; this test's
+    // downloadDir never contains it at all.
+    const source = join(downloadDir, 'scene.mp4');
+
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+    const registry = registryFor(
+      plugin((): ImportPlan => ({ files: [{ source, destination: 'scene.mp4' }] })),
+      library,
+    );
+
+    await importDownload(deps(db, registry, join(root, 'trash')), getDownload(db, 1)!);
+
+    assert.equal(getDownload(db, 1)?.status, 'imported');
+    const recorded = liveFilesForGroup(db, 1);
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0]?.destPath, destination);
+    assert.equal(
+      await readFile(destination, 'utf8'),
+      'already moved by an earlier attempt that crashed before recording it',
+    );
     db.close();
   } finally {
     await rm(root, { recursive: true, force: true });
