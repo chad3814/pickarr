@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSabnzbdClient } from '../../src/clients/sabnzbd.ts';
 import type { DownloadClientConfig } from '../../src/config/schema.ts';
+import type { JsonValue } from '../../src/json.ts';
 
 const CONFIG: DownloadClientConfig = {
   id: 'sab',
@@ -16,14 +17,14 @@ const CONFIG: DownloadClientConfig = {
   ],
 };
 
-function jsonResponse(body: unknown): Response {
+function jsonResponse(body: JsonValue): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
 }
 
-function recordingFetch(bodyFor: (url: string) => unknown): {
+function recordingFetch(bodyFor: (url: string) => JsonValue): {
   fetch: (url: string) => Promise<Response>;
   urls: string[];
 } {
@@ -65,6 +66,17 @@ test('an error never contains the api key', async () => {
   const client = createSabnzbdClient(CONFIG, async () => new Response('nope', { status: 500 }));
   await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
     assert.doesNotMatch(error.message, /SECRET_KEY/);
+    return true;
+  });
+});
+
+test('an error thrown by fetchImpl itself never leaks the api key', async () => {
+  const client = createSabnzbdClient(CONFIG, async (url) => {
+    throw new Error(`network failure while fetching ${url}`);
+  });
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
+    assert.doesNotMatch(error.message, /SECRET_KEY/);
+    assert.doesNotMatch(error.message, /apikey/);
     return true;
   });
 });
