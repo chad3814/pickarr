@@ -30,6 +30,7 @@ export async function loadPlugins(
   const byPackage = new Map<string, MediaTypePlugin>();
   const byId = new Map<string, MediaTypePlugin>();
   const roots = new Map<string, string>();
+  const idToPackage = new Map<string, string>();
 
   for (const [packageName, pluginConfig] of Object.entries(config.plugins)) {
     const libraryRoot = pluginConfig['libraryRoot'];
@@ -51,16 +52,17 @@ export async function loadPlugins(
 
     const plugin = factory(pluginConfig as PluginConfig);
 
-    const existing = byId.get(plugin.id);
-    if (existing !== undefined) {
+    const existingPackage = idToPackage.get(plugin.id);
+    if (existingPackage !== undefined) {
       throw new Error(
-        `Two plugin packages claim the id "${plugin.id}"; ids must be unique across packages`,
+        `Plugins ${existingPackage} and ${packageName} both claim the id "${plugin.id}"; ids must be unique across packages`,
       );
     }
 
     byPackage.set(packageName, plugin);
     byId.set(plugin.id, plugin);
     roots.set(packageName, libraryRoot);
+    idToPackage.set(plugin.id, packageName);
   }
 
   return {

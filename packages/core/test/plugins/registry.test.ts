@@ -47,7 +47,7 @@ test('two packages claiming the same id is fatal', async () => {
   });
   await assert.rejects(
     loadPlugins(config, async () => fakeModule('same')),
-    /same/,
+    /pkg-a.*pkg-b|pkg-b.*pkg-a/,
   );
 });
 
