@@ -1,0 +1,118 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadConfig } from '../../src/config/load.ts';
+
+const VALID = {
+  server: { port: 8080 },
+  database: { path: '/config/pickarr.db' },
+  trashDir: '/data/trash',
+  plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes' } },
+  downloadClients: [
+    {
+      id: 'sab',
+      type: 'sabnzbd',
+      url: 'http://sabnzbd:8080',
+      apiKey: 'literal-key',
+      category: 'pickarr',
+      importMode: 'move',
+      pathMappings: [{ from: '/downloads', to: '/data/downloads' }],
+    },
+  ],
+  feeds: [
+    {
+      id: 'feed1',
+      url: 'https://example.invalid/rss',
+      plugin: '@pickarr/plugin-scenes',
+      intervalSeconds: 900,
+    },
+  ],
+};
+
+async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-config-'));
+  try {
+    await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('loads a valid config', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    await writeFile(path, JSON.stringify(VALID));
+    const config = await loadConfig(path);
+    assert.equal(config.server.port, 8080);
+    assert.equal(config.downloadClients[0]?.apiKey, 'literal-key');
+    assert.equal(config.feeds[0]?.intervalSeconds, 900);
+  });
+});
+
+test('resolves a file: secret and trims its trailing newline', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'sab_key');
+    await writeFile(secretPath, 'super-secret-value\n');
+    const path = join(dir, 'config.json');
+    const withSecret = structuredClone(VALID);
+    withSecret.downloadClients[0]!.apiKey = `file:${secretPath}`;
+    await writeFile(path, JSON.stringify(withSecret));
+
+    const config = await loadConfig(path);
+    assert.equal(config.downloadClients[0]?.apiKey, 'super-secret-value');
+  });
+});
+
+test('a missing secret file is fatal and names the path but not the contents', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    const withSecret = structuredClone(VALID);
+    withSecret.downloadClients[0]!.apiKey = `file:${join(dir, 'absent')}`;
+    await writeFile(path, JSON.stringify(withSecret));
+
+    await assert.rejects(loadConfig(path), (error: Error) => {
+      assert.match(error.message, /absent/);
+      return true;
+    });
+  });
+});
+
+test('an invalid config names the offending field', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    const broken = structuredClone(VALID);
+    broken.downloadClients[0]!.importMode = 'teleport';
+    await writeFile(path, JSON.stringify(broken));
+
+    await assert.rejects(loadConfig(path), (error: Error) => {
+      assert.match(error.message, /importMode/);
+      return true;
+    });
+  });
+});
+
+test('PICKARR_PORT overrides the configured port', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    await writeFile(path, JSON.stringify(VALID));
+    process.env['PICKARR_PORT'] = '9999';
+    try {
+      const config = await loadConfig(path);
+      assert.equal(config.server.port, 9999);
+    } finally {
+      delete process.env['PICKARR_PORT'];
+    }
+  });
+});
+
+test('two feeds sharing an id is rejected', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    const dupes = structuredClone(VALID);
+    dupes.feeds.push({ ...dupes.feeds[0]! });
+    await writeFile(path, JSON.stringify(dupes));
+    await assert.rejects(loadConfig(path), /duplicate feed id/i);
+  });
+});
