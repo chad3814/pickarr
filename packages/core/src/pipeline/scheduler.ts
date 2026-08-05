@@ -49,17 +49,25 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     }
   }
 
-  async function reconcileNow(): Promise<void> {
-    await reconcileMutex.run(async () => {
-      for (const clientId of deps.clientIds) {
-        try {
-          const result = await deps.reconcile(clientId);
-          untracked.set(clientId, result.untracked);
-        } catch (error) {
-          deps.log(`reconcile ${clientId} failed: ${(error as Error).message}`);
-        }
+  async function reconcilePass(): Promise<void> {
+    for (const clientId of deps.clientIds) {
+      try {
+        const result = await deps.reconcile(clientId);
+        untracked.set(clientId, result.untracked);
+      } catch (error) {
+        deps.log(`reconcile ${clientId} failed: ${(error as Error).message}`);
       }
-    });
+    }
+  }
+
+  /**
+   * The explicit, caller-initiated pass — the one at boot, and anything else
+   * that asks for a reconcile by name. `run`, not `tryRun`: a caller that
+   * awaits this is entitled to have it actually happen, so it queues rather
+   * than being dropped.
+   */
+  async function reconcileNow(): Promise<void> {
+    await reconcileMutex.run(reconcilePass);
   }
 
   return {
@@ -74,8 +82,18 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         timers.push(timer);
       }
 
+      // `tryRun`, not `run`: a timer tick is a *sample*, not a work item. The
+      // imports a tick performs run inside it and can take minutes, while this
+      // timer keeps firing every ten seconds throughout — with a queueing
+      // acquisition, a five-minute import leaves roughly thirty ticks stacked
+      // up to run back-to-back the moment it finishes, each issuing its own
+      // pair of requests to the download client, and every one of them
+      // observing a state the first of them already handled. A tick that finds
+      // the mutex busy has nothing to contribute that the next tick will not,
+      // so it is dropped. `reconcileNow` above keeps `run` precisely because
+      // the opposite is true of an explicit call.
       const reconcileTimer = setInterval(() => {
-        void reconcileNow();
+        void reconcileMutex.tryRun(reconcilePass);
       }, RECONCILE_INTERVAL_MS);
       reconcileTimer.unref();
       timers.push(reconcileTimer);

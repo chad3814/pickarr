@@ -190,6 +190,50 @@ test('a destination escaping the library root is rejected', async () => {
   }
 });
 
+test('a planned source outside the download listing is refused, naming the path', async () => {
+  const root = await tempDir();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    await writeFile(join(downloadDir, 'scene.mp4'), 'the actual download');
+
+    // Not in the listing handed to planImport, and not something core has any
+    // business moving: a plugin naming it must be refused, not obeyed.
+    const outside = join(root, 'important.conf');
+    await writeFile(outside, 'a file that belongs to someone else');
+
+    const library = join(root, 'library');
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+    const registry = registryFor(
+      plugin((): ImportPlan => ({ files: [{ source: outside, destination: 'stolen.conf' }] })),
+      library,
+    );
+
+    await assert.rejects(
+      importDownload(deps(db, registry, join(root, 'trash')), getDownload(db, 1)!),
+      (error: Error) => {
+        assert.match(error.message, /was not in this download's file listing/);
+        assert.match(error.message, /important\.conf/);
+        return true;
+      },
+    );
+
+    assert.equal(await readFile(outside, 'utf8'), 'a file that belongs to someone else');
+    assert.equal(
+      await stat(join(library, 'stolen.conf')).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+    assert.equal(liveFilesForGroup(db, 1).length, 0);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('no importable files fails with a named reason', async () => {
   const root = await tempDir();
   try {

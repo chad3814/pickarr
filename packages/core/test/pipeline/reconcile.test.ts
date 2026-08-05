@@ -98,6 +98,54 @@ test('a completed download gets its mapped storage path and is imported', async 
   db.close();
 });
 
+// A `completed` row with a storage path has nothing left to learn from the
+// client: the download is done and the only remaining step is the import. The
+// client's history is not a durable record — SABnzbd prunes it on its own
+// schedule — so an import that is driven purely by observing the entry in
+// history stops happening the moment the entry ages out, and the row is then
+// indistinguishable from one that vanished mid-download. Imports are therefore
+// driven from the row's own state.
+test('a completed row with a storage path is imported even when the client has pruned its history', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'completed', clientRef: 'nzo_1' });
+  db.prepare("UPDATE downloads SET storage_path = '/pickarr/complete/R' WHERE id = 1").run();
+  const imported: DownloadRow[] = [];
+  const client = fakeClient(EMPTY);
+
+  // More ticks than it takes to be declared missing: a completed row is
+  // waiting on us, not on the client, so it is exempt from that accounting.
+  for (let tick = 0; tick <= MAX_MISSING_POLLS; tick += 1) {
+    await reconcileClient(deps(db, client, imported));
+  }
+
+  assert.equal(imported.length, MAX_MISSING_POLLS + 1);
+  assert.equal(imported[0]?.storagePath, '/pickarr/complete/R');
+  const download = getDownload(db, 1)!;
+  assert.equal(download.status, 'completed');
+  assert.equal(download.missingPolls, 0);
+  db.close();
+});
+
+test('an import failure on a completed row fails the download rather than retrying forever', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'completed', clientRef: 'nzo_1' });
+  db.prepare("UPDATE downloads SET storage_path = '/pickarr/complete/R' WHERE id = 1").run();
+
+  await reconcileClient({
+    db,
+    client: fakeClient(EMPTY),
+    now: () => 1000,
+    importDownload: async () => {
+      throw new Error('no-importable-files');
+    },
+  });
+
+  const download = getDownload(db, 1)!;
+  assert.equal(download.status, 'failed');
+  assert.match(download.error ?? '', /no-importable-files/);
+  db.close();
+});
+
 test('a failed download records the fail message', async () => {
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });

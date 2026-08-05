@@ -127,7 +127,42 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       .map((row) => String(row['client_ref'])),
   );
 
+  /**
+   * The single place an import is attempted, so the two routes into it — a
+   * job observed finishing during this tick, and a row already sitting in
+   * `completed` from an earlier one — cannot drift apart in how they record
+   * success or failure.
+   */
+  async function attemptImport(row: DownloadRow): Promise<void> {
+    try {
+      await deps.importDownload(row);
+      result.imported += 1;
+    } catch (error) {
+      failDownload(db, row.id, (error as Error).message, now);
+      result.failed += 1;
+    }
+  }
+
   for (const download of activeDownloads(db, client.id)) {
+    // A `completed` row that already has a storage path is waiting on us, not
+    // on the client: the transfer finished, the path is recorded, and the only
+    // step left is the import. Driving that from the row's own state — rather
+    // than only as a side effect of finding the job in the client's history —
+    // is what makes it survive the client forgetting about the job. SABnzbd
+    // prunes history on its own schedule, and once the entry is gone a
+    // history-driven import never fires again: the row matches neither queue
+    // nor history, so it accrues missing polls and is eventually failed as
+    // 'disappeared-from-client' having never been imported once. Retrying that
+    // row reproduces it exactly, because the condition that failed it (an
+    // empty history) is the same condition the retry runs under. Exempting
+    // these rows from missing-poll accounting falls out of handling them here:
+    // "the client no longer lists it" is the expected steady state for a
+    // download that is already off the client's books.
+    if (download.status === 'completed' && download.storagePath !== null) {
+      await attemptImport(download);
+      continue;
+    }
+
     let clientRef = download.clientRef;
     let status = download.status;
 
@@ -228,16 +263,14 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       setStatus(db, download.id, 'completed', now);
       result.advanced += 1;
 
+      // Imported here rather than left for the completed-row branch on the
+      // next tick: a download that finishes while we are watching should land
+      // in the library now, not ten seconds from now. The branch above is the
+      // safety net for every other way a row can reach `completed`, not a
+      // replacement for this.
       const ready = getDownload(db, download.id);
       if (ready === null) continue;
-
-      try {
-        await deps.importDownload(ready);
-        result.imported += 1;
-      } catch (error) {
-        failDownload(db, download.id, (error as Error).message, now);
-        result.failed += 1;
-      }
+      await attemptImport(ready);
       continue;
     }
 

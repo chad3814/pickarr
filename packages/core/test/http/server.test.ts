@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
+import { getDownload } from '../../src/db/downloads.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
 import type { DownloadClient } from '../../src/clients/types.ts';
 import type { UntrackedEntry } from '../../src/pipeline/reconcile.ts';
@@ -190,6 +191,25 @@ test('retrying a failed import resumes at completed', async () => {
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.json()['status'], 'completed');
+  await server.close();
+  db.close();
+});
+
+test('retrying a download that has not failed is refused', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+  db.prepare(
+    "UPDATE downloads SET status = 'imported', storage_path = '/x' WHERE id = 1",
+  ).run();
+
+  const response = await server.inject({ method: 'POST', url: '/api/downloads/1/retry' });
+
+  assert.equal(response.statusCode, 409);
+  // Untouched: re-running an already-imported upgrade is the one API call that
+  // could make an import destroy its own output, so the row must not be reset.
+  assert.equal(getDownload(db, 1)?.status, 'imported');
   await server.close();
   db.close();
 });

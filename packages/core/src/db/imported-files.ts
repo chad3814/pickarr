@@ -59,10 +59,38 @@ export function insertImportedFile(db: DatabaseSync, file: NewImportedFile): num
   return Number(result.lastInsertRowid);
 }
 
-export function liveFilesForGroup(db: DatabaseSync, groupId: number): ImportedFileRow[] {
+/**
+ * A group's live rows, optionally excluding one download's own.
+ *
+ * The exclusion exists because the only caller that acts on this list —
+ * `trashLiveFiles` — is invoked *by* an import, to clear the way for that
+ * import's own output. "Live files of this group" and "files this import is
+ * superseding" are the same set only on a first attempt: the moment an import
+ * retries (a crash between the transfer and the status write, a boot recovery
+ * that resets `importing` to `completed`, an operator-triggered retry), rows
+ * this same download inserted on an earlier attempt are live too, and trashing
+ * them destroys the very files the retry is about to claim it wrote. Excluding
+ * the download doing the work makes the list mean what the caller needs —
+ * *other* downloads' files — rather than what it happened to mean the first
+ * time through. In production the superseded file's row always belongs to an
+ * earlier download, so it is still returned and still trashed.
+ */
+export function liveFilesForGroup(
+  db: DatabaseSync,
+  groupId: number,
+  excludeDownloadId: number | null = null,
+): ImportedFileRow[] {
+  if (excludeDownloadId === null) {
+    return db
+      .prepare(`${SELECT} WHERE group_id = ? AND trashed_at IS NULL ORDER BY id`)
+      .all(groupId)
+      .map((row) => toRow(row as SqlRow));
+  }
   return db
-    .prepare(`${SELECT} WHERE group_id = ? AND trashed_at IS NULL ORDER BY id`)
-    .all(groupId)
+    .prepare(
+      `${SELECT} WHERE group_id = ? AND trashed_at IS NULL AND download_id != ? ORDER BY id`,
+    )
+    .all(groupId, excludeDownloadId)
     .map((row) => toRow(row as SqlRow));
 }
 
