@@ -44,3 +44,35 @@ test('tryRun skips instead of queueing when busy', async () => {
   assert.equal(skipped, false);
   assert.equal(ran, 0);
 });
+
+test('tryRun runs immediately once a preceding run has released the mutex', async () => {
+  const mutex = createMutex();
+  let ran = 0;
+
+  await mutex.run(async () => {});
+  const started = await mutex.tryRun(async () => {
+    ran += 1;
+  });
+
+  assert.equal(started, true);
+  assert.equal(ran, 1);
+});
+
+test(
+  'a nested acquisition on the same mutex throws instead of deadlocking',
+  { timeout: 2000 },
+  async () => {
+    const mutex = createMutex();
+
+    await assert.rejects(
+      mutex.run(async () => {
+        await mutex.run(async () => {});
+      }),
+      /reentrant/i,
+    );
+
+    // The mutex must still be usable afterward — the rejected nested
+    // acquisition must not have left `pending` or `tail` in a stuck state.
+    assert.equal(await mutex.run(async () => 'ok'), 'ok');
+  },
+);
