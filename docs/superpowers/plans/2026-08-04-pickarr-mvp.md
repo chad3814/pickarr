@@ -155,6 +155,8 @@ The `development` export condition is the mechanism that lets tests import works
     "lib": ["es2023"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
+    "customConditions": ["development"],
+    "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
@@ -168,10 +170,12 @@ The `development` export condition is the mechanism that lets tests import works
 }
 ```
 
-Two of these are load-bearing rather than stylistic:
+Four of these are load-bearing rather than stylistic:
 
 - `erasableSyntaxOnly` bans enums, namespaces, and parameter properties — exactly the constructs Node's type stripping cannot handle. Better to fail at typecheck than at runtime.
 - `allowImportingTsExtensions` permits `import './types.ts'`. Node's ESM resolver requires the real extension, and esbuild resolves it the same way, so every relative import in this repo ends in `.ts` or `.tsx`.
+- `customConditions: ["development"]` is the TypeScript-side analog of the `--conditions development` runtime flag. Without it, type resolution ignores the `development` export condition and falls through to `types`, which points at a `.d.ts` esbuild never emits — so every workspace-to-workspace import fails to typecheck. The runtime flag and this option must always be changed together.
+- `types: ["node"]` is needed because `tsgo` does not auto-discover `@types/node` by walking up to the workspace root the way `tsc` does. It is a no-op for `tsc`. Because setting `types` at all *replaces* automatic `@types` inclusion, any package needing more must list them all — see `web`'s tsconfig in Task 17.
 
 There is no root `tsconfig.json`. Each package typechecks itself, because `web` needs DOM libs and JSX while `core` must not have them — a single root project cannot express that, and project references would force `tsgo --build`, which is the least-proven part of a preview compiler.
 
@@ -6135,7 +6139,7 @@ Node's built-in type stripping cannot handle `.tsx` — JSX is not TypeScript sy
   "compilerOptions": {
     "lib": ["es2023", "dom", "dom.iterable"],
     "jsx": "react-jsx",
-    "types": ["react", "react-dom"]
+    "types": ["node", "react", "react-dom"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"]
 }
@@ -6144,6 +6148,10 @@ Node's built-in type stripping cannot handle `.tsx` — JSX is not TypeScript sy
 This is the package that justifies per-package typechecking: `web` needs DOM
 libs and JSX, and `core` must not have them — a server file that reaches for
 `document` should fail to compile.
+
+`types` must list `node` alongside the React packages. Setting `types` replaces
+automatic `@types` discovery rather than adding to it, and the web tests import
+`node:test` — omitting `node` here breaks them.
 
 `packages/web/vite.config.ts`:
 
