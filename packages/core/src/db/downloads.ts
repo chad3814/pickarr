@@ -64,6 +64,21 @@ function toDownloadRow(row: SqlRow): DownloadRow {
   };
 }
 
+/**
+ * The identifier a download's client-side job is submitted under, independent
+ * of the release's own name. `addUrl` callers (pick.ts on the first attempt,
+ * reconcile.ts on every retry) pass this as the client's job label so that a
+ * job the client already accepted can be recognized again from the client's
+ * own queue/history — never by matching against the release title, which is
+ * exactly the kind of free-text matching that has cost this project multiple
+ * fix rounds elsewhere (the scenes parser). Stable and derived from the
+ * download's own id, so the same label is produced on every attempt without
+ * needing to be stored anywhere new.
+ */
+export function downloadLabel(id: number): string {
+  return `pickarr-${id}`;
+}
+
 export interface NewDownload {
   releaseId: number;
   groupId: number;

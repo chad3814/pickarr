@@ -212,8 +212,10 @@ export function createSabnzbdClient(
     id: config.id,
     importMode: config.importMode,
 
-    async addUrl(url) {
-      const body = asRecord(await call('addurl', { name: url, cat: config.category }));
+    async addUrl(url, label) {
+      const body = asRecord(
+        await call('addurl', { name: url, cat: config.category, nzbname: label }),
+      );
       if (body === null || body['status'] !== true) {
         // `error` is SABnzbd's own wording and routinely quotes the request it
         // rejected — request that SABnzbd built no part of, and whose query

@@ -69,3 +69,14 @@ export function releasesForGroup(db: DatabaseSync, groupId: number): ReleaseRow[
     .all(groupId)
     .map((row) => toReleaseRow(row as SqlRow));
 }
+
+export function linkForRelease(db: DatabaseSync, releaseId: number): string | null {
+  const row = db
+    .prepare(
+      `SELECT feed_items.link AS link
+       FROM releases JOIN feed_items ON feed_items.id = releases.feed_item_id
+       WHERE releases.id = ?`,
+    )
+    .get(releaseId);
+  return row === undefined ? null : str(row as SqlRow, 'link');
+}

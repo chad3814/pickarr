@@ -1,9 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClient } from '../clients/types.ts';
 import { getGroup, markPicked } from '../db/groups.ts';
-import { getRelease } from '../db/releases.ts';
-import { str, type SqlRow } from '../db/row.ts';
+import { getRelease, linkForRelease } from '../db/releases.ts';
 import {
+  downloadLabel,
   getDownload,
   inFlightForRelease,
   insertDownload,
@@ -77,10 +77,7 @@ export async function pickRelease(
     throw error;
   }
 
-  const feedItem = db
-    .prepare('SELECT link FROM feed_items WHERE id = ?')
-    .get(release.feedItemId);
-  const link = feedItem === undefined ? null : str(feedItem as SqlRow, 'link');
+  const link = linkForRelease(db, request.releaseId);
   if (link === null) throw new Error(`Release ${request.releaseId} has no feed item link`);
 
   // addUrl and the persist that follows it are recorded as distinguishable
@@ -90,10 +87,14 @@ export async function pickRelease(
   // submission already happened; recording that identically to an addUrl
   // failure would make a naive reconcile retry addUrl and double-submit the
   // same nzb, so that case is recorded with a distinct message naming the
-  // ref that was already accepted.
+  // ref that was already accepted. addUrl is given downloadLabel(downloadId)
+  // rather than anything derived from the release, so that if this call
+  // succeeds and only the persist below fails, a reconcile tick can recover
+  // the ref from the client's own queue/history by that same label instead
+  // of submitting the nzb a second time.
   let clientRef: string;
   try {
-    clientRef = await client.addUrl(link);
+    clientRef = await client.addUrl(link, downloadLabel(downloadId));
   } catch (error) {
     recordError(db, downloadId, (error as Error).message, now);
     return mustGetDownload(db, downloadId);

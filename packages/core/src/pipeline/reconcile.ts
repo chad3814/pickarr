@@ -1,0 +1,225 @@
+import type { DatabaseSync } from 'node:sqlite';
+import type { DownloadClient } from '../clients/types.ts';
+import { linkForRelease } from '../db/releases.ts';
+import {
+  activeDownloads,
+  bumpAttempts,
+  bumpMissingPolls,
+  downloadLabel,
+  failDownload,
+  getDownload,
+  recordError,
+  resetMissingPolls,
+  setClientRef,
+  setStatus,
+  setStoragePath,
+  type DownloadRow,
+} from '../db/downloads.ts';
+
+export const MAX_ADDURL_ATTEMPTS = 5;
+export const MAX_MISSING_POLLS = 3;
+
+export interface UntrackedEntry {
+  ref: string;
+  name: string;
+  state: 'downloading' | 'completed' | 'failed';
+  percentage: number | null;
+}
+
+export interface ReconcileResult {
+  untracked: UntrackedEntry[];
+  advanced: number;
+  failed: number;
+  imported: number;
+}
+
+export interface ReconcileDeps {
+  db: DatabaseSync;
+  client: DownloadClient;
+  now(): number;
+  importDownload(download: DownloadRow): Promise<void>;
+}
+
+/**
+ * One poll of a client's category, reconciled against the database.
+ *
+ * Polling by category rather than per download means a fixed two requests per
+ * tick, and gives untracked visibility for free. Untracked entries are never
+ * imported and never persisted: SABnzbd prunes history on its own schedule and
+ * orphan rows would accumulate forever.
+ *
+ * A `queued` row with a null `client_ref` is ambiguous on its face — it looks
+ * identical whether `addUrl` was never attempted, or it succeeded and only the
+ * write of the ref was lost (a crash between the two, or the persist failure
+ * `pick.ts` records with a distinct message naming the ref that was already
+ * accepted). Retrying `addUrl` unconditionally for that row would double-submit
+ * the nzb whenever the ambiguous case is the true one, leaving one submission
+ * permanently untracked in the client. So every `addUrl` call this loop makes
+ * — the very first, from `pick.ts`, and every retry here — is given
+ * `downloadLabel(id)` as the client's job label, and before calling `addUrl`
+ * again this loop checks the very snapshot it already fetched for an entry
+ * already carrying that label. Finding one means the submission already
+ * happened somewhere between then and now; the ref is recovered from it and no
+ * second `addUrl` call is made, and — because the entry came out of this same
+ * snapshot — the rest of this tick's queue/history handling applies to it
+ * immediately rather than waiting a further poll. Not finding one means
+ * nothing has reached the client under this download's name, and a retry is
+ * safe. The label is ours, chosen from the download's own id — never the
+ * release's own name, which is exactly the kind of free-text matching that
+ * cost this project multiple fix rounds elsewhere (the scenes parser).
+ */
+export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileResult> {
+  const { db, client } = deps;
+  const now = deps.now();
+  const result: ReconcileResult = { untracked: [], advanced: 0, failed: 0, imported: 0 };
+
+  const snapshot = await client.snapshot();
+  const queueByRef = new Map(snapshot.queue.map((entry) => [entry.ref, entry]));
+  const historyByRef = new Map(snapshot.history.map((entry) => [entry.ref, entry]));
+
+  // Keyed by the label a download was submitted under, not by anything the
+  // client or the release supplied. Built from history first and queue
+  // second, so a label present in both (a job caught mid-transition) resolves
+  // to the still-active queue slot.
+  const refByLabel = new Map<string, string>();
+  for (const entry of snapshot.history) refByLabel.set(entry.name, entry.ref);
+  for (const entry of snapshot.queue) refByLabel.set(entry.name, entry.ref);
+
+  // Every ref this client has ever been given, terminal or not — an imported
+  // download still sitting in history is ours, not a stranger's.
+  const knownRefs = new Set<string>(
+    db
+      .prepare('SELECT client_ref FROM downloads WHERE client_id = ? AND client_ref IS NOT NULL')
+      .all(client.id)
+      .map((row) => String(row['client_ref'])),
+  );
+
+  for (const download of activeDownloads(db, client.id)) {
+    let clientRef = download.clientRef;
+    let status = download.status;
+
+    if (clientRef === null) {
+      const label = downloadLabel(download.id);
+      const recovered = refByLabel.get(label);
+
+      if (recovered !== undefined) {
+        // The client already has this job under our label — nothing to
+        // submit. Recorded here without touching `attempts`: this is a
+        // recovery of an existing submission, not a new attempt at one.
+        setClientRef(db, download.id, recovered, now);
+        knownRefs.add(recovered);
+        result.advanced += 1;
+        clientRef = recovered;
+        status = 'downloading';
+        // Falls through rather than `continue`ing: `recovered` was read out
+        // of this same snapshot, so the queue/history lookup just below is
+        // guaranteed to find it.
+      } else {
+        const attempts = bumpAttempts(db, download.id, now);
+        const link = linkForRelease(db, download.releaseId);
+        if (link === null) {
+          failDownload(db, download.id, 'addurl-failed: release has no link', now);
+          result.failed += 1;
+          continue;
+        }
+
+        try {
+          const ref = await client.addUrl(link, label);
+          setClientRef(db, download.id, ref, now);
+          knownRefs.add(ref);
+          result.advanced += 1;
+        } catch (error) {
+          const message = (error as Error).message;
+          if (attempts >= MAX_ADDURL_ATTEMPTS) {
+            failDownload(
+              db,
+              download.id,
+              `addurl-failed after ${attempts} attempts: ${message}`,
+              now,
+            );
+            result.failed += 1;
+          } else {
+            recordError(db, download.id, message, now);
+          }
+        }
+        // The snapshot was taken before this call could possibly have
+        // reached the client (success or failure), so checking queue/history
+        // against it now would only read as a false disappearance. Left for
+        // the next tick either way.
+        continue;
+      }
+    }
+
+    if (clientRef === null) continue; // unreachable: every path above either sets clientRef or continues.
+
+    const queued = queueByRef.get(clientRef);
+    if (queued !== undefined) {
+      resetMissingPolls(db, download.id);
+      if (status !== 'downloading') {
+        setStatus(db, download.id, 'downloading', now);
+        result.advanced += 1;
+      }
+      continue;
+    }
+
+    const historic = historyByRef.get(clientRef);
+    if (historic !== undefined) {
+      resetMissingPolls(db, download.id);
+
+      if (historic.outcome === 'failed') {
+        failDownload(db, download.id, historic.failMessage ?? 'download failed at client', now);
+        result.failed += 1;
+        continue;
+      }
+
+      if (historic.storagePath === null) {
+        failDownload(db, download.id, 'client reported success with no storage path', now);
+        result.failed += 1;
+        continue;
+      }
+
+      setStoragePath(db, download.id, client.mapPath(historic.storagePath), now);
+      setStatus(db, download.id, 'completed', now);
+      result.advanced += 1;
+
+      const ready = getDownload(db, download.id);
+      if (ready === null) continue;
+
+      try {
+        await deps.importDownload(ready);
+        result.imported += 1;
+      } catch (error) {
+        failDownload(db, download.id, (error as Error).message, now);
+        result.failed += 1;
+      }
+      continue;
+    }
+
+    const misses = bumpMissingPolls(db, download.id, now);
+    if (misses >= MAX_MISSING_POLLS) {
+      failDownload(db, download.id, 'disappeared-from-client', now);
+      result.failed += 1;
+    }
+  }
+
+  for (const entry of snapshot.queue) {
+    if (knownRefs.has(entry.ref)) continue;
+    result.untracked.push({
+      ref: entry.ref,
+      name: entry.name,
+      state: 'downloading',
+      percentage: entry.percentage,
+    });
+  }
+  for (const entry of snapshot.history) {
+    if (knownRefs.has(entry.ref)) continue;
+    result.untracked.push({
+      ref: entry.ref,
+      name: entry.name,
+      state: entry.outcome,
+      percentage: null,
+    });
+  }
+
+  return result;
+}
