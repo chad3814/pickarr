@@ -102,3 +102,43 @@ export function completeUpgrade(db: DatabaseSync, groupId: number, releaseId: nu
     'UPDATE media_groups SET picked_release_id = ?, upgrade_release_id = NULL WHERE id = ?',
   ).run(releaseId, groupId);
 }
+
+export interface BrowseQuery {
+  cursor: { listRankAt: number; id: number } | null;
+  limit: number;
+  search: string | null;
+}
+
+/**
+ * One query serves both cases from the spec: unpicked groups, and picked
+ * groups with something better available. Keyset pagination on
+ * (list_rank_at, id) keeps paging stable while ingest is writing.
+ */
+export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
+  const conditions = ["(state = 'new' OR upgrade_release_id IS NOT NULL)"];
+  const params: (string | number)[] = [];
+
+  if (query.search !== null) {
+    conditions.push('search_text LIKE ?');
+    params.push(`%${query.search.toLowerCase()}%`);
+  }
+  if (query.cursor !== null) {
+    conditions.push('(list_rank_at < ? OR (list_rank_at = ? AND id < ?))');
+    params.push(query.cursor.listRankAt, query.cursor.listRankAt, query.cursor.id);
+  }
+  params.push(query.limit);
+
+  return db
+    .prepare(
+      `${SELECT} WHERE ${conditions.join(' AND ')} ORDER BY list_rank_at DESC, id DESC LIMIT ?`,
+    )
+    .all(...params)
+    .map((row) => toGroupRow(row as SqlRow));
+}
+
+export function pickedGroups(db: DatabaseSync): GroupRow[] {
+  return db
+    .prepare(`${SELECT} WHERE state = 'picked' ORDER BY list_rank_at DESC, id DESC`)
+    .all()
+    .map((row) => toGroupRow(row as SqlRow));
+}
