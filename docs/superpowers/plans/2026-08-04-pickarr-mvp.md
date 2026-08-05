@@ -486,7 +486,7 @@ git commit -m "feat(plugin-api): add plugin contract types and shared quality ra
 
 **Files:**
 - Create: `packages/core/package.json`, `packages/core/tsconfig.json`
-- Create: `packages/core/src/config/schema.ts`, `packages/core/src/config/load.ts`
+- Create: `packages/core/src/json.ts`, `packages/core/src/config/schema.ts`, `packages/core/src/config/load.ts`
 - Test: `packages/core/test/config/load.test.ts`
 
 **Interfaces:**
@@ -654,7 +654,43 @@ test('two feeds sharing an id is rejected', async () => {
 Run: `npm test`
 Expected: FAIL — cannot resolve `../../src/config/load.ts`.
 
-- [ ] **Step 4: Write the zod schema**
+- [ ] **Step 4: Write the shared JSON type**
+
+`packages/core/src/json.ts`:
+
+```ts
+/**
+ * The shape of anything that came out of JSON.parse or response.json().
+ *
+ * This exists so the codebase never has to write `unknown` at a parse
+ * boundary: `JSON.parse` returns `any`, which assigns freely to this union,
+ * and from there every access is checked.
+ */
+export type JsonValue = string | number | boolean | null | JsonValue[] | JsonObject;
+
+export interface JsonObject {
+  [key: string]: JsonValue | undefined;
+}
+
+export function asJsonObject(value: JsonValue | undefined): JsonObject | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+  return value;
+}
+
+export function asJsonArray(value: JsonValue | undefined): JsonValue[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** Coerces a scalar to a string; anything else becomes the empty string. */
+export function asText(value: JsonValue | undefined): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+```
+
+- [ ] **Step 5: Write the zod schema**
 
 `packages/core/src/config/schema.ts`:
 
@@ -698,12 +734,13 @@ export type FeedConfig = z.infer<typeof feedSchema>;
 export type PathMapping = z.infer<typeof pathMappingSchema>;
 ```
 
-- [ ] **Step 5: Write the loader**
+- [ ] **Step 6: Write the loader**
 
 `packages/core/src/config/load.ts`:
 
 ```ts
 import { readFile } from 'node:fs/promises';
+import type { JsonValue } from '../json.ts';
 import { configSchema, type PickarrConfig } from './schema.ts';
 
 const SECRET_PREFIX = 'file:';
@@ -733,9 +770,9 @@ export async function loadConfig(path: string): Promise<PickarrConfig> {
     throw new Error(`Could not read config file at ${path}`);
   }
 
-  let json: unknown;
+  let json: JsonValue;
   try {
-    json = JSON.parse(raw);
+    json = JSON.parse(raw) as JsonValue;
   } catch (error) {
     throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
   }
@@ -787,12 +824,12 @@ export async function loadConfig(path: string): Promise<PickarrConfig> {
 
 Note the deliberate ordering: schema validation runs before secret resolution, so a typo in `importMode` fails without ever touching the filesystem.
 
-- [ ] **Step 6: Run the check**
+- [ ] **Step 7: Run the check**
 
 Run: `npm run check`
 Expected: all six config tests PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add -A
@@ -2710,7 +2747,7 @@ git commit -m "feat(core): add ingest with collation and upgrade-bump rules"
 - Test: `packages/core/test/clients/sabnzbd.test.ts`
 
 **Interfaces:**
-- Consumes: `DownloadClientConfig` from Task 3.
+- Consumes: `DownloadClientConfig` from Task 3, and `JsonValue`, `asJsonObject`, `asJsonArray`, `asText` from `src/json.ts` (also Task 3).
 - Produces: `DownloadClient`, `ClientSnapshot`, `ClientQueueEntry`, `ClientHistoryEntry`, `FetchLike`, and `createSabnzbdClient(config, fetchImpl?): DownloadClient`. Tasks 11–15 depend only on the `DownloadClient` interface, never on SABnzbd directly.
 
 - [ ] **Step 1: Define the client interface**
@@ -2894,6 +2931,12 @@ Expected: FAIL — cannot resolve `../../src/clients/sabnzbd.ts`.
 
 ```ts
 import type { DownloadClientConfig } from '../config/schema.ts';
+import {
+  asJsonArray as asArray,
+  asJsonObject as asRecord,
+  asText as text,
+  type JsonValue,
+} from '../json.ts';
 import type {
   ClientHistoryEntry,
   ClientQueueEntry,
@@ -2903,22 +2946,6 @@ import type {
 } from './types.ts';
 
 const TIMEOUT_MS = 20_000;
-
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-
-function asRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value !== 'object' || Array.isArray(value)) return null;
-  return value;
-}
-
-function asArray(value: JsonValue | undefined): JsonValue[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function text(value: JsonValue | undefined): string {
-  return typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '';
-}
 
 export function createSabnzbdClient(
   config: DownloadClientConfig,
