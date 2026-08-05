@@ -27,21 +27,53 @@ export function createSabnzbdClient(
     return `${base}/api?${query.toString()}`;
   }
 
+  /**
+   * Replaces every occurrence of the api key with a placeholder. Uses
+   * replaceAll rather than replace: the key can appear more than once in a
+   * URL-bearing message (e.g. a wrapped fetch error that logs its own retry
+   * history). Guarded against an empty key, which would otherwise splice the
+   * placeholder between every character of the message.
+   */
+  function redact(message: string): string {
+    return config.apiKey.length === 0 ? message : message.replaceAll(config.apiKey, '***');
+  }
+
+  /**
+   * Wraps an error from an injectable dependency (fetchImpl itself, or a
+   * Response's .json()) so nothing it says can leak the api key. The
+   * property must hold regardless of how a caller ends up logging or
+   * inspecting the resulting error — via .message, String(error),
+   * error.cause, or util.inspect — so the original is never attached
+   * verbatim as `cause`; a redacted stand-in is attached instead, preserving
+   * the original's name and message content (minus the secret) for
+   * debugging.
+   */
+  function sanitize(prefix: string, error: Error): Error {
+    const sanitizedCause = new Error(redact(error.message));
+    sanitizedCause.name = error.name;
+    return new Error(prefix, { cause: sanitizedCause });
+  }
+
   async function call(mode: string, params: Record<string, string>): Promise<JsonValue> {
+    const url = endpoint({ mode, ...params });
     let response: Response;
     try {
-      response = await fetchImpl(endpoint({ mode, ...params }));
+      response = await fetchImpl(url);
     } catch (error) {
       // fetchImpl is an injectable seam; some implementations (instrumented or
       // proxying fetch wrappers) embed the request URL in their thrown error.
-      // Never let that reach the caller — only name the mode, keep the
-      // original as `cause` for debugging.
-      throw new Error(`SABnzbd ${mode} request failed`, { cause: error });
+      throw sanitize(`SABnzbd ${mode} request failed`, error as Error);
     }
     if (!response.ok) {
       throw new Error(`SABnzbd ${mode} returned HTTP ${response.status}`);
     }
-    return (await response.json()) as JsonValue;
+    try {
+      return (await response.json()) as JsonValue;
+    } catch (error) {
+      // Same seam as above: a Response implementation's .json() can throw
+      // whatever it likes, including a message that echoes the request URL.
+      throw sanitize(`SABnzbd ${mode} returned an unparsable response`, error as Error);
+    }
   }
 
   // Longest prefix first, so a nested mapping wins over its parent.

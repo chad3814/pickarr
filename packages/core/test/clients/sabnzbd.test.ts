@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { inspect } from 'node:util';
 import { createSabnzbdClient } from '../../src/clients/sabnzbd.ts';
 import type { DownloadClientConfig } from '../../src/config/schema.ts';
 import type { JsonValue } from '../../src/json.ts';
@@ -22,6 +23,24 @@ function jsonResponse(body: JsonValue): Response {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+/**
+ * Checks the whole error surface a caller might log or inspect — not just
+ * `.message`. A fix that only cleaned `.message` while leaving the secret
+ * reachable through `.cause` or `util.inspect` would pass a narrower check
+ * but still leak in practice.
+ */
+function assertNoLeak(error: Error, secret: string): void {
+  const pattern = new RegExp(secret);
+  assert.doesNotMatch(error.message, pattern);
+  assert.doesNotMatch(String(error), pattern);
+  const cause = error.cause;
+  if (cause instanceof Error) {
+    assert.doesNotMatch(cause.message, pattern);
+    assert.doesNotMatch(String(cause), pattern);
+  }
+  assert.doesNotMatch(inspect(error, { depth: 5 }), pattern);
 }
 
 function recordingFetch(bodyFor: (url: string) => JsonValue): {
@@ -75,8 +94,22 @@ test('an error thrown by fetchImpl itself never leaks the api key', async () => 
     throw new Error(`network failure while fetching ${url}`);
   });
   await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
-    assert.doesNotMatch(error.message, /SECRET_KEY/);
-    assert.doesNotMatch(error.message, /apikey/);
+    assertNoLeak(error, CONFIG.apiKey);
+    return true;
+  });
+});
+
+test('a JSON-parse failure from response.json() never leaks the api key', async () => {
+  const client = createSabnzbdClient(CONFIG, async (url) => {
+    class ThrowingJsonResponse extends Response {
+      override readonly json = async (): Promise<never> => {
+        throw new Error(`could not parse JSON returned for ${url}`);
+      };
+    }
+    return new ThrowingJsonResponse('not json', { status: 200 });
+  });
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
+    assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
 });
