@@ -25,22 +25,41 @@ function jsonResponse(body: JsonValue): Response {
   });
 }
 
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Checks the whole error surface a caller might log or inspect — not just
  * `.message`. A fix that only cleaned `.message` while leaving the secret
- * reachable through `.cause` or `util.inspect` would pass a narrower check
- * but still leak in practice.
+ * reachable through `.cause`, `.name`, or `util.inspect` would pass a
+ * narrower check but still leak in practice. Also checks the *decoded*
+ * form of everything: a key that survives percent-encoding (base64-style
+ * keys routinely contain `+`, `/`, `=`) is recoverable with one
+ * decodeURIComponent, so literal-absence alone is not enough.
  */
 function assertNoLeak(error: Error, secret: string): void {
-  const pattern = new RegExp(secret);
-  assert.doesNotMatch(error.message, pattern);
-  assert.doesNotMatch(String(error), pattern);
+  const pattern = new RegExp(escapeRegExp(secret));
+  const surfaces = [error.message, String(error), inspect(error, { depth: 5 })];
   const cause = error.cause;
   if (cause instanceof Error) {
-    assert.doesNotMatch(cause.message, pattern);
-    assert.doesNotMatch(String(cause), pattern);
+    surfaces.push(cause.message, cause.name, String(cause));
   }
-  assert.doesNotMatch(inspect(error, { depth: 5 }), pattern);
+  for (const surface of surfaces) {
+    assert.doesNotMatch(surface, pattern);
+    // decodeURIComponent leaves already-decoded text untouched, so decoding
+    // is safe whenever the surface happens to be valid percent-encoding, and
+    // it is the check that would have caught the percent-encoding bypass.
+    // Stack traces can contain a bare `%` that isn't a valid escape; only
+    // the decode itself is allowed to fail silently, never the assertion.
+    let decoded: string | null = null;
+    try {
+      decoded = decodeURIComponent(surface);
+    } catch {
+      // Not valid percent-encoding; the literal check above already covered it.
+    }
+    if (decoded !== null) assert.doesNotMatch(decoded, pattern);
+  }
 }
 
 function recordingFetch(bodyFor: (url: string) => JsonValue): {
@@ -110,6 +129,70 @@ test('a JSON-parse failure from response.json() never leaks the api key', async 
   });
   await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
+    return true;
+  });
+});
+
+test('a base64-style api key with +, /, = never leaks, even decoded', async () => {
+  const config: DownloadClientConfig = { ...CONFIG, apiKey: 'dXNlcjpwYXNzd29yZA==' };
+  const client = createSabnzbdClient(config, async (url) => {
+    throw new Error(`fetch failed for ${url}`);
+  });
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
+    assertNoLeak(error, config.apiKey);
+    return true;
+  });
+});
+
+test('an api key containing +, /, =, and a space never leaks, even decoded', async () => {
+  const config: DownloadClientConfig = { ...CONFIG, apiKey: 'sec/ret+key=1 2' };
+  const client = createSabnzbdClient(config, async (url) => {
+    throw new Error(`fetch failed for ${url}`);
+  });
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
+    assertNoLeak(error, config.apiKey);
+    return true;
+  });
+});
+
+test('an api key embedded in the thrown error\'s name is also redacted', async () => {
+  const client = createSabnzbdClient(CONFIG, async () => {
+    const error = new Error('generic failure');
+    error.name = `FetchError(apikey=${CONFIG.apiKey})`;
+    throw error;
+  });
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
+    assertNoLeak(error, CONFIG.apiKey);
+    return true;
+  });
+});
+
+test('a non-Error throw from fetchImpl produces the wrapper, not a crash', async () => {
+  const client = createSabnzbdClient(CONFIG, async () => {
+    throw `raw string failure with apikey=${CONFIG.apiKey}`;
+  });
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
+    assert.equal(error.message, 'SABnzbd addurl request failed');
+    assert.ok(error.cause instanceof Error);
+    assertNoLeak(error, CONFIG.apiKey);
+    return true;
+  });
+});
+
+test('a one-character api key does not shred the rest of the error message', async () => {
+  const config: DownloadClientConfig = { ...CONFIG, apiKey: 'a' };
+  const client = createSabnzbdClient(config, async (url) => {
+    throw new Error(`fetch failed for ${url}`);
+  });
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb'), (error: Error) => {
+    const cause = error.cause;
+    assert.ok(cause instanceof Error);
+    // Legible: the rest of the message survives untouched.
+    assert.match(cause.message, /^fetch failed for http:\/\/sab\.invalid:8080\/api\?mode=addurl&/);
+    // The apikey query parameter's value is still stripped by the
+    // structural rule, even though the literal-value pass is skipped for a
+    // key this short.
+    assert.match(cause.message, /apikey=\*\*\*(&|$)/);
     return true;
   });
 });

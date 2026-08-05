@@ -15,6 +15,28 @@ import type {
 
 const TIMEOUT_MS = 20_000;
 
+// A key must be at least this long before we substring-match it literally.
+// Below this length, matching by value is more likely to shred ordinary
+// text by coincidence than to catch a real leak, and a key this short can't
+// be meaningfully protected by substring matching anyway. 8 is comfortably
+// below any real api key (SABnzbd's are 32 hex characters) while still
+// ruling out single- or few-character test/placeholder keys.
+const MIN_LITERAL_REDACTION_LENGTH = 8;
+
+/**
+ * Strips the value of an `apikey` query parameter wherever one appears in a
+ * string, regardless of how the value itself is encoded. This is the
+ * primary defense, because it keys off the structural delimiters (`?`/`&`
+ * before, `&`/whitespace/end-of-string after) rather than the literal
+ * value — so it doesn't need to anticipate every encoding
+ * (percent-encoding, `+` for space, etc.) the value might appear in. Takes
+ * no config, so it's declared at module scope rather than recreated on
+ * every createSabnzbdClient call.
+ */
+function redactApiKeyParam(message: string): string {
+  return message.replace(/([?&]apikey=)[^&\s]*/gi, '$1***');
+}
+
 export function createSabnzbdClient(
   config: DownloadClientConfig,
   fetchImpl: FetchLike = (url) => fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) }),
@@ -28,14 +50,21 @@ export function createSabnzbdClient(
   }
 
   /**
-   * Replaces every occurrence of the api key with a placeholder. Uses
-   * replaceAll rather than replace: the key can appear more than once in a
-   * URL-bearing message (e.g. a wrapped fetch error that logs its own retry
-   * history). Guarded against an empty key, which would otherwise splice the
-   * placeholder between every character of the message.
+   * Secondary net: replaces literal occurrences of the api key anywhere a
+   * string carries it outside of an `apikey=` query parameter (which
+   * redactApiKeyParam already handles). Uses replaceAll, not a single
+   * replace, since the key can appear more than once. Skipped below
+   * MIN_LITERAL_REDACTION_LENGTH — see its comment — which also covers the
+   * empty-string case.
    */
+  function redactLiteralApiKey(message: string): string {
+    return config.apiKey.length < MIN_LITERAL_REDACTION_LENGTH
+      ? message
+      : message.replaceAll(config.apiKey, '***');
+  }
+
   function redact(message: string): string {
-    return config.apiKey.length === 0 ? message : message.replaceAll(config.apiKey, '***');
+    return redactLiteralApiKey(redactApiKeyParam(message));
   }
 
   /**
@@ -44,13 +73,13 @@ export function createSabnzbdClient(
    * property must hold regardless of how a caller ends up logging or
    * inspecting the resulting error — via .message, String(error),
    * error.cause, or util.inspect — so the original is never attached
-   * verbatim as `cause`; a redacted stand-in is attached instead, preserving
-   * the original's name and message content (minus the secret) for
-   * debugging.
+   * verbatim as `cause`; a redacted stand-in is attached instead. Both
+   * `.message` and `.name` are redacted: nothing copied off an untrusted
+   * error may skip the redactor, since either field can carry the key.
    */
   function sanitize(prefix: string, error: Error): Error {
     const sanitizedCause = new Error(redact(error.message));
-    sanitizedCause.name = error.name;
+    sanitizedCause.name = redact(error.name);
     return new Error(prefix, { cause: sanitizedCause });
   }
 
@@ -61,8 +90,9 @@ export function createSabnzbdClient(
       response = await fetchImpl(url);
     } catch (error) {
       // fetchImpl is an injectable seam; some implementations (instrumented or
-      // proxying fetch wrappers) embed the request URL in their thrown error.
-      throw sanitize(`SABnzbd ${mode} request failed`, error as Error);
+      // proxying fetch wrappers) embed the request URL in their thrown error,
+      // and some may not throw an Error at all — coerce rather than assume.
+      throw sanitize(`SABnzbd ${mode} request failed`, error instanceof Error ? error : new Error(String(error)));
     }
     if (!response.ok) {
       throw new Error(`SABnzbd ${mode} returned HTTP ${response.status}`);
@@ -72,7 +102,10 @@ export function createSabnzbdClient(
     } catch (error) {
       // Same seam as above: a Response implementation's .json() can throw
       // whatever it likes, including a message that echoes the request URL.
-      throw sanitize(`SABnzbd ${mode} returned an unparsable response`, error as Error);
+      throw sanitize(
+        `SABnzbd ${mode} returned an unparsable response`,
+        error instanceof Error ? error : new Error(String(error)),
+      );
     }
   }
 
