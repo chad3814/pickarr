@@ -20,12 +20,18 @@ export interface ImportDeps {
   rename?: RenameLike;
 }
 
-async function exists(path: string): Promise<boolean> {
+/**
+ * `stat`, not `lstat`: the source is this function's own download directory,
+ * not plugin- or attacker-influenced, so following a symlink there (if one
+ * ever existed) is not the concern `lstatOrNull` below exists for. Returns
+ * the `Stats` rather than a boolean because the copy-mode recovery check
+ * needs the source's size, not just its presence.
+ */
+async function statOrNull(path: string): Promise<Stats | null> {
   try {
-    await stat(path);
-    return true;
+    return await stat(path);
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -155,6 +161,48 @@ async function copyIntoPlace(source: string, destination: string): Promise<void>
   await rename(tmp, destination);
 }
 
+/**
+ * Whether a regular file already sitting at a planned destination can be
+ * trusted as this download's own output from an earlier, crashed attempt —
+ * as opposed to a name collision with something this download never wrote.
+ * The signal that justifies trusting it is different in each mode, because
+ * "the source is gone" is only ever a proxy for "we already wrote this
+ * destination", and the proxy is sound in `move` mode alone.
+ *
+ * In `move` mode the source is removed as the very last step of a
+ * successful transfer, so its absence is unambiguous: nothing else in this
+ * codebase deletes files from the download directory. Its *presence* is
+ * therefore never treated as recovery in `move` mode, even when the
+ * destination looks right — an earlier attempt that crashed between
+ * finishing the copy (inside the EXDEV fallback) and removing the source
+ * lands here too, and the deliberate choice is to surface that as a
+ * collision the operator can see and resolve by hand, rather than finish
+ * the unlink automatically without being able to prove the file at the
+ * destination really is this download's copy.
+ *
+ * In `copy` mode the source is never removed by design, so its presence
+ * proves nothing either way — the only available signal is whether the
+ * destination's content actually is the source's content. `copyIntoPlace`
+ * only ever brings a destination into existence by atomically renaming a
+ * *complete* temp copy into place, so a byte-size match between source and
+ * destination is not something an accidental foreign file would produce by
+ * coincidence; it means an earlier attempt's copy finished before crashing,
+ * before `insertImportedFile` could run. The residual risk this doesn't
+ * close: a foreign file that already happens to sit at this exact,
+ * identity-derived destination path *and* happens to match the source's
+ * byte count exactly would still be adopted. That's judged acceptable for
+ * the MVP — narrow and stateable, not a designed-in gap — rather than
+ * closed with a stronger (and slower) content comparison.
+ */
+function wasAlreadyWrittenHere(
+  mode: 'move' | 'copy',
+  sourceStat: Stats | null,
+  destStat: Stats,
+): boolean {
+  if (sourceStat === null) return true;
+  return mode === 'copy' && sourceStat.size === destStat.size;
+}
+
 async function transfer(
   source: string,
   destination: string,
@@ -230,7 +278,7 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
     // symlink, not silently resolved to whatever it points at, so it can be
     // refused below rather than adopted.
     const destStat = await lstatOrNull(file.destination);
-    const sourceExists = await exists(file.source);
+    const sourceStat = await statOrNull(file.source);
 
     // A row already recorded for this exact destination means an earlier
     // attempt already finished this file (transferred it and recorded it)
@@ -241,30 +289,27 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
       // Nothing at the destination yet: a normal transfer, or — if the
       // source is gone too — a genuine fault (planned to move a file that
       // exists nowhere at all).
-      if (!sourceExists) throw new Error(`Planned source is missing: ${file.source}`);
+      if (sourceStat === null) throw new Error(`Planned source is missing: ${file.source}`);
       await transfer(file.source, file.destination, deps.importMode, renameImpl, libraryRootReal);
-    } else if (destStat.isFile() && !sourceExists) {
-      // Idempotent crash recovery, and only this: a *regular file* already
-      // sits at the destination, and the source is gone. That combination
-      // can only mean an earlier attempt already transferred this exact
-      // file and, for `move`, went on to remove the source before crashing
-      // — it is not a guess, because nothing else produces it (a plugin
-      // cannot make files vanish from the download directory; only this
-      // function's own `transfer` does that, and only after succeeding).
-      // Still re-verified against the real library root, in case the
-      // regular file it's confirming is itself reachable only through a
-      // symlinked ancestor directory that changed since the plan was made.
+    } else if (destStat.isFile() && wasAlreadyWrittenHere(deps.importMode, sourceStat, destStat)) {
+      // Idempotent crash recovery: a *regular file* already sits at the
+      // destination, and `wasAlreadyWrittenHere` has judged — by the signal
+      // appropriate to this mode — that it is this download's own output
+      // from an earlier attempt, not a guess. Still re-verified against the
+      // real library root, in case the regular file it's confirming is
+      // itself reachable only through a symlinked ancestor directory that
+      // changed since the plan was made.
       await assertRealContainment(libraryRootReal, dirname(file.destination));
     } else {
       // Anything else occupying the destination is a collision, not
-      // recovery, and must not be guessed at: either the source is still
-      // present too (this download never got as far as removing it, so
-      // whatever is at the destination was not put there by this attempt),
-      // or the occupant is not a regular file at all (a symlink or a
-      // directory), which this function never treats as "the file we
+      // recovery, and must not be guessed at: either `wasAlreadyWrittenHere`
+      // found no mode-appropriate signal that this download wrote it (the
+      // source is still present in `move` mode, or its size doesn't match in
+      // `copy` mode), or the occupant is not a regular file at all (a
+      // symlink or a directory), which is never treated as "the file we
       // wrote" regardless of the source's state. Failing loudly and never
       // touching the source is strictly safer than adopting the unknown
-      // occupant and deleting the only copy of the actual download.
+      // occupant and losing track of the only copy of the actual download.
       throw new Error(
         `Destination ${file.destination} is occupied by something this download did not write`,
       );
