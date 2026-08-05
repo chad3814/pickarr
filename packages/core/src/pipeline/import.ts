@@ -4,10 +4,11 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile, ParsedRelease } from '@pickarr/plugin-api';
 import type { PluginRegistry } from '../plugins/registry.ts';
-import { getGroup } from '../db/groups.ts';
+import { completeUpgrade, getGroup } from '../db/groups.ts';
 import { getRelease } from '../db/releases.ts';
 import { setStatus, type DownloadRow } from '../db/downloads.ts';
 import { findLiveByDest, insertImportedFile } from '../db/imported-files.ts';
+import { trashLiveFiles } from './upgrade.ts';
 
 export type RenameLike = (source: string, destination: string) => Promise<void>;
 
@@ -42,7 +43,7 @@ async function statOrNull(path: string): Promise<Stats | null> {
  * so a symlink planted at a destination is judged on its own presence, not
  * adopted as if it were the regular file this download was meant to write.
  */
-async function lstatOrNull(path: string): Promise<Stats | null> {
+export async function lstatOrNull(path: string): Promise<Stats | null> {
   try {
     return await lstat(path);
   } catch {
@@ -78,7 +79,7 @@ async function listFiles(root: string): Promise<DownloadedFile[]> {
  * Both containment tests are expressed here, in one place, so a future
  * change to what "contained" means cannot fix one copy and miss the other.
  */
-function isContained(root: string, target: string, allowRootItself: boolean): boolean {
+export function isContained(root: string, target: string, allowRootItself: boolean): boolean {
   if (allowRootItself && target === root) return true;
   return target.startsWith(root + sep);
 }
@@ -272,58 +273,95 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
   await mkdir(resolve(libraryRoot), { recursive: true });
   const libraryRootReal = await realpath(resolve(libraryRoot));
 
-  for (const file of resolved) {
-    const alreadyRecorded = findLiveByDest(db, download.groupId, file.destination);
-    // `lstat`, not `stat`: a symlink at the destination must be seen as a
-    // symlink, not silently resolved to whatever it points at, so it can be
-    // refused below rather than adopted.
-    const destStat = await lstatOrNull(file.destination);
-    const sourceStat = await statOrNull(file.source);
+  // Trash-first: an upgrade's replacement usually wants the exact destination
+  // path the superseded file already occupies, so the old file has to move
+  // out of the way before the transfer loop below can write there. Ordering
+  // this ahead of the loop — rather than deleting old files as new ones land
+  // — means a failure partway through the loop still leaves a fully
+  // recoverable trail (the old files sitting in `trashedTo`), never a
+  // half-deleted, half-written group.
+  const trashedTo =
+    download.kind === 'upgrade'
+      ? await trashLiveFiles(db, download.groupId, libraryRootReal, deps.trashDir, now)
+      : null;
 
-    // A row already recorded for this exact destination means an earlier
-    // attempt already finished this file (transferred it and recorded it)
-    // before crashing on a later file; nothing left to verify or repeat.
-    if (alreadyRecorded !== null && destStat !== null) continue;
+  try {
+    for (const file of resolved) {
+      const alreadyRecorded = findLiveByDest(db, download.groupId, file.destination);
+      // `lstat`, not `stat`: a symlink at the destination must be seen as a
+      // symlink, not silently resolved to whatever it points at, so it can be
+      // refused below rather than adopted.
+      const destStat = await lstatOrNull(file.destination);
+      const sourceStat = await statOrNull(file.source);
 
-    if (destStat === null) {
-      // Nothing at the destination yet: a normal transfer, or — if the
-      // source is gone too — a genuine fault (planned to move a file that
-      // exists nowhere at all).
-      if (sourceStat === null) throw new Error(`Planned source is missing: ${file.source}`);
-      await transfer(file.source, file.destination, deps.importMode, renameImpl, libraryRootReal);
-    } else if (destStat.isFile() && wasAlreadyWrittenHere(deps.importMode, sourceStat, destStat)) {
-      // Idempotent crash recovery: a *regular file* already sits at the
-      // destination, and `wasAlreadyWrittenHere` has judged — by the signal
-      // appropriate to this mode — that it is this download's own output
-      // from an earlier attempt, not a guess. Still re-verified against the
-      // real library root, in case the regular file it's confirming is
-      // itself reachable only through a symlinked ancestor directory that
-      // changed since the plan was made.
-      await assertRealContainment(libraryRootReal, dirname(file.destination));
-    } else {
-      // Anything else occupying the destination is a collision, not
-      // recovery, and must not be guessed at: either `wasAlreadyWrittenHere`
-      // found no mode-appropriate signal that this download wrote it (the
-      // source is still present in `move` mode, or its size doesn't match in
-      // `copy` mode), or the occupant is not a regular file at all (a
-      // symlink or a directory), which is never treated as "the file we
-      // wrote" regardless of the source's state. Failing loudly and never
-      // touching the source is strictly safer than adopting the unknown
-      // occupant and losing track of the only copy of the actual download.
-      throw new Error(
-        `Destination ${file.destination} is occupied by something this download did not write`,
-      );
+      // A row already recorded for this exact destination means an earlier
+      // attempt already finished this file (transferred it and recorded it)
+      // before crashing on a later file; nothing left to verify or repeat.
+      if (alreadyRecorded !== null && destStat !== null) continue;
+
+      if (destStat === null) {
+        // Nothing at the destination yet: a normal transfer, or — if the
+        // source is gone too — a genuine fault (planned to move a file that
+        // exists nowhere at all).
+        if (sourceStat === null) throw new Error(`Planned source is missing: ${file.source}`);
+        await transfer(
+          file.source,
+          file.destination,
+          deps.importMode,
+          renameImpl,
+          libraryRootReal,
+        );
+      } else if (
+        destStat.isFile() &&
+        wasAlreadyWrittenHere(deps.importMode, sourceStat, destStat)
+      ) {
+        // Idempotent crash recovery: a *regular file* already sits at the
+        // destination, and `wasAlreadyWrittenHere` has judged — by the signal
+        // appropriate to this mode — that it is this download's own output
+        // from an earlier attempt, not a guess. Still re-verified against the
+        // real library root, in case the regular file it's confirming is
+        // itself reachable only through a symlinked ancestor directory that
+        // changed since the plan was made.
+        await assertRealContainment(libraryRootReal, dirname(file.destination));
+      } else {
+        // Anything else occupying the destination is a collision, not
+        // recovery, and must not be guessed at: either `wasAlreadyWrittenHere`
+        // found no mode-appropriate signal that this download wrote it (the
+        // source is still present in `move` mode, or its size doesn't match in
+        // `copy` mode), or the occupant is not a regular file at all (a
+        // symlink or a directory), which is never treated as "the file we
+        // wrote" regardless of the source's state. Failing loudly and never
+        // touching the source is strictly safer than adopting the unknown
+        // occupant and losing track of the only copy of the actual download.
+        throw new Error(
+          `Destination ${file.destination} is occupied by something this download did not write`,
+        );
+      }
+
+      const stats = await stat(file.destination);
+      insertImportedFile(db, {
+        downloadId: download.id,
+        groupId: download.groupId,
+        sourcePath: file.source,
+        destPath: file.destination,
+        sizeBytes: stats.size,
+        createdAt: now,
+      });
     }
+  } catch (error) {
+    // Trashing already happened; a failure past this point must not read as
+    // "the old file is gone with nothing to show for it." Naming the trash
+    // location in the error is what lets the caller (reconcile.ts marks the
+    // download `failed` with this exact message) tell the user where to look
+    // to restore it by hand.
+    if (trashedTo === null) throw error;
+    throw new Error(
+      `${(error as Error).message} — previous files were moved to ${trashedTo} and can be restored by hand`,
+    );
+  }
 
-    const stats = await stat(file.destination);
-    insertImportedFile(db, {
-      downloadId: download.id,
-      groupId: download.groupId,
-      sourcePath: file.source,
-      destPath: file.destination,
-      sizeBytes: stats.size,
-      createdAt: now,
-    });
+  if (download.kind === 'upgrade') {
+    completeUpgrade(db, download.groupId, download.releaseId);
   }
 
   setStatus(db, download.id, 'imported', now);
