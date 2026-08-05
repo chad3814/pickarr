@@ -122,15 +122,31 @@ export function inFlightForRelease(db: DatabaseSync, releaseId: number): Downloa
   return row === undefined ? null : toDownloadRow(row as SqlRow);
 }
 
+/**
+ * Every setter below issues a single-row `WHERE id = ?` update. A stale or
+ * mistyped id must not silently no-op forever — the caller finds out
+ * immediately, by name, rather than downstream when nothing happened. This
+ * is safe against SQLite's own semantics: a row that matches `WHERE id = ?`
+ * always reports `changes = 1` from an UPDATE, even when every assigned
+ * column already held the value being written, so `changes === 0` here can
+ * only mean "no row with this id" (verified empirically, not assumed).
+ */
+function requireAffected(helper: string, id: number, changes: number | bigint): void {
+  if (Number(changes) === 0) throw new Error(`${helper}: no download with id ${id}`);
+}
+
 export function setClientRef(
   db: DatabaseSync,
   id: number,
   clientRef: string,
   now: number,
 ): void {
-  db.prepare(
-    "UPDATE downloads SET client_ref = ?, status = 'downloading', error = NULL, updated_at = ? WHERE id = ?",
-  ).run(clientRef, now, id);
+  const result = db
+    .prepare(
+      "UPDATE downloads SET client_ref = ?, status = 'downloading', error = NULL, updated_at = ? WHERE id = ?",
+    )
+    .run(clientRef, now, id);
+  requireAffected('setClientRef', id, result.changes);
 }
 
 export function setStatus(
@@ -139,7 +155,10 @@ export function setStatus(
   status: DownloadStatus,
   now: number,
 ): void {
-  db.prepare('UPDATE downloads SET status = ?, updated_at = ? WHERE id = ?').run(status, now, id);
+  const result = db
+    .prepare('UPDATE downloads SET status = ?, updated_at = ? WHERE id = ?')
+    .run(status, now, id);
+  requireAffected('setStatus', id, result.changes);
 }
 
 export function setStoragePath(
@@ -148,40 +167,58 @@ export function setStoragePath(
   storagePath: string,
   now: number,
 ): void {
-  db.prepare('UPDATE downloads SET storage_path = ?, updated_at = ? WHERE id = ?').run(
-    storagePath,
-    now,
-    id,
-  );
+  const result = db
+    .prepare('UPDATE downloads SET storage_path = ?, updated_at = ? WHERE id = ?')
+    .run(storagePath, now, id);
+  requireAffected('setStoragePath', id, result.changes);
 }
 
 export function failDownload(db: DatabaseSync, id: number, error: string, now: number): void {
-  db.prepare("UPDATE downloads SET status = 'failed', error = ?, updated_at = ? WHERE id = ?").run(
-    error,
-    now,
-    id,
-  );
+  const result = db
+    .prepare("UPDATE downloads SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
+    .run(error, now, id);
+  requireAffected('failDownload', id, result.changes);
 }
 
 export function recordError(db: DatabaseSync, id: number, error: string, now: number): void {
-  db.prepare('UPDATE downloads SET error = ?, updated_at = ? WHERE id = ?').run(error, now, id);
+  const result = db
+    .prepare('UPDATE downloads SET error = ?, updated_at = ? WHERE id = ?')
+    .run(error, now, id);
+  requireAffected('recordError', id, result.changes);
 }
 
 export function bumpAttempts(db: DatabaseSync, id: number, now: number): number {
-  db.prepare('UPDATE downloads SET attempts = attempts + 1, updated_at = ? WHERE id = ?').run(
-    now,
-    id,
-  );
-  return getDownload(db, id)?.attempts ?? 0;
+  const result = db
+    .prepare('UPDATE downloads SET attempts = attempts + 1, updated_at = ? WHERE id = ?')
+    .run(now, id);
+  requireAffected('bumpAttempts', id, result.changes);
+  const row = getDownload(db, id);
+  if (row === null) throw new Error(`bumpAttempts: download ${id} vanished after its own update`);
+  return row.attempts;
 }
 
 export function bumpMissingPolls(db: DatabaseSync, id: number, now: number): number {
-  db.prepare(
-    'UPDATE downloads SET missing_polls = missing_polls + 1, updated_at = ? WHERE id = ?',
-  ).run(now, id);
-  return getDownload(db, id)?.missingPolls ?? 0;
+  const result = db
+    .prepare('UPDATE downloads SET missing_polls = missing_polls + 1, updated_at = ? WHERE id = ?')
+    .run(now, id);
+  requireAffected('bumpMissingPolls', id, result.changes);
+  const row = getDownload(db, id);
+  if (row === null) {
+    throw new Error(`bumpMissingPolls: download ${id} vanished after its own update`);
+  }
+  return row.missingPolls;
 }
 
+/**
+ * A no-op when missing_polls is already 0 is legitimate (idempotent reset,
+ * not an error) and must not be confused with "no such id" — so a bad id is
+ * detected with a separate existence check, not by the affected-row count.
+ */
 export function resetMissingPolls(db: DatabaseSync, id: number): void {
-  db.prepare('UPDATE downloads SET missing_polls = 0 WHERE id = ? AND missing_polls != 0').run(id);
+  const result = db
+    .prepare('UPDATE downloads SET missing_polls = 0 WHERE id = ? AND missing_polls != 0')
+    .run(id);
+  if (result.changes === 0 && getDownload(db, id) === null) {
+    throw new Error(`resetMissingPolls: no download with id ${id}`);
+  }
 }
