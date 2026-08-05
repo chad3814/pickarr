@@ -41,6 +41,11 @@ export const downloadClientSchema = z.object({
         value.startsWith(SECRET_REFERENCE_PREFIX) || value.length >= MIN_API_KEY_LENGTH,
       `apiKey must be at least ${MIN_API_KEY_LENGTH} characters, or a "${SECRET_REFERENCE_PREFIX}" reference to a file containing such a key`,
     ),
+  // Must be unique to this Pickarr installation if multiple instances share
+  // one SABnzbd server: reconcile recovers an orphaned download by a label
+  // derived only from the download's own row id (see downloadLabel in
+  // db/downloads.ts), with no per-installation salt, so two instances
+  // polling the same category could each recover the other's job.
   category: z.string().min(1),
   importMode: z.enum(['move', 'copy']),
   pathMappings: z.array(pathMappingSchema).default([]),

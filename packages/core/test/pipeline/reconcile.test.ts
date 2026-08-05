@@ -1,8 +1,12 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { reconcileClient, MAX_MISSING_POLLS } from '../../src/pipeline/reconcile.ts';
+import {
+  reconcileClient,
+  MAX_MISSING_POLLS,
+  resetLabelMismatchWarningForTests,
+} from '../../src/pipeline/reconcile.ts';
 import { downloadLabel, getDownload, type DownloadRow } from '../../src/db/downloads.ts';
 import type { ClientSnapshot, DownloadClient } from '../../src/clients/types.ts';
 
@@ -381,5 +385,60 @@ test('a fresh addUrl call is given the download-derived label, not the release t
   await reconcileClient(deps(db, client));
 
   assert.equal(seenLabel, downloadLabel(1));
+  db.close();
+});
+
+// --- Label-mismatch observability --------------------------------------
+//
+// Recovery depends entirely on the client surfacing the label a download was
+// submitted under verbatim as that entry's name. If a real server doesn't
+// (renames jobs once it has parsed the actual nzb, say), refByLabel simply
+// never matches and every retry regresses to the pre-fix double-submit risk
+// — with no test failure, since the fakes here stub the name directly rather
+// than round-tripping it through a real client. The warning below is what
+// turns that silent regression into a visible one.
+
+test('a tracked download whose client-side name does not match its label warns exactly once, not once per tick', async () => {
+  resetLabelMismatchWarningForTests();
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  const client = fakeClient({
+    queue: [{ ref: 'nzo_1', name: 'Some.Release.Name', percentage: 10 }],
+    history: [],
+  });
+  const warnMock = mock.method(console, 'warn', () => {});
+
+  try {
+    await reconcileClient(deps(db, client));
+    await reconcileClient(deps(db, client));
+    await reconcileClient(deps(db, client));
+
+    assert.equal(warnMock.mock.callCount(), 1);
+    const message = String(warnMock.mock.calls[0]?.arguments[0] ?? '');
+    assert.match(message, /download 1/);
+    assert.match(message, /Some\.Release\.Name/);
+    assert.match(message, /pickarr-1/);
+  } finally {
+    warnMock.mock.restore();
+  }
+  db.close();
+});
+
+test('a tracked download whose client-side name matches its label never warns', async () => {
+  resetLabelMismatchWarningForTests();
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  const client = fakeClient({
+    queue: [{ ref: 'nzo_1', name: downloadLabel(1), percentage: 10 }],
+    history: [],
+  });
+  const warnMock = mock.method(console, 'warn', () => {});
+
+  try {
+    await reconcileClient(deps(db, client));
+    assert.equal(warnMock.mock.callCount(), 0);
+  } finally {
+    warnMock.mock.restore();
+  }
   db.close();
 });

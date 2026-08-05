@@ -41,6 +41,39 @@ export interface ReconcileDeps {
 }
 
 /**
+ * Whether the process has already emitted the "client does not honor our
+ * label" warning below. Recovery depends on the client surfacing the label a
+ * download was submitted under verbatim as that entry's name; if it doesn't
+ * (a server that renames jobs once the nzb is fetched, say), `refByLabel`
+ * will simply never match and every retry falls back to the pre-fix
+ * double-submit risk — silently, since nothing here throws. The warning
+ * makes that failure visible instead. It is deliberately global-once rather
+ * than once per tick: a short poll interval would otherwise flood the log
+ * with the same fact restated every few seconds.
+ */
+let warnedLabelMismatch = false;
+
+/**
+ * Test-only escape hatch. node:test runs every test in one file inside a
+ * single process/module instance, so the "once per process" flag above
+ * persists across tests in the same file unless a test resets it first.
+ */
+export function resetLabelMismatchWarningForTests(): void {
+  warnedLabelMismatch = false;
+}
+
+function warnIfLabelMismatch(download: DownloadRow, actualName: string): void {
+  if (warnedLabelMismatch) return;
+  const expected = downloadLabel(download.id);
+  if (actualName === expected) return;
+  warnedLabelMismatch = true;
+  console.warn(
+    `pickarr: download ${download.id} is named '${actualName}' at the client, expected ` +
+      `'${expected}'; label-based double-submit recovery will not work against this server.`,
+  );
+}
+
+/**
  * One poll of a client's category, reconciled against the database.
  *
  * Polling by category rather than per download means a fixed two requests per
@@ -106,6 +139,13 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
         // The client already has this job under our label — nothing to
         // submit. Recorded here without touching `attempts`: this is a
         // recovery of an existing submission, not a new attempt at one.
+        //
+        // This can make `advanced` and `failed`/`imported` both increment
+        // for the same download in the same tick (recovering the ref below,
+        // then discovering below that the recovered job already failed or
+        // completed) — that is two separate true events, not one event
+        // double-counted, so the counters are not meant to be mutually
+        // exclusive within a tick.
         setClientRef(db, download.id, recovered, now);
         knownRefs.add(recovered);
         result.advanced += 1;
@@ -150,10 +190,15 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       }
     }
 
-    if (clientRef === null) continue; // unreachable: every path above either sets clientRef or continues.
+    // Not reachable at runtime — every path above either assigns a non-null
+    // clientRef or `continue`s — but the type checker cannot see across the
+    // try/catch above, so this is kept purely to narrow `clientRef` to
+    // `string` for the rest of the loop body.
+    if (clientRef === null) continue;
 
     const queued = queueByRef.get(clientRef);
     if (queued !== undefined) {
+      warnIfLabelMismatch(download, queued.name);
       resetMissingPolls(db, download.id);
       if (status !== 'downloading') {
         setStatus(db, download.id, 'downloading', now);
@@ -164,6 +209,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
 
     const historic = historyByRef.get(clientRef);
     if (historic !== undefined) {
+      warnIfLabelMismatch(download, historic.name);
       resetMissingPolls(db, download.id);
 
       if (historic.outcome === 'failed') {
