@@ -28,7 +28,16 @@ export function createSabnzbdClient(
   }
 
   async function call(mode: string, params: Record<string, string>): Promise<JsonValue> {
-    const response = await fetchImpl(endpoint({ mode, ...params }));
+    let response: Response;
+    try {
+      response = await fetchImpl(endpoint({ mode, ...params }));
+    } catch (error) {
+      // fetchImpl is an injectable seam; some implementations (instrumented or
+      // proxying fetch wrappers) embed the request URL in their thrown error.
+      // Never let that reach the caller — only name the mode, keep the
+      // original as `cause` for debugging.
+      throw new Error(`SABnzbd ${mode} request failed`, { cause: error });
+    }
     if (!response.ok) {
       throw new Error(`SABnzbd ${mode} returned HTTP ${response.status}`);
     }
