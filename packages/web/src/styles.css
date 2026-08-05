@@ -1,0 +1,18 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; }
+.app { max-width: 60rem; margin: 0 auto; padding: 1rem; }
+nav { display: flex; gap: 1rem; padding-bottom: 1rem; }
+nav a { text-decoration: none; }
+nav a.active { font-weight: 600; text-decoration: underline; }
+.media-card { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; opacity: 0.95; }
+.media-card h2 { margin: 0; font-size: 1.1rem; }
+.subtitle, .date { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
+.badge { display: inline-block; margin-top: 0.4rem; padding: 0.1rem 0.5rem; border-radius: 0.25rem; background: #b45309; color: white; font-size: 0.8rem; }
+.fields { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; font-size: 0.85rem; }
+.fields li { opacity: 0.8; }
+.releases, .downloads { list-style: none; margin: 0; padding: 0; }
+.release-row, .download-row { display: flex; gap: 0.75rem; align-items: center; padding: 0.35rem 0; border-top: 1px solid rgb(from currentColor r g b / 20%); font-size: 0.9rem; }
+.release-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.6; }
+.release-current { font-weight: 600; }
+.download-row.untracked { opacity: 0.5; font-style: italic; }
+.download-error, .error { color: #b91c1c; }
