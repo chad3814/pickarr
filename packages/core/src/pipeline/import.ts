@@ -1,4 +1,5 @@
-import { copyFile, mkdir, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile, ParsedRelease } from '@pickarr/plugin-api';
@@ -28,6 +29,21 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * `lstat`, not `stat`: callers use this to decide whether something occupies
+ * a planned destination and, if so, what kind of thing it is. A symlink must
+ * be seen as a symlink — never silently followed to whatever it points at —
+ * so a symlink planted at a destination is judged on its own presence, not
+ * adopted as if it were the regular file this download was meant to write.
+ */
+async function lstatOrNull(path: string): Promise<Stats | null> {
+  try {
+    return await lstat(path);
+  } catch {
+    return null;
+  }
+}
+
 async function listFiles(root: string): Promise<DownloadedFile[]> {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   const files: DownloadedFile[] = [];
@@ -47,6 +63,21 @@ async function listFiles(root: string): Promise<DownloadedFile[]> {
 }
 
 /**
+ * Whether `target` is inside `root`, optionally allowing `target` to equal
+ * `root` itself. The two callers below want different answers to "does the
+ * root itself count?": a planned *file* destination must never literally be
+ * the library root (a file cannot replace the library directory), but a
+ * *directory* that will hold a file legitimately can be the root itself —
+ * every top-level file in the library has the root as its immediate parent.
+ * Both containment tests are expressed here, in one place, so a future
+ * change to what "contained" means cannot fix one copy and miss the other.
+ */
+function isContained(root: string, target: string, allowRootItself: boolean): boolean {
+  if (allowRootItself && target === root) return true;
+  return target.startsWith(root + sep);
+}
+
+/**
  * Resolves a plugin-supplied destination against the library root and refuses
  * anything that lexically escapes it. A plugin is not trusted to police its
  * own paths — a parser bug, or a different plugin entirely, must not be able
@@ -56,24 +87,27 @@ async function listFiles(root: string): Promise<DownloadedFile[]> {
  * normalizes `..` segments and collapses empty/`.` segments, and — critically
  * — ignores `root` entirely if `dest` is itself absolute, so an absolute
  * escape attempt is resolved to itself and then still caught by the
- * containment test below. The containment test requires the result to equal
- * `root` or begin with `root + sep`, which rules out both a sibling directory
- * that merely shares `root` as a string prefix (e.g. root `/lib`, target
- * `/library-evil`) and any parent-relative escape, on any platform's
- * separator (`sep` is platform-specific, not hardcoded).
+ * containment test below. `isContained` (called here with
+ * `allowRootItself: false`, since `target` here is the *file*, not a
+ * directory that may hold one) requires the result to begin with
+ * `root + sep`, which rules out: a sibling directory that merely shares
+ * `root` as a string prefix (e.g. root `/lib`, target `/library-evil`); any
+ * parent-relative escape; and the root itself. A destination of `.` or `""`
+ * resolves to `root` exactly, which is rejected here rather than treated as
+ * a valid (if odd) file path: the library root is a directory that must go
+ * on existing, never a name a download can be moved onto.
  *
  * What this textual check *cannot* see is a symlink already sitting inside
  * the library root: `resolve` never touches the filesystem, so a destination
  * that is lexically fine (e.g. `Site/scene.mp4`) could still land outside the
  * root at write time if `Site` is a symlink pointing elsewhere. That case is
- * handled separately, with `realpath`, immediately before the write in
- * `transfer` below — after the destination's parent directory has been
- * created (or confirmed to exist) but before any bytes move.
+ * handled separately, with `realpath`, immediately before anything is
+ * written or adopted, in `assertRealContainment` below.
  */
 function resolveDestination(libraryRoot: string, destination: string): string {
   const root = resolve(libraryRoot);
   const target = resolve(root, destination);
-  if (target !== root && !target.startsWith(root + sep)) {
+  if (!isContained(root, target, false)) {
     throw new Error(`Destination ${destination} escapes the library root`);
   }
   return target;
@@ -81,13 +115,21 @@ function resolveDestination(libraryRoot: string, destination: string): string {
 
 /**
  * Confirms, using the real (symlink-resolved) filesystem, that a directory we
- * are about to write into is actually inside the real library root — not
- * just lexically inside it. `dir` must already exist (callers create it with
- * `mkdir` first) so `realpath` has something to resolve.
+ * are about to write into or adopt a file from is actually inside the real
+ * library root — not just lexically inside it. `dir` must already exist
+ * (callers either just created it with `mkdir`, or it necessarily exists
+ * because a file was already found inside it) so `realpath` has something to
+ * resolve.
+ *
+ * Unlike `resolveDestination`'s check on the file itself, `dir` here is a
+ * *directory* that will hold (or already holds) the file — and the root
+ * itself is a perfectly legitimate parent directory, for any file living at
+ * the library's top level. So this call allows `dirReal === libraryRootReal`,
+ * where `resolveDestination` does not allow the equivalent for the file path.
  */
 async function assertRealContainment(libraryRootReal: string, dir: string): Promise<void> {
   const dirReal = await realpath(dir);
-  if (dirReal !== libraryRootReal && !dirReal.startsWith(libraryRootReal + sep)) {
+  if (!isContained(libraryRootReal, dirReal, true)) {
     throw new Error(`Destination directory ${dir} escapes the library root`);
   }
 }
@@ -97,14 +139,15 @@ async function assertRealContainment(libraryRootReal: string, dir: string): Prom
  * rather than copying straight to `destination`. A copy that crashes
  * partway through leaves a truncated file exactly where a plain `copyFile`
  * would have left one — but retry's idempotency check (below, in
- * `importDownload`) only asks "does the destination exist?", so a truncated
- * file at the final path would look indistinguishable from a completed
- * import and never be retried. Writing to `${destination}.pickarr-import-tmp`
- * and renaming it into place only after the copy finishes means the final
- * path comes into existence in one atomic step: it is either absent (crash
- * before the rename — safe to redo) or complete (crash never observed at
- * this path). The rename is same-directory, so it is never subject to EXDEV
- * and does not go through the injectable `renameImpl`.
+ * `importDownload`) treats a destination that exists as complete, so a
+ * truncated file at the final path would look indistinguishable from a
+ * finished import and never be retried. Writing to
+ * `${destination}.pickarr-import-tmp` and renaming it into place only after
+ * the copy finishes means the final path comes into existence in one atomic
+ * step: it is either absent (crash before the rename — safe to redo) or
+ * complete (crash never observed at this path). The rename is
+ * same-directory, so it is never subject to EXDEV and does not go through
+ * the injectable `renameImpl`.
  */
 async function copyIntoPlace(source: string, destination: string): Promise<void> {
   const tmp = `${destination}.pickarr-import-tmp`;
@@ -174,31 +217,57 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
     destination: resolveDestination(libraryRoot, file.destination),
   }));
 
-  // Anchor for the real-path containment check in transfer(): ensure the
-  // library root itself exists (so realpath has something to resolve) before
-  // resolving it, and resolve it once — not per file.
+  // Anchor for the real-path containment check in transfer() and in the
+  // adoption branch below: ensure the library root itself exists (so
+  // realpath has something to resolve) before resolving it, and resolve it
+  // once — not per file.
   await mkdir(resolve(libraryRoot), { recursive: true });
   const libraryRootReal = await realpath(resolve(libraryRoot));
 
   for (const file of resolved) {
-    // Idempotent on retry: a destination that exists with no surviving source
-    // was written by an earlier attempt that crashed before recording it.
     const alreadyRecorded = findLiveByDest(db, download.groupId, file.destination);
-    const destinationExists = await exists(file.destination);
+    // `lstat`, not `stat`: a symlink at the destination must be seen as a
+    // symlink, not silently resolved to whatever it points at, so it can be
+    // refused below rather than adopted.
+    const destStat = await lstatOrNull(file.destination);
     const sourceExists = await exists(file.source);
 
-    if (alreadyRecorded !== null && destinationExists) continue;
+    // A row already recorded for this exact destination means an earlier
+    // attempt already finished this file (transferred it and recorded it)
+    // before crashing on a later file; nothing left to verify or repeat.
+    if (alreadyRecorded !== null && destStat !== null) continue;
 
-    if (!destinationExists) {
+    if (destStat === null) {
+      // Nothing at the destination yet: a normal transfer, or — if the
+      // source is gone too — a genuine fault (planned to move a file that
+      // exists nowhere at all).
       if (!sourceExists) throw new Error(`Planned source is missing: ${file.source}`);
       await transfer(file.source, file.destination, deps.importMode, renameImpl, libraryRootReal);
-    } else if (deps.importMode === 'move' && sourceExists) {
-      // The destination already exists — because copyIntoPlace only ever
-      // makes it exist via an atomic rename, that content is guaranteed
-      // complete, not a truncated in-progress copy. So a surviving source
-      // here can only mean an earlier attempt finished the copy and crashed
-      // before this last unlink; finishing it now is safe, not a guess.
-      await unlink(file.source);
+    } else if (destStat.isFile() && !sourceExists) {
+      // Idempotent crash recovery, and only this: a *regular file* already
+      // sits at the destination, and the source is gone. That combination
+      // can only mean an earlier attempt already transferred this exact
+      // file and, for `move`, went on to remove the source before crashing
+      // — it is not a guess, because nothing else produces it (a plugin
+      // cannot make files vanish from the download directory; only this
+      // function's own `transfer` does that, and only after succeeding).
+      // Still re-verified against the real library root, in case the
+      // regular file it's confirming is itself reachable only through a
+      // symlinked ancestor directory that changed since the plan was made.
+      await assertRealContainment(libraryRootReal, dirname(file.destination));
+    } else {
+      // Anything else occupying the destination is a collision, not
+      // recovery, and must not be guessed at: either the source is still
+      // present too (this download never got as far as removing it, so
+      // whatever is at the destination was not put there by this attempt),
+      // or the occupant is not a regular file at all (a symlink or a
+      // directory), which this function never treats as "the file we
+      // wrote" regardless of the source's state. Failing loudly and never
+      // touching the source is strictly safer than adopting the unknown
+      // occupant and deleting the only copy of the actual download.
+      throw new Error(
+        `Destination ${file.destination} is occupied by something this download did not write`,
+      );
     }
 
     const stats = await stat(file.destination);
