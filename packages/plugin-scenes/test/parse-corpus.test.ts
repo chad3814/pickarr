@@ -73,6 +73,33 @@ const CORPUS: Entry[] = [
     quality: '2160|-|h265|mp4|-|GRP',
     isNew: false,
   },
+  // Group tags of 9-12 characters. The cap was 8, which refused these outright
+  // and made them the single largest source of parse_error rows against a real
+  // feed. They collate with the rows above: same scene, different group.
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-P0RNL0V3R',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|P0RNL0V3R',
+    isNew: true,
+  },
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-EVILANGEL',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|EVILANGEL',
+    isNew: true,
+  },
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-TWELVECHARSX',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|TWELVECHARSX',
+    isNew: true,
+  },
   {
     name: 'Brazzers.23.04.15.Alex.Coal.XXX.2160p60.WEB-DL.H.265.10bit.HDR.DDP5.1.MP4-G',
     scene: 'brazzers/alex-coal',
@@ -815,6 +842,20 @@ const REFUSED: [string, string][] = [
   ['Site.23.04.15.Name.XXX.1080p.MP4-PT2', 'the other part of the same scene'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-DISC1', 'spelled-out disc numbering'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-DISC2', 'the other disc of the same scene'],
+  // The length cap still exists; it is 12 rather than 8. A tag longer than
+  // that is more likely a run-together title word than a group.
+  ['Site.23.04.15.Name.XXX.1080p.MP4-DIGITALPLAYGROUND', 'thirteen characters or more is past the cap'],
+  // Raising the cap to 12 moved every 9-12 character edit tag out from behind
+  // it, leaving NON_GROUP_TERMS as their only guard. These rows are what make
+  // that list load-bearing in the newly exposed band: each is a *different cut
+  // or different content*, so detaching it as a group merges it with the scene
+  // proper. DIRECTORS and REMASTERED were already listed and were previously
+  // redundant with the cap; they are no longer redundant.
+  ['Site.23.04.15.Name.XXX.1080p.MP4-DIRECTORS', 'nine characters, an edit tag the old cap hid'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-REMASTERED', 'ten characters, the same'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-UNCENSORED', 'a different cut, not a group'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-DIRECTORSCUT', 'the same at the full twelve characters'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-COMPILATION', 'different content entirely, not one scene'],
   [
     'Site.23.04.15.Name.XXX.1080p.HEVC.G',
     'a single character attached by the name\'s own separator is a stray, not a group; a hyphen is what makes a one-letter tag like "-G" credible',
