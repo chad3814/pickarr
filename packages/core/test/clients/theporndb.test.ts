@@ -20,13 +20,19 @@ function respondWith(body: unknown, init?: ResponseInit): FetchImpl {
 }
 
 function site(name: string, shortName: string): Record<string, unknown> {
-  return { uuid: 'u', id: 1, name, short_name: shortName, url: 'https://example.test' };
+  return {
+    uuid: `uuid-${shortName}`,
+    id: 42,
+    name,
+    short_name: shortName,
+    url: 'https://example.test',
+  };
 }
 
 test('results are returned with both spellings intact', async () => {
   const client = createTpdbClient(CONFIG, respondWith({ data: [site('Bang Bros', 'bangbros')] }));
   assert.deepEqual(await client.searchSites('bangbros'), [
-    { name: 'Bang Bros', shortName: 'bangbros' },
+    { name: 'Bang Bros', shortName: 'bangbros', sourceUuid: 'uuid-bangbros' },
   ]);
 });
 
@@ -41,6 +47,28 @@ test('every result is returned, not just ones resembling the query', async () =>
     }),
   );
   assert.equal((await client.searchSites('2 chicks')).length, 2);
+});
+
+test("the site's uuid is carried through", async () => {
+  // Only the uuid: GET /sites/<id> and GET /sites/<uuid> return the same
+  // record, so keeping the numeric id too would be two columns for one fact.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({ data: [{ name: 'S', short_name: 's', id: 108995, uuid: 'u-1' }] }),
+  );
+  const [result] = await client.searchSites('s');
+  assert.equal(result?.sourceUuid, 'u-1');
+});
+
+test('a missing or empty uuid is null rather than invented', async () => {
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({ data: [{ name: 'S', short_name: 's', uuid: '' }, { name: 'T', short_name: 't' }] }),
+  );
+  const results = await client.searchSites('s');
+  assert.equal(results[0]?.name, 'S', 'the site is still usable without an identifier');
+  assert.equal(results[0]?.sourceUuid, null);
+  assert.equal(results[1]?.sourceUuid, null);
 });
 
 test('an empty result set is a negative, not an error', async () => {
@@ -220,7 +248,7 @@ test('unknown extra fields on a site do not prevent it being read', async () => 
     respondWith({ data: [{ ...site('Anal Only', 'analonly'), some_new_field: { a: 1 } }] }),
   );
   assert.deepEqual(await client.searchSites('anal only'), [
-    { name: 'Anal Only', shortName: 'analonly' },
+    { name: 'Anal Only', shortName: 'analonly', sourceUuid: 'uuid-analonly' },
   ]);
 });
 

@@ -9,7 +9,19 @@ export interface DiscoveredSite {
   prefix: string;
   site: string | null;
   source: string;
+  /**
+   * The answering service's identifier for the site, kept so a later feature
+   * can address it directly instead of searching by name again. Null on a
+   * negative answer, and null for a service that publishes none.
+   */
+  sourceUuid: string | null;
   foundAt: number;
+}
+
+/** What a lookup learned about a prefix. `null` records a negative answer. */
+export interface DiscoveredSiteInput {
+  readonly site: string | null;
+  readonly sourceUuid?: string | null;
 }
 
 /**
@@ -24,17 +36,24 @@ export function sitePrefixKey(text: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+function text(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
 export function getDiscoveredSite(db: DatabaseSync, prefix: string): DiscoveredSite | undefined {
   const row = db
-    .prepare('SELECT prefix, site, source, found_at FROM discovered_sites WHERE prefix = ?')
+    .prepare(
+      `SELECT prefix, site, source, source_uuid, found_at
+       FROM discovered_sites WHERE prefix = ?`,
+    )
     .get(sitePrefixKey(prefix));
   if (row === undefined) return undefined;
 
-  const site = row['site'];
   return {
     prefix: String(row['prefix']),
-    site: site === null || site === undefined ? null : String(site),
+    site: text(row['site']),
     source: String(row['source']),
+    sourceUuid: text(row['source_uuid']),
     foundAt: Number(row['found_at']),
   };
 }
@@ -48,15 +67,17 @@ export function getDiscoveredSite(db: DatabaseSync, prefix: string): DiscoveredS
 export function recordDiscoveredSite(
   db: DatabaseSync,
   prefix: string,
-  site: string | null,
+  found: DiscoveredSiteInput,
   source: string,
   now: number,
 ): void {
   db.prepare(
-    `INSERT INTO discovered_sites (prefix, site, source, found_at) VALUES (?, ?, ?, ?)
+    `INSERT INTO discovered_sites (prefix, site, source, source_uuid, found_at)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT (prefix) DO UPDATE SET site = excluded.site, source = excluded.source,
+                                        source_uuid = excluded.source_uuid,
                                         found_at = excluded.found_at`,
-  ).run(sitePrefixKey(prefix), site, source, now);
+  ).run(sitePrefixKey(prefix), found.site, source, found.sourceUuid ?? null, now);
 }
 
 /** Every confirmed site name, for seeding a plugin at boot. */

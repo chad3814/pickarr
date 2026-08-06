@@ -86,13 +86,22 @@ CREATE INDEX imported_files_live ON imported_files (group_id) WHERE trashed_at I
  *
  * `prefix` is the slug of the queried text, so lookups are insensitive to the
  * separators and casing a particular release happened to use.
+ *
+ * `source_uuid` is the answering service's identifier for the site, kept so a
+ * later feature — pulling artwork, or a site's scene list — can address it
+ * directly instead of searching by name again. ThePornDB also publishes a
+ * numeric id, but `GET /sites/<id>` and `GET /sites/<uuid>` return the same
+ * record, so storing both would be two columns for one fact. Nullable: a
+ * negative answer identifies nothing, and a service without such an
+ * identifier is still allowed to answer.
  */
 const DISCOVERED_SITES = `
 CREATE TABLE discovered_sites (
-  prefix   TEXT PRIMARY KEY,
-  site     TEXT,
-  source   TEXT    NOT NULL,
-  found_at INTEGER NOT NULL
+  prefix      TEXT PRIMARY KEY,
+  site        TEXT,
+  source      TEXT    NOT NULL,
+  source_uuid TEXT,
+  found_at    INTEGER NOT NULL
 );
 `;
 
