@@ -145,9 +145,10 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
  *
  * Raising it is not free. The cap was silently the *only* guard rejecting
  * 9-12 character edit tags, so widening it hands that job entirely to
- * `NON_GROUP_TERMS` and the word-shape test. Anything added here has to be matched
- * by a term below and a refusal row in the corpus, or the widening quietly
- * converts a refusal into a merge — the one error this parser may not make.
+ * `NON_GROUP_TERMS` — which, since casing was abandoned as a signal, is now
+ * the only guard there is. Anything added here has to be matched by a term
+ * below and a refusal row in the corpus, or the widening quietly converts a
+ * refusal into a merge.
  */
 const MAX_GROUP_TAG_LENGTH = 12;
 
@@ -442,45 +443,30 @@ function tokensOf(text: string): Token[] {
 }
 
 /**
- * True for a tag spelled the way an ordinary English word is: `Bonus`,
- * `Directors`, `bonus`, `extras`. Nothing else — `FETiSH`, `Zsex3i`, `WRB`,
- * `inSaNe`, `P0RNL0V3R`, `G` — is shaped like a word.
- *
- * This replaced a rule requiring all caps, which was wrong about the world:
- * scene groups style themselves freely, and `MP4-FETiSH` and `MP4-Zsex3i` are
- * both real. But the caps rule was carrying the over-collation guard, so it
- * could not simply be dropped. What it was really doing was rejecting tags
- * that look like words, because that is where the unlistable edit tags live —
- * and a word in Title case or lower case is precisely that shape.
- *
- * The trade is deliberate and unchanged in direction: a group that styles
- * itself as a plain word (`-Ghost`, `-rartv`) is still refused, exactly as
- * before. Refusing a real group costs a visible `parse_error`; accepting
- * `-Bonus` merges bonus footage into the scene it belongs beside.
- *
- * A single letter is not a word: `-G` is a common group and must survive, so
- * the Title-case test requires at least one lower-case letter after the
- * capital.
- */
-function looksLikeOrdinaryWord(text: string): boolean {
-  return /^[a-z]+$/.test(text) || /^[A-Z][a-z]+$/.test(text);
-}
-
-/**
  * A trailing token has a release group's *shape* when it is short, purely
- * alphanumeric, carries a letter, is not spelled like an ordinary word, and is
- * not a codec/source/container/language or edit term.
+ * alphanumeric, carries a letter, and is not a codec/source/container/language
+ * or edit term.
  *
- * Both of the last two tests are load-bearing, and neither subsumes the other:
- * `NON_GROUP_TERMS` is what stops `-UNCUT` and `-Part2`, which are shaped
- * nothing like words, and the word-shape test is what stops `-Bonus` and
- * `-Deleted`, which are not in any list anyone can finish writing. Together
- * they mean a trailing edit or part tag is refused rather than swallowed as a
- * group — swallowing it merges two different cuts of a scene, which is exactly
- * the over-collation this component may not commit, and refusing is always the
- * cheaper mistake. The digits are stripped before the lookup so that `Part1`
- * and `Part2` are both recognised as `PART` while a numbered group like `GRP1`
- * still reduces to the unlisted `GRP`.
+ * Casing is not consulted. Two stricter rules were tried and both cost more
+ * than they bought: requiring all caps refused the real groups `-FETiSH` and
+ * `-Zsex3i`, and refusing word-shaped tags additionally refused `-Ghost`,
+ * `-Rarbg`, `-rartv` and `-xpost`, which are also real. Nothing structural
+ * separates `Ghost` from `Bonus`, so any shape rule that admits one admits the
+ * other — the choice is which error to take.
+ *
+ * Taking the other one: a word-shaped edit tag is now detached as a group,
+ * which strips it from the identity and collates that release into the scene
+ * as another version. A `-Bonus` reel therefore appears alongside the scene
+ * and can outrank it on resolution. That is a visible annoyance rather than a
+ * loss, and it is preferred to real releases silently never appearing at all.
+ *
+ * `NON_GROUP_TERMS` is what still holds the line, and it is now the only thing
+ * holding it. Its entries are the tags where merging genuinely destroys
+ * something: `-Part1`/`-Part2`, `-CD1`/`-CD2` and `-DISC1`/`-DISC2` are halves
+ * of one scene, and merging them means the user picks one half believing it is
+ * the whole. Digits are stripped before the lookup so `Part1` and `Part2` both
+ * reduce to `PART`, while a numbered group like `GRP1` reduces to the unlisted
+ * `GRP`. Matching is case-insensitive, so one entry covers every spelling.
  *
  * `minLength` is 1 for a hyphen-attached tag, where the hyphen itself is
  * already strong evidence (single-letter groups like `-G` are common), and 2
@@ -490,7 +476,6 @@ function looksLikeGroupTag(text: string, minLength: number): boolean {
   if (text.length < minLength || text.length > MAX_GROUP_TAG_LENGTH) return false;
   if (!/^[A-Za-z0-9]+$/.test(text)) return false;
   if (!/[A-Za-z]/.test(text)) return false;
-  if (looksLikeOrdinaryWord(text)) return false;
   const upper = text.toUpperCase();
   if (NON_GROUP_TERMS.has(upper) || NON_GROUP_TERMS.has(upper.replace(/\d+$/, ''))) return false;
   return !isEncodeToken(text);

@@ -187,6 +187,35 @@ test('an arbitrary release with the same shape stays refused', () => {
   }
 });
 
+test('a word-shaped trailing tag is now a group, and the listed ones still are not', () => {
+  // Casing was abandoned as a signal, so -Ghost and -rartv parse. The cost is
+  // that -Bonus does too, collating a bonus reel into the scene as a version.
+  // What still holds is NON_GROUP_TERMS, and its job is the tags where merging
+  // destroys something rather than merely annoying.
+  const base = 'Site.23.04.15.Name.XXX.1080p.MP4';
+  const reference = parsed(`${base}-WRB`).identityKey;
+
+  for (const tag of ['Ghost', 'rartv', 'xpost', 'Rarbg', 'Bonus', 'bonus']) {
+    assert.equal(parsed(`${base}-${tag}`).identityKey, reference, tag);
+  }
+
+  // Halves of one scene: merging these means picking one believing it whole.
+  for (const [a, b] of [
+    ['Part1', 'Part2'],
+    ['CD1', 'CD2'],
+    ['DISC1', 'DISC2'],
+    ['PT1', 'PT2'],
+  ]) {
+    assert.equal(parseSceneRelease(`${base}-${a}`), null, a);
+    assert.equal(parseSceneRelease(`${base}-${b}`), null, b);
+  }
+
+  // Different cuts of one scene, in any casing the list is matched against.
+  for (const tag of ['UNCUT', 'Uncut', 'uncut', 'UNCENSORED', 'Directors', 'FRENCH']) {
+    assert.equal(parseSceneRelease(`${base}-${tag}`), null, tag);
+  }
+});
+
 test('a bare TLD after a confirmed site is part of the domain, not the title', () => {
   assert.equal(parsed(BRALESS, ['Braless Forever']).display.title, 'Emma G and Rocky Beach Days');
   assert.equal(
