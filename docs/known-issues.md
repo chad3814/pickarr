@@ -9,32 +9,60 @@ reading the `parse_error` rows it produces.
 
 ## Parser
 
-**The refusal set is wider than it should be.** Against a sample of realistic scene
-release names the parser returns `null` for roughly a quarter of them. A refused name
-never reaches the browse list at all, so this is the difference between the list being
-the product and the list being a quarter empty.
+The parser was rewritten after the MVP. It now finds the identity/encode boundary from
+the **date** rather than from an `XXX` marker, which is what the mature tools in this
+space do and what the marker approach kept failing at — `XXX` occurs both inside titles
+and as a release-group name, and three separate attempts to disambiguate it each moved
+the bug rather than closing it. The date is unambiguous and effectively always present.
 
-Known shapes that refuse:
+It handles the plain dotted form, dot-attached release groups, bracketed sites with the
+date in several positions, `Studio - Performers - Title (Month DD, YYYY)`, concatenated
+`YYYYMMDD` and `YYMMDD`, website prefixes, trailing file extensions, and VR tags.
 
-- A dot-attached release group — `Site.24.01.09.Performer.Title.XXX.1080p.HEVC.x265.PRT`.
-  `dropReleaseGroup` only strips a group introduced by a lone `-`. This shape is common.
-- VR and Oculus tags, `HDRip`, `1080i`, `FullHD`, `HQ`.
-- A trailing `[rartv]`-style suffix, or a trailing `.mp4`.
+What follows is what it still gets wrong.
 
-Widen `ANCILLARY_TOKEN` in `packages/plugin-scenes/src/parse.ts`, not the anchor sets —
-adding to the anchors enlarges the class of names that collate wrongly, which is the
-failure that actually costs you something. Tune it from the `parse_error` worklist
-once you have real feed data.
+**The hyphen-attached release group must be 1–8 all-caps alphanumerics, or the whole
+name is refused.** This is deliberate — it is what stops `-Part1` and `-Part2`, or
+`-Uncut` and `-Directors`, being read as release groups and merging two different cuts
+of one scene. But it also refuses twelve realistic tag spellings that used to parse:
+`-Rarbg`, `-Ghost`, `-inSaNe` and other mixed case; `-rartv`, `-xpost` and other
+lowercase; `-EVILANGEL`, `-DIGITALPLAYGROUND` and anything over eight characters. Those
+land in `parse_error` rather than the browse list. If the worklist fills with them,
+relax the length cap before the caps rule — the caps rule is the one carrying the
+over-collation guard.
+
+**A bare-domain prefix becomes the site.** Stripping a website prefix now requires
+`www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`
+are the same string shape and guessing wrong merged five real studios onto one identity.
+The cost of the safe choice: a genuine bare-domain stamp like `pornsite.net - Vixen - ...`
+is treated as the studio, so the scene files under the wrong directory and under-collates
+against the same scene without the stamp. Wrong path, never a wrong merge.
+
+**The same scene in a dotted and a bracketed listing gets two groups.** The dotted form
+carries no component boundaries, so `Vixen.23.07.19.Alex.Coal.Beautiful.Episode` and
+`[Vixen] Alex Coal - Beautiful Episode - 2023-07-19` cannot be told to be the same
+scene. Under-collation, and probably irreducible.
 
 **Residual over-collation, believed irreducible.** Two distinct scenes can share an
-identity key when a release has *no* `XXX` marker *and* its title ends in a word that
-looks like a resolution or source — a scene literally titled "Party 4K", for instance.
-Without a marker there is no information in the name that separates the two readings.
+identity key when a release has no marker *and* its title ends in a word that looks
+like a resolution or source — a scene literally titled "Party 4K". Without a marker
+the name contains nothing that separates the two readings.
+
+**Smaller, all pre-existing:** in a listing, a hyphen-attached group inside the quality
+segment leaks into the identity and the quality is lost (`- 1080p-GRP`); when a listing
+holds two dates the first wins and the second ends up in the title; `4K60` matches no
+resolution because there is no word boundary before the `60`.
 
 **Under-collation by design.** A name whose boundary is genuinely ambiguous returns
 `null` rather than guessing. That is the intended direction: a `parse_error` row is
-visible and fixable, a wrong identity key silently merges two different scenes and you
-pick the wrong thing.
+visible and fixable, while a wrong identity key silently merges two different scenes
+and you pick the wrong thing.
+
+**If you extend this file, extend the corpus test with it.** `parse-corpus.test.ts`
+asserts invariants over a table rather than checking cases one at a time, and it pins
+the refusal set deliberately. Both times a fix to this parser was justified by "the
+known cases pass", it was wrong; both times it was justified by an argument about
+structure, it held.
 
 ## Import and upgrade
 
