@@ -1,7 +1,10 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { inspect } from 'node:util';
-import { createSabnzbdClient } from '../../src/clients/sabnzbd.ts';
+import {
+  createSabnzbdClient,
+  resetUnrecognizedHistoryStatusWarningForTests,
+} from '../../src/clients/sabnzbd.ts';
 import type { DownloadClientConfig } from '../../src/config/schema.ts';
 import type { JsonValue } from '../../src/json.ts';
 
@@ -422,6 +425,7 @@ test("'Deleted' is a terminal failure, not in-progress", async () => {
 });
 
 test('an unrecognized status is a terminal failure, not in-progress', async () => {
+  resetUnrecognizedHistoryStatusWarningForTests();
   const client = createSabnzbdClient(CONFIG, async (url) =>
     url.includes('mode=queue')
       ? jsonResponse({})
@@ -441,6 +445,95 @@ test('an unrecognized status is a terminal failure, not in-progress', async () =
   );
   const snapshot = await client.snapshot();
   assert.equal(snapshot.history[0]?.outcome, 'failed');
+});
+
+// Defaulting an unrecognized status to 'failed' with no explanation produces
+// a record identical to a genuine unexplained failure — the exact bug this
+// whole change exists to fix, just moved one status later. The message has
+// to name the offending status, and the warning has to fire so a future
+// occurrence is visible in the log, not just in a failed download nobody can
+// explain.
+test('an unrecognized status names itself in the failure message rather than looking like a generic failure', async () => {
+  resetUnrecognizedHistoryStatusWarningForTests();
+  const client = createSabnzbdClient(CONFIG, async (url) =>
+    url.includes('mode=queue')
+      ? jsonResponse({})
+      : jsonResponse({
+          history: {
+            slots: [
+              {
+                nzo_id: 'h1',
+                name: 'R',
+                status: 'SomeFutureStatusThisClientHasNeverSeen',
+                storage: '',
+                fail_message: '',
+              },
+            ],
+          },
+        }),
+  );
+  const snapshot = await client.snapshot();
+  assert.match(snapshot.history[0]?.failMessage ?? '', /SomeFutureStatusThisClientHasNeverSeen/);
+});
+
+test('an unrecognized status warns exactly once, not once per snapshot', async () => {
+  resetUnrecognizedHistoryStatusWarningForTests();
+  const client = createSabnzbdClient(CONFIG, async (url) =>
+    url.includes('mode=queue')
+      ? jsonResponse({})
+      : jsonResponse({
+          history: {
+            slots: [
+              { nzo_id: 'h1', name: 'R', status: 'Weird', storage: '', fail_message: '' },
+            ],
+          },
+        }),
+  );
+  const warnMock = mock.method(console, 'warn', () => {});
+  try {
+    await client.snapshot();
+    await client.snapshot();
+    await client.snapshot();
+
+    assert.equal(warnMock.mock.callCount(), 1);
+    const message = String(warnMock.mock.calls[0]?.arguments[0] ?? '');
+    assert.match(message, /h1/);
+    assert.match(message, /Weird/);
+  } finally {
+    warnMock.mock.restore();
+  }
+});
+
+// A recognized failure status (Failed, Deleted) is not "unrecognized" and
+// must not trigger the warning or have the note appended — only a status
+// outside every enumerated bucket does.
+test('a recognized terminal failure status does not warn and keeps its own fail_message untouched', async () => {
+  resetUnrecognizedHistoryStatusWarningForTests();
+  const client = createSabnzbdClient(CONFIG, async (url) =>
+    url.includes('mode=queue')
+      ? jsonResponse({})
+      : jsonResponse({
+          history: {
+            slots: [
+              {
+                nzo_id: 'h1',
+                name: 'R',
+                status: 'Failed',
+                storage: '',
+                fail_message: 'Out of retention',
+              },
+            ],
+          },
+        }),
+  );
+  const warnMock = mock.method(console, 'warn', () => {});
+  try {
+    const snapshot = await client.snapshot();
+    assert.equal(warnMock.mock.callCount(), 0);
+    assert.equal(snapshot.history[0]?.failMessage, 'Out of retention');
+  } finally {
+    warnMock.mock.restore();
+  }
 });
 
 test('snapshot tolerates missing slots', async () => {

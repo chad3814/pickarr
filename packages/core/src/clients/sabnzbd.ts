@@ -65,6 +65,45 @@ function historyOutcome(status: string): 'completed' | 'failed' | 'in-progress' 
   return 'failed';
 }
 
+/** Whether `status` is one this client actually enumerates, in any bucket. */
+function isRecognizedStatus(status: string): boolean {
+  return status === 'completed' || TERMINAL_FAILURE_STATUSES.has(status) || IN_PROGRESS_STATUSES.has(status);
+}
+
+/**
+ * Whether the process has already emitted the "unrecognized history status"
+ * warning below. Defaulting an unrecognized status to `failed` (see
+ * `historyOutcome`) is deliberate, but silently, it produces a failure record
+ * indistinguishable from a genuine one — the exact failure class this whole
+ * three-way outcome exists to fix. The warning is what makes the next
+ * occurrence name itself instead of reproducing that bug invisibly. Global-
+ * once rather than once per tick, same rationale as `warnedLabelMismatch` in
+ * `pipeline/reconcile.ts`: a short poll interval would otherwise flood the
+ * log with the same fact restated every few seconds.
+ */
+let warnedUnrecognizedHistoryStatus = false;
+
+/**
+ * Test-only escape hatch, mirroring
+ * `resetLabelMismatchWarningForTests` in `pipeline/reconcile.ts`: node:test
+ * runs every test in one file inside a single process/module instance, so
+ * the "once per process" flag above persists across tests unless a test
+ * resets it first.
+ */
+export function resetUnrecognizedHistoryStatusWarningForTests(): void {
+  warnedUnrecognizedHistoryStatus = false;
+}
+
+function warnUnrecognizedStatusOnce(ref: string, rawStatus: string): void {
+  if (warnedUnrecognizedHistoryStatus) return;
+  warnedUnrecognizedHistoryStatus = true;
+  console.warn(
+    `pickarr: SABnzbd history entry ${ref} has status '${rawStatus}', which this client does ` +
+      'not recognize; treating it as failed rather than waiting on it indefinitely. If this is ' +
+      'actually a transient state, add it to IN_PROGRESS_STATUSES in clients/sabnzbd.ts.',
+  );
+}
+
 /**
  * What a string becomes when redaction cannot produce a version of it that is
  * *provably* free of the api key.
@@ -314,17 +353,31 @@ export function createSabnzbdClient(
         const ref = safeText(slot['nzo_id']);
         if (ref === '') continue;
 
-        const status = safeText(slot['status']).toLowerCase();
+        const rawStatus = safeText(slot['status']);
+        const status = rawStatus.toLowerCase();
         const outcome = historyOutcome(status);
         const storage = safeText(slot['storage']);
         const failMessage = safeText(slot['fail_message']);
+
+        // An unrecognized status defaults to `failed` (see historyOutcome),
+        // but without this, that record is indistinguishable from a genuine
+        // failure — exactly the failure class this whole change exists to
+        // fix. Naming the raw status in the message, and warning once, is
+        // what makes the next occurrence visible instead of silent.
+        let effectiveFailMessage = failMessage === '' ? null : failMessage;
+        if (outcome === 'failed' && !isRecognizedStatus(status)) {
+          warnUnrecognizedStatusOnce(ref, rawStatus);
+          const note = `unrecognized SABnzbd status '${rawStatus}'`;
+          effectiveFailMessage =
+            effectiveFailMessage === null ? note : `${note}: ${effectiveFailMessage}`;
+        }
 
         history.push({
           ref,
           name: safeText(slot['name']),
           outcome,
           storagePath: outcome === 'completed' && storage !== '' ? storage : null,
-          failMessage: failMessage === '' ? null : failMessage,
+          failMessage: effectiveFailMessage,
         });
       }
 

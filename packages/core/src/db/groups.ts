@@ -205,9 +205,17 @@ export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
     .map((row) => toGroupRow(row as SqlRow));
 }
 
+/**
+ * Same tiebreak as `browseGroups`, for the same reason: within one
+ * `list_rank_at` tie, ascending `id` is newest-first, because ingest walks
+ * an RSS batch newest-first and the newest item gets the lowest id. This has
+ * no cursor, so there is no paired comparison to keep in step — but it must
+ * still agree with `browseGroups` on order, or the same tied groups render
+ * in opposite order on the Picks page versus Browse.
+ */
 export function pickedGroups(db: DatabaseSync): GroupRow[] {
   return db
-    .prepare(`${SELECT} WHERE state = 'picked' ORDER BY list_rank_at DESC, id DESC`)
+    .prepare(`${SELECT} WHERE state = 'picked' ORDER BY list_rank_at DESC, id ASC`)
     .all()
     .map((row) => toGroupRow(row as SqlRow));
 }
