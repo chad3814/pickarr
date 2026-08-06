@@ -23,3 +23,21 @@ site; everything after is title/performers; quality is parsed separately. Our
 XXX-marker boundary cost three fix rounds during the MVP precisely because XXX
 appears in titles AND in release group names. The date does not have that problem
 and is effectively always present in this domain.
+
+FIX ROUND 1 — commit a87280d (signed). 233 -> 239 tests, corpus 62 -> 75 rows,
+quality now pinned per row.
+Controller verified all five:
+  C1 five .com studios -> five distinct keys, studio kept as the site; a real
+     www. prefix is still stripped.
+  C2 join is now '--'; both re-split pairs distinct; listing ORDER still does not
+     split (vixen:2023-07-19:kylie--page-turner).
+  I3 stamped dotted name keeps quality: 1080p 1,080,041,000 vs 2160p 2,160,044,000.
+  I4 group-tag guards now shared: -Part1/-Part2, -CD1/-CD2, -Uncut/-Directors,
+     -French/-German all REFUSE (null) in both the hyphen and dot branches, every
+     casing. Refusal is the safe direction; they land in the parse_error worklist.
+  I5 quality pinned per corpus row; 11 of 23 corpus tests fail against 3c0d43b.
+  Bonus: pinning quality exposed 2160p60 matching no resolution and scoring below
+  480p in its own group. Fixed.
+CONTROLLER TEST ERROR, corrected: I first reported I4 as FAIL because my assertion
+  was `k(x) !== k(y)` and both are null, so null!==null was false. Both-null is a
+  REFUSAL, not a merge. Check for refusal explicitly when the safe outcome is null.

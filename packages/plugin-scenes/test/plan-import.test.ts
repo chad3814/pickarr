@@ -74,6 +74,40 @@ test('two releases with the same identity key produce the same destination', () 
   assert.equal(canonicalPlan?.files[0]?.destination, variantPlan?.files[0]?.destination);
 });
 
+test('two distinct identity keys never produce the same destination', () => {
+  // The identity layer separates these by joining sorted components with `--`;
+  // the file layer has to preserve that boundary or the second scene collides
+  // on an occupied destination and can never be imported.
+  const names = [
+    '[Vixen] Kylie - Page Turner - 2023-07-19',
+    '[Vixen] Kylie Page - Turner - 2023-07-19',
+    '[Tushy] Anna Bell - Peaks - 2023-07-22',
+    '[Tushy] Anna - Bell Peaks - 2023-07-22',
+    '[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 1080p',
+    'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB',
+    'Pure Taboo - Sarah Arabic, Lily LaBeau - A Costly Divorce (June 24, 2025) [1080p]',
+  ];
+  const owner = new Map<string, string>();
+  for (const name of names) {
+    const media = parseSceneRelease(name);
+    assert.ok(media, `expected ${name} to parse`);
+    const destination = planSceneImport(media, [file('scene.mp4', 1_000)])?.files[0]?.destination;
+    assert.ok(destination !== undefined);
+    const clash = owner.get(destination);
+    assert.equal(clash, undefined, `${media.identityKey} and ${clash} both map to ${destination}`);
+    owner.set(destination, media.identityKey);
+  }
+});
+
+test('a multi-component scene renders its component boundary in the path', () => {
+  const media = parseSceneRelease('[Vixen] Kylie - Page Turner - 2023-07-19');
+  assert.ok(media);
+  assert.equal(
+    planSceneImport(media, [file('scene.mp4', 1_000)])?.files[0]?.destination,
+    'Vixen/2023-07-19 - Kylie - Page Turner.mp4',
+  );
+});
+
 test('a nested larger video does not beat a top-level smaller one', () => {
   const plan = planSceneImport(MEDIA, [
     file('scene.mp4', 1_000_000_000),

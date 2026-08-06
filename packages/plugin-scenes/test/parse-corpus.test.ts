@@ -262,6 +262,20 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|-|-|-',
     isNew: true,
   },
+  // A listing tail carrying a *source* token, not just a bare resolution.
+  // Every other listing row's tail is a lone resolution, which cannot form a
+  // valid encode suffix for the dotted recogniser — so without this row the
+  // two recognisers can be swapped and the whole suite still passes, even
+  // though the swap makes the dotted parser eat listings and key this name on
+  // its resolution.
+  {
+    name: '[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 1080p WEB-DL x264',
+    scene: 'tushy/alex-coal-beautiful-episode',
+    key: 'tushy:2023-07-22:alex-coal--beautiful-episode',
+    title: 'Beautiful Episode - Alex Coal',
+    quality: '1080|web-dl|x264|-|-|-',
+    isNew: true,
+  },
   {
     name: '[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 2160p HEVC',
     scene: 'tushy/alex-coal-beautiful-episode',
@@ -792,6 +806,15 @@ const REFUSED: [string, string][] = [
     'a numbered part tag in caps: only stripping the digits before the lookup rejects it, and merging PART1 with PART2 is the same over-collation',
   ],
   ['Site.23.04.15.Name.XXX.1080p.MP4-PART2', 'the other half, refused for the same reason'],
+  // Disc and part numbering, the other half of the same class. Each of these
+  // is rejected only by its own `NON_GROUP_TERMS` entry, so each entry needs
+  // its own row or removing it silently re-opens the merge.
+  ['Site.23.04.15.Name.XXX.1080p.MP4-CD1', 'disc numbering, not a group'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-CD2', 'the other disc of the same scene'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-PT1', 'abbreviated part numbering'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-PT2', 'the other part of the same scene'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-DISC1', 'spelled-out disc numbering'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-DISC2', 'the other disc of the same scene'],
   [
     'Site.23.04.15.Name.XXX.1080p.HEVC.G',
     'a single character attached by the name\'s own separator is a stray, not a group; a hyphen is what makes a one-letter tag like "-G" credible',
