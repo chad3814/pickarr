@@ -134,7 +134,12 @@ equal what I searched for" would reject `2 Chicks Same Time`. And because the se
 a substring search over 100k+ names, "did the search return anything" would invent a
 site called `Getting In`. Matching against the release's leading runs answers both. The
 longest run wins, so a four-word site beats the two-word run inside it, and site names
-of more than five words are not considered.
+of more than twelve words are not considered.
+
+Searches are paged. The service caps a page at 100 results and one-word queries often
+exceed it (`anal` returns 352, `big` 649), so a search follows up to ten pages — but
+stops after the first when the reported total is above 1000, which means the query was
+too broad to be naming a site. Each prefix is only ever looked up once, hit or miss.
 
 Answers are cached in the `discovered_sites` table, **including the negatives** — a
 prefix that is not a site is asked about once, not every tick. Your config list always

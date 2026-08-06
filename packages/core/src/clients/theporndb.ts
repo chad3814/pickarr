@@ -24,8 +24,36 @@ export interface SiteLookupClient {
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
-/** How many results one query asks for. The match is exact, so one page is plenty. */
+/**
+ * Results per request. 100 is the service's ceiling — asking for more returns
+ * an empty body rather than a larger page.
+ */
 const PER_PAGE = 100;
+
+/**
+ * How many pages one search will walk.
+ *
+ * A single page is not always enough. Measured against the live service, the
+ * one-word fallback queries run long: `free` reports 149 matches, `anal` 352,
+ * `teen` 349, `big` 649. The site being looked for can sit anywhere in that,
+ * so stopping at page one silently loses it. Ten pages covers every realistic
+ * query with headroom.
+ *
+ * The cost is paid once per prefix ever, because both hits and misses are
+ * cached, and only by queries whose results exceed a page — in practice the
+ * one-word fallback, not the two-word query that usually settles it first.
+ */
+const MAX_PAGES = 10;
+
+/**
+ * A result count past which the query is too broad to be a site name.
+ *
+ * `a` reports 87,955 matches — 880 pages. Walking that to look for an exact
+ * name match is pointless work, and a query that unspecific is not a site
+ * lookup in any useful sense. Page one is still examined, because an exact
+ * match tends to rank first, but the walk stops there.
+ */
+const MAX_TOTAL_TO_WALK = 1_000;
 
 /**
  * Pulls the fields we compare out of a response body, tolerating everything
@@ -53,6 +81,15 @@ function readSites(body: unknown): SiteSearchResult[] {
   return sites;
 }
 
+/** `meta.total` when the body reports one, for deciding whether to page on. */
+function readTotal(body: unknown): number | null {
+  if (body === null || typeof body !== 'object') return null;
+  const meta = (body as { meta?: unknown }).meta;
+  if (meta === null || typeof meta !== 'object') return null;
+  const total = (meta as { total?: unknown }).total;
+  return typeof total === 'number' && Number.isFinite(total) ? total : null;
+}
+
 /**
  * Removes the bearer token from anything on its way to a log or an error.
  *
@@ -77,38 +114,55 @@ export function createTpdbClient(config: SiteLookupConfig, fetchImpl: FetchImpl)
     async searchSites(query: string): Promise<readonly SiteSearchResult[]> {
       if (query.trim().length === 0) return [];
 
-      const url = `${base}/sites?q=${encodeURIComponent(query)}&page=1&per_page=${PER_PAGE}`;
+      const collected: SiteSearchResult[] = [];
 
-      let response: Response;
-      try {
-        response = await fetchImpl(url, {
-          headers: {
-            Authorization: `Bearer ${config.apiKey}`,
-            Accept: 'application/json',
-          },
-        });
-      } catch (error) {
-        throw new Error(
-          `site search for "${query}" failed: ${redactToken((error as Error).message, config.apiKey)}`,
-        );
+      for (let page = 1; page <= MAX_PAGES; page += 1) {
+        const url = `${base}/sites?q=${encodeURIComponent(query)}&page=${page}&per_page=${PER_PAGE}`;
+
+        let response: Response;
+        try {
+          // eslint-disable-next-line no-await-in-loop -- pages are sequential by nature, and each is only fetched when the previous one proved insufficient
+          response = await fetchImpl(url, {
+            headers: {
+              Authorization: `Bearer ${config.apiKey}`,
+              Accept: 'application/json',
+            },
+          });
+        } catch (error) {
+          throw new Error(
+            `site search for "${query}" failed: ${redactToken((error as Error).message, config.apiKey)}`,
+          );
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            `site search for "${query}" returned HTTP ${response.status} ${response.statusText}`,
+          );
+        }
+
+        let body: unknown;
+        try {
+          // eslint-disable-next-line no-await-in-loop -- see above
+          body = await response.json();
+        } catch (error) {
+          throw new Error(
+            `site search for "${query}" returned unreadable JSON: ${redactToken((error as Error).message, config.apiKey)}`,
+          );
+        }
+
+        const pageSites = readSites(body);
+        collected.push(...pageSites);
+
+        // Stop as soon as this page was not full, or the reported total is
+        // already covered. A body we could not read yields no sites, which
+        // also stops the walk rather than requesting the same page again.
+        if (pageSites.length < PER_PAGE) break;
+        const total = readTotal(body);
+        if (total !== null && collected.length >= total) break;
+        if (total !== null && total > MAX_TOTAL_TO_WALK) break;
       }
 
-      if (!response.ok) {
-        throw new Error(
-          `site search for "${query}" returned HTTP ${response.status} ${response.statusText}`,
-        );
-      }
-
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch (error) {
-        throw new Error(
-          `site search for "${query}" returned unreadable JSON: ${redactToken((error as Error).message, config.apiKey)}`,
-        );
-      }
-
-      return readSites(body);
+      return collected;
     },
   };
 }

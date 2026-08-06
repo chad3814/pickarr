@@ -48,6 +48,90 @@ test('an empty result set is a negative, not an error', async () => {
   assert.deepEqual(await client.searchSites('bangbros ass'), []);
 });
 
+// --- Paging ------------------------------------------------------------------
+
+/** Serves `total` generated sites, honouring page and per_page. */
+function pagedFetch(total: number): FetchImpl & { pages: number[] } {
+  const pages: number[] = [];
+  const impl = async (url: string) => {
+    const page = Number(new URL(url).searchParams.get('page'));
+    const perPage = Number(new URL(url).searchParams.get('per_page'));
+    pages.push(page);
+    const start = (page - 1) * perPage;
+    const data = Array.from({ length: Math.max(0, Math.min(perPage, total - start)) }, (_, i) => ({
+      name: `Site ${start + i}`,
+      short_name: `site${start + i}`,
+    }));
+    return new Response(JSON.stringify({ data, meta: { total } }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  return Object.assign(impl, { pages });
+}
+
+test('a single short page costs exactly one request', async () => {
+  const fetchImpl = pagedFetch(6);
+  await createTpdbClient(CONFIG, fetchImpl).searchSites('free use');
+  assert.deepEqual(fetchImpl.pages, [1]);
+});
+
+test('a result set larger than one page is followed to the end', async () => {
+  // q="free" reports 149 matches; the site being looked for can sit past the
+  // first hundred, and the service caps per_page at 100.
+  const fetchImpl = pagedFetch(149);
+  const results = await createTpdbClient(CONFIG, fetchImpl).searchSites('free');
+  assert.deepEqual(fetchImpl.pages, [1, 2]);
+  assert.equal(results.length, 149);
+  assert.equal(results.at(-1)?.name, 'Site 148');
+});
+
+test('a long but realistic result set is walked to the end', async () => {
+  // Measured live: anal=352, teen=349, big=649. All must be reachable.
+  for (const total of [352, 649]) {
+    const fetchImpl = pagedFetch(total);
+    const results = await createTpdbClient(CONFIG, fetchImpl).searchSites('big');
+    assert.equal(results.length, total, `total=${total}`);
+    assert.equal(results.at(-1)?.name, `Site ${total - 1}`);
+  }
+});
+
+test('a query too broad to be a site name is not walked past the first page', async () => {
+  // q="a" reports 87,955 matches. Paging that to look for an exact name is
+  // pointless work; page one still gets examined because an exact match
+  // tends to rank first.
+  const fetchImpl = pagedFetch(87_955);
+  const results = await createTpdbClient(CONFIG, fetchImpl).searchSites('a');
+  assert.deepEqual(fetchImpl.pages, [1]);
+  assert.equal(results.length, 100);
+});
+
+test('paging is bounded even when the service keeps offering full pages', async () => {
+  const fetchImpl = pagedFetch(999);
+  const results = await createTpdbClient(CONFIG, fetchImpl).searchSites('x');
+  assert.equal(fetchImpl.pages.length, 10, 'MAX_PAGES caps the walk');
+  assert.equal(results.length, 999);
+});
+
+test('an exactly-full single page does not provoke a second request', async () => {
+  const fetchImpl = pagedFetch(100);
+  await createTpdbClient(CONFIG, fetchImpl).searchSites('x');
+  assert.deepEqual(fetchImpl.pages, [1], 'meta.total says 100, so page 1 is everything');
+});
+
+test('a full page with no usable total still terminates', async () => {
+  let calls = 0;
+  const client = createTpdbClient(CONFIG, async () => {
+    calls += 1;
+    return new Response(
+      JSON.stringify({ data: Array.from({ length: 100 }, (_, i) => site(`S${i}`, `s${i}`)) }),
+      { headers: { 'content-type': 'application/json' } },
+    );
+  });
+  const results = await client.searchSites('x');
+  assert.equal(calls, 10, 'without a total it pages to the cap and stops');
+  assert.equal(results.length, 1000);
+});
+
 test('the query is sent url-encoded with the documented parameters', async () => {
   let seen = '';
   const client = createTpdbClient(CONFIG, async (url) => {
