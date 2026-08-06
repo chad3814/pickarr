@@ -73,6 +73,45 @@ const CORPUS: Entry[] = [
     quality: '2160|-|h265|mp4|-|GRP',
     isNew: false,
   },
+  // --- Shape 1b: the date at the *end*, immediately before the encode --------
+  //
+  // `Site.Title.And.Performers.YYYY.MM.DD.Encode`. Everything before the date
+  // is site and title with no separator between them, so with no configured
+  // site list the first token is taken as the site. That is a guess about the
+  // library *path*; the whole pre-date run still reaches the identity key, so
+  // it cannot merge two different scenes.
+  {
+    name: 'Anal.Only.Getting.In.Savannahs.Booty.Savannah.Bond.2022.09.29.Upscaled.2160p',
+    scene: 'anal/only-getting-in-savannahs-booty-savannah-bond',
+    key: 'anal:2022-09-29:only-getting-in-savannahs-booty-savannah-bond',
+    title: 'Only Getting In Savannahs Booty Savannah Bond',
+    quality: '2160|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'Anal.Only.Getting.In.Savannahs.Booty.Savannah.Bond.2022.09.29.2160p',
+    scene: 'anal/only-getting-in-savannahs-booty-savannah-bond',
+    key: 'anal:2022-09-29:only-getting-in-savannahs-booty-savannah-bond',
+    title: 'Only Getting In Savannahs Booty Savannah Bond',
+    quality: '2160|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'Bangbros.Ass.Parade.Chloe.Upgrades.her.Butt.Toy.to.Chevalier.a.BBC.Chloe.Chevalier.2026.08.03.2160p',
+    scene: 'bangbros/ass-parade-chloe-upgrades-her-butt-toy-to-chevalier-a-bbc-chloe-chevalier',
+    key: 'bangbros:2026-08-03:ass-parade-chloe-upgrades-her-butt-toy-to-chevalier-a-bbc-chloe-chevalier',
+    title: 'Ass Parade Chloe Upgrades her Butt Toy to Chevalier a BBC Chloe Chevalier',
+    quality: '2160|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'Vixen.Kylie.Rocket.Page.Turner.2023.07.19.1080p.MP4-WRB',
+    scene: 'vixen/kylie-rocket-page-turner',
+    key: 'vixen:2023-07-19:kylie-rocket-page-turner',
+    title: 'Kylie Rocket Page Turner',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
   // Group tags of 9-12 characters. The cap was 8, which refused these outright
   // and made them the single largest source of parse_error rows against a real
   // feed. They collate with the rows above: same scene, different group.
@@ -842,6 +881,18 @@ const REFUSED: [string, string][] = [
   ['Site.23.04.15.Name.XXX.1080p.MP4-PT2', 'the other part of the same scene'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-DISC1', 'spelled-out disc numbering'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-DISC2', 'the other disc of the same scene'],
+  [
+    'Site.23.04.15.Name.XXX.1080p.HEVC.G',
+    'a single character attached by the name\'s own separator is a stray, not a group; a hyphen is what makes a one-letter tag like "-G" credible',
+  ],
+  // The date-at-end shape is only recognised when *everything* after the date
+  // is encode information and there is more before the date than after it.
+  // These separate the two conditions, and each is what keeps a normal-form
+  // name from being re-read as a date-at-end one.
+  [
+    'Site.2022.09.29.1080p.MP4',
+    'only one token before the date against two after: the ordinary form, whose title would be empty',
+  ],
   // The length cap still exists; it is 12 rather than 8. A tag longer than
   // that is more likely a run-together title word than a group.
   ['Site.23.04.15.Name.XXX.1080p.MP4-DIGITALPLAYGROUND', 'thirteen characters or more is past the cap'],
@@ -856,10 +907,6 @@ const REFUSED: [string, string][] = [
   ['Site.23.04.15.Name.XXX.1080p.MP4-UNCENSORED', 'a different cut, not a group'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-DIRECTORSCUT', 'the same at the full twelve characters'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-COMPILATION', 'different content entirely, not one scene'],
-  [
-    'Site.23.04.15.Name.XXX.1080p.HEVC.G',
-    'a single character attached by the name\'s own separator is a stray, not a group; a hyphen is what makes a one-letter tag like "-G" credible',
-  ],
 ];
 
 const KEY_SHAPE = /^[a-z0-9-]+:\d{4}-\d{2}-\d{2}:[a-z0-9-]+$/;

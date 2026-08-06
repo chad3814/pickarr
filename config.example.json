@@ -3,7 +3,10 @@
   "database": { "path": "/config/pickarr.db" },
   "trashDir": "/data/trash",
   "plugins": {
-    "@pickarr/plugin-scenes": { "libraryRoot": "/media/scenes" }
+    "@pickarr/plugin-scenes": {
+      "libraryRoot": "/media/scenes",
+      "sites": ["Anal Only", "Bangbros", "Bangbros Ass Parade", "Vixen"]
+    }
   },
   "downloadClients": [
     {

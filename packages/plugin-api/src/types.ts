@@ -52,6 +52,13 @@ export interface MediaTypePlugin {
   planImport(media: ParsedRelease, files: DownloadedFile[]): ImportPlan | null;
 }
 
-export type PluginConfig = Record<string, string | number | boolean>;
+/**
+ * A plugin's own configuration block, passed through from `plugins.<package>`
+ * verbatim. String lists are permitted because some plugin-specific knowledge
+ * is irreducibly a list — the scenes plugin's known-site names, for one — and
+ * encoding those as a delimited string would make every plugin invent its own
+ * escaping for names that contain the delimiter.
+ */
+export type PluginConfig = Record<string, string | number | boolean | readonly string[]>;
 
 export type PluginFactory = (config: PluginConfig) => MediaTypePlugin;

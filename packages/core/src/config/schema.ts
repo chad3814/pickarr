@@ -62,7 +62,16 @@ export const configSchema = z.object({
   server: z.object({ port: z.number().int().positive().default(8080) }).default({ port: 8080 }),
   database: z.object({ path: z.string().min(1) }),
   trashDir: z.string().min(1),
-  plugins: z.record(z.string(), z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))),
+  // Mirrors PluginConfig in @pickarr/plugin-api; the array member is what lets
+  // a plugin take a list (the scenes plugin's known site names) without
+  // inventing a delimiter that a value could contain.
+  plugins: z.record(
+    z.string(),
+    z.record(
+      z.string(),
+      z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]),
+    ),
+  ),
   downloadClients: z.array(downloadClientSchema).min(1),
   feeds: z.array(feedSchema).min(1),
 });

@@ -42,6 +42,7 @@ immediately rather than starting in a broken state.
 | `database.path` | top level | Path to the SQLite file. Put it under `/config` so it survives container recreation. |
 | `trashDir` | top level | Where superseded files are moved instead of deleted. See "Trash is never emptied" below. |
 | `plugins.<package>` | plugin | Per-plugin settings, keyed by package name. The bundled scenes plugin takes `libraryRoot`, the destination directory imports land in. |
+| `plugins.<package>.sites` | plugin (scenes) | Optional list of site names. Used only for releases that put the date at the *end* of the name, where nothing separates the site from the title — see "Naming your sites" below. |
 | `downloadClients[]` | top level | One or more download clients. The MVP supports `type: "sabnzbd"` only. |
 | `downloadClients[].url` | download client | Base URL of the SABnzbd instance. |
 | `downloadClients[].apiKey` | download client | The SABnzbd API key, or a `file:/run/secrets/<name>` reference to read it from a Docker secret instead of embedding it in the config file. |
@@ -57,6 +58,43 @@ The SABnzbd API key can be supplied two ways: directly as a string in the config
 `file:/run/secrets/sabnzbd_api_key`, which Pickarr resolves by reading that file at
 startup. Docker Compose secrets are mounted exactly there, so the key never has to sit
 in an environment variable, `docker inspect` output, or a crash dump of `process.env`.
+
+### Naming your sites
+
+Most scene releases put the date between the site and the title
+(`Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB`), which is what lets Pickarr tell the
+two apart. Some feeds instead put it at the end:
+
+```
+Anal.Only.Getting.In.Savannahs.Booty.Savannah.Bond.2022.09.29.Upscaled.2160p
+```
+
+Here nothing marks where the site stops — `Anal`, `Anal Only`, and `Anal Only Getting`
+are all readings a parser could defend. Pickarr recognises the shape (everything after
+the date is encode information, and there is more before the date than after it) and
+then needs you to resolve the split. List the sites you follow:
+
+```json
+"plugins": {
+  "@pickarr/plugin-scenes": {
+    "libraryRoot": "/media/scenes",
+    "sites": ["Anal Only", "Bangbros", "Bangbros Ass Parade"]
+  }
+}
+```
+
+The longest match wins, so listing both a network and its sub-site files scenes under
+the sub-site. Separators and case do not have to match the release: releases write
+`Bang Bros` as `BangBros`, `bangbros` and `Bang.Bros`, and all three match a site
+configured as any one of those. **The spelling you configure is the one you get** — it
+becomes the canonical name, so it decides both the directory and the identity key.
+Configure `Bang Bros` and scenes land in `Bang Bros/`; configure `BangBros` and they
+land in `BangBros/`. Pick one and keep it.
+
+**The list is optional.** Without it Pickarr treats the first word as the site, which
+files `Anal Only`'s scenes under `Anal/`. That is a wrong directory, never a wrong
+grouping: the whole pre-date run still reaches the identity key either way, so two
+different scenes can never merge because of how the split fell.
 
 ## Operational notes
 
