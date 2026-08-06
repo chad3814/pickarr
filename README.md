@@ -142,12 +142,14 @@ stops after the first when the reported total is above 1000, which means the que
 too broad to be naming a site. Each prefix is only ever looked up once, hit or miss.
 
 Answers are cached in the `discovered_sites` table, **including the negatives** — a
-prefix that is not a site is asked about once, not every tick. Your config list always
+prefix that is not a site is asked about once, not every tick. A confirmed row also
+keeps the service's `uuid` for the site, so a later feature can address it directly
+rather than searching by name again. Your config list always
 wins over a discovered one, and Pickarr never writes to your config file. To see what
 it has learned:
 
 ```sql
-SELECT prefix, site, source, found_at FROM discovered_sites ORDER BY prefix;
+SELECT prefix, site, source, source_uuid, found_at FROM discovered_sites ORDER BY prefix;
 ```
 
 If a lookup *fails* — service down, bad key, rate limited — nothing is cached, and the

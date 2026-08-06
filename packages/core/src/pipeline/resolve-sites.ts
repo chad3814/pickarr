@@ -8,6 +8,12 @@ function comparisonKey(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
+/** A confirmed site: the name to use, plus the service's identifier for it. */
+export interface PickedSite {
+  readonly name: string;
+  readonly sourceUuid: string | null;
+}
+
 /**
  * Chooses which search result is the release's site, or `null` for none.
  *
@@ -24,14 +30,15 @@ function comparisonKey(text: string): string {
 export function pickSite(
   results: readonly SiteSearchResult[],
   prefixes: readonly string[],
-): string | null {
-  const byKey = new Map<string, string>();
+): PickedSite | null {
+  const byKey = new Map<string, PickedSite>();
   for (const site of results) {
     const display = site.name.length > 0 ? site.name : site.shortName;
     if (display.length === 0) continue;
+    const picked: PickedSite = { name: display, sourceUuid: site.sourceUuid };
     for (const spelling of [site.name, site.shortName]) {
       const key = comparisonKey(spelling);
-      if (key.length > 0 && !byKey.has(key)) byKey.set(key, display);
+      if (key.length > 0 && !byKey.has(key)) byKey.set(key, picked);
     }
   }
 
@@ -156,10 +163,16 @@ export async function resolveSitesForBatch(
 
       result.queried += 1;
       const found = pickSite(results, candidates.prefixes);
-      answered.set(key, found);
-      recordDiscoveredSite(deps.db, key, found, deps.client.source, deps.now());
+      answered.set(key, found?.name ?? null);
+      recordDiscoveredSite(
+        deps.db,
+        key,
+        { site: found?.name ?? null, sourceUuid: found?.sourceUuid ?? null },
+        deps.client.source,
+        deps.now(),
+      );
       if (found !== null) {
-        confirmed.add(found);
+        confirmed.add(found.name);
         settled = true;
         break;
       }

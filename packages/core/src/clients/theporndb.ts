@@ -6,6 +6,11 @@ export interface SiteSearchResult {
   readonly name: string;
   /** Separator-free spelling, e.g. `bangbros`. Often how releases write it. */
   readonly shortName: string;
+  /**
+   * The service's identifier for this site, recorded so a later feature can
+   * address it directly rather than searching by name again. May be absent.
+   */
+  readonly sourceUuid: string | null;
 }
 
 /**
@@ -73,10 +78,15 @@ function readSites(body: unknown): SiteSearchResult[] {
   const sites: SiteSearchResult[] = [];
   for (const entry of data) {
     if (entry === null || typeof entry !== 'object') continue;
-    const record = entry as { name?: unknown; short_name?: unknown };
+    const record = entry as {
+      name?: unknown;
+      short_name?: unknown;
+      uuid?: unknown;
+    };
     const name = typeof record.name === 'string' ? record.name : '';
     const shortName = typeof record.short_name === 'string' ? record.short_name : '';
-    if (name.length > 0 || shortName.length > 0) sites.push({ name, shortName });
+    const sourceUuid = typeof record.uuid === 'string' && record.uuid.length > 0 ? record.uuid : null;
+    if (name.length > 0 || shortName.length > 0) sites.push({ name, shortName, sourceUuid });
   }
   return sites;
 }

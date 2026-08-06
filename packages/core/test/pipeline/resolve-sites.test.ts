@@ -28,7 +28,11 @@ function fakeLookup(known: string[]): SiteLookupClient & { asked: string[] } {
       return Promise.resolve(
         known
           .filter((site) => solid(site).includes(needle))
-          .map((site) => ({ name: site, shortName: solid(site) })),
+          .map((site) => ({
+            name: site,
+            shortName: solid(site),
+            sourceUuid: `uuid-${solid(site)}`,
+          })),
       );
     },
   };
@@ -55,32 +59,29 @@ function deps(plugin: MediaTypePlugin, client: SiteLookupClient | undefined, log
 test('a site longer than the query is found, because prefixes are what match', () => {
   // q="2 Chicks" returns both of these; nothing is named "2 Chicks".
   const results = [
-    { name: '2 Chicks Same Time', shortName: '2chickssametime' },
-    { name: '2 Chicks 1 Dick', shortName: '2chicks1dick' },
+    { name: '2 Chicks Same Time', shortName: '2chickssametime', sourceUuid: 'uuid-2chickssametime' },
+    { name: '2 Chicks 1 Dick', shortName: '2chicks1dick', sourceUuid: 'uuid-2chicks1dick' },
   ];
   const prefixes = ['2 Chicks Same Time Scene', '2 Chicks Same Time', '2 Chicks Same', '2 Chicks', '2'];
-  assert.equal(pickSite(results, prefixes), '2 Chicks Same Time');
+  assert.equal(pickSite(results, prefixes)?.name, '2 Chicks Same Time');
 });
 
 test('a site spelled solid is found from a spaced query', () => {
   // q="Free Use" returns "Freeuse Fantasy" among six others.
   const results = [
-    { name: 'Freeuse Twink', shortName: 'freeusetwink' },
-    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy' },
-    { name: 'Free Use MILF', shortName: 'freeusemilf' },
+    { name: 'Freeuse Twink', shortName: 'freeusetwink', sourceUuid: 'uuid-freeusetwink' },
+    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy', sourceUuid: 'uuid-freeusefantasy' },
+    { name: 'Free Use MILF', shortName: 'freeusemilf', sourceUuid: 'uuid-freeusemilf' },
   ];
-  assert.equal(
-    pickSite(results, ['Free Use Fantasy Scene', 'Free Use Fantasy', 'Free Use', 'Free']),
-    'Freeuse Fantasy',
-  );
+  assert.equal(pickSite(results, ['Free Use Fantasy Scene', 'Free Use Fantasy', 'Free Use', 'Free'])?.name, 'Freeuse Fantasy');
 });
 
 test('the longest prefix wins over a shorter one that also matches', () => {
   const results = [
-    { name: 'Free', shortName: 'free' },
-    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy' },
+    { name: 'Free', shortName: 'free', sourceUuid: 'uuid-free' },
+    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy', sourceUuid: 'uuid-freeusefantasy' },
   ];
-  assert.equal(pickSite(results, ['Free Use Fantasy', 'Free Use', 'Free']), 'Freeuse Fantasy');
+  assert.equal(pickSite(results, ['Free Use Fantasy', 'Free Use', 'Free'])?.name, 'Freeuse Fantasy');
 });
 
 test('a real but wrong site is not confirmed when it is not the longest match', () => {
@@ -88,23 +89,23 @@ test('a real but wrong site is not confirmed when it is not the longest match', 
   // rather than by the release's own prefixes confirmed it for
   // Free.Use.Fantasy..., filing the scene under Free/ with title "Use
   // Fantasy". Only the prefixes rule out that answer.
-  const results = [{ name: 'Free', shortName: 'free' }];
+  const results = [{ name: 'Free', shortName: 'free', sourceUuid: 'uuid-free' }];
   assert.equal(pickSite(results, ['Free Use Fantasy', 'Free Use']), null);
   // ...but a release that really is from "Free" still resolves.
-  assert.equal(pickSite(results, ['Free Some Scene', 'Free Some', 'Free']), 'Free');
+  assert.equal(pickSite(results, ['Free Some Scene', 'Free Some', 'Free'])?.name, 'Free');
 });
 
 test('results that merely contain a prefix do not match it', () => {
   const results = [
-    { name: 'Getting In Deep', shortName: 'gettingindeep' },
-    { name: 'Getting Into It', shortName: 'gettingintoit' },
+    { name: 'Getting In Deep', shortName: 'gettingindeep', sourceUuid: 'uuid-gettingindeep' },
+    { name: 'Getting Into It', shortName: 'gettingintoit', sourceUuid: 'uuid-gettingintoit' },
   ];
   assert.equal(pickSite(results, ['Getting In Savannahs', 'Getting In', 'Getting']), null);
 });
 
 test('short_name alone can carry the match, and the display name is preferred', () => {
-  const results = [{ name: 'Bang Bros', shortName: 'bangbros' }];
-  assert.equal(pickSite(results, ['Bangbros']), 'Bang Bros');
+  const results = [{ name: 'Bang Bros', shortName: 'bangbros', sourceUuid: 'uuid-bangbros' }];
+  assert.equal(pickSite(results, ['Bangbros'])?.name, 'Bang Bros');
 });
 
 test('no results is no match', () => {
@@ -183,6 +184,41 @@ test('both answers are cached, negatives included', async () => {
   assert.deepEqual(knownSiteNames(context.db), ['Bangbros']);
 });
 
+test("the service's identifiers are stored alongside the confirmed name", async () => {
+  // Kept so a later feature can address the site directly rather than
+  // searching by name again.
+  const context = deps(scenes(), fakeLookup(['Anal Only']));
+  await resolveSitesForBatch(context, [ANAL_ONLY]);
+
+  const row = getDiscoveredSite(context.db, 'Anal Only');
+  assert.equal(row?.site, 'Anal Only');
+  assert.equal(row?.sourceUuid, 'uuid-analonly');
+  assert.equal(row?.source, 'fake');
+});
+
+test('a negative answer identifies nothing and stores null identifiers', async () => {
+  const context = deps(scenes(), fakeLookup(['Bangbros']));
+  await resolveSitesForBatch(context, [BANGBROS]);
+
+  const miss = getDiscoveredSite(context.db, 'Bangbros Ass');
+  assert.equal(miss?.site, null);
+  assert.equal(miss?.sourceUuid, null);
+});
+
+test('pickSite carries the uuid of the result it chose, not another', async () => {
+  const results = [
+    { name: 'Free', shortName: 'free', sourceUuid: 'uuid-free' },
+    {
+      name: 'Freeuse Fantasy',
+      shortName: 'freeusefantasy',
+      sourceUuid: 'uuid-freeusefantasy',
+    },
+  ];
+  const picked = pickSite(results, ['Free Use Fantasy', 'Free Use', 'Free']);
+  assert.equal(picked?.name, 'Freeuse Fantasy');
+  assert.equal(picked?.sourceUuid, 'uuid-freeusefantasy');
+});
+
 test('a cached negative is not asked about again', async () => {
   const client = fakeLookup(['Bangbros']);
   const context = deps(scenes(), client);
@@ -233,7 +269,7 @@ test('a failed lookup is not recorded as a negative and is retried next pass', a
     searchSites(query) {
       if (failing) return Promise.reject(new Error('ECONNREFUSED'));
       return Promise.resolve(
-        query === 'Anal Only' ? [{ name: 'Anal Only', shortName: 'analonly' }] : [],
+        query === 'Anal Only' ? [{ name: 'Anal Only', shortName: 'analonly', sourceUuid: 'uuid-analonly' }] : [],
       );
     },
   };
