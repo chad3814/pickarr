@@ -799,7 +799,7 @@ const REFUSED: [string, string][] = [
   ['', 'nothing to parse'],
   [
     'Some.Random.Movie.2023.1080p.BluRay-GRP',
-    'no date: a bare year is not a release date, and without one there is no site/title boundary',
+    'a bare year is not a release date, and no site named "Some Random" or "Some" is confirmed, so nothing marks where the site stops',
   ],
   [
     '23.04.15.Alex.Coal.XXX.1080p.MP4-G',

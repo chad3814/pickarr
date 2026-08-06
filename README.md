@@ -67,7 +67,7 @@ in an environment variable, `docker inspect` output, or a crash dump of `process
 
 Most scene releases put the date between the site and the title
 (`Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB`), which is what lets Pickarr tell the
-two apart. Some feeds instead put it at the end:
+two apart. Some feeds instead put it at the end, and some carry no date at all:
 
 ```
 Anal.Only.Getting.In.Savannahs.Booty.Savannah.Bond.2022.09.29.Upscaled.2160p
@@ -86,6 +86,14 @@ then needs you to resolve the split. List the sites you follow:
   }
 }
 ```
+
+**Releases with no date need this list, or a lookup, to parse at all.**
+`BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p` has nothing marking where the
+site ends, so Pickarr refuses it until `Braless Forever` is a site it knows — there is no
+first-word fallback for dateless names, because without a date nothing distinguishes a
+scene release from any other release with the same shape. Such a scene files as
+`Braless Forever/Emma G And Rocky Beach Days.mp4`, with no date in the name, and it will
+not group with a dated release of the same scene.
 
 The longest match wins, so listing both a network and its sub-site files scenes under
 the sub-site. Separators and case do not have to match the release: releases write

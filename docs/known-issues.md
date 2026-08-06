@@ -147,6 +147,36 @@ the date already supplies the boundary, nor to the bare-domain case below. Exten
 there would change how names that parse correctly today are read, which is a different
 decision from adding a shape that currently fails.
 
+**A release with no date at all parses only when its site is confirmed.** These exist,
+and until the site lookup arrived they were refused outright — the date was the only
+thing marking where the site stopped. A confirmed site marks it just as well, so the
+shape is now read as site, then title, then encode, with the encode boundary as the only
+anchor.
+
+There is deliberately **no first-token fallback here**, unlike the date-at-end shape.
+The date was also the evidence that a name was a scene release at all, and without it
+`Some.Random.Movie.2023.1080p.BluRay-GRP` and `Some.Band.Live.At.Wembley.1080p.WEB-DL`
+have exactly this shape. Requiring a real site is what replaces that evidence; guessing
+would turn every unrecognised release in a feed into a group filed under its first word.
+
+**Dateless keys carry an empty date segment, and that is a knowing over-collation.**
+`brazzers::alex-coal`. Two encodes of one dateless scene collate with each other, and
+*not* with a dated release of the same scene — ordinary under-collation. The cost is the
+other direction: **two different scenes from one site sharing a title become one group**,
+and in this domain a title is frequently just a performer name. Nothing in a dateless
+name can separate them, so this is the one place the parser knowingly commits the error
+it otherwise refuses. It was chosen over the alternatives — refusing these releases
+entirely, or filling the slot with the RSS publish date, which would put a date that is
+not the scene's date into the library path and split re-posted scenes into separate
+groups. If it bites, the fix is a real per-scene date, not a heuristic.
+
+**A bare TLD directly after a confirmed site belongs to the domain.**
+`BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p` files under `Braless Forever`
+with the title `Emma G and Rocky Beach Days`; without the rule the title would begin
+`com`. It only ever runs *behind a confirmation*, which is what keeps it clear of the
+bare-domain problem below: nothing confirms `Bang` in `Bang.com - Alex Coal`, so the rule
+never fires there. It also never consumes the last remaining token.
+
 **A bare-domain prefix becomes the site.** Stripping a website prefix now requires
 `www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`
 are the same string shape and guessing wrong merged five real studios onto one identity.

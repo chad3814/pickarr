@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSceneRelease } from '../src/parse.ts';
+import { parseSceneRelease, sceneSiteCandidates } from '../src/parse.ts';
 import { scoreScene } from '../src/score.ts';
 
 const ANAL_ONLY = 'Anal.Only.Getting.In.Savannahs.Booty.Savannah.Bond.2022.09.29.Upscaled.2160p';
@@ -155,6 +155,102 @@ test('the ordinary form is unaffected when its title is long and its encode shor
   const result = parsed('Brazzers.23.04.15.A.Very.Long.Scene.Title.Here.XXX.1080p');
   assert.equal(result.display.subtitle, 'Brazzers');
   assert.equal(result.display.title, 'A Very Long Scene Title Here');
+});
+
+// --- No date at all ----------------------------------------------------------
+
+const BRALESS = 'BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p';
+
+test('a dateless release parses once its site is known', () => {
+  const result = parsed(BRALESS, ['Braless Forever']);
+  assert.equal(result.identityKey, 'braless-forever::emma-g-and-rocky-beach-days');
+  assert.equal(result.display.subtitle, 'Braless Forever');
+  assert.equal(result.display.title, 'Emma G and Rocky Beach Days');
+});
+
+test('a dateless release is refused while its site is unknown', () => {
+  // No first-token fallback here, unlike the date-at-end shape. The date was
+  // also the evidence that a name is a scene release at all.
+  assert.equal(parseSceneRelease(BRALESS), null);
+  assert.equal(parseSceneRelease(BRALESS, { sites: ['Vixen'] }), null);
+});
+
+test('an arbitrary release with the same shape stays refused', () => {
+  // Site, then title, then encode — structurally identical to a dateless
+  // scene. Only the site requirement separates them.
+  for (const name of [
+    'Some.Random.Movie.2023.1080p.BluRay-GRP',
+    'Ubuntu.Desktop.Live.ISO.amd64',
+    'Some.Band.Live.At.Wembley.1080p.WEB-DL',
+  ]) {
+    assert.equal(parseSceneRelease(name, { sites: ['Braless Forever', 'Brazzers'] }), null, name);
+  }
+});
+
+test('a bare TLD after a confirmed site is part of the domain, not the title', () => {
+  assert.equal(parsed(BRALESS, ['Braless Forever']).display.title, 'Emma G and Rocky Beach Days');
+  assert.equal(
+    parsed('Vixen.net.Kylie.Rocket.Page.Turner.2023.07.19.1080p', ['Vixen']).display.title,
+    'Kylie Rocket Page Turner',
+    'the same rule applies to the date-at-end shape',
+  );
+});
+
+test('a TLD-shaped word is kept when no site was confirmed', () => {
+  // The rule only ever runs behind a confirmation, which is what keeps it
+  // away from `Bang.com - Alex Coal` and friends.
+  const result = parsed('Site.Co.Star.Alex.Coal.2023.07.19.1080p');
+  assert.equal(result.display.subtitle, 'Site');
+  assert.equal(result.display.title, 'Co Star Alex Coal');
+});
+
+test('a dateless release keeps its quality and group', () => {
+  const result = parsed('Brazzers.Alex.Coal.XXX.1080p.MP4-WRB', ['Brazzers']);
+  assert.equal(result.identityKey, 'brazzers::alex-coal');
+  assert.equal(result.quality.resolution, 1080);
+  assert.equal(result.quality.releaseGroup, 'WRB');
+  assert.equal(result.quality.extras?.['container'], 'mp4');
+});
+
+test('two encodes of one dateless scene collate; a dated one stays separate', () => {
+  const sites = ['Brazzers'];
+  const a = parsed('Brazzers.Alex.Coal.XXX.1080p.MP4-WRB', sites);
+  const b = parsed('Brazzers.Alex.Coal.XXX.2160p.HEVC.MP4-GRP', sites);
+  assert.equal(a.identityKey, b.identityKey);
+
+  const dated = parsed('Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB', sites);
+  assert.notEqual(
+    a.identityKey,
+    dated.identityKey,
+    'a dateless key cannot claim to be the same scene as a dated one',
+  );
+});
+
+test('a dateless release carries no date rather than a blank one', () => {
+  const result = parsed(BRALESS, ['Braless Forever']);
+  assert.equal(result.display.date, undefined);
+  assert.ok(
+    !result.display.fields.some((field) => field.label === 'Date'),
+    'an empty Date row would render as a gap in the UI',
+  );
+});
+
+test('dateless names ask for a site lookup too', () => {
+  const candidates = sceneSiteCandidates(BRALESS);
+  assert.deepEqual(candidates?.queries, ['BralessForever com', 'BralessForever']);
+  assert.ok(candidates?.prefixes.includes('BralessForever'));
+});
+
+test('a dateless name whose site is already configured asks for nothing', () => {
+  assert.equal(sceneSiteCandidates(BRALESS, { sites: ['Braless Forever'] }), null);
+});
+
+test('a name with no encode section is still refused, date or not', () => {
+  assert.equal(parseSceneRelease('Brazzers.Alex.Coal', { sites: ['Brazzers'] }), null);
+});
+
+test('a dateless name with nothing left for a title is refused', () => {
+  assert.equal(parseSceneRelease('Brazzers.1080p.MP4-WRB', { sites: ['Brazzers'] }), null);
 });
 
 // --- Upscaled ----------------------------------------------------------------
