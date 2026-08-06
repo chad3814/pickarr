@@ -731,11 +731,21 @@ function siteComparisonKey(value: string): string {
 }
 
 /**
- * The most tokens a site name may claim. `2 Chicks Same Time` is four; beyond
- * about five the run is title material and every extra length is another way
- * for an unrelated site name to match a leading run by accident.
+ * The most tokens a site name may claim.
+ *
+ * Generous, because site names in this space run long — `Giga de Rein
+ * Mk-II/Delusion group` is seven tokens when a release splits it, and
+ * `Giga de Rein no odor - the woman who appeared uncensored -` is ten.
+ *
+ * A low cap is not the safe choice here, which is the counterintuitive part.
+ * Matching is exact equality against a name the metadata service returned, and
+ * the longest match wins, so extra length only ever adds candidates that must
+ * still exactly equal a real site. Truncating instead produces *wrong hits*:
+ * capped at five, `Giga.de.Rein.Mk.II.Delusion.group` matched the separate,
+ * genuine site `Gigade Rein Mk-II`, because the truncated run happened to
+ * equal it. Raising the cap let the full name win on length.
  */
-const MAX_SITE_TOKENS = 5;
+const MAX_SITE_TOKENS = 12;
 
 interface SiteMatch {
   /** How many leading tokens the site name claims. */

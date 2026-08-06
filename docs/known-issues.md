@@ -112,6 +112,27 @@ but it does mean a site is undiscoverable when neither of its first two words ap
 its registered name. None has been seen, and each extra query costs a round trip against
 a substring search that gets noisier as the query gets shorter.
 
+**A short site-token cap causes wrong hits, not misses, so it is set generously.**
+`MAX_SITE_TOKENS` is 12. The instinct to keep it small is backwards here. Matching is
+exact equality against a name the service returned and the longest match wins, so extra
+length only adds candidates that must still equal a real site. Truncating actively
+misresolves: capped at five, `Giga.de.Rein.Mk.II.Delusion.group` matched the separate and
+entirely genuine site `Gigade Rein Mk-II`, because the truncated run happened to equal
+it exactly. That search returns 29 near-identical names differing by a letter
+(`Rain`/`Rein`) or a suffix, and only the full-length run picks the right one. Names in
+this space run long — `Giga de Rein no odor - the woman who appeared uncensored -` is ten
+tokens.
+
+**Searches are paged, with two bounds.** The service caps `per_page` at 100 (asking for
+more returns an empty body), and one-word fallback queries routinely exceed that:
+measured live, `free` returns 149, `teen` 349, `anal` 352, `big` 649. Stopping at page
+one silently loses any site past the first hundred, so a search walks up to
+`MAX_PAGES` (10). The second bound is for queries too broad to be a site lookup at all —
+`a` reports 87,955 matches, and walking 880 pages to look for an exact name is pointless
+work — so a reported total above `MAX_TOTAL_TO_WALK` (1000) stops after page one. Page
+one is still examined, since an exact match tends to rank first. The cost is paid once
+per prefix ever, because both hits and misses are cached.
+
 The list deliberately does **not** apply to the ordinary date-in-the-middle form, where
 the date already supplies the boundary, nor to the bare-domain case below. Extending it
 there would change how names that parse correctly today are read, which is a different
