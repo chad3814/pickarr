@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrate } from '../../src/db/migrate.ts';
+import { migrations } from '../../src/db/migrations.ts';
 
 test('migrate creates every table', () => {
   const db = openTestDatabase();
@@ -11,6 +12,7 @@ test('migrate creates every table', () => {
     .map((row) => String(row['name']));
 
   for (const expected of [
+    'discovered_sites',
     'downloads',
     'feed_items',
     'imported_files',
@@ -28,7 +30,36 @@ test('migrate is idempotent', () => {
   migrate(db);
   migrate(db);
   const row = db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get();
-  assert.equal(Number(row?.['n']), 1);
+  // Against the list rather than a literal: the property under test is that a
+  // second run applies nothing, which a hardcoded count stops expressing the
+  // moment a migration is added.
+  assert.equal(Number(row?.['n']), migrations.length);
+  db.close();
+});
+
+test('an existing database gains discovered_sites without losing its data', () => {
+  // The migration ships after real databases exist, so it has to run as an
+  // upgrade and not only as part of a fresh create.
+  const db = openTestDatabase();
+  db.prepare('DROP TABLE discovered_sites').run();
+  db.prepare('DELETE FROM schema_migrations WHERE version = 2').run();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state,
+       created_at, list_rank_at) VALUES (1, 'scenes', 'k', '{}', 't', 'new', 1, 1)`,
+  ).run();
+
+  migrate(db);
+
+  const names = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all()
+    .map((row) => String(row['name']));
+  assert.ok(names.includes('discovered_sites'));
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM media_groups').get()?.['n']),
+    1,
+    'existing rows must survive the upgrade',
+  );
   db.close();
 });
 

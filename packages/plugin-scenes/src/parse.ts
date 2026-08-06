@@ -1,4 +1,9 @@
-import type { ParsedRelease, QualityExtra, QualityTokens } from '@pickarr/plugin-api';
+import type {
+  ParsedRelease,
+  QualityExtra,
+  QualityTokens,
+  SiteLookupCandidates,
+} from '@pickarr/plugin-api';
 
 /**
  * # The boundary rule
@@ -698,6 +703,20 @@ function findSceneDate(tokens: Token[]): DateSpan | null {
 }
 
 /**
+ * Finds how many leading tokens a configured site name claims, or `null` when
+ * none matches.
+ *
+ * Matching is on slugs, so the configured spelling need not use the same
+ * separators or case as the release. The longest match wins: with both
+ * `Bangbros` and `Bangbros Ass Parade` configured, the sub-site is the more
+ * specific answer and filing under the parent would leave its name repeated
+ * in every title.
+ *
+ * A match may never consume every pre-date token — that would leave no scene
+ * slug, and refusing the match yields a usable (if less tidy) split instead of
+ * refusing the whole name.
+ */
+/**
  * Reduces a site name to a comparison key: lowercase, alphanumerics only.
  *
  * Separators are dropped rather than normalised because a site's own name and
@@ -710,6 +729,13 @@ function findSceneDate(tokens: Token[]): DateSpan | null {
 function siteComparisonKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
+
+/**
+ * The most tokens a site name may claim. `2 Chicks Same Time` is four; beyond
+ * about five the run is title material and every extra length is another way
+ * for an unrelated site name to match a leading run by accident.
+ */
+const MAX_SITE_TOKENS = 5;
 
 interface SiteMatch {
   /** How many leading tokens the site name claims. */
@@ -762,9 +788,10 @@ function matchSitePrefix(before: Token[], sites: readonly string[]): SiteMatch |
  * The pre-date tokens of a date-at-end name, or `null` for anything that is
  * not one.
  *
- * Extracted so the shape test is stated once: anything else that needs to know
- * whether a name is this shape goes through here rather than keeping a second
- * copy free to drift from it.
+ * Both the parser and `sceneSiteCandidates` go through this, so the shape test
+ * is stated once. A second copy would be free to drift, and a candidate list
+ * generated for a name the parser does not read this way would send lookups
+ * for prefixes that can never be used.
  */
 function dateAtEndPrefixTokens(name: string, tokens: Token[], date: DateSpan): Token[] | null {
   const before = tokens.filter((token) => token.start + token.text.length <= date.startOffset);
@@ -1055,6 +1082,53 @@ export interface SceneParseOptions {
  * A candidate never consumes every pre-date token: something has to remain to
  * be the title.
  */
+export function sceneSiteCandidates(
+  releaseName: string,
+  options: SceneParseOptions = {},
+): SiteLookupCandidates | null {
+  const trimmed = releaseName.trim();
+  if (trimmed.length === 0) return null;
+
+  const name = stripFileExtension(stripWebsitePrefix(trimmed)).trim();
+  if (name.length === 0) return null;
+  // The delimited form has explicit boundaries, so it never needs a lookup.
+  if (parseDelimitedForm(name) !== null) return null;
+
+  const tokens = tokensOf(name);
+  const date = findSceneDate(tokens);
+  if (date === null) return null;
+
+  const before = dateAtEndPrefixTokens(name, tokens, date);
+  if (before === null) return null;
+  if (matchSitePrefix(before, options.sites ?? []) !== null) return null;
+
+  const run = (count: number): string =>
+    before
+      .slice(0, count)
+      .map((token) => token.text)
+      .join(' ');
+
+  // Never every token: something has to remain to be the title.
+  const longest = Math.min(before.length - 1, MAX_SITE_TOKENS);
+  if (longest < 1) return null;
+
+  const prefixes: string[] = [];
+  for (let count = longest; count >= 1; count -= 1) {
+    const text = run(count);
+    if (text.length > 0) prefixes.push(text);
+  }
+
+  const queries: string[] = [];
+  for (const count of [2, 1]) {
+    if (count > longest) continue;
+    const text = run(count);
+    if (text.length > 0 && !queries.includes(text)) queries.push(text);
+  }
+  if (queries.length === 0 || prefixes.length === 0) return null;
+
+  return { queries, prefixes };
+}
+
 export function parseSceneRelease(
   releaseName: string,
   options: SceneParseOptions = {},

@@ -76,13 +76,46 @@ rows pinning the cases that must *not* be read this way.
 
 **Site matching drops separators, and the configured spelling is canonical.** A site's
 own name and the way releases write it disagree about word boundaries roughly 10-15% of
-the time: the site is named `Bang Bros`, most of its releases write it as a single token
-(`BangBros`, `bangbros`), and a minority split it (`Bang.Bros`). Matching therefore
-compares alphanumerics only, so all of those find one configured site — a slug comparison
-made `bang-bros` and `bangbros` two different sites. The *configured* name then replaces
-whatever the release wrote, so one site cannot become three groups depending on spelling.
-The corollary is that the configured spelling decides the directory and the key, and
+the time: ThePornDB calls the site `Bang Bros`, most releases use the `short_name` as a
+single token (`BangBros`, `bangbros`), and a minority split it (`Bang.Bros`). Matching
+therefore compares alphanumerics only, so all of those find one site — a slug comparison
+made `bang-bros` and `bangbros` two different sites, which was a live bug the first time
+this ran against the real API. The *matched* name then replaces whatever the release
+wrote, so one site cannot become three groups depending on spelling. The corollary is
+that the configured (or discovered) spelling decides the directory and the key, and
 `ANALONLY` is a legitimate if ugly choice.
+
+**A sub-site is only found when it is the name's leading run.** `Bangbros.Ass.Parade....`
+resolves to `Bang Bros`, not to `Ass Parade`, even though `Ass Parade` is a real site
+TPDB knows — the two-word candidate is `Bangbros Ass`, which matches nothing, so the
+one-word fallback settles it and `Ass Parade` stays in the title. Matching a site
+anywhere in the name was rejected deliberately: `Ass Parade` occurs at token 1 here, and
+accepting it would drop `Bangbros` from the name entirely. Listing
+`"Bangbros Ass Parade"` in config files these under the sub-site if that is wanted.
+
+**A search result is believed only when it is one of the release's own leading runs.**
+Two weaker rules were tried against the live API first and both are wrong. Confirming on
+a non-zero result count invents sites: the search is a substring search over 100k+ names,
+so `Getting In` returns `Getting In Deep` and friends without any site being called that.
+Confirming only when a result *equals the query* fails in the other direction, because
+the site is routinely longer than the query that finds it — `2 Chicks` finds
+`2 Chicks Same Time`, `Free Use` finds `Freeuse Fantasy`, and neither query names a site.
+Worse, that rule then falls through to the one-word retry, and **there is a real site
+named `Free`**, so `Free.Use.Fantasy...` confirmed it and filed the scene under `Free/`
+with the title `Use Fantasy ...` — a confidently wrong answer that got cached. Matching
+returned names against the release's leading runs, longest first, is what settles all
+three cases. `MAX_SITE_TOKENS` caps a site at five words.
+
+**Only two searches are made per unknown site: the first two words, then the first.**
+This is not a cap on the site's length — a four-word site is found by a two-word query —
+but it does mean a site is undiscoverable when neither of its first two words appears in
+its registered name. None has been seen, and each extra query costs a round trip against
+a substring search that gets noisier as the query gets shorter.
+
+The list deliberately does **not** apply to the ordinary date-in-the-middle form, where
+the date already supplies the boundary, nor to the bare-domain case below. Extending it
+there would change how names that parse correctly today are read, which is a different
+decision from adding a shape that currently fails.
 
 **A bare-domain prefix becomes the site.** Stripping a website prefix now requires
 `www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`

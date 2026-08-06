@@ -4,7 +4,10 @@ import { loadConfig } from './config/load.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins } from './plugins/registry.ts';
 import { createSabnzbdClient } from './clients/sabnzbd.ts';
+import { createTpdbClient, type SiteLookupClient } from './clients/theporndb.ts';
 import type { DownloadClient } from './clients/types.ts';
+import { knownSiteNames } from './db/sites.ts';
+import { resolveSitesForBatch } from './pipeline/resolve-sites.ts';
 import { fetchFeed } from './feeds/fetch-feed.ts';
 import { ingestEntries } from './ingest/ingest.ts';
 import { reconcileClient } from './pipeline/reconcile.ts';
@@ -38,6 +41,24 @@ async function main(): Promise<void> {
     throw new Error(`downloadClients: no client registered for id ${firstClientConfig.id}`);
   }
 
+  let siteLookup: SiteLookupClient | undefined;
+  if (config.siteLookup === undefined) {
+    log('site lookup: not configured; date-at-end names use their first word as the site');
+  } else {
+    siteLookup = createTpdbClient(config.siteLookup, fetch);
+    log(`site lookup: ${config.siteLookup.type}`);
+  }
+
+  // Sites confirmed on previous runs are handed back to their plugins before
+  // any feed is read, so a restart does not re-ask about what it already knows
+  // and — more importantly — does not parse a name with less site information
+  // than the run before it had.
+  const seeded = knownSiteNames(db);
+  if (seeded.length > 0) {
+    for (const plugin of registry.all()) plugin.learnSites?.(seeded);
+    log(`site lookup: seeded ${seeded.length} known site(s) from previous runs`);
+  }
+
   const recovery = recoverInterruptedWork(db, Date.now());
   log(
     `recovery: ${recovery.importsReset} imports reset, ${recovery.pendingAddUrl} awaiting addurl`,
@@ -50,7 +71,29 @@ async function main(): Promise<void> {
     log,
     ingestFeed: async (feed) => {
       const plugin = registry.byPackage(feed.plugin);
-      return ingestEntries(db, plugin, feed, await fetchFeed(feed), Date.now());
+      const entries = await fetchFeed(feed);
+
+      // Before parsing, not after: an identity key outlives the tick, so a
+      // site learned too late cannot be applied without re-keying a group the
+      // user may already have picked.
+      const sites = await resolveSitesForBatch(
+        { db, plugin, client: siteLookup, now: () => Date.now(), log },
+        entries.map((entry) => entry.title),
+      );
+      if (sites.queried > 0 || sites.confirmed.length > 0) {
+        log(
+          `site lookup ${feed.id}: ${sites.confirmed.length} confirmed ` +
+            `(${sites.queried} queried, ${sites.cached} cached)`,
+        );
+      }
+      for (const title of sites.unresolved) {
+        log(
+          `site lookup ${feed.id}: unresolved, filing under its first word — ${title}. ` +
+            'This identity key is durable; it will not change once lookups recover.',
+        );
+      }
+
+      return ingestEntries(db, plugin, feed, entries, Date.now());
     },
     reconcile: async (clientId) => {
       const client = clients.get(clientId);
