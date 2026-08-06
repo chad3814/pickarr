@@ -140,6 +140,38 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|mp4|-|inSaNe',
     isNew: true,
   },
+  // --- The resolution is an anchor ------------------------------------------
+  //
+  // Extra content is named *before* the resolution; only format and a group
+  // tag follow it. So `Bonus` here is part of the scene's identity and these
+  // are three different pieces of content, not three encodes of one.
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.Bonus.XXX.1080p.MP4-WRB',
+    scene: 'brazzers/alex-coal-bonus',
+    key: 'brazzers:2023-04-15:alex-coal-bonus',
+    title: 'Alex Coal Bonus',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.BTS.XXX.1080p.MP4-WRB',
+    scene: 'brazzers/alex-coal-bts',
+    key: 'brazzers:2023-04-15:alex-coal-bts',
+    title: 'Alex Coal BTS',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
+  // ...and the same word *after* the resolution is a group. `B0NUS` is a real
+  // one, which is the whole argument against guarding this position with a
+  // list of words: a group can be spelled to look like anything.
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-B0NUS',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|B0NUS',
+    isNew: true,
+  },
   // Group tags of 9-12 characters. The cap was 8, which refused these outright
   // and made them the single largest source of parse_error rows against a real
   // feed. They collate with the rows above: same scene, different group.
