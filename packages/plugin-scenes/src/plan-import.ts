@@ -119,13 +119,21 @@ export function planSceneImport(
   const [siteSlug, date, sceneSlug] = media.identityKey.split(':');
   const site = sanitizeSegment(titleCaseSlug(siteSlug ?? 'unknown'));
   const scene = sanitizeSegment(titleCaseSlug(sceneSlug ?? 'unknown'));
-  const dateSegment = sanitizeSegment(date ?? 'unknown');
+
+  // A release with no date in its name has an empty middle segment. Naming
+  // the file `Unknown - Scene.mp4` would be worse than leaving the date out:
+  // it puts a placeholder in the library that reads like a parse failure, and
+  // every dateless scene on a site would share that same prefix. Injectivity
+  // is unaffected — the date is absent from the key too, so two paths can only
+  // collide when their keys already did.
+  const dateSegment = date === undefined || date.length === 0 ? '' : sanitizeSegment(date);
+  const fileName = dateSegment.length > 0 ? `${dateSegment} - ${scene}` : scene;
 
   return {
     files: [
       {
         source: chosen.absolutePath,
-        destination: `${site}/${dateSegment} - ${scene}${extensionOf(chosen.relativePath)}`,
+        destination: `${site}/${fileName}${extensionOf(chosen.relativePath)}`,
       },
     ],
   };

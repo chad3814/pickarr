@@ -1,4 +1,5 @@
 import type {
+  DisplayFields,
   ParsedRelease,
   QualityExtra,
   QualityTokens,
@@ -624,6 +625,13 @@ function stripFileExtension(name: string): string {
 
 // --- Result construction ----------------------------------------------------
 
+/**
+ * Builds the release. `date` is empty for names that carry none, which leaves
+ * the key's middle segment empty — `brazzers::alex-coal`. The segment is kept
+ * rather than dropped so the key always has three parts and consumers can go
+ * on splitting on `:`; a slug can never be empty, so an empty middle is
+ * unambiguous. The display omits the date entirely instead of showing a blank.
+ */
 function buildRelease(
   site: string,
   date: string,
@@ -634,20 +642,14 @@ function buildRelease(
   const siteSlug = slug(site);
   if (siteSlug.length === 0 || sceneSlug.length === 0) return null;
 
-  return {
-    identityKey: `${siteSlug}:${date}:${sceneSlug}`,
-    display: {
-      title: sceneTitle,
-      subtitle: site,
-      date,
-      fields: [
-        { label: 'Site', value: site },
-        { label: 'Date', value: date },
-        { label: 'Scene', value: sceneTitle },
-      ],
-    },
-    quality,
-  };
+  const fields = [{ label: 'Site', value: site }];
+  if (date.length > 0) fields.push({ label: 'Date', value: date });
+  fields.push({ label: 'Scene', value: sceneTitle });
+
+  const display: DisplayFields = { title: sceneTitle, subtitle: site, fields };
+  if (date.length > 0) display.date = date;
+
+  return { identityKey: `${siteSlug}:${date}:${sceneSlug}`, display, quality };
 }
 
 // --- Shape 1: the dotted scene form -----------------------------------------
@@ -747,11 +749,33 @@ function siteComparisonKey(value: string): string {
  */
 const MAX_SITE_TOKENS = 12;
 
+/**
+ * Bare TLDs that trail a site's name when a release stamps its domain rather
+ * than its title — `BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p`.
+ *
+ * Only ever consumed *after* a site has been confirmed, which is what makes it
+ * safe. `Bang.com - Alex Coal` is the case this must not touch, and it cannot:
+ * nothing has confirmed `Bang` there, so the rule never runs. Once the leading
+ * run is known to name a site, a `com` immediately behind it belongs to the
+ * domain and not to the title.
+ */
+const SITE_TLDS = new Set(['com', 'net', 'org', 'tv', 'xxx', 'co', 'io', 'cc']);
+
 interface SiteMatch {
   /** How many leading tokens the site name claims. */
   readonly tokenCount: number;
   /** The site's canonical spelling, which is what reaches the key. */
   readonly name: string;
+}
+
+/**
+ * Extends a confirmed match over a trailing bare TLD, never over the last
+ * token — something has to remain to be the title.
+ */
+function consumeSiteTld(before: Token[], tokenCount: number): number {
+  const next = before[tokenCount];
+  if (next === undefined || tokenCount + 1 >= before.length) return tokenCount;
+  return SITE_TLDS.has(next.text.toLowerCase()) ? tokenCount + 1 : tokenCount;
 }
 
 function matchSitePrefix(before: Token[], sites: readonly string[]): SiteMatch | null {
@@ -834,7 +858,7 @@ function parseDateAtEndForm(
   // them as three sites. Unmatched names have no canonical form to use, so
   // they fall back to the release's own first token.
   const match = matchSitePrefix(before, options.sites ?? []);
-  const siteTokens = match?.tokenCount ?? 1;
+  const siteTokens = match === null ? 1 : consumeSiteTld(before, match.tokenCount);
   const lastSiteToken = before[siteTokens - 1];
   const firstSceneToken = before[siteTokens];
   if (lastSiteToken === undefined || firstSceneToken === undefined) return null;
@@ -848,10 +872,74 @@ function parseDateAtEndForm(
   return buildRelease(site, date.iso, sceneText, slug(sceneText), extractQuality(tail, detached.group));
 }
 
+/**
+ * The pre-encode tokens of a name that carries no date, or `null` when the
+ * name has no trustworthy encode boundary either.
+ *
+ * With no date there is only one anchor left — where the encode section
+ * starts — and everything before it is site and title with nothing separating
+ * them. `minIndex` is 2 so at least one token can be the site and one the
+ * title.
+ */
+function datelessPrefixTokens(name: string): { before: Token[]; tail: string } | null {
+  const detached = detachReleaseGroup(tokensOf(name), name);
+  const cut = findEncodeSuffixStart(detached.tokens, 2);
+  if (cut === null) return null;
+
+  const cutToken = detached.tokens[cut];
+  if (cutToken === undefined) return null;
+
+  return { before: detached.tokens.slice(0, cut), tail: name.slice(cutToken.start) };
+}
+
+/**
+ * Shape 3: no date anywhere — `Site.Title.And.Performers.Encode`.
+ *
+ * Releases like this exist, and until now they were refused outright because
+ * the date was the only thing marking where the site stopped. A confirmed site
+ * marks it just as well, so the refusal is lifted — but *only* for a confirmed
+ * one. There is deliberately no first-token fallback here, unlike the
+ * date-at-end shape: the date was also the evidence that a name was a scene
+ * release at all, and without it `Some.Random.Movie.2023.1080p.BluRay-GRP` has
+ * exactly this shape. Requiring the site to be real is what replaces that
+ * evidence; guessing would turn every unrecognised release into a group filed
+ * under its first word.
+ *
+ * The identity key has an empty date segment, so two releases of one scene
+ * collate with each other but not with a *dated* release of the same scene.
+ * The accepted cost is over-collation of a kind the parser otherwise refuses:
+ * two different scenes from one site sharing a title become one group, and in
+ * this domain a title is often just a performer name. Nothing in a dateless
+ * name can separate them.
+ */
+function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRelease | null {
+  const prefix = datelessPrefixTokens(name);
+  if (prefix === null) return null;
+
+  const match = matchSitePrefix(prefix.before, options.sites ?? []);
+  if (match === null) return null;
+
+  const siteTokens = consumeSiteTld(prefix.before, match.tokenCount);
+  const firstSceneToken = prefix.before[siteTokens];
+  if (firstSceneToken === undefined) return null;
+
+  const sceneText = prettify(name.slice(firstSceneToken.start, prefix.tail.length > 0 ? name.length - prefix.tail.length : name.length));
+  if (sceneText.length === 0 || sceneText.toUpperCase() === MARKER_TOKEN) return null;
+
+  const detached = detachReleaseGroup(tokensOf(name), name);
+  return buildRelease(
+    match.name,
+    '',
+    sceneText,
+    slug(sceneText),
+    extractQuality(prefix.tail, detached.group),
+  );
+}
+
 function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease | null {
   const tokens = tokensOf(name);
   const date = findSceneDate(tokens);
-  if (date === null) return null;
+  if (date === null) return parseDatelessForm(name, options);
 
   const atEnd = parseDateAtEndForm(name, tokens, date, options);
   if (atEnd !== null) return atEnd;
@@ -1128,9 +1216,13 @@ export function sceneSiteCandidates(
 
   const tokens = tokensOf(name);
   const date = findSceneDate(tokens);
-  if (date === null) return null;
 
-  const before = dateAtEndPrefixTokens(name, tokens, date);
+  // A dateless name needs the same lookup, and needs it more: it has no
+  // fallback, so an unconfirmed site means the name is refused entirely.
+  const before =
+    date === null
+      ? (datelessPrefixTokens(name)?.before ?? null)
+      : dateAtEndPrefixTokens(name, tokens, date);
   if (before === null) return null;
   if (matchSitePrefix(before, options.sites ?? []) !== null) return null;
 
