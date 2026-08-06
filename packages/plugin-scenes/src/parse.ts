@@ -447,26 +447,30 @@ function tokensOf(text: string): Token[] {
  * alphanumeric, carries a letter, and is not a codec/source/container/language
  * or edit term.
  *
- * Casing is not consulted. Two stricter rules were tried and both cost more
- * than they bought: requiring all caps refused the real groups `-FETiSH` and
- * `-Zsex3i`, and refusing word-shaped tags additionally refused `-Ghost`,
- * `-Rarbg`, `-rartv` and `-xpost`, which are also real. Nothing structural
- * separates `Ghost` from `Bonus`, so any shape rule that admits one admits the
- * other — the choice is which error to take.
+ * Casing is not consulted, and neither is the word itself. Two stricter rules
+ * were tried and both cost more than they bought: requiring all caps refused
+ * the real groups `-FETiSH` and `-Zsex3i`, and refusing word-shaped tags
+ * additionally refused `-Ghost`, `-Rarbg`, `-rartv` and `-xpost`, also real.
+ * Nothing structural separates `Ghost` from `Bonus`, and `B0NUS` is itself a
+ * real group — a group can be spelled to look like anything, so no list of
+ * words can guard this position.
  *
- * Taking the other one: a word-shaped edit tag is now detached as a group,
- * which strips it from the identity and collates that release into the scene
- * as another version. A `-Bonus` reel therefore appears alongside the scene
- * and can outrank it on resolution. That is a visible annoyance rather than a
- * loss, and it is preferred to real releases silently never appearing at all.
+ * What guards it instead is the *position*. The resolution is a second anchor:
+ * extra content is named before it, and only format and a group tag follow it.
+ * So `Site.23.04.15.Name.Bonus.XXX.1080p.MP4-WRB` keeps `Bonus` in the
+ * identity — it is a different piece of content — while
+ * `Site.23.04.15.Name.XXX.1080p.MP4-Bonus` reads `Bonus` as a group, because
+ * nothing but format and a group can be there. The two cases that look alike
+ * as strings are unambiguous as positions.
  *
- * `NON_GROUP_TERMS` is what still holds the line, and it is now the only thing
- * holding it. Its entries are the tags where merging genuinely destroys
- * something: `-Part1`/`-Part2`, `-CD1`/`-CD2` and `-DISC1`/`-DISC2` are halves
- * of one scene, and merging them means the user picks one half believing it is
- * the whole. Digits are stripped before the lookup so `Part1` and `Part2` both
- * reduce to `PART`, while a numbered group like `GRP1` reduces to the unlisted
- * `GRP`. Matching is case-insensitive, so one entry covers every spelling.
+ * `NON_GROUP_TERMS` remains as a narrow exception to that positional rule, for
+ * the tags that do appear after the resolution and where a merge destroys
+ * something rather than merely annoying: `-Part1`/`-Part2`, `-CD1`/`-CD2` and
+ * `-DISC1`/`-DISC2` are halves of one scene, so merging them means the user
+ * picks one half believing it is the whole. Digits are stripped before the
+ * lookup so `Part1` and `Part2` both reduce to `PART`, while a numbered group
+ * like `GRP1` reduces to the unlisted `GRP`. Matching is case-insensitive, so
+ * one entry covers every spelling.
  *
  * `minLength` is 1 for a hyphen-attached tag, where the hyphen itself is
  * already strong evidence (single-letter groups like `-G` are common), and 2

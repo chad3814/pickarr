@@ -31,15 +31,17 @@ real. Nothing structural separates `Ghost` from `Bonus` — same length, same ca
 character classes — so any shape rule that admits one admits the other. The only question
 is which error to take.
 
-The error now taken: **a word-shaped edit tag is detached as a group**, which strips it
-from the identity and collates that release into the scene as another version. A `-Bonus`
-reel appears beside the scene and can outrank it on resolution. That is a visible
-annoyance — you download the wrong file once — and it was chosen over real releases
-silently never appearing at all.
+What guards the position instead is **the resolution, which is a second anchor**. Extra
+content is named *before* the resolution, and only format and a group tag follow it. So
+`Site.23.04.15.Name.Bonus.XXX.1080p.MP4-WRB` keeps `Bonus` in the identity — a different
+piece of content, its own group — while `Site.23.04.15.Name.XXX.1080p.MP4-Bonus` reads
+`Bonus` as a group, because nothing else can be there. Two strings that look alike are
+unambiguous as positions. `B0NUS` is a real group name, which is the clearest argument
+that a word list could never have done this job.
 
-**`NON_GROUP_TERMS` is now the only guard, and its entries are load-bearing in a way
-they were not before.** Every one of them is a tag where merging destroys something
-rather than merely annoying: `-Part1`/`-Part2`, `-CD1`/`-CD2` and `-DISC1`/`-DISC2` are
+**`NON_GROUP_TERMS` is a narrow exception to that positional rule, and its entries are
+load-bearing in a way they were not before.** Each is a tag that does turn up after the
+resolution and where merging destroys something rather than merely annoying: `-Part1`/`-Part2`, `-CD1`/`-CD2` and `-DISC1`/`-DISC2` are
 halves of one scene, so merging them means picking one half believing it is the whole;
 `-UNCUT`, `-UNCENSORED`, `-DIRECTORS` are different cuts. Matching is case-insensitive
 and digits are stripped, so one entry covers `Part1`, `part2` and `PART`. **Removing an

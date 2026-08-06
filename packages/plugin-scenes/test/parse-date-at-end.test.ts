@@ -187,6 +187,41 @@ test('an arbitrary release with the same shape stays refused', () => {
   }
 });
 
+test('the resolution is an anchor: content before it, format and group after', () => {
+  // The rule that makes the permissive trailing-tag test safe. Extra content
+  // is named before the resolution, so it lands in the identity; only format
+  // and a group tag follow the resolution, so a trailing tag can be taken as
+  // a group without inspecting the word at all.
+  const scene = parsed('Site.23.04.15.Name.XXX.1080p.MP4-WRB').identityKey;
+
+  for (const word of ['Bonus', 'bonus', 'BTS', 'Extras', 'Deleted']) {
+    const before = parsed(`Site.23.04.15.Name.${word}.XXX.1080p.MP4-WRB`);
+    assert.notEqual(before.identityKey, scene, `${word} before the resolution is content`);
+    assert.equal(before.identityKey, `site:2023-04-15:name-${word.toLowerCase()}`);
+
+    const after = parsed(`Site.23.04.15.Name.XXX.1080p.MP4-${word}`);
+    assert.equal(after.identityKey, scene, `${word} after the resolution is a group`);
+    assert.equal(after.quality.releaseGroup, word);
+  }
+});
+
+test('a group spelled to look like a word is still a group', () => {
+  // B0NUS is a real group. No list of words can guard this position, which is
+  // why the position itself is what decides.
+  const result = parsed('Site.23.04.15.Name.XXX.1080p.MP4-B0NUS');
+  assert.equal(result.identityKey, 'site:2023-04-15:name');
+  assert.equal(result.quality.releaseGroup, 'B0NUS');
+});
+
+test('one group posting several cuts at one resolution collates them', () => {
+  // Same scene, same resolution, different short trailing tags — they are
+  // versions of one scene and belong on one shelf.
+  const keys = ['WRB', 'WRBx2', 'a1b2c3', 'Zsex3i'].map(
+    (tag) => parsed(`Site.23.04.15.Name.XXX.1080p.MP4-${tag}`).identityKey,
+  );
+  assert.equal(new Set(keys).size, 1, JSON.stringify(keys));
+});
+
 test('a word-shaped trailing tag is now a group, and the listed ones still are not', () => {
   // Casing was abandoned as a signal, so -Ghost and -rartv parse. The cost is
   // that -Bonus does too, collating a bonus reel into the scene as a version.
