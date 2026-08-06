@@ -1,5 +1,10 @@
 import type { MediaTypePlugin, PluginConfig, PluginFactory } from '@pickarr/plugin-api';
-import { parseSceneRelease, sceneSiteCandidates, type SceneParseOptions } from './parse.ts';
+import {
+  lastRefusalReason,
+  parseSceneRelease,
+  sceneSiteCandidates,
+  type SceneParseOptions,
+} from './parse.ts';
 import { scoreScene } from './score.ts';
 import { planSceneImport } from './plan-import.ts';
 
@@ -46,4 +51,4 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
 };
 
 export default createScenesPlugin;
-export { parseSceneRelease, sceneSiteCandidates, scoreScene, planSceneImport };
+export { lastRefusalReason, parseSceneRelease, sceneSiteCandidates, scoreScene, planSceneImport };

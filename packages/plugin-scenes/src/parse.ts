@@ -83,6 +83,30 @@ import type {
  * return `null`.
  */
 
+/**
+ * Why the most recent `parseSceneRelease` call returned `null`.
+ *
+ * Diagnostics only: written on the way out of a refusal, never read by the
+ * parser itself, so it cannot change how anything parses. It exists because
+ * `null` alone cannot rank what to fix next — against a real corpus the useful
+ * question is *which* rule is refusing thousands of titles, and that needs a
+ * reason attached to the refusal rather than inferred from the title later by
+ * a second copy of the same tests.
+ *
+ * Single-threaded and valid only immediately after the call it describes.
+ */
+let lastRefusal: string | null = null;
+
+/** The reason the last `parseSceneRelease` refused, or `null` if it succeeded. */
+export function lastRefusalReason(): string | null {
+  return lastRefusal;
+}
+
+function refuse(reason: string): null {
+  lastRefusal = reason;
+  return null;
+}
+
 /** The literal marker token that separates identity from encode information. */
 const MARKER_TOKEN = 'XXX';
 
@@ -665,7 +689,8 @@ function buildRelease(
   quality: QualityTokens,
 ): ParsedRelease | null {
   const siteSlug = slug(site);
-  if (siteSlug.length === 0 || sceneSlug.length === 0) return null;
+  if (siteSlug.length === 0) return refuse('site slug is empty');
+  if (sceneSlug.length === 0) return refuse('scene slug is empty');
 
   const fields = [{ label: 'Site', value: site }];
   if (date.length > 0) fields.push({ label: 'Date', value: date });
@@ -939,17 +964,19 @@ function datelessPrefixTokens(name: string): { before: Token[]; tail: string } |
  */
 function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRelease | null {
   const prefix = datelessPrefixTokens(name);
-  if (prefix === null) return null;
+  if (prefix === null) return refuse('no date and no trustworthy encode boundary');
 
   const match = matchSitePrefix(prefix.before, options.sites ?? []);
-  if (match === null) return null;
+  if (match === null) return refuse('no date, and the site is not in the known list');
 
   const siteTokens = consumeSiteTld(prefix.before, match.tokenCount);
   const firstSceneToken = prefix.before[siteTokens];
-  if (firstSceneToken === undefined) return null;
+  if (firstSceneToken === undefined) return refuse('no date, and the site name uses every token');
 
   const sceneText = prettify(name.slice(firstSceneToken.start, prefix.tail.length > 0 ? name.length - prefix.tail.length : name.length));
-  if (sceneText.length === 0 || sceneText.toUpperCase() === MARKER_TOKEN) return null;
+  if (sceneText.length === 0 || sceneText.toUpperCase() === MARKER_TOKEN) {
+    return refuse('no date, and no title left after the site');
+  }
 
   const detached = detachReleaseGroup(tokensOf(name), name);
   return buildRelease(
@@ -971,20 +998,21 @@ function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease
 
   const site = prettify(name.slice(0, date.startOffset));
   const rest = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
-  if (site.length === 0 || rest.length === 0) return null;
+  if (site.length === 0) return refuse('date is first, so there is no site');
+  if (rest.length === 0) return refuse('nothing follows the date');
 
   const detached = detachReleaseGroup(tokensOf(rest), rest);
   const cut = findEncodeSuffixStart(detached.tokens, 1);
-  if (cut === null) return null;
+  if (cut === null) return refuse('no trustworthy encode boundary after the date');
 
   const cutToken = detached.tokens[cut];
-  if (cutToken === undefined) return null;
+  if (cutToken === undefined) return refuse('no trustworthy encode boundary after the date');
 
   const sceneText = prettify(rest.slice(0, cutToken.start));
-  if (sceneText.length === 0) return null;
+  if (sceneText.length === 0) return refuse('no title between the date and the encode section');
   // A "title" made only of the marker carries no discriminating content, so
   // two unrelated scenes on one site and day would collide on it.
-  if (sceneText.toUpperCase() === MARKER_TOKEN) return null;
+  if (sceneText.toUpperCase() === MARKER_TOKEN) return refuse('title is only the XXX marker');
 
   const tail = rest.slice(cutToken.start);
   return buildRelease(site, date.iso, sceneText, slug(sceneText), extractQuality(tail, detached.group));
@@ -1284,11 +1312,15 @@ export function parseSceneRelease(
   releaseName: string,
   options: SceneParseOptions = {},
 ): ParsedRelease | null {
+  lastRefusal = null;
+
   const trimmed = releaseName.trim();
-  if (trimmed.length === 0) return null;
+  if (trimmed.length === 0) return refuse('empty name');
 
   const name = stripFileExtension(stripWebsitePrefix(trimmed)).trim();
-  if (name.length === 0) return null;
+  if (name.length === 0) return refuse('nothing left after stripping prefix/extension');
 
-  return parseDelimitedForm(name) ?? parseSceneForm(name, options);
+  const result = parseDelimitedForm(name) ?? parseSceneForm(name, options);
+  if (result !== null) lastRefusal = null;
+  return result;
 }

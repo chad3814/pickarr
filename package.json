@@ -2,14 +2,19 @@
   "name": "pickarr",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
-  "workspaces": ["packages/*"],
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "lint": "oxlint",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsgo --noEmit -p scripts",
     "test:server": "node --import tsx --conditions development --test \"packages/*/test/**/*.test.ts\"",
     "test:web": "TSX_TSCONFIG_PATH=packages/web/tsconfig.json node --import tsx --import ./packages/web/test/setup.ts --conditions development --test \"packages/web/test/**/*.test.tsx\"",
     "test": "npm run test:server && npm run test:web",
+    "corpus": "node --import tsx --conditions development scripts/parse-corpus.ts",
     "check": "npm run lint && npm run typecheck && npm run test",
     "build": "npm run build -w @pickarr/plugin-api -w @pickarr/plugin-scenes -w @pickarr/core -w @pickarr/web"
   },
