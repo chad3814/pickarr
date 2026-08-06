@@ -1,14 +1,88 @@
 import type { ParsedRelease, QualityExtra, QualityTokens } from '@pickarr/plugin-api';
 
-const DATE_PATTERN = /(?:^|[.\s_-])((?:19|20)?\d{2})[.\s_-](\d{2})[.\s_-](\d{2})(?:[.\s_-]|$)/;
+/**
+ * # The boundary rule
+ *
+ * A scene release name is three fields glued together with an arbitrary
+ * separator: the site/studio, the release date, and the scene (title and/or
+ * performers), followed by encode information. Deciding *where the fields
+ * meet* is the whole job, because `identityKey` is built from the first three
+ * and two different scenes sharing a key is the one failure this component
+ * must never produce.
+ *
+ * Every field except one is drawn from an open or overlapping vocabulary. A
+ * studio can be called `Tushy`; so can a title. Encode words come from a
+ * closed vocabulary, but that vocabulary overlaps titles freely — `XXX`,
+ * `MP4`, `4K` and `Web` are all real title words in this domain, and `XXX` is
+ * also a real release-group name. Any rule that locates the boundary by
+ * recognising a *word* therefore has as many candidate boundaries as that word
+ * has occurrences, and no local test can tell the real one from an impostor:
+ * whatever property the true marker has, an in-title occurrence can have too.
+ * Three successive attempts to patch the `XXX`-marker rule failed for exactly
+ * that reason.
+ *
+ * The date is different in kind. It is recognised by *arithmetic*, not by
+ * lookup: a run of digits that forms a valid calendar date. No title word can
+ * impersonate it, no vocabulary drift can invalidate it, and it is effectively
+ * always present. So the date is the anchor:
+ *
+ *   - Everything before the date is the site. This needs no vocabulary
+ *     judgement at all, which is what makes the site half of the identity
+ *     exact.
+ *   - Everything after the date is the scene plus its encode suffix.
+ *
+ * That reduces the problem to one boundary inside a bounded region, and it
+ * confines the search: the encode scan can never run backwards past the date
+ * into the site, so a studio named `4K Media` or `WebYoung` can no longer be
+ * eaten by an encode rule, and a mistake in the encode boundary can no longer
+ * relocate the site.
+ *
+ * # Inside the post-date region
+ *
+ * The encode section is structurally a *suffix*: every token after the
+ * boundary is encode information. A suffix has exactly one start, so there is
+ * no candidate to choose between — that is why the trailing-run walk is robust
+ * where "first/last/best `XXX`" is not. Walking backwards from the end over
+ * encode-vocabulary tokens gives the run; the cut is then placed either
+ *
+ *   1. at the `XXX` marker, when one sits immediately before the run. `XXX` is
+ *      never an encode token, so the backward walk cannot pass through a
+ *      marker; the one found there is necessarily the *last* marker in the
+ *      name, and any in-title `XXX` is shielded by it. A group literally named
+ *      `XXX` has already been detached as a group tag, so it cannot be
+ *      mistaken for the marker either.
+ *   2. otherwise at the earliest *boundary anchor* — a resolution or explicit
+ *      source, tokens that are implausible as title words — inside the run.
+ *      Cutting at the anchor rather than at the start of the run is what keeps
+ *      `Girls Of Web` and `Episode 2 4K` intact: the weak encode words `Web`
+ *      and `2` stay in the title because no anchor precedes them.
+ *
+ * If neither applies the name is ambiguous and the caller gets `null`, which
+ * surfaces as a visible `parse_error` rather than a silent mis-collation.
+ *
+ * # Why this is correct in general
+ *
+ * The identity is `slug(pre-date text) : ISO date : slug(post-date text minus
+ * an encode suffix)`. Two names collide only if all three agree. The first two
+ * are exact — no vocabulary is consulted for the site, and the date is
+ * self-verifying. So a collision requires two post-date regions that differ
+ * *only* inside a suffix that (a) reaches the end of the name, (b) consists
+ * entirely of closed-vocabulary encode tokens, and (c) is introduced by the
+ * `XXX` marker or by a resolution/source anchor. "Differs only in trailing
+ * encode tokens" is the definition of "two encodes of one release" — so the
+ * rule collapses exactly the set it is supposed to collapse. The residual
+ * risk is a scene whose genuine title *ends* in an anchor-introduced run of
+ * encode words; the parser refuses whenever that run is interrupted rather
+ * than guessing, which is why names like `Site.23.04.15.The.1080p.Club.MP4-G`
+ * return `null`.
+ */
 
 /** The literal marker token that separates identity from encode information. */
 const MARKER_TOKEN = 'XXX';
 
 /**
  * Tokens that can only plausibly be encode information, never title words.
- * These are strong enough on their own to anchor a boundary when no marker
- * token is present.
+ * These are strong enough on their own to anchor a boundary.
  */
 const RESOLUTION_TOKEN = /^(?:\d{3,4}p(?:\d{2,3})?|4K|8K|UHD)$/i;
 const SOURCE_TOKEN =
@@ -20,7 +94,10 @@ const SOURCE_TOKEN =
  * perfectly ordinary title words in this domain.
  */
 const ANCILLARY_TOKEN =
-  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|\d)$/i;
+  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
+
+/** Immersive/VR layout tags, recorded as a quality extra when present. */
+const VR_TOKEN = /\b(?:VR|MKX200|MKX220|FISHEYE190|OCULUS|GEARVR|PSVR|SMARTPHONE)\b/i;
 
 /**
  * Encode tokens that are conventionally written with an internal separator.
@@ -40,6 +117,83 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
   'X264',
   'X265',
 ]);
+
+/**
+ * Short uppercase words that are *not* release groups even though they have a
+ * group's shape. Languages, edit tags and distribution notes all trail an
+ * encode section the way a group does; treating one as a group would silently
+ * merge two genuinely different cuts of a scene.
+ */
+const NON_GROUP_TERMS = new Set([
+  'ENGLISH',
+  'FRENCH',
+  'GERMAN',
+  'SPANISH',
+  'ITALIAN',
+  'RUSSIAN',
+  'ENG',
+  'FRA',
+  'GER',
+  'ESP',
+  'ITA',
+  'RUS',
+  'JAP',
+  'JPN',
+  'SUB',
+  'SUBS',
+  'SUBBED',
+  'DUBBED',
+  'UNCUT',
+  'UNRATED',
+  'EXTENDED',
+  'DIRECTORS',
+  'REMASTERED',
+  'REMUX',
+  'PART',
+  'SCENE',
+  'FULL',
+  'HQ',
+  'LQ',
+]);
+
+/** File extensions a downloader or indexer may have appended to a name. */
+const MEDIA_EXTENSIONS = new Set([
+  'mp4',
+  'mkv',
+  'avi',
+  'wmv',
+  'mov',
+  'm4v',
+  'mpg',
+  'mpeg',
+  'flv',
+  'ts',
+  'webm',
+  'nfo',
+]);
+
+const TLD =
+  '(?:com|net|org|xxx|tv|to|cc|me|io|co|se|ws|pw|biz|info|site|club|app|online|link|is|nl|de|fr|ru|us|uk|su)';
+/**
+ * The label repetition is *lazy* on purpose. `xxx` is a real TLD and also the
+ * marker token, so a greedy domain will happily swallow
+ * `www.Site.com.Brazzers.23.04.15.Alex.Coal.XXX.` and call it a prefix.
+ * Preferring the shortest domain that still ends in a TLD stops the prefix at
+ * the first plausible boundary, which is where a real one ends.
+ */
+const DOMAIN = `(?:www\\.)?[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9-]+)*?\\.${TLD}`;
+
+/**
+ * Leading website prefixes. Each requires a real domain *and* an unambiguous
+ * delimiter, so that a studio whose own name ends in a TLD-like word
+ * (`Tushy.com.23.04.15....`) is not amputated: a bare dot is never accepted as
+ * the delimiter unless the prefix also starts with `www.`.
+ */
+const WEBSITE_PREFIXES = [
+  new RegExp(`^[[(]\\s*${DOMAIN}\\s*[\\])]\\s*[-–—]?\\s*`, 'i'),
+  new RegExp(`^${DOMAIN}\\s+[-–—]\\s+`, 'i'),
+  new RegExp(`^www\\.[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9-]+)*?\\.${TLD}[\\s._-]+`, 'i'),
+];
 
 const RESOLUTIONS: [RegExp, number][] = [
   [/\b8K\b/i, 4320],
@@ -76,6 +230,33 @@ const CONTAINERS: [RegExp, string][] = [
   [/\bAVI\b/i, 'avi'],
 ];
 
+const MONTH_NAMES: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
 function firstMatch<T>(table: [RegExp, T][], haystack: string): T | undefined {
   for (const [pattern, value] of table) {
     if (pattern.test(haystack)) return value;
@@ -83,6 +264,12 @@ function firstMatch<T>(table: [RegExp, T][], haystack: string): T | undefined {
   return undefined;
 }
 
+/**
+ * Emits only `[a-z0-9-]`. Destinations are rendered back out of the slugs in
+ * `identityKey`, and that round trip is only injective while the alphabet
+ * stays this small — so this must not be widened. `planSceneImport` also
+ * splits `identityKey` on `:`, which a slug can therefore never contain.
+ */
 function slug(value: string): string {
   return value
     .toLowerCase()
@@ -97,70 +284,20 @@ function prettify(value: string): string {
     .replace(/^[\s-]+|[\s-]+$/g, '');
 }
 
-function toIsoDate(rawYear: string, rawMonth: string, rawDay: string): string | null {
-  const year = rawYear.length === 2 ? 2000 + Number(rawYear) : Number(rawYear);
-  const month = Number(rawMonth);
-  const day = Number(rawDay);
+function toIsoDate(year: number, month: number, day: number): string | null {
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (year < 1900 || year > 2199) return null;
 
   const date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1) return null;
   if (date.getUTCDate() !== day) return null;
 
-  return `${String(year).padStart(4, '0')}-${rawMonth}-${rawDay}`;
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-/**
- * Rewrites a tail's underscores as dots before the quality tables read it.
- *
- * Every table above delimits its tokens with `\b`, and `_` is a *word*
- * character to a JavaScript regex — so there is no word boundary between `_`
- * and an alphanumeric, and `\b1080p\b` simply does not match inside
- * `..._XXX_1080p_MP4-KTR`. The effect was total rather than partial: an
- * underscore-separated name lost its resolution, source, codec and container
- * all at once, scoring as if it carried no quality information, while its
- * dotted twin scored normally. Both spellings collate into the same group by
- * design, so that gap put two wildly different scores on one shelf: a 480p
- * dotted release outranked an underscore 1080p and flagged as an upgrade over
- * it (taking which trashes the better file), and a genuinely better underscore
- * release never flagged at all.
- *
- * Normalizing the haystack once, here, fixes all four tables together —
- * including `SOURCES` and `VIDEO_CODECS`, whose internal `[.\s_-]?` classes
- * already tolerated `WEB_DL` and `H_265` but whose surrounding `\b` anchors
- * did not. The alternative, replacing every `\b` with explicit
- * `(?<![A-Za-z0-9])` / `(?![A-Za-z0-9])` guards, is the same fix written
- * twenty times, and an earlier attempt at this bug fixed the tokenizer alone
- * and left `extractQuality` broken precisely because the change had to be
- * repeated in more than one place to be complete.
- *
- * Only `_` is rewritten: spaces and hyphens are already non-word characters,
- * so `\b` behaves correctly around them, and the release-group tag is matched
- * against the untouched tail below so its introducing `-` is unambiguous.
- */
-function normalizeSeparators(tail: string): string {
-  return tail.replace(/_/g, '.');
-}
-
-function extractQuality(tail: string): QualityTokens {
-  const haystack = normalizeSeparators(tail);
-
-  const extras: Record<string, QualityExtra> = {};
-  const container = firstMatch(CONTAINERS, haystack);
-  if (container !== undefined) extras['container'] = container;
-
-  const groupMatch = /-([A-Za-z0-9]+)$/.exec(tail.trim());
-
-  const quality: QualityTokens = { extras };
-  const resolution = firstMatch(RESOLUTIONS, haystack);
-  if (resolution !== undefined) quality.resolution = resolution;
-  const source = firstMatch(SOURCES, haystack);
-  if (source !== undefined) quality.source = source;
-  const videoCodec = firstMatch(VIDEO_CODECS, haystack);
-  if (videoCodec !== undefined) quality.videoCodec = videoCodec;
-  if (groupMatch?.[1] !== undefined) quality.releaseGroup = groupMatch[1];
-
-  return quality;
+/** Expands a bare two-digit year into the 2000s, as scene naming intends. */
+function expandYear(raw: string): number {
+  return raw.length === 2 ? 2000 + Number(raw) : Number(raw);
 }
 
 interface Token {
@@ -177,19 +314,19 @@ function isBoundaryAnchor(text: string): boolean {
   return RESOLUTION_TOKEN.test(text) || SOURCE_TOKEN.test(text);
 }
 
-/** Splits on every separator, recording each token's offset in `name`. */
-function tokenize(name: string): Token[] {
+/** Splits on every separator, recording each token's offset in `text`. */
+function tokenize(text: string): Token[] {
   const tokens: Token[] = [];
   const pattern = /[^.\s_-]+/g;
   let match: RegExpExecArray | null;
-  while ((match = pattern.exec(name)) !== null) {
+  while ((match = pattern.exec(text)) !== null) {
     tokens.push({ text: match[0], start: match.index });
   }
   return tokens;
 }
 
 /** Re-joins `WEB-DL`, `H.265`, `Blu-Ray` and friends into single tokens. */
-function joinHyphenatedEncodeTokens(tokens: Token[], name: string): Token[] {
+function joinHyphenatedEncodeTokens(tokens: Token[], text: string): Token[] {
   const joined: Token[] = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const current = tokens[index];
@@ -201,7 +338,7 @@ function joinHyphenatedEncodeTokens(tokens: Token[], name: string): Token[] {
       HYPHENATED_ENCODE_TOKENS.has((current.text + next.text).toUpperCase())
     ) {
       joined.push({
-        text: name.slice(current.start, next.start + next.text.length),
+        text: text.slice(current.start, next.start + next.text.length),
         start: current.start,
       });
       index += 1;
@@ -212,106 +349,446 @@ function joinHyphenatedEncodeTokens(tokens: Token[], name: string): Token[] {
   return joined;
 }
 
-/**
- * Drops a trailing `-GROUP` tag. The release group is the only part of a
- * scene name attached with a hyphen rather than the name's own separator, so
- * a final token introduced by a lone `-` that is not itself encode
- * information is a group tag — including one literally named `XXX`.
- */
-function dropReleaseGroup(tokens: Token[], name: string): Token[] {
-  const last = tokens.at(-1);
-  const previous = tokens.at(-2);
-  if (last === undefined || previous === undefined) return tokens;
-  const separator = name.slice(previous.start + previous.text.length, last.start);
-  if (separator !== '-' || isEncodeToken(last.text)) return tokens;
-  return tokens.slice(0, -1);
+function tokensOf(text: string): Token[] {
+  return joinHyphenatedEncodeTokens(tokenize(text), text);
 }
 
 /**
- * Splits a scene release name at the boundary between identity and encode.
- *
- * The encode section is, structurally, the *trailing run* of the name: every
- * token after the boundary is encode information, and the run ends where the
- * first non-encode token appears reading backwards from the end. That run is
- * unique — there is no candidate to choose between — which is what makes this
- * robust where "first XXX", "last XXX", and "the XXX whose tail looks like an
- * encode" are not. Those rules test a local property of one marker, and an
- * in-title `XXX` can satisfy any local test that the real marker satisfies.
- *
- * From the run, two cases:
- *
- * 1. The token immediately preceding the run is `XXX`. Because `XXX` is never
- *    an encode token, the backward walk cannot pass through a marker, so the
- *    token found there is necessarily the *last* marker in the name — and any
- *    earlier, in-title `XXX` is protected from being chosen by the real marker
- *    standing between it and the run. Equally, a release group named `XXX` has
- *    already been removed as a group tag, so it cannot be mistaken for the
- *    marker. The boundary is exact.
- * 2. No marker sits there (the name omits it, or an unrecognised token
- *    interrupts the encode section). Then fall back to the earliest
- *    *boundary anchor* — a resolution or an explicit source, tokens that are
- *    implausible as title words — that begins an all-encode suffix. Requiring
- *    both properties means a title ending in a weak encode word ("...Of.Web")
- *    is not silently eaten: it stays in the identity if an anchor follows it,
- *    and yields `null` if no anchor exists at all.
- *
- * When neither case applies the name is ambiguous and the caller gets `null`,
- * which surfaces as a parse error rather than a wrong collation.
+ * A trailing token has a release group's *shape* when it is short, purely
+ * alphanumeric, carries a letter, is written in caps (the universal scene
+ * convention for a group tag), and is not a codec/source/container/language
+ * or edit term. The caps requirement is what keeps `.Uncut` and `.Directors`
+ * out: merging two edits of a scene is exactly the over-collation this
+ * component may not commit, and refusing is always the cheaper mistake.
  */
-function splitAtQualityBoundary(name: string): { head: string; tail: string } | null {
-  const tokens = dropReleaseGroup(joinHyphenatedEncodeTokens(tokenize(name), name), name);
+function looksLikeGroupTag(text: string): boolean {
+  if (!/^[A-Za-z0-9]{2,8}$/.test(text)) return false;
+  if (!/[A-Za-z]/.test(text)) return false;
+  if (text !== text.toUpperCase()) return false;
+  if (NON_GROUP_TERMS.has(text.toUpperCase())) return false;
+  return !isEncodeToken(text);
+}
 
+interface Detached {
+  readonly tokens: Token[];
+  readonly group: string | undefined;
+}
+
+/**
+ * Detaches a trailing release-group tag.
+ *
+ * A group is attached either with a hyphen — the only part of a scene name
+ * introduced by a separator other than the name's own, so a final
+ * non-encode token after a lone `-` is a group tag, including one literally
+ * named `XXX` — or, in some trackers' output, with the name's own separator.
+ * The dot-attached form is only accepted when the preceding token is encode
+ * information, because a group can only ever follow a complete encode
+ * section; a token following title material is title material.
+ */
+function detachReleaseGroup(tokens: Token[], text: string): Detached {
+  const last = tokens.at(-1);
+  const previous = tokens.at(-2);
+  if (last === undefined || previous === undefined) return { tokens, group: undefined };
+
+  const separator = text.slice(previous.start + previous.text.length, last.start);
+  if (separator === '-') {
+    if (isEncodeToken(last.text)) return { tokens, group: undefined };
+    return { tokens: tokens.slice(0, -1), group: last.text };
+  }
+  if (/^[._\s]$/.test(separator) && isEncodeToken(previous.text) && looksLikeGroupTag(last.text)) {
+    return { tokens: tokens.slice(0, -1), group: last.text };
+  }
+  return { tokens, group: undefined };
+}
+
+/**
+ * Locates the start of the trailing encode suffix, or `null` when the tokens
+ * carry no recognisable encode section. `minIndex` is the first index the cut
+ * may fall on, so callers that must retain at least one identity token pass
+ * `1` and callers happy to consume the whole run pass `0`.
+ */
+function findEncodeSuffixStart(tokens: Token[], minIndex: number): number | null {
   let runStart = tokens.length;
-  while (runStart > 0 && isEncodeToken(tokens[runStart - 1]?.text ?? '')) runStart -= 1;
+  while (runStart > minIndex && isEncodeToken(tokens[runStart - 1]?.text ?? '')) runStart -= 1;
 
   const marker = tokens[runStart - 1];
-  if (runStart >= 2 && marker !== undefined && marker.text.toUpperCase() === MARKER_TOKEN) {
-    return { head: name.slice(0, marker.start), tail: name.slice(marker.start) };
+  if (runStart - 1 >= minIndex && marker !== undefined && marker.text.toUpperCase() === MARKER_TOKEN) {
+    return runStart - 1;
   }
 
-  for (let index = Math.max(runStart, 1); index < tokens.length; index += 1) {
+  for (let index = Math.max(runStart, minIndex); index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token !== undefined && isBoundaryAnchor(token.text)) {
-      return { head: name.slice(0, token.start), tail: name.slice(token.start) };
-    }
+    if (token !== undefined && isBoundaryAnchor(token.text)) return index;
   }
 
   return null;
 }
 
-export function parseSceneRelease(releaseName: string): ParsedRelease | null {
-  const name = releaseName.trim();
-  if (name.length === 0) return null;
+/**
+ * Rewrites underscores as dots before the quality tables read a haystack.
+ *
+ * Every table below delimits its tokens with `\b`, and `_` is a *word*
+ * character to a JavaScript regex — so there is no word boundary between `_`
+ * and an alphanumeric, and `\b1080p\b` simply does not match inside
+ * `..._XXX_1080p_MP4-KTR`. The effect was total rather than partial: an
+ * underscore-separated name lost its resolution, source, codec and container
+ * all at once, scoring as if it carried no quality information, while its
+ * dotted twin scored normally. Both spellings collate into the same group by
+ * design, so that gap put two wildly different scores on one shelf: a 480p
+ * dotted release outranked an underscore 1080p and flagged as an upgrade over
+ * it (taking which trashes the better file), and a genuinely better underscore
+ * release never flagged at all.
+ *
+ * Normalizing the haystack once, here, fixes all four tables together —
+ * including `SOURCES` and `VIDEO_CODECS`, whose internal `[.\s_-]?` classes
+ * already tolerated `WEB_DL` and `H_265` but whose surrounding `\b` anchors
+ * did not. The release group is no longer recovered by a regex over this
+ * string at all; it is detached structurally from the token stream, which is
+ * separator-blind by construction.
+ */
+function normalizeSeparators(text: string): string {
+  return text.replace(/_/g, '.');
+}
 
-  const split = splitAtQualityBoundary(name);
-  if (split === null) return null;
+function extractQuality(tail: string, releaseGroup: string | undefined): QualityTokens {
+  const haystack = normalizeSeparators(tail);
 
-  const dateMatch = DATE_PATTERN.exec(split.head);
-  if (dateMatch?.[1] === undefined || dateMatch[2] === undefined || dateMatch[3] === undefined) {
-    return null;
+  const extras: Record<string, QualityExtra> = {};
+  const container = firstMatch(CONTAINERS, haystack);
+  if (container !== undefined) extras['container'] = container;
+  if (VR_TOKEN.test(haystack)) extras['vr'] = true;
+
+  const quality: QualityTokens = { extras };
+  const resolution = firstMatch(RESOLUTIONS, haystack);
+  if (resolution !== undefined) quality.resolution = resolution;
+  const source = firstMatch(SOURCES, haystack);
+  if (source !== undefined) quality.source = source;
+  const videoCodec = firstMatch(VIDEO_CODECS, haystack);
+  if (videoCodec !== undefined) quality.videoCodec = videoCodec;
+  if (releaseGroup !== undefined) quality.releaseGroup = releaseGroup;
+
+  return quality;
+}
+
+// --- Preprocessing ----------------------------------------------------------
+
+function stripWebsitePrefix(name: string): string {
+  for (const pattern of WEBSITE_PREFIXES) {
+    const stripped = name.replace(pattern, '');
+    if (stripped.length > 0 && stripped !== name) return stripped.trim();
   }
+  return name;
+}
 
-  const date = toIsoDate(dateMatch[1], dateMatch[2], dateMatch[3]);
-  if (date === null) return null;
+/**
+ * Drops a media file extension an indexer appended to the release name.
+ *
+ * An extension is by definition appended *after* a complete release name, so
+ * what precedes it is that name's last element: the group tag or the encode
+ * section. When the preceding token is neither — as in
+ * `Site.23.04.15.Alex.Coal.XXX.WMV` — the trailing token is the container the
+ * release name itself states, not an appended extension, and removing it
+ * would throw away the only quality information present.
+ */
+function stripFileExtension(name: string): string {
+  const match = /\.([A-Za-z0-9]{2,4})$/.exec(name);
+  if (match?.[1] === undefined) return name;
+  if (!MEDIA_EXTENSIONS.has(match[1].toLowerCase())) return name;
 
-  const site = prettify(split.head.slice(0, dateMatch.index));
-  if (site.length === 0) return null;
+  const head = name.slice(0, match.index);
+  const tokens = tokenize(head);
+  const last = tokens.at(-1);
+  const previous = tokens.at(-2);
+  if (last === undefined) return name;
 
-  const scene = prettify(split.head.slice(dateMatch.index + dateMatch[0].length));
-  if (scene.length === 0) return null;
+  const attachedGroup =
+    previous !== undefined && head.slice(previous.start + previous.text.length, last.start) === '-';
+  if (attachedGroup || isEncodeToken(last.text)) return head;
+  return name;
+}
+
+// --- Result construction ----------------------------------------------------
+
+function buildRelease(
+  site: string,
+  date: string,
+  sceneTitle: string,
+  sceneSlug: string,
+  quality: QualityTokens,
+): ParsedRelease | null {
+  const siteSlug = slug(site);
+  if (siteSlug.length === 0 || sceneSlug.length === 0) return null;
 
   return {
-    identityKey: `${slug(site)}:${date}:${slug(scene)}`,
+    identityKey: `${siteSlug}:${date}:${sceneSlug}`,
     display: {
-      title: scene,
+      title: sceneTitle,
       subtitle: site,
       date,
       fields: [
         { label: 'Site', value: site },
         { label: 'Date', value: date },
-        { label: 'Scene', value: scene },
+        { label: 'Scene', value: sceneTitle },
       ],
     },
-    quality: extractQuality(split.tail),
+    quality,
   };
+}
+
+// --- Shape 1: the dotted scene form -----------------------------------------
+
+interface DateSpan {
+  readonly iso: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+}
+
+/**
+ * Finds the release date in a token stream, scanning left to right and taking
+ * the first run of digits that forms a *valid* calendar date. Three shapes
+ * occur: `YY.MM.DD`, `YYYY.MM.DD`, and the concatenated `YYMMDD` / `YYYYMMDD`.
+ * Index 0 is skipped because a date there would leave no site.
+ */
+function findSceneDate(tokens: Token[]): DateSpan | null {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === undefined) continue;
+    const text = token.text;
+    const end = token.start + text.length;
+
+    if (/^\d{8}$/.test(text)) {
+      const iso = toIsoDate(Number(text.slice(0, 4)), Number(text.slice(4, 6)), Number(text.slice(6, 8)));
+      if (iso !== null) return { iso, startOffset: token.start, endOffset: end };
+    }
+    if (/^\d{6}$/.test(text)) {
+      const iso = toIsoDate(
+        expandYear(text.slice(0, 2)),
+        Number(text.slice(2, 4)),
+        Number(text.slice(4, 6)),
+      );
+      if (iso !== null) return { iso, startOffset: token.start, endOffset: end };
+    }
+
+    const month = tokens[index + 1];
+    const day = tokens[index + 2];
+    if (
+      month !== undefined &&
+      day !== undefined &&
+      /^(?:19|20)?\d{2}$/.test(text) &&
+      /^\d{2}$/.test(month.text) &&
+      /^\d{2}$/.test(day.text)
+    ) {
+      const iso = toIsoDate(expandYear(text), Number(month.text), Number(day.text));
+      if (iso !== null) {
+        return { iso, startOffset: token.start, endOffset: day.start + day.text.length };
+      }
+    }
+  }
+  return null;
+}
+
+function parseSceneForm(name: string): ParsedRelease | null {
+  const date = findSceneDate(tokensOf(name));
+  if (date === null) return null;
+
+  const site = prettify(name.slice(0, date.startOffset));
+  const rest = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
+  if (site.length === 0 || rest.length === 0) return null;
+
+  const detached = detachReleaseGroup(tokensOf(rest), rest);
+  const cut = findEncodeSuffixStart(detached.tokens, 1);
+  if (cut === null) return null;
+
+  const cutToken = detached.tokens[cut];
+  if (cutToken === undefined) return null;
+
+  const sceneText = prettify(rest.slice(0, cutToken.start));
+  if (sceneText.length === 0) return null;
+  // A "title" made only of the marker carries no discriminating content, so
+  // two unrelated scenes on one site and day would collide on it.
+  if (sceneText.toUpperCase() === MARKER_TOKEN) return null;
+
+  const tail = rest.slice(cutToken.start);
+  return buildRelease(site, date.iso, sceneText, slug(sceneText), extractQuality(tail, detached.group));
+}
+
+// --- Shape 2: the delimited metadata form -----------------------------------
+
+const SEGMENT_SPLIT = /\s+[-–—]\s+/;
+const YMD_PATTERN = /\b((?:19|20)\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})\b/;
+const DMY_PATTERN = /\b(\d{1,2})[.\-/](\d{1,2})[.\-/]((?:19|20)\d{2})\b/;
+const WRITTEN_PATTERN = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{2})\b/g;
+
+interface SegmentDate {
+  readonly iso: string;
+  readonly before: string;
+  readonly after: string;
+}
+
+/**
+ * Finds a fully-written date inside one delimited segment. ISO order is tried
+ * first because it is unambiguous; the remaining numeric form is read
+ * day-first, the convention these listings follow. A day/month transposition
+ * can only ever *split* a group (the same scene filed under two dates), never
+ * merge two scenes, so guessing here is on the safe side of the asymmetry.
+ */
+function findSegmentDate(segment: string): SegmentDate | null {
+  const iso = YMD_PATTERN.exec(segment);
+  if (iso?.[1] !== undefined && iso[2] !== undefined && iso[3] !== undefined) {
+    const value = toIsoDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+    if (value !== null) return splitAround(segment, iso.index, iso[0].length, value);
+  }
+
+  const dmy = DMY_PATTERN.exec(segment);
+  if (dmy?.[1] !== undefined && dmy[2] !== undefined && dmy[3] !== undefined) {
+    const value = toIsoDate(Number(dmy[3]), Number(dmy[2]), Number(dmy[1]));
+    if (value !== null) return splitAround(segment, dmy.index, dmy[0].length, value);
+  }
+
+  WRITTEN_PATTERN.lastIndex = 0;
+  let written: RegExpExecArray | null;
+  while ((written = WRITTEN_PATTERN.exec(segment)) !== null) {
+    const monthName = written[1]?.toLowerCase();
+    if (monthName === undefined || written[2] === undefined || written[3] === undefined) continue;
+    const month = MONTH_NAMES[monthName];
+    if (month === undefined) continue;
+    const value = toIsoDate(Number(written[3]), month, Number(written[2]));
+    if (value !== null) return splitAround(segment, written.index, written[0].length, value);
+  }
+
+  return null;
+}
+
+/** Removes the matched date and the brackets that were wrapping it. */
+function splitAround(segment: string, index: number, length: number, iso: string): SegmentDate {
+  const before = segment.slice(0, index).replace(/[([{]\s*$/, '');
+  const after = segment.slice(index + length).replace(/^\s*[)\]}]/, '');
+  return { iso, before: before.trim(), after: after.trim() };
+}
+
+interface SegmentSplit {
+  readonly title: string;
+  readonly quality: string;
+  readonly group: string | undefined;
+}
+
+/**
+ * Separates one segment's title text from the quality material trailing it,
+ * using the same suffix rule as the dotted form plus the bracketed groups
+ * these listings append (`[1080p HEVC x265]`, `{GROUP}`).
+ */
+function splitSegment(segment: string): SegmentSplit {
+  let text = segment.trim();
+  const quality: string[] = [];
+  let group: string | undefined;
+
+  for (;;) {
+    const bracket = /\s*[[{]([^\]}]*)[\]}]\s*$/.exec(text);
+    if (bracket?.[1] === undefined) break;
+    const content = bracket[1].trim();
+    if (group === undefined && looksLikeGroupTag(content)) group = content;
+    else quality.unshift(content);
+    text = text.slice(0, bracket.index).trim();
+  }
+
+  const tokens = tokensOf(text);
+  const cut = findEncodeSuffixStart(tokens, 0);
+  const cutToken = cut === null ? undefined : tokens[cut];
+  if (cutToken !== undefined) {
+    quality.unshift(text.slice(cutToken.start));
+    text = text.slice(0, cutToken.start);
+  }
+
+  return { title: prettify(text), quality: quality.join(' '), group };
+}
+
+function parseDelimitedForm(name: string): ParsedRelease | null {
+  let rest = name;
+  let site: string | null = null;
+
+  const bracketed = /^\s*[[(]([^\])]+)[\])]\s*/.exec(rest);
+  if (bracketed?.[1] !== undefined) {
+    site = bracketed[1].trim();
+    rest = rest.slice(bracketed[0].length);
+  }
+
+  const segments = rest
+    .split(SEGMENT_SPLIT)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+
+  // Not this shape: no bracketed studio and nothing delimited by " - ".
+  if (site === null && segments.length < 2) return null;
+  if (segments.length === 0) return null;
+
+  let dateIso: string | null = null;
+  const residues: string[] = [];
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment === undefined) continue;
+    if (dateIso === null) {
+      const found = findSegmentDate(segment);
+      if (found !== null) {
+        dateIso = found.iso;
+        // A leading segment that is *only* a date cannot also be the studio.
+        if (index === 0 && site === null && found.before.length === 0) return null;
+        const residue = [found.before, found.after].filter((part) => part.length > 0).join(' ');
+        residues.push(residue);
+        continue;
+      }
+    }
+    residues.push(segment);
+  }
+  if (dateIso === null) return null;
+
+  let startIndex = 0;
+  if (site === null) {
+    const first = residues[0];
+    if (first === undefined || first.length === 0) return null;
+    site = first;
+    startIndex = 1;
+  }
+
+  const titleParts: string[] = [];
+  const qualityParts: string[] = [];
+  let group: string | undefined;
+  for (let index = startIndex; index < residues.length; index += 1) {
+    const residue = residues[index];
+    if (residue === undefined || residue.length === 0) continue;
+    const split = splitSegment(residue);
+    if (split.title.length > 0) titleParts.push(split.title);
+    if (split.quality.length > 0) qualityParts.push(split.quality);
+    if (group === undefined) group = split.group;
+  }
+  if (titleParts.length === 0) return null;
+
+  // The identity slug is built from the *sorted* part slugs while the display
+  // title keeps source order. These listings put performers and title on
+  // either side of each other depending on the tracker, and two scenes on one
+  // site and day whose part multisets are permutations of each other are the
+  // same scene — so sorting recovers collation that order alone would lose,
+  // without admitting any collision that order would have prevented.
+  const sceneSlug = titleParts
+    .map(slug)
+    .filter((part) => part.length > 0)
+    .toSorted()
+    .join('-');
+
+  return buildRelease(
+    site,
+    dateIso,
+    titleParts.join(' - '),
+    sceneSlug,
+    extractQuality(qualityParts.join(' '), group),
+  );
+}
+
+export function parseSceneRelease(releaseName: string): ParsedRelease | null {
+  const trimmed = releaseName.trim();
+  if (trimmed.length === 0) return null;
+
+  const name = stripFileExtension(stripWebsitePrefix(trimmed)).trim();
+  if (name.length === 0) return null;
+
+  return parseDelimitedForm(name) ?? parseSceneForm(name);
 }
