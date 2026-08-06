@@ -875,10 +875,11 @@ const REFUSED: [string, string][] = [
     '19-07-2023 - Alex Coal - Beautiful Episode 1080p',
     'delimited listing whose first segment is the date, leaving no site',
   ],
-  // A trailing tag is only a release group if it passes *both* guards, and
-  // these four separate them: NON_GROUP_TERMS is the only thing that rejects
-  // the correctly-capitalised UNCUT/Part1, and the caps test is the only thing
-  // that rejects Bonus, which no finite list would contain.
+  // NON_GROUP_TERMS is now the only guard on a trailing tag, casing having
+  // been abandoned as a signal. Every row below is a tag whose entry in that
+  // list is the sole reason it is not detached as a group, and each is a case
+  // where merging destroys something: two halves of one scene, or two cuts of
+  // it. Removing an entry re-opens exactly one merge, silently.
   [
     'Site.23.04.15.Name.XXX.1080p.MP4-Part1',
     'a part tag, not a group: detaching it would merge the two halves of one scene under a single key',
@@ -889,23 +890,7 @@ const REFUSED: [string, string][] = [
   ],
   ['Site.23.04.15.Name.XXX.1080p.MP4-UNCUT', 'an edit tag in NON_GROUP_TERMS, correctly capitalised'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-FRENCH', 'a language tag, not a group'],
-  [
-    'Site.23.04.15.Name.XXX.1080p.MP4-Bonus',
-    'an edit tag no list would contain; only its Title-case shape rejects it',
-  ],
-  // The shape rule that replaced the caps rule rejects exactly two spellings:
-  // an ordinary word in Title case, and one in lower case. That is where the
-  // unlistable edit tags live, and a group styled like a word is refused with
-  // them — the cheaper mistake.
-  ['Site.23.04.15.Name.XXX.1080p.MP4-Bonuses', 'a Title-case word, whatever the word is'],
-  ['Site.23.04.15.Name.XXX.1080p.MP4-Deleted', 'the same'],
-  ['Site.23.04.15.Name.XXX.1080p.MP4-Outtakes', 'the same'],
-  ['Site.23.04.15.Name.XXX.1080p.MP4-bonus', 'a lower-case word, refused for the same reason'],
-  ['Site.23.04.15.Name.XXX.1080p.MP4-extras', 'the same'],
-  ['Site.23.04.15.Name.XXX.1080p.MP4-Ghost', 'a real group styled as a word, refused with them'],
-  ['Site.23.04.15.Name.XXX.1080p.MP4-rartv', 'a real lower-case group, refused with them'],
   ['Site.23.04.15.Name.XXX.1080p.HEVC.UNCUT', 'the same, dot-attached'],
-  ['Site.23.04.15.Name.XXX.1080p.HEVC.Bonus', 'the same, dot-attached and mixed case'],
   [
     'Site.23.04.15.Name.XXX.1080p.MP4-PART1',
     'a numbered part tag in caps: only stripping the digits before the lookup rejects it, and merging PART1 with PART2 is the same over-collation',

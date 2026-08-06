@@ -21,173 +21,31 @@ date in several positions, `Studio - Performers - Title (Month DD, YYYY)`, conca
 
 What follows is what it still gets wrong.
 
-**A hyphen-attached release group must be 1–12 alphanumerics and must not be spelled
-like an ordinary word**, or the whole name is refused. `-Bonus`, `-Deleted`, `-bonus`
-and `-extras` are refused; `-WRB`, `-G`, `-FETiSH`, `-Zsex3i`, `-inSaNe` and
-`-P0RNL0V3R` are accepted. This is what stops an edit tag being read as a group and
-merging two different cuts of one scene.
+**A hyphen-attached release group must be 1–12 alphanumerics and must not be a listed
+term**, or the whole name is refused. Casing is not consulted at all.
 
-The rule used to require all caps, which was simply wrong about the world — scene groups
-style themselves freely and `MP4-FETiSH` and `MP4-Zsex3i` are both real. But the caps
-rule was carrying the over-collation guard and could not just be dropped. What it was
-actually doing was rejecting tags that look like words, because that is where the
-unlistable edit tags live, and Title case or lower case is exactly that shape. Replacing
-"must be caps" with "must not look like a word" admits the mixed-case groups without
-admitting `-Bonus`.
+Two stricter rules were tried against real feeds and both cost more than they bought.
+Requiring all caps refused `-FETiSH` and `-Zsex3i`, which are real groups. Refusing
+word-shaped tags additionally refused `-Ghost`, `-Rarbg`, `-rartv` and `-xpost`, also
+real. Nothing structural separates `Ghost` from `Bonus` — same length, same casing, same
+character classes — so any shape rule that admits one admits the other. The only question
+is which error to take.
 
-The cost is unchanged in direction: a group that styles itself as a plain word — `-Ghost`,
-`-Rarbg`, `-rartv`, `-xpost` — is still refused, along with `-DIGITALPLAYGROUND` and
-anything over twelve characters. They land in `parse_error` rather than the browse list.
-Nothing structural separates `Ghost` from `Bonus`, so accepting one accepts the other,
-and refusing a real group costs a visible error while accepting an edit tag silently
-merges two scenes.
+The error now taken: **a word-shaped edit tag is detached as a group**, which strips it
+from the identity and collates that release into the scene as another version. A `-Bonus`
+reel appears beside the scene and can outrank it on resolution. That is a visible
+annoyance — you download the wrong file once — and it was chosen over real releases
+silently never appearing at all.
 
-The cap was 8 until a real feed showed that one rule producing the majority of all
-`parse_error` rows, most of them the 9-character group `P0RNL0V3R`. Raising it to 12
-came with a cost that is easy to miss: **the cap had silently been the only guard
-rejecting 9-12 character edit tags**, since `NON_GROUP_TERMS` and the word-shape test
-are what handle the short ones. Widening it moved `-UNCENSORED`, `-DIRECTORSCUT` and
-`-COMPILATION` from refused to parsed-as-a-group — a merge, not a refusal, and merging
-is the one error this parser may not make. They are now listed terms with their own
-corpus refusal rows. `DIRECTORS` and `REMASTERED` were already listed and had been
-redundant with the cap; they are load-bearing now. **If you raise `MAX_GROUP_TAG_LENGTH`
-again, walk the newly exposed length band for edit and content tags first** — the
-constant's doc comment says the same thing at the point of change.
+**`NON_GROUP_TERMS` is now the only guard, and its entries are load-bearing in a way
+they were not before.** Every one of them is a tag where merging destroys something
+rather than merely annoying: `-Part1`/`-Part2`, `-CD1`/`-CD2` and `-DISC1`/`-DISC2` are
+halves of one scene, so merging them means picking one half believing it is the whole;
+`-UNCUT`, `-UNCENSORED`, `-DIRECTORS` are different cuts. Matching is case-insensitive
+and digits are stripped, so one entry covers `Part1`, `part2` and `PART`. **Removing an
+entry now re-opens exactly one merge, silently** — there is no second rule behind it.
 
-**Theoretical, never observed: content tags of 8 characters or fewer would be swallowed
-as release groups.** `-SAMPLE`, `-TRAILER`, `-PREVIEW`, `-CENSORED` and `-BLOOPERS` are
-all-caps, alphanumeric, short, and absent from `NON_GROUP_TERMS`, so each would be
-detached as a group and collate into the scene proper — a two-minute trailer offered as
-a pickable "version" of the full scene. This predates the cap change and the cap never
-covered it. Deliberately not fixed: none of these has been seen in a real feed, and
-adding them *changes* current behaviour, turning names that parse today into
-`parse_error` rows — a certain cost against a hypothetical benefit. Recorded so that if
-a trailer ever does show up on a scene's version list, the cause is already written
-down. `-PROPER` and `-REPACK` are the same shape but merging those is correct: they are
-re-releases of the same scene, which is what upgrade detection is for.
-
-**Date-at-end names need a configured site list to file correctly.** A second dotted
-shape appeared in real feeds after the MVP: `Site.Title.And.Performers.YYYY.MM.DD.Encode`,
-with the date at the end. It is hostile to this parser because the date is the only
-boundary the ordinary form has, and here it sits past both the site and the title, so
-*nothing* separates those two. The shape is recognised by two conditions that must hold
-together — every token after the date is encode information (the positive test), and
-there is more before the date than after it (which stops an ordinary name whose title
-is all encode-like words from being re-read this way). The site/title split is then
-resolved against `plugins.<pkg>.sites`, falling back to the first token.
-
-The fallback is a guess about the library *path* only: every pre-date token reaches the
-identity key whichever side of the split it lands on, so no split can merge two
-different scenes. But two consequences are worth knowing. Without the list,
-`Anal Only`'s scenes file under `Anal/`. And **changing a site's name changes the
-identity key of every affected scene**, so anything already picked reappears as a new
-group rather than an upgrade of the old one — settle the naming before a long run, not
-during one. No other parser surveyed handles this shape at all, so there is no prior art
-to check the heuristic against; it rests on the two conditions above and on the corpus
-rows pinning the cases that must *not* be read this way.
-
-**Site matching drops separators, and the configured spelling is canonical.** A site's
-own name and the way releases write it disagree about word boundaries roughly 10-15% of
-the time: ThePornDB calls the site `Bang Bros`, most releases use the `short_name` as a
-single token (`BangBros`, `bangbros`), and a minority split it (`Bang.Bros`). Matching
-therefore compares alphanumerics only, so all of those find one site — a slug comparison
-made `bang-bros` and `bangbros` two different sites, which was a live bug the first time
-this ran against the real API. The *matched* name then replaces whatever the release
-wrote, so one site cannot become three groups depending on spelling. The corollary is
-that the configured (or discovered) spelling decides the directory and the key, and
-`ANALONLY` is a legitimate if ugly choice.
-
-**A sub-site is only found when it is the name's leading run.** `Bangbros.Ass.Parade....`
-resolves to `Bang Bros`, not to `Ass Parade`, even though `Ass Parade` is a real site
-TPDB knows — the two-word candidate is `Bangbros Ass`, which matches nothing, so the
-one-word fallback settles it and `Ass Parade` stays in the title. Matching a site
-anywhere in the name was rejected deliberately: `Ass Parade` occurs at token 1 here, and
-accepting it would drop `Bangbros` from the name entirely. Listing
-`"Bangbros Ass Parade"` in config files these under the sub-site if that is wanted.
-
-**A search result is believed only when it is one of the release's own leading runs.**
-Two weaker rules were tried against the live API first and both are wrong. Confirming on
-a non-zero result count invents sites: the search is a substring search over 100k+ names,
-so `Getting In` returns `Getting In Deep` and friends without any site being called that.
-Confirming only when a result *equals the query* fails in the other direction, because
-the site is routinely longer than the query that finds it — `2 Chicks` finds
-`2 Chicks Same Time`, `Free Use` finds `Freeuse Fantasy`, and neither query names a site.
-Worse, that rule then falls through to the one-word retry, and **there is a real site
-named `Free`**, so `Free.Use.Fantasy...` confirmed it and filed the scene under `Free/`
-with the title `Use Fantasy ...` — a confidently wrong answer that got cached. Matching
-returned names against the release's leading runs, longest first, is what settles all
-three cases. `MAX_SITE_TOKENS` caps a site at five words.
-
-**Only two searches are made per unknown site: the first two words, then the first.**
-This is not a cap on the site's length — a four-word site is found by a two-word query —
-but it does mean a site is undiscoverable when neither of its first two words appears in
-its registered name. None has been seen, and each extra query costs a round trip against
-a substring search that gets noisier as the query gets shorter.
-
-**A short site-token cap causes wrong hits, not misses, so it is set generously.**
-`MAX_SITE_TOKENS` is 12. The instinct to keep it small is backwards here. Matching is
-exact equality against a name the service returned and the longest match wins, so extra
-length only adds candidates that must still equal a real site. Truncating actively
-misresolves: capped at five, `Giga.de.Rein.Mk.II.Delusion.group` matched the separate and
-entirely genuine site `Gigade Rein Mk-II`, because the truncated run happened to equal
-it exactly. That search returns 29 near-identical names differing by a letter
-(`Rain`/`Rein`) or a suffix, and only the full-length run picks the right one. Names in
-this space run long — `Giga de Rein no odor - the woman who appeared uncensored -` is ten
-tokens.
-
-**A single-letter query is never sent; a single-digit one is.** The service matches a
-query anywhere in a name, so one letter confirms nothing and costs a page: measured live,
-`a` returns 87,955 results (`Male Reality`, `Laundry`), `b` 25,078, `x` 13,168. Digits are
-the opposite — they lead real site names (`2 Chicks Same Time`) and are cheap, with `0`
-through `4` returning nothing and `8` returning one. A blanket minimum query length would
-have discarded the useful case with the useless one. The cost of the rule: a site named
-with a single letter, and there is one called `X`, can be configured but never
-discovered.
-
-**Searches are paged, with two bounds.** The service caps `per_page` at 100 (asking for
-more returns an empty body), and one-word fallback queries routinely exceed that:
-measured live, `free` returns 149, `teen` 349, `anal` 352, `big` 649. Stopping at page
-one silently loses any site past the first hundred, so a search walks up to
-`MAX_PAGES` (10). The second bound is for queries too broad to be a site lookup at all —
-`a` reports 87,955 matches, and walking 880 pages to look for an exact name is pointless
-work — so a reported total above `MAX_TOTAL_TO_WALK` (1000) stops after page one. Page
-one is still examined, since an exact match tends to rank first. The cost is paid once
-per prefix ever, because both hits and misses are cached.
-
-The list deliberately does **not** apply to the ordinary date-in-the-middle form, where
-the date already supplies the boundary, nor to the bare-domain case below. Extending it
-there would change how names that parse correctly today are read, which is a different
-decision from adding a shape that currently fails.
-
-**A release with no date at all parses only when its site is confirmed.** These exist,
-and until the site lookup arrived they were refused outright — the date was the only
-thing marking where the site stopped. A confirmed site marks it just as well, so the
-shape is now read as site, then title, then encode, with the encode boundary as the only
-anchor.
-
-There is deliberately **no first-token fallback here**, unlike the date-at-end shape.
-The date was also the evidence that a name was a scene release at all, and without it
-`Some.Random.Movie.2023.1080p.BluRay-GRP` and `Some.Band.Live.At.Wembley.1080p.WEB-DL`
-have exactly this shape. Requiring a real site is what replaces that evidence; guessing
-would turn every unrecognised release in a feed into a group filed under its first word.
-
-**Dateless keys carry an empty date segment, and that is a knowing over-collation.**
-`brazzers::alex-coal`. Two encodes of one dateless scene collate with each other, and
-*not* with a dated release of the same scene — ordinary under-collation. The cost is the
-other direction: **two different scenes from one site sharing a title become one group**,
-and in this domain a title is frequently just a performer name. Nothing in a dateless
-name can separate them, so this is the one place the parser knowingly commits the error
-it otherwise refuses. It was chosen over the alternatives — refusing these releases
-entirely, or filling the slot with the RSS publish date, which would put a date that is
-not the scene's date into the library path and split re-posted scenes into separate
-groups. If it bites, the fix is a real per-scene date, not a heuristic.
-
-**A bare TLD directly after a confirmed site belongs to the domain.**
-`BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p` files under `Braless Forever`
-with the title `Emma G and Rocky Beach Days`; without the rule the title would begin
-`com`. It only ever runs *behind a confirmation*, which is what keeps it clear of the
-bare-domain problem below: nothing confirms `Bang` in `Bang.com - Alex Coal`, so the rule
-never fires there. It also never consumes the last remaining token.
+Still refused for length: `-DIGITALPLAYGROUND` and anything over twelve characters.
 
 **A bare-domain prefix becomes the site.** Stripping a website prefix now requires
 `www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`
