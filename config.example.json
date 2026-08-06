@@ -8,6 +8,10 @@
       "sites": ["Anal Only", "Bangbros", "Bangbros Ass Parade", "Vixen"]
     }
   },
+  "siteLookup": {
+    "type": "theporndb",
+    "apiKey": "file:/run/secrets/tpdb_api_key"
+  },
   "downloadClients": [
     {
       "id": "sab",

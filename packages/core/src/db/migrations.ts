@@ -76,11 +76,37 @@ CREATE TABLE imported_files (
 CREATE INDEX imported_files_live ON imported_files (group_id) WHERE trashed_at IS NULL;
 `;
 
+/**
+ * The answers a site lookup has already given, positive and negative alike.
+ *
+ * `site IS NULL` is a real answer — "this prefix is not a site" — and is the
+ * reason the table exists rather than a plain list. Without persisted
+ * negatives, every tick would re-ask the metadata service about the same
+ * unresolvable prefixes for as long as the feed keeps serving them.
+ *
+ * `prefix` is the slug of the queried text, so lookups are insensitive to the
+ * separators and casing a particular release happened to use.
+ */
+const DISCOVERED_SITES = `
+CREATE TABLE discovered_sites (
+  prefix   TEXT PRIMARY KEY,
+  site     TEXT,
+  source   TEXT    NOT NULL,
+  found_at INTEGER NOT NULL
+);
+`;
+
 export const migrations: Migration[] = [
   {
     version: 1,
     up(db) {
       db.exec(INITIAL);
+    },
+  },
+  {
+    version: 2,
+    up(db) {
+      db.exec(DISCOVERED_SITES);
     },
   },
 ];

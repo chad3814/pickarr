@@ -80,6 +80,18 @@ export async function loadConfig(path: string): Promise<PickarrConfig> {
     }
   }
 
+  if (config.siteLookup !== undefined) {
+    const field = 'siteLookup.apiKey';
+    config.siteLookup.apiKey = await resolveSecret(config.siteLookup.apiKey, field);
+    // As with the download clients, the schema's rule saw the `file:` path
+    // rather than the key behind it, so an empty secret file would otherwise
+    // reach the client and produce 401s that look like an outage. The message
+    // states the rule and never the value.
+    if (config.siteLookup.apiKey.length === 0) {
+      throw new Error(`${field} resolves to an empty value`);
+    }
+  }
+
   const portOverride = process.env['PICKARR_PORT'];
   if (portOverride !== undefined) {
     const port = Number.parseInt(portOverride, 10);

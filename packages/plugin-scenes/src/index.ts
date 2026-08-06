@@ -1,5 +1,5 @@
 import type { MediaTypePlugin, PluginConfig, PluginFactory } from '@pickarr/plugin-api';
-import { parseSceneRelease, type SceneParseOptions } from './parse.ts';
+import { parseSceneRelease, sceneSiteCandidates, type SceneParseOptions } from './parse.ts';
 import { scoreScene } from './score.ts';
 import { planSceneImport } from './plan-import.ts';
 
@@ -20,7 +20,9 @@ function readSites(config: PluginConfig): readonly string[] {
 }
 
 const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugin => {
-  const options: SceneParseOptions = { sites: readSites(config) };
+  // Reassigned rather than mutated so that the options object handed to
+  // `parse` is never aliased by a caller that could change it underneath us.
+  let options: SceneParseOptions = { sites: readSites(config) };
 
   return {
     id: 'scenes',
@@ -28,8 +30,20 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
     parse: (releaseName: string) => parseSceneRelease(releaseName, options),
     score: scoreScene,
     planImport: planSceneImport,
+    siteCandidates: (releaseName: string) => sceneSiteCandidates(releaseName, options),
+    learnSites(sites: readonly string[]) {
+      const known = new Set(options.sites ?? []);
+      const merged = [...(options.sites ?? [])];
+      for (const site of sites) {
+        if (site.length > 0 && !known.has(site)) {
+          known.add(site);
+          merged.push(site);
+        }
+      }
+      options = { sites: merged };
+    },
   };
 };
 
 export default createScenesPlugin;
-export { parseSceneRelease, scoreScene, planSceneImport };
+export { parseSceneRelease, sceneSiteCandidates, scoreScene, planSceneImport };

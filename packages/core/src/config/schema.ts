@@ -58,6 +58,19 @@ export const feedSchema = z.object({
   intervalSeconds: z.number().int().positive().default(900),
 });
 
+/**
+ * Optional metadata service used to settle the site of a release whose name
+ * cannot settle it alone. Absent means the feature is off and such names fall
+ * back to treating the first word as the site.
+ */
+export const siteLookupSchema = z.object({
+  type: z.literal('theporndb'),
+  apiKey: z.string().min(1),
+  baseUrl: z.string().url().default('https://api.theporndb.net'),
+});
+
+export type SiteLookupConfig = z.infer<typeof siteLookupSchema>;
+
 export const configSchema = z.object({
   server: z.object({ port: z.number().int().positive().default(8080) }).default({ port: 8080 }),
   database: z.object({ path: z.string().min(1) }),
@@ -74,6 +87,7 @@ export const configSchema = z.object({
   ),
   downloadClients: z.array(downloadClientSchema).min(1),
   feeds: z.array(feedSchema).min(1),
+  siteLookup: siteLookupSchema.optional(),
 });
 
 export type PickarrConfig = z.infer<typeof configSchema>;

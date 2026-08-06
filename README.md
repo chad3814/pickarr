@@ -49,6 +49,10 @@ immediately rather than starting in a broken state.
 | `downloadClients[].category` | download client | The SABnzbd category Pickarr uses for its own jobs. **Must be unique to this Pickarr instance** — see below. |
 | `downloadClients[].importMode` | download client | `"move"` or `"copy"` — what happens to a completed download when it's imported into the library. |
 | `downloadClients[].pathMappings[]` | download client | `{ from, to }` pairs translating SABnzbd's view of a completed download's path into the path Pickarr sees on its own filesystem. |
+| `siteLookup` | top level | Optional. A metadata service used to confirm site names for releases that put the date at the end. Omit it and those releases file under their first word. |
+| `siteLookup.type` | site lookup | `"theporndb"` is the only supported value. |
+| `siteLookup.apiKey` | site lookup | The service's API key, or a `file:/run/secrets/<name>` reference. Sent as a bearer token, never in a URL. |
+| `siteLookup.baseUrl` | site lookup | Defaults to `https://api.theporndb.net`. |
 | `feeds[]` | top level | One or more RSS feeds to poll. |
 | `feeds[].url` | feed | The RSS feed URL, including any indexer API key. |
 | `feeds[].plugin` | feed | Which configured plugin package interprets this feed's entries. |
@@ -95,6 +99,60 @@ land in `BangBros/`. Pick one and keep it.
 files `Anal Only`'s scenes under `Anal/`. That is a wrong directory, never a wrong
 grouping: the whole pre-date run still reaches the identity key either way, so two
 different scenes can never merge because of how the split fell.
+
+### Looking sites up automatically
+
+Maintaining that list by hand gets old. With `siteLookup` configured, a site Pickarr
+does not recognise is looked up in ThePornDB before the batch is parsed, and confirmed
+answers are remembered:
+
+```json
+"siteLookup": {
+  "type": "theporndb",
+  "apiKey": "file:/run/secrets/tpdb_api_key"
+}
+```
+
+It searches for the first two words of the name, then the first word alone if that found
+nothing. Two words first is what keeps it accurate: `bangbros ass` matches no site and
+rules itself out, whereas `anal` on its own matches a great many sites that are not
+`Anal Only`.
+
+A result is believed only when it **is** one of the release's own leading runs — not
+when it merely equals the query, and not merely because the search returned something.
+That distinction does real work in both directions:
+
+| Release | Query | Returns | Confirmed |
+|---|---|---|---|
+| `Free.Use.Fantasy.…` | `Free Use` | `Freeuse Fantasy`, `Free Use MILF`, … | `Freeuse Fantasy` |
+| `2.Chicks.Same.Time.…` | `2 Chicks` | `2 Chicks Same Time`, `2 Chicks 1 Dick` | `2 Chicks Same Time` |
+| `Bangbros.Ass.Parade.…` | `Bangbros Ass` → `Bangbros` | (none) → `Bang Bros`, … | `Bang Bros` |
+| `Getting.In.Savannahs.…` | `Getting In` | `Getting In Deep`, `Getting Into It` | none |
+
+The site is regularly longer than the query that found it, so a rule of "does a result
+equal what I searched for" would reject `2 Chicks Same Time`. And because the search is
+a substring search over 100k+ names, "did the search return anything" would invent a
+site called `Getting In`. Matching against the release's leading runs answers both. The
+longest run wins, so a four-word site beats the two-word run inside it, and site names
+of more than five words are not considered.
+
+Answers are cached in the `discovered_sites` table, **including the negatives** — a
+prefix that is not a site is asked about once, not every tick. Your config list always
+wins over a discovered one, and Pickarr never writes to your config file. To see what
+it has learned:
+
+```sql
+SELECT prefix, site, source, found_at FROM discovered_sites ORDER BY prefix;
+```
+
+If a lookup *fails* — service down, bad key, rate limited — nothing is cached, and the
+name falls back to its first word for that tick. That key is durable: the group stays
+where it landed even after lookups recover. Pickarr logs a line naming each affected
+title so you can see when it happened.
+
+Changing a site's name — in the config list or by deleting a `discovered_sites` row —
+changes the identity key of its scenes, so anything already picked reappears as a new
+entry rather than as an upgrade. Settle the naming before a long run, not during one.
 
 ## Operational notes
 
