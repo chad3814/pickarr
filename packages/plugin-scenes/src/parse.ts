@@ -94,7 +94,17 @@ const SOURCE_TOKEN =
  * perfectly ordinary title words in this domain.
  */
 const ANCILLARY_TOKEN =
-  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
+  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTER|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
+
+/**
+ * An upscale is a lower-resolution source stretched to a higher one, so it
+ * carries the *number* of the better release without its detail. Recorded as
+ * an extra because `scoreScene` has to rank it below a native encode at the
+ * same resolution — left unrecorded the two tie, and a tie is enough for the
+ * upgrade path to trash a genuine 2160p file and replace it with a stretched
+ * 1080p one.
+ */
+const UPSCALED_TOKEN = /\bUPSCALED?\b/i;
 
 /** Immersive/VR layout tags, recorded as a quality extra when present. */
 const VR_TOKEN = /\b(?:VR|MKX200|MKX220|FISHEYE190|OCULUS|GEARVR|PSVR|SMARTPHONE)\b/i;
@@ -550,6 +560,7 @@ function extractQuality(tail: string, releaseGroup: string | undefined): Quality
   const container = firstMatch(CONTAINERS, haystack);
   if (container !== undefined) extras['container'] = container;
   if (VR_TOKEN.test(haystack)) extras['vr'] = true;
+  if (UPSCALED_TOKEN.test(haystack)) extras['upscaled'] = true;
 
   const quality: QualityTokens = { extras };
   const resolution = firstMatch(RESOLUTIONS, haystack);
@@ -686,9 +697,127 @@ function findSceneDate(tokens: Token[]): DateSpan | null {
   return null;
 }
 
-function parseSceneForm(name: string): ParsedRelease | null {
-  const date = findSceneDate(tokensOf(name));
+/**
+ * Reduces a site name to a comparison key: lowercase, alphanumerics only.
+ *
+ * Separators are dropped rather than normalised because a site's own name and
+ * the way releases write it disagree about word boundaries far more often than
+ * they disagree about letters. `Bang Bros` is the site; most of its releases
+ * say `BangBros` or `bangbros`, and a minority say `Bang.Bros`. A slug would
+ * make those three different sites (`bang-bros` vs `bangbros`); this makes
+ * them one.
+ */
+function siteComparisonKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+interface SiteMatch {
+  /** How many leading tokens the site name claims. */
+  readonly tokenCount: number;
+  /** The site's canonical spelling, which is what reaches the key. */
+  readonly name: string;
+}
+
+function matchSitePrefix(before: Token[], sites: readonly string[]): SiteMatch | null {
+  const wanted = new Map<string, string>();
+  for (const site of sites) {
+    const key = siteComparisonKey(site);
+    const display = prettify(site);
+    if (key.length > 0 && display.length > 0 && !wanted.has(key)) wanted.set(key, display);
+  }
+  if (wanted.size === 0) return null;
+
+  for (let count = before.length - 1; count >= 1; count -= 1) {
+    const key = siteComparisonKey(before.slice(0, count).map((token) => token.text).join(' '));
+    const name = wanted.get(key);
+    if (name !== undefined) return { tokenCount: count, name };
+  }
+  return null;
+}
+
+/**
+ * Shape 1b: `Site.Title.And.Performers.YYYY.MM.DD.Encode`, with the date at
+ * the end rather than between the site and the title.
+ *
+ * This shape is hostile to the rest of the parser because the date is the only
+ * boundary the ordinary form has, and here it sits at the far end: *nothing*
+ * separates the site from the title. Two conditions have to hold together
+ * before a name is read this way, and each rejects cases the other admits:
+ *
+ *  - every token after the date is encode information. In the ordinary form
+ *    the title follows the date, so a single title word after it rules this
+ *    shape out. This is the positive shape test.
+ *  - there is more before the date than after it. This is what stops an
+ *    ordinary name whose title happens to be entirely encode-like words from
+ *    being re-read as this shape.
+ *
+ * The site/title split is then a guess, resolved against the configured site
+ * list and falling back to the first token. It is only ever a guess about the
+ * library *path*: every pre-date token still reaches the identity key, whether
+ * in the site half or the scene half, so no split can make two different
+ * scenes collide. Moving the split changes where a scene files, never what it
+ * collates with.
+ */
+/**
+ * The pre-date tokens of a date-at-end name, or `null` for anything that is
+ * not one.
+ *
+ * Extracted so the shape test is stated once: anything else that needs to know
+ * whether a name is this shape goes through here rather than keeping a second
+ * copy free to drift from it.
+ */
+function dateAtEndPrefixTokens(name: string, tokens: Token[], date: DateSpan): Token[] | null {
+  const before = tokens.filter((token) => token.start + token.text.length <= date.startOffset);
+  const after = tokens.filter((token) => token.start >= date.endOffset);
+  if (after.length === 0 || before.length <= after.length) return null;
+
+  const tail = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
+  const detached = detachReleaseGroup(tokensOf(tail), tail);
+  if (detached.tokens.length === 0) return null;
+  if (!detached.tokens.every((token) => isEncodeToken(token.text))) return null;
+
+  return before;
+}
+
+function parseDateAtEndForm(
+  name: string,
+  tokens: Token[],
+  date: DateSpan,
+  options: SceneParseOptions,
+): ParsedRelease | null {
+  const before = dateAtEndPrefixTokens(name, tokens, date);
+  if (before === null) return null;
+
+  const tail = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
+  const detached = detachReleaseGroup(tokensOf(tail), tail);
+
+  // A matched site contributes its *canonical* spelling, not the release's.
+  // The same site arrives written several ways — `BangBros`, `bangbros`,
+  // `Bang.Bros` — and keying on whichever one this release used would file
+  // them as three sites. Unmatched names have no canonical form to use, so
+  // they fall back to the release's own first token.
+  const match = matchSitePrefix(before, options.sites ?? []);
+  const siteTokens = match?.tokenCount ?? 1;
+  const lastSiteToken = before[siteTokens - 1];
+  const firstSceneToken = before[siteTokens];
+  if (lastSiteToken === undefined || firstSceneToken === undefined) return null;
+
+  const site =
+    match?.name ?? prettify(name.slice(0, lastSiteToken.start + lastSiteToken.text.length));
+  const sceneText = prettify(name.slice(firstSceneToken.start, date.startOffset));
+  if (site.length === 0 || sceneText.length === 0) return null;
+  if (sceneText.toUpperCase() === MARKER_TOKEN) return null;
+
+  return buildRelease(site, date.iso, sceneText, slug(sceneText), extractQuality(tail, detached.group));
+}
+
+function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease | null {
+  const tokens = tokensOf(name);
+  const date = findSceneDate(tokens);
   if (date === null) return null;
+
+  const atEnd = parseDateAtEndForm(name, tokens, date, options);
+  if (atEnd !== null) return atEnd;
 
   const site = prettify(name.slice(0, date.startOffset));
   const rest = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
@@ -901,12 +1030,40 @@ function parseDelimitedForm(name: string): ParsedRelease | null {
   );
 }
 
-export function parseSceneRelease(releaseName: string): ParsedRelease | null {
+export interface SceneParseOptions {
+  /**
+   * Known site names, used only by the date-at-end shape, where nothing in the
+   * name separates the site from the title. Spelling is free: matching is on
+   * slugs, so case and separators do not have to agree with the release.
+   * Unmatched names fall back to treating the first token as the site.
+   */
+  readonly sites?: readonly string[];
+}
+
+/**
+ * Site names worth confirming for a release name, most specific first, or an
+ * empty array when the name needs no help.
+ *
+ * Only date-at-end names need it, and only when the configured list does not
+ * already cover them — the ordinary form carries its own boundary. Two
+ * candidates are offered, the first two tokens and then the first one, because
+ * a search for a site's full name is precise while a search for its first word
+ * alone is not: `bangbros ass` returns nothing and rules itself out, whereas
+ * `anal` matches a great many sites that are not `Anal Only`. Trying the
+ * longer one first is what makes the shorter one safe to fall back to.
+ *
+ * A candidate never consumes every pre-date token: something has to remain to
+ * be the title.
+ */
+export function parseSceneRelease(
+  releaseName: string,
+  options: SceneParseOptions = {},
+): ParsedRelease | null {
   const trimmed = releaseName.trim();
   if (trimmed.length === 0) return null;
 
   const name = stripFileExtension(stripWebsitePrefix(trimmed)).trim();
   if (name.length === 0) return null;
 
-  return parseDelimitedForm(name) ?? parseSceneForm(name);
+  return parseDelimitedForm(name) ?? parseSceneForm(name, options);
 }

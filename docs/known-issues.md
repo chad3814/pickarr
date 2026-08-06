@@ -54,6 +54,36 @@ a trailer ever does show up on a scene's version list, the cause is already writ
 down. `-PROPER` and `-REPACK` are the same shape but merging those is correct: they are
 re-releases of the same scene, which is what upgrade detection is for.
 
+**Date-at-end names need a configured site list to file correctly.** A second dotted
+shape appeared in real feeds after the MVP: `Site.Title.And.Performers.YYYY.MM.DD.Encode`,
+with the date at the end. It is hostile to this parser because the date is the only
+boundary the ordinary form has, and here it sits past both the site and the title, so
+*nothing* separates those two. The shape is recognised by two conditions that must hold
+together — every token after the date is encode information (the positive test), and
+there is more before the date than after it (which stops an ordinary name whose title
+is all encode-like words from being re-read this way). The site/title split is then
+resolved against `plugins.<pkg>.sites`, falling back to the first token.
+
+The fallback is a guess about the library *path* only: every pre-date token reaches the
+identity key whichever side of the split it lands on, so no split can merge two
+different scenes. But two consequences are worth knowing. Without the list,
+`Anal Only`'s scenes file under `Anal/`. And **changing a site's name changes the
+identity key of every affected scene**, so anything already picked reappears as a new
+group rather than an upgrade of the old one — settle the naming before a long run, not
+during one. No other parser surveyed handles this shape at all, so there is no prior art
+to check the heuristic against; it rests on the two conditions above and on the corpus
+rows pinning the cases that must *not* be read this way.
+
+**Site matching drops separators, and the configured spelling is canonical.** A site's
+own name and the way releases write it disagree about word boundaries roughly 10-15% of
+the time: the site is named `Bang Bros`, most of its releases write it as a single token
+(`BangBros`, `bangbros`), and a minority split it (`Bang.Bros`). Matching therefore
+compares alphanumerics only, so all of those find one configured site — a slug comparison
+made `bang-bros` and `bangbros` two different sites. The *configured* name then replaces
+whatever the release wrote, so one site cannot become three groups depending on spelling.
+The corollary is that the configured spelling decides the directory and the key, and
+`ANALONLY` is a legitimate if ugly choice.
+
 **A bare-domain prefix becomes the site.** Stripping a website prefix now requires
 `www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`
 are the same string shape and guessing wrong merged five real studios onto one identity.
