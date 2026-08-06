@@ -24,8 +24,9 @@ function sanitizeSegment(value: string): string {
 }
 
 /**
- * Renders a normalized, hyphen-joined slug (e.g. `alex-coal`) as a
- * human-readable, title-cased segment (`Alex Coal`).
+ * Renders a slug from `identityKey` as a human-readable, title-cased path
+ * segment: `alex-coal` becomes `Alex Coal`, and `kylie--page-turner` becomes
+ * `Kylie - Page Turner`.
  *
  * Destinations are derived from `identityKey`'s slugs rather than from the
  * release's raw display strings so that any two releases the parser
@@ -35,13 +36,36 @@ function sanitizeSegment(value: string): string {
  * normalization in `identityKey`); deriving the path from the raw display
  * strings would let that surface variation leak into the path and split one
  * scene's files across two destinations.
+ *
+ * The `--` split is what makes the reverse direction hold too, and it is not
+ * cosmetic. The parser's listing form joins its sorted components with `--`
+ * precisely because `slug()` can never emit that sequence, which is what keeps
+ * the identity injective on the component multiset. Splitting on a single `-`
+ * here erased that boundary again one layer down: `kylie--page-turner` and
+ * `kylie-page--turner` are two different scenes with two different keys, and
+ * both rendered `Kylie Page Turner`. Nothing is overwritten -- the importer
+ * refuses an occupied destination -- but the second scene then fails on every
+ * attempt and can never be imported at all.
+ *
+ * Injectivity, precisely: `slug()` emits only `[a-z0-9]` runs separated by
+ * single `-`, with no leading or trailing `-`. So a component contains no
+ * `--`, and splitting it on `-` yields no empty words. A rendered word
+ * therefore contains neither a space nor a hyphen, words are joined by ` `,
+ * and components by ` - `; neither delimiter can occur inside a word, so the
+ * rendering is uniquely decodable and distinct slugs render distinctly.
  */
 function titleCaseSlug(value: string): string {
   return value
-    .split('-')
-    .filter((part) => part.length > 0)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
+    .split('--')
+    .map((component) =>
+      component
+        .split('-')
+        .filter((word) => word.length > 0)
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' '),
+    )
+    .filter((component) => component.length > 0)
+    .join(' - ');
 }
 
 /** Counts path segments, e.g. `extras/scene.mp4` has depth 2. */

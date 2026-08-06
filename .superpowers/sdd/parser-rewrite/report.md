@@ -1,15 +1,21 @@
 # Release-name parser rewrite: the date is the boundary
 
 `packages/plugin-scenes/src/parse.ts`, rewritten. Tests:
-`packages/plugin-scenes/test/parse-corpus.test.ts` (new, 17 tests);
+`packages/plugin-scenes/test/parse-corpus.test.ts` (new, 23 tests);
 `packages/plugin-scenes/test/parse.test.ts` (unchanged, still passing).
 
-No file outside `packages/plugin-scenes` was touched. `plan-import.ts` did not
-need to change: the identity shape is still exactly
-`slug(site) ":" ISO-date ":" slug(scene)`, three fields, slugs restricted to
-`[a-z0-9-]`, which is what keeps `titleCaseSlug` injective and
-`identityKey.split(':')` well-defined. A corpus invariant now pins that shape
-directly.
+No file outside `packages/plugin-scenes` was touched. The identity shape is
+still exactly `slug(site) ":" ISO-date ":" slug(scene)`, three fields, slugs
+restricted to `[a-z0-9-]`, and `identityKey.split(':')` stays well-defined; a
+corpus invariant pins that shape directly.
+
+`plan-import.ts` **did** have to change, and this is the one place the brief
+allows it only if identity genuinely requires it — it does. The listing form
+joins its sorted components with `--`, and `titleCaseSlug` split on a single
+`-`, which erased that boundary one layer down: two different scenes with two
+different keys rendered the same destination. `titleCaseSlug` was *not*
+injective, contrary to what the first version of this report claimed; the fix
+and the corrected argument are in §9.
 
 ## 1. The boundary rule, and why it is correct in general
 
@@ -212,7 +218,7 @@ different key` and by the four re-split rows in the corpus.
 
 ## 5. Corpus
 
-75 rows. `new?` marks a shape the previous parser refused or mis-parsed.
+76 rows. `new?` marks a shape the previous parser refused or mis-parsed.
 `quality` is `resolution|source|codec|container|vr|group`, `-` for absent, and
 is pinned per row: a shape can parse to the right key and still lose its
 quality tokens, which ties every encode in a group at one score and inverts
@@ -246,57 +252,58 @@ asserted never to. Generated from the test table by running the parser.
 | 22 | `[Vixen] Beautiful Episode - Alex Coal - 2023-07-19 - 1080p` | `vixen:2023-07-19:alex-coal--beautiful-episode` | `Beautiful Episode - Alex Coal` | `1080|-|-|-|-|-` | **new** |
 | 23 | `[Vixen] 19.07.2023 - Alex Coal - Beautiful Episode [1080p]` | `vixen:2023-07-19:alex-coal--beautiful-episode` | `Alex Coal - Beautiful Episode` | `1080|-|-|-|-|-` | **new** |
 | 24 | `[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 1080p` | `tushy:2023-07-22:alex-coal--beautiful-episode` | `Beautiful Episode - Alex Coal` | `1080|-|-|-|-|-` | **new** |
-| 25 | `[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 2160p HEVC` | `tushy:2023-07-22:alex-coal--beautiful-episode` | `Beautiful Episode - Alex Coal` | `2160|-|h265|-|-|-` | **new** |
-| 26 | `[Tushy] Different Episode - Alex Coal - 2023-07-22 - 1080p` | `tushy:2023-07-22:alex-coal--different-episode` | `Different Episode - Alex Coal` | `1080|-|-|-|-|-` | **new** |
-| 27 | `Pure Taboo - Sarah Arabic, Lily LaBeau - A Costly Divorce (June 24, 2025) [1080p HEVC x265]` | `pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau` | `Sarah Arabic, Lily LaBeau - A Costly Divorce` | `1080|-|x265|-|-|-` | **new** |
-| 28 | `Pure Taboo - A Costly Divorce - Sarah Arabic, Lily LaBeau - 2025-06-24 - 2160p` | `pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau` | `A Costly Divorce - Sarah Arabic, Lily LaBeau` | `2160|-|-|-|-|-` | **new** |
-| 29 | `Pure Taboo - Sarah Arabic - A Different Divorce (Jun 24, 2025) [1080p]` | `pure-taboo:2025-06-24:a-different-divorce--sarah-arabic` | `Sarah Arabic - A Different Divorce` | `1080|-|-|-|-|-` | **new** |
-| 30 | `TeamSkeet.24.01.02.Jane.Doe.XXX.1080p.MP4-XXX` | `teamskeet:2024-01-02:jane-doe` | `Jane Doe` | `1080|-|-|mp4|-|XXX` |  |
-| 31 | `TeamSkeet.24.01.02.Jane.Doe.XXX.2160p.HEVC.MP4-XXX` | `teamskeet:2024-01-02:jane-doe` | `Jane Doe` | `2160|-|h265|mp4|-|XXX` |  |
-| 32 | `TeamSkeet.24.01.02.John.Smith.XXX.1080p.MP4-XXX` | `teamskeet:2024-01-02:john-smith` | `John Smith` | `1080|-|-|mp4|-|XXX` |  |
-| 33 | `Site.23.04.15.Anniversary.XXX.1080p.MP4-G` | `site:2023-04-15:anniversary` | `Anniversary` | `1080|-|-|mp4|-|G` |  |
-| 34 | `Site.23.04.15.Anniversary.XXX.Edition.XXX.1080p.MP4-G` | `site:2023-04-15:anniversary-xxx-edition` | `Anniversary XXX Edition` | `1080|-|-|mp4|-|G` |  |
-| 35 | `Site.23.04.15.Anniversary.XXX.Edition.XXX.2160p.HEVC.MP4-G` | `site:2023-04-15:anniversary-xxx-edition` | `Anniversary XXX Edition` | `2160|-|h265|mp4|-|G` |  |
-| 36 | `Site.23.04.15.Anniversary.XXX.Web.Party.XXX.MP4-GRP1` | `site:2023-04-15:anniversary-xxx-web-party` | `Anniversary XXX Web Party` | `-|-|-|mp4|-|GRP1` |  |
-| 37 | `Site.23.04.15.Anniversary.XXX.Web.Party.XXX.1080p.MP4-GRP2` | `site:2023-04-15:anniversary-xxx-web-party` | `Anniversary XXX Web Party` | `1080|-|-|mp4|-|GRP2` |  |
-| 38 | `Site.23.04.15.Anniversary.XXX.Web.Bash.XXX.MP4-GRP2` | `site:2023-04-15:anniversary-xxx-web-bash` | `Anniversary XXX Web Bash` | `-|-|-|mp4|-|GRP2` |  |
-| 39 | `Site.23.04.15.Anniversary.XXX.4K.Party.XXX.MP4-GRP1` | `site:2023-04-15:anniversary-xxx-4k-party` | `Anniversary XXX 4K Party` | `-|-|-|mp4|-|GRP1` |  |
-| 40 | `Site.23.04.15.Gala.XXX.MP4.Madness.XXX.1080p.MP4-G` | `site:2023-04-15:gala-xxx-mp4-madness` | `Gala XXX MP4 Madness` | `1080|-|-|mp4|-|G` |  |
-| 41 | `Site.23.04.15.Gala.XXX.MP4.Mayhem.XXX.1080p.MP4-G` | `site:2023-04-15:gala-xxx-mp4-mayhem` | `Gala XXX MP4 Mayhem` | `1080|-|-|mp4|-|G` |  |
-| 42 | `Site.23.04.15.XXX.Anniversary.XXX.1080p.MP4-GRP` | `site:2023-04-15:xxx-anniversary` | `XXX Anniversary` | `1080|-|-|mp4|-|GRP` |  |
-| 43 | `Site.23.04.15.XXXtreme.Makeover.XXX.1080p.MP4-GRP` | `site:2023-04-15:xxxtreme-makeover` | `XXXtreme Makeover` | `1080|-|-|mp4|-|GRP` |  |
-| 44 | `Site.23.04.15.Girls.Of.Web.1080p.MP4-G` | `site:2023-04-15:girls-of-web` | `Girls Of Web` | `1080|-|-|mp4|-|G` |  |
-| 45 | `Site.23.04.15.Girls.Of.Print.1080p.MP4-G` | `site:2023-04-15:girls-of-print` | `Girls Of Print` | `1080|-|-|mp4|-|G` |  |
-| 46 | `Site.23.04.15.The.1080.Club.XXX.1080p.MP4-G` | `site:2023-04-15:the-1080-club` | `The 1080 Club` | `1080|-|-|mp4|-|G` |  |
-| 47 | `Site.23.04.15.Agent.007.Undercover.XXX.1080p.MP4-G` | `site:2023-04-15:agent-007-undercover` | `Agent 007 Undercover` | `1080|-|-|mp4|-|G` |  |
-| 48 | `Site.23.04.15.Agent.007.Overcover.XXX.1080p.MP4-G` | `site:2023-04-15:agent-007-overcover` | `Agent 007 Overcover` | `1080|-|-|mp4|-|G` |  |
-| 49 | `Site.23.04.15.Miss.AVI.XXX.1080p.MP4-G` | `site:2023-04-15:miss-avi` | `Miss AVI` | `1080|-|-|mp4|-|G` |  |
-| 50 | `Site.23.04.15.Miss.MKV.XXX.1080p.MP4-G` | `site:2023-04-15:miss-mkv` | `Miss MKV` | `1080|-|-|mp4|-|G` |  |
-| 51 | `[Site] 2023-01-01 - Girls Of Web` | `site:2023-01-01:girls-of-web` | `Girls Of Web` | `-|-|-|-|-|-` | **new** |
-| 52 | `[Site] 2023-01-01 - Episode 2 4K` | `site:2023-01-01:episode-2` | `Episode 2` | `2160|-|-|-|-|-` | **new** |
-| 53 | `[Site] 2023-01-01 - Episode 3 4K` | `site:2023-01-01:episode-3` | `Episode 3` | `2160|-|-|-|-|-` | **new** |
-| 54 | `Site.23.04.15.Alex.Coal.1080p.MP4-WRB` | `site:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` |  |
-| 55 | `Site.23.04.15.Alex.Coal.XXX.MP4-GRP` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|mp4|-|GRP` |  |
-| 56 | `Site.23.04.15.Alex.Coal.XXX.MKV-GRP` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|mkv|-|GRP` |  |
-| 57 | `Site.23.04.15.Alex.Coal.XXX.WMV` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|wmv|-|-` |  |
-| 58 | `Site.23.04.15.Alex.Coal.XXX` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|-|-|-` |  |
-| 59 | `4K.Media.23.04.15.Alex.Coal.XXX.1080p.MP4-G` | `4k-media:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|G` |  |
-| 60 | `WebYoung.23.04.15.Alex.Coal.XXX.1080p.MP4-G` | `webyoung:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|G` |  |
-| 61 | `Tushy.com.23.04.15.Emily.Willis.XXX.1080p-G` | `tushy-com:2023-04-15:emily-willis` | `Emily Willis` | `1080|-|-|-|-|G` |  |
-| 62 | `Vintage.1979.Collection.23.04.15.Alex.Coal.XXX.1080p.MP4-G` | `vintage-1979-collection:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|G` |  |
-| 63 | `Bang.com - Alex Coal - Deep - 2023-01-01 - 1080p` | `bang-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
-| 64 | `Deeper.com - Alex Coal - Deep - 2023-01-01 - 1080p` | `deeper-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
-| 65 | `Private.com - Alex Coal - Deep - 2023-01-01 - 1080p` | `private-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
-| 66 | `Nubiles.net - Alex Coal - Deep - 2023-01-01 - 1080p` | `nubiles-net:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
-| 67 | `[Bang.com] - Alex Coal - Deep - 2023-01-01 - 1080p` | `bang-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
-| 68 | `http://www.site.com/rss - Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB` | `brazzers:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` | **new** |
-| 69 | `[pornsite.net] Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB` | `brazzers:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` | **new** |
-| 70 | `[Vixen] Kylie - Page Turner - 2023-07-19` | `vixen:2023-07-19:kylie--page-turner` | `Kylie - Page Turner` | `-|-|-|-|-|-` | **new** |
-| 71 | `[Vixen] Kylie Page - Turner - 2023-07-19` | `vixen:2023-07-19:kylie-page--turner` | `Kylie Page - Turner` | `-|-|-|-|-|-` | **new** |
-| 72 | `[Tushy] Anna Bell - Peaks - 2023-07-22` | `tushy:2023-07-22:anna-bell--peaks` | `Anna Bell - Peaks` | `-|-|-|-|-|-` | **new** |
-| 73 | `[Tushy] Anna - Bell Peaks - 2023-07-22` | `tushy:2023-07-22:anna--bell-peaks` | `Anna - Bell Peaks` | `-|-|-|-|-|-` | **new** |
-| 74 | `[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.1080p.MP4-WRB` | `empornium-brazzers:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` | **new** |
-| 75 | `[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-WRB` | `empornium-brazzers:2023-04-15:alex-coal` | `Alex Coal` | `2160|-|h265|mp4|-|WRB` | **new** |
+| 25 | `[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 1080p WEB-DL x264` | `tushy:2023-07-22:alex-coal--beautiful-episode` | `Beautiful Episode - Alex Coal` | `1080|web-dl|x264|-|-|-` | **new** |
+| 26 | `[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 2160p HEVC` | `tushy:2023-07-22:alex-coal--beautiful-episode` | `Beautiful Episode - Alex Coal` | `2160|-|h265|-|-|-` | **new** |
+| 27 | `[Tushy] Different Episode - Alex Coal - 2023-07-22 - 1080p` | `tushy:2023-07-22:alex-coal--different-episode` | `Different Episode - Alex Coal` | `1080|-|-|-|-|-` | **new** |
+| 28 | `Pure Taboo - Sarah Arabic, Lily LaBeau - A Costly Divorce (June 24, 2025) [1080p HEVC x265]` | `pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau` | `Sarah Arabic, Lily LaBeau - A Costly Divorce` | `1080|-|x265|-|-|-` | **new** |
+| 29 | `Pure Taboo - A Costly Divorce - Sarah Arabic, Lily LaBeau - 2025-06-24 - 2160p` | `pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau` | `A Costly Divorce - Sarah Arabic, Lily LaBeau` | `2160|-|-|-|-|-` | **new** |
+| 30 | `Pure Taboo - Sarah Arabic - A Different Divorce (Jun 24, 2025) [1080p]` | `pure-taboo:2025-06-24:a-different-divorce--sarah-arabic` | `Sarah Arabic - A Different Divorce` | `1080|-|-|-|-|-` | **new** |
+| 31 | `TeamSkeet.24.01.02.Jane.Doe.XXX.1080p.MP4-XXX` | `teamskeet:2024-01-02:jane-doe` | `Jane Doe` | `1080|-|-|mp4|-|XXX` |  |
+| 32 | `TeamSkeet.24.01.02.Jane.Doe.XXX.2160p.HEVC.MP4-XXX` | `teamskeet:2024-01-02:jane-doe` | `Jane Doe` | `2160|-|h265|mp4|-|XXX` |  |
+| 33 | `TeamSkeet.24.01.02.John.Smith.XXX.1080p.MP4-XXX` | `teamskeet:2024-01-02:john-smith` | `John Smith` | `1080|-|-|mp4|-|XXX` |  |
+| 34 | `Site.23.04.15.Anniversary.XXX.1080p.MP4-G` | `site:2023-04-15:anniversary` | `Anniversary` | `1080|-|-|mp4|-|G` |  |
+| 35 | `Site.23.04.15.Anniversary.XXX.Edition.XXX.1080p.MP4-G` | `site:2023-04-15:anniversary-xxx-edition` | `Anniversary XXX Edition` | `1080|-|-|mp4|-|G` |  |
+| 36 | `Site.23.04.15.Anniversary.XXX.Edition.XXX.2160p.HEVC.MP4-G` | `site:2023-04-15:anniversary-xxx-edition` | `Anniversary XXX Edition` | `2160|-|h265|mp4|-|G` |  |
+| 37 | `Site.23.04.15.Anniversary.XXX.Web.Party.XXX.MP4-GRP1` | `site:2023-04-15:anniversary-xxx-web-party` | `Anniversary XXX Web Party` | `-|-|-|mp4|-|GRP1` |  |
+| 38 | `Site.23.04.15.Anniversary.XXX.Web.Party.XXX.1080p.MP4-GRP2` | `site:2023-04-15:anniversary-xxx-web-party` | `Anniversary XXX Web Party` | `1080|-|-|mp4|-|GRP2` |  |
+| 39 | `Site.23.04.15.Anniversary.XXX.Web.Bash.XXX.MP4-GRP2` | `site:2023-04-15:anniversary-xxx-web-bash` | `Anniversary XXX Web Bash` | `-|-|-|mp4|-|GRP2` |  |
+| 40 | `Site.23.04.15.Anniversary.XXX.4K.Party.XXX.MP4-GRP1` | `site:2023-04-15:anniversary-xxx-4k-party` | `Anniversary XXX 4K Party` | `-|-|-|mp4|-|GRP1` |  |
+| 41 | `Site.23.04.15.Gala.XXX.MP4.Madness.XXX.1080p.MP4-G` | `site:2023-04-15:gala-xxx-mp4-madness` | `Gala XXX MP4 Madness` | `1080|-|-|mp4|-|G` |  |
+| 42 | `Site.23.04.15.Gala.XXX.MP4.Mayhem.XXX.1080p.MP4-G` | `site:2023-04-15:gala-xxx-mp4-mayhem` | `Gala XXX MP4 Mayhem` | `1080|-|-|mp4|-|G` |  |
+| 43 | `Site.23.04.15.XXX.Anniversary.XXX.1080p.MP4-GRP` | `site:2023-04-15:xxx-anniversary` | `XXX Anniversary` | `1080|-|-|mp4|-|GRP` |  |
+| 44 | `Site.23.04.15.XXXtreme.Makeover.XXX.1080p.MP4-GRP` | `site:2023-04-15:xxxtreme-makeover` | `XXXtreme Makeover` | `1080|-|-|mp4|-|GRP` |  |
+| 45 | `Site.23.04.15.Girls.Of.Web.1080p.MP4-G` | `site:2023-04-15:girls-of-web` | `Girls Of Web` | `1080|-|-|mp4|-|G` |  |
+| 46 | `Site.23.04.15.Girls.Of.Print.1080p.MP4-G` | `site:2023-04-15:girls-of-print` | `Girls Of Print` | `1080|-|-|mp4|-|G` |  |
+| 47 | `Site.23.04.15.The.1080.Club.XXX.1080p.MP4-G` | `site:2023-04-15:the-1080-club` | `The 1080 Club` | `1080|-|-|mp4|-|G` |  |
+| 48 | `Site.23.04.15.Agent.007.Undercover.XXX.1080p.MP4-G` | `site:2023-04-15:agent-007-undercover` | `Agent 007 Undercover` | `1080|-|-|mp4|-|G` |  |
+| 49 | `Site.23.04.15.Agent.007.Overcover.XXX.1080p.MP4-G` | `site:2023-04-15:agent-007-overcover` | `Agent 007 Overcover` | `1080|-|-|mp4|-|G` |  |
+| 50 | `Site.23.04.15.Miss.AVI.XXX.1080p.MP4-G` | `site:2023-04-15:miss-avi` | `Miss AVI` | `1080|-|-|mp4|-|G` |  |
+| 51 | `Site.23.04.15.Miss.MKV.XXX.1080p.MP4-G` | `site:2023-04-15:miss-mkv` | `Miss MKV` | `1080|-|-|mp4|-|G` |  |
+| 52 | `[Site] 2023-01-01 - Girls Of Web` | `site:2023-01-01:girls-of-web` | `Girls Of Web` | `-|-|-|-|-|-` | **new** |
+| 53 | `[Site] 2023-01-01 - Episode 2 4K` | `site:2023-01-01:episode-2` | `Episode 2` | `2160|-|-|-|-|-` | **new** |
+| 54 | `[Site] 2023-01-01 - Episode 3 4K` | `site:2023-01-01:episode-3` | `Episode 3` | `2160|-|-|-|-|-` | **new** |
+| 55 | `Site.23.04.15.Alex.Coal.1080p.MP4-WRB` | `site:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` |  |
+| 56 | `Site.23.04.15.Alex.Coal.XXX.MP4-GRP` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|mp4|-|GRP` |  |
+| 57 | `Site.23.04.15.Alex.Coal.XXX.MKV-GRP` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|mkv|-|GRP` |  |
+| 58 | `Site.23.04.15.Alex.Coal.XXX.WMV` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|wmv|-|-` |  |
+| 59 | `Site.23.04.15.Alex.Coal.XXX` | `site:2023-04-15:alex-coal` | `Alex Coal` | `-|-|-|-|-|-` |  |
+| 60 | `4K.Media.23.04.15.Alex.Coal.XXX.1080p.MP4-G` | `4k-media:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|G` |  |
+| 61 | `WebYoung.23.04.15.Alex.Coal.XXX.1080p.MP4-G` | `webyoung:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|G` |  |
+| 62 | `Tushy.com.23.04.15.Emily.Willis.XXX.1080p-G` | `tushy-com:2023-04-15:emily-willis` | `Emily Willis` | `1080|-|-|-|-|G` |  |
+| 63 | `Vintage.1979.Collection.23.04.15.Alex.Coal.XXX.1080p.MP4-G` | `vintage-1979-collection:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|G` |  |
+| 64 | `Bang.com - Alex Coal - Deep - 2023-01-01 - 1080p` | `bang-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
+| 65 | `Deeper.com - Alex Coal - Deep - 2023-01-01 - 1080p` | `deeper-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
+| 66 | `Private.com - Alex Coal - Deep - 2023-01-01 - 1080p` | `private-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
+| 67 | `Nubiles.net - Alex Coal - Deep - 2023-01-01 - 1080p` | `nubiles-net:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
+| 68 | `[Bang.com] - Alex Coal - Deep - 2023-01-01 - 1080p` | `bang-com:2023-01-01:alex-coal--deep` | `Alex Coal - Deep` | `1080|-|-|-|-|-` | **new** |
+| 69 | `http://www.site.com/rss - Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB` | `brazzers:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` | **new** |
+| 70 | `[pornsite.net] Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB` | `brazzers:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` | **new** |
+| 71 | `[Vixen] Kylie - Page Turner - 2023-07-19` | `vixen:2023-07-19:kylie--page-turner` | `Kylie - Page Turner` | `-|-|-|-|-|-` | **new** |
+| 72 | `[Vixen] Kylie Page - Turner - 2023-07-19` | `vixen:2023-07-19:kylie-page--turner` | `Kylie Page - Turner` | `-|-|-|-|-|-` | **new** |
+| 73 | `[Tushy] Anna Bell - Peaks - 2023-07-22` | `tushy:2023-07-22:anna-bell--peaks` | `Anna Bell - Peaks` | `-|-|-|-|-|-` | **new** |
+| 74 | `[Tushy] Anna - Bell Peaks - 2023-07-22` | `tushy:2023-07-22:anna--bell-peaks` | `Anna - Bell Peaks` | `-|-|-|-|-|-` | **new** |
+| 75 | `[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.1080p.MP4-WRB` | `empornium-brazzers:2023-04-15:alex-coal` | `Alex Coal` | `1080|-|-|mp4|-|WRB` | **new** |
+| 76 | `[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-WRB` | `empornium-brazzers:2023-04-15:alex-coal` | `Alex Coal` | `2160|-|h265|mp4|-|WRB` | **new** |
 ### Invariants asserted over the whole table
 
 | Test | Property |
@@ -340,6 +347,7 @@ so refusing is the correct answer rather than a gap. All are pinned by
 | `Site.23.04.15.Name.XXX.1080p.MP4-UNCUT`, `-FRENCH` | new. Edit and language tags in `NON_GROUP_TERMS`; the caps test passes them, so the list is what rejects these. |
 | `Site.23.04.15.Name.XXX.1080p.MP4-Bonus` | new. An edit tag no finite list would contain; only the caps test rejects it. |
 | `Site.23.04.15.Name.XXX.1080p.HEVC.UNCUT` / `.Bonus` | new. The same two cases, dot-attached. |
+| `Site.23.04.15.Name.XXX.1080p.MP4-CD1` / `-CD2`, `-PT1` / `-PT2`, `-DISC1` / `-DISC2` | new. Disc and part numbering. Each is rejected only by its own `NON_GROUP_TERMS` entry, so each entry carries its own pair of rows; without them, removing `CD` silently re-opens the merge those entries were added to close. |
 | `Site.23.04.15.Name.XXX.1080p.HEVC.G` | new. A single character attached by the name's own separator is a stray; a hyphen is what makes a one-letter tag like `-G` credible. |
 | `[Vixen] Alex Coal - Beautiful Episode` | delimited listing with no date: the anchor the whole rule rests on is absent |
 | `19-07-2023 - Alex Coal - Beautiful Episode 1080p` | delimited listing whose first segment is the date, leaving no site |
@@ -352,7 +360,7 @@ original `parse.test.ts` also still pins all of them, unmodified.
 
 | # | Regression | Evidence |
 |---|-----------|----------|
-| 1 | Two encodes of one scene share a key; two scenes never do | `regression 1`; corpus invariants 3 and 4 over all 75 rows |
+| 1 | Two encodes of one scene share a key; two scenes never do | `regression 1`; corpus invariants 3 and 4 over all 76 rows |
 | 2 | A release group named `XXX` does not break the boundary | `regression 2`: `TeamSkeet.24.01.02.Jane.Doe.XXX.{1080p,2160p.HEVC}.MP4-XXX` → one key, title `Jane Doe`. Structural reason: the group is detached before the boundary walk. |
 | 3 | An in-title `XXX` neither collapses nor truncates | `regression 3`: `Anniversary.XXX.1080p` and `Anniversary.XXX.Edition.XXX.1080p` get different keys; the latter's title is `Anniversary XXX Edition`. Corpus also pins `Gala XXX MP4 Madness`, `XXX Anniversary`, `Anniversary XXX 4K Party`, `XXXtreme Makeover`. |
 | 4 | Separator and case differences never split a group | `regression 4`: dot / space / underscore / hyphen spellings of one name → one key. Corpus rows 1-7. |
@@ -412,7 +420,89 @@ killed by adding the refusal rows that separate them, not by weakening them.
 | M9 drop the frame-rate suffix | 2 |
 | M10 dot branch accepts a 1-character tag | 2 (0 before adding `.HEVC.G`) |
 
-## 9. Reference projects
+## 9. Second review round
+
+Re-review closed all five earlier findings and raised one substantive defect
+plus three coverage gaps.
+
+### 9.1 (Important) `titleCaseSlug` erased the component boundary
+
+C2 separated the re-split scenes at the identity layer, but `plan-import.ts`
+split the scene slug on a single `-`, so the `--` vanished and the very pairs
+C2 distinguishes landed on one destination:
+
+```
+vixen:2023-07-19:kylie--page-turner  ->  Vixen/2023-07-19 - Kylie Page Turner.mp4
+vixen:2023-07-19:kylie-page--turner  ->  Vixen/2023-07-19 - Kylie Page Turner.mp4
+```
+
+Not data loss — the importer refuses an occupied destination — but the second
+scene then fails on every attempt and can never be imported. The reviewer's
+fuzz found 160 such pairs.
+
+**Fix.** `titleCaseSlug` now splits on `--` into components first, then on `-`
+into words within each; words join with a space, components with ` - `. The two
+cases above render `Kylie - Page Turner` and `Kylie Page - Turner`.
+
+Why ` - ` and not a new character: these are library paths a human browses, and
+the destination already reads `Site/DATE - Scene.ext`, so a hyphen-space
+component separator stays in the visual grammar the user already sees rather
+than introducing punctuation that looks like an encoding artefact. It is also
+already known path-safe, since `sanitizeSegment` passes it untouched.
+
+**The injectivity argument, stated properly this time.** `slug()` emits only
+`[a-z0-9]` runs separated by single `-`, with no leading or trailing `-`
+(independently fuzzed over 7.6M inputs). Therefore a component contains no
+`--`, and splitting it on `-` yields no empty words. A rendered word contains
+neither a space nor a hyphen; words are joined by ` ` and components by ` - `;
+neither delimiter can occur inside a word. The rendering is therefore uniquely
+decodable, so distinct slugs render distinctly. **I previously called
+`titleCaseSlug` injective when it was not** — the same species of over-claim as
+the two corrected in §8, and the reason the claim is now derived from a stated
+precondition rather than asserted.
+
+Pinned by `two distinct identity keys never produce the same destination` and
+`a multi-component scene renders its component boundary in the path` in
+`plan-import.test.ts`. Existing destination tests are unchanged and still pass:
+single-component slugs render exactly as before.
+
+### 9.2 Coverage gaps closed
+
+| Gap | Row added |
+|-----|-----------|
+| `PT`/`CD`/`DISC` guard entries were untested, so all three mutants survived and removing `CD` would silently re-open the I4 merge | six `REFUSED` rows: `-CD1`/`-CD2`, `-PT1`/`-PT2`, `-DISC1`/`-DISC2` |
+| Swapping the two recognisers survived the whole suite, because every listing row's tail was a bare resolution that cannot form a valid encode suffix | one listing row whose tail carries a source token: `[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 1080p WEB-DL x264` |
+
+### 9.3 Mutation check
+
+Baseline 0 failures. All six new mutants killed, and the two representative
+earlier ones re-confirmed.
+
+| Mutant | Tests failed |
+|--------|--------------|
+| N1 remove `CD` from `NON_GROUP_TERMS` | 3 |
+| N2 remove `DISC` | 3 |
+| N3 remove `PT` | 3 |
+| N4 swap the two recognisers | 9 |
+| N5 `titleCaseSlug` ignores `--` (the 9.1 regression) | 5 |
+| N6 `titleCaseSlug` joins components with a space | 5 |
+| M1 drop the caps test (re-check) | 3 |
+| M8 join components with a single `-` (re-check) | 11 |
+
+### 9.4 Ledger — raised, deliberately not fixed
+
+Recorded so they are not lost, and untouched because all are pre-existing or
+cosmetic and none is an over-collation:
+
+- the listing form leaks a hyphen-attached group into the identity
+  (`- 1080p-GRP`);
+- first-date-wins across listing segments;
+- `4K60` matches no resolution (the frame-rate suffix fix covered `NNNp60`
+  only);
+- the `NON_GROUP_TERMS.has(upper)` clause is subsumed by its digit-stripped
+  sibling.
+
+## 10. Reference projects
 
 **I did not fetch, read, or consult the source of Whisparr or
 ThePornDatabase/namer at any point during this task.** No regex, table,
@@ -424,7 +514,7 @@ release-name shapes exist in the wild, and that the date is the right boundary
 — which are facts about the domain rather than protected expression. The
 repository stays MIT-clean.
 
-## 10. Shapes not supported
+## 11. Shapes not supported
 
 - **Bare orientation numerals in VR names** (`...VR.LR.180.MP4-G`). `180` and
   `360` are not in the encode vocabulary because a bare number is a plausible
@@ -432,19 +522,29 @@ repository stays MIT-clean.
   `The 1080 Club`). Adding them would trade a visible refusal for a truncation
   risk in the wrong direction. The common VR form
   (`...XXX.1080p.VR.MP4-G`, `...VR.SBS.MP4-G`) is supported.
+- **A bare-domain prefix that really is a prefix.** This is the other half of
+  the C1 fix and it is a genuine loss: `site.com - Brazzers.23.04.15....` is no
+  longer stripped, so it attributes to the site `site com - Brazzers` and files
+  under the wrong directory. Unavoidable, because `Bang.com - Alex Coal - ...`
+  is the same string shape and stripping there was the Critical. Prefixed with
+  `www.` or a scheme it is stripped correctly. This is under-collation plus a
+  wrong path, not over-collation, which is why the trade goes this way.
 - **Ambiguous day/month in the listing form** (`07-08-2023`). Read day-first.
   Where a tracker means month-first the scene files under the transposed date,
   which splits a group rather than merging two — under-collation, the
   acceptable direction. Refusing instead would lose the whole shape.
-- **Fully lowercase release names with a group tag**
-  (`brazzers.23.04.15.alex.coal.xxx.1080p.mp4-wrb`). The group test requires
-  caps, which is what keeps unlisted edit tags like `-Bonus` out; a fully
-  lowercased name offers no case signal to test, so it is refused rather than
-  risking the merge. This now applies to hyphen-attached tags as well as
-  dot-attached ones, which is a deliberate narrowing taken in exchange for
-  closing I4. Case *differences* still never split a group — the pinned
-  spellings all carry caps on the tag — but an all-lowercase spelling yields
-  `null` rather than a key.
+- **Any release-group tag that is not 1-8 all-caps alphanumerics.** This is
+  broader than "fully lowercase names", which is how I first described it and
+  which understated the cost. The rule refuses `-Rarbg`, `-Ghost`, `-Evil`,
+  and equally `-EVILANGEL` and `-DIGITALPLAYGROUND` (both over eight
+  characters) — twelve realistic spellings were measured, and all parsed before
+  this change. The caps-and-length test is what keeps unlisted edit tags such
+  as `-Bonus` out, and no finite term list can replace it, so this is the price
+  of closing I4. Case *differences* still never split a group — the pinned
+  spellings all carry a short all-caps tag — but a name whose group tag falls
+  outside that shape yields `null` rather than a key. Widening the length bound
+  would recover the long studio-style groups at some cost in edit-tag risk;
+  that trade is worth revisiting with real feed data.
 - **Names with no date.** Out of scope by construction — the rule is the date.
   These were already refused and still are.
 - **A tracker stamp in front of a dotted name under-collates.**
@@ -455,11 +555,12 @@ repository stays MIT-clean.
 - **A title genuinely ending in an anchor-introduced encode run.** The residual
   class from §1. Refused, not guessed.
 
-## 11. `npm run check`
+## 12. `npm run check`
 
 Exit status 0. Warnings shown are pre-existing and all in `packages/core`;
-`packages/plugin-scenes` produces none. 239 tests pass (216 before this change,
-plus 23 corpus tests). No existing test was modified.
+`packages/plugin-scenes` produces none. 241 tests pass (216 before this work,
+plus 23 corpus tests and 2 destination-injectivity tests). No existing test was
+modified.
 
 ```
 
@@ -470,9 +571,9 @@ plus 23 corpus tests). No existing test was modified.
 > lint
 > oxlint
 
+packages/core/src/pipeline/upgrade.ts:149:5: warning eslint(preserve-caught-error): There is no cause error attached to this new thrown error. help: Preserve the original error by using the `cause` property when re-throwing errors.
 packages/core/src/pipeline/import.ts:429:5: warning eslint(preserve-caught-error): There is no cause error attached to this new thrown error. help: Preserve the original error by using the `cause` property when re-throwing errors.
 packages/core/src/config/load.ts:39:5: warning eslint(preserve-caught-error): There is no cause error attached to this new thrown error. help: Preserve the original error by using the `cause` property when re-throwing errors.
-packages/core/src/pipeline/upgrade.ts:149:5: warning eslint(preserve-caught-error): There is no cause error attached to this new thrown error. help: Preserve the original error by using the `cause` property when re-throwing errors.
 packages/core/src/plugins/registry.ts:47:7: warning eslint(preserve-caught-error): There is no cause error attached to this new thrown error. help: Preserve the original error by using the `cause` property when re-throwing errors.
 
 > typecheck
@@ -502,258 +603,260 @@ packages/core/src/plugins/registry.ts:47:7: warning eslint(preserve-caught-error
 > test:server
 > node --import tsx --conditions development --test "packages/*/test/**/*.test.ts"
 
-✔ addUrl sends the category and returns the nzo id (10.465333ms)
-✔ addUrl sends the caller-provided label as nzbname (0.245416ms)
-✔ addUrl throws when sabnzbd reports failure (0.318083ms)
-✔ addUrl throws when no nzo id comes back (0.162292ms)
-✔ an error never contains the api key (1.326ms)
-✔ an error thrown by fetchImpl itself never leaks the api key (0.349417ms)
-✔ a JSON-parse failure from response.json() never leaks the api key (0.339417ms)
-✔ a base64-style api key with +, /, = never leaks, even decoded (0.201916ms)
-✔ an api key containing +, /, =, and a space never leaks, even decoded (0.28825ms)
-✔ an api key embedded in the thrown error's name is also redacted (0.238125ms)
-✔ a non-Error throw from fetchImpl produces the wrapper, not a crash (0.529ms)
-✔ redaction leaves the rest of an error message legible (0.219ms)
-✔ the server's own error field never leaks the api key (0.3405ms)
-✔ a percent-encoded request url outside query shape does not leak the key (0.190958ms)
-✔ a doubly percent-encoded request url does not leak the key (0.15725ms)
-✔ server-supplied strings returned by snapshot never carry the api key (0.34375ms)
-✔ an nzo id echoing the request url is not returned verbatim (0.299959ms)
-✔ snapshot reads queue and history filtered by category (1.39475ms)
-✔ snapshot tolerates missing slots (0.423083ms)
-✔ mapPath applies the longest matching prefix (0.19075ms)
-✔ mapPath leaves an unmatched path alone (0.13525ms)
-✔ loads a valid config (17.539084ms)
-✔ resolves a file: secret and trims its trailing newline (11.04275ms)
-✔ a missing secret file is fatal and names the path but not the contents (14.749833ms)
-✔ a literal api key below the minimum length is rejected (4.99275ms)
-✔ a file: secret resolving to a short key is rejected without printing it (5.500334ms)
-✔ an invalid config names the offending field (2.595959ms)
-✔ PICKARR_PORT overrides the configured port (4.898417ms)
-✔ two feeds sharing an id is rejected (5.376083ms)
-✔ setClientRef throws by name and id rather than silently no-opping on a bad id (1.159167ms)
-✔ setStatus throws on a bad id (0.325541ms)
-✔ setStoragePath throws on a bad id (0.258875ms)
-✔ failDownload throws on a bad id (0.238292ms)
-✔ recordError throws on a bad id (0.239167ms)
-✔ bumpAttempts throws on a bad id instead of returning 0 (0.249875ms)
-✔ bumpMissingPolls throws on a bad id instead of returning 0 (0.231208ms)
-✔ resetMissingPolls throws on a bad id (0.227583ms)
-✔ resetMissingPolls on a real row whose missing_polls is already 0 is a legitimate no-op, not an error (0.326084ms)
-✔ bumpAttempts and bumpMissingPolls increment and return the new count for a real row (0.28675ms)
-✔ completeUpgrade keeps a better release flagged instead of clearing it (1.005208ms)
-✔ completeUpgrade onto the best release clears the flag (0.338625ms)
-✔ picking the worse of two known releases flags the better one (0.289083ms)
-✔ picking the best known release leaves nothing flagged (0.248291ms)
-✔ an equal-scoring release is not an upgrade (0.2535ms)
-✔ flagUpgrade re-derives the same invariant and is the only write that moves list_rank_at (0.246916ms)
-✔ migrate creates every table (3.585834ms)
-✔ migrate is idempotent (0.812458ms)
-✔ feed_items rejects a duplicate guid within a feed (1.098833ms)
-✔ feed_items allows the same guid in a different feed (0.50725ms)
-✔ media_groups rejects a duplicate identity within a plugin (0.344584ms)
-✔ parses items into feed entries (1.435ms)
-✔ prefers the enclosure url over the link (0.1695ms)
-✔ falls back to the link when there is no guid (0.085583ms)
-✔ a single item is not mistaken for a non-array (0.074458ms)
-✔ an empty channel yields no entries (0.315625ms)
-✔ a channel containing bare text rather than elements throws (0.205167ms)
-✔ an unparseable pubDate becomes null rather than NaN (0.100125ms)
-✔ a non-rss document throws (0.096958ms)
-✔ items missing a title or link are skipped (0.098292ms)
-✔ health responds ok (70.2045ms)
-✔ browse returns groups newest-rank first with their releases (2.289416ms)
-✔ browse paginates with a stable cursor (1.866041ms)
-✔ browse filters by q (1.459583ms)
-✔ a picked group with no upgrade drops out of browse and appears in picks (3.909583ms)
-✔ picking a release from the wrong group is a 400 (2.137833ms)
-✔ a malformed pick body is a 400 (1.540959ms)
-✔ downloads merges tracked rows with the untracked snapshot (1.948417ms)
-✔ retrying a failed import resumes at completed (1.408958ms)
-✔ retrying a download that has not failed is refused (1.473666ms)
-✔ retrying an unknown download is a 404 (1.152708ms)
-✔ no route ever returns the client api key (1.995708ms)
-✔ re-ingesting the same guid is a no-op (2.020333ms)
-✔ two releases with the same identity collate into one group (0.465292ms)
-✔ different identities create separate groups (0.344417ms)
-✔ a new release on an unpicked group does not touch list_rank_at (0.325709ms)
-✔ a better release on a picked group flags an upgrade and bumps list_rank_at (0.478167ms)
-✔ a worse release on a picked group changes nothing (0.348708ms)
-✔ an equal-scoring release on a picked group changes nothing (0.28975ms)
-✔ a release better than the pick but not the flagged upgrade is ignored (0.336125ms)
-✔ a release better than the flagged upgrade replaces it and bumps again (0.347667ms)
-✔ an unparseable name records a parse_error and creates no group (0.277792ms)
-✔ a plugin that throws does not stop the batch (0.571375ms)
-✔ a plugin whose score throws records a parse_error and lets later entries through (0.908917ms)
-✔ a plugin returning a non-finite score records a parse_error rather than a failed insert (0.891333ms)
-✔ a plugin returning a display with no fields records a parse_error (0.465917ms)
-✔ a plugin returning a malformed quality records a parse_error and lets later entries through (0.330917ms)
-✔ a plugin returning a display field of null records a parse_error rather than persisting it (0.288375ms)
-✔ a plugin returning an empty identity key records a parse_error (0.203833ms)
-✔ groups are keyed by plugin id, not by feed (0.240667ms)
-✔ search_text is lowercased and includes every display value (0.195792ms)
-✔ imports the planned file and records it (19.30925ms)
-✔ move removes the source, copy leaves it (11.407ms)
-✔ a cross-device rename falls back to copy-then-unlink (18.626ms)
-✔ a destination escaping the library root is rejected (5.831042ms)
-✔ a planned source outside the download listing is refused, naming the path (5.864292ms)
-✔ no importable files fails with a named reason (1.665708ms)
-✔ retry after a partial import skips files already in place (8.404083ms)
-✔ the file listing reaches the plugin with sizes and relative paths (5.2105ms)
-✔ a destination resolving to the library root itself is rejected, and the source survives (8.609208ms)
-✔ a foreign regular file already at the destination fails the import and leaves the source untouched (6.20525ms)
-✔ a symlink at the exact destination path is treated as a collision, not adopted (3.765458ms)
-✔ a destination that already exists with no surviving source and no recorded row is adopted as crash recovery (3.200084ms)
-✔ copy mode: a destination that already matches the source in size is adopted as crash recovery (5.334917ms)
-✔ copy mode: a destination with different content than the source is a collision, not recovery (4.439333ms)
-✔ a symlink at the destination with the source already gone is still a collision, not adopted (2.61475ms)
-✔ runs exclusively and in order (20.910334ms)
-✔ a rejection does not wedge the mutex (0.638458ms)
-✔ tryRun skips instead of queueing when busy (20.800291ms)
-✔ tryRun runs immediately once a preceding run has released the mutex (0.19875ms)
-✔ a nested acquisition on the same mutex throws instead of deadlocking (0.25425ms)
-✔ picking marks the group picked and starts a download (1.308583ms)
-✔ picking sets picked_release_id immediately, before any download finishes (0.401334ms)
-✔ an addUrl failure leaves the download queued and the pick intact (0.394375ms)
-✔ a pick on an already-picked group is inferred as an upgrade and does not overwrite picked_release_id (0.441542ms)
-✔ picking a release that belongs to another group is rejected (0.37575ms)
-✔ picking an unknown release is rejected (0.244875ms)
-✔ picking the same release twice while in flight is rejected (0.37225ms)
-✔ the download row records the client id and timestamps (0.291834ms)
-✔ a persist failure after a successful addUrl is recorded distinctly from an addUrl failure (0.342584ms)
-✔ a failure between marking picked and inserting the download rolls back the pick (0.327209ms)
+✔ addUrl sends the category and returns the nzo id (14.319625ms)
+✔ addUrl sends the caller-provided label as nzbname (0.240334ms)
+✔ addUrl throws when sabnzbd reports failure (0.303708ms)
+✔ addUrl throws when no nzo id comes back (0.157375ms)
+✔ an error never contains the api key (1.413667ms)
+✔ an error thrown by fetchImpl itself never leaks the api key (0.315958ms)
+✔ a JSON-parse failure from response.json() never leaks the api key (0.311583ms)
+✔ a base64-style api key with +, /, = never leaks, even decoded (0.191166ms)
+✔ an api key containing +, /, =, and a space never leaks, even decoded (0.197917ms)
+✔ an api key embedded in the thrown error's name is also redacted (0.231958ms)
+✔ a non-Error throw from fetchImpl produces the wrapper, not a crash (0.203167ms)
+✔ redaction leaves the rest of an error message legible (0.144833ms)
+✔ the server's own error field never leaks the api key (0.238417ms)
+✔ a percent-encoded request url outside query shape does not leak the key (0.173375ms)
+✔ a doubly percent-encoded request url does not leak the key (0.168875ms)
+✔ server-supplied strings returned by snapshot never carry the api key (0.347125ms)
+✔ an nzo id echoing the request url is not returned verbatim (0.154292ms)
+✔ snapshot reads queue and history filtered by category (0.530083ms)
+✔ snapshot tolerates missing slots (0.14375ms)
+✔ mapPath applies the longest matching prefix (0.05025ms)
+✔ mapPath leaves an unmatched path alone (0.031125ms)
+✔ loads a valid config (9.576584ms)
+✔ resolves a file: secret and trims its trailing newline (16.367792ms)
+✔ a missing secret file is fatal and names the path but not the contents (6.963833ms)
+✔ a literal api key below the minimum length is rejected (14.334958ms)
+✔ a file: secret resolving to a short key is rejected without printing it (4.785292ms)
+✔ an invalid config names the offending field (4.182ms)
+✔ PICKARR_PORT overrides the configured port (5.353209ms)
+✔ two feeds sharing an id is rejected (8.731417ms)
+✔ setClientRef throws by name and id rather than silently no-opping on a bad id (1.017292ms)
+✔ setStatus throws on a bad id (0.308875ms)
+✔ setStoragePath throws on a bad id (0.249041ms)
+✔ failDownload throws on a bad id (0.226167ms)
+✔ recordError throws on a bad id (0.224667ms)
+✔ bumpAttempts throws on a bad id instead of returning 0 (0.21725ms)
+✔ bumpMissingPolls throws on a bad id instead of returning 0 (0.23125ms)
+✔ resetMissingPolls throws on a bad id (0.253875ms)
+✔ resetMissingPolls on a real row whose missing_polls is already 0 is a legitimate no-op, not an error (0.326125ms)
+✔ bumpAttempts and bumpMissingPolls increment and return the new count for a real row (0.287125ms)
+✔ completeUpgrade keeps a better release flagged instead of clearing it (1.05175ms)
+✔ completeUpgrade onto the best release clears the flag (0.2975ms)
+✔ picking the worse of two known releases flags the better one (0.269958ms)
+✔ picking the best known release leaves nothing flagged (0.24775ms)
+✔ an equal-scoring release is not an upgrade (0.25275ms)
+✔ flagUpgrade re-derives the same invariant and is the only write that moves list_rank_at (0.245375ms)
+✔ migrate creates every table (1.278667ms)
+✔ migrate is idempotent (0.299417ms)
+✔ feed_items rejects a duplicate guid within a feed (0.28375ms)
+✔ feed_items allows the same guid in a different feed (0.201042ms)
+✔ media_groups rejects a duplicate identity within a plugin (0.212917ms)
+✔ parses items into feed entries (2.527583ms)
+✔ prefers the enclosure url over the link (0.310083ms)
+✔ falls back to the link when there is no guid (0.277459ms)
+✔ a single item is not mistaken for a non-array (0.201042ms)
+✔ an empty channel yields no entries (0.615084ms)
+✔ a channel containing bare text rather than elements throws (0.409333ms)
+✔ an unparseable pubDate becomes null rather than NaN (0.554167ms)
+✔ a non-rss document throws (0.191667ms)
+✔ items missing a title or link are skipped (0.150375ms)
+✔ health responds ok (65.069084ms)
+✔ browse returns groups newest-rank first with their releases (2.308667ms)
+✔ browse paginates with a stable cursor (1.800625ms)
+✔ browse filters by q (1.309417ms)
+✔ a picked group with no upgrade drops out of browse and appears in picks (3.799666ms)
+✔ picking a release from the wrong group is a 400 (1.735125ms)
+✔ a malformed pick body is a 400 (1.834208ms)
+✔ downloads merges tracked rows with the untracked snapshot (1.629ms)
+✔ retrying a failed import resumes at completed (1.931667ms)
+✔ retrying a download that has not failed is refused (1.616541ms)
+✔ retrying an unknown download is a 404 (0.918792ms)
+✔ no route ever returns the client api key (1.415375ms)
+✔ re-ingesting the same guid is a no-op (2.706666ms)
+✔ two releases with the same identity collate into one group (0.514958ms)
+✔ different identities create separate groups (0.337042ms)
+✔ a new release on an unpicked group does not touch list_rank_at (0.327583ms)
+✔ a better release on a picked group flags an upgrade and bumps list_rank_at (0.48375ms)
+✔ a worse release on a picked group changes nothing (1.144375ms)
+✔ an equal-scoring release on a picked group changes nothing (0.769792ms)
+✔ a release better than the pick but not the flagged upgrade is ignored (0.468833ms)
+✔ a release better than the flagged upgrade replaces it and bumps again (0.405209ms)
+✔ an unparseable name records a parse_error and creates no group (0.290292ms)
+✔ a plugin that throws does not stop the batch (0.302333ms)
+✔ a plugin whose score throws records a parse_error and lets later entries through (0.284875ms)
+✔ a plugin returning a non-finite score records a parse_error rather than a failed insert (0.206834ms)
+✔ a plugin returning a display with no fields records a parse_error (0.268917ms)
+✔ a plugin returning a malformed quality records a parse_error and lets later entries through (0.239917ms)
+✔ a plugin returning a display field of null records a parse_error rather than persisting it (0.226667ms)
+✔ a plugin returning an empty identity key records a parse_error (0.185458ms)
+✔ groups are keyed by plugin id, not by feed (0.226208ms)
+✔ search_text is lowercased and includes every display value (0.185125ms)
+✔ imports the planned file and records it (16.927833ms)
+✔ move removes the source, copy leaves it (13.072209ms)
+✔ a cross-device rename falls back to copy-then-unlink (25.842375ms)
+✔ a destination escaping the library root is rejected (14.820292ms)
+✔ a planned source outside the download listing is refused, naming the path (6.166583ms)
+✔ no importable files fails with a named reason (3.252166ms)
+✔ retry after a partial import skips files already in place (7.92475ms)
+✔ the file listing reaches the plugin with sizes and relative paths (3.796583ms)
+✔ a destination resolving to the library root itself is rejected, and the source survives (3.623ms)
+✔ a foreign regular file already at the destination fails the import and leaves the source untouched (2.665208ms)
+✔ a symlink at the exact destination path is treated as a collision, not adopted (2.365167ms)
+✔ a destination that already exists with no surviving source and no recorded row is adopted as crash recovery (1.968541ms)
+✔ copy mode: a destination that already matches the source in size is adopted as crash recovery (4.879625ms)
+✔ copy mode: a destination with different content than the source is a collision, not recovery (7.593083ms)
+✔ a symlink at the destination with the source already gone is still a collision, not adopted (5.133834ms)
+✔ runs exclusively and in order (30.886167ms)
+✔ a rejection does not wedge the mutex (0.308334ms)
+✔ tryRun skips instead of queueing when busy (21.117791ms)
+✔ tryRun runs immediately once a preceding run has released the mutex (0.183042ms)
+✔ a nested acquisition on the same mutex throws instead of deadlocking (0.252542ms)
+✔ picking marks the group picked and starts a download (1.227834ms)
+✔ picking sets picked_release_id immediately, before any download finishes (0.369458ms)
+✔ an addUrl failure leaves the download queued and the pick intact (0.420709ms)
+✔ a pick on an already-picked group is inferred as an upgrade and does not overwrite picked_release_id (0.428ms)
+✔ picking a release that belongs to another group is rejected (0.392458ms)
+✔ picking an unknown release is rejected (0.237792ms)
+✔ picking the same release twice while in flight is rejected (0.341709ms)
+✔ the download row records the client id and timestamps (0.324459ms)
+✔ a persist failure after a successful addUrl is recorded distinctly from an addUrl failure (0.329291ms)
+✔ a failure between marking picked and inserting the download rolls back the pick (0.359708ms)
 pickarr: download 1 is named 'R' at the client, expected 'pickarr-1'; label-based double-submit recovery will not work against this server.
-✔ a download in the queue stays downloading and resets missing_polls (1.58325ms)
-✔ a completed download gets its mapped storage path and is imported (0.44025ms)
-✔ a completed row with a storage path is imported even when the client has pruned its history (0.387792ms)
-✔ an import failure on a completed row fails the download rather than retrying forever (0.391291ms)
-✔ a failed download records the fail message (0.290875ms)
-✔ a completed download with no storage path fails rather than importing nothing (0.266667ms)
-✔ a download missing from both lists fails only after three consecutive polls (0.373417ms)
-✔ reappearing resets the missing counter (0.361708ms)
-✔ a queued download with no client ref is retried (0.326833ms)
-✔ addurl retries stop after the attempt cap (0.719042ms)
-✔ entries with no matching row are reported as untracked and never imported (0.554916ms)
-✔ an already-imported download still in history is not reported as untracked (0.240166ms)
-✔ an import failure fails the download rather than throwing out of the tick (0.282292ms)
-✔ a queued download whose addUrl already succeeded is recovered from the queue, not resubmitted (0.24525ms)
-✔ a queued download whose addUrl already succeeded and finished is recovered from history and imported in the same tick (0.245ms)
-✔ recovering a ref by label does not consume an addurl attempt, unlike a real retry (0.22825ms)
-✔ a fresh addUrl call is given the download-derived label, not the release title (0.228375ms)
-✔ a tracked download whose client-side name does not match its label warns exactly once, not once per tick (0.461708ms)
-✔ a tracked download whose client-side name matches its label never warns (0.227625ms)
-✔ importing resets to completed so the next tick redoes the import (1.455459ms)
-✔ queued with no client ref is left queued for retry and counted (0.725541ms)
-✔ terminal and in-flight rows are untouched (0.476625ms)
-✔ reconcileNow caches the untracked snapshot for later reads (1.28475ms)
-✔ a reconcile failure is logged and does not throw out of the tick (0.362333ms)
-✔ a timer tick that lands while a reconcile is still running is dropped, not queued (3.47575ms)
-✔ an ingest failure on one feed does not stop the others (1.202041ms)
-✔ an upgrade trashes the old file, writes the new one, and repoints the group (16.7355ms)
-✔ re-running the same upgrade import does not trash the files it just imported (12.842416ms)
-✔ trash paths are namespaced so repeated upgrades cannot collide (13.079209ms)
-✔ a failure after trashing reports where the old file went (5.500292ms)
-✔ an initial import trashes nothing and leaves the pointer alone (5.054166ms)
-✔ two live files sharing a basename in different library directories both survive in trash (5.264792ms)
-✔ a refusal partway through trashing still names where earlier files in the same group went (3.634958ms)
-✔ a live row whose file is already gone is trashed with no invented path (1.868625ms)
-✔ a live row pointing at a directory is refused rather than trashed (1.751792ms)
-✔ a live row that resolves outside the library root is refused rather than trashed (1.926584ms)
-✔ loads a plugin and indexes it by package name and id (0.496333ms)
-✔ two packages claiming the same id is fatal (0.296375ms)
-✔ a plugin config without a libraryRoot is fatal (0.090541ms)
-✔ a module without a default export is fatal and names the package (0.067291ms)
-✔ an import failure is fatal and names the package (0.077333ms)
-✔ byPackage throws for an unregistered package (0.089875ms)
-✔ higher resolution always outranks lower (0.376417ms)
-✔ resolution dominates codec and source (0.098042ms)
-✔ at equal resolution, better source and codec win (0.051416ms)
-✔ size breaks ties without ever overtaking a quality tier (0.054291ms)
-✔ unknown tokens score without throwing (0.060875ms)
-✔ plugin-api resolves through the development condition (0.504667ms)
-✔ corpus: every accepted name round-trips to its pinned identity key (4.7635ms)
-✔ corpus: parsing is deterministic across repeated calls (2.052291ms)
-✔ corpus: every encode, spelling, and layout of one scene shares a key (1.011875ms)
-✔ corpus: no two distinct scenes ever share an identity key (0.977334ms)
-✔ corpus: no title is silently truncated (0.756792ms)
-✔ corpus: every accepted name keeps its full quality tokens (0.652417ms)
-✔ corpus: encodes of one scene are ranked apart, never tied by a lost token (1.906ms)
-✔ corpus: every key stays inside the alphabet destinations are derived from (0.6625ms)
-✔ corpus: the display date always agrees with the key (0.678959ms)
-✔ corpus: the new shapes really are new coverage (0.122292ms)
-✔ refusal set: ambiguous names are refused rather than guessed (0.164042ms)
-✔ regression 1: two encodes of one scene share a key, two scenes never do (0.085084ms)
-✔ regression 2: a release group literally named XXX does not move the boundary (0.045125ms)
-✔ regression 3: an in-title XXX neither collapses nor truncates the title (0.045875ms)
-✔ regression 4: separator and case differences never split a group (0.082375ms)
-✔ regression 5: an underscore name yields the same quality tokens as its dotted twin (0.080709ms)
-✔ regression 6: an invalid calendar date returns null (0.032458ms)
-✔ regression 7: a website prefix does not split a group (0.059875ms)
-✔ listing layout order does not change the identity key (0.06925ms)
-✔ the component join is injective: a re-split of one string is a different key (0.050916ms)
-✔ a studio named after its domain keeps the studio as the site (0.068833ms)
-✔ a tracker stamp in front of a dotted name does not cost it its quality (0.070458ms)
-✔ a part or edit tag is never detached as a release group (0.049709ms)
-✔ parses the canonical Site.YY.MM.DD.Names.XXX.quality-GROUP form (1.857583ms)
-✔ two encodes of the same scene share an identity key (0.704583ms)
-✔ different scenes on the same site and day do not collate (0.096916ms)
-✔ separator and case differences do not split a group (0.097833ms)
-✔ extracts resolution from every common token (0.218333ms)
-✔ extracts video codec and source (0.062584ms)
-✔ a two-digit year maps into the 2000s (0.067208ms)
-✔ a four-digit year is accepted (0.046666ms)
-✔ a release with no XXX marker still parses using the first quality token (0.072834ms)
-✔ a name with no date returns null (0.095292ms)
-✔ an empty name returns null (0.04725ms)
-✔ a name with a date but no site returns null (0.042916ms)
-✔ an invalid calendar date returns null (0.036667ms)
-✔ display fields carry site and performers (0.330125ms)
-✔ two scenes differing only by content after an in-title XXX get different identity keys (0.064292ms)
-✔ an in-title XXX scene keeps its full title instead of being truncated (0.042875ms)
-✔ two encodes of a scene with an XXX release group still share an identity key (0.053ms)
-✔ two scenes differing only by content after an in-title XXX followed by an encode-like word get different identity keys (0.06075ms)
-✔ invariant: separator spelling never changes the quality tokens (0.207416ms)
-✔ invariant: no two distinct scenes ever share an identity key (0.801ms)
-✔ invariant: every encode of one scene collapses to a single identity key (0.273833ms)
-✔ invariant: a title is never silently truncated at an in-title marker or encode word (0.101167ms)
-✔ invariant: ambiguous names are refused rather than guessed (0.07025ms)
-✔ picks the largest video file and names it from the parsed media (0.840458ms)
-✔ skips sample, proof, and screens files even when they are large (0.141875ms)
-✔ preserves the source extension (0.093833ms)
-✔ returns null when there is no video file (0.046583ms)
-✔ returns null for an empty listing (0.045ms)
-✔ sanitizes path separators and reserved characters out of the destination (0.719458ms)
-✔ a destination can never escape the library root (0.062459ms)
-✔ two releases with the same identity key produce the same destination (0.123583ms)
-✔ a nested larger video does not beat a top-level smaller one (0.074041ms)
-✔ a single junk-named video is imported rather than refused (0.086958ms)
-✔ a release with no stated source is treated as an original site rip (0.51ms)
-✔ an explicit re-encode source ranks below an unstated one (0.135625ms)
-✔ an explicit source is never overridden (0.063708ms)
-✔ resolution still dominates the source adjustment (0.055084ms)
-✔ formats the tokens that are present, in a stable order (0.34875ms)
-✔ omits absent tokens without leaving separators (0.065333ms)
-✔ an empty token set reads as unknown (0.392625ms)
-✔ formats sizes in binary units (0.102292ms)
-ℹ tests 232
+✔ a download in the queue stays downloading and resets missing_polls (1.84875ms)
+✔ a completed download gets its mapped storage path and is imported (0.474208ms)
+✔ a completed row with a storage path is imported even when the client has pruned its history (0.387375ms)
+✔ an import failure on a completed row fails the download rather than retrying forever (0.384167ms)
+✔ a failed download records the fail message (0.308ms)
+✔ a completed download with no storage path fails rather than importing nothing (0.261875ms)
+✔ a download missing from both lists fails only after three consecutive polls (0.374792ms)
+✔ reappearing resets the missing counter (0.362625ms)
+✔ a queued download with no client ref is retried (0.304083ms)
+✔ addurl retries stop after the attempt cap (0.724833ms)
+✔ entries with no matching row are reported as untracked and never imported (0.528042ms)
+✔ an already-imported download still in history is not reported as untracked (0.226875ms)
+✔ an import failure fails the download rather than throwing out of the tick (0.281333ms)
+✔ a queued download whose addUrl already succeeded is recovered from the queue, not resubmitted (0.248833ms)
+✔ a queued download whose addUrl already succeeded and finished is recovered from history and imported in the same tick (0.2445ms)
+✔ recovering a ref by label does not consume an addurl attempt, unlike a real retry (0.2245ms)
+✔ a fresh addUrl call is given the download-derived label, not the release title (0.215ms)
+✔ a tracked download whose client-side name does not match its label warns exactly once, not once per tick (0.440875ms)
+✔ a tracked download whose client-side name matches its label never warns (1.324583ms)
+✔ importing resets to completed so the next tick redoes the import (1.238667ms)
+✔ queued with no client ref is left queued for retry and counted (0.351542ms)
+✔ terminal and in-flight rows are untouched (1.152917ms)
+✔ reconcileNow caches the untracked snapshot for later reads (1.251542ms)
+✔ a reconcile failure is logged and does not throw out of the tick (0.336542ms)
+✔ a timer tick that lands while a reconcile is still running is dropped, not queued (29.006292ms)
+✔ an ingest failure on one feed does not stop the others (0.714625ms)
+✔ an upgrade trashes the old file, writes the new one, and repoints the group (13.835041ms)
+✔ re-running the same upgrade import does not trash the files it just imported (17.177708ms)
+✔ trash paths are namespaced so repeated upgrades cannot collide (10.32975ms)
+✔ a failure after trashing reports where the old file went (3.919333ms)
+✔ an initial import trashes nothing and leaves the pointer alone (2.175541ms)
+✔ two live files sharing a basename in different library directories both survive in trash (3.739125ms)
+✔ a refusal partway through trashing still names where earlier files in the same group went (10.772291ms)
+✔ a live row whose file is already gone is trashed with no invented path (6.38625ms)
+✔ a live row pointing at a directory is refused rather than trashed (3.910292ms)
+✔ a live row that resolves outside the library root is refused rather than trashed (3.918291ms)
+✔ loads a plugin and indexes it by package name and id (0.478875ms)
+✔ two packages claiming the same id is fatal (0.241334ms)
+✔ a plugin config without a libraryRoot is fatal (0.089916ms)
+✔ a module without a default export is fatal and names the package (0.079583ms)
+✔ an import failure is fatal and names the package (0.077917ms)
+✔ byPackage throws for an unregistered package (0.080375ms)
+✔ higher resolution always outranks lower (0.376458ms)
+✔ resolution dominates codec and source (0.091542ms)
+✔ at equal resolution, better source and codec win (0.051834ms)
+✔ size breaks ties without ever overtaking a quality tier (0.054ms)
+✔ unknown tokens score without throwing (0.057917ms)
+✔ plugin-api resolves through the development condition (0.33875ms)
+✔ corpus: every accepted name round-trips to its pinned identity key (6.246542ms)
+✔ corpus: parsing is deterministic across repeated calls (1.651375ms)
+✔ corpus: every encode, spelling, and layout of one scene shares a key (0.684875ms)
+✔ corpus: no two distinct scenes ever share an identity key (2.200667ms)
+✔ corpus: no title is silently truncated (0.614042ms)
+✔ corpus: every accepted name keeps its full quality tokens (0.577125ms)
+✔ corpus: encodes of one scene are ranked apart, never tied by a lost token (1.904042ms)
+✔ corpus: every key stays inside the alphabet destinations are derived from (0.616875ms)
+✔ corpus: the display date always agrees with the key (0.447834ms)
+✔ corpus: the new shapes really are new coverage (0.10075ms)
+✔ refusal set: ambiguous names are refused rather than guessed (0.169958ms)
+✔ regression 1: two encodes of one scene share a key, two scenes never do (0.059667ms)
+✔ regression 2: a release group literally named XXX does not move the boundary (0.044625ms)
+✔ regression 3: an in-title XXX neither collapses nor truncates the title (0.049791ms)
+✔ regression 4: separator and case differences never split a group (0.063959ms)
+✔ regression 5: an underscore name yields the same quality tokens as its dotted twin (0.081459ms)
+✔ regression 6: an invalid calendar date returns null (0.033125ms)
+✔ regression 7: a website prefix does not split a group (0.054667ms)
+✔ listing layout order does not change the identity key (0.073083ms)
+✔ the component join is injective: a re-split of one string is a different key (0.052459ms)
+✔ a studio named after its domain keeps the studio as the site (0.067375ms)
+✔ a tracker stamp in front of a dotted name does not cost it its quality (0.061625ms)
+✔ a part or edit tag is never detached as a release group (0.052833ms)
+✔ parses the canonical Site.YY.MM.DD.Names.XXX.quality-GROUP form (1.863ms)
+✔ two encodes of the same scene share an identity key (0.725375ms)
+✔ different scenes on the same site and day do not collate (0.099959ms)
+✔ separator and case differences do not split a group (0.095208ms)
+✔ extracts resolution from every common token (0.2285ms)
+✔ extracts video codec and source (0.070375ms)
+✔ a two-digit year maps into the 2000s (0.065291ms)
+✔ a four-digit year is accepted (0.049875ms)
+✔ a release with no XXX marker still parses using the first quality token (0.06775ms)
+✔ a name with no date returns null (0.095ms)
+✔ an empty name returns null (0.044875ms)
+✔ a name with a date but no site returns null (0.039958ms)
+✔ an invalid calendar date returns null (0.0345ms)
+✔ display fields carry site and performers (0.356167ms)
+✔ two scenes differing only by content after an in-title XXX get different identity keys (0.067292ms)
+✔ an in-title XXX scene keeps its full title instead of being truncated (0.038584ms)
+✔ two encodes of a scene with an XXX release group still share an identity key (0.052292ms)
+✔ two scenes differing only by content after an in-title XXX followed by an encode-like word get different identity keys (0.051625ms)
+✔ invariant: separator spelling never changes the quality tokens (0.210375ms)
+✔ invariant: no two distinct scenes ever share an identity key (0.834334ms)
+✔ invariant: every encode of one scene collapses to a single identity key (0.262708ms)
+✔ invariant: a title is never silently truncated at an in-title marker or encode word (0.107708ms)
+✔ invariant: ambiguous names are refused rather than guessed (0.066041ms)
+✔ picks the largest video file and names it from the parsed media (0.891291ms)
+✔ skips sample, proof, and screens files even when they are large (0.144292ms)
+✔ preserves the source extension (0.100042ms)
+✔ returns null when there is no video file (0.044417ms)
+✔ returns null for an empty listing (0.039542ms)
+✔ sanitizes path separators and reserved characters out of the destination (0.715208ms)
+✔ a destination can never escape the library root (0.055709ms)
+✔ two releases with the same identity key produce the same destination (0.133625ms)
+✔ two distinct identity keys never produce the same destination (0.88325ms)
+✔ a multi-component scene renders its component boundary in the path (0.109125ms)
+✔ a nested larger video does not beat a top-level smaller one (0.055083ms)
+✔ a single junk-named video is imported rather than refused (0.040167ms)
+✔ a release with no stated source is treated as an original site rip (0.574833ms)
+✔ an explicit re-encode source ranks below an unstated one (0.096208ms)
+✔ an explicit source is never overridden (0.051375ms)
+✔ resolution still dominates the source adjustment (0.043042ms)
+✔ formats the tokens that are present, in a stable order (0.361625ms)
+✔ omits absent tokens without leaving separators (0.060292ms)
+✔ an empty token set reads as unknown (0.044083ms)
+✔ formats sizes in binary units (0.057042ms)
+ℹ tests 234
 ℹ suites 0
-ℹ pass 232
+ℹ pass 234
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 380.157791
+ℹ duration_ms 430.815417
 
 > test:web
 > TSX_TSCONFIG_PATH=packages/web/tsconfig.json node --import tsx --import ./packages/web/test/setup.ts --conditions development --test "packages/web/test/**/*.test.tsx"
 
-✔ a tracked row shows status and offers retry only when failed (11.62825ms)
-✔ untracked entries render inert and labelled (10.136917ms)
-✔ renders the display fields (9.70675ms)
-✔ shows one pick control per release, best first (4.375792ms)
-✔ picking a release reports its id (2.898666ms)
-✔ an upgrade-flagged group is badged (2.410958ms)
-✔ the release you already own is marked and not offered again (1.478833ms)
+✔ a tracked row shows status and offers retry only when failed (11.845ms)
+✔ untracked entries render inert and labelled (8.275166ms)
+✔ renders the display fields (9.662333ms)
+✔ shows one pick control per release, best first (4.206375ms)
+✔ picking a release reports its id (2.612416ms)
+✔ an upgrade-flagged group is badged (2.412292ms)
+✔ the release you already own is marked and not offered again (1.584042ms)
 ℹ tests 7
 ℹ suites 0
 ℹ pass 7
@@ -761,7 +864,7 @@ pickarr: download 1 is named 'R' at the client, expected 'pickarr-1'; label-base
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 453.117416
+ℹ duration_ms 433.931958
 ```
 
 (Long-tail `no-await-in-loop` / `prefer-set-has` / `no-array-sort` /
