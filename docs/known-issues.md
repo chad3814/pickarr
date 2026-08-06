@@ -123,6 +123,15 @@ it exactly. That search returns 29 near-identical names differing by a letter
 this space run long — `Giga de Rein no odor - the woman who appeared uncensored -` is ten
 tokens.
 
+**A single-letter query is never sent; a single-digit one is.** The service matches a
+query anywhere in a name, so one letter confirms nothing and costs a page: measured live,
+`a` returns 87,955 results (`Male Reality`, `Laundry`), `b` 25,078, `x` 13,168. Digits are
+the opposite — they lead real site names (`2 Chicks Same Time`) and are cheap, with `0`
+through `4` returning nothing and `8` returning one. A blanket minimum query length would
+have discarded the useful case with the useless one. The cost of the rule: a site named
+with a single letter, and there is one called `X`, can be configured but never
+discovered.
+
 **Searches are paged, with two bounds.** The service caps `per_page` at 100 (asking for
 more returns an empty body), and one-word fallback queries routinely exceed that:
 measured live, `free` returns 149, `teen` 349, `anal` 352, `big` 649. Stopping at page
