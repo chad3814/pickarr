@@ -125,6 +125,19 @@ be submitted twice. Pickarr logs a warning once per process the first time it se
 tracked download whose name is not its expected label — **watch for that on your first
 real run.**
 
+**A release title that itself ends in something shaped like `[pickarr-N]`, combined with
+truncation landing at exactly that offset, can misattribute a ref.** The job name sent to
+SABnzbd is the release title with `[pickarr-<id>]` appended (see `clientJobName` in
+`db/downloads.ts`), and recovery (`extractLabel`) reads the label back out by matching
+that bracketed pattern anchored at the end of whatever name the client reports — not by
+searching for our own marker specifically. If SABnzbd truncates away the real trailing
+marker *and* the truncated remainder happens to end in a same-shaped bracketed substring
+that the release's own title supplied, that substring is read as the label instead, and a
+ref could attach to the wrong download. This requires our app-namespaced string to appear
+literally in an indexer title and truncation to land at exactly that offset — reproduced
+under test, but the preconditions make it vanishingly unlikely in practice. Not fixed;
+recorded here rather than complicating the marker format.
+
 ## Web and API
 
 `/api/downloads` returns every download row ever created, unpaginated, with one query per
@@ -151,3 +164,11 @@ reclaiming the space stays a manual decision.
 
 **No library scanning.** Pickarr only knows about media it picked itself. Files already on
 disk are invisible to it.
+
+**A chronically unparseable feed logs its cap every tick, indefinitely.** Each ingest
+tick logs up to `MAX_REPORTED_PARSE_FAILURES` (50) individual parse-failure lines, which
+bounds one tick but not the feed's whole lifetime — a feed whose title format changed and
+now fails to parse anything logs 50 lines every interval forever, not just once. That is
+the intended tradeoff (each line is the raw title you need to fix the parser, and there is
+no per-title dedup to complicate), but it is worth knowing before deciding a feed's
+interval or where its log ends up.

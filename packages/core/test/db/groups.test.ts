@@ -8,6 +8,7 @@ import {
   flagUpgrade,
   getGroup,
   markPicked,
+  pickedGroups,
 } from '../../src/db/groups.ts';
 
 // `upgrade_release_id` is an invariant, not an event log: it names the
@@ -198,5 +199,53 @@ test('keyset pagination over a list_rank_at tie yields every row exactly once, i
   }
 
   assert.deepEqual(seen, [1, 2, 3, 4, 5]);
+  db.close();
+});
+
+// pickedGroups backs the unpaginated Picks page and has no cursor to keep in
+// step, but it orders on the same (list_rank_at, id) pair as browseGroups and
+// must agree with it — a picked group with an upgrade flagged appears on
+// both pages, and the same tie must not render in opposite order on one page
+// versus the other.
+test('browseGroups and pickedGroups agree on the order of the same tied, upgrade-flagged groups', () => {
+  const db = openTestDatabase();
+  const feedItemValues: string[] = [];
+  const releaseValues: string[] = [];
+  const groupValues: string[] = [];
+  for (let g = 1; g <= 3; g += 1) {
+    const pickedFeedItemId = g * 2 - 1;
+    const upgradeFeedItemId = g * 2;
+    feedItemValues.push(
+      `(${pickedFeedItemId}, 'f', 'g${pickedFeedItemId}', 'T${pickedFeedItemId}', 'https://indexer.invalid/${pickedFeedItemId}.nzb', 1)`,
+      `(${upgradeFeedItemId}, 'f', 'g${upgradeFeedItemId}', 'T${upgradeFeedItemId}', 'https://indexer.invalid/${upgradeFeedItemId}.nzb', 1)`,
+    );
+    releaseValues.push(
+      `(${pickedFeedItemId}, ${g}, ${pickedFeedItemId}, '{}', 100, 1)`,
+      `(${upgradeFeedItemId}, ${g}, ${upgradeFeedItemId}, '{}', 200, 1)`,
+    );
+    groupValues.push(
+      `(${g}, 'test', 'k${g}', '{"title":"G${g}","fields":[]}', 'g${g}', 'picked', ${pickedFeedItemId}, ${upgradeFeedItemId}, 100, 500)`,
+    );
+  }
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at) VALUES ${feedItemValues.join(', ')}`,
+  ).run();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state,
+                               picked_release_id, upgrade_release_id, created_at, list_rank_at)
+     VALUES ${groupValues.join(', ')}`,
+  ).run();
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at) VALUES ${releaseValues.join(', ')}`,
+  ).run();
+
+  const browseIds = browseGroups(db, { cursor: null, limit: 10, search: null }).map(
+    (group) => group.id,
+  );
+  const picksIds = pickedGroups(db).map((group) => group.id);
+
+  assert.deepEqual(browseIds, [1, 2, 3]);
+  assert.deepEqual(picksIds, [1, 2, 3]);
+  assert.deepEqual(browseIds, picksIds);
   db.close();
 });
