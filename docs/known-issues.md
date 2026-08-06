@@ -39,13 +39,22 @@ piece of content, its own group — while `Site.23.04.15.Name.XXX.1080p.MP4-Bonu
 unambiguous as positions. `B0NUS` is a real group name, which is the clearest argument
 that a word list could never have done this job.
 
-**`NON_GROUP_TERMS` is a narrow exception to that positional rule, and its entries are
-load-bearing in a way they were not before.** Each is a tag that does turn up after the
-resolution and where merging destroys something rather than merely annoying: `-Part1`/`-Part2`, `-CD1`/`-CD2` and `-DISC1`/`-DISC2` are
+**`NON_GROUP_TERMS` is a narrow exception to that positional rule — and measurably a
+quiet one.** 2,310 real indexer titles containing `cd`/`part`/`disc` markers were
+checked: **none** placed one after a resolution in the trailing group position, and
+removing the four split-marker entries changed nothing on that sample. Where those
+markers actually occur — inside the title, or before the resolution — they land in the
+identity by themselves and the halves keep separate keys with no rule involved. That is
+the positional rule working, not the list.
+
+The entries stay because they cost nothing and the failure they prevent is the expensive
+kind, but they are insurance against an unobserved shape rather than a load-bearing
+guard. The tags in question: `-Part1`/`-Part2`, `-CD1`/`-CD2` and `-DISC1`/`-DISC2` are
 halves of one scene, so merging them means picking one half believing it is the whole;
 `-UNCUT`, `-UNCENSORED`, `-DIRECTORS` are different cuts. Matching is case-insensitive
-and digits are stripped, so one entry covers `Part1`, `part2` and `PART`. **Removing an
-entry now re-opens exactly one merge, silently** — there is no second rule behind it.
+and digits are stripped, so one entry covers `Part1`, `part2` and `PART`. Removing an
+entry re-opens exactly one merge with no second rule behind it — though on current
+evidence the split-marker entries have nothing to re-open.
 
 Still refused for length: `-DIGITALPLAYGROUND` and anything over twelve characters.
 
