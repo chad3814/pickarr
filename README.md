@@ -208,6 +208,30 @@ Node, Fastify, and SQLite.
 
 ## Development
 
+
+### Measuring the parser against a corpus
+
+`npm run corpus -- <file...>` runs the real parser over files of indexer titles, one
+title per line, one file per tier, and reports what it does with them:
+
+```bash
+npm run corpus -- corpus/uhd.txt corpus/hd.txt corpus/sd.txt
+npm run corpus -- corpus/*.txt --sites=sites.txt --examples=5
+```
+
+It prints the parse rate per tier, every refusal reason ranked by how many titles it
+accounts for (which is what says where to spend effort next), collisions where distinct
+content landed on one identity key, and how many site lookups the corpus would ask for —
+without sending any.
+
+The harness imports the shipped parser rather than reimplementing it, so what gets tuned
+is what runs. It deduplicates, and buckets usenet artefacts (`.par2`, `.partNN.rar`, yEnc
+subjects) separately rather than counting them as failures.
+
+**10% of titles are held back by default** and never measured, keyed on the title itself
+so the same ones are held across runs and file orderings. Tuning against a set you also
+measure on reports overfitting back to you as progress. Check against the holdout at the
+end with `--holdout=0`.
 ```bash
 npm ci
 npm run check   # lint + typecheck + tests
