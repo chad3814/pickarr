@@ -6,3 +6,6 @@ dist/
 .env
 /config/
 /secrets/
+
+# SDD process scratch (ledgers, briefs, review packages)
+.superpowers/
