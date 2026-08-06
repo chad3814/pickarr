@@ -1,6 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { QualityTokens } from '@pickarr/plugin-api';
 import { parseSceneRelease } from '../src/parse.ts';
+import { scoreScene } from '../src/score.ts';
+
+function qualitySignature(quality: QualityTokens): string {
+  return [
+    quality.resolution ?? '-',
+    quality.source ?? '-',
+    quality.videoCodec ?? '-',
+    quality.extras?.['container'] ?? '-',
+    quality.extras?.['vr'] === true ? 'vr' : '-',
+    quality.releaseGroup ?? '-',
+  ].join('|');
+}
 
 /**
  * The corpus is the specification for the date-boundary parser.
@@ -27,6 +40,17 @@ interface Entry {
   readonly key: string;
   /** The exact display title expected, pinning against truncation. */
   readonly title: string;
+  /**
+   * `resolution|source|codec|container|vr|group`, `-` for absent.
+   *
+   * Quality is pinned per row because identity is not the only thing that has
+   * to survive a shape change. Two encodes of one scene collate into a single
+   * group *by design*, and the group is ranked by these tokens: a shape that
+   * parses to the right key but drops its resolution puts a 480p and a 2160p
+   * on one shelf with the same score, which inverts upgrade detection. That is
+   * a silent failure with no key to inspect, so it needs its own assertion.
+   */
+  readonly quality: string;
   /** True where the previous (XXX-marker) parser refused or mis-parsed this. */
   readonly isNew: boolean;
 }
@@ -38,6 +62,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: false,
   },
   {
@@ -45,6 +70,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '2160|-|h265|mp4|-|GRP',
     isNew: false,
   },
   {
@@ -52,6 +78,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '2160|web-dl|h265|mp4|-|G',
     isNew: false,
   },
   {
@@ -59,6 +86,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'alex coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: false,
   },
   {
@@ -66,6 +94,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: false,
   },
   {
@@ -73,6 +102,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex-Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: false,
   },
   {
@@ -80,6 +110,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: false,
   },
 
@@ -89,6 +120,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: true,
   },
   {
@@ -96,6 +128,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: true,
   },
   {
@@ -103,6 +136,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: true,
   },
   {
@@ -110,6 +144,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: true,
   },
   {
@@ -117,6 +152,7 @@ const CORPUS: Entry[] = [
     scene: 'brazzers/alex-coal',
     key: 'brazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '2160|-|h265|mp4|-|GRP',
     isNew: true,
   },
 
@@ -126,6 +162,7 @@ const CORPUS: Entry[] = [
     scene: 'blacked/alex-coal',
     key: 'blacked:2018-04-28:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|KTR',
     isNew: true,
   },
   {
@@ -133,6 +170,7 @@ const CORPUS: Entry[] = [
     scene: 'blacked/alex-coal',
     key: 'blacked:2018-04-28:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|KTR',
     isNew: true,
   },
   {
@@ -140,6 +178,7 @@ const CORPUS: Entry[] = [
     scene: 'blacked/alex-coal',
     key: 'blacked:2018-04-28:alex-coal',
     title: 'Alex Coal',
+    quality: '2160|-|h265|mp4|-|KTR',
     isNew: false,
   },
 
@@ -149,6 +188,7 @@ const CORPUS: Entry[] = [
     scene: 'tushy/emily-willis',
     key: 'tushy:2024-01-09:emily-willis',
     title: 'Emily Willis',
+    quality: '1080|-|x265|-|-|PRT',
     isNew: true,
   },
   {
@@ -156,6 +196,7 @@ const CORPUS: Entry[] = [
     scene: 'tushy/emily-willis',
     key: 'tushy:2024-01-09:emily-willis',
     title: 'Emily Willis',
+    quality: '2160|-|x265|-|-|PRT',
     isNew: true,
   },
   {
@@ -163,6 +204,7 @@ const CORPUS: Entry[] = [
     scene: 'tushy/emily-willis',
     key: 'tushy:2024-01-09:emily-willis',
     title: 'Emily Willis',
+    quality: '1080|-|x265|-|-|PRT',
     isNew: false,
   },
 
@@ -172,6 +214,7 @@ const CORPUS: Entry[] = [
     scene: 'sexbabesvr/alex-coal',
     key: 'sexbabesvr:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|vr|G',
     isNew: true,
   },
   {
@@ -179,6 +222,7 @@ const CORPUS: Entry[] = [
     scene: 'sexbabesvr/alex-coal',
     key: 'sexbabesvr:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '2160|-|-|mp4|vr|G',
     isNew: true,
   },
 
@@ -189,36 +233,41 @@ const CORPUS: Entry[] = [
   {
     name: '[Vixen] 19-07-2023 - Alex Coal - Beautiful Episode 2160p {SLUT}',
     scene: 'vixen/alex-coal-beautiful-episode',
-    key: 'vixen:2023-07-19:alex-coal-beautiful-episode',
+    key: 'vixen:2023-07-19:alex-coal--beautiful-episode',
     title: 'Alex Coal - Beautiful Episode',
+    quality: '2160|-|-|-|-|SLUT',
     isNew: true,
   },
   {
     name: '[Vixen] Beautiful Episode - Alex Coal - 2023-07-19 - 1080p',
     scene: 'vixen/alex-coal-beautiful-episode',
-    key: 'vixen:2023-07-19:alex-coal-beautiful-episode',
+    key: 'vixen:2023-07-19:alex-coal--beautiful-episode',
     title: 'Beautiful Episode - Alex Coal',
+    quality: '1080|-|-|-|-|-',
     isNew: true,
   },
   {
     name: '[Vixen] 19.07.2023 - Alex Coal - Beautiful Episode [1080p]',
     scene: 'vixen/alex-coal-beautiful-episode',
-    key: 'vixen:2023-07-19:alex-coal-beautiful-episode',
+    key: 'vixen:2023-07-19:alex-coal--beautiful-episode',
     title: 'Alex Coal - Beautiful Episode',
+    quality: '1080|-|-|-|-|-',
     isNew: true,
   },
   {
     name: '[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 1080p',
     scene: 'tushy/alex-coal-beautiful-episode',
-    key: 'tushy:2023-07-22:alex-coal-beautiful-episode',
+    key: 'tushy:2023-07-22:alex-coal--beautiful-episode',
     title: 'Beautiful Episode - Alex Coal',
+    quality: '1080|-|-|-|-|-',
     isNew: true,
   },
   {
     name: '[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 2160p HEVC',
     scene: 'tushy/alex-coal-beautiful-episode',
-    key: 'tushy:2023-07-22:alex-coal-beautiful-episode',
+    key: 'tushy:2023-07-22:alex-coal--beautiful-episode',
     title: 'Beautiful Episode - Alex Coal',
+    quality: '2160|-|h265|-|-|-',
     isNew: true,
   },
   // A different scene on the same site and day: the title segment differs, so
@@ -226,8 +275,9 @@ const CORPUS: Entry[] = [
   {
     name: '[Tushy] Different Episode - Alex Coal - 2023-07-22 - 1080p',
     scene: 'tushy/alex-coal-different-episode',
-    key: 'tushy:2023-07-22:alex-coal-different-episode',
+    key: 'tushy:2023-07-22:alex-coal--different-episode',
     title: 'Different Episode - Alex Coal',
+    quality: '1080|-|-|-|-|-',
     isNew: true,
   },
 
@@ -235,22 +285,25 @@ const CORPUS: Entry[] = [
   {
     name: 'Pure Taboo - Sarah Arabic, Lily LaBeau - A Costly Divorce (June 24, 2025) [1080p HEVC x265]',
     scene: 'pure-taboo/a-costly-divorce',
-    key: 'pure-taboo:2025-06-24:a-costly-divorce-sarah-arabic-lily-labeau',
+    key: 'pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau',
     title: 'Sarah Arabic, Lily LaBeau - A Costly Divorce',
+    quality: '1080|-|x265|-|-|-',
     isNew: true,
   },
   {
     name: 'Pure Taboo - A Costly Divorce - Sarah Arabic, Lily LaBeau - 2025-06-24 - 2160p',
     scene: 'pure-taboo/a-costly-divorce',
-    key: 'pure-taboo:2025-06-24:a-costly-divorce-sarah-arabic-lily-labeau',
+    key: 'pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau',
     title: 'A Costly Divorce - Sarah Arabic, Lily LaBeau',
+    quality: '2160|-|-|-|-|-',
     isNew: true,
   },
   {
     name: 'Pure Taboo - Sarah Arabic - A Different Divorce (Jun 24, 2025) [1080p]',
     scene: 'pure-taboo/a-different-divorce',
-    key: 'pure-taboo:2025-06-24:a-different-divorce-sarah-arabic',
+    key: 'pure-taboo:2025-06-24:a-different-divorce--sarah-arabic',
     title: 'Sarah Arabic - A Different Divorce',
+    quality: '1080|-|-|-|-|-',
     isNew: true,
   },
 
@@ -260,6 +313,7 @@ const CORPUS: Entry[] = [
     scene: 'teamskeet/jane-doe',
     key: 'teamskeet:2024-01-02:jane-doe',
     title: 'Jane Doe',
+    quality: '1080|-|-|mp4|-|XXX',
     isNew: false,
   },
   {
@@ -267,6 +321,7 @@ const CORPUS: Entry[] = [
     scene: 'teamskeet/jane-doe',
     key: 'teamskeet:2024-01-02:jane-doe',
     title: 'Jane Doe',
+    quality: '2160|-|h265|mp4|-|XXX',
     isNew: false,
   },
   {
@@ -274,6 +329,7 @@ const CORPUS: Entry[] = [
     scene: 'teamskeet/john-smith',
     key: 'teamskeet:2024-01-02:john-smith',
     title: 'John Smith',
+    quality: '1080|-|-|mp4|-|XXX',
     isNew: false,
   },
 
@@ -283,6 +339,7 @@ const CORPUS: Entry[] = [
     scene: 'site/anniversary',
     key: 'site:2023-04-15:anniversary',
     title: 'Anniversary',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -290,6 +347,7 @@ const CORPUS: Entry[] = [
     scene: 'site/anniversary-edition',
     key: 'site:2023-04-15:anniversary-xxx-edition',
     title: 'Anniversary XXX Edition',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -297,6 +355,7 @@ const CORPUS: Entry[] = [
     scene: 'site/anniversary-edition',
     key: 'site:2023-04-15:anniversary-xxx-edition',
     title: 'Anniversary XXX Edition',
+    quality: '2160|-|h265|mp4|-|G',
     isNew: false,
   },
   {
@@ -304,6 +363,7 @@ const CORPUS: Entry[] = [
     scene: 'site/anniversary-web-party',
     key: 'site:2023-04-15:anniversary-xxx-web-party',
     title: 'Anniversary XXX Web Party',
+    quality: '-|-|-|mp4|-|GRP1',
     isNew: false,
   },
   {
@@ -311,6 +371,7 @@ const CORPUS: Entry[] = [
     scene: 'site/anniversary-web-party',
     key: 'site:2023-04-15:anniversary-xxx-web-party',
     title: 'Anniversary XXX Web Party',
+    quality: '1080|-|-|mp4|-|GRP2',
     isNew: false,
   },
   {
@@ -318,6 +379,7 @@ const CORPUS: Entry[] = [
     scene: 'site/anniversary-web-bash',
     key: 'site:2023-04-15:anniversary-xxx-web-bash',
     title: 'Anniversary XXX Web Bash',
+    quality: '-|-|-|mp4|-|GRP2',
     isNew: false,
   },
   {
@@ -325,6 +387,7 @@ const CORPUS: Entry[] = [
     scene: 'site/anniversary-4k-party',
     key: 'site:2023-04-15:anniversary-xxx-4k-party',
     title: 'Anniversary XXX 4K Party',
+    quality: '-|-|-|mp4|-|GRP1',
     isNew: false,
   },
   {
@@ -332,6 +395,7 @@ const CORPUS: Entry[] = [
     scene: 'site/gala-mp4-madness',
     key: 'site:2023-04-15:gala-xxx-mp4-madness',
     title: 'Gala XXX MP4 Madness',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -339,6 +403,7 @@ const CORPUS: Entry[] = [
     scene: 'site/gala-mp4-mayhem',
     key: 'site:2023-04-15:gala-xxx-mp4-mayhem',
     title: 'Gala XXX MP4 Mayhem',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -346,6 +411,7 @@ const CORPUS: Entry[] = [
     scene: 'site/xxx-anniversary',
     key: 'site:2023-04-15:xxx-anniversary',
     title: 'XXX Anniversary',
+    quality: '1080|-|-|mp4|-|GRP',
     isNew: false,
   },
   {
@@ -353,6 +419,7 @@ const CORPUS: Entry[] = [
     scene: 'site/xxxtreme-makeover',
     key: 'site:2023-04-15:xxxtreme-makeover',
     title: 'XXXtreme Makeover',
+    quality: '1080|-|-|mp4|-|GRP',
     isNew: false,
   },
 
@@ -362,6 +429,7 @@ const CORPUS: Entry[] = [
     scene: 'site/girls-of-web',
     key: 'site:2023-04-15:girls-of-web',
     title: 'Girls Of Web',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -369,6 +437,7 @@ const CORPUS: Entry[] = [
     scene: 'site/girls-of-print',
     key: 'site:2023-04-15:girls-of-print',
     title: 'Girls Of Print',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -376,6 +445,7 @@ const CORPUS: Entry[] = [
     scene: 'site/the-1080-club',
     key: 'site:2023-04-15:the-1080-club',
     title: 'The 1080 Club',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -383,6 +453,7 @@ const CORPUS: Entry[] = [
     scene: 'site/agent-007-undercover',
     key: 'site:2023-04-15:agent-007-undercover',
     title: 'Agent 007 Undercover',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -390,6 +461,7 @@ const CORPUS: Entry[] = [
     scene: 'site/agent-007-overcover',
     key: 'site:2023-04-15:agent-007-overcover',
     title: 'Agent 007 Overcover',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -397,6 +469,7 @@ const CORPUS: Entry[] = [
     scene: 'site/miss-avi',
     key: 'site:2023-04-15:miss-avi',
     title: 'Miss AVI',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -404,6 +477,7 @@ const CORPUS: Entry[] = [
     scene: 'site/miss-mkv',
     key: 'site:2023-04-15:miss-mkv',
     title: 'Miss MKV',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -411,6 +485,7 @@ const CORPUS: Entry[] = [
     scene: 'site/girls-of-web-listing',
     key: 'site:2023-01-01:girls-of-web',
     title: 'Girls Of Web',
+    quality: '-|-|-|-|-|-',
     isNew: true,
   },
   {
@@ -418,6 +493,7 @@ const CORPUS: Entry[] = [
     scene: 'site/episode-2',
     key: 'site:2023-01-01:episode-2',
     title: 'Episode 2',
+    quality: '2160|-|-|-|-|-',
     isNew: true,
   },
   {
@@ -425,6 +501,7 @@ const CORPUS: Entry[] = [
     scene: 'site/episode-3',
     key: 'site:2023-01-01:episode-3',
     title: 'Episode 3',
+    quality: '2160|-|-|-|-|-',
     isNew: true,
   },
 
@@ -434,6 +511,7 @@ const CORPUS: Entry[] = [
     scene: 'site/alex-coal',
     key: 'site:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
     isNew: false,
   },
   {
@@ -441,6 +519,7 @@ const CORPUS: Entry[] = [
     scene: 'site/alex-coal',
     key: 'site:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '-|-|-|mp4|-|GRP',
     isNew: false,
   },
   {
@@ -448,6 +527,7 @@ const CORPUS: Entry[] = [
     scene: 'site/alex-coal',
     key: 'site:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '-|-|-|mkv|-|GRP',
     isNew: false,
   },
   {
@@ -455,6 +535,7 @@ const CORPUS: Entry[] = [
     scene: 'site/alex-coal',
     key: 'site:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '-|-|-|wmv|-|-',
     isNew: false,
   },
   {
@@ -462,6 +543,7 @@ const CORPUS: Entry[] = [
     scene: 'site/alex-coal',
     key: 'site:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '-|-|-|-|-|-',
     isNew: false,
   },
 
@@ -473,6 +555,7 @@ const CORPUS: Entry[] = [
     scene: '4k-media/alex-coal',
     key: '4k-media:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -480,6 +563,7 @@ const CORPUS: Entry[] = [
     scene: 'webyoung/alex-coal',
     key: 'webyoung:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
   },
   {
@@ -487,6 +571,7 @@ const CORPUS: Entry[] = [
     scene: 'tushy-com/emily-willis',
     key: 'tushy-com:2023-04-15:emily-willis',
     title: 'Emily Willis',
+    quality: '1080|-|-|-|-|G',
     isNew: false,
   },
   {
@@ -494,7 +579,132 @@ const CORPUS: Entry[] = [
     scene: 'vintage-1979-collection/alex-coal',
     key: 'vintage-1979-collection:2023-04-15:alex-coal',
     title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|G',
     isNew: false,
+  },
+
+  // --- A studio named after its domain, in the listing form ----------------
+  // `Bang.com - Alex Coal - ...` is shaped exactly like a website prefix, so
+  // stripping on a bare domain promoted the *performer* into the site slot and
+  // collapsed every `.com` studio onto one key (and filed all their scenes
+  // under `Alex Coal/`). A prefix now needs `www.` or a scheme.
+  {
+    name: 'Bang.com - Alex Coal - Deep - 2023-01-01 - 1080p',
+    scene: 'bang-com/alex-coal-deep',
+    key: 'bang-com:2023-01-01:alex-coal--deep',
+    title: 'Alex Coal - Deep',
+    quality: '1080|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'Deeper.com - Alex Coal - Deep - 2023-01-01 - 1080p',
+    scene: 'deeper-com/alex-coal-deep',
+    key: 'deeper-com:2023-01-01:alex-coal--deep',
+    title: 'Alex Coal - Deep',
+    quality: '1080|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'Private.com - Alex Coal - Deep - 2023-01-01 - 1080p',
+    scene: 'private-com/alex-coal-deep',
+    key: 'private-com:2023-01-01:alex-coal--deep',
+    title: 'Alex Coal - Deep',
+    quality: '1080|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'Nubiles.net - Alex Coal - Deep - 2023-01-01 - 1080p',
+    scene: 'nubiles-net/alex-coal-deep',
+    key: 'nubiles-net:2023-01-01:alex-coal--deep',
+    title: 'Alex Coal - Deep',
+    quality: '1080|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: '[Bang.com] - Alex Coal - Deep - 2023-01-01 - 1080p',
+    scene: 'bang-com/alex-coal-deep',
+    key: 'bang-com:2023-01-01:alex-coal--deep',
+    title: 'Alex Coal - Deep',
+    quality: '1080|-|-|-|-|-',
+    isNew: true,
+  },
+  // A marked prefix is still stripped, path and scheme included.
+  {
+    name: 'http://www.site.com/rss - Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
+  // A bracketed *bare* domain is a tracker stamp only when the name is not a
+  // listing, and then it is safe to strip.
+  {
+    name: '[pornsite.net] Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
+
+  // --- Component re-splits in the listing form ------------------------------
+  // Sorting the components is only safe if the join is injective. Joined with
+  // a single "-" these four collapse into two collisions, because `slug()`
+  // emits "-" as well and the component boundaries dissolve.
+  {
+    name: '[Vixen] Kylie - Page Turner - 2023-07-19',
+    scene: 'vixen/kylie--page-turner',
+    key: 'vixen:2023-07-19:kylie--page-turner',
+    title: 'Kylie - Page Turner',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: '[Vixen] Kylie Page - Turner - 2023-07-19',
+    scene: 'vixen/kylie-page--turner',
+    key: 'vixen:2023-07-19:kylie-page--turner',
+    title: 'Kylie Page - Turner',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: '[Tushy] Anna Bell - Peaks - 2023-07-22',
+    scene: 'tushy/anna-bell--peaks',
+    key: 'tushy:2023-07-22:anna-bell--peaks',
+    title: 'Anna Bell - Peaks',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: '[Tushy] Anna - Bell Peaks - 2023-07-22',
+    scene: 'tushy/anna--bell-peaks',
+    key: 'tushy:2023-07-22:anna--bell-peaks',
+    title: 'Anna - Bell Peaks',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
+
+  // --- A tracker stamp in front of a dotted name ---------------------------
+  // The leading bracket must not hand the name to the listing recogniser: that
+  // reading finds a date but no encode section, so every encode in the group
+  // scores identically and upgrade detection dies. Quality is the assertion
+  // that catches it; the key alone looks fine.
+  {
+    name: '[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.1080p.MP4-WRB',
+    scene: 'empornium-brazzers/alex-coal',
+    key: 'empornium-brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
+  {
+    name: '[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-WRB',
+    scene: 'empornium-brazzers/alex-coal',
+    key: 'empornium-brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '2160|-|h265|mp4|-|WRB',
+    isNew: true,
   },
 ];
 
@@ -557,6 +767,35 @@ const REFUSED: [string, string][] = [
     '19-07-2023 - Alex Coal - Beautiful Episode 1080p',
     'delimited listing whose first segment is the date, leaving no site',
   ],
+  // A trailing tag is only a release group if it passes *both* guards, and
+  // these four separate them: NON_GROUP_TERMS is the only thing that rejects
+  // the correctly-capitalised UNCUT/Part1, and the caps test is the only thing
+  // that rejects Bonus, which no finite list would contain.
+  [
+    'Site.23.04.15.Name.XXX.1080p.MP4-Part1',
+    'a part tag, not a group: detaching it would merge the two halves of one scene under a single key',
+  ],
+  [
+    'Site.23.04.15.Name.XXX.1080p.MP4-Part2',
+    'the other half of the same scene, refused for the same reason',
+  ],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-UNCUT', 'an edit tag in NON_GROUP_TERMS, correctly capitalised'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-FRENCH', 'a language tag, not a group'],
+  [
+    'Site.23.04.15.Name.XXX.1080p.MP4-Bonus',
+    'an edit tag no list would contain; only the caps test rejects it',
+  ],
+  ['Site.23.04.15.Name.XXX.1080p.HEVC.UNCUT', 'the same, dot-attached'],
+  ['Site.23.04.15.Name.XXX.1080p.HEVC.Bonus', 'the same, dot-attached and mixed case'],
+  [
+    'Site.23.04.15.Name.XXX.1080p.MP4-PART1',
+    'a numbered part tag in caps: only stripping the digits before the lookup rejects it, and merging PART1 with PART2 is the same over-collation',
+  ],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-PART2', 'the other half, refused for the same reason'],
+  [
+    'Site.23.04.15.Name.XXX.1080p.HEVC.G',
+    'a single character attached by the name\'s own separator is a stray, not a group; a hyphen is what makes a one-letter tag like "-G" credible',
+  ],
 ];
 
 const KEY_SHAPE = /^[a-z0-9-]+:\d{4}-\d{2}-\d{2}:[a-z0-9-]+$/;
@@ -615,6 +854,34 @@ test('corpus: no two distinct scenes ever share an identity key', () => {
 test('corpus: no title is silently truncated', () => {
   for (const entry of CORPUS) {
     assert.equal(parsed(entry.name).display.title, entry.title, entry.name);
+  }
+});
+
+test('corpus: every accepted name keeps its full quality tokens', () => {
+  for (const entry of CORPUS) {
+    assert.equal(qualitySignature(parsed(entry.name).quality), entry.quality, entry.name);
+  }
+});
+
+test('corpus: encodes of one scene are ranked apart, never tied by a lost token', () => {
+  // The consequence of the assertion above, stated as the behaviour that
+  // actually matters: within a scene, rows whose pinned resolutions differ
+  // must score differently. A shape that silently drops quality ties them.
+  const byScene = new Map<string, Entry[]>();
+  for (const entry of CORPUS) byScene.set(entry.scene, [...(byScene.get(entry.scene) ?? []), entry]);
+  for (const [scene, entries] of byScene) {
+    for (const a of entries) {
+      for (const b of entries) {
+        const resolutionA = a.quality.split('|')[0];
+        const resolutionB = b.quality.split('|')[0];
+        if (resolutionA === resolutionB) continue;
+        assert.notEqual(
+          scoreScene(parsed(a.name).quality),
+          scoreScene(parsed(b.name).quality),
+          `${scene}: ${a.name} and ${b.name} scored the same despite different resolutions`,
+        );
+      }
+    }
   }
 });
 
@@ -734,15 +1001,27 @@ test('regression 7: a website prefix does not split a group', () => {
  * each other depending on the tracker, so the identity slug is built from the
  * *sorted* component slugs while the display title keeps source order.
  *
- * The alternative — preserving order — was rejected: it under-collates every
- * time one site is scraped by two indexers with different layouts, and
- * under-collation here is silent (two cards that look identical) rather than
- * self-evident. Sorting cannot raise the collision risk in the way word-level
- * normalisation would, because it reorders whole components and never merges
- * them: two scenes that share performers still differ in their title
- * component, and the sorted join of a different multiset is a different
- * string. Two scenes on one site and day whose component multisets are exact
- * permutations of each other are the same scene.
+ * Preserving order was rejected: it under-collates every time one site is
+ * scraped by two indexers with different layouts, and under-collation here is
+ * silent — two cards that look identical, with no way to tell which carries
+ * the better encode.
+ *
+ * Sorting is sound *only because the join is injective*, and that is a
+ * property of the delimiter, not of sorting. Joined with a single `-` it is
+ * false: `slug()` emits `-` too, so component boundaries dissolve and any
+ * re-split preserving alphabetical order collides — `Kylie` + `Page Turner`
+ * and `Kylie Page` + `Turner` both render `kylie-page-turner`, and those are
+ * different scenes. The join is therefore `--`, which `slug()` can never
+ * produce inside a component (it collapses runs of non-alphanumerics to one
+ * `-` and strips the edges) and which empty components cannot introduce (they
+ * are filtered). With that delimiter the split is unique, the multiset
+ * determines the string and vice versa, and the only remaining way for two
+ * scenes to collide is for one site to publish, on one day, two scenes whose
+ * component multisets are exact permutations of each other — which are the
+ * same scene. Sharing a performer is not enough, because the title component
+ * still differs.
+ *
+ * Both halves are pinned below, and the four re-split rows are in the corpus.
  */
 test('listing layout order does not change the identity key', () => {
   const layouts = [
@@ -758,4 +1037,52 @@ test('listing layout order does not change the identity key', () => {
     parsed('[Tushy] Beautiful Episode - Alex Coal - 2023-07-22 - 1080p').identityKey,
     parsed('[Tushy] Different Episode - Alex Coal - 2023-07-22 - 1080p').identityKey,
   );
+});
+
+test('the component join is injective: a re-split of one string is a different key', () => {
+  const pairs: [string, string][] = [
+    ['[Vixen] Kylie - Page Turner - 2023-07-19', '[Vixen] Kylie Page - Turner - 2023-07-19'],
+    ['[Tushy] Anna Bell - Peaks - 2023-07-22', '[Tushy] Anna - Bell Peaks - 2023-07-22'],
+  ];
+  for (const [a, b] of pairs) {
+    assert.notEqual(parsed(a).identityKey, parsed(b).identityKey, `${a} vs ${b}`);
+  }
+});
+
+test('a studio named after its domain keeps the studio as the site', () => {
+  const studios = ['Bang.com', 'Deeper.com', 'Tushy.com', 'Private.com', 'Nubiles.net'];
+  const keys = new Set<string>();
+  for (const studio of studios) {
+    const release = parsed(`${studio} - Alex Coal - Deep - 2023-01-01 - 1080p`);
+    assert.equal(release.display.subtitle, studio, studio);
+    assert.equal(release.identityKey.split(':')[0], studio.toLowerCase().replace('.', '-'), studio);
+    keys.add(release.identityKey);
+  }
+  assert.equal(keys.size, studios.length, `${JSON.stringify([...keys])}`);
+});
+
+test('a tracker stamp in front of a dotted name does not cost it its quality', () => {
+  const bare = parsed('Brazzers.2023.04.15.Alex.Coal.XXX.1080p.MP4-WRB');
+  const stamped = parsed('[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.1080p.MP4-WRB');
+  assert.deepEqual(stamped.quality, bare.quality);
+  assert.notEqual(
+    scoreScene(stamped.quality),
+    scoreScene(parsed('[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-WRB').quality),
+  );
+});
+
+test('a part or edit tag is never detached as a release group', () => {
+  const merged: [string, string][] = [
+    ['Site.23.04.15.Name.XXX.1080p.MP4-Part1', 'Site.23.04.15.Name.XXX.1080p.MP4-Part2'],
+    ['Site.23.04.15.Name.XXX.1080p.MP4-UNCUT', 'Site.23.04.15.Name.XXX.1080p.MP4-Bonus'],
+    ['Site.23.04.15.Name.XXX.1080p.HEVC.UNCUT', 'Site.23.04.15.Name.XXX.1080p.HEVC.Bonus'],
+  ];
+  for (const [a, b] of merged) {
+    const left = parseSceneRelease(a);
+    const right = parseSceneRelease(b);
+    assert.ok(
+      left === null || right === null || left.identityKey !== right.identityKey,
+      `${a} and ${b} merged onto one key`,
+    );
+  }
 });

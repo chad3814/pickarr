@@ -150,6 +150,9 @@ const NON_GROUP_TERMS = new Set([
   'REMASTERED',
   'REMUX',
   'PART',
+  'PT',
+  'CD',
+  'DISC',
   'SCENE',
   'FULL',
   'HQ',
@@ -181,28 +184,69 @@ const TLD =
  * Preferring the shortest domain that still ends in a TLD stops the prefix at
  * the first plausible boundary, which is where a real one ends.
  */
-const DOMAIN = `(?:www\\.)?[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9-]+)*?\\.${TLD}`;
+const HOST = `[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9-]+)*?\\.${TLD}`;
 
 /**
- * Leading website prefixes. Each requires a real domain *and* an unambiguous
- * delimiter, so that a studio whose own name ends in a TLD-like word
- * (`Tushy.com.23.04.15....`) is not amputated: a bare dot is never accepted as
- * the delimiter unless the prefix also starts with `www.`.
+ * A domain carrying an explicit *prefix marker* — `www.` or a URL scheme.
+ *
+ * A bare domain is not enough, because a great many studios are named after
+ * their domain: `Bang.com`, `Deeper.com`, `Nubiles.net`, `Private.com`. In the
+ * delimited listing form those are indistinguishable from a website prefix —
+ * both are "a domain, then ` - `" — and stripping one promotes the *performer*
+ * to the site slot, which collapses every such studio onto one key and files
+ * their scenes under the performer's name. `www.` and `http://` are markers no
+ * studio puts in its own name, so requiring one restores the distinction. A
+ * studio allowlist would not: it fails for every studio nobody thought of.
+ */
+const MARKED_DOMAIN = `(?:https?://(?:www\\.)?|www\\.)${HOST}(?:/\\S*)?`;
+
+/**
+ * Leading website prefixes. The label repetition inside `HOST` is *lazy* on
+ * purpose: `xxx` is a real TLD and also the marker token, so a greedy domain
+ * will happily swallow `www.Site.com.Brazzers.23.04.15.Alex.Coal.XXX.` and
+ * call it a prefix. Preferring the shortest host that still ends in a TLD
+ * stops the prefix where a real one ends.
  */
 const WEBSITE_PREFIXES = [
-  new RegExp(`^[[(]\\s*${DOMAIN}\\s*[\\])]\\s*[-–—]?\\s*`, 'i'),
-  new RegExp(`^${DOMAIN}\\s+[-–—]\\s+`, 'i'),
-  new RegExp(`^www\\.[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9-]+)*?\\.${TLD}[\\s._-]+`, 'i'),
+  new RegExp(`^[[(]\\s*${MARKED_DOMAIN}\\s*[\\])]\\s*[-–—]?\\s*`, 'i'),
+  new RegExp(`^${MARKED_DOMAIN}[\\s._-]+`, 'i'),
 ];
 
+/**
+ * A bracketed *bare* domain. Only safe to strip when the name is not a
+ * delimited listing, because there a leading bracket is the studio field
+ * itself (`[Vixen] ...`) and `[Bang.com] - Alex Coal - ...` means the studio,
+ * not a tracker stamp.
+ */
+const BRACKETED_BARE_DOMAIN = new RegExp(`^[[(]\\s*${HOST}\\s*[\\])]\\s*[-–—]?\\s*`, 'i');
+
+/** Splits the delimited listing form into its fields. */
+const SEGMENT_SPLIT = /\s+[-–—]\s+/;
+
+/**
+ * A date written with the dotted form's own separators. Its presence means the
+ * name is a dotted scene release even if a tracker stamp or a stray ` - ` also
+ * makes it look delimited, so the delimited recogniser declines on it. Dates
+ * delimited by ` - ` or `-` (`2023-07-22`, `19-07-2023`) deliberately do not
+ * match: those are the listing form's own spelling.
+ */
+const DOTTED_DATE_RUN = /(?:^|[._])(?:(?:19|20)?\d{2}[._]\d{2}[._]\d{2}|\d{6}|\d{8})(?:[._]|$)/;
+
+/**
+ * The optional trailing digits absorb a frame-rate suffix: `2160p60` is a
+ * 2160p encode, and without this it matched nothing and scored as resolution
+ * zero — ranking below a 480p inside its own group, which is the same
+ * upgrade-inversion the underscore bug caused.
+ */
+const FPS = '(?:\\d{2,3})?';
 const RESOLUTIONS: [RegExp, number][] = [
   [/\b8K\b/i, 4320],
-  [/\b4K\b|\b2160p\b|\bUHD\b/i, 2160],
-  [/\b1440p\b/i, 1440],
-  [/\b1080p\b/i, 1080],
-  [/\b720p\b/i, 720],
-  [/\b540p\b/i, 540],
-  [/\b480p\b/i, 480],
+  [new RegExp(`\\b4K\\b|\\b2160p${FPS}\\b|\\bUHD\\b`, 'i'), 2160],
+  [new RegExp(`\\b1440p${FPS}\\b`, 'i'), 1440],
+  [new RegExp(`\\b1080p${FPS}\\b`, 'i'), 1080],
+  [new RegExp(`\\b720p${FPS}\\b`, 'i'), 720],
+  [new RegExp(`\\b540p${FPS}\\b`, 'i'), 540],
+  [new RegExp(`\\b480p${FPS}\\b`, 'i'), 480],
 ];
 
 const SOURCES: [RegExp, string][] = [
@@ -357,15 +401,30 @@ function tokensOf(text: string): Token[] {
  * A trailing token has a release group's *shape* when it is short, purely
  * alphanumeric, carries a letter, is written in caps (the universal scene
  * convention for a group tag), and is not a codec/source/container/language
- * or edit term. The caps requirement is what keeps `.Uncut` and `.Directors`
- * out: merging two edits of a scene is exactly the over-collation this
- * component may not commit, and refusing is always the cheaper mistake.
+ * or edit term.
+ *
+ * Both of the last two tests are load-bearing, and neither subsumes the other:
+ * `NON_GROUP_TERMS` is what stops `-UNCUT` and `-Part2`, which are correctly
+ * capitalised, and the caps test is what stops `-Bonus` and `-Directors`,
+ * which are not in any list anyone can finish writing. Together they mean a
+ * trailing edit or part tag is refused rather than swallowed as a group —
+ * swallowing it merges two different cuts of a scene, which is exactly the
+ * over-collation this component may not commit, and refusing is always the
+ * cheaper mistake. The digits are stripped before the lookup so that `Part1`
+ * and `Part2` are both recognised as `PART` while a numbered group like `GRP1`
+ * still reduces to the unlisted `GRP`.
+ *
+ * `minLength` is 1 for a hyphen-attached tag, where the hyphen itself is
+ * already strong evidence (single-letter groups like `-G` are common), and 2
+ * for a dot-attached one, where the separator carries no information.
  */
-function looksLikeGroupTag(text: string): boolean {
-  if (!/^[A-Za-z0-9]{2,8}$/.test(text)) return false;
+function looksLikeGroupTag(text: string, minLength: number): boolean {
+  if (text.length < minLength || text.length > 8) return false;
+  if (!/^[A-Za-z0-9]+$/.test(text)) return false;
   if (!/[A-Za-z]/.test(text)) return false;
   if (text !== text.toUpperCase()) return false;
-  if (NON_GROUP_TERMS.has(text.toUpperCase())) return false;
+  const upper = text.toUpperCase();
+  if (NON_GROUP_TERMS.has(upper) || NON_GROUP_TERMS.has(upper.replace(/\d+$/, ''))) return false;
   return !isEncodeToken(text);
 }
 
@@ -378,12 +437,18 @@ interface Detached {
  * Detaches a trailing release-group tag.
  *
  * A group is attached either with a hyphen — the only part of a scene name
- * introduced by a separator other than the name's own, so a final
- * non-encode token after a lone `-` is a group tag, including one literally
- * named `XXX` — or, in some trackers' output, with the name's own separator.
- * The dot-attached form is only accepted when the preceding token is encode
- * information, because a group can only ever follow a complete encode
- * section; a token following title material is title material.
+ * introduced by a separator other than the name's own — or, in some trackers'
+ * output, with the name's own separator. The dot-attached form additionally
+ * requires the preceding token to be encode information, because a group can
+ * only ever follow a complete encode section; a token following title material
+ * is title material.
+ *
+ * *Both* forms go through `looksLikeGroupTag`. A hyphen is strong evidence but
+ * it is not proof: `...MP4-Part1` and `...MP4-Part2` are two halves of one
+ * scene, and detaching `Part1`/`Part2` as groups merges them under a single
+ * key. The guards are what separate a group tag from an edit or part tag, and
+ * they have to apply wherever a tag is detached, not only on the branch they
+ * were first written for.
  */
 function detachReleaseGroup(tokens: Token[], text: string): Detached {
   const last = tokens.at(-1);
@@ -392,10 +457,14 @@ function detachReleaseGroup(tokens: Token[], text: string): Detached {
 
   const separator = text.slice(previous.start + previous.text.length, last.start);
   if (separator === '-') {
-    if (isEncodeToken(last.text)) return { tokens, group: undefined };
+    if (!looksLikeGroupTag(last.text, 1)) return { tokens, group: undefined };
     return { tokens: tokens.slice(0, -1), group: last.text };
   }
-  if (/^[._\s]$/.test(separator) && isEncodeToken(previous.text) && looksLikeGroupTag(last.text)) {
+  if (
+    /^[._\s]$/.test(separator) &&
+    isEncodeToken(previous.text) &&
+    looksLikeGroupTag(last.text, 2)
+  ) {
     return { tokens: tokens.slice(0, -1), group: last.text };
   }
   return { tokens, group: undefined };
@@ -475,6 +544,12 @@ function extractQuality(tail: string, releaseGroup: string | undefined): Quality
 function stripWebsitePrefix(name: string): string {
   for (const pattern of WEBSITE_PREFIXES) {
     const stripped = name.replace(pattern, '');
+    if (stripped.length > 0 && stripped !== name) return stripped.trim();
+  }
+  // A bracketed bare domain is a tracker stamp only when the name is not a
+  // delimited listing; in a listing the leading bracket is the studio field.
+  if (!SEGMENT_SPLIT.test(name)) {
+    const stripped = name.replace(BRACKETED_BARE_DOMAIN, '');
     if (stripped.length > 0 && stripped !== name) return stripped.trim();
   }
   return name;
@@ -614,7 +689,6 @@ function parseSceneForm(name: string): ParsedRelease | null {
 
 // --- Shape 2: the delimited metadata form -----------------------------------
 
-const SEGMENT_SPLIT = /\s+[-–—]\s+/;
 const YMD_PATTERN = /\b((?:19|20)\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})\b/;
 const DMY_PATTERN = /\b(\d{1,2})[.\-/](\d{1,2})[.\-/]((?:19|20)\d{2})\b/;
 const WRITTEN_PATTERN = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{2})\b/g;
@@ -686,7 +760,7 @@ function splitSegment(segment: string): SegmentSplit {
     const bracket = /\s*[[{]([^\]}]*)[\]}]\s*$/.exec(text);
     if (bracket?.[1] === undefined) break;
     const content = bracket[1].trim();
-    if (group === undefined && looksLikeGroupTag(content)) group = content;
+    if (group === undefined && looksLikeGroupTag(content, 2)) group = content;
     else quality.unshift(content);
     text = text.slice(0, bracket.index).trim();
   }
@@ -711,6 +785,17 @@ function parseDelimitedForm(name: string): ParsedRelease | null {
     site = bracketed[1].trim();
     rest = rest.slice(bracketed[0].length);
   }
+
+  // Positive shape test. A leading bracket or a stray " - " is not enough to
+  // make a name a listing: `[Tracker] Brazzers.2023.04.15.Alex.Coal.XXX.1080p
+  // .MP4-WRB` is a dotted release with a tracker stamp, and reading it as a
+  // listing throws away its entire encode section — which flattens every
+  // encode in the group to one score and kills upgrade detection. Declining on
+  // a dotted date run is a test of *this* shape rather than a reordering of
+  // the two recognisers: the listing form's own date spellings (`2023-07-22`,
+  // `19-07-2023`, `19.07.2023`, `(June 24, 2025)`) do not match it, so
+  // preferring the dotted parser outright would instead let it eat listings.
+  if (DOTTED_DATE_RUN.test(rest)) return null;
 
   const segments = rest
     .split(SEGMENT_SPLIT)
@@ -763,16 +848,25 @@ function parseDelimitedForm(name: string): ParsedRelease | null {
   if (titleParts.length === 0) return null;
 
   // The identity slug is built from the *sorted* part slugs while the display
-  // title keeps source order. These listings put performers and title on
-  // either side of each other depending on the tracker, and two scenes on one
-  // site and day whose part multisets are permutations of each other are the
-  // same scene — so sorting recovers collation that order alone would lose,
-  // without admitting any collision that order would have prevented.
+  // title keeps source order, because these listings put performers and title
+  // on either side of each other depending on the tracker.
+  //
+  // The join is `--`, and that is load-bearing rather than cosmetic. Sorting
+  // is only safe if the join is injective on the multiset of parts, and
+  // joining with a single `-` is not: `slug()` emits `-` too, so the part
+  // boundaries dissolve and any re-split that happens to preserve alphabetical
+  // order collides — `Kylie` + `Page Turner` and `Kylie Page` + `Turner` both
+  // render `kylie-page-turner`, and those are different scenes. `slug()`
+  // collapses runs of non-alphanumerics to a single `-` and strips the edges,
+  // so `--` cannot occur inside a part; empty parts are filtered out above.
+  // The join is therefore a delimiter that no part can contain, the split is
+  // unique, and *now* the multiset determines the string and vice versa.
+  // `titleCaseSlug` drops empty segments, so paths render unchanged.
   const sceneSlug = titleParts
     .map(slug)
     .filter((part) => part.length > 0)
     .toSorted()
-    .join('-');
+    .join('--');
 
   return buildRelease(
     site,
