@@ -58,6 +58,25 @@ resolution because there is no word boundary before the `60`.
 visible and fixable, while a wrong identity key silently merges two different scenes
 and you pick the wrong thing.
 
+**A constraint, not a defect: `--` inside a scene slug is a component boundary, and
+two files have to agree about that.** Where a release names its parts separately —
+`[Vixen] Kylie - Page Turner - 2023-07-19` — the parts are sorted and joined with `--`,
+so listing order cannot split a group. Sorting alone is not enough: joined with a single
+`-`, `Kylie | Page Turner` and `Kylie Page | Turner` produce the same string and two
+different scenes merge. `slug()` never emits `--`, which is what makes the doubled
+separator injective.
+
+`titleCaseSlug` in `plan-import.ts` has to know this, because it renders the key into a
+library path. It splits on `--` first, then on `-`, and joins the components back with
+` - `, so those two scenes land at `Kylie - Page Turner.mp4` and `Kylie Page - Turner.mp4`.
+An earlier version split only on `-` and dropped empties, which collapsed both onto one
+path — the identities were distinct and the files still collided, so the second scene
+could never import.
+
+If you change either the join in `parse.ts` or the render in `plan-import.ts`, change
+both, and keep the destination-injectivity tests. Single-component names are unaffected;
+only multi-part listings render differently, and only since the rewrite.
+
 **If you extend this file, extend the corpus test with it.** `parse-corpus.test.ts`
 asserts invariants over a table rather than checking cases one at a time, and it pins
 the refusal set deliberately. Both times a fix to this parser was justified by "the
