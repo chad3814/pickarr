@@ -124,6 +124,23 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
  * encode section the way a group does; treating one as a group would silently
  * merge two genuinely different cuts of a scene.
  */
+/**
+ * The longest a trailing tag may be and still read as a release group.
+ *
+ * This is a shape heuristic, not a rule anyone published: a group tag is short
+ * because it is a signature, and a long run-together token is more likely a
+ * title word. It was 8, which refused real groups — `P0RNL0V3R` is 9 — and
+ * against a live feed those refusals were the single largest source of
+ * `parse_error` rows.
+ *
+ * Raising it is not free. The cap was silently the *only* guard rejecting
+ * 9-12 character edit tags, so widening it hands that job entirely to
+ * `NON_GROUP_TERMS` and the caps test. Anything added here has to be matched
+ * by a term below and a refusal row in the corpus, or the widening quietly
+ * converts a refusal into a merge — the one error this parser may not make.
+ */
+const MAX_GROUP_TAG_LENGTH = 12;
+
 const NON_GROUP_TERMS = new Set([
   'ENGLISH',
   'FRENCH',
@@ -148,6 +165,13 @@ const NON_GROUP_TERMS = new Set([
   'EXTENDED',
   'DIRECTORS',
   'REMASTERED',
+  // 9-12 characters: refused by the length cap until it was raised to 12, so
+  // these entries are what keeps them refused now. Each names a different cut
+  // or different content, which is why detaching one as a group would merge
+  // two things that are not the same scene.
+  'UNCENSORED',
+  'DIRECTORSCUT',
+  'COMPILATION',
   'REMUX',
   'PART',
   'PT',
@@ -419,7 +443,7 @@ function tokensOf(text: string): Token[] {
  * for a dot-attached one, where the separator carries no information.
  */
 function looksLikeGroupTag(text: string, minLength: number): boolean {
-  if (text.length < minLength || text.length > 8) return false;
+  if (text.length < minLength || text.length > MAX_GROUP_TAG_LENGTH) return false;
   if (!/^[A-Za-z0-9]+$/.test(text)) return false;
   if (!/[A-Za-z]/.test(text)) return false;
   if (text !== text.toUpperCase()) return false;

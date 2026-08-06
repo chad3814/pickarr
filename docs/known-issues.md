@@ -21,15 +21,38 @@ date in several positions, `Studio - Performers - Title (Month DD, YYYY)`, conca
 
 What follows is what it still gets wrong.
 
-**The hyphen-attached release group must be 1–8 all-caps alphanumerics, or the whole
+**The hyphen-attached release group must be 1–12 all-caps alphanumerics, or the whole
 name is refused.** This is deliberate — it is what stops `-Part1` and `-Part2`, or
 `-Uncut` and `-Directors`, being read as release groups and merging two different cuts
-of one scene. But it also refuses twelve realistic tag spellings that used to parse:
-`-Rarbg`, `-Ghost`, `-inSaNe` and other mixed case; `-rartv`, `-xpost` and other
-lowercase; `-EVILANGEL`, `-DIGITALPLAYGROUND` and anything over eight characters. Those
-land in `parse_error` rather than the browse list. If the worklist fills with them,
-relax the length cap before the caps rule — the caps rule is the one carrying the
-over-collation guard.
+of one scene. But it also refuses realistic tag spellings that used to parse: `-Rarbg`,
+`-Ghost`, `-inSaNe` and other mixed case; `-rartv`, `-xpost` and other lowercase; and
+`-DIGITALPLAYGROUND` or anything else over twelve characters. Those land in
+`parse_error` rather than the browse list. If the worklist fills with them, relax the
+caps rule last — it is the one carrying the over-collation guard.
+
+The cap was 8 until a real feed showed that one rule producing the majority of all
+`parse_error` rows, most of them the 9-character group `P0RNL0V3R`. Raising it to 12
+came with a cost that is easy to miss: **the cap had silently been the only guard
+rejecting 9-12 character edit tags**, since `NON_GROUP_TERMS` and the caps test are
+what handle the short ones. Widening it moved `-UNCENSORED`, `-DIRECTORSCUT` and
+`-COMPILATION` from refused to parsed-as-a-group — a merge, not a refusal, and merging
+is the one error this parser may not make. They are now listed terms with their own
+corpus refusal rows. `DIRECTORS` and `REMASTERED` were already listed and had been
+redundant with the cap; they are load-bearing now. **If you raise `MAX_GROUP_TAG_LENGTH`
+again, walk the newly exposed length band for edit and content tags first** — the
+constant's doc comment says the same thing at the point of change.
+
+**Theoretical, never observed: content tags of 8 characters or fewer would be swallowed
+as release groups.** `-SAMPLE`, `-TRAILER`, `-PREVIEW`, `-CENSORED` and `-BLOOPERS` are
+all-caps, alphanumeric, short, and absent from `NON_GROUP_TERMS`, so each would be
+detached as a group and collate into the scene proper — a two-minute trailer offered as
+a pickable "version" of the full scene. This predates the cap change and the cap never
+covered it. Deliberately not fixed: none of these has been seen in a real feed, and
+adding them *changes* current behaviour, turning names that parse today into
+`parse_error` rows — a certain cost against a hypothetical benefit. Recorded so that if
+a trailer ever does show up on a scene's version list, the cause is already written
+down. `-PROPER` and `-REPACK` are the same shape but merging those is correct: they are
+re-releases of the same scene, which is what upgrade detection is for.
 
 **A bare-domain prefix becomes the site.** Stripping a website prefix now requires
 `www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`
