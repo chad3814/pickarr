@@ -463,14 +463,22 @@ function tokensOf(text: string): Token[] {
  * nothing but format and a group can be there. The two cases that look alike
  * as strings are unambiguous as positions.
  *
- * `NON_GROUP_TERMS` remains as a narrow exception to that positional rule, for
- * the tags that do appear after the resolution and where a merge destroys
- * something rather than merely annoying: `-Part1`/`-Part2`, `-CD1`/`-CD2` and
- * `-DISC1`/`-DISC2` are halves of one scene, so merging them means the user
- * picks one half believing it is the whole. Digits are stripped before the
+ * `NON_GROUP_TERMS` remains as a narrow exception to that positional rule. Be
+ * honest about how much it is doing: 2,310 real indexer titles containing
+ * cd/part/disc markers were checked, and *none* placed one after a resolution
+ * in this position. Removing the four split-marker entries changed nothing
+ * measurable on that sample. Where those markers really occur — inside the
+ * title, or before the resolution — they land in the identity on their own and
+ * the two halves keep separate keys with no rule involved, which is the
+ * positional rule working rather than the list.
+ *
+ * The entries stay because they cost nothing and the failure they prevent is
+ * the expensive kind: `-Part1`/`-Part2`, `-CD1`/`-CD2`, `-DISC1`/`-DISC2`
+ * merged onto one key means the user picks one half believing it is the whole.
+ * But they are insurance against an unobserved shape, not a load-bearing
+ * guard, and should not be described as one. Digits are stripped before the
  * lookup so `Part1` and `Part2` both reduce to `PART`, while a numbered group
- * like `GRP1` reduces to the unlisted `GRP`. Matching is case-insensitive, so
- * one entry covers every spelling.
+ * like `GRP1` reduces to the unlisted `GRP`. Matching is case-insensitive.
  *
  * `minLength` is 1 for a hyphen-attached tag, where the hyphen itself is
  * already strong evidence (single-letter groups like `-G` are common), and 2

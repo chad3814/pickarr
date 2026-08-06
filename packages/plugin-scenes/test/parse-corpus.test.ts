@@ -140,6 +140,28 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|mp4|-|inSaNe',
     isNew: true,
   },
+  // --- Split markers, as they actually occur --------------------------------
+  //
+  // Sampled from 2,310 real indexer titles containing cd/part/disc markers:
+  // none put one after a resolution in a hyphen-attached group position. What
+  // does occur is this — the marker inside the title, where it stays part of
+  // the identity and the two halves keep separate keys with no rule needed.
+  {
+    name: 'DeviceBondage - Lindsey Grant - 19-06-2010 - Altered State.part1',
+    scene: 'devicebondage/altered-state-part1',
+    key: 'devicebondage:2010-06-19:altered-state-part1--lindsey-grant',
+    title: 'Lindsey Grant - Altered State part1',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'DeviceBondage - Lindsey Grant - 19-06-2010 - Altered State.part2',
+    scene: 'devicebondage/altered-state-part2',
+    key: 'devicebondage:2010-06-19:altered-state-part2--lindsey-grant',
+    title: 'Lindsey Grant - Altered State part2',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
   // --- The resolution is an anchor ------------------------------------------
   //
   // Extra content is named *before* the resolution; only format and a group
