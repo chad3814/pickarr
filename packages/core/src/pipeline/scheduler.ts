@@ -34,14 +34,36 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     return ingestMutex.run(() => deps.ingestFeed(feed));
   }
 
+  /**
+   * The count alone (`parseErrors`) says a feed has names the parser cannot
+   * handle; it never says which ones, so there was nothing to act on. Each
+   * failure in `result.parseFailures` is logged on its own line — bounded by
+   * `MAX_REPORTED_PARSE_FAILURES` inside `ingestEntries` itself, so a feed
+   * that suddenly fails to parse at all cannot flood the log — with the
+   * suppressed count logged too when the cap was hit, so a truncated report
+   * still says how much was left out.
+   */
+  function logIngestResult(feed: FeedConfig, result: IngestResult): void {
+    deps.log(
+      `ingest ${feed.id}: ${result.inserted} new, ${result.groupsCreated} groups, ` +
+        `${result.upgradesFlagged} upgrades, ${result.parseErrors} parse errors`,
+    );
+    for (const failure of result.parseFailures) {
+      deps.log(`ingest ${feed.id}: parse_error (${failure.reason}): ${failure.title}`);
+    }
+    if (result.parseFailuresSuppressed > 0) {
+      deps.log(
+        `ingest ${feed.id}: ${result.parseFailuresSuppressed} additional parse failures ` +
+          'suppressed this tick',
+      );
+    }
+  }
+
   async function ingestAllNow(): Promise<void> {
     for (const feed of deps.feeds) {
       try {
         const result = await ingestOne(feed);
-        deps.log(
-          `ingest ${feed.id}: ${result.inserted} new, ${result.groupsCreated} groups, ` +
-            `${result.upgradesFlagged} upgrades, ${result.parseErrors} parse errors`,
-        );
+        logIngestResult(feed, result);
       } catch (error) {
         // One bad feed must never stop the others.
         deps.log(`ingest ${feed.id} failed: ${(error as Error).message}`);
@@ -74,9 +96,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     start() {
       for (const feed of deps.feeds) {
         const timer = setInterval(() => {
-          void ingestOne(feed).catch((error: Error) =>
-            deps.log(`ingest ${feed.id} failed: ${error.message}`),
-          );
+          void ingestOne(feed)
+            .then((result) => logIngestResult(feed, result))
+            .catch((error: Error) => deps.log(`ingest ${feed.id} failed: ${error.message}`));
         }, feed.intervalSeconds * 1000);
         timer.unref();
         timers.push(timer);

@@ -1,11 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClient } from '../clients/types.ts';
-import { linkForRelease } from '../db/releases.ts';
+import { linkForRelease, titleForRelease } from '../db/releases.ts';
 import {
   activeDownloads,
   bumpAttempts,
   bumpMissingPolls,
+  clientJobName,
   downloadLabel,
+  extractLabel,
   failDownload,
   getDownload,
   recordError,
@@ -22,7 +24,7 @@ export const MAX_MISSING_POLLS = 3;
 export interface UntrackedEntry {
   ref: string;
   name: string;
-  state: 'downloading' | 'completed' | 'failed';
+  state: 'downloading' | 'completed' | 'failed' | 'in-progress';
   percentage: number | null;
 }
 
@@ -65,11 +67,12 @@ export function resetLabelMismatchWarningForTests(): void {
 function warnIfLabelMismatch(download: DownloadRow, actualName: string): void {
   if (warnedLabelMismatch) return;
   const expected = downloadLabel(download.id);
-  if (actualName === expected) return;
+  if (extractLabel(actualName) === expected) return;
   warnedLabelMismatch = true;
   console.warn(
     `pickarr: download ${download.id} is named '${actualName}' at the client, expected ` +
-      `'${expected}'; label-based double-submit recovery will not work against this server.`,
+      `a name ending '[${expected}]'; label-based double-submit recovery will not work ` +
+      'against this server.',
   );
 }
 
@@ -110,13 +113,24 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
   const queueByRef = new Map(snapshot.queue.map((entry) => [entry.ref, entry]));
   const historyByRef = new Map(snapshot.history.map((entry) => [entry.ref, entry]));
 
-  // Keyed by the label a download was submitted under, not by anything the
-  // client or the release supplied. Built from history first and queue
-  // second, so a label present in both (a job caught mid-transition) resolves
-  // to the still-active queue slot.
+  // Keyed by the label a download was submitted under, extracted from
+  // whatever name the client reports rather than matched against it as a
+  // whole — the client-reported name now carries the release title ahead of
+  // the marker (see `clientJobName` in `db/downloads.ts`), so an exact-string
+  // match against the bare label would never hit. An entry whose name has no
+  // well-formed marker (`extractLabel` returns null) contributes nothing
+  // here; that is the case `warnIfLabelMismatch` exists to surface. Built
+  // from history first and queue second, so a label present in both (a job
+  // caught mid-transition) resolves to the still-active queue slot.
   const refByLabel = new Map<string, string>();
-  for (const entry of snapshot.history) refByLabel.set(entry.name, entry.ref);
-  for (const entry of snapshot.queue) refByLabel.set(entry.name, entry.ref);
+  for (const entry of snapshot.history) {
+    const label = extractLabel(entry.name);
+    if (label !== null) refByLabel.set(label, entry.ref);
+  }
+  for (const entry of snapshot.queue) {
+    const label = extractLabel(entry.name);
+    if (label !== null) refByLabel.set(label, entry.ref);
+  }
 
   // Every ref this client has ever been given, terminal or not — an imported
   // download still sitting in history is ours, not a stranger's.
@@ -197,9 +211,10 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
           result.failed += 1;
           continue;
         }
+        const title = titleForRelease(db, download.releaseId) ?? link;
 
         try {
-          const ref = await client.addUrl(link, label);
+          const ref = await client.addUrl(link, clientJobName(title, download.id));
           setClientRef(db, download.id, ref, now);
           knownRefs.add(ref);
           result.advanced += 1;
@@ -246,6 +261,15 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
     if (historic !== undefined) {
       warnIfLabelMismatch(download, historic.name);
       resetMissingPolls(db, download.id);
+
+      // A transient post-processing state (extracting, moving, repairing,
+      // verifying...) is not a failure and not a state change — the job is
+      // still being worked on by the client. We saw it this tick, which is
+      // why missing_polls was just reset above, but nothing else about the
+      // row changes; the next tick re-reads it fresh.
+      if (historic.outcome === 'in-progress') {
+        continue;
+      }
 
       if (historic.outcome === 'failed') {
         failDownload(db, download.id, historic.failMessage ?? 'download failed at client', now);

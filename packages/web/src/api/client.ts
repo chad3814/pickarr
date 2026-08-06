@@ -66,7 +66,7 @@ export interface DownloadView {
 export interface UntrackedEntry {
   ref: string;
   name: string;
-  state: 'downloading' | 'completed' | 'failed';
+  state: 'downloading' | 'completed' | 'failed' | 'in-progress';
   percentage: number | null;
 }
 

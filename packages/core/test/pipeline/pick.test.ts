@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { pickRelease } from '../../src/pipeline/pick.ts';
 import { getGroup } from '../../src/db/groups.ts';
-import { getDownload } from '../../src/db/downloads.ts';
+import { extractLabel, getDownload, downloadLabel } from '../../src/db/downloads.ts';
 import type { DownloadClient, ClientSnapshot } from '../../src/clients/types.ts';
 
 function fakeClient(overrides: Partial<DownloadClient> = {}): DownloadClient {
@@ -46,6 +46,29 @@ test('picking marks the group picked and starts a download', async () => {
   assert.equal(download.status, 'downloading');
   assert.equal(download.clientRef, 'nzo_1');
   assert.equal(download.kind, 'initial');
+  db.close();
+});
+
+// The job name sent to the client is the release's own raw title (readable
+// in SABnzbd's UI) with the download's recovery marker appended, not the
+// bare marker alone — a bare 'pickarr-7' is what made every job in the real
+// SABnzbd UI unreadable. The marker must still be recoverable by
+// extractLabel regardless of what the title looks like.
+test('addUrl is sent a name carrying the release title, with the label recoverable as a marker', async () => {
+  const db = openTestDatabase();
+  const { groupId, releaseId } = seed(db);
+  let seenName: string | undefined;
+  const client = fakeClient({
+    addUrl: async (_url: string, name: string) => {
+      seenName = name;
+      return 'nzo_1';
+    },
+  });
+
+  const download = await pickRelease(db, client, { groupId, releaseId }, 500);
+
+  assert.match(seenName ?? '', /^Title /);
+  assert.equal(extractLabel(seenName ?? ''), downloadLabel(download.id));
   db.close();
 });
 

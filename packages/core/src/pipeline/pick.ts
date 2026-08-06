@@ -1,9 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClient } from '../clients/types.ts';
 import { getGroup, markPicked } from '../db/groups.ts';
-import { getRelease, linkForRelease } from '../db/releases.ts';
+import { getRelease, linkForRelease, titleForRelease } from '../db/releases.ts';
 import {
-  downloadLabel,
+  clientJobName,
   getDownload,
   inFlightForRelease,
   insertDownload,
@@ -79,6 +79,7 @@ export async function pickRelease(
 
   const link = linkForRelease(db, request.releaseId);
   if (link === null) throw new Error(`Release ${request.releaseId} has no feed item link`);
+  const title = titleForRelease(db, request.releaseId) ?? link;
 
   // addUrl and the persist that follows it are recorded as distinguishable
   // failure modes. If addUrl throws, nothing was submitted — the row stays
@@ -87,14 +88,15 @@ export async function pickRelease(
   // submission already happened; recording that identically to an addUrl
   // failure would make a naive reconcile retry addUrl and double-submit the
   // same nzb, so that case is recorded with a distinct message naming the
-  // ref that was already accepted. addUrl is given downloadLabel(downloadId)
-  // rather than anything derived from the release, so that if this call
-  // succeeds and only the persist below fails, a reconcile tick can recover
-  // the ref from the client's own queue/history by that same label instead
-  // of submitting the nzb a second time.
+  // ref that was already accepted. addUrl is given clientJobName(title,
+  // downloadId), which carries downloadLabel(downloadId) as a bracketed
+  // marker rather than anything else derived from the release, so that if
+  // this call succeeds and only the persist below fails, a reconcile tick
+  // can recover the ref from the client's own queue/history by that same
+  // marker instead of submitting the nzb a second time.
   let clientRef: string;
   try {
-    clientRef = await client.addUrl(link, downloadLabel(downloadId));
+    clientRef = await client.addUrl(link, clientJobName(title, downloadId));
   } catch (error) {
     recordError(db, downloadId, (error as Error).message, now);
     return mustGetDownload(db, downloadId);

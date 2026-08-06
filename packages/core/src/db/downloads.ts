@@ -88,6 +88,43 @@ export function downloadLabel(id: number): string {
   return `pickarr-${id}`;
 }
 
+/**
+ * The structural delimiter `extractLabel` anchors on: a `downloadLabel`
+ * wrapped in brackets at the very end of a client-reported name. Anchoring on
+ * this rather than scanning for the label as a substring, or matching against
+ * the release title, is deliberate — free-text matching against a release
+ * title is exactly what has cost this project multiple fix rounds elsewhere
+ * (the scenes parser).
+ */
+const LABEL_MARKER_PATTERN = /\[(pickarr-\d+)\]\s*$/;
+
+/**
+ * The name pickarr sends the client as a job's display name: the release
+ * title, for legibility in the client's own UI (SABnzbd's queue/history
+ * otherwise shows every job as an unreadable `pickarr-<id>`), with
+ * `downloadLabel(id)` appended as a bracketed marker `extractLabel` can pull
+ * back out deterministically. The marker goes at the end rather than
+ * anywhere else in the string so it survives a client that reflows or
+ * re-punctuates the title ahead of it — as long as the client does not
+ * truncate the name outright, which is exactly the failure `extractLabel`
+ * returning null is meant to surface (see `warnIfLabelMismatch` in
+ * `pipeline/reconcile.ts`).
+ */
+export function clientJobName(title: string, id: number): string {
+  return `${title} [${downloadLabel(id)}]`;
+}
+
+/**
+ * The inverse of `clientJobName`: pulls the label back out of a
+ * client-reported name, or `null` if there is no well-formed trailing marker
+ * — the client sanitised, reflowed past, or truncated it away. A `null`
+ * result is exactly what should make label-based recovery treat the entry as
+ * unrecognized and `warnIfLabelMismatch` fire.
+ */
+export function extractLabel(name: string): string | null {
+  return LABEL_MARKER_PATTERN.exec(name)?.[1] ?? null;
+}
+
 export interface NewDownload {
   releaseId: number;
   groupId: number;

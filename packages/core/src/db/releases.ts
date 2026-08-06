@@ -80,3 +80,22 @@ export function linkForRelease(db: DatabaseSync, releaseId: number): string | nu
     .get(releaseId);
   return row === undefined ? null : str(row as SqlRow, 'link');
 }
+
+/**
+ * The feed's own raw title for a release, used as the readable half of the
+ * job name sent to the download client (see `clientJobName` in
+ * `db/downloads.ts`). Deliberately the raw feed title, not anything derived
+ * from the group's display fields — a group can hold releases from several
+ * differently-shaped listings, and the raw title is unambiguously this one
+ * release's own name.
+ */
+export function titleForRelease(db: DatabaseSync, releaseId: number): string | null {
+  const row = db
+    .prepare(
+      `SELECT feed_items.raw_title AS title
+       FROM releases JOIN feed_items ON feed_items.id = releases.feed_item_id
+       WHERE releases.id = ?`,
+    )
+    .get(releaseId);
+  return row === undefined ? null : str(row as SqlRow, 'title');
+}

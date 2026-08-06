@@ -2,7 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { completeUpgrade, flagUpgrade, getGroup, markPicked } from '../../src/db/groups.ts';
+import {
+  browseGroups,
+  completeUpgrade,
+  flagUpgrade,
+  getGroup,
+  markPicked,
+} from '../../src/db/groups.ts';
 
 // `upgrade_release_id` is an invariant, not an event log: it names the
 // highest-scoring release in the group that is strictly better than
@@ -125,5 +131,72 @@ test('flagUpgrade re-derives the same invariant and is the only write that moves
   const group = getGroup(db, 1)!;
   assert.equal(group.upgradeReleaseId, 4);
   assert.equal(group.listRankAt, 7000);
+  db.close();
+});
+
+// --- Browse ordering within a tie -------------------------------------
+//
+// Every group created in one ingest batch shares that batch's list_rank_at.
+// RSS feeds serve newest-first, so ingest processes the newest item first
+// and it gets the lowest id in the batch — ascending id order within a tie
+// is therefore already newest-first. The previous ORDER BY tiebroke on id
+// descending, which put the batch's oldest item on top of the list.
+
+test('browseGroups puts the lowest id first within a list_rank_at tie (newest ingested first)', () => {
+  const db = openTestDatabase();
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'T1', 'https://indexer.invalid/1.nzb', 1),
+            (2, 'f', 'g2', 'T2', 'https://indexer.invalid/2.nzb', 1),
+            (3, 'f', 'g3', 'T3', 'https://indexer.invalid/3.nzb', 1)`,
+  ).run();
+  // Ids 1..3 simulate ingest walking one RSS batch newest-first: id 1 is the
+  // newest item (processed first, so it got the lowest id), id 3 the oldest.
+  // All three land in the same batch, so they share one list_rank_at.
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+     VALUES (1, 'test', 'k1', '{"title":"G1","fields":[]}', 'g1', 100, 500),
+            (2, 'test', 'k2', '{"title":"G2","fields":[]}', 'g2', 100, 500),
+            (3, 'test', 'k3', '{"title":"G3","fields":[]}', 'g3', 100, 500)`,
+  ).run();
+
+  const page = browseGroups(db, { cursor: null, limit: 10, search: null });
+
+  assert.deepEqual(page.map((group) => group.id), [1, 2, 3]);
+  db.close();
+});
+
+test('keyset pagination over a list_rank_at tie yields every row exactly once, in order, with no duplicates', () => {
+  const db = openTestDatabase();
+  const values: string[] = [];
+  for (let i = 1; i <= 5; i += 1) {
+    values.push(
+      `(${i}, 'f', 'g${i}', 'T${i}', 'https://indexer.invalid/${i}.nzb', 1)`,
+    );
+  }
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at) VALUES ${values.join(', ')}`,
+  ).run();
+  const groupValues: string[] = [];
+  for (let i = 1; i <= 5; i += 1) {
+    groupValues.push(
+      `(${i}, 'test', 'k${i}', '{"title":"G${i}","fields":[]}', 'g${i}', 100, 500)`,
+    );
+  }
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, created_at, list_rank_at) VALUES ${groupValues.join(', ')}`,
+  ).run();
+
+  const seen: number[] = [];
+  let cursor: { listRankAt: number; id: number } | null = null;
+  for (let guard = 0; guard < 10; guard += 1) {
+    const page = browseGroups(db, { cursor, limit: 2, search: null });
+    if (page.length === 0) break;
+    for (const group of page) seen.push(group.id);
+    const last = page.at(-1);
+    cursor = last === undefined ? null : { listRankAt: last.listRankAt, id: last.id };
+  }
+
+  assert.deepEqual(seen, [1, 2, 3, 4, 5]);
   db.close();
 });
