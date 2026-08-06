@@ -112,6 +112,34 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|mp4|-|WRB',
     isNew: true,
   },
+  // --- Group tags that are not all-caps -------------------------------------
+  //
+  // Both from real feeds. Scene groups style themselves freely, and the caps
+  // rule refused every one that is not shouting.
+  {
+    name: 'Hentaied.26.01.20.Emiri.Momota.MILFa.Vs.Cumboro.XXX.2160p.MP4-FETiSH',
+    scene: 'hentaied/emiri-momota',
+    key: 'hentaied:2026-01-20:emiri-momota-milfa-vs-cumboro',
+    title: 'Emiri Momota MILFa Vs Cumboro',
+    quality: '2160|-|-|mp4|-|FETiSH',
+    isNew: true,
+  },
+  {
+    name: 'OperationEscort.17.10.27.Kenzie.Reeves.XXX.2160p.MP4-Zsex3i',
+    scene: 'operationescort/kenzie-reeves',
+    key: 'operationescort:2017-10-27:kenzie-reeves',
+    title: 'Kenzie Reeves',
+    quality: '2160|-|-|mp4|-|Zsex3i',
+    isNew: true,
+  },
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-inSaNe',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|inSaNe',
+    isNew: true,
+  },
   // Group tags of 9-12 characters. The cap was 8, which refused these outright
   // and made them the single largest source of parse_error rows against a real
   // feed. They collate with the rows above: same scene, different group.
@@ -863,8 +891,19 @@ const REFUSED: [string, string][] = [
   ['Site.23.04.15.Name.XXX.1080p.MP4-FRENCH', 'a language tag, not a group'],
   [
     'Site.23.04.15.Name.XXX.1080p.MP4-Bonus',
-    'an edit tag no list would contain; only the caps test rejects it',
+    'an edit tag no list would contain; only its Title-case shape rejects it',
   ],
+  // The shape rule that replaced the caps rule rejects exactly two spellings:
+  // an ordinary word in Title case, and one in lower case. That is where the
+  // unlistable edit tags live, and a group styled like a word is refused with
+  // them — the cheaper mistake.
+  ['Site.23.04.15.Name.XXX.1080p.MP4-Bonuses', 'a Title-case word, whatever the word is'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-Deleted', 'the same'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-Outtakes', 'the same'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-bonus', 'a lower-case word, refused for the same reason'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-extras', 'the same'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-Ghost', 'a real group styled as a word, refused with them'],
+  ['Site.23.04.15.Name.XXX.1080p.MP4-rartv', 'a real lower-case group, refused with them'],
   ['Site.23.04.15.Name.XXX.1080p.HEVC.UNCUT', 'the same, dot-attached'],
   ['Site.23.04.15.Name.XXX.1080p.HEVC.Bonus', 'the same, dot-attached and mixed case'],
   [

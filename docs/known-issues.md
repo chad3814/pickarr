@@ -21,20 +21,32 @@ date in several positions, `Studio - Performers - Title (Month DD, YYYY)`, conca
 
 What follows is what it still gets wrong.
 
-**The hyphen-attached release group must be 1–12 all-caps alphanumerics, or the whole
-name is refused.** This is deliberate — it is what stops `-Part1` and `-Part2`, or
-`-Uncut` and `-Directors`, being read as release groups and merging two different cuts
-of one scene. But it also refuses realistic tag spellings that used to parse: `-Rarbg`,
-`-Ghost`, `-inSaNe` and other mixed case; `-rartv`, `-xpost` and other lowercase; and
-`-DIGITALPLAYGROUND` or anything else over twelve characters. Those land in
-`parse_error` rather than the browse list. If the worklist fills with them, relax the
-caps rule last — it is the one carrying the over-collation guard.
+**A hyphen-attached release group must be 1–12 alphanumerics and must not be spelled
+like an ordinary word**, or the whole name is refused. `-Bonus`, `-Deleted`, `-bonus`
+and `-extras` are refused; `-WRB`, `-G`, `-FETiSH`, `-Zsex3i`, `-inSaNe` and
+`-P0RNL0V3R` are accepted. This is what stops an edit tag being read as a group and
+merging two different cuts of one scene.
+
+The rule used to require all caps, which was simply wrong about the world — scene groups
+style themselves freely and `MP4-FETiSH` and `MP4-Zsex3i` are both real. But the caps
+rule was carrying the over-collation guard and could not just be dropped. What it was
+actually doing was rejecting tags that look like words, because that is where the
+unlistable edit tags live, and Title case or lower case is exactly that shape. Replacing
+"must be caps" with "must not look like a word" admits the mixed-case groups without
+admitting `-Bonus`.
+
+The cost is unchanged in direction: a group that styles itself as a plain word — `-Ghost`,
+`-Rarbg`, `-rartv`, `-xpost` — is still refused, along with `-DIGITALPLAYGROUND` and
+anything over twelve characters. They land in `parse_error` rather than the browse list.
+Nothing structural separates `Ghost` from `Bonus`, so accepting one accepts the other,
+and refusing a real group costs a visible error while accepting an edit tag silently
+merges two scenes.
 
 The cap was 8 until a real feed showed that one rule producing the majority of all
 `parse_error` rows, most of them the 9-character group `P0RNL0V3R`. Raising it to 12
 came with a cost that is easy to miss: **the cap had silently been the only guard
-rejecting 9-12 character edit tags**, since `NON_GROUP_TERMS` and the caps test are
-what handle the short ones. Widening it moved `-UNCENSORED`, `-DIRECTORSCUT` and
+rejecting 9-12 character edit tags**, since `NON_GROUP_TERMS` and the word-shape test
+are what handle the short ones. Widening it moved `-UNCENSORED`, `-DIRECTORSCUT` and
 `-COMPILATION` from refused to parsed-as-a-group — a merge, not a refusal, and merging
 is the one error this parser may not make. They are now listed terms with their own
 corpus refusal rows. `DIRECTORS` and `REMASTERED` were already listed and had been
