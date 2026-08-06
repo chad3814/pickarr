@@ -111,6 +111,36 @@ test('no results is no match', () => {
   assert.equal(pickSite([], ['Anything']), null);
 });
 
+// --- Which queries are worth sending -----------------------------------------
+
+test('a single-letter fallback query is never sent', () => {
+  // Measured live: "a" matches 87,955 sites, "b" 25,078, "x" 13,168 — the
+  // service matches the letter anywhere in a name, so nothing is confirmable
+  // and the request is pure waste.
+  const plugin = scenes();
+  const candidates = plugin.siteCandidates?.('A.Very.Long.Scene.Title.Here.2024.01.01.1080p');
+  assert.deepEqual(candidates?.queries, ['A Very']);
+  assert.ok(
+    candidates?.prefixes.includes('A'),
+    'the one-token run stays a valid answer if some other query returns it',
+  );
+});
+
+test('a single-digit fallback query is still sent', () => {
+  // Digits lead real site names and are cheap: "0".."4" return nothing at
+  // all, "8" returns one. A blanket minimum length would lose
+  // "2 Chicks Same Time".
+  const plugin = scenes();
+  const candidates = plugin.siteCandidates?.('2.Chicks.Same.Time.Angela.White.2024.05.10.1080p');
+  assert.deepEqual(candidates?.queries, ['2 Chicks', '2']);
+});
+
+test('a two-token query is sent even when its first token is one letter', () => {
+  const plugin = scenes();
+  const candidates = plugin.siteCandidates?.('X.Art.Some.Scene.Title.2024.01.01.1080p');
+  assert.deepEqual(candidates?.queries, ['X Art']);
+});
+
 // --- Resolution over a batch -------------------------------------------------
 
 test('a confirmed two-word site is learned and used by the next parse', async () => {

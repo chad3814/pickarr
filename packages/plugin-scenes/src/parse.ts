@@ -1092,6 +1092,28 @@ export interface SceneParseOptions {
  * A candidate never consumes every pre-date token: something has to remain to
  * be the title.
  */
+/**
+ * True for a query with nothing to discriminate on.
+ *
+ * A single letter is worthless as a site search: the service matches it
+ * anywhere in a name, so `a` reports 87,955 results (`Male Reality`, `Laundry`),
+ * `b` 25,078 and `x` 13,168. None of that can confirm anything, and asking
+ * costs a request and a wasted page.
+ *
+ * A single *digit* is a different case and is allowed. Digits lead real site
+ * names — `2 Chicks Same Time` — and are cheap rather than pathological: `0`
+ * through `4` return nothing at all and `8` returns one. The asymmetry is the
+ * point; a blanket minimum length would throw the useful case away with the
+ * useless one.
+ *
+ * The cost is that a site named with a single letter — there is one called
+ * `X` — cannot be discovered, only configured.
+ */
+function isTooBroadToSearch(query: string): boolean {
+  const key = query.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return key.length === 1 && /[a-z]/.test(key);
+}
+
 export function sceneSiteCandidates(
   releaseName: string,
   options: SceneParseOptions = {},
@@ -1132,7 +1154,9 @@ export function sceneSiteCandidates(
   for (const count of [2, 1]) {
     if (count > longest) continue;
     const text = run(count);
-    if (text.length > 0 && !queries.includes(text)) queries.push(text);
+    if (text.length === 0 || queries.includes(text)) continue;
+    if (isTooBroadToSearch(text)) continue;
+    queries.push(text);
   }
   if (queries.length === 0 || prefixes.length === 0) return null;
 
