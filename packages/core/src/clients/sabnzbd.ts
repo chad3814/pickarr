@@ -16,6 +16,56 @@ import type {
 const TIMEOUT_MS = 20_000;
 
 /**
+ * Statuses SABnzbd's history reports that mean a job is genuinely never
+ * coming back. `Failed` is the obvious one. `Deleted` belongs here too: it
+ * means a person removed the job at the client, and unlike every status in
+ * `IN_PROGRESS_STATUSES` nothing is going to move it out of that state later
+ * — the entry just sits in history as `Deleted` forever. Reading it as
+ * in-progress would make reconcile wait on it indefinitely, because
+ * missing_polls only counts *absence* from queue/history, and a deleted job
+ * is never absent.
+ */
+const TERMINAL_FAILURE_STATUSES = new Set(['failed', 'deleted']);
+
+/**
+ * Transient post-processing statuses a real SABnzbd history slot can carry
+ * for a job that has neither failed nor finished. Every one of these used to
+ * be read as a terminal failure, which is the reported bug: a normal
+ * multi-part download got marked failed while SABnzbd was still unpacking
+ * it.
+ */
+const IN_PROGRESS_STATUSES = new Set([
+  'extracting',
+  'moving',
+  'repairing',
+  'verifying',
+  'fetching',
+  'running',
+  'queued',
+  'paused',
+]);
+
+/**
+ * The three-way read of a history slot's status.
+ *
+ * A status this client has never seen is read as a failure, not as
+ * in-progress, deliberately the less forgiving of the two wrong guesses.
+ * In-progress means "wait and poll again," and there is no mechanism that
+ * ever revisits that guess: the job is present in history, so missing_polls
+ * stays at zero, and it stays present indefinitely if the unrecognized label
+ * is itself a terminal state SABnzbd introduced that this client does not
+ * enumerate yet. A wrong failure is visible immediately and fixable by
+ * extending this list; a wrong "still working" can hang forever with no
+ * signal that anything is wrong.
+ */
+function historyOutcome(status: string): 'completed' | 'failed' | 'in-progress' {
+  if (status === 'completed') return 'completed';
+  if (TERMINAL_FAILURE_STATUSES.has(status)) return 'failed';
+  if (IN_PROGRESS_STATUSES.has(status)) return 'in-progress';
+  return 'failed';
+}
+
+/**
  * What a string becomes when redaction cannot produce a version of it that is
  * *provably* free of the api key.
  *
@@ -212,9 +262,9 @@ export function createSabnzbdClient(
     id: config.id,
     importMode: config.importMode,
 
-    async addUrl(url, label) {
+    async addUrl(url, name) {
       const body = asRecord(
-        await call('addurl', { name: url, cat: config.category, nzbname: label }),
+        await call('addurl', { name: url, cat: config.category, nzbname: name }),
       );
       if (body === null || body['status'] !== true) {
         // `error` is SABnzbd's own wording and routinely quotes the request it
@@ -265,10 +315,7 @@ export function createSabnzbdClient(
         if (ref === '') continue;
 
         const status = safeText(slot['status']).toLowerCase();
-        // Anything not explicitly completed is a failure; sabnzbd uses several
-        // terminal labels and treating an unknown one as success would import
-        // a partial download.
-        const outcome = status === 'completed' ? 'completed' : 'failed';
+        const outcome = historyOutcome(status);
         const storage = safeText(slot['storage']);
         const failMessage = safeText(slot['fail_message']);
 

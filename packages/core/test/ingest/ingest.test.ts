@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DisplayFields, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { ingestEntries } from '../../src/ingest/ingest.ts';
+import { ingestEntries, MAX_REPORTED_PARSE_FAILURES } from '../../src/ingest/ingest.ts';
 import { findGroup, getGroup } from '../../src/db/groups.ts';
 import type { FeedEntry } from '../../src/feeds/parse-rss.ts';
 import type { FeedConfig } from '../../src/config/schema.ts';
@@ -175,6 +175,34 @@ test('an unparseable name records a parse_error and creates no group', () => {
     db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.['parse_error'],
     'unrecognized',
   );
+  db.close();
+});
+
+// The count alone (parseErrors) says nothing about which titles the parser
+// is missing. parseFailures is the actionable half: the raw title the feed
+// served, paired with the reason, for every parse failure this tick — not
+// reduced or deduplicated, since a scheduler logging these is the only way
+// to see what to fix in the parser.
+test('a parse failure surfaces the raw title and reason on IngestResult', () => {
+  const db = openTestDatabase();
+  const result = ingestEntries(db, PLUGIN, FEED, [entry('g1', 'no-separator')], 1000);
+
+  assert.deepEqual(result.parseFailures, [{ title: 'no-separator', reason: 'unrecognized' }]);
+  assert.equal(result.parseFailuresSuppressed, 0);
+  db.close();
+});
+
+test('parse failures beyond the cap are counted as suppressed instead of accumulating without bound', () => {
+  const db = openTestDatabase();
+  const entries = Array.from({ length: MAX_REPORTED_PARSE_FAILURES + 5 }, (_unused, index) =>
+    entry(`g${index}`, `no-separator-${index}`),
+  );
+
+  const result = ingestEntries(db, PLUGIN, FEED, entries, 1000);
+
+  assert.equal(result.parseErrors, MAX_REPORTED_PARSE_FAILURES + 5);
+  assert.equal(result.parseFailures.length, MAX_REPORTED_PARSE_FAILURES);
+  assert.equal(result.parseFailuresSuppressed, 5);
   db.close();
 });
 

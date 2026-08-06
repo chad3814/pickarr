@@ -32,6 +32,8 @@ test('reconcileNow caches the untracked snapshot for later reads', async () => {
       groupsCreated: 0,
       releasesAdded: 0,
       upgradesFlagged: 0,
+      parseFailures: [],
+      parseFailuresSuppressed: 0,
     }),
     reconcile: async () => ({ untracked: UNTRACKED, advanced: 0, failed: 0, imported: 0 }),
     clientIds: ['sab'],
@@ -141,6 +143,8 @@ test('an ingest failure on one feed does not stop the others', async () => {
         groupsCreated: 0,
         releasesAdded: 0,
         upgradesFlagged: 0,
+        parseFailures: [],
+        parseFailuresSuppressed: 0,
       };
     },
     reconcile: async () => ({ untracked: [], advanced: 0, failed: 0, imported: 0 }),
@@ -150,5 +154,41 @@ test('an ingest failure on one feed does not stop the others', async () => {
 
   await scheduler.ingestAllNow();
   assert.deepEqual(ingested, ['b']);
+  db.close();
+});
+
+// The count on IngestResult (parseErrors) says *that* names failed to parse;
+// it never says *which* ones, so there was nothing to act on. Each failure
+// the ingest function reports has to be logged on its own line so the raw
+// title is visible, not just tallied.
+test('ingestAllNow logs each parse failure individually, plus a suppressed count past the cap', async () => {
+  const db = openTestDatabase();
+  const logged: string[] = [];
+  const scheduler = createScheduler({
+    db,
+    feeds: [{ id: 'feed1', url: 'https://a.invalid', plugin: 'p', intervalSeconds: 900 }],
+    ingestFeed: async () => ({
+      seen: 3,
+      inserted: 3,
+      parseErrors: 3,
+      groupsCreated: 0,
+      releasesAdded: 0,
+      upgradesFlagged: 0,
+      parseFailures: [
+        { title: 'Weird.Release.One', reason: 'unrecognized' },
+        { title: 'Weird.Release.Two', reason: 'unrecognized' },
+      ],
+      parseFailuresSuppressed: 1,
+    }),
+    reconcile: async () => NO_RECONCILE_WORK,
+    clientIds: [],
+    log: (message) => logged.push(message),
+  });
+
+  await scheduler.ingestAllNow();
+
+  assert.ok(logged.some((line) => line.includes('Weird.Release.One')));
+  assert.ok(logged.some((line) => line.includes('Weird.Release.Two')));
+  assert.ok(logged.some((line) => /1.*suppress/i.test(line)));
   db.close();
 });

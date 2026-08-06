@@ -371,6 +371,78 @@ test('snapshot reads queue and history filtered by category', async () => {
   assert.ok(recorder.urls.every((url) => url.includes('category=pickarr')));
 });
 
+// --- History status -> outcome -----------------------------------------
+//
+// SABnzbd's real history carries several transient post-processing labels
+// for a job that has neither failed nor finished. The previous rule read
+// every one of them as a terminal failure, which meant an ordinary
+// multi-part download got marked failed while SABnzbd was still unpacking
+// it. Only 'Completed' is success; a specific, deliberately short list of
+// terminal-failure labels is 'failed'; everything else transient is
+// 'in-progress'.
+
+test('every transient SABnzbd post-processing status is read as in-progress, not failed', async () => {
+  const transient = [
+    'Extracting',
+    'Moving',
+    'Repairing',
+    'Verifying',
+    'Fetching',
+    'Running',
+    'Queued',
+    'Paused',
+  ];
+  for (const status of transient) {
+    const client = createSabnzbdClient(CONFIG, async (url) =>
+      url.includes('mode=queue')
+        ? jsonResponse({})
+        : jsonResponse({
+            history: {
+              slots: [{ nzo_id: 'h1', name: 'R', status, storage: '', fail_message: '' }],
+            },
+          }),
+    );
+    const snapshot = await client.snapshot();
+    assert.equal(snapshot.history[0]?.outcome, 'in-progress', `status ${status}`);
+  }
+});
+
+test("'Deleted' is a terminal failure, not in-progress", async () => {
+  const client = createSabnzbdClient(CONFIG, async (url) =>
+    url.includes('mode=queue')
+      ? jsonResponse({})
+      : jsonResponse({
+          history: {
+            slots: [{ nzo_id: 'h1', name: 'R', status: 'Deleted', storage: '', fail_message: '' }],
+          },
+        }),
+  );
+  const snapshot = await client.snapshot();
+  assert.equal(snapshot.history[0]?.outcome, 'failed');
+});
+
+test('an unrecognized status is a terminal failure, not in-progress', async () => {
+  const client = createSabnzbdClient(CONFIG, async (url) =>
+    url.includes('mode=queue')
+      ? jsonResponse({})
+      : jsonResponse({
+          history: {
+            slots: [
+              {
+                nzo_id: 'h1',
+                name: 'R',
+                status: 'SomeFutureStatusThisClientHasNeverSeen',
+                storage: '',
+                fail_message: '',
+              },
+            ],
+          },
+        }),
+  );
+  const snapshot = await client.snapshot();
+  assert.equal(snapshot.history[0]?.outcome, 'failed');
+});
+
 test('snapshot tolerates missing slots', async () => {
   const client = createSabnzbdClient(CONFIG, async () => jsonResponse({}));
   const snapshot = await client.snapshot();

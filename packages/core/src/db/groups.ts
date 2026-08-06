@@ -161,6 +161,27 @@ export interface BrowseQuery {
  * One query serves both cases from the spec: unpicked groups, and picked
  * groups with something better available. Keyset pagination on
  * (list_rank_at, id) keeps paging stable while ingest is writing.
+ *
+ * The tiebreak on `id` is ascending, not descending. Every group created in
+ * one ingest batch shares that batch's `list_rank_at`, and RSS feeds serve
+ * newest-first, so ingest processes the newest item first and it gets the
+ * lowest id in the batch. Ascending id order within a tie therefore already
+ * is newest-first — the id column is not a proxy for "arrival order" here,
+ * it *is* recency, inherited from the order ingest walked the feed in.
+ * Descending, the previous ordering, put the batch's oldest item on top.
+ *
+ * `feed_items.published_at` was the other candidate for this tiebreak — it
+ * is the feed's own claim about recency rather than an assumption about feed
+ * order — but a group has many releases across many feed items, "whose
+ * published_at" is not well-defined without an aggregate, and the column is
+ * nullable, so it would still need this same id fallback behind it. That
+ * turns a single-table keyset query into a join-and-aggregate for a case
+ * this codebase has not observed (a feed serving out of date order); id is
+ * kept.
+ *
+ * The cursor comparison's tiebreak direction has to mirror the ORDER BY's:
+ * with `id` ascending inside a tie, the next page holds ids *greater* than
+ * the cursor's, not smaller.
  */
 export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
   const conditions = ["(state = 'new' OR upgrade_release_id IS NOT NULL)"];
@@ -171,14 +192,14 @@ export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
     params.push(`%${query.search.toLowerCase()}%`);
   }
   if (query.cursor !== null) {
-    conditions.push('(list_rank_at < ? OR (list_rank_at = ? AND id < ?))');
+    conditions.push('(list_rank_at < ? OR (list_rank_at = ? AND id > ?))');
     params.push(query.cursor.listRankAt, query.cursor.listRankAt, query.cursor.id);
   }
   params.push(query.limit);
 
   return db
     .prepare(
-      `${SELECT} WHERE ${conditions.join(' AND ')} ORDER BY list_rank_at DESC, id DESC LIMIT ?`,
+      `${SELECT} WHERE ${conditions.join(' AND ')} ORDER BY list_rank_at DESC, id ASC LIMIT ?`,
     )
     .all(...params)
     .map((row) => toGroupRow(row as SqlRow));

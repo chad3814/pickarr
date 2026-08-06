@@ -7,7 +7,13 @@ import {
   MAX_MISSING_POLLS,
   resetLabelMismatchWarningForTests,
 } from '../../src/pipeline/reconcile.ts';
-import { downloadLabel, getDownload, type DownloadRow } from '../../src/db/downloads.ts';
+import {
+  clientJobName,
+  downloadLabel,
+  extractLabel,
+  getDownload,
+  type DownloadRow,
+} from '../../src/db/downloads.ts';
 import type { ClientSnapshot, DownloadClient } from '../../src/clients/types.ts';
 
 const EMPTY: ClientSnapshot = { queue: [], history: [] };
@@ -167,6 +173,49 @@ test('a failed download records the fail message', async () => {
   const download = getDownload(db, 1)!;
   assert.equal(download.status, 'failed');
   assert.match(download.error ?? '', /Out of retention/);
+  db.close();
+});
+
+// A history entry in a transient post-processing state (extracting, moving,
+// verifying...) is neither a failure nor a completion — the client is still
+// working on it. The bug this guards: the old two-way outcome read every
+// such state as a terminal failure, so an ordinary multi-part download got
+// marked failed while SABnzbd was still unpacking it.
+test('a download in a transient client state is left alone, but its missing-poll count is still reset', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1', missingPolls: 2 });
+  const client = fakeClient({
+    queue: [],
+    history: [
+      { ref: 'nzo_1', name: 'R', outcome: 'in-progress', storagePath: null, failMessage: null },
+    ],
+  });
+
+  const result = await reconcileClient(deps(db, client));
+
+  const download = getDownload(db, 1)!;
+  assert.equal(download.status, 'downloading');
+  assert.equal(download.error, null);
+  assert.equal(download.missingPolls, 0);
+  assert.equal(result.failed, 0);
+  assert.equal(result.imported, 0);
+  db.close();
+});
+
+test('a download with a genuine terminal failure status still fails, distinct from in-progress', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  const client = fakeClient({
+    queue: [],
+    history: [
+      { ref: 'nzo_1', name: 'R', outcome: 'failed', storagePath: null, failMessage: 'Failed' },
+    ],
+  });
+
+  await reconcileClient(deps(db, client));
+
+  const download = getDownload(db, 1)!;
+  assert.equal(download.status, 'failed');
   db.close();
 });
 
@@ -339,7 +388,9 @@ test('a queued download whose addUrl already succeeded is recovered from the que
   seedDownload(db, { id: 1, status: 'queued', clientRef: null });
   let addUrlCalls = 0;
   const client = fakeClient(
-    { queue: [{ ref: 'nzo_orphan', name: downloadLabel(1), percentage: 5 }], history: [] },
+    // Recovery has to extract the marker out of a name that also carries the
+    // release title (see clientJobName), not match on the bare label alone.
+    { queue: [{ ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 5 }], history: [] },
     {
       addUrl: async () => {
         addUrlCalls += 1;
@@ -369,7 +420,7 @@ test('a queued download whose addUrl already succeeded and finished is recovered
       history: [
         {
           ref: 'nzo_finished',
-          name: downloadLabel(1),
+          name: clientJobName('Some.Release.Title', 1),
           outcome: 'completed',
           storagePath: '/sab/complete/R',
           failMessage: null,
@@ -401,7 +452,7 @@ test('recovering a ref by label does not consume an addurl attempt, unlike a rea
   db.prepare('UPDATE downloads SET attempts = 4 WHERE id = 1').run();
   let addUrlCalls = 0;
   const client = fakeClient(
-    { queue: [{ ref: 'nzo_orphan', name: downloadLabel(1), percentage: 1 }], history: [] },
+    { queue: [{ ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 1 }], history: [] },
     {
       addUrl: async () => {
         addUrlCalls += 1;
@@ -419,20 +470,27 @@ test('recovering a ref by label does not consume an addurl attempt, unlike a rea
   db.close();
 });
 
-test('a fresh addUrl call is given the download-derived label, not the release title', async () => {
+// seedDownload's feed item carries raw_title 'T', so a retry's addUrl call
+// should send a name built from that title with the download's own label
+// appended as a bracketed marker (see clientJobName) — readable in the
+// client's UI, and still recoverable by extractLabel regardless of what the
+// title looks like.
+test('a fresh addUrl call sends a name carrying the release title, with the label recoverable as a marker', async () => {
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'queued', clientRef: null });
-  let seenLabel: string | undefined;
+  let seenName: string | undefined;
   const client = fakeClient(EMPTY, {
-    addUrl: async (_url: string, label: string) => {
-      seenLabel = label;
+    addUrl: async (_url: string, name: string) => {
+      seenName = name;
       return 'nzo_retry';
     },
   });
 
   await reconcileClient(deps(db, client));
 
-  assert.equal(seenLabel, downloadLabel(1));
+  assert.ok(seenName !== undefined);
+  assert.match(seenName ?? '', /^T /);
+  assert.equal(extractLabel(seenName ?? ''), downloadLabel(1));
   db.close();
 });
 
@@ -477,7 +535,8 @@ test('a tracked download whose client-side name matches its label never warns', 
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient({
-    queue: [{ ref: 'nzo_1', name: downloadLabel(1), percentage: 10 }],
+    // A real client reports the title-plus-marker name, not the bare label.
+    queue: [{ ref: 'nzo_1', name: clientJobName('T', 1), percentage: 10 }],
     history: [],
   });
   const warnMock = mock.method(console, 'warn', () => {});

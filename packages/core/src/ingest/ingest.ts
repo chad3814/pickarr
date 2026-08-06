@@ -6,6 +6,20 @@ import { insertFeedItem, setParseError } from '../db/feed-items.ts';
 import { findGroup, flagUpgrade, insertGroup } from '../db/groups.ts';
 import { insertRelease, releaseScore } from '../db/releases.ts';
 
+/**
+ * How many individual parse failures one `ingestEntries` call will report by
+ * title before it starts only counting them. A feed that suddenly fails to
+ * parse everything — a redesign of its title format, say — must not write
+ * thousands of log lines in one tick; `parseFailuresSuppressed` on the
+ * result says how many were left out so the cap itself is visible.
+ */
+export const MAX_REPORTED_PARSE_FAILURES = 50;
+
+export interface ParseFailure {
+  title: string;
+  reason: string;
+}
+
 export interface IngestResult {
   seen: number;
   inserted: number;
@@ -13,6 +27,16 @@ export interface IngestResult {
   groupsCreated: number;
   releasesAdded: number;
   upgradesFlagged: number;
+  /**
+   * The raw title and reason for up to `MAX_REPORTED_PARSE_FAILURES` of this
+   * tick's parse failures — the actionable half of `parseErrors`, which is
+   * only ever a count. `ingestEntries` has no logger of its own; the
+   * scheduler logs these, one per line, which is what makes a name the
+   * parser cannot handle visible instead of merely counted.
+   */
+  parseFailures: ParseFailure[];
+  /** How many parse failures beyond the cap were left out of `parseFailures`. */
+  parseFailuresSuppressed: number;
 }
 
 function isText(value: string | undefined): boolean {
@@ -148,6 +172,8 @@ export function ingestEntries(
     groupsCreated: 0,
     releasesAdded: 0,
     upgradesFlagged: 0,
+    parseFailures: [],
+    parseFailuresSuppressed: 0,
   };
 
   for (const entry of entries) {
@@ -172,6 +198,11 @@ export function ingestEntries(
       if ('error' in outcome) {
         setParseError(db, feedItemId, outcome.error);
         result.parseErrors += 1;
+        if (result.parseFailures.length < MAX_REPORTED_PARSE_FAILURES) {
+          result.parseFailures.push({ title: entry.title, reason: outcome.error });
+        } else {
+          result.parseFailuresSuppressed += 1;
+        }
         db.exec('COMMIT');
         continue;
       }
