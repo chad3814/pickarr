@@ -177,23 +177,6 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
   'X265',
 ]);
 
-/**
- * The longest a trailing tag may be and still read as a release group.
- *
- * This is a shape heuristic, not a rule anyone published: a group tag is short
- * because it is a signature, and a long run-together token is more likely a
- * title word. It was 8, which refused real groups — `P0RNL0V3R` is 9 — and
- * against a live feed those refusals were the single largest source of
- * `parse_error` rows.
- *
- * Raising it is not free. The cap was silently the *only* guard rejecting
- * 9-12 character edit tags, so widening it hands that job entirely to
- * `NON_GROUP_TERMS` — which, since casing was abandoned as a signal, is now
- * the only guard there is. Anything added here has to be matched by a term
- * below and a refusal row in the corpus, or the widening quietly converts a
- * refusal into a merge.
- */
-const MAX_GROUP_TAG_LENGTH = 12;
 
 /**
  * Short words that are *not* release groups even though they have a group's
@@ -486,9 +469,20 @@ function tokensOf(text: string): Token[] {
 }
 
 /**
- * A trailing token has a release group's *shape* when it is short, purely
+ * A trailing token has a release group's *shape* when it is purely
  * alphanumeric, carries a letter, and is not a codec/source/container/language
  * or edit term.
+ *
+ * Length is not consulted. A cap of 8 lived here, then 12, on the reasoning
+ * that a group tag is short and a long run-together token is more likely a
+ * title word. The position rule made it redundant: a tag is read as a group
+ * because of *where* it sits — after the encode section, the one place title
+ * material never reaches — and a name with no encode section detaches no group
+ * at all. Removed after measuring, and the measurement is the point. Two
+ * corpus titles gained (`-JustDifferent`, 13 characters, a real group) and
+ * **no existing identity key changed**, which is the result that matters:
+ * a swallowed title word would have shown up there, and collisions could not
+ * have found it.
  *
  * Casing is not consulted, and neither is the word itself. Two stricter rules
  * were tried and both cost more than they bought: requiring all caps refused
@@ -528,7 +522,7 @@ function tokensOf(text: string): Token[] {
  * for a dot-attached one, where the separator carries no information.
  */
 function looksLikeGroupTag(text: string, minLength: number): boolean {
-  if (text.length < minLength || text.length > MAX_GROUP_TAG_LENGTH) return false;
+  if (text.length < minLength) return false;
   if (!/^[A-Za-z0-9]+$/.test(text)) return false;
   if (!/[A-Za-z]/.test(text)) return false;
   const upper = text.toUpperCase();

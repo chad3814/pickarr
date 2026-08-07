@@ -330,6 +330,16 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|mp4|-|EVILANGEL',
     isNew: true,
   },
+  // No length cap: `-DIGITALPLAYGROUND` used to be refused for being too long.
+  // Position decides instead, and after the encode section only a group can be.
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-DIGITALPLAYGROUND',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|DIGITALPLAYGROUND',
+    isNew: true,
+  },
   {
     name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-TWELVECHARSX',
     scene: 'brazzers/alex-coal',
@@ -1084,9 +1094,6 @@ const REFUSED: [string, string][] = [
     'Site.2022.09.29.1080p.MP4',
     'only one token before the date against two after: the ordinary form, whose title would be empty',
   ],
-  // The length cap still exists; it is 12 rather than 8. A tag longer than
-  // that is more likely a run-together title word than a group.
-  ['Site.23.04.15.Name.XXX.1080p.MP4-DIGITALPLAYGROUND', 'thirteen characters or more is past the cap'],
   // Raising the cap to 12 moved every 9-12 character edit tag out from behind
   // it, leaving NON_GROUP_TERMS as their only guard. These rows are what make
   // that list load-bearing in the newly exposed band: each is a *different cut

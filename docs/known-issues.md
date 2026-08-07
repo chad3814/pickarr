@@ -206,13 +206,18 @@ three characters of metadata. The strip is deliberately narrow — a bracketed `
 at the very end and nothing else — because bracketed text is *not* junk in general: the
 delimited form reads `[Vixen] Alex Coal - ...` and depends on it surviving.
 
-**`MAX_GROUP_TAG_LENGTH` is no longer doing much.** Measured across the corpus, raising it
-from 12 gains 0.1% at 13 and nothing at all beyond that, so the two titles it still
-refuses (`-JustDifferent`, 13 characters) are the whole remaining cost. It is left at 12
-because the measurement cannot see the failure it prevents: a long run-together title
-word swallowed as a group produces a wrong key silently, without colliding with anything,
-so a zero-collision result is not evidence of safety here. The position rule now carries
-most of the weight this cap used to.
+**There is no length cap on a release group.** One lived here at 8, then 12, on the
+reasoning that a group tag is short and a long run-together token is more likely a title
+word. The position rule made it redundant: a tag reads as a group because of *where* it
+sits — after the encode section, the one place title material never reaches — and a name
+with no encode section detaches no group at all.
+
+Removed after measuring, and the measurement is the point. Across the corpus it gained
+two titles (`-JustDifferent`, 13 characters, a real group) and **changed no existing
+identity key**. That second number is the one that mattered: a title word swallowed as a
+group produces a wrong key silently, without colliding with anything, so the collision
+report could not have caught it — but a diff of every key before and against after can,
+and did not find one.
 
 **A name carrying no encode vocabulary at all is entirely title.**
 `KarupsPC.com_13.10.14.Chelsey.Lanette` used to be refused, on the grounds that nothing
