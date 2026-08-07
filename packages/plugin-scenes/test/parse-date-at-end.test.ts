@@ -624,12 +624,26 @@ test('a dateless name asks for a site lookup even with no encode boundary', () =
 
 // --- The bare-4K poster -------------------------------------------------------
 
-test('a name that opens with a bare 4K has no site and is labelled', () => {
+test('a name that opens with a bare 4K is filed under the site it comes from', () => {
   const result = parsed('4K.kleo.34ans.de.clapiers');
-  assert.equal(result.identityKey, 'french-4k::kleo-34ans-de-clapiers');
-  assert.equal(result.display.subtitle, 'French 4K');
+  assert.equal(result.identityKey, 'jacquieetmicheltv::kleo-34ans-de-clapiers');
   assert.equal(result.display.title, 'kleo 34ans de clapiers');
   assert.equal(result.quality.resolution, 2160, 'the 4K is still the resolution');
+});
+
+test('the bare-4K poster shares a directory with that site\'s named releases', () => {
+  // The whole point of naming the real site rather than inventing a bucket.
+  const bare = parsed('4K.kleo.34ans.de.clapiers');
+  const named = parsed('JacquieEtMichelTV.26.06.02.Lena.XXX.2160p.MP4-NABL0G');
+  assert.equal(bare.identityKey.split(':')[0], named.identityKey.split(':')[0]);
+});
+
+test('a configured spelling wins, so the two never split apart', () => {
+  const sites = ['Jacquie Et Michel TV'];
+  const bare = parsed('4K.kleo.34ans.de.clapiers', sites);
+  const named = parsed('JacquieEtMichelTV.26.06.02.Lena.XXX.2160p.MP4-NABL0G', sites);
+  assert.equal(bare.display.subtitle, 'Jacquie Et Michel TV');
+  assert.equal(bare.identityKey.split(':')[0], named.identityKey.split(':')[0]);
 });
 
 test('two of that poster stay separate', () => {
@@ -645,12 +659,30 @@ test('a leading 4K only counts at the very start', () => {
   // TINY.4K.DAKOTA.BLUE.14.12.2017 is refused for its own reason — its 4K is
   // mid-name, so there is no encode *suffix* to cut at.
   assert.equal(parseSceneRelease('TINY.4K.DAKOTA.BLUE.14.12.2017'), null);
-  assert.equal(
-    parsed('Brazzers.23.04.15.Alex.Coal.XXX.4K.MP4-WRB').display.subtitle,
-    'Brazzers',
-  );
+  assert.equal(parsed('Brazzers.23.04.15.Alex.Coal.XXX.4K.MP4-WRB').display.subtitle, 'Brazzers');
 });
 
 test('the bare-4K poster is never looked up', () => {
   assert.equal(sceneSiteCandidates('4K.kleo.34ans.de.clapiers'), null);
+});
+
+test('a configured spelling reaches every shape, not just the ones that look sites up', () => {
+  // The dated form takes its site verbatim from the text and never consulted
+  // the list, so configuring a site split it in two: dated releases under one
+  // slug, date-at-end and dateless ones under another.
+  const sites = ['Jacquie Et Michel TV'];
+  const keys = [
+    'JacquieEtMichelTV.26.06.02.Lena.XXX.2160p.MP4-NABL0G',
+    'JacquieEtMichelTV.Fanny.Double.Jump.2026.07.29.1080p',
+    '4K.kleo.34ans.de.clapiers',
+  ].map((name) => parsed(name, sites).identityKey.split(':')[0]);
+  assert.equal(new Set(keys).size, 1, JSON.stringify(keys));
+  assert.equal(keys[0], 'jacquie-et-michel-tv');
+});
+
+test('the delimited form canonicalises its site too', () => {
+  assert.equal(
+    parsed('[Vixen] Alex Coal - Beautiful Episode - 2023-07-19', ['VIXEN']).display.subtitle,
+    'VIXEN',
+  );
 });

@@ -205,16 +205,25 @@ there was no trustworthy place to cut one, so if what follows the site *starts* 
 encode vocabulary the name is site plus encode with no scene: `Brazzers.1080p.MP4-WRB`
 would otherwise have taken `1080p MP4-WRB` as its title. An existing test caught it.
 
-**The bare-4K poster is filed under a label.** `4K.kleo.34ans.de.clapiers` — 24 corpus
-titles, all distinct, none in ThePornDB. A resolution cannot be a site, so there is no
-site anywhere in the text and nothing to look up. They are one poster's output and are
-filed under `French 4K`.
+**The bare-4K poster is filed under the site it comes from.**
+`4K.kleo.34ans.de.clapiers` — 24 corpus titles, all distinct, none in ThePornDB. A
+resolution cannot be a site, so there is no site anywhere in the text and nothing to look
+up. They are Jacquie et Michel TV's output, which appears in the same feeds under its own
+name, so they file there rather than in a bucket of their own — `4K.kleo...` and
+`JacquieEtMichelTV.26.06.02.Lena...` belong in one directory.
 
-Like the poster signatures, **this is a named case rather than a structural rule**: the
-label describes where they come from and is not detected from the text, so a different
-poster opening names with a bare resolution would be mislabelled. No other bare-resolution
-lead appears in the corpus. Only a `4K` at the very start counts — the token turns up
-mid-name constantly, and `Tiny4K` is a real site.
+**This is a named case rather than a structural rule.** The site is not detected from the
+text; it cannot be, there is nothing there. Another poster opening names with a bare
+resolution would be filed here wrongly, and no other bare-resolution lead appears in the
+corpus. Only a leading `4K` counts — the token turns up mid-name constantly and `Tiny4K`
+is a real site.
+
+**Every shape canonicalises its site against the configured list, including the ones that
+never look a site up.** The ordinary dated form takes its site verbatim from the text
+ahead of the date and used to stop there, so configuring `Jacquie Et Michel TV` split that
+site in two: dated releases kept the release's own `JacquieEtMichelTV` while the
+date-at-end, dateless and bare-4K ones took the configured spelling, and the same site
+filed under two directories. A test written for the bare-4K poster is what surfaced it.
 
 **A release with no date at all parses only when its site is confirmed.** These exist,
 and until the site lookup arrived they were refused outright — the date was the only
