@@ -70,24 +70,26 @@ in an environment variable, `docker inspect` output, or a crash dump of `process
 scene naming:
 
 ```json
-"pathTemplate": "{sitename}/{sitename}.{date}{episode}.{title}.{resolution}-{group}"
+"pathTemplate": "{sitename}/{sitename}.{date}{episode}.{titledots}.{resolution}-{group}"
 ```
 
 ```
-bangbros/bangbros.2026-08-03.chloe upgrades her butt.2160p-WRB.mp4
-inthecrack/inthecrack.E1178.tracy gold.2160p-KTR.mp4
-tripforfuck/tripforfuck.hiyori japanese 2.mp4
+bangbros/bangbros.2026.08.03.chloe.upgrades.her.butt.2160p-WRB.mp4
+inthecrack/inthecrack.E1178.tracy.gold.2160p-KTR.mp4
+tripforfuck/tripforfuck.hiyori.japanese.2.mp4
 ```
 
-For a more readable library, `{Site}/{date}{episode} - {Title}` gives
+For a more readable library, `{Site}/{isodate}{episode} - {Title}` gives
 `Bang Bros/2026-08-03 - Chloe Upgrades Her Butt.mp4`.
 
 | Placeholder | Renders | Notes |
 |---|---|---|
 | `{site}` / `{Site}` | `bang bros` / `Bang Bros` | words separated |
 | `{sitename}` / `{SiteName}` | `bangbros` / `BangBros` | run together; the lower-case form matches ThePornDB's `short_name` |
-| `{title}` / `{Title}` | `chloe upgrades her butt` / `Chloe Upgrades Her Butt` | |
-| `{date}` | `2026-08-03` | empty when the release carries none |
+| `{title}` / `{Title}` | `chloe upgrades her butt` / `Chloe Upgrades Her Butt` | words separated by spaces |
+| `{titledots}` / `{TitleDots}` | `chloe.upgrades.her.butt` / `Chloe.Upgrades.Her.Butt` | scene style |
+| `{date}` | `2026.08.03` | scene style; empty when the release carries none |
+| `{isodate}` | `2026-08-03` | the same date, dashed |
 | `{year}` | `2026` | empty when the release carries none |
 | `{episode}` | `E1178` | empty unless the release is numbered rather than dated |
 | `{resolution}` | `2160p` | |
