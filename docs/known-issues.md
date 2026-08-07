@@ -70,6 +70,18 @@ evidence the split-marker entries have nothing to re-open.
 
 Still refused for length: `-DIGITALPLAYGROUND` and anything over twelve characters.
 
+**A date at the very end, with the encode ahead of it, is the same shape read from the
+other side.** `teensexmania_mishelle-klein_babe-loves-sperm-as-coffee-2160p-18.12.18`
+puts the date last of all, so the date-at-end reader — which wants every token *after*
+the date to be encode information — saw nothing after it and declined, and the ordinary
+reader found nothing following the date and refused.
+
+Both readings are now one function. When the date trails the name, the encode boundary
+inside the pre-date run does the job the trailing run does in the ordinary case, and the
+identity ends at that boundary rather than at the date — otherwise `2160p` lands in the
+scene title. A trailing date with *no* encode section before it is still refused: nothing
+would separate site from title or title from encode.
+
 **Date-at-end names need a configured site list to file correctly.** A second dotted
 shape appeared in real feeds after the MVP: `Site.Title.And.Performers.YYYY.MM.DD.Encode`,
 with the date at the end. It is hostile to this parser because the date is the only
