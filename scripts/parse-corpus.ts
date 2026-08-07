@@ -86,17 +86,30 @@ function heldOut(title: string, percent: number): boolean {
  * identity key are *supposed* to when they are two encodes of one scene, so a
  * raw list of collisions is mostly correct behaviour and unreadable. Titles
  * whose fingerprints also differ are the ones worth a human look.
+ *
+ * The release group is removed using the value the parser actually detached,
+ * not a guess at where it starts. A first version guessed, and every one of
+ * the clusters it surfaced turned out to be a correct collation whose group
+ * names simply differed — `-NBQ` against `-P0RNL0V3R` against `.P2P`. A
+ * triage heuristic that reports mostly false positives is worse than none,
+ * because it trains you to skim past the real ones.
  */
-function contentFingerprint(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/\b(?:\d{3,4}p(?:\d{2,3})?|4k|8k|uhd|sd|hd)\b/g, '')
+function contentFingerprint(title: string, releaseGroup: string | undefined): string {
+  let text = title.toLowerCase();
+  if (releaseGroup !== undefined && releaseGroup.length > 0) {
+    text = text.replaceAll(releaseGroup.toLowerCase(), '');
+  }
+  return text
+    .replace(/\b(?:19|20)?\d{2}[.\-_ ]\d{2}[.\-_ ]\d{2}\b/g, '')
+    .replace(/\b\d{8}\b/g, '')
+    .replace(/\bxxx\b/g, '')
+    .replace(/\b(?:\d{3,4}[pi](?:\d{2,3})?|4k|8k|uhd|sd|hd)\b/g, '')
     .replace(/\b(?:x26[45]|h ?26[45]|hevc|avc|av1|xvid|divx|vp9)\b/g, '')
     .replace(/\b(?:mp4|mkv|avi|wmv|mov|m4v|flv|ts|webm)\b/g, '')
     .replace(/\b(?:web[- ]?dl|web[- ]?rip|siterip|blu[- ]?ray|bd[- ]?rip|dvd[- ]?rip|hdtv)\b/g, '')
-    .replace(/\b(?:aac\d?|ac3|eac3|ddp?\d?|mp3|flac|opus|\d{1,2}bit|hdr(?:10)?|dv)\b/g, '')
+    .replace(/\b(?:aac\d?|ac3|eac3|ddp?\d?|mp3|flac|opus|\d{1,2}bit|hdr(?:10)?|dv|p2p)\b/g, '')
+    .replace(/\b(?:internal|repack|proper|multi|dual|upscaled?|remaster)\b/g, '')
     .replace(/\b(?:vr|3d|sbs|lr|ou|mono|fisheye\d*|mkx\d+|oculus|gearvr|psvr)\b/g, '')
-    .replace(/-[a-z0-9]{1,12}$/, '')
     .replace(/[^a-z0-9]+/g, '');
 }
 
@@ -129,6 +142,7 @@ async function main(): Promise<void> {
 
   const reports: TierReport[] = [];
   const keyToTitles = new Map<string, Set<string>>();
+  const fingerprints = new Map<string, string>();
   const siteQueries = new Map<string, number>();
 
   for (const file of options.files) {
@@ -174,6 +188,7 @@ async function main(): Promise<void> {
       const titles = keyToTitles.get(result.identityKey) ?? new Set<string>();
       titles.add(title);
       keyToTitles.set(result.identityKey, titles);
+      fingerprints.set(title, contentFingerprint(title, result.quality.releaseGroup));
     }
 
     reports.push(report);
@@ -219,8 +234,8 @@ async function main(): Promise<void> {
   const suspicious: { key: string; titles: string[] }[] = [];
   for (const [key, titles] of keyToTitles) {
     if (titles.size < 2) continue;
-    const fingerprints = new Set([...titles].map(contentFingerprint));
-    if (fingerprints.size > 1) suspicious.push({ key, titles: [...titles] });
+    const distinct = new Set([...titles].map((title) => fingerprints.get(title) ?? title));
+    if (distinct.size > 1) suspicious.push({ key, titles: [...titles] });
   }
   suspicious.sort((a, b) => b.titles.length - a.titles.length);
 

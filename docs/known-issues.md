@@ -21,6 +21,18 @@ date in several positions, `Studio - Performers - Title (Month DD, YYYY)`, conca
 
 What follows is what it still gets wrong.
 
+**A release group's name may contain spaces, and reading it as one token cost 65% of
+all parse failures.** `...XXX.XviD-iPT Team` was read as the single token `Team`, which
+left the run `iPT Team` with no encode boundary behind it and refused the whole name.
+Measured against a 6,804-title corpus, that one group accounted for 1,496 of 2,302
+refusals; fixing it took the SD tier from 22% to 85% and the corpus overall from 66% to
+88%.
+
+A multi-token group is detached under a stricter rule than a single-token one: it must
+sit directly behind encode information, exactly as the dot-attached form must, and spans
+at most three tokens. Title material never follows the encode section, so that is what
+stops a run of words after a stray hyphen being swallowed.
+
 **A hyphen-attached release group must be 1–12 alphanumerics and must not be a listed
 term**, or the whole name is refused. Casing is not consulted at all.
 
