@@ -140,6 +140,12 @@ async function main(): Promise<void> {
   }
   const parseOptions = { sites };
 
+  // Deduplicated across every input, not just within each file. Corpora
+  // pulled at different times overlap almost entirely — a second snapshot
+  // seventeen hours later shared 2,337 of 2,337 SD titles with the first — and
+  // counting a title once per file it appears in would report that overlap as
+  // corpus size.
+  const seen = new Set<string>();
   const reports: TierReport[] = [];
   const keyToTitles = new Map<string, Set<string>>();
   const fingerprints = new Map<string, string>();
@@ -148,7 +154,8 @@ async function main(): Promise<void> {
   for (const file of options.files) {
     const raw = (await readFile(file, 'utf8')).split('\n').map((line) => line.trim());
     const lines = raw.filter((line) => line.length > 0);
-    const unique = [...new Set(lines)];
+    const unique = [...new Set(lines)].filter((title) => !seen.has(title));
+    for (const title of unique) seen.add(title);
     const signal = unique.filter((title) => !USENET_NOISE.test(title));
 
     const report: TierReport = {
