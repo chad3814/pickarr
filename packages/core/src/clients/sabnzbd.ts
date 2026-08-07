@@ -384,6 +384,16 @@ export function createSabnzbdClient(
       return { queue, history };
     },
 
+    async remove(ref: string, deleteFiles: boolean): Promise<void> {
+      // `del_files` is what reclaims the download directory; without it
+      // SABnzbd forgets the job and leaves its files behind forever.
+      await call('history', {
+        name: 'delete',
+        value: ref,
+        del_files: deleteFiles ? '1' : '0',
+      });
+    },
+
     mapPath(clientPath) {
       for (const mapping of mappings) {
         if (clientPath === mapping.from || clientPath.startsWith(`${mapping.from}/`)) {

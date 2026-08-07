@@ -47,6 +47,22 @@ export interface DownloadClient {
   addUrl(url: string, name: string): Promise<string>;
   /** One poll of everything in this client's configured category. */
   snapshot(): Promise<ClientSnapshot>;
+  /**
+   * Drops a finished job from the client, and its leftover files with it.
+   *
+   * Called once the import has been recorded, so the file Pickarr wanted is
+   * already in the library and what remains under the client's storage path is
+   * spent: par2 volumes, samples, and in move mode an empty directory. Nothing
+   * else reclaims that space, and nothing else stops the client's history
+   * growing for the lifetime of the installation.
+   *
+   * The client is asked to delete rather than Pickarr doing it, because those
+   * paths are the client's own. Pickarr sees them only through `mapPath`, and
+   * a recursive delete aimed through a path mapping is the wrong place to
+   * discover the mapping is wrong.
+   */
+  remove(ref: string, deleteFiles: boolean): Promise<void>;
+
   /** Translates a client-reported path into one Pickarr can open. */
   mapPath(clientPath: string): string;
 }

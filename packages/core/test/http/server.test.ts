@@ -33,6 +33,7 @@ function fakeClient(): DownloadClient {
     importMode: 'move',
     addUrl: async () => 'nzo_1',
     snapshot: async () => ({ queue: [], history: [] }),
+  remove: async () => {},
     mapPath: (path) => path,
   };
 }

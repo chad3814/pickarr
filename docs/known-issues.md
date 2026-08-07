@@ -440,6 +440,26 @@ check immediately before the transfer closes it.
 
 ## Download client
 
+**A finished job is dropped from the client, with its files.** Once the import is
+recorded, the file Pickarr wanted is in the library and what remains under the client's
+storage path is spent: par2 volumes, samples, and in move mode an empty directory.
+Nothing used to reclaim that space, and nothing stopped SABnzbd's history growing for the
+lifetime of the installation.
+
+The *client* is asked to delete rather than Pickarr doing it. Those paths belong to the
+client; Pickarr only sees them through `mapPath`, and a recursive delete aimed through a
+path mapping is the wrong place to find out the mapping is wrong.
+
+Three things it will not touch. A **failed** download stays where it is — deleting it
+destroys the evidence for why it failed. An **untracked** entry is never ours; the
+category may be shared. And a job still running is left alone.
+
+Driven from the history snapshot rather than from a column, which makes it self-healing
+without extra bookkeeping: while an entry is still listed it is still ours and still
+imported, so a tick that could not reach the client tries again on the next one. A
+failure here is logged and never marks the download failed — the import already
+succeeded, and the cost of giving up is disk space rather than data.
+
 **Labels are unique only within one database.** `downloadLabel` is `pickarr-<id>` with no
 per-installation salt, so two Pickarr instances sharing one SABnzbd category — or one
 instance whose database was deleted and recreated — can recover each other's jobs and
