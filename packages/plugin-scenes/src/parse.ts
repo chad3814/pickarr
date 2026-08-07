@@ -1157,19 +1157,46 @@ function datelessPrefixTokens(name: string): { before: Token[]; tail: string } |
  * A name opening with a bare `4K` and then only words:
  * `4K.kleo.34ans.de.clapiers`.
  *
- * A resolution cannot be a site, so these have no site anywhere in the text
+ * A resolution cannot be a site, so these carry no site anywhere in the text
  * and nothing can be looked up — 24 corpus titles, all distinct, none present
- * in ThePornDB. They are one poster's output, so they are filed under one
- * label rather than refused.
+ * in ThePornDB. They are Jacquie et Michel TV's output, which also appears in
+ * the same feeds under its own name, so they are filed there rather than
+ * under a bucket of their own: `JacquieEtMichelTV.26.06.02.Lena.XXX.2160p`
+ * and `4K.kleo.34ans.de.clapiers` belong in one directory.
  *
- * This is a named case, not a structural rule, in the same way the poster
- * signatures are: `French 4K` describes where these come from and is not
- * detected from the text. A different poster opening names with a bare
- * resolution would be mislabelled, and no other bare-resolution lead appears
- * in the corpus. The `4K` is still read as the resolution it is.
+ * This is a named case rather than a structural rule. The site is not
+ * detected from the text — it cannot be, there is nothing there — so another
+ * poster opening names with a bare resolution would be filed here wrongly. No
+ * other bare-resolution lead appears in the corpus. The `4K` is still read as
+ * the resolution it is.
  */
 const BARE_4K_PREFIX = /^4K[.\-_ ]/i;
-const BARE_4K_SITE = 'French 4K';
+
+/**
+ * Spelled as the site's own releases spell it, so the two agree on a slug
+ * with no configuration at all. A configured or discovered spelling still
+ * wins — see `canonicalSiteName` — because otherwise setting the site in
+ * config would split it across two directories.
+ */
+const BARE_4K_SITE = 'JacquieEtMichelTV';
+
+/**
+ * The configured or discovered spelling of a site named literally in code.
+ *
+ * Without this the hardcoded name and the list's name are two sites whenever
+ * they differ by a space, which is exactly the split `matchSitePrefix` exists
+ * to prevent for names read out of a release.
+ */
+function canonicalSiteName(name: string, sites: readonly string[]): string {
+  const key = siteComparisonKey(name);
+  for (const site of sites) {
+    if (siteComparisonKey(site) === key) {
+      const display = prettify(site);
+      if (display.length > 0) return display;
+    }
+  }
+  return name;
+}
 
 /**
  * Shape 3: no date anywhere — `Site.Title.And.Performers.Encode`.
@@ -1195,7 +1222,8 @@ function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRele
   if (BARE_4K_PREFIX.test(name)) {
     const title = prettify(name.replace(BARE_4K_PREFIX, ''));
     if (title.length === 0) return refuse('nothing follows the leading 4K');
-    return buildRelease(BARE_4K_SITE, null, title, slug(title), extractQuality('4K', undefined));
+    const site = canonicalSiteName(BARE_4K_SITE, options.sites ?? []);
+    return buildRelease(site, null, title, slug(title), extractQuality('4K', undefined));
   }
 
   const prefix = datelessPrefixTokens(name);
@@ -1267,7 +1295,12 @@ function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease
   const atEnd = parseDateAtEndForm(name, tokens, date, options);
   if (atEnd !== null) return atEnd;
 
-  const site = prettify(name.slice(0, date.startOffset));
+  // Canonicalised like every other path's site. Without this a configured
+  // spelling splits one site in two: the dated releases keep the release's
+  // own `JacquieEtMichelTV` while the date-at-end and dateless ones take the
+  // configured `Jacquie Et Michel TV`, and the same site files under two
+  // directories. A test for the bare-4K poster is what surfaced it.
+  const site = canonicalSiteName(prettify(name.slice(0, date.startOffset)), options.sites ?? []);
   const rest = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
   if (site.length === 0) return refuse('date is first, so there is no site');
   if (rest.length === 0) return refuse('nothing follows the date');
@@ -1410,7 +1443,7 @@ function splitSegment(segment: string): SegmentSplit {
   return { title: prettify(text), quality: quality.join(' '), group };
 }
 
-function parseDelimitedForm(name: string): ParsedRelease | null {
+function parseDelimitedForm(name: string, options: SceneParseOptions): ParsedRelease | null {
   let rest = name;
   let site: string | null = null;
 
@@ -1503,7 +1536,7 @@ function parseDelimitedForm(name: string): ParsedRelease | null {
     .join('--');
 
   return buildRelease(
-    site,
+    canonicalSiteName(site, options.sites ?? []),
     { kind: 'date', key: dateIso, startOffset: 0, endOffset: 0 },
     titleParts.join(' - '),
     sceneSlug,
@@ -1568,7 +1601,7 @@ export function sceneSiteCandidates(
   const name = stripFileExtension(stripWebsitePrefix(stripPosterSignature(stripRuntimeStamp(trimmed)))).trim();
   if (name.length === 0) return null;
   // The delimited form has explicit boundaries, so it never needs a lookup.
-  if (parseDelimitedForm(name) !== null) return null;
+  if (parseDelimitedForm(name, options) !== null) return null;
 
   const tokens = tokensOf(name);
   const date = findSceneDate(tokens);
@@ -1628,7 +1661,7 @@ export function parseSceneRelease(
 
   if (NOT_VIDEO_TOKEN.test(name)) return refuse('not a video release (image or photo set)');
 
-  const result = parseDelimitedForm(name) ?? parseSceneForm(name, options);
+  const result = parseDelimitedForm(name, options) ?? parseSceneForm(name, options);
   if (result !== null) lastRefusal = null;
   return result;
 }
