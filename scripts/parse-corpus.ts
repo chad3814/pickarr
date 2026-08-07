@@ -16,11 +16,17 @@
  */
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import {
+import createScenesPlugin, {
   lastRefusalReason,
-  parseSceneRelease,
   sceneSiteCandidates,
 } from '@pickarr/plugin-scenes';
+// Reached by path rather than by package name: @pickarr/core exports only its
+// application entrypoint, and widening that for a dev script would add
+// production surface nothing ships against. This is repo-local tooling.
+import { createTpdbClient } from '../packages/core/src/clients/theporndb.ts';
+import { openDatabase } from '../packages/core/src/db/open.ts';
+import { knownSiteNames } from '../packages/core/src/db/sites.ts';
+import { resolveSitesForBatch } from '../packages/core/src/pipeline/resolve-sites.ts';
 
 interface Options {
   files: string[];
@@ -28,6 +34,10 @@ interface Options {
   examples: number;
   holdoutPercent: number;
   showCollisions: number;
+  /** Send real site lookups. Requires TPDB_API_KEY in the environment. */
+  lookups: boolean;
+  /** Where confirmed and refused site prefixes persist between runs. */
+  cachePath: string;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -37,6 +47,8 @@ function parseArgs(argv: string[]): Options {
     examples: 3,
     holdoutPercent: 10,
     showCollisions: 15,
+    lookups: false,
+    cachePath: '/tmp/pickarr-corpus-sites.db',
   };
   for (const arg of argv) {
     if (arg.startsWith('--sites=')) options.sitesFile = arg.slice('--sites='.length);
@@ -44,6 +56,8 @@ function parseArgs(argv: string[]): Options {
     else if (arg.startsWith('--holdout=')) options.holdoutPercent = Number(arg.slice('--holdout='.length));
     else if (arg.startsWith('--collisions='))
       options.showCollisions = Number(arg.slice('--collisions='.length));
+    else if (arg === '--lookups') options.lookups = true;
+    else if (arg.startsWith('--cache=')) options.cachePath = arg.slice('--cache='.length);
     else if (arg.startsWith('--')) throw new Error(`Unknown flag: ${arg}`);
     else options.files.push(arg);
   }
@@ -138,6 +152,7 @@ async function main(): Promise<void> {
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && !line.startsWith('#'));
   }
+  const plugin = createScenesPlugin({ libraryRoot: '/corpus', sites });
   const parseOptions = { sites };
 
   // Deduplicated across every input, not just within each file. Corpora
@@ -150,6 +165,46 @@ async function main(): Promise<void> {
   const keyToTitles = new Map<string, Set<string>>();
   const fingerprints = new Map<string, string>();
   const siteQueries = new Map<string, number>();
+
+  // Every title, gathered before anything is parsed. Ordering matters for the
+  // same reason it does in main.ts: an identity key outlives the tick, so a
+  // site learned after a name is parsed cannot be applied to it.
+  const allTitles: string[] = [];
+  for (const file of options.files) {
+    const lines = (await readFile(file, 'utf8')).split('\n').map((line) => line.trim());
+    allTitles.push(...lines.filter((line) => line.length > 0 && !USENET_NOISE.test(line)));
+  }
+
+  let lookupSummary = '';
+  if (options.lookups) {
+    const apiKey = process.env['TPDB_API_KEY'];
+    if (apiKey === undefined || apiKey.length === 0) {
+      throw new Error('--lookups needs TPDB_API_KEY in the environment');
+    }
+    const db = openDatabase(options.cachePath);
+    const seeded = knownSiteNames(db);
+    if (seeded.length > 0) plugin.learnSites?.(seeded);
+
+    const client = createTpdbClient(
+      { type: 'theporndb', apiKey, baseUrl: 'https://api.theporndb.net' },
+      fetch,
+    );
+    const started = Date.now();
+    const failures: string[] = [];
+    const result = await resolveSitesForBatch(
+      { db, plugin, client, now: () => Date.now(), log: (m) => failures.push(m) },
+      [...new Set(allTitles)],
+    );
+    lookupSummary =
+      `  seeded from cache : ${seeded.length}\n` +
+      `  confirmed         : ${result.confirmed.length}\n` +
+      `  queries sent      : ${result.queried}\n` +
+      `  answered by cache : ${result.cached}\n` +
+      `  unresolved        : ${result.unresolved.length}\n` +
+      `  lookup failures   : ${failures.length}\n` +
+      `  elapsed           : ${Math.round((Date.now() - started) / 1000)}s\n` +
+      `  cache             : ${options.cachePath}`;
+  }
 
   for (const file of options.files) {
     const raw = (await readFile(file, 'utf8')).split('\n').map((line) => line.trim());
@@ -176,7 +231,7 @@ async function main(): Promise<void> {
       }
       report.measured += 1;
 
-      const result = parseSceneRelease(title, parseOptions);
+      const result = plugin.parse(title);
       if (result === null) {
         const reason = lastRefusalReason() ?? 'unrecognized';
         const bucket = report.refusals.get(reason) ?? [];
@@ -199,6 +254,11 @@ async function main(): Promise<void> {
     }
 
     reports.push(report);
+  }
+
+  if (lookupSummary.length > 0) {
+    console.log('\n=== Site lookups');
+    console.log(lookupSummary);
   }
 
   // --- per-tier summary -----------------------------------------------------

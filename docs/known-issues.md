@@ -109,6 +109,25 @@ anywhere in the name was rejected deliberately: `Ass Parade` occurs at token 1 h
 accepting it would drop `Bangbros` from the name entirely. Listing
 `"Bangbros Ass Parade"` in config files these under the sub-site if that is wanted.
 
+**A confirmed site's own name must be at least four characters.** ThePornDB knows sites
+called `BIG`, `DP`, `Ex` and `Rk`. They are real, so the lookup answers correctly, and
+the answer is still wrong: a name that short cannot be told from an ordinary first word.
+Measured on the corpus, `Big.Boobs.For.The.Win` resolved to the site `BIG` with the title
+`Boobs For The Win`, and `DP.Addiction.Vol.1.Elegant.Angel` to the site `DP`.
+
+Rejecting them costs ten titles that previously parsed — every one with a fabricated site
+and a truncated title — and the corpus rate falls from 93.6% to 93.4%. **The rate went
+down and the output got better**, which is the second time that pair has come up in this
+file. The floor bounds the *answer*, not the query: a short query is still worth sending,
+because it is how a longer site name is found.
+
+Two things this does not fix. Four characters is a calibration, not a principle —
+`Kink` and `Vixen` are four and five and both resolve correctly, so length is a weak
+discriminator that happens to separate the observed cases. And **the cache outlives the
+rule**: entries confirmed before this floor existed are seeded straight into the plugin
+without passing through it again, so an existing `discovered_sites` needs its short
+entries cleared by hand.
+
 **A search result is believed only when it is one of the release's own leading runs.**
 Two weaker rules were tried against the live API first and both are wrong. Confirming on
 a non-zero result count invents sites: the search is a substring search over 100k+ names,

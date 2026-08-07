@@ -358,3 +358,30 @@ test('learnSites is additive and ignores duplicates', async () => {
     'Vixen',
   );
 });
+
+test('a site whose whole name is very short is not confirmed', () => {
+  // The service really does know sites called BIG and DP, so it answers
+  // correctly and the answer is still wrong: a name that short cannot be told
+  // from an ordinary first word. Big.Boobs.For.The.Win resolved to the site
+  // "BIG" with the title "Boobs For The Win".
+  for (const short of ['BIG', 'DP', 'Ex', 'Rk']) {
+    const results = [{ name: short, shortName: short.toLowerCase(), sourceUuid: 'u' }];
+    assert.equal(pickSite(results, [short]), null, short);
+  }
+});
+
+test('a four-character site is still confirmed', () => {
+  // The floor has to clear BIG without clearing Kink or Vixen, both of which
+  // resolve correctly in the corpus.
+  for (const name of ['Kink', 'Pure', 'Vixen', 'MILFY']) {
+    const results = [{ name, shortName: name.toLowerCase(), sourceUuid: 'u' }];
+    assert.equal(pickSite(results, [name])?.name, name);
+  }
+});
+
+test('a short query still finds a longer site', () => {
+  // The floor bounds the answer, not the question: searching "2 Chicks" is
+  // how "2 Chicks Same Time" is found.
+  const results = [{ name: '2 Chicks Same Time', shortName: '2chickssametime', sourceUuid: 'u' }];
+  assert.equal(pickSite(results, ['2 Chicks Same Time', '2 Chicks'])?.name, '2 Chicks Same Time');
+});
