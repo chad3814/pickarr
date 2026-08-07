@@ -369,3 +369,57 @@ test('the upscale penalty outweighs every source and codec advantage', () => {
   const worstNative = scoreScene({ resolution: 2160, source: 'cam', videoCodec: 'divx' });
   assert.ok(bestUpscale < worstNative, `expected ${bestUpscale} < ${worstNative}`);
 });
+
+// --- Interlaced --------------------------------------------------------------
+
+test('an interlaced encode is recorded and ranks below progressive', () => {
+  const result = parsed('Pantyhosed4U.16.07.20.Heidi.Bush.Tease.XXX.1080i.MP4-KTR');
+  assert.equal(result.quality.resolution, 1080, '1080i still claims 1080');
+  assert.equal(result.quality.extras?.['interlaced'], true);
+
+  const progressive = scoreScene({ resolution: 1080 });
+  const interlaced = scoreScene({ resolution: 1080, extras: { interlaced: true } });
+  assert.ok(interlaced < progressive, `expected ${interlaced} < ${progressive}`);
+});
+
+test('an interlaced encode still beats a lower progressive resolution', () => {
+  const interlaced1080 = scoreScene({ resolution: 1080, extras: { interlaced: true } });
+  for (const resolution of [480, 540, 720]) {
+    assert.ok(interlaced1080 > scoreScene({ resolution, source: 'remux', videoCodec: 'av1' }));
+  }
+});
+
+test('upscaled and interlaced penalties add rather than collapse', () => {
+  const both = scoreScene({ resolution: 2160, extras: { upscaled: true, interlaced: true } });
+  const upscaledOnly = scoreScene({ resolution: 2160, extras: { upscaled: true } });
+  const interlacedOnly = scoreScene({ resolution: 2160, extras: { interlaced: true } });
+  assert.ok(both < upscaledOnly && both < interlacedOnly);
+  assert.ok(both > scoreScene({ resolution: 1440 }), 'still beats a lower resolution');
+});
+
+test('a progressive encode records no interlaced extra', () => {
+  const result = parsed('Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB');
+  assert.equal(result.quality.extras?.['interlaced'], undefined);
+});
+
+// --- Not video ---------------------------------------------------------------
+
+test('an image set is refused rather than collated with the scene it depicts', () => {
+  // These carry a date, site and title and parse cleanly on shape alone. Left
+  // to do so, a zip of photographs becomes one of the video's "versions" and
+  // the user can pick it; planSceneImport then refuses the download long
+  // after the choice was made.
+  for (const name of [
+    '21Sextreme.com_17.01.13.Emily.Thorne.Wreckless.In.The.Rec.Room.XXX.IMAGESET-FuGLi',
+    'BigTitsAtSchool.com_16.12.12.Brenna.Sparks.Bunk.Bed.XXX.iMAGESET-YAPG',
+    'Site.23.04.15.Alex.Coal.XXX.PHOTOSET-G',
+  ]) {
+    assert.equal(parseSceneRelease(name), null, name);
+  }
+});
+
+test('the XXX marker ends the title even when nothing after it is encode', () => {
+  const result = parsed('Site.23.04.15.Alex.Coal.XXX.SomeTrailingJunk');
+  assert.equal(result.identityKey, 'site:2023-04-15:alex-coal');
+  assert.equal(result.display.title, 'Alex Coal');
+});
