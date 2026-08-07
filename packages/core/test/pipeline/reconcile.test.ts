@@ -12,6 +12,7 @@ import {
   downloadLabel,
   extractLabel,
   getDownload,
+  setStatus,
   type DownloadRow,
 } from '../../src/db/downloads.ts';
 import type { ClientSnapshot, DownloadClient } from '../../src/clients/types.ts';
@@ -24,6 +25,7 @@ function fakeClient(snapshot: ClientSnapshot, overrides: Partial<DownloadClient>
     importMode: 'move' as const,
     addUrl: async () => 'nzo_new',
     snapshot: async () => snapshot,
+    remove: async () => {},
     mapPath: (path: string) => path.replace('/sab', '/pickarr'),
     ...overrides,
   } satisfies DownloadClient;
@@ -548,4 +550,127 @@ test('a tracked download whose client-side name matches its label never warns', 
     warnMock.mock.restore();
   }
   db.close();
+});
+
+// --- Cleanup after a successful import ---------------------------------------
+
+function removalTracking(): { removed: { ref: string; deleteFiles: boolean }[]; remove: DownloadClient['remove'] } {
+  const removed: { ref: string; deleteFiles: boolean }[] = [];
+  return {
+    removed,
+    remove: (ref: string, deleteFiles: boolean) => {
+      removed.push({ ref, deleteFiles });
+      return Promise.resolve();
+    },
+  };
+}
+
+test('an imported download is removed from the client, with its files', async () => {
+  // Nothing ever told SABnzbd the job was finished with, so its history grew
+  // without bound and the download directory was never reclaimed.
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'imported', clientRef: 'nzo-done' });
+  const { removed, remove } = removalTracking();
+  const client = fakeClient(
+    {
+      queue: [],
+      history: [{ ref: 'nzo-done', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+    },
+    { remove },
+  );
+
+  await reconcileClient({ db, client, now: () => 2000, importDownload: async () => {} });
+  assert.deepEqual(removed, [{ ref: 'nzo-done', deleteFiles: true }]);
+});
+
+test('a download still running is left alone', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo-live' });
+  const { removed, remove } = removalTracking();
+  const client = fakeClient(
+    { queue: [{ ref: 'nzo-live', name: 'Scene [pickarr-1]', percentage: 40 }], history: [] },
+    { remove },
+  );
+
+  await reconcileClient({ db, client, now: () => 2000, importDownload: async () => {} });
+  assert.deepEqual(removed, [], 'a running job must survive the tick');
+});
+
+test('a failed download is left in the client for inspection', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'failed', clientRef: 'nzo-bad' });
+  const { removed, remove } = removalTracking();
+  const client = fakeClient(
+    { queue: [], history: [{ ref: 'nzo-bad', name: 'Scene [pickarr-1]', outcome: 'failed', storagePath: null, failMessage: null }] },
+    { remove },
+  );
+
+  await reconcileClient({ db, client, now: () => 2000, importDownload: async () => {} });
+  assert.deepEqual(removed, [], 'deleting a failure destroys the evidence for it');
+});
+
+test('an untracked entry is never removed, however finished it looks', async () => {
+  const db = openTestDatabase();
+  const { removed, remove } = removalTracking();
+  const client = fakeClient(
+    {
+      queue: [],
+      history: [{ ref: 'nzo-stranger', name: 'Someone Elses Job', outcome: 'completed', storagePath: '/sab/y', failMessage: null }],
+    },
+    { remove },
+  );
+
+  await reconcileClient({ db, client, now: () => 2000, importDownload: async () => {} });
+  assert.deepEqual(removed, [], 'the category may be shared, and that data is not ours');
+});
+
+test('a download imported during this same tick is cleaned up in it', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo-now' });
+  const { removed, remove } = removalTracking();
+  const client = fakeClient(
+    {
+      queue: [],
+      history: [{ ref: 'nzo-now', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+    },
+    { remove },
+  );
+
+  await reconcileClient({
+    db,
+    client,
+    now: () => 2000,
+    importDownload: async (download) => {
+      setStatus(db, download.id, 'imported', 2000);
+    },
+  });
+  assert.deepEqual(removed, [{ ref: 'nzo-now', deleteFiles: true }]);
+});
+
+test('a removal that fails does not undo the import, and is retried next tick', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'imported', clientRef: 'nzo-done' });
+  let attempts = 0;
+  const client = fakeClient(
+    {
+      queue: [],
+      history: [{ ref: 'nzo-done', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+    },
+    {
+      remove: () => {
+        attempts += 1;
+        return Promise.reject(new Error('connection refused'));
+      },
+    },
+  );
+
+  const first = await reconcileClient({ db, client, now: () => 2000, importDownload: async () => {} });
+  assert.equal(getDownload(db, 1)?.status, 'imported', 'the file is already in place');
+  assert.equal(first.failed, 0, 'a cleanup failure is not an import failure');
+
+  // Self-healing with no extra bookkeeping: while the entry is still in the
+  // client's history it is still ours and still imported, so the next tick
+  // tries again.
+  await reconcileClient({ db, client, now: () => 3000, importDownload: async () => {} });
+  assert.equal(attempts, 2);
 });

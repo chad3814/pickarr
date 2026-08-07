@@ -33,6 +33,8 @@ export interface ReconcileResult {
   advanced: number;
   failed: number;
   imported: number;
+  /** Finished jobs dropped from the client, freeing their download directory. */
+  removed: number;
 }
 
 export interface ReconcileDeps {
@@ -40,6 +42,8 @@ export interface ReconcileDeps {
   client: DownloadClient;
   now(): number;
   importDownload(download: DownloadRow): Promise<void>;
+  /** Optional; only used to surface cleanup failures, which are not fatal. */
+  log?(message: string): void;
 }
 
 /**
@@ -107,7 +111,7 @@ function warnIfLabelMismatch(download: DownloadRow, actualName: string): void {
 export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileResult> {
   const { db, client } = deps;
   const now = deps.now();
-  const result: ReconcileResult = { untracked: [], advanced: 0, failed: 0, imported: 0 };
+  const result: ReconcileResult = { untracked: [], advanced: 0, failed: 0, imported: 0, removed: 0 };
 
   const snapshot = await client.snapshot();
   const queueByRef = new Map(snapshot.queue.map((entry) => [entry.ref, entry]));
@@ -322,6 +326,47 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       state: entry.outcome,
       percentage: null,
     });
+  }
+
+  // --- Cleanup ---------------------------------------------------------------
+  //
+  // An imported download's job has served its purpose: the file Pickarr wanted
+  // is in the library and what is left under the client's storage path is
+  // spent. Nothing else reclaims that space, and nothing else stops the
+  // client's history growing for the lifetime of the installation.
+  //
+  // Driven from the history snapshot rather than from a column, which makes it
+  // self-healing for free: while an entry is still listed it is still ours and
+  // still imported, so a tick that could not reach the client simply tries
+  // again on the next one. `activeDownloads` excludes imported rows, so there
+  // is no other pass that would ever revisit them.
+  //
+  // Runs last, after every status change this tick, so a download imported a
+  // few lines above is cleaned up in the same tick rather than the next.
+  const importedRefs = new Set<string>(
+    db
+      .prepare(
+        `SELECT client_ref FROM downloads
+         WHERE client_id = ? AND status = 'imported' AND client_ref IS NOT NULL`,
+      )
+      .all(client.id)
+      .map((row) => String(row['client_ref'])),
+  );
+
+  for (const entry of snapshot.history) {
+    // Ours, and finished with. A stranger's job in a shared category is never
+    // touched, and a failure is left where it is — deleting it would destroy
+    // the evidence for why it failed.
+    if (!importedRefs.has(entry.ref)) continue;
+    try {
+      // eslint-disable-next-line no-await-in-loop -- one call per finished job, and the list is short
+      await client.remove(entry.ref, true);
+      result.removed += 1;
+    } catch (error) {
+      // Never a download failure: the import already succeeded and the file is
+      // in place. The cost of giving up here is disk space, not data.
+      deps.log?.(`reconcile ${client.id}: could not remove ${entry.ref}: ${(error as Error).message}`);
+    }
   }
 
   return result;

@@ -102,6 +102,7 @@ async function main(): Promise<void> {
         db,
         client,
         now: () => Date.now(),
+        log,
         importDownload: (download) =>
           importDownload(
             {
