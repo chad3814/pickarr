@@ -288,6 +288,29 @@ penalised — below `1080p`, still above a progressive 720p. The penalty is boun
 the upscale one and deliberately a different size, so a release that is both upscaled and
 interlaced ranks below one that is only either; their sum stays under one resolution unit.
 
+**Day-first dates with a four-digit year.** `19.04.2014` — the dotted reader knew
+`YY.MM.DD` and `YYYY.MM.DD` but not this, which European sites use. Tried after the
+year-first shapes, and the two can never both match: those need a two-digit final token
+and this needs a four-digit one. `04.08.2026` is genuinely ambiguous between 4 August and
+8 April; it reads day-first, the same convention the delimited reader already follows, so
+the two do not disagree.
+
+**A year restated in full after a short date is swallowed.**
+`ManyVids.26.08.02.2026.August.Heat.2` states 2026 twice. The reader stopped after `DD`,
+so `2026` became the first word of the identity — **parsing, but wrong**, and the same
+scene posted without the repeat keyed differently. Eighteen corpus titles were silently
+in that state; a refusal would have been more visible. The repeat is only swallowed when
+it agrees with the date already read: `26.08.02.1999.Party.Classics` keeps its 1999,
+because a year that disagrees is title material.
+
+**Poster signatures are stripped, from a list of observed posters.**
+`..._2160p_iris2_by_cdrw69`, `....by.am`, `...ai.x2.4k.suffo.ed` are appended after a
+complete name and sit past the encode section, so the trailing run stops reaching the
+end. Unlike the runtime stamp this is **a list of names rather than a structural rule**,
+and a new poster with a new suffix needs a new entry — worth knowing before relying on
+it. A generic "trailing `by <word>`" rule was rejected because ordinary titles end that
+way. Ten corpus titles.
+
 **An episode number anchors the boundary the same way a date does.** Sites that number
 episodes instead of dating them — `HeavyOnHotties.E141.Daniela.Pechotes...`,
 `InTheCrack.E1178.Tracy.Gold...` — put `E` followed by two or more digits exactly where

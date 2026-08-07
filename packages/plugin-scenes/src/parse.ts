@@ -707,6 +707,25 @@ function stripWebsitePrefix(name: string): string {
 }
 
 /**
+ * Drops a poster's signature from the end of a name.
+ *
+ * Appended after a complete release name by whoever uploaded it, the same
+ * class of noise as the runtime stamp below, and with the same effect: it
+ * sits past the encode section so the trailing run no longer reaches the end.
+ *
+ * This one is a list of *observed posters* rather than a structural rule, and
+ * that is a maintenance cost worth naming — a new poster with a new suffix
+ * needs a new entry. A generic "trailing by <word>" rule was rejected because
+ * ordinary titles end that way. Ten corpus titles.
+ */
+function stripPosterSignature(name: string): string {
+  return name.replace(
+    /[._-]+(?:iris2[._-]by[._-]\w+|(?:ai[._-]x2[._-]4k[._-])?suffo[._-]ed|by[._-]am)\s*$/i,
+    '',
+  );
+}
+
+/**
  * Drops an indexer's trailing runtime stamp, `... MP4-KTR [06:32:12]`.
  *
  * Added by the indexer after the complete release name, and specific enough
@@ -846,11 +865,44 @@ function findSceneDate(tokens: Token[]): AnchorSpan | null {
     ) {
       const iso = toIsoDate(expandYear(text), Number(month.text), Number(day.text));
       if (iso !== null) {
+        // Some feeds restate the year in full right after the short date:
+        // `ManyVids.26.08.02.2026.August.Heat.2`. Swallowed only when it
+        // agrees with the date already read — a year that disagrees is title
+        // material, as in `26.08.02.1999.Party.Classics`. Left in place it
+        // became the first word of the identity, so the same scene posted
+        // without the repeat keyed differently.
+        const repeated = tokens[index + 3];
+        const end =
+          repeated !== undefined && repeated.text === String(expandYear(text))
+            ? repeated.start + repeated.text.length
+            : day.start + day.text.length;
+        return { kind: 'date', key: iso, startOffset: token.start, endOffset: end };
+      }
+    }
+
+    // Day first with a four-digit year, `19.04.2014`, which European sites
+    // write. Tried after the year-first shapes so it can never capture a
+    // position one of those already reads: those require a two-digit final
+    // token and this requires a four-digit one, so the two cannot both match.
+    //
+    // `04.08.2026` is 4 August, not 8 April. The ambiguity is real and
+    // unresolvable from the name, so it follows the same day-first convention
+    // the delimited reader already uses rather than inventing a second one.
+    const year = tokens[index + 2];
+    if (
+      month !== undefined &&
+      year !== undefined &&
+      /^\d{1,2}$/.test(text) &&
+      /^\d{1,2}$/.test(month.text) &&
+      /^(?:19|20)\d{2}$/.test(year.text)
+    ) {
+      const iso = toIsoDate(Number(year.text), Number(month.text), Number(text));
+      if (iso !== null) {
         return {
           kind: 'date',
           key: iso,
           startOffset: token.start,
-          endOffset: day.start + day.text.length,
+          endOffset: year.start + year.text.length,
         };
       }
     }
@@ -1469,7 +1521,7 @@ export function sceneSiteCandidates(
   const trimmed = releaseName.trim();
   if (trimmed.length === 0) return null;
 
-  const name = stripFileExtension(stripWebsitePrefix(stripRuntimeStamp(trimmed))).trim();
+  const name = stripFileExtension(stripWebsitePrefix(stripPosterSignature(stripRuntimeStamp(trimmed)))).trim();
   if (name.length === 0) return null;
   // The delimited form has explicit boundaries, so it never needs a lookup.
   if (parseDelimitedForm(name) !== null) return null;
@@ -1524,7 +1576,7 @@ export function parseSceneRelease(
   const trimmed = releaseName.trim();
   if (trimmed.length === 0) return refuse('empty name');
 
-  const name = stripFileExtension(stripWebsitePrefix(stripRuntimeStamp(trimmed))).trim();
+  const name = stripFileExtension(stripWebsitePrefix(stripPosterSignature(stripRuntimeStamp(trimmed)))).trim();
   if (name.length === 0) return refuse('nothing left after stripping prefix/extension');
 
   if (NOT_VIDEO_TOKEN.test(name)) return refuse('not a video release (image or photo set)');
