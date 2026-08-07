@@ -42,6 +42,7 @@ immediately rather than starting in a broken state.
 | `database.path` | top level | Path to the SQLite file. Put it under `/config` so it survives container recreation. |
 | `trashDir` | top level | Where superseded files are moved instead of deleted. See "Trash is never emptied" below. |
 | `plugins.<package>` | plugin | Per-plugin settings, keyed by package name. The bundled scenes plugin takes `libraryRoot`, the destination directory imports land in. |
+| `plugins.<package>.pathTemplate` | plugin (scenes) | Where imports land under `libraryRoot`. Defaults to `{Site}/{date}{episode} - {Title}` — see "Naming your files" below. |
 | `plugins.<package>.sites` | plugin (scenes) | Optional list of site names. Used only for releases that put the date at the *end* of the name, where nothing separates the site from the title — see "Naming your sites" below. |
 | `downloadClients[]` | top level | One or more download clients. The MVP supports `type: "sabnzbd"` only. |
 | `downloadClients[].url` | download client | Base URL of the SABnzbd instance. |
@@ -62,6 +63,43 @@ The SABnzbd API key can be supplied two ways: directly as a string in the config
 `file:/run/secrets/sabnzbd_api_key`, which Pickarr resolves by reading that file at
 startup. Docker Compose secrets are mounted exactly there, so the key never has to sit
 in an environment variable, `docker inspect` output, or a crash dump of `process.env`.
+
+### Naming your files
+
+`pathTemplate` decides where an import lands under `libraryRoot`. The default is
+
+```json
+"pathTemplate": "{Site}/{date}{episode} - {Title}"
+```
+
+which gives `Bang Bros/2026-08-03 - Chloe Upgrades Her Butt.mp4`.
+
+| Placeholder | Renders | Notes |
+|---|---|---|
+| `{site}` / `{Site}` | `bang bros` / `Bang Bros` | words separated |
+| `{sitename}` / `{SiteName}` | `bangbros` / `BangBros` | run together; the lower-case form matches ThePornDB's `short_name` |
+| `{title}` / `{Title}` | `chloe upgrades her butt` / `Chloe Upgrades Her Butt` | |
+| `{date}` | `2026-08-03` | empty when the release carries none |
+| `{year}` | `2026` | empty when the release carries none |
+| `{episode}` | `E1178` | empty unless the release is numbered rather than dated |
+| `{resolution}` | `2160p` | |
+| `{container}` | `mp4` | |
+| `{group}` | `WRB` | |
+
+Slashes make directories, so `{sitename}/{year}/{title}` nests by site then year. A
+placeholder that renders empty takes its surrounding punctuation with it — `{date}{episode} - {Title}`
+gives `Hiyori Japanese 2` for a release with neither — and a path segment that renders
+empty is dropped rather than becoming a directory with no name. An unrecognised
+placeholder is left in the path verbatim, so a typo is visible instead of silently
+shortening every filename.
+
+**Changing this moves nothing that is already imported.** Pickarr writes new files to the
+new layout and leaves existing ones where they are, so a change part-way through leaves a
+library split across two schemes until you move the old files yourself.
+
+Every value comes from the identity key rather than from the release name, which is what
+keeps two encodes of one scene landing on one path. Two *different* scenes can never
+collide under any template — there are tests pinning both directions.
 
 ### Naming your sites
 

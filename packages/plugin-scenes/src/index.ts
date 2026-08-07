@@ -7,6 +7,7 @@ import {
 } from './parse.ts';
 import { scoreScene } from './score.ts';
 import { planSceneImport } from './plan-import.ts';
+import { DEFAULT_PATH_TEMPLATE } from './path-template.ts';
 
 /**
  * Reads the optional `sites` list out of plugin config.
@@ -29,12 +30,18 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
   // `parse` is never aliased by a caller that could change it underneath us.
   let options: SceneParseOptions = { sites: readSites(config) };
 
+  const configured = config['pathTemplate'];
+  if (configured !== undefined && typeof configured !== 'string') {
+    throw new Error('The scenes plugin\'s "pathTemplate" config must be a string');
+  }
+  const pathTemplate = configured ?? DEFAULT_PATH_TEMPLATE;
+
   return {
     id: 'scenes',
     displayName: 'Adult Scenes',
     parse: (releaseName: string) => parseSceneRelease(releaseName, options),
     score: scoreScene,
-    planImport: planSceneImport,
+    planImport: (media, files) => planSceneImport(media, files, { pathTemplate }),
     siteCandidates: (releaseName: string) => sceneSiteCandidates(releaseName, options),
     learnSites(sites: readonly string[]) {
       const known = new Set(options.sites ?? []);
