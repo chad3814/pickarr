@@ -423,3 +423,34 @@ test('the XXX marker ends the title even when nothing after it is encode', () =>
   assert.equal(result.identityKey, 'site:2023-04-15:alex-coal');
   assert.equal(result.display.title, 'Alex Coal');
 });
+
+// --- Indexer noise around a good name ----------------------------------------
+
+test("an indexer's trailing runtime stamp is stripped", () => {
+  // It sits behind the group tag, so the encode run stops reaching the end
+  // and the whole name is refused over three characters of metadata.
+  const result = parsed('Bang.Surprise.19.10.29.Katya.Rodriguez.XXX.1080p.MP4-KTR [06:32:12]');
+  assert.equal(result.identityKey, 'bang-surprise:2019-10-29:katya-rodriguez');
+  assert.equal(result.quality.releaseGroup, 'KTR');
+  assert.equal(
+    result.identityKey,
+    parsed('Bang.Surprise.19.10.29.Katya.Rodriguez.XXX.1080p.MP4-KTR').identityKey,
+    'with and without the stamp must be one scene',
+  );
+});
+
+test('bracketed text is only stripped when it is a runtime stamp', () => {
+  // The delimited form depends on `[Vixen] ...` surviving.
+  const result = parsed('[Vixen] Alex Coal - Beautiful Episode - 2023-07-19');
+  assert.equal(result.display.subtitle, 'Vixen');
+});
+
+test('VERTICAL and F4V are encode information, not title words', () => {
+  assert.equal(
+    parsed('FoxxedUp.23.07.19.Buns.And.Boobs.Joi.XXX.VERTICAL.XviD-iPT Team').identityKey,
+    'foxxedup:2023-07-19:buns-and-boobs-joi',
+  );
+  const f4v = parsed('MyFirstSexTeacher.09.11.16.Darla.Crane.XXX.1080p.F4V-CuMBuCKeTS');
+  assert.equal(f4v.identityKey, 'myfirstsexteacher:2009-11-16:darla-crane');
+  assert.equal(f4v.quality.extras?.['container'], 'f4v');
+});
