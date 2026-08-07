@@ -193,6 +193,27 @@ with the title `Emma G and Rocky Beach Days`; without the rule the title would b
 bare-domain problem below: nothing confirms `Bang` in `Bang.com - Alex Coal`, so the rule
 never fires there. It also never consumes the last remaining token.
 
+**One unknown encode word refuses the whole name, so the vocabulary is worth
+extending on evidence.** A token the encode vocabulary does not know interrupts the
+trailing run, the run no longer reaches the end, and the name is refused — the same
+mechanism that `REMASTERED` tripped. Corpus evidence added `VERTICAL` (phone-format
+video), `F4V` (a Flash container), and `10bits` alongside `10bit`. Each was one or two
+titles; the pattern is what matters, since the failure is total rather than partial.
+
+**An indexer's trailing runtime stamp is stripped.** `... MP4-KTR [06:32:12]` sits behind
+the group tag, so the encode run stops reaching the end and the name is refused over
+three characters of metadata. The strip is deliberately narrow — a bracketed `HH:MM:SS`
+at the very end and nothing else — because bracketed text is *not* junk in general: the
+delimited form reads `[Vixen] Alex Coal - ...` and depends on it surviving.
+
+**`MAX_GROUP_TAG_LENGTH` is no longer doing much.** Measured across the corpus, raising it
+from 12 gains 0.1% at 13 and nothing at all beyond that, so the two titles it still
+refuses (`-JustDifferent`, 13 characters) are the whole remaining cost. It is left at 12
+because the measurement cannot see the failure it prevents: a long run-together title
+word swallowed as a group produces a wrong key silently, without colliding with anything,
+so a zero-collision result is not evidence of safety here. The position rule now carries
+most of the weight this cap used to.
+
 **A name carrying no encode vocabulary at all is entirely title.**
 `KarupsPC.com_13.10.14.Chelsey.Lanette` used to be refused, on the grounds that nothing
 marked where the title stopped. That doubt needs at least one encode-ish token to exist:

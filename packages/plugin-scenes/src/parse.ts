@@ -135,7 +135,7 @@ const SOURCE_TOKEN =
  * perfectly ordinary title words in this domain.
  */
 const ANCILLARY_TOKEN =
-  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTERED?|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
+  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bits?|8bits?|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTERED?|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|F4V|VERTICAL|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
 
 /**
  * An upscale is a lower-resolution source stretched to a higher one, so it
@@ -359,6 +359,7 @@ const CONTAINERS: [RegExp, string][] = [
   [/\bMKV\b/i, 'mkv'],
   [/\bWMV\b/i, 'wmv'],
   [/\bAVI\b/i, 'avi'],
+  [/\bF4V\b/i, 'f4v'],
 ];
 
 const MONTH_NAMES: Record<string, number> = {
@@ -709,6 +710,21 @@ function stripWebsitePrefix(name: string): string {
     if (stripped.length > 0 && stripped !== name) return stripped.trim();
   }
   return name;
+}
+
+/**
+ * Drops an indexer's trailing runtime stamp, `... MP4-KTR [06:32:12]`.
+ *
+ * Added by the indexer after the complete release name, and specific enough
+ * to strip safely: a bracketed `HH:MM:SS` at the very end is a duration, not
+ * part of any release's name. Left alone it sits behind the group tag, so the
+ * encode run no longer reaches the end and the whole name is refused.
+ *
+ * Deliberately narrow. Bracketed text is *not* junk in general — the delimited
+ * form reads `[Vixen] Alex Coal - ...` and depends on it.
+ */
+function stripRuntimeStamp(name: string): string {
+  return name.replace(/\s*\[\d{1,2}:\d{2}(?::\d{2})?\]\s*$/, '');
 }
 
 /**
@@ -1415,7 +1431,7 @@ export function sceneSiteCandidates(
   const trimmed = releaseName.trim();
   if (trimmed.length === 0) return null;
 
-  const name = stripFileExtension(stripWebsitePrefix(trimmed)).trim();
+  const name = stripFileExtension(stripWebsitePrefix(stripRuntimeStamp(trimmed))).trim();
   if (name.length === 0) return null;
   // The delimited form has explicit boundaries, so it never needs a lookup.
   if (parseDelimitedForm(name) !== null) return null;
@@ -1470,7 +1486,7 @@ export function parseSceneRelease(
   const trimmed = releaseName.trim();
   if (trimmed.length === 0) return refuse('empty name');
 
-  const name = stripFileExtension(stripWebsitePrefix(trimmed)).trim();
+  const name = stripFileExtension(stripWebsitePrefix(stripRuntimeStamp(trimmed))).trim();
   if (name.length === 0) return refuse('nothing left after stripping prefix/extension');
 
   if (NOT_VIDEO_TOKEN.test(name)) return refuse('not a video release (image or photo set)');
