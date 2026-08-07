@@ -194,6 +194,28 @@ the date already supplies the boundary, nor to the bare-domain case below. Exten
 there would change how names that parse correctly today are read, which is a different
 decision from adding a shape that currently fails.
 
+**A confirmed site can stand in for the encode boundary.** A dateless name used to need
+*both* a site and a trustworthy encode boundary. The boundary was only ever needed to
+find where the title stops, and a confirmed site says where it starts — the same
+information from the other end. `TripForFuck - Hiyori JAPANESE 2` has no date and no
+encode vocabulary at all, and parses once the site is known.
+
+One guard came out of this. On that path nothing has removed an encode section, because
+there was no trustworthy place to cut one, so if what follows the site *starts* with
+encode vocabulary the name is site plus encode with no scene: `Brazzers.1080p.MP4-WRB`
+would otherwise have taken `1080p MP4-WRB` as its title. An existing test caught it.
+
+**The bare-4K poster is filed under a label.** `4K.kleo.34ans.de.clapiers` — 24 corpus
+titles, all distinct, none in ThePornDB. A resolution cannot be a site, so there is no
+site anywhere in the text and nothing to look up. They are one poster's output and are
+filed under `French 4K`.
+
+Like the poster signatures, **this is a named case rather than a structural rule**: the
+label describes where they come from and is not detected from the text, so a different
+poster opening names with a bare resolution would be mislabelled. No other bare-resolution
+lead appears in the corpus. Only a `4K` at the very start counts — the token turns up
+mid-name constantly, and `Tiny4K` is a real site.
+
 **A release with no date at all parses only when its site is confirmed.** These exist,
 and until the site lookup arrived they were refused outright — the date was the only
 thing marking where the site stopped. A confirmed site marks it just as well, so the

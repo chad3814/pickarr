@@ -1134,13 +1134,42 @@ function parseDateAtEndForm(
 function datelessPrefixTokens(name: string): { before: Token[]; tail: string } | null {
   const detached = detachReleaseGroup(tokensOf(name), name);
   const cut = findEncodeSuffixStart(detached.tokens, 2);
-  if (cut === null) return null;
 
-  const cutToken = detached.tokens[cut];
-  if (cutToken === undefined) return null;
+  const cutToken = cut === null ? undefined : detached.tokens[cut];
+  if (cutToken !== undefined && cut !== null) {
+    return { before: detached.tokens.slice(0, cut), tail: name.slice(cutToken.start) };
+  }
 
-  return { before: detached.tokens.slice(0, cut), tail: name.slice(cutToken.start) };
+  // No encode boundary either. That used to end it, but the boundary was only
+  // ever needed to find where the title *stops* — and a confirmed site says
+  // where the title *starts*, which is the same information from the other
+  // end. `TripForFuck - Hiyori JAPANESE 2` has no date and no encode
+  // vocabulary; once the site is known there is nothing left to guess.
+  //
+  // The whole run is offered, and the caller still requires a confirmed site
+  // match against it. Nothing is admitted here that was not already gated on
+  // that, so a name with no recognisable site is refused exactly as before.
+  const tokens = tokensOf(name);
+  return tokens.length >= 2 ? { before: tokens, tail: '' } : null;
 }
+
+/**
+ * A name opening with a bare `4K` and then only words:
+ * `4K.kleo.34ans.de.clapiers`.
+ *
+ * A resolution cannot be a site, so these have no site anywhere in the text
+ * and nothing can be looked up — 24 corpus titles, all distinct, none present
+ * in ThePornDB. They are one poster's output, so they are filed under one
+ * label rather than refused.
+ *
+ * This is a named case, not a structural rule, in the same way the poster
+ * signatures are: `French 4K` describes where these come from and is not
+ * detected from the text. A different poster opening names with a bare
+ * resolution would be mislabelled, and no other bare-resolution lead appears
+ * in the corpus. The `4K` is still read as the resolution it is.
+ */
+const BARE_4K_PREFIX = /^4K[.\-_ ]/i;
+const BARE_4K_SITE = 'French 4K';
 
 /**
  * Shape 3: no date anywhere — `Site.Title.And.Performers.Encode`.
@@ -1163,6 +1192,12 @@ function datelessPrefixTokens(name: string): { before: Token[]; tail: string } |
  * name can separate them.
  */
 function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRelease | null {
+  if (BARE_4K_PREFIX.test(name)) {
+    const title = prettify(name.replace(BARE_4K_PREFIX, ''));
+    if (title.length === 0) return refuse('nothing follows the leading 4K');
+    return buildRelease(BARE_4K_SITE, null, title, slug(title), extractQuality('4K', undefined));
+  }
+
   const prefix = datelessPrefixTokens(name);
   if (prefix === null) return refuse('no date and no trustworthy encode boundary');
 
@@ -1172,6 +1207,15 @@ function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRele
   const siteTokens = consumeSiteTld(prefix.before, match.tokenCount);
   const firstSceneToken = prefix.before[siteTokens];
   if (firstSceneToken === undefined) return refuse('no date, and the site name uses every token');
+
+  // On the no-boundary path the whole run was offered, so nothing has removed
+  // an encode section — there was no trustworthy place to cut one. If what
+  // follows the site *starts* with encode vocabulary then the name is site
+  // plus encode with no scene at all, as in `Brazzers.1080p.MP4-WRB`, and the
+  // title would be the encode section verbatim.
+  if (prefix.tail.length === 0 && isEncodeToken(firstSceneToken.text)) {
+    return refuse('no date, and nothing between the site and the encode section');
+  }
 
   const sceneText = prettify(name.slice(firstSceneToken.start, prefix.tail.length > 0 ? name.length - prefix.tail.length : name.length));
   if (sceneText.length === 0 || sceneText.toUpperCase() === MARKER_TOKEN) {
@@ -1531,6 +1575,9 @@ export function sceneSiteCandidates(
 
   // A dateless name needs the same lookup, and needs it more: it has no
   // fallback, so an unconfirmed site means the name is refused entirely.
+  // The bare-4K poster is handled locally and has no site to find.
+  if (BARE_4K_PREFIX.test(name)) return null;
+
   const before =
     date === null
       ? (datelessPrefixTokens(name)?.before ?? null)
