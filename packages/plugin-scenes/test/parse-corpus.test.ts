@@ -140,6 +140,35 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|mp4|-|inSaNe',
     isNew: true,
   },
+  // --- Release groups whose name contains a space ---------------------------
+  //
+  // `iPT Team` alone accounted for 65% of every refusal across a 6,800-title
+  // corpus. A multi-token group is only detached directly behind encode
+  // information, which is what stops it eating title words.
+  {
+    name: 'HotCrazyMess.19.09.13.Cadence.Lux.My.Friends.Boyfriend.XXX.XviD-iPT Team',
+    scene: 'hotcrazymess/cadence-lux-my-friends-boyfriend',
+    key: 'hotcrazymess:2019-09-13:cadence-lux-my-friends-boyfriend',
+    title: 'Cadence Lux My Friends Boyfriend',
+    quality: '-|-|xvid|-|-|iPT Team',
+    isNew: true,
+  },
+  {
+    name: 'Seska 22 07 26 A Cuckold Quickie XXX XviD-iPT Team',
+    scene: 'seska/a-cuckold-quickie',
+    key: 'seska:2022-07-26:a-cuckold-quickie',
+    title: 'A Cuckold Quickie',
+    quality: '-|-|xvid|-|-|iPT Team',
+    isNew: true,
+  },
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-iPT Team',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '1080|-|-|mp4|-|iPT Team',
+    isNew: true,
+  },
   // --- Split markers, as they actually occur --------------------------------
   //
   // Sampled from 2,310 real indexer titles containing cd/part/disc markers:
