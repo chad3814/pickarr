@@ -981,17 +981,49 @@ function matchSitePrefix(before: Token[], sites: readonly string[]): SiteMatch |
  * generated for a name the parser does not read this way would send lookups
  * for prefixes that can never be used.
  */
-function dateAtEndPrefixTokens(name: string, tokens: Token[], date: AnchorSpan): Token[] | null {
+interface DateAtEnd {
+  /** Site and title, with the encode section already removed. */
+  readonly before: Token[];
+  /** The encode text, for `extractQuality`. */
+  readonly tail: string;
+  readonly group: string | undefined;
+}
+
+function dateAtEndPrefixTokens(
+  name: string,
+  tokens: Token[],
+  date: AnchorSpan,
+): DateAtEnd | null {
   const before = tokens.filter((token) => token.start + token.text.length <= date.startOffset);
   const after = tokens.filter((token) => token.start >= date.endOffset);
-  if (after.length === 0 || before.length <= after.length) return null;
+
+  // The date is the very last thing in the name, so the encode section — if
+  // there is one — sits ahead of it rather than behind:
+  // `site_performer_title-2160p-18.12.18`. Structurally this is the same shape
+  // read from the other side, and the encode boundary does the same job the
+  // trailing run does in the ordinary case. `minIndex` is 2 so at least one
+  // token can be the site and one the title.
+  if (after.length === 0) {
+    const beforeText = name.slice(0, date.startOffset).replace(/[.\s_-]+$/, '');
+    const beforeTokens = tokensOf(beforeText);
+    const cut = findEncodeSuffixStart(beforeTokens, 2);
+    const cutToken = cut === null ? undefined : beforeTokens[cut];
+    if (cutToken === undefined) return null;
+    return {
+      before: beforeTokens.slice(0, cut ?? 0),
+      tail: beforeText.slice(cutToken.start),
+      group: undefined,
+    };
+  }
+
+  if (before.length <= after.length) return null;
 
   const tail = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
   const detached = detachReleaseGroup(tokensOf(tail), tail);
   if (detached.tokens.length === 0) return null;
   if (!detached.tokens.every((token) => isEncodeToken(token.text))) return null;
 
-  return before;
+  return { before, tail, group: detached.group };
 }
 
 function parseDateAtEndForm(
@@ -1000,11 +1032,9 @@ function parseDateAtEndForm(
   date: AnchorSpan,
   options: SceneParseOptions,
 ): ParsedRelease | null {
-  const before = dateAtEndPrefixTokens(name, tokens, date);
-  if (before === null) return null;
-
-  const tail = name.slice(date.endOffset).replace(/^[.\s_-]+/, '');
-  const detached = detachReleaseGroup(tokensOf(tail), tail);
+  const shape = dateAtEndPrefixTokens(name, tokens, date);
+  if (shape === null) return null;
+  const before = shape.before;
 
   // A matched site contributes its *canonical* spelling, not the release's.
   // The same site arrives written several ways — `BangBros`, `bangbros`,
@@ -1019,11 +1049,25 @@ function parseDateAtEndForm(
 
   const site =
     match?.name ?? prettify(name.slice(0, lastSiteToken.start + lastSiteToken.text.length));
-  const sceneText = prettify(name.slice(firstSceneToken.start, date.startOffset));
+
+  // The identity ends at the last token `before` kept, not at the date. When
+  // the date trails the name the encode section sits between the two, and
+  // slicing to the date would leave `2160p` in the scene title.
+  const lastIdentityToken = before.at(-1);
+  if (lastIdentityToken === undefined) return null;
+  const identityEnd = lastIdentityToken.start + lastIdentityToken.text.length;
+
+  const sceneText = prettify(name.slice(firstSceneToken.start, identityEnd));
   if (site.length === 0 || sceneText.length === 0) return null;
   if (sceneText.toUpperCase() === MARKER_TOKEN) return null;
 
-  return buildRelease(site, date, sceneText, slug(sceneText), extractQuality(tail, detached.group));
+  return buildRelease(
+    site,
+    date,
+    sceneText,
+    slug(sceneText),
+    extractQuality(shape.tail, shape.group),
+  );
 }
 
 /**
@@ -1438,7 +1482,7 @@ export function sceneSiteCandidates(
   const before =
     date === null
       ? (datelessPrefixTokens(name)?.before ?? null)
-      : dateAtEndPrefixTokens(name, tokens, date);
+      : (dateAtEndPrefixTokens(name, tokens, date)?.before ?? null);
   if (before === null) return null;
   if (matchSitePrefix(before, options.sites ?? []) !== null) return null;
 

@@ -454,3 +454,46 @@ test('VERTICAL and F4V are encode information, not title words', () => {
   assert.equal(f4v.identityKey, 'myfirstsexteacher:2009-11-16:darla-crane');
   assert.equal(f4v.quality.extras?.['container'], 'f4v');
 });
+
+// --- The date at the very end, with the encode before it ---------------------
+
+test('a date at the very end parses, with the encode ahead of it', () => {
+  // site _ performer _ title - resolution - date. The date-at-end reader wants
+  // the encode *after* the date; here it comes first, so the same shape read
+  // from the other side.
+  const result = parsed('teensexmania_mishelle-klein_babe-loves-sperm-as-coffee-2160p-18.12.18');
+  assert.equal(
+    result.identityKey,
+    'teensexmania:2018-12-18:mishelle-klein-babe-loves-sperm-as-coffee',
+  );
+  assert.equal(result.display.subtitle, 'teensexmania');
+  assert.equal(result.quality.resolution, 2160, 'the encode still has to be read');
+});
+
+test('the encode before a trailing date is not left in the title', () => {
+  const result = parsed('hookuphotshot_della-cate_episode-411-2160p-25.01.31');
+  assert.equal(result.display.title, 'della-cate episode-411');
+  assert.equal(result.quality.resolution, 2160);
+});
+
+test('a trailing date works with dots as well as dashes', () => {
+  const result = parsed(
+    'Alterotic.Viviana.Rose.Ava.Holt.Enjoy.the.Sensual.Performance.2160p.23.07.26',
+  );
+  assert.equal(result.display.subtitle, 'Alterotic');
+  assert.equal(result.identityKey.split(':')[1], '2023-07-26');
+});
+
+test('a configured site still splits a trailing-date name', () => {
+  const result = parsed(
+    'teensexmania_mishelle-klein_babe-loves-sperm-as-coffee-2160p-18.12.18',
+    ['Teen Sex Mania'],
+  );
+  assert.equal(result.display.subtitle, 'Teen Sex Mania');
+});
+
+test('a trailing date with no encode before it is still refused', () => {
+  // Nothing separates site from title *or* title from encode, so there is no
+  // boundary to work from and guessing would truncate the title.
+  assert.equal(parseSceneRelease('somesite_a-scene-title-18.12.18'), null);
+});
