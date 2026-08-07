@@ -120,14 +120,17 @@ export function planSceneImport(
   const site = sanitizeSegment(titleCaseSlug(siteSlug ?? 'unknown'));
   const scene = sanitizeSegment(titleCaseSlug(sceneSlug ?? 'unknown'));
 
-  // A release with no date in its name has an empty middle segment. Naming
-  // the file `Unknown - Scene.mp4` would be worse than leaving the date out:
-  // it puts a placeholder in the library that reads like a parse failure, and
-  // every dateless scene on a site would share that same prefix. Injectivity
-  // is unaffected — the date is absent from the key too, so two paths can only
-  // collide when their keys already did.
-  const dateSegment = date === undefined || date.length === 0 ? '' : sanitizeSegment(date);
-  const fileName = dateSegment.length > 0 ? `${dateSegment} - ${scene}` : scene;
+  // The key's middle segment is an ISO date, an episode number, or empty for a
+  // name that carried neither. Naming a dateless file `Unknown - Scene.mp4`
+  // would be worse than leaving the segment out: it puts a placeholder in the
+  // library that reads like a parse failure, and every dateless scene on a
+  // site would share that same prefix. Injectivity is unaffected — the segment
+  // is absent from the key too, so two paths can only collide when their keys
+  // already did. An episode is upper-cased back to the form releases write it
+  // in, `E141`, since the key is lower-case only to keep its alphabet small.
+  const anchor = date ?? '';
+  const anchorSegment = /^e\d+$/.test(anchor) ? anchor.toUpperCase() : sanitizeSegment(anchor);
+  const fileName = anchor.length > 0 ? `${anchorSegment} - ${scene}` : scene;
 
   return {
     files: [

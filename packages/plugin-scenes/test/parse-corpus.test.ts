@@ -140,6 +140,46 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|mp4|-|inSaNe',
     isNew: true,
   },
+  // --- Episode numbers, where a date would be -------------------------------
+  //
+  // Sites that number episodes instead of dating them. `E141` sits exactly
+  // where the date sits and is recognised the same way — by shape, not by
+  // vocabulary — so it anchors the site/title boundary just as well and needs
+  // no site lookup to do it.
+  {
+    name: 'HeavyOnHotties.E141.Daniela.Pechotes.Fuck.Me.Silly.XXX.1080p.MP4-KTR',
+    scene: 'heavyonhotties/daniela-pechotes',
+    key: 'heavyonhotties:e141:daniela-pechotes-fuck-me-silly',
+    title: 'Daniela Pechotes Fuck Me Silly',
+    quality: '1080|-|-|mp4|-|KTR',
+    isNew: true,
+  },
+  {
+    name: 'InTheCrack.E1178.Tracy.Gold.XXX.2160p.MP4-KTR',
+    scene: 'inthecrack/tracy-gold',
+    key: 'inthecrack:e1178:tracy-gold',
+    title: 'Tracy Gold',
+    quality: '2160|-|-|mp4|-|KTR',
+    isNew: true,
+  },
+  {
+    name: 'GirlsDoPorn.E380.20.Years.Old.XXX.720p.MP4-KTR',
+    scene: 'girlsdoporn/20-years-old',
+    key: 'girlsdoporn:e380:20-years-old',
+    title: '20 Years Old',
+    quality: '720|-|-|mp4|-|KTR',
+    isNew: true,
+  },
+  // Two encodes of one episode collate, exactly as two encodes of one dated
+  // scene do.
+  {
+    name: 'InTheCrack.E1178.Tracy.Gold.XXX.1080p.MP4-P0RNL0V3R',
+    scene: 'inthecrack/tracy-gold',
+    key: 'inthecrack:e1178:tracy-gold',
+    title: 'Tracy Gold',
+    quality: '1080|-|-|mp4|-|P0RNL0V3R',
+    isNew: true,
+  },
   // --- Release groups whose name contains a space ---------------------------
   //
   // `iPT Team` alone accounted for 65% of every refusal across a 6,800-title
@@ -1016,7 +1056,13 @@ const REFUSED: [string, string][] = [
   ['Site.23.04.15.Name.XXX.1080p.MP4-COMPILATION', 'different content entirely, not one scene'],
 ];
 
-const KEY_SHAPE = /^[a-z0-9-]+:\d{4}-\d{2}-\d{2}:[a-z0-9-]+$/;
+/**
+ * `site : anchor : scene`. The anchor is an ISO date, an episode number, or
+ * empty for a name that carries neither — never anything else, because the
+ * whole key is rendered back into a library path and that round trip only
+ * survives inside this alphabet.
+ */
+const KEY_SHAPE = /^[a-z0-9-]+:(?:\d{4}-\d{2}-\d{2}|e\d+|):[a-z0-9-]+$/;
 
 function parsed(name: string) {
   const result = parseSceneRelease(name);
@@ -1114,10 +1160,26 @@ test('corpus: every key stays inside the alphabet destinations are derived from'
   }
 });
 
-test('corpus: the display date always agrees with the key', () => {
+test('corpus: the display never disagrees with the key about the anchor', () => {
+  // `display.date` carries a real date or nothing. An episode number occupies
+  // the same slot in the key but is not a date, and handing it to a consumer
+  // that sorts or filters on that field would be a lie the type does not
+  // prevent — so it is surfaced as its own field instead.
   for (const entry of CORPUS) {
     const release = parsed(entry.name);
-    assert.equal(release.display.date, release.identityKey.split(':')[1], entry.name);
+    const anchor = release.identityKey.split(':')[1] ?? '';
+    const episode = release.display.fields.find((field) => field.label === 'Episode');
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
+      assert.equal(release.display.date, anchor, entry.name);
+      assert.equal(episode, undefined, entry.name);
+    } else if (anchor.length > 0) {
+      assert.equal(release.display.date, undefined, entry.name);
+      assert.equal(episode?.value, anchor.toUpperCase(), entry.name);
+    } else {
+      assert.equal(release.display.date, undefined, entry.name);
+      assert.equal(episode, undefined, entry.name);
+    }
   }
 });
 

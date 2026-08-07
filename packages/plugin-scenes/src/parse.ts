@@ -730,7 +730,7 @@ function stripFileExtension(name: string): string {
  */
 function buildRelease(
   site: string,
-  date: string,
+  anchor: AnchorSpan | null,
   sceneTitle: string,
   sceneSlug: string,
   quality: QualityTokens,
@@ -740,19 +740,42 @@ function buildRelease(
   if (sceneSlug.length === 0) return refuse('scene slug is empty');
 
   const fields = [{ label: 'Site', value: site }];
-  if (date.length > 0) fields.push({ label: 'Date', value: date });
+  const display: DisplayFields = { title: sceneTitle, subtitle: site, fields };
+
+  if (anchor?.kind === 'date') {
+    fields.push({ label: 'Date', value: anchor.key });
+    // Only a real date populates `display.date`; an episode number is not one,
+    // and a consumer sorting or filtering on that field must not be handed a
+    // string that cannot be a date.
+    display.date = anchor.key;
+  } else if (anchor?.kind === 'episode') {
+    fields.push({ label: 'Episode', value: anchor.key.toUpperCase() });
+  }
+
   fields.push({ label: 'Scene', value: sceneTitle });
 
-  const display: DisplayFields = { title: sceneTitle, subtitle: site, fields };
-  if (date.length > 0) display.date = date;
-
-  return { identityKey: `${siteSlug}:${date}:${sceneSlug}`, display, quality };
+  return { identityKey: `${siteSlug}:${anchor?.key ?? ''}:${sceneSlug}`, display, quality };
 }
 
 // --- Shape 1: the dotted scene form -----------------------------------------
 
-interface DateSpan {
-  readonly iso: string;
+type AnchorKind = 'date' | 'episode';
+
+/**
+ * Where the site stops and the scene starts, and what that boundary is worth
+ * as part of the identity.
+ *
+ * A date is the ideal anchor because it is recognised by arithmetic rather
+ * than vocabulary. An episode number is recognised the same way — by shape,
+ * `E` followed by two or more digits — and occupies exactly the same position,
+ * so everything downstream treats the two identically. It is also just as
+ * discriminating: `E1178` names one episode of a site as surely as a date
+ * names one day of it.
+ */
+interface AnchorSpan {
+  readonly kind: AnchorKind;
+  /** What reaches the identity key's middle segment. */
+  readonly key: string;
   readonly startOffset: number;
   readonly endOffset: number;
 }
@@ -763,7 +786,7 @@ interface DateSpan {
  * occur: `YY.MM.DD`, `YYYY.MM.DD`, and the concatenated `YYMMDD` / `YYYYMMDD`.
  * Index 0 is skipped because a date there would leave no site.
  */
-function findSceneDate(tokens: Token[]): DateSpan | null {
+function findSceneDate(tokens: Token[]): AnchorSpan | null {
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === undefined) continue;
@@ -772,7 +795,7 @@ function findSceneDate(tokens: Token[]): DateSpan | null {
 
     if (/^\d{8}$/.test(text)) {
       const iso = toIsoDate(Number(text.slice(0, 4)), Number(text.slice(4, 6)), Number(text.slice(6, 8)));
-      if (iso !== null) return { iso, startOffset: token.start, endOffset: end };
+      if (iso !== null) return { kind: 'date', key: iso, startOffset: token.start, endOffset: end };
     }
     if (/^\d{6}$/.test(text)) {
       const iso = toIsoDate(
@@ -780,7 +803,7 @@ function findSceneDate(tokens: Token[]): DateSpan | null {
         Number(text.slice(2, 4)),
         Number(text.slice(4, 6)),
       );
-      if (iso !== null) return { iso, startOffset: token.start, endOffset: end };
+      if (iso !== null) return { kind: 'date', key: iso, startOffset: token.start, endOffset: end };
     }
 
     const month = tokens[index + 1];
@@ -794,7 +817,12 @@ function findSceneDate(tokens: Token[]): DateSpan | null {
     ) {
       const iso = toIsoDate(expandYear(text), Number(month.text), Number(day.text));
       if (iso !== null) {
-        return { iso, startOffset: token.start, endOffset: day.start + day.text.length };
+        return {
+          kind: 'date',
+          key: iso,
+          startOffset: token.start,
+          endOffset: day.start + day.text.length,
+        };
       }
     }
   }
@@ -924,7 +952,7 @@ function matchSitePrefix(before: Token[], sites: readonly string[]): SiteMatch |
  * generated for a name the parser does not read this way would send lookups
  * for prefixes that can never be used.
  */
-function dateAtEndPrefixTokens(name: string, tokens: Token[], date: DateSpan): Token[] | null {
+function dateAtEndPrefixTokens(name: string, tokens: Token[], date: AnchorSpan): Token[] | null {
   const before = tokens.filter((token) => token.start + token.text.length <= date.startOffset);
   const after = tokens.filter((token) => token.start >= date.endOffset);
   if (after.length === 0 || before.length <= after.length) return null;
@@ -940,7 +968,7 @@ function dateAtEndPrefixTokens(name: string, tokens: Token[], date: DateSpan): T
 function parseDateAtEndForm(
   name: string,
   tokens: Token[],
-  date: DateSpan,
+  date: AnchorSpan,
   options: SceneParseOptions,
 ): ParsedRelease | null {
   const before = dateAtEndPrefixTokens(name, tokens, date);
@@ -966,7 +994,7 @@ function parseDateAtEndForm(
   if (site.length === 0 || sceneText.length === 0) return null;
   if (sceneText.toUpperCase() === MARKER_TOKEN) return null;
 
-  return buildRelease(site, date.iso, sceneText, slug(sceneText), extractQuality(tail, detached.group));
+  return buildRelease(site, date, sceneText, slug(sceneText), extractQuality(tail, detached.group));
 }
 
 /**
@@ -1028,16 +1056,43 @@ function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRele
   const detached = detachReleaseGroup(tokensOf(name), name);
   return buildRelease(
     match.name,
-    '',
+    null,
     sceneText,
     slug(sceneText),
     extractQuality(prefix.tail, detached.group),
   );
 }
 
+/**
+ * `E` followed by two or more digits, standing where a date would.
+ *
+ * Sites that number their episodes rather than dating them put the number in
+ * exactly the date's position, so it anchors the site/title boundary the same
+ * way and — unlike a dateless name — needs no site lookup to do it. Against
+ * the corpus these were the largest remaining block of refusals.
+ *
+ * Two digits minimum, because a bare `E1` is too easy for a title to produce.
+ * Index 0 is skipped for the same reason it is for a date: an anchor there
+ * leaves no site. `S01E05` tokenises whole and does not match, which keeps
+ * episodic television numbering out of this.
+ */
+function findEpisodeAnchor(tokens: Token[]): AnchorSpan | null {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === undefined || !/^[Ee]\d{2,}$/.test(token.text)) continue;
+    return {
+      kind: 'episode',
+      key: token.text.toLowerCase(),
+      startOffset: token.start,
+      endOffset: token.start + token.text.length,
+    };
+  }
+  return null;
+}
+
 function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease | null {
   const tokens = tokensOf(name);
-  const date = findSceneDate(tokens);
+  const date = findSceneDate(tokens) ?? findEpisodeAnchor(tokens);
   if (date === null) return parseDatelessForm(name, options);
 
   const atEnd = parseDateAtEndForm(name, tokens, date, options);
@@ -1062,7 +1117,7 @@ function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease
   if (sceneText.toUpperCase() === MARKER_TOKEN) return refuse('title is only the XXX marker');
 
   const tail = rest.slice(cutToken.start);
-  return buildRelease(site, date.iso, sceneText, slug(sceneText), extractQuality(tail, detached.group));
+  return buildRelease(site, date, sceneText, slug(sceneText), extractQuality(tail, detached.group));
 }
 
 // --- Shape 2: the delimited metadata form -----------------------------------
@@ -1248,7 +1303,7 @@ function parseDelimitedForm(name: string): ParsedRelease | null {
 
   return buildRelease(
     site,
-    dateIso,
+    { kind: 'date', key: dateIso, startOffset: 0, endOffset: 0 },
     titleParts.join(' - '),
     sceneSlug,
     extractQuality(qualityParts.join(' '), group),
