@@ -1,4 +1,10 @@
 import type { DownloadedFile, ImportPlan, ParsedRelease } from '@pickarr/plugin-api';
+import { DEFAULT_PATH_TEMPLATE, renderPath } from './path-template.ts';
+
+export interface PlanImportOptions {
+  /** See `path-template.ts` for the placeholders. */
+  readonly pathTemplate?: string;
+}
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mkv', '.avi', '.wmv', '.m4v', '.mov', '.mpg']);
 const JUNK_PATTERN = /(^|[^a-z])(sample|proof|screens?|trailer)([^a-z]|$)/i;
@@ -11,61 +17,6 @@ const JUNK_PATTERN = /(^|[^a-z])(sample|proof|screens?|trailer)([^a-z]|$)/i;
 function extensionOf(path: string): string {
   const index = path.lastIndexOf('.');
   return index === -1 ? '' : path.slice(index).toLowerCase();
-}
-
-/** Strips characters that are invalid or hazardous in a path segment. */
-function sanitizeSegment(value: string): string {
-  const cleaned = value
-    .replace(/[/\\:*?"<>|]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .replace(/^[.\s]+|[.\s]+$/g, '')
-    .trim();
-  return cleaned.length > 0 ? cleaned : 'Unknown';
-}
-
-/**
- * Renders a slug from `identityKey` as a human-readable, title-cased path
- * segment: `alex-coal` becomes `Alex Coal`, and `kylie--page-turner` becomes
- * `Kylie - Page Turner`.
- *
- * Destinations are derived from `identityKey`'s slugs rather than from the
- * release's raw display strings so that any two releases the parser
- * considers the same scene -- same site, date, and scene slug -- always
- * resolve to the same path. Two releases can carry the same identity while
- * differing in casing, spacing, or punctuation (that is the whole point of
- * normalization in `identityKey`); deriving the path from the raw display
- * strings would let that surface variation leak into the path and split one
- * scene's files across two destinations.
- *
- * The `--` split is what makes the reverse direction hold too, and it is not
- * cosmetic. The parser's listing form joins its sorted components with `--`
- * precisely because `slug()` can never emit that sequence, which is what keeps
- * the identity injective on the component multiset. Splitting on a single `-`
- * here erased that boundary again one layer down: `kylie--page-turner` and
- * `kylie-page--turner` are two different scenes with two different keys, and
- * both rendered `Kylie Page Turner`. Nothing is overwritten -- the importer
- * refuses an occupied destination -- but the second scene then fails on every
- * attempt and can never be imported at all.
- *
- * Injectivity, precisely: `slug()` emits only `[a-z0-9]` runs separated by
- * single `-`, with no leading or trailing `-`. So a component contains no
- * `--`, and splitting it on `-` yields no empty words. A rendered word
- * therefore contains neither a space nor a hyphen, words are joined by ` `,
- * and components by ` - `; neither delimiter can occur inside a word, so the
- * rendering is uniquely decodable and distinct slugs render distinctly.
- */
-function titleCaseSlug(value: string): string {
-  return value
-    .split('--')
-    .map((component) =>
-      component
-        .split('-')
-        .filter((word) => word.length > 0)
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(' '),
-    )
-    .filter((component) => component.length > 0)
-    .join(' - ');
 }
 
 /** Counts path segments, e.g. `extras/scene.mp4` has depth 2. */
@@ -99,6 +50,7 @@ function pickBest(candidates: DownloadedFile[]): DownloadedFile {
 export function planSceneImport(
   media: ParsedRelease,
   files: DownloadedFile[],
+  options: PlanImportOptions = {},
 ): ImportPlan | null {
   const videoFiles = files.filter((candidate) =>
     VIDEO_EXTENSIONS.has(extensionOf(candidate.relativePath)),
@@ -116,28 +68,17 @@ export function planSceneImport(
 
   const chosen = pickBest(candidates);
 
-  const [siteSlug, date, sceneSlug] = media.identityKey.split(':');
-  const site = sanitizeSegment(titleCaseSlug(siteSlug ?? 'unknown'));
-  const scene = sanitizeSegment(titleCaseSlug(sceneSlug ?? 'unknown'));
-
-  // The key's middle segment is an ISO date, an episode number, or empty for a
-  // name that carried neither. Naming a dateless file `Unknown - Scene.mp4`
-  // would be worse than leaving the segment out: it puts a placeholder in the
-  // library that reads like a parse failure, and every dateless scene on a
-  // site would share that same prefix. Injectivity is unaffected — the segment
-  // is absent from the key too, so two paths can only collide when their keys
-  // already did. An episode is upper-cased back to the form releases write it
-  // in, `E141`, since the key is lower-case only to keep its alphabet small.
-  const anchor = date ?? '';
-  const anchorSegment = /^e\d+$/.test(anchor) ? anchor.toUpperCase() : sanitizeSegment(anchor);
-  const fileName = anchor.length > 0 ? `${anchorSegment} - ${scene}` : scene;
-
   return {
     files: [
       {
         source: chosen.absolutePath,
-        destination: `${site}/${fileName}${extensionOf(chosen.relativePath)}`,
+        destination: renderPath(
+          options.pathTemplate ?? DEFAULT_PATH_TEMPLATE,
+          media,
+          extensionOf(chosen.relativePath),
+        ),
       },
     ],
   };
 }
+

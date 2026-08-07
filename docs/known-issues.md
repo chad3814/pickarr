@@ -386,6 +386,23 @@ resolution because there is no word boundary before the `60`.
 visible and fixable, while a wrong identity key silently merges two different scenes
 and you pick the wrong thing.
 
+**A configurable path template does not move files already imported.** `pathTemplate`
+decides where new imports land; changing it leaves everything already in the library
+where it is, so a change part-way through leaves two layouts side by side until the old
+files are moved by hand. Pickarr has no library scan, so it will not notice.
+
+The default is `{Site}/{date}{episode} - {Title}`, chosen to reproduce the layout that
+shipped before the template existed rather than to be the nicest — an upgrade must not
+silently split a library. `{SiteName}` is PascalCase (`BangBros`) and `{Site}` is
+title-cased with spaces (`Bang Bros`); the older layout used the latter, which is why
+both exist.
+
+Every value is derived from `identityKey`, never from the release's display strings, so
+two encodes of one scene render one path under any template. `{sitename}` and
+`{SiteName}` run the words together and are the one pair that is not injective —
+`bang-bros` and `bangbros` both give `bangbros` — but those cannot be two different
+sites, because site matching compares exactly that separator-free form.
+
 **A constraint, not a defect: `--` inside a scene slug is a component boundary, and
 two files have to agree about that.** Where a release names its parts separately —
 `[Vixen] Kylie - Page Turner - 2023-07-19` — the parts are sorted and joined with `--`,
