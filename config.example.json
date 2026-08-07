@@ -6,7 +6,7 @@
     "@pickarr/plugin-scenes": {
       "libraryRoot": "/media/scenes",
       "sites": ["Anal Only", "Bangbros", "Bangbros Ass Parade", "Vixen"],
-      "pathTemplate": "{Site}/{date}{episode} - {Title}"
+      "pathTemplate": "{sitename}/{sitename}.{date}{episode}.{title}.{resolution}-{group}"
     }
   },
   "siteLookup": {

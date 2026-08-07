@@ -20,7 +20,7 @@ test('picks the largest video file and names it from the parsed media', () => {
     files: [
       {
         source: '/downloads/release/scene.mp4',
-        destination: 'Brazzers/2023-04-15 - Alex Coal.mp4',
+        destination: 'brazzers/brazzers.2023-04-15.alex coal.1080p-WRB.mp4',
       },
     ],
   });
@@ -104,7 +104,7 @@ test('a multi-component scene renders its component boundary in the path', () =>
   assert.ok(media);
   assert.equal(
     planSceneImport(media, [file('scene.mp4', 1_000)])?.files[0]?.destination,
-    'Vixen/2023-07-19 - Kylie - Page Turner.mp4',
+    'vixen/vixen.2023-07-19.kylie - page turner.mp4',
   );
 });
 

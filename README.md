@@ -42,7 +42,7 @@ immediately rather than starting in a broken state.
 | `database.path` | top level | Path to the SQLite file. Put it under `/config` so it survives container recreation. |
 | `trashDir` | top level | Where superseded files are moved instead of deleted. See "Trash is never emptied" below. |
 | `plugins.<package>` | plugin | Per-plugin settings, keyed by package name. The bundled scenes plugin takes `libraryRoot`, the destination directory imports land in. |
-| `plugins.<package>.pathTemplate` | plugin (scenes) | Where imports land under `libraryRoot`. Defaults to `{Site}/{date}{episode} - {Title}` — see "Naming your files" below. |
+| `plugins.<package>.pathTemplate` | plugin (scenes) | Where imports land under `libraryRoot`. Defaults to scene naming — see "Naming your files" below. |
 | `plugins.<package>.sites` | plugin (scenes) | Optional list of site names. Used only for releases that put the date at the *end* of the name, where nothing separates the site from the title — see "Naming your sites" below. |
 | `downloadClients[]` | top level | One or more download clients. The MVP supports `type: "sabnzbd"` only. |
 | `downloadClients[].url` | download client | Base URL of the SABnzbd instance. |
@@ -66,13 +66,21 @@ in an environment variable, `docker inspect` output, or a crash dump of `process
 
 ### Naming your files
 
-`pathTemplate` decides where an import lands under `libraryRoot`. The default is
+`pathTemplate` decides where an import lands under `libraryRoot`. The default follows
+scene naming:
 
 ```json
-"pathTemplate": "{Site}/{date}{episode} - {Title}"
+"pathTemplate": "{sitename}/{sitename}.{date}{episode}.{title}.{resolution}-{group}"
 ```
 
-which gives `Bang Bros/2026-08-03 - Chloe Upgrades Her Butt.mp4`.
+```
+bangbros/bangbros.2026-08-03.chloe upgrades her butt.2160p-WRB.mp4
+inthecrack/inthecrack.E1178.tracy gold.2160p-KTR.mp4
+tripforfuck/tripforfuck.hiyori japanese 2.mp4
+```
+
+For a more readable library, `{Site}/{date}{episode} - {Title}` gives
+`Bang Bros/2026-08-03 - Chloe Upgrades Her Butt.mp4`.
 
 | Placeholder | Renders | Notes |
 |---|---|---|
@@ -96,6 +104,12 @@ shortening every filename.
 **Changing this moves nothing that is already imported.** Pickarr writes new files to the
 new layout and leaves existing ones where they are, so a change part-way through leaves a
 library split across two schemes until you move the old files yourself.
+
+The default names the encode, so two encodes of one scene get two paths. That is
+deliberate: an upgrade lands on its own path and the superseded file is trashed by group
+rather than overwritten by path. Drop `{resolution}` and `{group}` and the two share a
+path instead, which also works — the importer refuses an occupied destination until the
+old file has been trashed.
 
 Every value comes from the identity key rather than from the release name, which is what
 keeps two encodes of one scene landing on one path. Two *different* scenes can never
