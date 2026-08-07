@@ -107,6 +107,17 @@ function refuse(reason: string): null {
   return null;
 }
 
+/**
+ * Marks a release that is not video, so there is nothing here to pick.
+ *
+ * These carry a date, a site and a title and would otherwise parse cleanly —
+ * and then collate with the *video* release of the same scene, offering a zip
+ * of photographs as one of its versions. `planSceneImport` would refuse the
+ * download at import time, long after the user picked it. Refusing at parse
+ * time says so up front.
+ */
+const NOT_VIDEO_TOKEN = /\b(?:IMAGESET|IMGSET|PHOTOSET|PICSET)\b/i;
+
 /** The literal marker token that separates identity from encode information. */
 const MARKER_TOKEN = 'XXX';
 
@@ -114,7 +125,7 @@ const MARKER_TOKEN = 'XXX';
  * Tokens that can only plausibly be encode information, never title words.
  * These are strong enough on their own to anchor a boundary.
  */
-const RESOLUTION_TOKEN = /^(?:\d{3,4}p(?:\d{2,3})?|4K|8K|UHD)$/i;
+const RESOLUTION_TOKEN = /^(?:\d{3,4}[pi](?:\d{2,3})?|4K|8K|UHD)$/i;
 const SOURCE_TOKEN =
   /^(?:WEB[-_.]?DL|WEB[-_.]?Rip|SiteRip|Blu[-_.]?Ray|BD[-_.]?Rip|BR[-_.]?Rip|DVD[-_.]?Rip|HD[-_.]?TV)$/i;
 
@@ -124,7 +135,7 @@ const SOURCE_TOKEN =
  * perfectly ordinary title words in this domain.
  */
 const ANCILLARY_TOKEN =
-  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTER|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
+  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bit|8bit|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTERED?|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
 
 /**
  * An upscale is a lower-resolution source stretched to a higher one, so it
@@ -135,6 +146,14 @@ const ANCILLARY_TOKEN =
  * 1080p one.
  */
 const UPSCALED_TOKEN = /\bUPSCALED?\b/i;
+
+/**
+ * An interlaced encode carries half the vertical detail per field, so `1080i`
+ * is worse than `1080p` while claiming the same number. Recorded for the same
+ * reason `upscaled` is: unrecorded, the two tie, and a tie is enough for the
+ * upgrade path to replace a progressive file with an interlaced one.
+ */
+const INTERLACED_TOKEN = /\b\d{3,4}i(?:\d{2,3})?\b/i;
 
 /** Immersive/VR layout tags, recorded as a quality extra when present. */
 const VR_TOKEN = /\b(?:VR|MKX200|MKX220|FISHEYE190|OCULUS|GEARVR|PSVR|SMARTPHONE)\b/i;
@@ -209,7 +228,6 @@ const NON_GROUP_TERMS = new Set([
   'UNRATED',
   'EXTENDED',
   'DIRECTORS',
-  'REMASTERED',
   // 9-12 characters: refused by the length cap until it was raised to 12, so
   // these entries are what keeps them refused now. Each names a different cut
   // or different content, which is why detaching one as a group would merge
@@ -310,12 +328,12 @@ const DOTTED_DATE_RUN = /(?:^|[._])(?:(?:19|20)?\d{2}[._]\d{2}[._]\d{2}|\d{6}|\d
 const FPS = '(?:\\d{2,3})?';
 const RESOLUTIONS: [RegExp, number][] = [
   [/\b8K\b/i, 4320],
-  [new RegExp(`\\b4K\\b|\\b2160p${FPS}\\b|\\bUHD\\b`, 'i'), 2160],
-  [new RegExp(`\\b1440p${FPS}\\b`, 'i'), 1440],
-  [new RegExp(`\\b1080p${FPS}\\b`, 'i'), 1080],
-  [new RegExp(`\\b720p${FPS}\\b`, 'i'), 720],
-  [new RegExp(`\\b540p${FPS}\\b`, 'i'), 540],
-  [new RegExp(`\\b480p${FPS}\\b`, 'i'), 480],
+  [new RegExp(`\\b4K\\b|\\b2160[pi]${FPS}\\b|\\bUHD\\b`, 'i'), 2160],
+  [new RegExp(`\\b1440[pi]${FPS}\\b`, 'i'), 1440],
+  [new RegExp(`\\b1080[pi]${FPS}\\b`, 'i'), 1080],
+  [new RegExp(`\\b720[pi]${FPS}\\b`, 'i'), 720],
+  [new RegExp(`\\b540[pi]${FPS}\\b`, 'i'), 540],
+  [new RegExp(`\\b480[pi]${FPS}\\b`, 'i'), 480],
 ];
 
 const SOURCES: [RegExp, string][] = [
@@ -663,6 +681,7 @@ function extractQuality(tail: string, releaseGroup: string | undefined): Quality
   if (container !== undefined) extras['container'] = container;
   if (VR_TOKEN.test(haystack)) extras['vr'] = true;
   if (UPSCALED_TOKEN.test(haystack)) extras['upscaled'] = true;
+  if (INTERLACED_TOKEN.test(haystack)) extras['interlaced'] = true;
 
   const quality: QualityTokens = { extras };
   const resolution = firstMatch(RESOLUTIONS, haystack);
@@ -1103,6 +1122,38 @@ function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease
   if (site.length === 0) return refuse('date is first, so there is no site');
   if (rest.length === 0) return refuse('nothing follows the date');
 
+  // A run carrying no encode vocabulary at all is entirely the scene.
+  //
+  // The usual refusal here is about ambiguity: `Alex.Coal.MP4-G` might be the
+  // scene "Alex Coal" with a container, or the scene "Alex Coal MP4", and
+  // nothing in the name settles it. That doubt needs at least one encode-ish
+  // token to exist. When none does there is no run to mistake for title and no
+  // title to mistake for a run, so taking the whole remainder is not a guess —
+  // and it lets `Site.23.04.15.Alex.Coal` collate with the same scene listed
+  // with its encode information, which refusing could never do.
+  //
+  // No group is detached here either, and that is the same argument rather
+  // than a separate concession. A trailing tag reads as a group because of
+  // where it sits — after the encode section, the one place title material
+  // never reaches. With no encode section there is no such place, so a hyphen
+  // is just punctuation: `Amanda.Verhooks.Anal.Three-way` is a title, not the
+  // scene "Amanda Verhooks Anal Three" released by a group called `way`.
+  const restTokens = tokensOf(rest);
+  if (!restTokens.some((token) => isEncodeToken(token.text))) {
+    // The `XXX` marker still ends the title when it is there. `findEncodeSuffixStart`
+    // only reports it when it sits against the encode run, which by definition
+    // is empty here, so the marker is looked for directly — everything after
+    // it is not title, whatever it turns out to be.
+    const markerIndex = restTokens.findLastIndex(
+      (token, index) => index >= 1 && token.text.toUpperCase() === MARKER_TOKEN,
+    );
+    const markerToken = markerIndex === -1 ? undefined : restTokens[markerIndex];
+    const whole = prettify(markerToken === undefined ? rest : rest.slice(0, markerToken.start));
+    if (whole.length === 0) return refuse('no title between the date and the encode section');
+    if (whole.toUpperCase() === MARKER_TOKEN) return refuse('title is only the XXX marker');
+    return buildRelease(site, date, whole, slug(whole), extractQuality('', undefined));
+  }
+
   const detached = detachReleaseGroup(tokensOf(rest), rest);
   const cut = findEncodeSuffixStart(detached.tokens, 1);
   if (cut === null) return refuse('no trustworthy encode boundary after the date');
@@ -1421,6 +1472,8 @@ export function parseSceneRelease(
 
   const name = stripFileExtension(stripWebsitePrefix(trimmed)).trim();
   if (name.length === 0) return refuse('nothing left after stripping prefix/extension');
+
+  if (NOT_VIDEO_TOKEN.test(name)) return refuse('not a video release (image or photo set)');
 
   const result = parseDelimitedForm(name) ?? parseSceneForm(name, options);
   if (result !== null) lastRefusal = null;

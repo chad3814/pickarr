@@ -140,6 +140,54 @@ const CORPUS: Entry[] = [
     quality: '1080|-|-|mp4|-|inSaNe',
     isNew: true,
   },
+  // --- Names the encode vocabulary nearly missed ----------------------------
+  {
+    name: 'PornMegaLoad.24.03.17.Cherry.Brady.26282.XXX.REMASTERED.XviD-iPT Team',
+    scene: 'pornmegaload/cherry-brady-26282',
+    key: 'pornmegaload:2024-03-17:cherry-brady-26282',
+    title: 'Cherry Brady 26282',
+    quality: '-|-|xvid|-|-|iPT Team',
+    isNew: true,
+  },
+  {
+    name: 'Pantyhosed4U.16.07.20.Heidi.Bush.V.Tight.Tease.And.Tear.XXX.1080i.MP4-KTR',
+    scene: 'pantyhosed4u/heidi-bush-v-tight-tease-and-tear',
+    key: 'pantyhosed4u:2016-07-20:heidi-bush-v-tight-tease-and-tear',
+    title: 'Heidi Bush V Tight Tease And Tear',
+    quality: '1080|-|-|mp4|-|KTR',
+    isNew: true,
+  },
+  // --- A name that carries no encode information at all ---------------------
+  //
+  // Nothing marks where the title stops because nothing needs to: not one
+  // token after the date is encode vocabulary, so there is no run to mistake
+  // for title or title to mistake for a run. The whole remainder is the scene.
+  {
+    name: 'KarupsPC.com_13.10.14.Chelsey.Lanette',
+    scene: 'karupspc-com/chelsey-lanette',
+    key: 'karupspc-com:2013-10-14:chelsey-lanette',
+    title: 'Chelsey Lanette',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
+  {
+    name: 'Pornmegaload.16.08.11.Amanda.Verhooks.Anal.Three-way',
+    scene: 'pornmegaload/amanda-verhooks-anal-three-way',
+    key: 'pornmegaload:2016-08-11:amanda-verhooks-anal-three-way',
+    title: 'Amanda Verhooks Anal Three-way',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
+  // It collates with the same scene listed *with* encode information, which
+  // refusing could never do.
+  {
+    name: 'Brazzers.23.04.15.Alex.Coal',
+    scene: 'brazzers/alex-coal',
+    key: 'brazzers:2023-04-15:alex-coal',
+    title: 'Alex Coal',
+    quality: '-|-|-|-|-|-',
+    isNew: true,
+  },
   // --- Episode numbers, where a date would be -------------------------------
   //
   // Sites that number episodes instead of dating them. `E141` sits exactly
@@ -959,10 +1007,6 @@ const REFUSED: [string, string][] = [
   ['Site.23.13.45.Name.XXX.1080p.MP4-G', 'month 13 and day 45 are not a calendar date'],
   ['Site.23.02.30.Name.XXX.1080p.MP4-G', 'February 30 does not exist'],
   [
-    'Site.23.04.15.Alex.Coal',
-    'no encode section at all: nothing marks where the title stops, so "Alex Coal" and "Alex Coal 1080p" cannot be told apart',
-  ],
-  [
     'Site.23.04.15.Alex.Coal.MP4-G',
     'the only encode evidence is a container, which is also an ordinary title word here (cf. "Gala XXX MP4 Madness")',
   ],
@@ -1049,8 +1093,11 @@ const REFUSED: [string, string][] = [
   // or different content*, so detaching it as a group merges it with the scene
   // proper. DIRECTORS and REMASTERED were already listed and were previously
   // redundant with the cap; they are no longer redundant.
+  // REMASTERED used to sit here too. Real titles put it *inside* the encode
+  // run — `XXX.REMASTERED.XviD-iPT Team` — which is where REPACK and PROPER
+  // sit, so it is encode vocabulary and a remaster collates with the original
+  // as another version of one scene.
   ['Site.23.04.15.Name.XXX.1080p.MP4-DIRECTORS', 'nine characters, an edit tag the old cap hid'],
-  ['Site.23.04.15.Name.XXX.1080p.MP4-REMASTERED', 'ten characters, the same'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-UNCENSORED', 'a different cut, not a group'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-DIRECTORSCUT', 'the same at the full twelve characters'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-COMPILATION', 'different content entirely, not one scene'],

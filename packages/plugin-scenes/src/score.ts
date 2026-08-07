@@ -21,6 +21,18 @@ import { scoreStandardQuality, type QualityTokens } from '@pickarr/plugin-api';
 const UPSCALE_PENALTY = 100_000;
 
 /**
+ * What an interlaced encode gives up against a progressive one of the same
+ * resolution. `1080i` claims 1080 but carries half the vertical detail per
+ * field, so it must lose to `1080p` and still beat a progressive 720p.
+ *
+ * Bounded exactly as `UPSCALE_PENALTY` is, and deliberately a different value:
+ * a release that is both upscaled *and* interlaced should rank below one that
+ * is only one of the two, which requires the penalties to add rather than
+ * collapse. Their sum stays under one resolution unit.
+ */
+const INTERLACE_PENALTY = 200_000;
+
+/**
  * Scene releases usually omit a source token when they are the original rip
  * straight from the site, and state one explicitly when they are a re-encode.
  * Treating a missing source as a site rip therefore ranks originals above
@@ -32,5 +44,8 @@ export function scoreScene(quality: QualityTokens): number {
       ? scoreStandardQuality({ ...quality, source: 'siterip' })
       : scoreStandardQuality(quality);
 
-  return quality.extras?.['upscaled'] === true ? base - UPSCALE_PENALTY : base;
+  let score = base;
+  if (quality.extras?.['upscaled'] === true) score -= UPSCALE_PENALTY;
+  if (quality.extras?.['interlaced'] === true) score -= INTERLACE_PENALTY;
+  return score;
 }

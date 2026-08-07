@@ -203,7 +203,11 @@ const REFUSED = [
   '23.04.15.Alex.Coal.XXX.1080p.MP4-G',
   'Site.23.13.45.Name.XXX.1080p.MP4-G',
   'Site.23.02.30.Name.XXX.1080p.MP4-G',
-  'Site.23.04.15.Alex.Coal',
+  // `Site.23.04.15.Alex.Coal` used to sit here. It carries no encode
+  // vocabulary at all, so there is no run to mistake for title and nothing to
+  // guess — it parses, and collates with the same scene listed with its
+  // encode information. The rows below still refuse because each *does* carry
+  // a weak encode token, which is exactly what makes them ambiguous.
   'Site.23.04.15.Alex.Coal.MP4-G',
   'Site.23.04.15.Girls.Of.Web.MP4-G',
   'Site.23.04.15.The.1080p.Club.MP4-G',

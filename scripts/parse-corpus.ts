@@ -60,7 +60,7 @@ function parseArgs(argv: string[]): Options {
  * enough to dominate a report.
  */
 const USENET_NOISE =
-  /\.part\d+\.(rar|nzb)\b|\.par2\b|\.vol\d+\+\d+|\.r\d{2}\b|yEnc|^\s*\[\d+\/\d+\]|\.nzb\b/i;
+  /\.part\d+\.(rar|nzb)\b|\.par2\b|\.vol\d+\+\d+|\.r\d{2}\b|yEnc|\[\d+\/\d+\]|\.nzb\b|\._Screen\b/i;
 
 /**
  * Stable 10% holdout, keyed on the title itself rather than on position, so

@@ -193,6 +193,44 @@ with the title `Emma G and Rocky Beach Days`; without the rule the title would b
 bare-domain problem below: nothing confirms `Bang` in `Bang.com - Alex Coal`, so the rule
 never fires there. It also never consumes the last remaining token.
 
+**A name carrying no encode vocabulary at all is entirely title.**
+`KarupsPC.com_13.10.14.Chelsey.Lanette` used to be refused, on the grounds that nothing
+marked where the title stopped. That doubt needs at least one encode-ish token to exist:
+`Alex.Coal.MP4-G` might be the scene "Alex Coal" with a container or the scene "Alex Coal
+MP4", and nothing settles it — but when no token is encode vocabulary there is no run to
+mistake for title and no title to mistake for a run. It also lets
+`Site.23.04.15.Alex.Coal` collate with the same scene listed with its encode information,
+which refusing could never do. Names that *do* carry a weak encode token are still
+refused, for the original reason.
+
+No group is detached on that path either, and it is the same argument rather than a
+separate concession: a trailing tag reads as a group because of where it sits, after the
+encode section, the one place title material never reaches. With no encode section there
+is no such place, so a hyphen is only punctuation and
+`Amanda.Verhooks.Anal.Three-way` is a title, not the scene "Amanda Verhooks Anal Three"
+from a group called `way`.
+
+**Image and photo sets are refused up front.** `...XXX.IMAGESET-FuGLi` carries a date,
+a site and a title, so it parses cleanly on shape alone — and then collates with the
+*video* release of the same scene, offering a zip of photographs as one of its versions.
+`planSceneImport` would reject the download at import time, long after the pick. This was
+introduced accidentally by the rule above and caught only because the titles looked wrong;
+**the corpus parse rate went up while the output got worse**, which is worth remembering
+about that metric.
+
+**`REMASTERED` was in the encode vocabulary and the non-group list at once.** The
+vocabulary entry read `REMASTER`, anchored, so the longer spelling matched neither and
+interrupted the encode run — 14 corpus titles refused by a typo. Real titles put it
+*inside* the run, `XXX.REMASTERED.XviD-iPT Team`, exactly where `REPACK` and `PROPER`
+sit, so it is encode vocabulary and a remaster collates with the original as another
+version of one scene. Its `NON_GROUP_TERMS` entry is gone.
+
+**Interlaced resolutions parse and rank below progressive.** `1080i` claims 1080 and
+carries half the vertical detail per field, so it is recorded as `extras.interlaced` and
+penalised — below `1080p`, still above a progressive 720p. The penalty is bounded like
+the upscale one and deliberately a different size, so a release that is both upscaled and
+interlaced ranks below one that is only either; their sum stays under one resolution unit.
+
 **An episode number anchors the boundary the same way a date does.** Sites that number
 episodes instead of dating them — `HeavyOnHotties.E141.Daniela.Pechotes...`,
 `InTheCrack.E1178.Tracy.Gold...` — put `E` followed by two or more digits exactly where
