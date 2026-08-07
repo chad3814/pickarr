@@ -17,11 +17,11 @@ import type { ParsedRelease } from '@pickarr/plugin-api';
  * Casing of the placeholder mirrors the casing of the value:
  *
  *   site        bang bros                 the site, words separated
- *   Site        Bang Bros                 ...title-cased. The default.
+ *   Site        Bang Bros                 ...title-cased
  *   sitename    bangbros                  run together, as TPDB's short_name
  *   SiteName    BangBros                  ...PascalCase
  *   title       chloe upgrades her butt
- *   Title       Chloe Upgrades Her Butt   the default
+ *   Title       Chloe Upgrades Her Butt
  *   date        2026-08-03                empty when the release carries none
  *   year        2026                      empty when the release carries none
  *   episode     E1178                     empty unless the anchor is one
@@ -33,7 +33,8 @@ import type { ParsedRelease } from '@pickarr/plugin-api';
  * the other, or neither — so a template can carry both and get whichever
  * exists. The default does exactly that.
  */
-export const DEFAULT_PATH_TEMPLATE = '{Site}/{date}{episode} - {Title}';
+export const DEFAULT_PATH_TEMPLATE =
+  '{sitename}/{sitename}.{date}{episode}.{title}.{resolution}-{group}';
 
 /** Characters that are invalid or hazardous in a path segment. */
 function sanitizeSegment(value: string): string {
@@ -119,35 +120,85 @@ export function templateValues(media: ParsedRelease): Record<string, string> {
 }
 
 /**
- * Substitutes, then tidies each segment.
+ * Substitutes, dropping the punctuation around any placeholder that came back
+ * empty.
  *
- * A value can legitimately be empty — most releases have no episode, some have
- * no date — and the literal text around it then has nothing to separate. The
- * template `{date}{episode} - {Title}` must yield `Alex Coal` rather than
- * ` - Alex Coal` for a release carrying neither. Rather than invent a
- * conditional syntax, leftover separators are collapsed away afterwards, which
- * is the same thing with nothing to learn.
+ * A value can legitimately be empty — most releases have no episode, some no
+ * date or group — and the literal text around it then has nothing to separate.
+ * `{sitename}.{date}{episode}.{title}` must give `tripforfuck.hiyori japanese 2`
+ * rather than `tripforfuck..hiyori japanese 2`.
  *
+ * Done by dropping the literal that *introduces* the empty placeholder — the
+ * one immediately before it — rather than by collapsing repeated punctuation
+ * afterwards. Collapsing looks equivalent and is not: ` - ` is a run of three
+ * separator characters that a scene slug emits deliberately, marking the
+ * component boundary in `Kylie - Page Turner`, and squeezing it would erase
+ * exactly the distinction `--` exists to keep. Working from which placeholder
+ * was empty touches only punctuation the template itself supplied.
+ *
+ * Preceding rather than following, because punctuation belongs to the value it
+ * introduces. Dropping the following one instead reads the same on
+ * `{title}.{resolution}` and is wrong on `{date}{episode}.{title}`: with no
+ * episode it takes the separator that was holding the date apart from the
+ * title, giving `2026-08-03chloe upgrades her butt`.
+ *
+ * The unit is a *run* of adjacent placeholders, not one placeholder. In
+ * `{date}{episode}` the two share a slot — a release has one or the other —
+ * so the separator ahead of them is dropped only when the whole run comes back
+ * empty. Judging them individually loses the separator for every episode-
+ * numbered release, whose `{date}` is empty while the slot is not:
+ * `inthecrackE1178`. Anything left stranded at a segment edge is trimmed after.
+ */
+function renderSegment(segment: string, values: Record<string, string>): string {
+  const parts = segment.split(/(\{\w+\})/).filter((part) => part.length > 0);
+
+  const resolved = parts.map((part) => {
+    const match = /^\{(\w+)\}$/.exec(part);
+    if (match === null) return { text: part, isValue: false };
+    const name = match[1] ?? '';
+    // An unknown name is left alone rather than silently deleted, so a typo
+    // shows up in the path instead of quietly shortening it.
+    if (!Object.hasOwn(values, name)) return { text: part, isValue: false };
+    return { text: sanitizeSegment(values[name] ?? ''), isValue: true };
+  });
+
+  const dropped = new Set<number>();
+  for (let index = 0; index < resolved.length; index += 1) {
+    if (!resolved[index]?.isValue) continue;
+
+    // The whole run of adjacent placeholders, which share one slot.
+    let end = index;
+    while (resolved[end + 1]?.isValue === true) end += 1;
+
+    const slotIsEmpty = resolved
+      .slice(index, end + 1)
+      .every((part) => part.text.length === 0);
+    if (slotIsEmpty) {
+      for (let at = index; at <= end; at += 1) dropped.add(at);
+      const before = resolved[index - 1];
+      if (before !== undefined && !before.isValue) dropped.add(index - 1);
+    }
+    index = end;
+  }
+
+  return resolved
+    .filter((_, index) => !dropped.has(index))
+    .map((part) => part.text)
+    .join('')
+    .replace(/^[.\-\s]+|[.\-\s]+$/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
  * An empty segment is dropped entirely, so a template beginning `{group}/` does
  * not produce a nameless top-level directory for every release without one.
  */
 export function renderPath(template: string, media: ParsedRelease, extension: string): string {
   const values = templateValues(media);
-
   const segments = template
     .split('/')
-    .map((segment) =>
-      segment.replace(/\{(\w+)\}/g, (whole, name: string) =>
-        Object.hasOwn(values, name) ? sanitizeSegment(values[name] ?? '') : whole,
-      ),
-    )
-    .map((segment) =>
-      segment
-        .replace(/\s*-\s*(?=-|$)/g, '')
-        .replace(/^\s*-\s*/, '')
-        .replace(/\s{2,}/g, ' ')
-        .trim(),
-    )
+    .map((segment) => renderSegment(segment, values))
     .filter((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
 
   if (segments.length === 0) return `Unknown${extension}`;

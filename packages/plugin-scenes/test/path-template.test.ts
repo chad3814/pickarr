@@ -24,15 +24,67 @@ function path(name: string, pathTemplate?: string, sites: string[] = []): string
 
 const BANGBROS = 'Bangbros.Chloe.Upgrades.her.Butt.2026.08.03.2160p.MP4-WRB';
 
-// --- The default must not move an existing library ---------------------------
+// --- The default -------------------------------------------------------------
 
-test('the default template reproduces the layout that shipped before it', () => {
-  assert.equal(path(BANGBROS, undefined, ['Bang Bros']), 'Bang Bros/2026-08-03 - Chloe Upgrades Her Butt.mp4');
-  assert.equal(path('Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB'), 'Brazzers/2023-04-15 - Alex Coal.mp4');
-  assert.equal(path('InTheCrack.E1178.Tracy.Gold.XXX.2160p.MP4-KTR'), 'Inthecrack/E1178 - Tracy Gold.mp4');
+test('the default follows scene naming, and survives every missing field', () => {
+  assert.equal(
+    path(BANGBROS, undefined, ['Bang Bros']),
+    'bangbros/bangbros.2026-08-03.chloe upgrades her butt.2160p-WRB.mp4',
+  );
+  // Numbered rather than dated: the anchor slot still gets its separator.
+  assert.equal(
+    path('InTheCrack.E1178.Tracy.Gold.XXX.2160p.MP4-KTR'),
+    'inthecrack/inthecrack.E1178.tracy gold.2160p-KTR.mp4',
+  );
+  // No group: the `-` that introduced it goes too.
+  assert.equal(
+    path('Anal.Only.Getting.In.Booty.2022.09.29.2160p', undefined, ['Anal Only']),
+    'analonly/analonly.2022-09-29.getting in booty.2160p.mp4',
+  );
+  // No anchor, no resolution, no group.
   assert.equal(
     path('TripForFuck - Hiyori JAPANESE 2', undefined, ['Trip For Fuck']),
-    'Trip For Fuck/Hiyori Japanese 2.mp4',
+    'tripforfuck/tripforfuck.hiyori japanese 2.mp4',
+  );
+});
+
+test('the layout that shipped before the template is still expressible', () => {
+  // Anyone already running Pickarr can keep their library where it is.
+  assert.equal(
+    path(BANGBROS, '{Site}/{date}{episode} - {Title}', ['Bang Bros']),
+    'Bang Bros/2026-08-03 - Chloe Upgrades Her Butt.mp4',
+  );
+});
+
+test('an empty slot drops the separator introducing it, not the one after', () => {
+  // {date}{episode} is one slot filled by whichever the release has. Judging
+  // the two placeholders separately loses the separator ahead of them for
+  // every episode-numbered release: `inthecrackE1178`.
+  assert.equal(
+    path('InTheCrack.E1178.Tracy.Gold.XXX.2160p.MP4-KTR', '{sitename}.{date}{episode}.{title}'),
+    'inthecrack.E1178.tracy gold.mp4',
+  );
+  assert.equal(
+    path(BANGBROS, '{sitename}.{date}{episode}.{title}', ['Bang Bros']),
+    'bangbros.2026-08-03.chloe upgrades her butt.mp4',
+  );
+  assert.equal(
+    path('TripForFuck - Hiyori JAPANESE 2', '{sitename}.{date}{episode}.{title}', ['Trip For Fuck']),
+    'tripforfuck.hiyori japanese 2.mp4',
+  );
+});
+
+test('a component boundary inside a title survives a dotted template', () => {
+  // ` - ` is three separator characters a scene slug emits on purpose. A
+  // renderer that collapsed punctuation would erase it, and with it the only
+  // thing keeping these two scenes on different paths.
+  assert.equal(
+    path('[Vixen] Kylie - Page Turner - 2023-07-19'),
+    'vixen/vixen.2023-07-19.kylie - page turner.mp4',
+  );
+  assert.equal(
+    path('[Vixen] Kylie Page - Turner - 2023-07-19'),
+    'vixen/vixen.2023-07-19.kylie page - turner.mp4',
   );
 });
 
@@ -79,11 +131,13 @@ test('an episode fills the same slot a date would', () => {
 // --- Empty values -------------------------------------------------------------
 
 test('a missing value takes its separator with it', () => {
-  // Most releases have no episode and some have no date; the literal text
-  // around an empty placeholder would otherwise be left stranded.
   assert.equal(
     path('TripForFuck - Hiyori JAPANESE 2', '{Site}/{date}{episode} - {Title}', ['Trip For Fuck']),
     'Trip For Fuck/Hiyori Japanese 2.mp4',
+  );
+  assert.equal(
+    path('Anal.Only.Getting.In.Booty.2022.09.29.2160p', '{title}.{container}-{group}'),
+    'only getting in booty.mp4',
   );
 });
 
@@ -126,15 +180,27 @@ test('an unknown placeholder is left visible rather than silently dropped', () =
 
 // --- One scene, one path --------------------------------------------------------
 
-test('two encodes of one scene render one path under any template', () => {
-  const templates = [DEFAULT_PATH_TEMPLATE, '{sitename}/{title}', '{SiteName}/{year}/{Title}'];
-  for (const template of templates) {
+test('two encodes of one scene share a path when the template says nothing about the encode', () => {
+  for (const template of ['{sitename}/{title}', '{SiteName}/{year}/{Title}']) {
     assert.equal(
       path('Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB', template),
       path('Brazzers.23.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-GRP', template),
       template,
     );
   }
+});
+
+test('the default distinguishes two encodes, because it names the encode', () => {
+  // A consequence of {resolution}-{group} being in the default rather than a
+  // defect: an upgrade lands on its own path and the superseded file is
+  // trashed by group, not overwritten by path. A template that omits both puts
+  // the two on one path instead, and the importer refuses the occupied
+  // destination until the old file is trashed. Both work; they differ in where
+  // the old file is standing when the new one arrives.
+  assert.notEqual(
+    path('Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB'),
+    path('Brazzers.23.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-GRP'),
+  );
 });
 
 test('two different scenes never render one path', () => {

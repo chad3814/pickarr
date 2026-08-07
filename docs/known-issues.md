@@ -391,11 +391,29 @@ decides where new imports land; changing it leaves everything already in the lib
 where it is, so a change part-way through leaves two layouts side by side until the old
 files are moved by hand. Pickarr has no library scan, so it will not notice.
 
-The default is `{Site}/{date}{episode} - {Title}`, chosen to reproduce the layout that
-shipped before the template existed rather than to be the nicest — an upgrade must not
-silently split a library. `{SiteName}` is PascalCase (`BangBros`) and `{Site}` is
-title-cased with spaces (`Bang Bros`); the older layout used the latter, which is why
-both exist.
+The default is `{sitename}/{sitename}.{date}{episode}.{title}.{resolution}-{group}`,
+which follows scene naming. It is **not** the layout that shipped before the template
+existed — anyone already running Pickarr gets a second layout alongside the first unless
+they set `{Site}/{date}{episode} - {Title}`, which reproduces the old one exactly.
+`{SiteName}` is PascalCase (`BangBros`) and `{Site}` is title-cased with spaces
+(`Bang Bros`); the older layout used the latter, which is why both exist.
+
+Because the default names the encode, **two encodes of one scene render two paths**. An
+upgrade therefore lands on its own path and the superseded file is trashed by group
+rather than overwritten by path. Omitting `{resolution}` and `{group}` puts both on one
+path, where the importer refuses the occupied destination until the old file is trashed.
+Both work; they differ in where the old file is standing when the new one arrives.
+
+**Punctuation around an empty placeholder is dropped by structure, not by collapsing.**
+The unit is a *run* of adjacent placeholders: `{date}{episode}` share one slot, so the
+separator ahead of them goes only when the whole slot is empty. Two simpler rules were
+wrong. Dropping the literal *after* an empty placeholder eats the separator holding the
+date apart from the title (`2026-08-03chloe upgrades her butt`), and judging placeholders
+individually loses the separator for every episode-numbered release
+(`inthecrackE1178`). Collapsing repeated punctuation afterwards is wrong for a third
+reason: ` - ` is three separator characters a scene slug emits deliberately, and
+squeezing it erases the component boundary that keeps `Kylie - Page Turner` and
+`Kylie Page - Turner` apart.
 
 Every value is derived from `identityKey`, never from the release's display strings, so
 two encodes of one scene render one path under any template. `{sitename}` and
