@@ -70,6 +70,146 @@ evidence the split-marker entries have nothing to re-open.
 
 Still refused for length: `-DIGITALPLAYGROUND` and anything over twelve characters.
 
+**Date-at-end names need a configured site list to file correctly.** A second dotted
+shape appeared in real feeds after the MVP: `Site.Title.And.Performers.YYYY.MM.DD.Encode`,
+with the date at the end. It is hostile to this parser because the date is the only
+boundary the ordinary form has, and here it sits past both the site and the title, so
+*nothing* separates those two. The shape is recognised by two conditions that must hold
+together — every token after the date is encode information (the positive test), and
+there is more before the date than after it (which stops an ordinary name whose title
+is all encode-like words from being re-read this way). The site/title split is then
+resolved against `plugins.<pkg>.sites`, falling back to the first token.
+
+The fallback is a guess about the library *path* only: every pre-date token reaches the
+identity key whichever side of the split it lands on, so no split can merge two
+different scenes. But two consequences are worth knowing. Without the list,
+`Anal Only`'s scenes file under `Anal/`. And **changing a site's name changes the
+identity key of every affected scene**, so anything already picked reappears as a new
+group rather than an upgrade of the old one — settle the naming before a long run, not
+during one. No other parser surveyed handles this shape at all, so there is no prior art
+to check the heuristic against; it rests on the two conditions above and on the corpus
+rows pinning the cases that must *not* be read this way.
+
+**Site matching drops separators, and the configured spelling is canonical.** A site's
+own name and the way releases write it disagree about word boundaries roughly 10-15% of
+the time: ThePornDB calls the site `Bang Bros`, most releases use the `short_name` as a
+single token (`BangBros`, `bangbros`), and a minority split it (`Bang.Bros`). Matching
+therefore compares alphanumerics only, so all of those find one site — a slug comparison
+made `bang-bros` and `bangbros` two different sites, which was a live bug the first time
+this ran against the real API. The *matched* name then replaces whatever the release
+wrote, so one site cannot become three groups depending on spelling. The corollary is
+that the configured (or discovered) spelling decides the directory and the key, and
+`ANALONLY` is a legitimate if ugly choice.
+
+**A sub-site is only found when it is the name's leading run.** `Bangbros.Ass.Parade....`
+resolves to `Bang Bros`, not to `Ass Parade`, even though `Ass Parade` is a real site
+TPDB knows — the two-word candidate is `Bangbros Ass`, which matches nothing, so the
+one-word fallback settles it and `Ass Parade` stays in the title. Matching a site
+anywhere in the name was rejected deliberately: `Ass Parade` occurs at token 1 here, and
+accepting it would drop `Bangbros` from the name entirely. Listing
+`"Bangbros Ass Parade"` in config files these under the sub-site if that is wanted.
+
+**A search result is believed only when it is one of the release's own leading runs.**
+Two weaker rules were tried against the live API first and both are wrong. Confirming on
+a non-zero result count invents sites: the search is a substring search over 100k+ names,
+so `Getting In` returns `Getting In Deep` and friends without any site being called that.
+Confirming only when a result *equals the query* fails in the other direction, because
+the site is routinely longer than the query that finds it — `2 Chicks` finds
+`2 Chicks Same Time`, `Free Use` finds `Freeuse Fantasy`, and neither query names a site.
+Worse, that rule then falls through to the one-word retry, and **there is a real site
+named `Free`**, so `Free.Use.Fantasy...` confirmed it and filed the scene under `Free/`
+with the title `Use Fantasy ...` — a confidently wrong answer that got cached. Matching
+returned names against the release's leading runs, longest first, is what settles all
+three cases. `MAX_SITE_TOKENS` caps a site at five words.
+
+**Only two searches are made per unknown site: the first two words, then the first.**
+This is not a cap on the site's length — a four-word site is found by a two-word query —
+but it does mean a site is undiscoverable when neither of its first two words appears in
+its registered name. None has been seen, and each extra query costs a round trip against
+a substring search that gets noisier as the query gets shorter.
+
+**A short site-token cap causes wrong hits, not misses, so it is set generously.**
+`MAX_SITE_TOKENS` is 12. The instinct to keep it small is backwards here. Matching is
+exact equality against a name the service returned and the longest match wins, so extra
+length only adds candidates that must still equal a real site. Truncating actively
+misresolves: capped at five, `Giga.de.Rein.Mk.II.Delusion.group` matched the separate and
+entirely genuine site `Gigade Rein Mk-II`, because the truncated run happened to equal
+it exactly. That search returns 29 near-identical names differing by a letter
+(`Rain`/`Rein`) or a suffix, and only the full-length run picks the right one. Names in
+this space run long — `Giga de Rein no odor - the woman who appeared uncensored -` is ten
+tokens.
+
+**A single-letter query is never sent; a single-digit one is.** The service matches a
+query anywhere in a name, so one letter confirms nothing and costs a page: measured live,
+`a` returns 87,955 results (`Male Reality`, `Laundry`), `b` 25,078, `x` 13,168. Digits are
+the opposite — they lead real site names (`2 Chicks Same Time`) and are cheap, with `0`
+through `4` returning nothing and `8` returning one. A blanket minimum query length would
+have discarded the useful case with the useless one. The cost of the rule: a site named
+with a single letter, and there is one called `X`, can be configured but never
+discovered.
+
+**Searches are paged, with two bounds.** The service caps `per_page` at 100 (asking for
+more returns an empty body), and one-word fallback queries routinely exceed that:
+measured live, `free` returns 149, `teen` 349, `anal` 352, `big` 649. Stopping at page
+one silently loses any site past the first hundred, so a search walks up to
+`MAX_PAGES` (10). The second bound is for queries too broad to be a site lookup at all —
+`a` reports 87,955 matches, and walking 880 pages to look for an exact name is pointless
+work — so a reported total above `MAX_TOTAL_TO_WALK` (1000) stops after page one. Page
+one is still examined, since an exact match tends to rank first. The cost is paid once
+per prefix ever, because both hits and misses are cached.
+
+The list deliberately does **not** apply to the ordinary date-in-the-middle form, where
+the date already supplies the boundary, nor to the bare-domain case below. Extending it
+there would change how names that parse correctly today are read, which is a different
+decision from adding a shape that currently fails.
+
+**A release with no date at all parses only when its site is confirmed.** These exist,
+and until the site lookup arrived they were refused outright — the date was the only
+thing marking where the site stopped. A confirmed site marks it just as well, so the
+shape is now read as site, then title, then encode, with the encode boundary as the only
+anchor.
+
+There is deliberately **no first-token fallback here**, unlike the date-at-end shape.
+The date was also the evidence that a name was a scene release at all, and without it
+`Some.Random.Movie.2023.1080p.BluRay-GRP` and `Some.Band.Live.At.Wembley.1080p.WEB-DL`
+have exactly this shape. Requiring a real site is what replaces that evidence; guessing
+would turn every unrecognised release in a feed into a group filed under its first word.
+
+**Dateless keys carry an empty date segment, and that is a knowing over-collation.**
+`brazzers::alex-coal`. Two encodes of one dateless scene collate with each other, and
+*not* with a dated release of the same scene — ordinary under-collation. The cost is the
+other direction: **two different scenes from one site sharing a title become one group**,
+and in this domain a title is frequently just a performer name. Nothing in a dateless
+name can separate them, so this is the one place the parser knowingly commits the error
+it otherwise refuses. It was chosen over the alternatives — refusing these releases
+entirely, or filling the slot with the RSS publish date, which would put a date that is
+not the scene's date into the library path and split re-posted scenes into separate
+groups. If it bites, the fix is a real per-scene date, not a heuristic.
+
+**A bare TLD directly after a confirmed site belongs to the domain.**
+`BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p` files under `Braless Forever`
+with the title `Emma G and Rocky Beach Days`; without the rule the title would begin
+`com`. It only ever runs *behind a confirmation*, which is what keeps it clear of the
+bare-domain problem below: nothing confirms `Bang` in `Bang.com - Alex Coal`, so the rule
+never fires there. It also never consumes the last remaining token.
+
+**An episode number anchors the boundary the same way a date does.** Sites that number
+episodes instead of dating them — `HeavyOnHotties.E141.Daniela.Pechotes...`,
+`InTheCrack.E1178.Tracy.Gold...` — put `E` followed by two or more digits exactly where
+the date sits. It is recognised by shape rather than vocabulary, which is what made the
+date a trustworthy anchor in the first place, so it gets the same treatment and needs no
+site lookup to do it. Two digits minimum: a bare `E1` is too easy for a title to produce.
+`S01E05` tokenises whole and does not match, keeping television numbering out.
+
+The episode occupies the key's middle segment — `inthecrack:e1178:tracy-gold` — so two
+encodes of one episode collate exactly as two encodes of one dated scene do. It is
+deliberately **not** written to `display.date`, which carries a real date or nothing; a
+consumer sorting or filtering on that field must not be handed a string that cannot be a
+date. It surfaces as its own `Episode` field and renders in the library path as `E1178`.
+
+Measured: 40 corpus titles carry an E-number and 38 of them now parse, against roughly
+five before — a small share of the corpus, but complete coverage of the shape.
+
 **A bare-domain prefix becomes the site.** Stripping a website prefix now requires
 `www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`
 are the same string shape and guessing wrong merged five real studios onto one identity.
