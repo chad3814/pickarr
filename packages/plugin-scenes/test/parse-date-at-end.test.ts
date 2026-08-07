@@ -309,8 +309,13 @@ test('a dateless name whose site is already configured asks for nothing', () => 
   assert.equal(sceneSiteCandidates(BRALESS, { sites: ['Braless Forever'] }), null);
 });
 
-test('a name with no encode section is still refused, date or not', () => {
-  assert.equal(parseSceneRelease('Brazzers.Alex.Coal', { sites: ['Brazzers'] }), null);
+test('a dateless name with no encode section parses when the site is known', () => {
+  // This used to be refused: no date and no encode meant no boundary at all.
+  // A confirmed site supplies one, from the other end.
+  const result = parsed('Brazzers.Alex.Coal', ['Brazzers']);
+  assert.equal(result.identityKey, 'brazzers::alex-coal');
+  assert.equal(result.display.title, 'Alex Coal');
+  assert.equal(parseSceneRelease('Brazzers.Alex.Coal'), null, 'still needs the site');
 });
 
 test('a dateless name with nothing left for a title is refused', () => {
@@ -578,4 +583,74 @@ test('a signature is only stripped at the end', () => {
   // "by am" mid-title is ordinary words.
   const result = parsed('Site.23.04.15.Stand.by.am.Friend.XXX.1080p.MP4-G');
   assert.equal(result.display.title, 'Stand by am Friend');
+});
+
+// --- A confirmed site replaces the encode boundary ---------------------------
+
+test('a dateless name with no encode section parses once its site is known', () => {
+  // TripForFuck - Hiyori JAPANESE 2 has no date and no encode vocabulary at
+  // all, so there was no boundary to work from. A confirmed site is the
+  // boundary: everything after it is the title.
+  const result = parsed('TripForFuck - Hiyori JAPANESE 2', ['Trip For Fuck']);
+  assert.equal(result.identityKey, 'trip-for-fuck::hiyori-japanese-2');
+  assert.equal(result.display.subtitle, 'Trip For Fuck');
+  assert.equal(result.display.title, 'Hiyori JAPANESE 2');
+});
+
+test('two episodes of one dateless site stay separate', () => {
+  const sites = ['Trip For Fuck'];
+  assert.notEqual(
+    parsed('TripForFuck - Hiyori JAPANESE 2', sites).identityKey,
+    parsed('TripForFuck - Hiyori JAPANESE 3', sites).identityKey,
+  );
+});
+
+test('the site still has to be confirmed, boundary or not', () => {
+  assert.equal(parseSceneRelease('TripForFuck - Hiyori JAPANESE 2'), null);
+  assert.equal(parseSceneRelease('Some.Random.Thing.With.No.Site', { sites: ['Trip For Fuck'] }), null);
+});
+
+test('a dateless name with an encode section still strips it', () => {
+  // The encode path is tried first; the site-only path is the fallback.
+  const result = parsed('BralessForever.com.Emma.G.Beach.Days.2160p', ['Braless Forever']);
+  assert.equal(result.identityKey, 'braless-forever::emma-g-beach-days');
+  assert.equal(result.quality.resolution, 2160);
+});
+
+test('a dateless name asks for a site lookup even with no encode boundary', () => {
+  const candidates = sceneSiteCandidates('TripForFuck - Hiyori JAPANESE 2');
+  assert.deepEqual(candidates?.queries, ['TripForFuck Hiyori', 'TripForFuck']);
+});
+
+// --- The bare-4K poster -------------------------------------------------------
+
+test('a name that opens with a bare 4K has no site and is labelled', () => {
+  const result = parsed('4K.kleo.34ans.de.clapiers');
+  assert.equal(result.identityKey, 'french-4k::kleo-34ans-de-clapiers');
+  assert.equal(result.display.subtitle, 'French 4K');
+  assert.equal(result.display.title, 'kleo 34ans de clapiers');
+  assert.equal(result.quality.resolution, 2160, 'the 4K is still the resolution');
+});
+
+test('two of that poster stay separate', () => {
+  assert.notEqual(
+    parsed('4K.ruby.24ans.de.nimes').identityKey,
+    parsed('4K.ruby.rossini.30ans.de.rouen').identityKey,
+  );
+});
+
+test('a leading 4K only counts at the very start', () => {
+  // 4K appears mid-name constantly and Tiny4K is a real site. Neither of
+  // these may be swept into the poster's bucket, whether they parse or not:
+  // TINY.4K.DAKOTA.BLUE.14.12.2017 is refused for its own reason — its 4K is
+  // mid-name, so there is no encode *suffix* to cut at.
+  assert.equal(parseSceneRelease('TINY.4K.DAKOTA.BLUE.14.12.2017'), null);
+  assert.equal(
+    parsed('Brazzers.23.04.15.Alex.Coal.XXX.4K.MP4-WRB').display.subtitle,
+    'Brazzers',
+  );
+});
+
+test('the bare-4K poster is never looked up', () => {
+  assert.equal(sceneSiteCandidates('4K.kleo.34ans.de.clapiers'), null);
 });
