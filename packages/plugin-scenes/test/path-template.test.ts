@@ -29,29 +29,30 @@ const BANGBROS = 'Bangbros.Chloe.Upgrades.her.Butt.2026.08.03.2160p.MP4-WRB';
 test('the default follows scene naming, and survives every missing field', () => {
   assert.equal(
     path(BANGBROS, undefined, ['Bang Bros']),
-    'bangbros/bangbros.2026-08-03.chloe upgrades her butt.2160p-WRB.mp4',
+    'bangbros/bangbros.2026.08.03.chloe.upgrades.her.butt.2160p-WRB.mp4',
   );
   // Numbered rather than dated: the anchor slot still gets its separator.
   assert.equal(
     path('InTheCrack.E1178.Tracy.Gold.XXX.2160p.MP4-KTR'),
-    'inthecrack/inthecrack.E1178.tracy gold.2160p-KTR.mp4',
+    'inthecrack/inthecrack.E1178.tracy.gold.2160p-KTR.mp4',
   );
   // No group: the `-` that introduced it goes too.
   assert.equal(
     path('Anal.Only.Getting.In.Booty.2022.09.29.2160p', undefined, ['Anal Only']),
-    'analonly/analonly.2022-09-29.getting in booty.2160p.mp4',
+    'analonly/analonly.2022.09.29.getting.in.booty.2160p.mp4',
   );
   // No anchor, no resolution, no group.
   assert.equal(
     path('TripForFuck - Hiyori JAPANESE 2', undefined, ['Trip For Fuck']),
-    'tripforfuck/tripforfuck.hiyori japanese 2.mp4',
+    'tripforfuck/tripforfuck.hiyori.japanese.2.mp4',
   );
 });
 
 test('the layout that shipped before the template is still expressible', () => {
   // Anyone already running Pickarr can keep their library where it is.
+  // {date} is dotted for scene naming, so the dashed form has its own name.
   assert.equal(
-    path(BANGBROS, '{Site}/{date}{episode} - {Title}', ['Bang Bros']),
+    path(BANGBROS, '{Site}/{isodate}{episode} - {Title}', ['Bang Bros']),
     'Bang Bros/2026-08-03 - Chloe Upgrades Her Butt.mp4',
   );
 });
@@ -66,7 +67,7 @@ test('an empty slot drops the separator introducing it, not the one after', () =
   );
   assert.equal(
     path(BANGBROS, '{sitename}.{date}{episode}.{title}', ['Bang Bros']),
-    'bangbros.2026-08-03.chloe upgrades her butt.mp4',
+    'bangbros.2026.08.03.chloe upgrades her butt.mp4',
   );
   assert.equal(
     path('TripForFuck - Hiyori JAPANESE 2', '{sitename}.{date}{episode}.{title}', ['Trip For Fuck']),
@@ -78,14 +79,9 @@ test('a component boundary inside a title survives a dotted template', () => {
   // ` - ` is three separator characters a scene slug emits on purpose. A
   // renderer that collapsed punctuation would erase it, and with it the only
   // thing keeping these two scenes on different paths.
-  assert.equal(
-    path('[Vixen] Kylie - Page Turner - 2023-07-19'),
-    'vixen/vixen.2023-07-19.kylie - page turner.mp4',
-  );
-  assert.equal(
-    path('[Vixen] Kylie Page - Turner - 2023-07-19'),
-    'vixen/vixen.2023-07-19.kylie page - turner.mp4',
-  );
+  // The dotted form cannot use `.` for both, or the two collapse together.
+  assert.equal(path('[Vixen] Kylie - Page Turner - 2023-07-19'), 'vixen/vixen.2023.07.19.kylie-page.turner.mp4');
+  assert.equal(path('[Vixen] Kylie Page - Turner - 2023-07-19'), 'vixen/vixen.2023.07.19.kylie.page-turner.mp4');
 });
 
 // --- Every placeholder --------------------------------------------------------
@@ -99,7 +95,10 @@ test('each placeholder renders its documented form', () => {
     SiteName: 'BangBros',
     title: 'chloe upgrades her butt',
     Title: 'Chloe Upgrades Her Butt',
-    date: '2026-08-03',
+    titledots: 'chloe.upgrades.her.butt',
+    TitleDots: 'Chloe.Upgrades.Her.Butt',
+    date: '2026.08.03',
+    isodate: '2026-08-03',
     year: '2026',
     episode: '',
     resolution: '2160p',
@@ -206,7 +205,13 @@ test('the default distinguishes two encodes, because it names the encode', () =>
 test('two different scenes never render one path', () => {
   // The component boundary the parser emits has to survive every template, or
   // the second scene can never import — the destination is already occupied.
-  for (const template of [DEFAULT_PATH_TEMPLATE, '{sitename}/{title}', '{Site}/{Title}']) {
+  for (const template of [
+    DEFAULT_PATH_TEMPLATE,
+    '{sitename}/{title}',
+    '{Site}/{Title}',
+    '{sitename}/{titledots}',
+    '{sitename}/{TitleDots}',
+  ]) {
     assert.notEqual(
       path('[Vixen] Kylie - Page Turner - 2023-07-19', template),
       path('[Vixen] Kylie Page - Turner - 2023-07-19', template),

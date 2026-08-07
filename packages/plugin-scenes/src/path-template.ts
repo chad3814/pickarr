@@ -22,7 +22,10 @@ import type { ParsedRelease } from '@pickarr/plugin-api';
  *   SiteName    BangBros                  ...PascalCase
  *   title       chloe upgrades her butt
  *   Title       Chloe Upgrades Her Butt
- *   date        2026-08-03                empty when the release carries none
+ *   titledots   chloe.upgrades.her.butt   scene style
+ *   TitleDots   Chloe.Upgrades.Her.Butt
+ *   date        2026.08.03                scene style; empty when there is none
+ *   isodate     2026-08-03                the same date, dashed
  *   year        2026                      empty when the release carries none
  *   episode     E1178                     empty unless the anchor is one
  *   resolution  2160p
@@ -34,7 +37,7 @@ import type { ParsedRelease } from '@pickarr/plugin-api';
  * exists. The default does exactly that.
  */
 export const DEFAULT_PATH_TEMPLATE =
-  '{sitename}/{sitename}.{date}{episode}.{title}.{resolution}-{group}';
+  '{sitename}/{sitename}.{date}{episode}.{titledots}.{resolution}-{group}';
 
 /** Characters that are invalid or hazardous in a path segment. */
 function sanitizeSegment(value: string): string {
@@ -91,6 +94,25 @@ function titleJoin(value: string): string {
     .join(' - ');
 }
 
+/**
+ * Words joined by dots, components by a hyphen.
+ *
+ * The component separator has to differ from the word separator or the two
+ * scenes `kylie--page-turner` and `kylie-page--turner` both render
+ * `kylie.page.turner` — the collision the `--` boundary exists to prevent, and
+ * the one that stops the second scene ever importing. Words contain neither
+ * `.` nor `-`, so `kylie-page.turner` and `kylie.page-turner` decode uniquely.
+ */
+function dotJoin(value: string, capitalise: boolean): string {
+  return slugWords(value)
+    .map((component) =>
+      component
+        .map((word) => (capitalise ? word.charAt(0).toUpperCase() + word.slice(1) : word))
+        .join('.'),
+    )
+    .join('-');
+}
+
 function pascalJoin(value: string): string {
   return slugWords(value)
     .map((component) => component.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(''))
@@ -110,7 +132,10 @@ export function templateValues(media: ParsedRelease): Record<string, string> {
     SiteName: pascalJoin(siteSlug),
     title: lowerJoin(sceneSlug),
     Title: titleJoin(sceneSlug),
-    date: isDate ? anchor : '',
+    titledots: dotJoin(sceneSlug, false),
+    TitleDots: dotJoin(sceneSlug, true),
+    date: isDate ? anchor.replaceAll('-', '.') : '',
+    isodate: isDate ? anchor : '',
     year: isDate ? anchor.slice(0, 4) : '',
     episode: !isDate && anchor.length > 0 ? anchor.toUpperCase() : '',
     resolution: typeof resolution === 'number' ? `${resolution}p` : '',

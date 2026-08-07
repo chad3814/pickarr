@@ -391,10 +391,11 @@ decides where new imports land; changing it leaves everything already in the lib
 where it is, so a change part-way through leaves two layouts side by side until the old
 files are moved by hand. Pickarr has no library scan, so it will not notice.
 
-The default is `{sitename}/{sitename}.{date}{episode}.{title}.{resolution}-{group}`,
+The default is `{sitename}/{sitename}.{date}{episode}.{titledots}.{resolution}-{group}`,
 which follows scene naming. It is **not** the layout that shipped before the template
 existed — anyone already running Pickarr gets a second layout alongside the first unless
-they set `{Site}/{date}{episode} - {Title}`, which reproduces the old one exactly.
+they set `{Site}/{isodate}{episode} - {Title}`, which reproduces the old one exactly.
+`{date}` is dotted for scene naming, so the dashed form is `{isodate}`.
 `{SiteName}` is PascalCase (`BangBros`) and `{Site}` is title-cased with spaces
 (`Bang Bros`); the older layout used the latter, which is why both exist.
 
@@ -414,6 +415,14 @@ individually loses the separator for every episode-numbered release
 reason: ` - ` is three separator characters a scene slug emits deliberately, and
 squeezing it erases the component boundary that keeps `Kylie - Page Turner` and
 `Kylie Page - Turner` apart.
+
+**The dot-joined title cannot use dots for both words and components.**
+`{titledots}` joins words with `.` and components with `-`, so
+`kylie--page-turner` gives `kylie-page.turner` and `kylie-page--turner` gives
+`kylie.page-turner`. Using `.` for both renders them identically and the second scene can
+then never import — the same collision the `--` boundary exists to prevent, reappearing
+one layer down for the third time. Words contain neither `.` nor `-`, so the rendering
+still decodes uniquely.
 
 Every value is derived from `identityKey`, never from the release's display strings, so
 two encodes of one scene render one path under any template. `{sitename}` and
