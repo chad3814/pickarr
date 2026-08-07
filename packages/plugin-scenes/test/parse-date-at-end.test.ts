@@ -497,3 +497,85 @@ test('a trailing date with no encode before it is still refused', () => {
   // boundary to work from and guessing would truncate the title.
   assert.equal(parseSceneRelease('somesite_a-scene-title-18.12.18'), null);
 });
+
+// --- Day-first dates with a four-digit year ----------------------------------
+
+test('a DD.MM.YYYY date is read day-first', () => {
+  // The dotted reader knew YY.MM.DD and YYYY.MM.DD but not day-first with a
+  // four-digit year, which European sites use.
+  const result = parsed('WoodmanCastingX.com.Kendra.Star.19.04.2014.2160p');
+  assert.equal(result.identityKey.split(':')[1], '2014-04-19');
+  // The `.com` only leaves the title once the site is confirmed, since the
+  // TLD rule deliberately runs behind a confirmation and nothing else.
+  assert.equal(
+    parsed('WoodmanCastingX.com.Kendra.Star.19.04.2014.2160p', ['Woodman Casting X']).display.title,
+    'Kendra Star',
+  );
+});
+
+test('day-first is the convention even when the day could be a month', () => {
+  // 04.08.2026 is 4 August, not 8 April. Ambiguous by construction; the
+  // delimited reader already resolves it this way, so both agree.
+  assert.equal(
+    parsed('LadyboyGold.Lita.Yellow.Pantie.Party.04.08.2026.2160p').identityKey.split(':')[1],
+    '2026-08-04',
+  );
+});
+
+test('an existing date shape is unaffected by the day-first rule', () => {
+  // Checked because findSceneDate takes the first valid date it finds, so a
+  // new pattern can quietly capture a position an older one used to.
+  const pairs: [string, string][] = [
+    ['Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB', '2023-04-15'],
+    ['Brazzers.2023.04.15.Alex.Coal.XXX.1080p.MP4-WRB', '2023-04-15'],
+    ['Blacked.20180428.Alex.Coal.XXX.1080p.MP4-KTR', '2018-04-28'],
+    ['Blacked.180428.Alex.Coal.XXX.1080p.MP4-KTR', '2018-04-28'],
+  ];
+  for (const [name, iso] of pairs) {
+    assert.equal(parsed(name).identityKey.split(':')[1], iso, name);
+  }
+});
+
+test('a day-first date that is not a calendar date is still refused', () => {
+  assert.equal(parseSceneRelease('Site.32.04.2014.Name.XXX.1080p.MP4-G'), null);
+  assert.equal(parseSceneRelease('Site.30.02.2014.Name.XXX.1080p.MP4-G'), null);
+});
+
+// --- A four-digit year repeated after a YY.MM.DD date ------------------------
+
+test('a year repeated after the short date is not left in the title', () => {
+  // ManyVids.26.08.02.2026.August.Heat.2 states the year twice. The year-first
+  // reader stopped after DD, so 2026 became the first word of the identity —
+  // parsing, but wrong, and the same scene posted without the repeat would key
+  // differently.
+  const result = parsed('ManyVids.26.08.02.2026.August.Heat.2.XXX.1080p.MP4-P0RNL0V3R');
+  assert.equal(result.identityKey, 'manyvids:2026-08-02:august-heat-2');
+  assert.equal(result.display.title, 'August Heat 2');
+});
+
+test('the repeat is only swallowed when it agrees with the short date', () => {
+  // A year that is not the date's year is title material, not a restatement.
+  const result = parsed('Site.26.08.02.1999.Party.Classics.XXX.1080p.MP4-G');
+  assert.equal(result.identityKey, 'site:2026-08-02:1999-party-classics');
+});
+
+test('with and without the repeated year are one scene', () => {
+  assert.equal(
+    parsed('ManyVids.26.07.26.2026.Ruth.Lee.XXX.1080p.MP4-P0RNL0V3R').identityKey,
+    parsed('ManyVids.26.07.26.Ruth.Lee.XXX.1080p.MP4-P0RNL0V3R').identityKey,
+  );
+});
+
+// --- Poster signatures -------------------------------------------------------
+
+test("a poster's trailing signature is stripped", () => {
+  const result = parsed('WoodmanCastingX.com.Kendra.Star.19.04.2014._2160p_iris2_by_cdrw69');
+  assert.equal(result.identityKey.split(':')[1], '2014-04-19');
+  assert.equal(result.quality.resolution, 2160, 'the encode ahead of it still reads');
+});
+
+test('a signature is only stripped at the end', () => {
+  // "by am" mid-title is ordinary words.
+  const result = parsed('Site.23.04.15.Stand.by.am.Friend.XXX.1080p.MP4-G');
+  assert.equal(result.display.title, 'Stand by am Friend');
+});
