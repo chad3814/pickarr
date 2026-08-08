@@ -23,12 +23,40 @@ export interface QualityTokens {
   extras?: Record<string, QualityExtra>;
 }
 
+export type ManualFieldType = 'text' | 'number' | 'select';
+
+/** Mirrors `ManualField` in `@pickarr/plugin-api`; see the note on `request` below. */
+export interface ManualField {
+  name: string;
+  label: string;
+  type: ManualFieldType;
+  scope: 'identity' | 'quality';
+  required?: boolean;
+  /** Permitted values, for `type: 'select'`. An empty string means "unset". */
+  options?: string[];
+  placeholder?: string;
+  help?: string;
+}
+
+/**
+ * Keyed by plugin id. A plugin with no field list is *missing* from this map
+ * rather than mapped to `[]`, which is how the SPA decides there is no form to
+ * offer for its items at all.
+ */
+export type ManualFieldsResponse = Record<string, ManualField[]>;
+
 export interface ReleaseView {
   id: number;
   score: number;
   quality: QualityTokens;
   releaseName: string;
   publishedAt: number | null;
+  /**
+   * The quality half of an edit form, prefilled. Optional rather than
+   * `| undefined`: the server omits the key entirely for a plugin with no
+   * `toManualValues`, and its absence is what says "offer no Edit control".
+   */
+  manualValues?: Record<string, string>;
 }
 
 export interface GroupView {
@@ -40,7 +68,69 @@ export interface GroupView {
   upgradeReleaseId: number | null;
   listRankAt: number;
   releases: ReleaseView[];
+  /** The identity half of an edit form, prefilled. Absent as on `ReleaseView`. */
+  manualValues?: Record<string, string>;
 }
+
+/** One name the parser refused, and everything a human needs to describe it. */
+export interface FailedItemView {
+  id: number;
+  feedId: string;
+  /** The plugin id, so the SPA picks the right schema. Empty when the feed has left configuration. */
+  plugin: string;
+  rawTitle: string;
+  link: string;
+  parseError: string;
+  firstSeenAt: number;
+  publishedAt: number | null;
+  /** Best-effort and *sparse*: only the keys the plugin could work out. */
+  suggestedValues: Record<string, string>;
+  dismissedAt: number | null;
+}
+
+export interface FailedResponse {
+  items: FailedItemView[];
+  nextCursor: string | null;
+}
+
+export interface ResolveResponse {
+  group: GroupView;
+  joinedExisting: boolean;
+}
+
+export interface DismissResponse {
+  id: number;
+  dismissedAt: number;
+}
+
+/**
+ * `group` is the *surviving* group, which on a merge is the target rather than
+ * the one that was patched; `mergedInto` names it, and is null when nothing
+ * merged. The caller knows the source id because it sent it, so the two
+ * together are what let a paginated list drop one card and replace another.
+ */
+export interface GroupEditResponse {
+  group: GroupView;
+  mergedInto: number | null;
+}
+
+/**
+ * `group` is the edited release's standing in browse afterwards; null means it
+ * left, exactly as on `PickResponse`. Rescoring re-derives the upgrade flag, so
+ * downgrading the release that was the only reason a picked group was listed
+ * takes that group out of the list.
+ */
+export interface ReleaseEditResponse {
+  group: GroupView | null;
+}
+
+/**
+ * `/api/manual-preview` answers 200 either way: the form calls it on a debounce
+ * while the user is still typing, so a plugin's complaint about a half-typed
+ * date is an answer to "what would these values produce?", not a failed
+ * request.
+ */
+export type ManualPreviewResponse = { identityKey: string } | { error: string };
 
 export interface BrowseResponse {
   groups: GroupView[];
@@ -118,4 +208,36 @@ export const api = {
     }),
   retry: (downloadId: number) =>
     request<DownloadView>(`/api/downloads/${downloadId}/retry`, { method: 'POST' }),
+  manualFields: () => request<ManualFieldsResponse>('/api/manual-fields'),
+  failed: (cursor: string | null, includeDismissed: boolean) => {
+    const params = new URLSearchParams();
+    if (cursor !== null) params.set('cursor', cursor);
+    // The literal '1'; the server compares against it rather than coercing,
+    // because every non-empty string coerces to true and `=false` would then
+    // include them.
+    if (includeDismissed) params.set('includeDismissed', '1');
+    return request<FailedResponse>(`/api/failed?${params.toString()}`);
+  },
+  resolveFeedItem: (feedItemId: number, values: Record<string, string>) =>
+    request<ResolveResponse>(`/api/feed-items/${feedItemId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ values }),
+    }),
+  dismissFeedItem: (feedItemId: number) =>
+    request<DismissResponse>(`/api/feed-items/${feedItemId}/dismiss`, { method: 'POST' }),
+  editGroup: (groupId: number, values: Record<string, string>) =>
+    request<GroupEditResponse>(`/api/groups/${groupId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ values }),
+    }),
+  editRelease: (releaseId: number, values: Record<string, string>) =>
+    request<ReleaseEditResponse>(`/api/releases/${releaseId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ values }),
+    }),
+  manualPreview: (plugin: string, values: Record<string, string>) =>
+    request<ManualPreviewResponse>('/api/manual-preview', {
+      method: 'POST',
+      body: JSON.stringify({ plugin, values }),
+    }),
 };

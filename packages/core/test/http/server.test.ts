@@ -5,6 +5,7 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import { getDownload } from '../../src/db/downloads.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
 import type { DownloadClient } from '../../src/clients/types.ts';
+import type { PluginRegistry } from '../../src/plugins/registry.ts';
 import type { UntrackedEntry } from '../../src/pipeline/reconcile.ts';
 
 function seedGroups(db: DatabaseSync): void {
@@ -38,6 +39,24 @@ function fakeClient(): DownloadClient {
   };
 }
 
+/**
+ * No plugins are loaded here. These tests are about browsing, picking and
+ * retrying, none of which asks a plugin anything, and an empty registry is the
+ * honest way to say so — the manual routes and the prefill values a plugin
+ * supplies have their own file, `manual.test.ts`.
+ */
+function emptyRegistry(): PluginRegistry {
+  return {
+    byPackage: (packageName) => {
+      throw new Error(`No plugin registered for package ${packageName}`);
+    },
+    byId: () => undefined,
+    libraryRoot: () => '/library',
+    libraryRootById: () => '/library',
+    all: () => [],
+  };
+}
+
 function deps(db: DatabaseSync, untracked: UntrackedEntry[] = []): ServerDeps {
   return {
     db,
@@ -45,6 +64,8 @@ function deps(db: DatabaseSync, untracked: UntrackedEntry[] = []): ServerDeps {
     untrackedFor: () => untracked,
     now: () => 1000,
     webRoot: null,
+    registry: emptyRegistry(),
+    pluginForFeed: () => null,
   };
 }
 
@@ -289,7 +310,14 @@ test('no route ever returns the client api key', async () => {
   seedGroups(db);
   const server = buildServer(deps(db));
   await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
-  for (const url of ['/api/browse', '/api/picks', '/api/downloads', '/api/health']) {
+  for (const url of [
+    '/api/browse',
+    '/api/picks',
+    '/api/downloads',
+    '/api/health',
+    '/api/failed',
+    '/api/manual-fields',
+  ]) {
     const body = (await server.inject({ method: 'GET', url })).body;
     assert.doesNotMatch(body, /apiKey|apikey/);
   }

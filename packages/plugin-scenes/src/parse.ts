@@ -385,21 +385,76 @@ function firstMatch<T>(table: [RegExp, T][], haystack: string): T | undefined {
  * stays this small — so this must not be widened. `planSceneImport` also
  * splits `identityKey` on `:`, which a slug can therefore never contain.
  */
-function slug(value: string): string {
+export function slug(value: string): string {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }
 
-function prettify(value: string): string {
+export function prettify(value: string): string {
   return value
     .replace(/[._]+/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/^[\s-]+|[\s-]+$/g, '');
 }
 
-function toIsoDate(year: number, month: number, day: number): string | null {
+/**
+ * What separates the components of a multi-part scene slug.
+ *
+ * Named rather than spelled inline because the value and the reasoning below
+ * are one fact: anything that *reads* a scene slug back — deciding whether a
+ * key has components at all, splitting it for a path — has to agree with what
+ * wrote it, and a second literal `--` is a second place for that agreement to
+ * break.
+ */
+export const SCENE_COMPONENT_BOUNDARY = '--';
+
+/**
+ * The scene slug for a title whose parts may appear in either order: each part
+ * slugged, empties dropped, sorted, joined with `SCENE_COMPONENT_BOUNDARY`.
+ *
+ * Sorting is what makes the two orderings one identity, and the display title
+ * keeps source order separately — trackers put performer and title on either
+ * side of each other, so the same scene arrives spelled both ways.
+ *
+ * The join is `--`, and that is load-bearing rather than cosmetic. Sorting is
+ * only safe if the join is injective on the multiset of parts, and joining
+ * with a single `-` is not: `slug()` emits `-` too, so the part boundaries
+ * dissolve and any re-split that happens to preserve alphabetical order
+ * collides — `Kylie` + `Page Turner` and `Kylie Page` + `Turner` both render
+ * `kylie-page-turner`, and those are different scenes. `slug()` collapses runs
+ * of non-alphanumerics to a single `-` and strips the edges, so `--` cannot
+ * occur inside a part; empty parts are filtered out here. The join is
+ * therefore a delimiter that no part can contain, the split is unique, and
+ * *now* the multiset determines the string and vice versa. `titleCaseSlug`
+ * drops empty segments, so paths render unchanged.
+ *
+ * This lives here, exported, rather than at its one parser call site because
+ * the manual-entry path has to produce the same boundary for the same title.
+ * Two spellings of this expression are two identity models: a hand-corrected
+ * release that joins on `-` lands in a different group, and on a different
+ * library path, than the parsed siblings it was corrected to match — with
+ * nothing failing to say so.
+ */
+export function sceneSlugFromParts(parts: readonly string[]): string {
+  return parts
+    .map(slug)
+    .filter((part) => part.length > 0)
+    .toSorted()
+    .join(SCENE_COMPONENT_BOUNDARY);
+}
+
+/**
+ * A calendar date as `YYYY-MM-DD`, or `null` if those numbers name no real
+ * day. `Date.UTC` rolls `2023-02-30` forward into March rather than refusing
+ * it, so the components have to be read back out to catch it.
+ *
+ * The year range is deliberately narrower than "valid": a release dated 9023
+ * is a typo, and admitting it opens a group and a library directory that no
+ * correctly-dated release can ever join.
+ */
+export function toIsoDate(year: number, month: number, day: number): string | null {
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
   if (year < 1900 || year > 2199) return null;
 
@@ -415,7 +470,7 @@ function expandYear(raw: string): number {
   return raw.length === 2 ? 2000 + Number(raw) : Number(raw);
 }
 
-interface Token {
+export interface Token {
   readonly text: string;
   readonly start: number;
 }
@@ -464,7 +519,7 @@ function joinHyphenatedEncodeTokens(tokens: Token[], text: string): Token[] {
   return joined;
 }
 
-function tokensOf(text: string): Token[] {
+export function tokensOf(text: string): Token[] {
   return joinHyphenatedEncodeTokens(tokenize(text), text);
 }
 
@@ -668,7 +723,7 @@ function normalizeSeparators(text: string): string {
   return text.replace(/_/g, '.');
 }
 
-function extractQuality(tail: string, releaseGroup: string | undefined): QualityTokens {
+export function extractQuality(tail: string, releaseGroup: string | undefined): QualityTokens {
   const haystack = normalizeSeparators(tail);
 
   const extras: Record<string, QualityExtra> = {};
@@ -776,7 +831,7 @@ function stripFileExtension(name: string): string {
  * on splitting on `:`; a slug can never be empty, so an empty middle is
  * unambiguous. The display omits the date entirely instead of showing a blank.
  */
-function buildRelease(
+export function buildRelease(
   site: string,
   anchor: AnchorSpan | null,
   sceneTitle: string,
@@ -820,7 +875,7 @@ type AnchorKind = 'date' | 'episode';
  * discriminating: `E1178` names one episode of a site as surely as a date
  * names one day of it.
  */
-interface AnchorSpan {
+export interface AnchorSpan {
   readonly kind: AnchorKind;
   /** What reaches the identity key's middle segment. */
   readonly key: string;
@@ -834,7 +889,7 @@ interface AnchorSpan {
  * occur: `YY.MM.DD`, `YYYY.MM.DD`, and the concatenated `YYMMDD` / `YYYYMMDD`.
  * Index 0 is skipped because a date there would leave no site.
  */
-function findSceneDate(tokens: Token[]): AnchorSpan | null {
+export function findSceneDate(tokens: Token[]): AnchorSpan | null {
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === undefined) continue;
@@ -967,7 +1022,7 @@ const MAX_SITE_TOKENS = 12;
  */
 const SITE_TLDS = new Set(['com', 'net', 'org', 'tv', 'xxx', 'co', 'io', 'cc']);
 
-interface SiteMatch {
+export interface SiteMatch {
   /** How many leading tokens the site name claims. */
   readonly tokenCount: number;
   /** The site's canonical spelling, which is what reaches the key. */
@@ -984,7 +1039,7 @@ function consumeSiteTld(before: Token[], tokenCount: number): number {
   return SITE_TLDS.has(next.text.toLowerCase()) ? tokenCount + 1 : tokenCount;
 }
 
-function matchSitePrefix(before: Token[], sites: readonly string[]): SiteMatch | null {
+export function matchSitePrefix(before: Token[], sites: readonly string[]): SiteMatch | null {
   const wanted = new Map<string, string>();
   for (const site of sites) {
     const key = siteComparisonKey(site);
@@ -1187,7 +1242,7 @@ const BARE_4K_SITE = 'JacquieEtMichelTV';
  * they differ by a space, which is exactly the split `matchSitePrefix` exists
  * to prevent for names read out of a release.
  */
-function canonicalSiteName(name: string, sites: readonly string[]): string {
+export function canonicalSiteName(name: string, sites: readonly string[]): string {
   const key = siteComparisonKey(name);
   for (const site of sites) {
     if (siteComparisonKey(site) === key) {
@@ -1414,6 +1469,42 @@ interface SegmentSplit {
 }
 
 /**
+ * The listing form's part separator, removed from *inside* a part.
+ *
+ * `parseDelimitedForm` joins its parts with ` - ` to make `display.title`, and
+ * that join is only reversible while no part contains the separator itself.
+ * A part normally cannot: `SEGMENT_SPLIT` has already cut the name on every
+ * ` - ` it contained. But `prettify` puts one back — it rewrites `.` and `_`
+ * as spaces, so the single segment `Kylie.-.Page` becomes the part
+ * `Kylie - Page`, and the two-part title `[Kylie - Page, Turner]` then renders
+ * exactly like the three-part `[Kylie, Page, Turner]`.
+ *
+ * That is not a cosmetic clash. Those are two different scenes with two
+ * different keys (`kylie-page--turner` and `kylie--page--turner`), and
+ * `sceneToManualValues` hands the edit form `display.title` while
+ * `sceneFromManualValues` recovers the parts by splitting it on ` - ` — so
+ * opening Edit on the first and saving it unchanged re-keyed it as the second,
+ * merging two scenes and deleting a group. The identity-key preview showed the
+ * wrong key with equal confidence, because it is built from the same values.
+ *
+ * The fix belongs here rather than in the form because `display.title` is what
+ * is lossy, and it is fixed by making the join injective again: collapse the
+ * separator inside a part so ` - ` occurs only *between* parts. One pass is
+ * enough — `prettify` has already collapsed whitespace runs and stripped the
+ * edges, so the `-` this writes is never adjacent to a space and cannot form a
+ * fresh separator.
+ *
+ * No identity key moves. `slug()` collapses any run of non-alphanumerics to a
+ * single `-`, so `slug('Kylie - Page')` and `slug('Kylie-Page')` are both
+ * `kylie-page`; only the displayed spelling changes, from `Kylie - Page` to
+ * `Kylie-Page`. That is what makes this safe to apply to a populated database,
+ * where a key change would silently relocate files already on disk.
+ */
+function collapsePartSeparator(part: string): string {
+  return part.replaceAll(' - ', '-');
+}
+
+/**
  * Separates one segment's title text from the quality material trailing it,
  * using the same suffix rule as the dotted form plus the bracketed groups
  * these listings append (`[1080p HEVC x265]`, `{GROUP}`).
@@ -1440,7 +1531,7 @@ function splitSegment(segment: string): SegmentSplit {
     text = text.slice(0, cutToken.start);
   }
 
-  return { title: prettify(text), quality: quality.join(' '), group };
+  return { title: collapsePartSeparator(prettify(text)), quality: quality.join(' '), group };
 }
 
 function parseDelimitedForm(name: string, options: SceneParseOptions): ParsedRelease | null {
@@ -1514,32 +1605,13 @@ function parseDelimitedForm(name: string, options: SceneParseOptions): ParsedRel
   }
   if (titleParts.length === 0) return null;
 
-  // The identity slug is built from the *sorted* part slugs while the display
-  // title keeps source order, because these listings put performers and title
-  // on either side of each other depending on the tracker.
-  //
-  // The join is `--`, and that is load-bearing rather than cosmetic. Sorting
-  // is only safe if the join is injective on the multiset of parts, and
-  // joining with a single `-` is not: `slug()` emits `-` too, so the part
-  // boundaries dissolve and any re-split that happens to preserve alphabetical
-  // order collides — `Kylie` + `Page Turner` and `Kylie Page` + `Turner` both
-  // render `kylie-page-turner`, and those are different scenes. `slug()`
-  // collapses runs of non-alphanumerics to a single `-` and strips the edges,
-  // so `--` cannot occur inside a part; empty parts are filtered out above.
-  // The join is therefore a delimiter that no part can contain, the split is
-  // unique, and *now* the multiset determines the string and vice versa.
-  // `titleCaseSlug` drops empty segments, so paths render unchanged.
-  const sceneSlug = titleParts
-    .map(slug)
-    .filter((part) => part.length > 0)
-    .toSorted()
-    .join('--');
-
+  // This is the one parser shape whose parts have no fixed order — see
+  // `sceneSlugFromParts` for why they are sorted and why the join is `--`.
   return buildRelease(
     canonicalSiteName(site, options.sites ?? []),
     { kind: 'date', key: dateIso, startOffset: 0, endOffset: 0 },
     titleParts.join(' - '),
-    sceneSlug,
+    sceneSlugFromParts(titleParts),
     extractQuality(qualityParts.join(' '), group),
   );
 }
