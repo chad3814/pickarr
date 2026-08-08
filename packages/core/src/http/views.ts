@@ -47,6 +47,23 @@ export interface DownloadsResponse {
   untracked: UntrackedEntry[];
 }
 
+/**
+ * `group` is the picked group's standing in the *browse* list afterwards: its
+ * refreshed view, or `null` when the pick took it out of that list. It lets a
+ * paginated browse patch the one card that changed instead of refetching, and
+ * refetching was not a harmless shortcut — it threw away every page past the
+ * first, so picking anything after "Load more" snapped the list back to one
+ * page.
+ *
+ * The server answers this because the server owns the rule (`BROWSABLE` in
+ * db/groups.ts). A client deciding for itself from `state` and
+ * `upgradeReleaseId` would be a second copy of that rule, free to drift.
+ */
+export interface PickResponse {
+  download: DownloadView;
+  group: GroupView | null;
+}
+
 export function toGroupView(db: DatabaseSync, group: GroupRow): GroupView {
   const releases = releasesForGroup(db, group.id).map((release) => {
     const feedItem = db

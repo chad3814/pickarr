@@ -151,6 +151,29 @@ export function completeUpgrade(db: DatabaseSync, groupId: number, releaseId: nu
   ).run(releaseId, deriveUpgradeReleaseId(db, groupId, releaseId), groupId);
 }
 
+/**
+ * What it means for a group to belong in the browse list: nothing picked yet,
+ * or something better than what was picked. Written once and shared by the
+ * list query and the single-group lookup below, because the two must never
+ * disagree — a client that patched a card into a list the server would not
+ * have returned, or dropped one it would have, is a list that quietly stops
+ * matching the database.
+ */
+const BROWSABLE = "(state = 'new' OR upgrade_release_id IS NOT NULL)";
+
+/**
+ * The group, but only if it still belongs in the browse list.
+ *
+ * `null` here means "not in browse", not "no such group" — the caller
+ * (`/api/groups/:id/pick`) has already established the group exists. Picking
+ * changes exactly one group's membership, and this is how the server states
+ * the new answer rather than making the client re-derive it from a view.
+ */
+export function browsableGroup(db: DatabaseSync, id: number): GroupRow | null {
+  const row = db.prepare(`${SELECT} WHERE id = ? AND ${BROWSABLE}`).get(id);
+  return row === undefined ? null : toGroupRow(row as SqlRow);
+}
+
 export interface BrowseQuery {
   cursor: { listRankAt: number; id: number } | null;
   limit: number;
@@ -184,7 +207,7 @@ export interface BrowseQuery {
  * the cursor's, not smaller.
  */
 export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
-  const conditions = ["(state = 'new' OR upgrade_release_id IS NOT NULL)"];
+  const conditions = [BROWSABLE];
   const params: (string | number)[] = [];
 
   if (query.search !== null) {

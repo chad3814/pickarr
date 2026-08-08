@@ -3,11 +3,16 @@ import fastifyStatic from '@fastify/static';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type { DownloadClient } from '../clients/types.ts';
-import { browseGroups, getGroup, pickedGroups } from '../db/groups.ts';
+import { browsableGroup, browseGroups, getGroup, pickedGroups } from '../db/groups.ts';
 import { allDownloads, getDownload, resetForRetry } from '../db/downloads.ts';
 import { pickRelease } from '../pipeline/pick.ts';
 import type { UntrackedEntry } from '../pipeline/reconcile.ts';
-import { toDownloadView, toGroupView, type BrowseResponse } from './views.ts';
+import {
+  toDownloadView,
+  toGroupView,
+  type BrowseResponse,
+  type PickResponse,
+} from './views.ts';
 
 export interface ServerDeps {
   db: DatabaseSync;
@@ -39,6 +44,28 @@ function parseCursor(raw: string | undefined): { listRankAt: number; id: number 
 export function buildServer(deps: ServerDeps): FastifyInstance {
   const server = Fastify({ logger: false });
   const { db } = deps;
+
+  // An empty body with `content-type: application/json` reads as `{}` rather
+  // than Fastify's default 400 (FST_ERR_CTP_EMPTY_JSON_BODY), which it raises
+  // before any handler runs. `/api/downloads/:id/retry` takes no body at all,
+  // so under the default every retry from a client that sets the header
+  // unconditionally — as this project's own SPA did, for its whole life — was
+  // refused by the framework for a rule the route does not have. Routes that
+  // do want a body are unaffected: they validate it with zod and reject `{}`
+  // themselves, with their own message.
+  server.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (_request, body: string | Buffer, done) => {
+      const text = body.toString().trim();
+      if (text.length === 0) return done(null, {});
+      try {
+        done(null, JSON.parse(text) as unknown);
+      } catch (error) {
+        done(error as Error, undefined);
+      }
+    },
+  );
 
   server.get('/api/health', async () => ({ status: 'ok' }));
 
@@ -91,7 +118,14 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         { groupId: params.data.id, releaseId: body.data.releaseId },
         deps.now(),
       );
-      return toDownloadView(db, download);
+      // Read after the pick, not before: `markPicked` is what changes the
+      // answer, and the answer is the whole point of returning it.
+      const stillListed = browsableGroup(db, params.data.id);
+      const response: PickResponse = {
+        download: toDownloadView(db, download),
+        group: stillListed === null ? null : toGroupView(db, stillListed),
+      };
+      return response;
     } catch (error) {
       return reply.code(400).send({ error: (error as Error).message });
     }
