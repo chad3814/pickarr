@@ -1,5 +1,8 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
@@ -669,6 +672,187 @@ test('a download imported during this same tick is cleaned up in it', async () =
     },
   });
   assert.deepEqual(removed, [{ ref: 'nzo-now', deleteFiles: true }]);
+});
+
+/** Records what the cleanup pass asked the filesystem to delete. */
+function directoryTracking(): {
+  deleted: string[];
+  rm: (path: string, options: { recursive: boolean; force: boolean }) => Promise<void>;
+} {
+  const deleted: string[] = [];
+  return {
+    deleted,
+    rm: (path) => {
+      deleted.push(path);
+      return Promise.resolve();
+    },
+  };
+}
+
+function importedWithStorage(db: DatabaseSync, storagePath: string): void {
+  seedDownload(db, { id: 1, status: 'imported', clientRef: 'nzo-done' });
+  db.prepare('UPDATE downloads SET storage_path = ? WHERE id = 1').run(storagePath);
+}
+
+const DONE = {
+  queue: [],
+  history: [
+    {
+      ref: 'nzo-done',
+      name: 'Scene [pickarr-1]',
+      outcome: 'completed' as const,
+      storagePath: '/sab/x',
+      failMessage: null,
+    },
+  ],
+};
+
+test('the job directory goes too — the client empties it but leaves it standing', async () => {
+  const db = openTestDatabase();
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]');
+  const { deleted, rm } = directoryTracking();
+
+  await reconcileClient({
+    db,
+    client: fakeClient(DONE, { remove: async () => {} }),
+    now: () => 2000,
+    rm,
+    importDownload: async () => {},
+  });
+
+  assert.deepEqual(deleted, ['/downloads/Scene.1080p [pickarr-1]']);
+  db.close();
+});
+
+test('a storage path naming the file removes the directory holding it', async () => {
+  // The single-file shape SABnzbd reports for a one-video job.
+  const db = openTestDatabase();
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]/scene.mp4');
+  const { deleted, rm } = directoryTracking();
+
+  await reconcileClient({
+    db,
+    client: fakeClient(DONE, { remove: async () => {} }),
+    now: () => 2000,
+    rm,
+    importDownload: async () => {},
+  });
+
+  assert.deepEqual(deleted, ['/downloads/Scene.1080p [pickarr-1]']);
+  db.close();
+});
+
+test('an unlabelled directory is never deleted, and the refusal is logged', async () => {
+  // A client configured without per-job folders puts completed files straight
+  // into the category directory, shared with every other job. Deleting that
+  // parent because it happens to hold our file would take everything with it.
+  const db = openTestDatabase();
+  importedWithStorage(db, '/downloads/complete/scene.mp4');
+  const { deleted, rm } = directoryTracking();
+  const lines: string[] = [];
+
+  await reconcileClient({
+    db,
+    client: fakeClient(DONE, { remove: async () => {} }),
+    now: () => 2000,
+    rm,
+    log: (message) => lines.push(message),
+    importDownload: async () => {},
+  });
+
+  assert.deepEqual(deleted, []);
+  assert.match(lines.join('\n'), /left its directory in place/);
+  db.close();
+});
+
+test("another download's label is not this one's licence to delete", async () => {
+  const db = openTestDatabase();
+  importedWithStorage(db, '/downloads/Other.Scene [pickarr-99]');
+  const { deleted, rm } = directoryTracking();
+
+  await reconcileClient({
+    db,
+    client: fakeClient(DONE, { remove: async () => {} }),
+    now: () => 2000,
+    rm,
+    importDownload: async () => {},
+  });
+
+  assert.deepEqual(deleted, []);
+  db.close();
+});
+
+test('a directory is only removed once the client has let the job go', async () => {
+  // Order matters: the client deletes the files it knows about, and only then
+  // is the folder ours to remove. A removal that never happened leaves the
+  // directory alone so the next tick can try the whole sequence again.
+  const db = openTestDatabase();
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]');
+  const { deleted, rm } = directoryTracking();
+
+  await reconcileClient({
+    db,
+    client: fakeClient(DONE, { remove: () => Promise.reject(new Error('connection refused')) }),
+    now: () => 2000,
+    rm,
+    importDownload: async () => {},
+  });
+
+  assert.deepEqual(deleted, []);
+  db.close();
+});
+
+test('a directory that will not delete is logged, not fatal', async () => {
+  const db = openTestDatabase();
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]');
+  const lines: string[] = [];
+
+  const result = await reconcileClient({
+    db,
+    client: fakeClient(DONE, { remove: async () => {} }),
+    now: () => 2000,
+    rm: () => Promise.reject(new Error('EACCES')),
+    log: (message) => lines.push(message),
+    importDownload: async () => {},
+  });
+
+  assert.equal(result.removed, 1, 'the client entry did go');
+  assert.equal(getDownload(db, 1)?.status, 'imported');
+  assert.match(lines.join('\n'), /could not remove \/downloads\/Scene\.1080p \[pickarr-1\]: EACCES/);
+  db.close();
+});
+
+test('the real filesystem, with no injected rm and a directory that is not empty', async () => {
+  // Everything above fakes `rm`. This exercises the default — what actually
+  // runs on a server — and on a directory with leftovers in it, which is the
+  // state SABnzbd leaves behind when `del_files` misses something.
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-cleanup-'));
+  try {
+    const jobDir = join(root, 'Scene.1080p [pickarr-1]');
+    await mkdir(jobDir, { recursive: true });
+    await writeFile(join(jobDir, 'leftover.nzb'), 'x');
+
+    const db = openTestDatabase();
+    importedWithStorage(db, join(jobDir, 'scene.mp4'));
+
+    await reconcileClient({
+      db,
+      client: fakeClient(DONE, { remove: async () => {} }),
+      now: () => 2000,
+      importDownload: async () => {},
+    });
+
+    const survived = await stat(jobDir).then(
+      () => true,
+      () => false,
+    );
+    assert.equal(survived, false);
+    // And only that directory: its parent is untouched.
+    assert.deepEqual(await readdir(root), []);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('a removal that fails does not undo the import, and is retried next tick', async () => {
