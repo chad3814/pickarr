@@ -154,6 +154,30 @@ test('an import failure on a completed row fails the download rather than retryi
   db.close();
 });
 
+test('an import failure says so in the log, not only in the row', async () => {
+  // The row is what the UI reads; the log is what an operator watching a
+  // deployment reads. The first single-file storage path failed every pick
+  // silently — the reason was visible on one screen and nowhere else.
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'completed', clientRef: 'nzo_1' });
+  db.prepare("UPDATE downloads SET storage_path = '/pickarr/complete/R' WHERE id = 1").run();
+
+  const lines: string[] = [];
+  await reconcileClient({
+    db,
+    client: fakeClient(EMPTY),
+    now: () => 1000,
+    log: (message) => lines.push(message),
+    importDownload: async () => {
+      throw new Error('ENOTDIR: not a directory, scandir ...');
+    },
+  });
+
+  assert.equal(lines.length, 1);
+  assert.match(lines[0] ?? '', /import failed for download 1: ENOTDIR/);
+  db.close();
+});
+
 test('a failed download records the fail message', async () => {
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });

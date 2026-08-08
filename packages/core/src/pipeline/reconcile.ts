@@ -156,7 +156,13 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       await deps.importDownload(row);
       result.imported += 1;
     } catch (error) {
-      failDownload(db, row.id, (error as Error).message, now);
+      const message = (error as Error).message;
+      failDownload(db, row.id, message, now);
+      // The row carries this message and the UI shows it, but a failure only
+      // one screen knows about is a failure nobody is told about: the first
+      // ENOTDIR from a single-file storage path was found by looking at the
+      // UI, with the log saying nothing at all.
+      deps.log?.(`reconcile ${client.id}: import failed for download ${row.id}: ${message}`);
       result.failed += 1;
     }
   }
