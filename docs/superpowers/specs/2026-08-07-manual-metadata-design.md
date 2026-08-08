@@ -36,8 +36,11 @@ Out of scope:
 - **Re-parsing.** Nothing re-runs the parser over existing items, then or now. The
   `edited_at` columns below exist so that a future re-parse pass can leave hand-entered
   data alone; nothing reads them yet.
-- **Un-dismissing from the UI.** Dismissed items are hidden, not deleted, and the API
-  can still return them. No button in this cut.
+- **Un-dismissing from the UI.** Dismissed items are hidden, not deleted, and the API can
+  still return them. No un-dismiss *button* in this cut — but the Failed tab does carry a
+  "Show dismissed" checkbox, because otherwise `includeDismissed` has no caller in the SPA
+  and a dismissal is unrecoverable in practice while claiming not to be. Fixing a shown
+  dismissed item clears its `dismissed_at` (§7.1), which is the recovery path.
 - **Merging groups that have history.** See §7.3.
 
 ## 3. Where the data lives
@@ -134,6 +137,36 @@ The property this buys, and which the tests assert: for any name the parser hand
 parse(name) → toManualValues → fromManualValues  ===  parse(name)
 ```
 
+This is a universal claim and it rests on one thing that is easy to break by accident:
+`display.title` must be a *reversible* rendering of whatever the key was built from. The
+bracketed-listing shape joins its title parts with ` - ` and `fromManualValues` splits
+them back out on ` - `, so no part may contain that separator. `prettify` put one back —
+it rewrites `.` and `_` as spaces, so the single part `Kylie.-.Page` rendered as
+`Kylie - Page` and the two-part title became indistinguishable from a three-part one.
+`collapsePartSeparator` in `parse.ts` restores the invariant, and does so without moving
+any key, because `slug()` reduces both ` - ` and `-` to a single `-`. Anything that
+changes how a display title is spelled has to keep that reversibility or the claim above
+stops being true.
+
+### Title order is a field, not an inference
+
+The bracketed-listing shape builds its scene slug from title parts **sorted** and joined
+with `--`, because those trackers put performer and title on either side of each other;
+every other shape slugs the title as one piece. Two releases can therefore have the same
+display title and legitimately different keys, and nothing in a `ParsedRelease` says
+which rule produced it — a dotted name containing `.-.` renders a display title with
+` - ` in it while its scene slug has no `--`.
+
+Inferring the rule from punctuation in the title silently re-keys that release the first
+time someone edits it. So the structure is an explicit field, `titleOrder`:
+
+- `fixed` → the slug is `slug(title)`, the title read as one piece.
+- `any` → the title is split on ` - `, each part slugged, sorted, joined with `--`.
+
+`toManualValues` sets it from the key it already has (`any` when the scene segment
+contains `--`), which makes the round trip exact for both shapes. A new manual entry
+defaults to `fixed`.
+
 ### Scenes field list
 
 | name | type | scope | notes |
@@ -143,12 +176,22 @@ parse(name) → toManualValues → fromManualValues  ===  parse(name)
 | `date` | text | identity | `YYYY-MM-DD`, required when `anchorKind` is `date` |
 | `episode` | text | identity | e.g. `E1178`, required when `anchorKind` is `episode` |
 | `title` | text | identity | required |
-| `resolution` | select | quality | `2160p` \| `1080p` \| `720p` \| `480p` \| `` |
+| `titleOrder` | select | identity | `fixed` \| `any`, per above |
+| `resolution` | select | quality | `` \| `4320p` \| `2160p` \| `1440p` \| `1080p` \| `720p` \| `540p` \| `480p` |
 | `source` | text | quality | |
 | `videoCodec` | text | quality | |
-| `audioCodec` | text | quality | |
+| `audioCodec` | text | quality | the parser never emits this; editable so a human can |
 | `releaseGroup` | text | quality | |
-| `container` | text | quality | |
+| `container` | text | quality | `quality.extras.container` |
+| `vr` | select | quality | `` \| `yes` → `quality.extras.vr` |
+| `upscaled` | select | quality | `` \| `yes` → `quality.extras.upscaled` |
+| `interlaced` | select | quality | `` \| `yes` → `quality.extras.interlaced` |
+
+The three boolean extras are here because `extractQuality` sets them, and a token the
+form cannot represent is a token the round trip drops. `bitrateKbps` and `sizeBytes` have
+no field: nothing in the scenes plugin writes them today, and inventing controls for
+values no code produces is speculative. Whoever makes the parser emit them must add the
+fields in the same change, or an edit will silently discard them.
 
 Validation, with the offending field named in every message: `site` and `title` must be
 non-empty after slugging; `date` must match `YYYY-MM-DD` and be a real calendar date;
@@ -160,10 +203,16 @@ parser; `anchorKind: none` leaves the anchor empty, which the key format already
 Migration 3:
 
 ```sql
-ALTER TABLE feed_items  ADD COLUMN dismissed_at INTEGER;
-ALTER TABLE media_groups ADD COLUMN edited_at   INTEGER;
-ALTER TABLE releases     ADD COLUMN edited_at   INTEGER;
+ALTER TABLE feed_items   ADD COLUMN dismissed_at INTEGER;
+ALTER TABLE media_groups ADD COLUMN edited_at    INTEGER;
+ALTER TABLE releases     ADD COLUMN edited_at    INTEGER;
+CREATE INDEX feed_items_failed
+  ON feed_items (first_seen_at DESC, id) WHERE parse_error IS NOT NULL;
 ```
+
+The partial index is what keeps the Failed tab's keyset pagination from scanning a
+`feed_items` table that grows without bound — failures are a small minority of it, and
+the predicate keeps the index that size rather than the table's.
 
 `dismissed_at` drives the Failed tab's default filter. The two `edited_at` columns record
 that a human, not the parser, produced the current values — written by the operations in
@@ -201,6 +250,11 @@ class of duplication is what `deriveUpgradeReleaseId` was introduced to end.
 Joining an existing group is the expected case, not an edge case: a failure is very often
 a scene already present from another release.
 
+**A resolve may move `list_rank_at`, and the two edits below may not.** Resolving is a
+release *arriving* — it just took a slower route through a human — so if it beats a
+picked release it earns its group a place at the top of the list, exactly as ingest
+would have. Correcting an existing record is not an arrival.
+
 ### 7.2 Dismiss a failed item
 
 Sets `dismissed_at`. 409 if the item has no `parse_error` — there is nothing to dismiss
@@ -216,7 +270,14 @@ about an item that parsed.
    the target.
 4. Otherwise update `identity_key`, `display`, `search_text`.
 
-In all cases set `edited_at`, and never touch `list_rank_at` — an edit is not an arrival.
+In all cases set `edited_at` — on the surviving group, which for a merge is the target —
+and never touch `list_rank_at`: an edit is not an arrival.
+
+**A merge does not overwrite the target's display.** The submitted values were the user's
+way of *naming* which existing scene this is, and the target is already that scene,
+described by whatever produced it. Taking the display too would let a hasty edit rewrite
+a record the user was only pointing at. The releases move; the target's own description
+stands.
 
 **The merge is refused with 409 when the source group has any `downloads` row or any
 `imported_files` row.** Those tables reference `group_id`; the target may already carry
@@ -246,7 +307,30 @@ imported keeps the path it was given (§2).
 | POST | `/api/feed-items/:id/resolve` | `{ values }` | `{ group: GroupView, joinedExisting: boolean }` |
 | POST | `/api/feed-items/:id/dismiss` | | `{ id, dismissedAt }` |
 | PATCH | `/api/groups/:id` | `{ values }` | `{ group: GroupView, mergedInto: number \| null }` |
-| PATCH | `/api/releases/:id` | `{ values }` | `{ group: GroupView }` |
+| PATCH | `/api/releases/:id` | `{ values }` | `{ group: GroupView \| null }` |
+| POST | `/api/manual-preview` | `{ plugin, values }` | `{ identityKey }` or `{ error }` |
+
+`PATCH /api/releases/:id` answers `group: null` for the same reason `/api/groups/:id/pick`
+does: a null is the route saying "this group is no longer in the list you are showing".
+Step 3 of §7.4 re-derives the upgrade flag, and on a group that is browsable *only* because
+of that flag — picked, with something better on offer — downgrading the better release
+clears it and takes the group out of Browse. A 404 would be a lie, because the group still
+exists; returning it as a `GroupView` is worse, because the client patches the card back in
+and the list goes on offering a group it no longer contains. That stale card is actionable:
+Pick on it queues an `upgrade` (the kind comes from `state = 'picked'`), and importing an
+upgrade trashes the live file and repoints `picked_release_id` — a downgrade executed as an
+upgrade, on files. The route must be able to say the group left, so the client can drop it.
+
+`/api/manual-preview` exists because §11 names the identity-key preview as the only guard
+against a wrong manual identity, and the key can only be built by the plugin, on the
+server. It writes nothing. The form debounces calls to it and shows the key, or the
+plugin's own complaint, under the fields.
+
+It answers **200 with `{ error }`** when the plugin rejects the values, reserving 4xx for
+a malformed body, an unknown plugin, and a plugin with no manual hooks. A rejection is
+the normal state of a half-typed form — the endpoint is called on every keystroke, and a
+date reading `2026-0` is not a client error. Returning 4xx there would make the SPA's
+fetch helper throw on ordinary typing.
 
 ```ts
 interface FailedItemView {
@@ -287,8 +371,12 @@ feed it came from, and **Fix…** / **Dismiss**. Fix expands an inline form; sav
 the row and reports whether it joined an existing group or made a new one.
 
 One shared `ManualForm` component, rendered from `ManualField[]`, used by all three
-forms, with a live identity-key preview so the consequence of a change is visible before
-it is saved.
+forms. The two forms that edit an identity — Fix on Failed, and Edit on a Browse card —
+carry a live identity-key preview, so the consequence of a change is visible before it is
+saved. The per-release quality form does not, and must not: a quality edit cannot change
+the identity key (§7.4), so a preview there would answer a question the form does not
+ask — and, given only quality values, the answer would be the plugin complaining about
+the identity fields it was never sent.
 
 Browse gains an **Edit** control on the card (identity and display) and one per release
 row (quality). Both patch the affected card in place from the response, the way picking

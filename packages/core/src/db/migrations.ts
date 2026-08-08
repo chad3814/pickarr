@@ -105,6 +105,36 @@ CREATE TABLE discovered_sites (
 );
 `;
 
+/**
+ * What a human, rather than the parser, decided about a row.
+ *
+ * `feed_items.dismissed_at` is "I have looked at this failure and it is not
+ * worth fixing" — a third state alongside failed and resolved, and the default
+ * filter of the Failed list. It is nullable rather than a boolean flag because
+ * *when* it was waved off is the only thing that distinguishes an old
+ * dismissal from a fresh one, and clearing it back to NULL is how a resolve
+ * says the decision was reversed.
+ *
+ * The two `edited_at` columns record that the current values were typed rather
+ * than parsed. Nothing reads them yet; they exist so that a future re-parse
+ * pass can tell which rows it must not overwrite, which is a fact only
+ * recordable at the moment of the edit.
+ *
+ * The partial index carries the Failed list's exact ORDER BY. `WHERE
+ * parse_error IS NOT NULL` keeps it proportional to the failures rather than
+ * to the whole feed history, which is the far larger table and never queried
+ * this way. `id` is left ascending inside the index because the list tiebreaks
+ * ascending on it — see `failedFeedItems`.
+ */
+const MANUAL_METADATA = `
+ALTER TABLE feed_items   ADD COLUMN dismissed_at INTEGER;
+ALTER TABLE media_groups ADD COLUMN edited_at    INTEGER;
+ALTER TABLE releases     ADD COLUMN edited_at    INTEGER;
+
+CREATE INDEX feed_items_failed
+  ON feed_items (first_seen_at DESC, id) WHERE parse_error IS NOT NULL;
+`;
+
 export const migrations: Migration[] = [
   {
     version: 1,
@@ -116,6 +146,12 @@ export const migrations: Migration[] = [
     version: 2,
     up(db) {
       db.exec(DISCOVERED_SITES);
+    },
+  },
+  {
+    version: 3,
+    up(db) {
+      db.exec(MANUAL_METADATA);
     },
   },
 ];

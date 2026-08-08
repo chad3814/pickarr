@@ -14,11 +14,13 @@ export interface GroupRow {
   upgradeReleaseId: number | null;
   createdAt: number;
   listRankAt: number;
+  editedAt: number | null;
 }
 
 const SELECT = `
   SELECT id, plugin, identity_key, display, search_text, state,
-         picked_release_id, upgrade_release_id, created_at, list_rank_at
+         picked_release_id, upgrade_release_id, created_at, list_rank_at,
+         edited_at
   FROM media_groups
 `;
 
@@ -35,6 +37,7 @@ export function toGroupRow(row: SqlRow): GroupRow {
     upgradeReleaseId: maybeNum(row, 'upgrade_release_id'),
     createdAt: num(row, 'created_at'),
     listRankAt: num(row, 'list_rank_at'),
+    editedAt: maybeNum(row, 'edited_at'),
   };
 }
 
@@ -129,6 +132,25 @@ export function flagUpgrade(db: DatabaseSync, groupId: number, now: number): voi
   db.prepare('UPDATE media_groups SET upgrade_release_id = ?, list_rank_at = ? WHERE id = ?').run(
     upgrade,
     now,
+    groupId,
+  );
+}
+
+/**
+ * Re-derives the flag and nothing else. `flagUpgrade` cannot be reused here:
+ * it also moves `list_rank_at`, and only a new release arriving earns a group
+ * a place at the top of the list. Correcting a release's quality is not an
+ * arrival.
+ *
+ * A missing group is silence rather than an error: the callers that reach here
+ * — a release edit, a merge — have already resolved the group, and re-deriving
+ * a flag for a row that is gone has nothing to say.
+ */
+export function refreshUpgradeFlag(db: DatabaseSync, groupId: number): void {
+  const group = getGroup(db, groupId);
+  if (group === null) return;
+  db.prepare('UPDATE media_groups SET upgrade_release_id = ? WHERE id = ?').run(
+    deriveUpgradeReleaseId(db, groupId, group.pickedReleaseId),
     groupId,
   );
 }
@@ -241,4 +263,107 @@ export function pickedGroups(db: DatabaseSync): GroupRow[] {
     .prepare(`${SELECT} WHERE state = 'picked' ORDER BY list_rank_at DESC, id ASC`)
     .all()
     .map((row) => toGroupRow(row as SqlRow));
+}
+
+/**
+ * The three columns a corrected identity rewrites, and no others — notably not
+ * `list_rank_at`: renaming a group is not a release arriving.
+ *
+ * `search_text` travels with `display` because it is derived from it; letting
+ * a caller update one without the other is how a group becomes unsearchable
+ * under the name it now shows.
+ */
+export function updateGroupIdentity(
+  db: DatabaseSync,
+  group: { id: number; identityKey: string; display: string; searchText: string },
+): void {
+  db.prepare(
+    'UPDATE media_groups SET identity_key = ?, display = ?, search_text = ? WHERE id = ?',
+  ).run(group.identityKey, group.display, group.searchText, group.id);
+}
+
+/**
+ * Separate from `updateGroupIdentity` because a resolve stamps a group it
+ * created without otherwise rewriting it, and a merge stamps the *target*,
+ * whose own identity columns deliberately stand.
+ */
+export function markGroupEdited(db: DatabaseSync, groupId: number, editedAt: number): void {
+  db.prepare('UPDATE media_groups SET edited_at = ? WHERE id = ?').run(editedAt, groupId);
+}
+
+/**
+ * The first half of a merge. `PRAGMA foreign_keys = ON` and
+ * `releases.group_id REFERENCES media_groups (id)`, so this must run before
+ * `deleteGroup` — deleting first fails outright rather than orphaning rows,
+ * which is the behaviour we want but not a sequence worth relying on.
+ *
+ * **This and the `deleteGroup` that follows it belong in one transaction.**
+ * The move leaves the source's `picked_release_id` and `upgrade_release_id`
+ * pointing at releases the target now owns, and neither column has a foreign
+ * key to catch that. Nothing notices, because the source row is deleted a
+ * statement later — but that delete is precisely the statement that can throw
+ * (see above), and a merge that half-committed would leave a group claiming
+ * releases it no longer holds, which every browse and pick query would then
+ * read as truth.
+ *
+ * The caller re-derives the target's upgrade flag afterwards: the arriving
+ * releases can beat the target's pick, and this function knowing that rule too
+ * is exactly the duplication `deriveUpgradeReleaseId` exists to prevent.
+ */
+export function moveReleasesToGroup(
+  db: DatabaseSync,
+  fromGroupId: number,
+  toGroupId: number,
+): void {
+  db.prepare('UPDATE releases SET group_id = ? WHERE group_id = ?').run(toGroupId, fromGroupId);
+}
+
+/**
+ * Only ever called on a group already emptied by `moveReleasesToGroup`, and
+ * only when `groupHasHistory` said no. Anything still referencing the row
+ * raises a foreign key error rather than vanishing.
+ */
+export function deleteGroup(db: DatabaseSync, id: number): void {
+  db.prepare('DELETE FROM media_groups WHERE id = ?').run(id);
+}
+
+/** The two kinds of history a group can have. */
+export type GroupHistory = 'downloads' | 'imported-files';
+
+/**
+ * What has already happened to the one group handed in, or null for a group
+ * nothing has happened to yet.
+ *
+ * Which kind, rather than a bare yes, because the caller refusing a merge has
+ * to tell the user what is in the way, and a message naming two tables sends
+ * them looking in both. The two situations are also genuinely different: a
+ * download is something recorded against this group, an imported file is
+ * something already on disk under its name.
+ *
+ * A group with both is reported as `imported-files`. The ordering only decides
+ * anything in that case, and in that case the download has already landed —
+ * files are in the library under this group's name, which is the heavier fact
+ * and the one the user has to go and look at.
+ *
+ * Only this group is inspected — in a merge that is the *source*, the group
+ * about to be emptied and deleted. Why the merge refuses on a source with
+ * history is a fact about the target (it may already carry its own pick, its
+ * own upgrade flag and its own imported files, and silently reconciling two
+ * picks is a guess), but that is spec §7.3's rationale for asking, not
+ * something this observes. It answers about one group and nothing else.
+ *
+ * A trashed `imported_files` row still counts. The file was placed on disk
+ * under this group's name, and trashing recorded where it went — history, not
+ * an absence of it.
+ */
+export function groupHistory(db: DatabaseSync, groupId: number): GroupHistory | null {
+  const row = db
+    .prepare(
+      `SELECT EXISTS (SELECT 1 FROM downloads WHERE group_id = ?)       AS downloads,
+              EXISTS (SELECT 1 FROM imported_files WHERE group_id = ?)  AS imported`,
+    )
+    .get(groupId, groupId);
+  if (row === undefined) return null;
+  if (num(row as SqlRow, 'imported') !== 0) return 'imported-files';
+  return num(row as SqlRow, 'downloads') !== 0 ? 'downloads' : null;
 }

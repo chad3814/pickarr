@@ -70,6 +70,28 @@ export interface SiteLookupCandidates {
   readonly prefixes: readonly string[];
 }
 
+export type ManualFieldType = 'text' | 'number' | 'select';
+
+/**
+ * One field in the form a human fills in to describe a release by hand.
+ *
+ * `scope` is what lets a single schema drive three different forms: the whole
+ * list when describing a failed item from scratch, the `identity` fields when
+ * correcting a group, the `quality` fields when correcting one release. Core
+ * renders from this list and never learns what a "site" is.
+ */
+export interface ManualField {
+  readonly name: string;
+  readonly label: string;
+  readonly type: ManualFieldType;
+  readonly scope: 'identity' | 'quality';
+  readonly required?: boolean;
+  /** Permitted values, for `type: 'select'`. An empty string means "unset". */
+  readonly options?: readonly string[];
+  readonly placeholder?: string;
+  readonly help?: string;
+}
+
 export interface MediaTypePlugin {
   readonly id: string;
   readonly displayName: string;
@@ -106,6 +128,40 @@ export interface MediaTypePlugin {
    * purely descriptive — nothing may depend on it.
    */
   refusalReason?(): string | null;
+
+  /**
+   * The fields a human may fill in to describe a release this plugin handles.
+   *
+   * A plugin implementing none of the manual hooks simply gets no edit UI;
+   * core hides the controls. Dismissing a failed item still works, because
+   * that is core's own bookkeeping and needs no plugin knowledge.
+   */
+  manualFields?(): readonly ManualField[];
+
+  /**
+   * Field values turned into a release, or a message naming what is wrong.
+   *
+   * Must produce a correct `identityKey` and `display` from the
+   * `identity`-scoped values alone: core does not send quality values when
+   * editing a group, and ignores `media.quality` if one comes back.
+   */
+  fromManualValues?(
+    values: Readonly<Record<string, string>>,
+  ): { media: ParsedRelease } | { error: string };
+
+  /**
+   * The inverse, to prefill an edit form. Manual values are never stored —
+   * only the `ParsedRelease` is — so this is how a form is repopulated, and
+   * why a plugin renaming a field later orphans nothing.
+   */
+  toManualValues?(media: ParsedRelease): Record<string, string>;
+
+  /**
+   * Best-effort prefill for a name that failed to parse. Runs on names the
+   * parser has already refused, so returning little or nothing is normal.
+   * Must never throw: a suggestion is a convenience, not a contract.
+   */
+  suggestManualValues?(releaseName: string): Record<string, string>;
 }
 
 /**

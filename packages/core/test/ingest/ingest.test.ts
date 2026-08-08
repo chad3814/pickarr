@@ -315,11 +315,13 @@ test('a plugin returning a display with no fields records a parse_error', () => 
 
   assert.equal(result.parseErrors, 1);
   assert.equal(result.releasesAdded, 1);
-  assert.match(
-    String(db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.[
-      'parse_error'
-    ]),
-    /fields/,
+  // The exact message, not merely /fields/: dropping the Array.isArray guard
+  // does not make the call succeed, it makes the fields loop throw
+  // "display.fields is not iterable" — which also matches /fields/, so a
+  // looser assertion here survives the very bug the guard exists to prevent.
+  assert.equal(
+    db.prepare('SELECT parse_error FROM feed_items WHERE guid = ?').get('g1')?.['parse_error'],
+    'invalid parse result: display.fields must be an array',
   );
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM feed_items').get()?.['n']), 2);
   db.close();

@@ -564,3 +564,66 @@ now fails to parse anything logs 50 lines every interval forever, not just once.
 the intended tradeoff (each line is the raw title you need to fix the parser, and there is
 no per-title dedup to complicate), but it is worth knowing before deciding a feed's
 interval or where its log ends up.
+
+## Manual metadata
+
+**A group ingested before its site was learned re-keys itself on a save that changed
+nothing.** A release parsed with an empty site list keys as `bangbros:2026-08-03:…`; once
+`learnSites` adds `Bang Bros` from the metadata service, opening that group's Edit form
+and pressing Save without touching a field rebuilds the key as `bang-bros:2026-08-03:…`.
+
+This one is worth reading carefully, because the obvious fix is provably impossible.
+`sceneToManualValues` verifies the prefilled *title* against the key and falls back to a
+key-derived spelling when they disagree; the same trick does not work for the site.
+`siteComparisonKey(v)` is `slug(v)` with the hyphens removed, so every value that slugs to
+the stored segment lies in that segment's match class, and `canonicalSiteName` maps an
+entire class to one string. If *any* value of the site field could rebuild the stored key,
+the segment itself would — and it does not. So when the check falls through, no prefill
+can preserve that key, and the code emits the stored subtitle unchanged rather than a slug
+that buys nothing and costs the casing.
+
+Two things bound it. The default path template's `{sitename}` collapses separators, so
+both spellings render the *same* library directory. And `learnSites` has already re-keyed
+the parser for that name, so new arrivals split from the old group whether or not anyone
+ever opens Edit — the save converges them rather than diverging them.
+
+Closing it properly means one of: making the key's site segment `siteComparisonKey` rather
+than `slug` (kills the root cause, needs a migration and a decision about what `{Site}`
+renders), or handing the edit path the identity key it is editing so it can compare
+directly. Neither belonged in the branch that found it.
+
+## Test-suite blind spots
+
+These are not product defects. They are ways this repo's tests have been green while
+proving less than they appeared to, each found by mutating the source and watching nothing
+fail. They are recorded because all three will recur.
+
+**A round-trip assertion cannot pin any property of a helper shared by both directions.**
+`parse(name) → toManualValues → fromManualValues === parse(name)` looks like a strong
+property, and it is — until the two directions are deduplicated onto one function, which is
+otherwise the right thing to do. After that, changing the shared helper moves both sides
+together and the assertion still holds: `.toSorted()` was deleted from
+`sceneSlugFromParts` and the round-trip tests stayed green. Absolute-value assertions on
+the key are what actually pin it. Deduplicate anyway — but replace the redundancy you just
+removed.
+
+**Mutation coverage flatters itself when every mutant targets contents and never the
+wrapper.** `inTransaction` in `manual/operations.ts` was surrounded by 22 mutants that all
+passed through it and none that attacked it; replacing its whole `BEGIN`/`COMMIT`/`ROLLBACK`
+body with `return body()` left 302 tests green. A wrapper is invisible on every happy path,
+so it needs a fault injected deliberately — for that one, a `BEFORE DELETE` trigger raising
+`ABORT`, which fails the statement and leaves the transaction to the caller the way a real
+constraint failure does. `RAISE(ROLLBACK)` unwinds first and tests SQLite instead of you.
+
+**A test whose fixtures all come from the code under test cannot see that code's history.**
+Every test of the manual-edit prefill seeded its rows from the *fixed* parser, so none
+could observe a row written by the parser before the fix — and the defect that survived
+into the final review lived exactly there. When behaviour changes and stored data does not,
+hand-build a fixture in the old shape.
+
+**`assert.equal(screen.queryByText(x), null)` OOM-kills the web test run.** When the node
+exists, node:assert deep-inspects a live DOM element to format the failure. Inside a
+`waitFor` that happens on every retry; even outside one it burns about 75 seconds and takes
+the file with it. Either way it presents as a bare SIGKILL naming no test, which costs an
+hour to trace. Compare booleans — `packages/web/test/Browse.test.tsx` has a `gone()` helper
+for exactly this.
