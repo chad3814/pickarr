@@ -1,11 +1,23 @@
 # Known issues
 
-Everything here was found during the build, deliberately not fixed, and verified to
-reproduce. Nothing in this list is speculative. It exists so that the next person to
-open this repo — probably you — does not have to rediscover it.
+This file is now two things at once.
 
-The most useful of these will be settled by pointing Pickarr at a real indexer and
-reading the `parse_error` rows it produces.
+**A map of the tracked defects.** Everything here that is a defect — something that
+behaves wrongly, or something absent that should exist — now lives as a GitHub issue.
+Those appear below as links, under their original section heading and in their original
+order. The full evidence for each one, verbatim, is in the issue.
+
+**The standing record of why the parser is shaped the way it is.** The rest of this file
+is not work. It is settled reasoning: a rule that works, and the alternatives that were
+tried against real feeds and cost more than they bought. Those entries stay here in full
+and in place, because their job is to stop someone undoing the decision. They were not
+filed as issues because there is nothing in them to research or solve.
+
+So, reading below: **a bulleted link is tracked work; a paragraph is settled reasoning.**
+
+Everything was found during the build and verified to reproduce. Nothing here is
+speculative. The most useful of these will be settled by pointing Pickarr at a real
+indexer and reading the `parse_error` rows it produces.
 
 ## Parser
 
@@ -21,17 +33,7 @@ date in several positions, `Studio - Performers - Title (Month DD, YYYY)`, conca
 
 What follows is what it still gets wrong.
 
-**A release group's name may contain spaces, and reading it as one token cost 65% of
-all parse failures.** `...XXX.XviD-iPT Team` was read as the single token `Team`, which
-left the run `iPT Team` with no encode boundary behind it and refused the whole name.
-Measured against a 6,804-title corpus, that one group accounted for 1,496 of 2,302
-refusals; fixing it took the SD tier from 22% to 85% and the corpus overall from 66% to
-88%.
-
-A multi-token group is detached under a stricter rule than a single-token one: it must
-sit directly behind encode information, exactly as the dot-attached form must, and spans
-at most three tokens. Title material never follows the encode section, so that is what
-stops a run of words after a stray hyphen being swallowed.
+- [A release group's name may contain spaces, and reading it as one token cost 65% of all parse failures](https://github.com/chad3814/pickarr/issues/3) — `...XXX.XviD-iPT Team` was read as the single token `Team`; 1,496 of 2,302 corpus refusals.
 
 **A hyphen-attached release group must be 1–12 alphanumerics and must not be a listed
 term**, or the whole name is refused. Casing is not consulted at all.
@@ -68,7 +70,7 @@ and digits are stripped, so one entry covers `Part1`, `part2` and `PART`. Removi
 entry re-opens exactly one merge with no second rule behind it — though on current
 evidence the split-marker entries have nothing to re-open.
 
-Still refused for length: `-DIGITALPLAYGROUND` and anything over twelve characters.
+- [Release group tags over twelve characters are still refused (`-DIGITALPLAYGROUND`)](https://github.com/chad3814/pickarr/issues/4) — Still refused for length: `-DIGITALPLAYGROUND` and anything over twelve characters.
 
 **A date at the very end, with the encode ahead of it, is the same shape read from the
 other side.** `teensexmania_mishelle-klein_babe-loves-sperm-as-coffee-2160p-18.12.18`
@@ -82,25 +84,7 @@ identity ends at that boundary rather than at the date — otherwise `2160p` lan
 scene title. A trailing date with *no* encode section before it is still refused: nothing
 would separate site from title or title from encode.
 
-**Date-at-end names need a configured site list to file correctly.** A second dotted
-shape appeared in real feeds after the MVP: `Site.Title.And.Performers.YYYY.MM.DD.Encode`,
-with the date at the end. It is hostile to this parser because the date is the only
-boundary the ordinary form has, and here it sits past both the site and the title, so
-*nothing* separates those two. The shape is recognised by two conditions that must hold
-together — every token after the date is encode information (the positive test), and
-there is more before the date than after it (which stops an ordinary name whose title
-is all encode-like words from being re-read this way). The site/title split is then
-resolved against `plugins.<pkg>.sites`, falling back to the first token.
-
-The fallback is a guess about the library *path* only: every pre-date token reaches the
-identity key whichever side of the split it lands on, so no split can merge two
-different scenes. But two consequences are worth knowing. Without the list,
-`Anal Only`'s scenes file under `Anal/`. And **changing a site's name changes the
-identity key of every affected scene**, so anything already picked reappears as a new
-group rather than an upgrade of the old one — settle the naming before a long run, not
-during one. No other parser surveyed handles this shape at all, so there is no prior art
-to check the heuristic against; it rests on the two conditions above and on the corpus
-rows pinning the cases that must *not* be read this way.
+- [Date-at-end names need a configured site list to file correctly, and changing a site's name re-keys every affected scene](https://github.com/chad3814/pickarr/issues/5) — Without the list `Anal Only`'s scenes file under `Anal/`, and anything already picked reappears as a new group rather than an upgrade.
 
 **Site matching drops separators, and the configured spelling is canonical.** A site's
 own name and the way releases write it disagree about word boundaries roughly 10-15% of
@@ -113,32 +97,8 @@ wrote, so one site cannot become three groups depending on spelling. The corolla
 that the configured (or discovered) spelling decides the directory and the key, and
 `ANALONLY` is a legitimate if ugly choice.
 
-**A sub-site is only found when it is the name's leading run.** `Bangbros.Ass.Parade....`
-resolves to `Bang Bros`, not to `Ass Parade`, even though `Ass Parade` is a real site
-TPDB knows — the two-word candidate is `Bangbros Ass`, which matches nothing, so the
-one-word fallback settles it and `Ass Parade` stays in the title. Matching a site
-anywhere in the name was rejected deliberately: `Ass Parade` occurs at token 1 here, and
-accepting it would drop `Bangbros` from the name entirely. Listing
-`"Bangbros Ass Parade"` in config files these under the sub-site if that is wanted.
-
-**A confirmed site's own name must be at least four characters.** ThePornDB knows sites
-called `BIG`, `DP`, `Ex` and `Rk`. They are real, so the lookup answers correctly, and
-the answer is still wrong: a name that short cannot be told from an ordinary first word.
-Measured on the corpus, `Big.Boobs.For.The.Win` resolved to the site `BIG` with the title
-`Boobs For The Win`, and `DP.Addiction.Vol.1.Elegant.Angel` to the site `DP`.
-
-Rejecting them costs ten titles that previously parsed — every one with a fabricated site
-and a truncated title — and the corpus rate falls from 93.6% to 93.4%. **The rate went
-down and the output got better**, which is the second time that pair has come up in this
-file. The floor bounds the *answer*, not the query: a short query is still worth sending,
-because it is how a longer site name is found.
-
-Two things this does not fix. Four characters is a calibration, not a principle —
-`Kink` and `Vixen` are four and five and both resolve correctly, so length is a weak
-discriminator that happens to separate the observed cases. And **the cache outlives the
-rule**: entries confirmed before this floor existed are seeded straight into the plugin
-without passing through it again, so an existing `discovered_sites` needs its short
-entries cleared by hand.
+- [A sub-site is only found when it is the name's leading run](https://github.com/chad3814/pickarr/issues/6) — `Bangbros.Ass.Parade....` resolves to `Bang Bros`, not to `Ass Parade`.
+- [A confirmed site's own name must be at least four characters, and the cache outlives the rule](https://github.com/chad3814/pickarr/issues/7) — `Big.Boobs.For.The.Win` resolved to the site `BIG`; entries confirmed before the floor existed need clearing from `discovered_sites` by hand.
 
 **A search result is believed only when it is one of the release's own leading runs.**
 Two weaker rules were tried against the live API first and both are wrong. Confirming on
@@ -153,11 +113,7 @@ with the title `Use Fantasy ...` — a confidently wrong answer that got cached.
 returned names against the release's leading runs, longest first, is what settles all
 three cases. `MAX_SITE_TOKENS` caps a site at five words.
 
-**Only two searches are made per unknown site: the first two words, then the first.**
-This is not a cap on the site's length — a four-word site is found by a two-word query —
-but it does mean a site is undiscoverable when neither of its first two words appears in
-its registered name. None has been seen, and each extra query costs a round trip against
-a substring search that gets noisier as the query gets shorter.
+- [Only two searches are made per unknown site, so a site whose first two words are absent from its registered name is undiscoverable](https://github.com/chad3814/pickarr/issues/8) — Only two searches are made per unknown site: the first two words, then the first.
 
 **A short site-token cap causes wrong hits, not misses, so it is set generously.**
 `MAX_SITE_TOKENS` is 12. The instinct to keep it small is backwards here. Matching is
@@ -170,14 +126,7 @@ it exactly. That search returns 29 near-identical names differing by a letter
 this space run long — `Giga de Rein no odor - the woman who appeared uncensored -` is ten
 tokens.
 
-**A single-letter query is never sent; a single-digit one is.** The service matches a
-query anywhere in a name, so one letter confirms nothing and costs a page: measured live,
-`a` returns 87,955 results (`Male Reality`, `Laundry`), `b` 25,078, `x` 13,168. Digits are
-the opposite — they lead real site names (`2 Chicks Same Time`) and are cheap, with `0`
-through `4` returning nothing and `8` returning one. A blanket minimum query length would
-have discarded the useful case with the useless one. The cost of the rule: a site named
-with a single letter, and there is one called `X`, can be configured but never
-discovered.
+- [A single-letter query is never sent, so the real site named `X` can be configured but never discovered](https://github.com/chad3814/pickarr/issues/9) — A single-letter query is never sent; a single-digit one is.
 
 **Searches are paged, with two bounds.** The service caps `per_page` at 100 (asking for
 more returns an empty body), and one-word fallback queries routinely exceed that:
@@ -212,11 +161,7 @@ up. They are Jacquie et Michel TV's output, which appears in the same feeds unde
 name, so they file there rather than in a bucket of their own — `4K.kleo...` and
 `JacquieEtMichelTV.26.06.02.Lena...` belong in one directory.
 
-**This is a named case rather than a structural rule.** The site is not detected from the
-text; it cannot be, there is nothing there. Another poster opening names with a bare
-resolution would be filed here wrongly, and no other bare-resolution lead appears in the
-corpus. Only a leading `4K` counts — the token turns up mid-name constantly and `Tiny4K`
-is a real site.
+- [The bare-4K rule is a named case rather than a structural rule, so another bare-resolution poster would be filed wrongly](https://github.com/chad3814/pickarr/issues/10) — The site is not detected from the text; it cannot be, there is nothing there.
 
 **Every shape canonicalises its site against the configured list, including the ones that
 never look a site up.** The ordinary dated form takes its site verbatim from the text
@@ -237,16 +182,7 @@ The date was also the evidence that a name was a scene release at all, and witho
 have exactly this shape. Requiring a real site is what replaces that evidence; guessing
 would turn every unrecognised release in a feed into a group filed under its first word.
 
-**Dateless keys carry an empty date segment, and that is a knowing over-collation.**
-`brazzers::alex-coal`. Two encodes of one dateless scene collate with each other, and
-*not* with a dated release of the same scene — ordinary under-collation. The cost is the
-other direction: **two different scenes from one site sharing a title become one group**,
-and in this domain a title is frequently just a performer name. Nothing in a dateless
-name can separate them, so this is the one place the parser knowingly commits the error
-it otherwise refuses. It was chosen over the alternatives — refusing these releases
-entirely, or filling the slot with the RSS publish date, which would put a date that is
-not the scene's date into the library path and split re-posted scenes into separate
-groups. If it bites, the fix is a real per-scene date, not a heuristic.
+- [Dateless keys carry an empty date segment, so two different scenes from one site sharing a title become one group](https://github.com/chad3814/pickarr/issues/11) — Dateless keys carry an empty date segment, and that is a knowing over-collation.
 
 **A bare TLD directly after a confirmed site belongs to the domain.**
 `BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p` files under `Braless Forever`
@@ -255,12 +191,7 @@ with the title `Emma G and Rocky Beach Days`; without the rule the title would b
 bare-domain problem below: nothing confirms `Bang` in `Bang.com - Alex Coal`, so the rule
 never fires there. It also never consumes the last remaining token.
 
-**One unknown encode word refuses the whole name, so the vocabulary is worth
-extending on evidence.** A token the encode vocabulary does not know interrupts the
-trailing run, the run no longer reaches the end, and the name is refused — the same
-mechanism that `REMASTERED` tripped. Corpus evidence added `VERTICAL` (phone-format
-video), `F4V` (a Flash container), and `10bits` alongside `10bit`. Each was one or two
-titles; the pattern is what matters, since the failure is total rather than partial.
+- [One unknown encode word refuses the whole name, so the encode vocabulary is worth extending on evidence](https://github.com/chad3814/pickarr/issues/12) — A token the vocabulary does not know interrupts the trailing run and the whole name is refused.
 
 **An indexer's trailing runtime stamp is stripped.** `... MP4-KTR [06:32:12]` sits behind
 the group tag, so the encode run stops reaching the end and the name is refused over
@@ -306,12 +237,7 @@ introduced accidentally by the rule above and caught only because the titles loo
 **the corpus parse rate went up while the output got worse**, which is worth remembering
 about that metric.
 
-**`REMASTERED` was in the encode vocabulary and the non-group list at once.** The
-vocabulary entry read `REMASTER`, anchored, so the longer spelling matched neither and
-interrupted the encode run — 14 corpus titles refused by a typo. Real titles put it
-*inside* the run, `XXX.REMASTERED.XviD-iPT Team`, exactly where `REPACK` and `PROPER`
-sit, so it is encode vocabulary and a remaster collates with the original as another
-version of one scene. Its `NON_GROUP_TERMS` entry is gone.
+- [`REMASTERED` was in the encode vocabulary and the non-group list at once, refusing 14 corpus titles](https://github.com/chad3814/pickarr/issues/13) — The vocabulary entry read `REMASTER`, anchored, so the longer spelling matched neither and interrupted the encode run.
 
 **Interlaced resolutions parse and rank below progressive.** `1080i` claims 1080 and
 carries half the vertical detail per field, so it is recorded as `extras.interlaced` and
@@ -326,21 +252,8 @@ and this needs a four-digit one. `04.08.2026` is genuinely ambiguous between 4 A
 8 April; it reads day-first, the same convention the delimited reader already follows, so
 the two do not disagree.
 
-**A year restated in full after a short date is swallowed.**
-`ManyVids.26.08.02.2026.August.Heat.2` states 2026 twice. The reader stopped after `DD`,
-so `2026` became the first word of the identity — **parsing, but wrong**, and the same
-scene posted without the repeat keyed differently. Eighteen corpus titles were silently
-in that state; a refusal would have been more visible. The repeat is only swallowed when
-it agrees with the date already read: `26.08.02.1999.Party.Classics` keeps its 1999,
-because a year that disagrees is title material.
-
-**Poster signatures are stripped, from a list of observed posters.**
-`..._2160p_iris2_by_cdrw69`, `....by.am`, `...ai.x2.4k.suffo.ed` are appended after a
-complete name and sit past the encode section, so the trailing run stops reaching the
-end. Unlike the runtime stamp this is **a list of names rather than a structural rule**,
-and a new poster with a new suffix needs a new entry — worth knowing before relying on
-it. A generic "trailing `by <word>`" rule was rejected because ordinary titles end that
-way. Ten corpus titles.
+- [A year restated in full after a short date is swallowed, and eighteen corpus titles were silently keyed wrong](https://github.com/chad3814/pickarr/issues/14) — `ManyVids.26.08.02.2026.August.Heat.2` states 2026 twice — parsing, but wrong.
+- [Poster signatures are stripped from a list of observed posters, so a new poster needs a new entry](https://github.com/chad3814/pickarr/issues/15) — A list of names rather than a structural rule. Ten corpus titles.
 
 **An episode number anchors the boundary the same way a date does.** Sites that number
 episodes instead of dating them — `HeavyOnHotties.E141.Daniela.Pechotes...`,
@@ -359,45 +272,19 @@ date. It surfaces as its own `Episode` field and renders in the library path as 
 Measured: 40 corpus titles carry an E-number and 38 of them now parse, against roughly
 five before — a small share of the corpus, but complete coverage of the shape.
 
-**A bare-domain prefix becomes the site.** Stripping a website prefix now requires
-`www.` or a scheme, because `Bang.com - Alex Coal - Deep` and `site.com - Brazzers - ...`
-are the same string shape and guessing wrong merged five real studios onto one identity.
-The cost of the safe choice: a genuine bare-domain stamp like `pornsite.net - Vixen - ...`
-is treated as the studio, so the scene files under the wrong directory and under-collates
-against the same scene without the stamp. Wrong path, never a wrong merge.
-
-**The same scene in a dotted and a bracketed listing gets two groups.** The dotted form
-carries no component boundaries, so `Vixen.23.07.19.Alex.Coal.Beautiful.Episode` and
-`[Vixen] Alex Coal - Beautiful Episode - 2023-07-19` cannot be told to be the same
-scene. Under-collation, and probably irreducible.
-
-**Residual over-collation, believed irreducible.** Two distinct scenes can share an
-identity key when a release has no marker *and* its title ends in a word that looks
-like a resolution or source — a scene literally titled "Party 4K". Without a marker
-the name contains nothing that separates the two readings.
-
-**Smaller, all pre-existing:** in a listing, a hyphen-attached group inside the quality
-segment leaks into the identity and the quality is lost (`- 1080p-GRP`); when a listing
-holds two dates the first wins and the second ends up in the title; `4K60` matches no
-resolution because there is no word boundary before the `60`.
+- [A bare-domain prefix becomes the site, so a genuine bare-domain stamp files the scene under the wrong directory](https://github.com/chad3814/pickarr/issues/16) — Wrong path, never a wrong merge.
+- [The same scene in a dotted and a bracketed listing gets two groups](https://github.com/chad3814/pickarr/issues/17) — The dotted form carries no component boundaries. Under-collation, and probably irreducible.
+- [Residual over-collation, believed irreducible](https://github.com/chad3814/pickarr/issues/18) — Two distinct scenes can share an identity key when a release has no marker and its title ends in a word that looks like a resolution or source — a scene literally titled "Party 4K".
+- [In a listing, a hyphen-attached group inside the quality segment leaks into the identity and the quality is lost](https://github.com/chad3814/pickarr/issues/19) — `- 1080p-GRP`. One of the "Smaller, all pre-existing" defects.
+- [When a listing holds two dates the first wins and the second ends up in the title](https://github.com/chad3814/pickarr/issues/20) — One of the "Smaller, all pre-existing" defects.
+- [`4K60` matches no resolution because there is no word boundary before the `60`](https://github.com/chad3814/pickarr/issues/21) — One of the "Smaller, all pre-existing" defects.
 
 **Under-collation by design.** A name whose boundary is genuinely ambiguous returns
 `null` rather than guessing. That is the intended direction: a `parse_error` row is
 visible and fixable, while a wrong identity key silently merges two different scenes
 and you pick the wrong thing.
 
-**A configurable path template does not move files already imported.** `pathTemplate`
-decides where new imports land; changing it leaves everything already in the library
-where it is, so a change part-way through leaves two layouts side by side until the old
-files are moved by hand. Pickarr has no library scan, so it will not notice.
-
-The default is `{sitename}/{sitename}.{date}{episode}.{titledots}.{resolution}-{group}`,
-which follows scene naming. It is **not** the layout that shipped before the template
-existed — anyone already running Pickarr gets a second layout alongside the first unless
-they set `{Site}/{isodate}{episode} - {Title}`, which reproduces the old one exactly.
-`{date}` is dotted for scene naming, so the dashed form is `{isodate}`.
-`{SiteName}` is PascalCase (`BangBros`) and `{Site}` is title-cased with spaces
-(`Bang Bros`); the older layout used the latter, which is why both exist.
+- [A configurable path template does not move files already imported](https://github.com/chad3814/pickarr/issues/22) — `pathTemplate` decides where new imports land; a change part-way through leaves two layouts side by side until the old files are moved by hand.
 
 Because the default names the encode, **two encodes of one scene render two paths**. An
 upgrade therefore lands on its own path and the superseded file is trashed by group
@@ -457,110 +344,73 @@ structure, it held.
 
 ## Import and upgrade
 
-**A crash mid-import can cause a benign retry to re-trash correct files.** A hard crash
-inside `importDownload` on a multi-file upgrade can leave a retry trashing files an
-earlier attempt placed correctly, then failing. No data is lost — the error names the
-trash directory — but the retry does not converge without intervention. Currently
-unreachable because `planSceneImport` only ever selects one file. **Fix this before
-adding multi-file import plans.**
-
-**Copy-mode crash recovery adopts by byte size.** After a crash between the copy landing
-and the row being recorded, a retry treats a destination whose size matches the source as
-its own completed copy. A foreign file at that exact path with an exactly equal byte count
-would be adopted. For a zero-byte source the size match is guaranteed rather than
-coincidental — harmless, since copy mode never touches the source.
-
-**A move-mode `EXDEV` crash no longer self-heals.** A crash between the copy completing
-and the source being unlinked now reports a collision rather than finishing the move.
-This is deliberate: a stuck import you can see beats automatically deleting a file we
-cannot prove we wrote.
-
-**Plugin sources are validated only at plan time.** `assertSourcesWereListed` rejects a
-planned source that exists on disk but was not in the listing handed to `planImport`.
-A source that does not exist at plan time but *materialises during* the import — a path
-inside `trashDir` that `trashLiveFiles` then creates, for example — is not caught. The
-reachable set is bounded to the library and trash directories. Adding the same membership
-check immediately before the transfer closes it.
+- [A crash mid-import can cause a benign retry to re-trash correct files](https://github.com/chad3814/pickarr/issues/23) — No data is lost, but the retry does not converge without intervention. Fix this before adding multi-file import plans.
+- [Copy-mode crash recovery adopts a destination by byte size](https://github.com/chad3814/pickarr/issues/24) — A foreign file at that exact path with an exactly equal byte count would be adopted.
+- [A move-mode `EXDEV` crash no longer self-heals and reports a collision instead](https://github.com/chad3814/pickarr/issues/25) — Deliberate: a stuck import you can see beats automatically deleting a file we cannot prove we wrote.
+- [Plugin sources are validated only at plan time, so a source that materialises during import is not caught](https://github.com/chad3814/pickarr/issues/26) — `assertSourcesWereListed` runs at plan time only; adding the same membership check immediately before the transfer closes it.
 
 ## Download client
 
-**A finished job is dropped from the client, with its files.** Once the import is
-recorded, the file Pickarr wanted is in the library and what remains under the client's
-storage path is spent: par2 volumes, samples, and in move mode an empty directory.
-Nothing used to reclaim that space, and nothing stopped SABnzbd's history growing for the
-lifetime of the installation.
-
-The *client* is asked to delete rather than Pickarr doing it. Those paths belong to the
-client; Pickarr only sees them through `mapPath`, and a recursive delete aimed through a
-path mapping is the wrong place to find out the mapping is wrong.
-
-Three things it will not touch. A **failed** download stays where it is — deleting it
-destroys the evidence for why it failed. An **untracked** entry is never ours; the
-category may be shared. And a job still running is left alone.
-
-Driven from the history snapshot rather than from a column, which makes it self-healing
-without extra bookkeeping: while an entry is still listed it is still ours and still
-imported, so a tick that could not reach the client tries again on the next one. A
-failure here is logged and never marks the download failed — the import already
-succeeded, and the cost of giving up is disk space rather than data.
-
-**Labels are unique only within one database.** `downloadLabel` is `pickarr-<id>` with no
-per-installation salt, so two Pickarr instances sharing one SABnzbd category — or one
-instance whose database was deleted and recreated — can recover each other's jobs and
-attach the wrong client reference. **Give each instance its own SABnzbd category.** A
-per-install salt stored in the database at first boot would remove the constraint.
-
-**The `nzbname` round-trip is unverified against a real server.** Double-submit recovery
-depends on SABnzbd surfacing the label we send as the job's `name` in its queue and
-history. If it renames jobs instead, recovery silently never fires and the same NZB can
-be submitted twice. Pickarr logs a warning once per process the first time it sees a
-tracked download whose name is not its expected label — **watch for that on your first
-real run.**
-
-**A release title that itself ends in something shaped like `[pickarr-N]`, combined with
-truncation landing at exactly that offset, can misattribute a ref.** The job name sent to
-SABnzbd is the release title with `[pickarr-<id>]` appended (see `clientJobName` in
-`db/downloads.ts`), and recovery (`extractLabel`) reads the label back out by matching
-that bracketed pattern anchored at the end of whatever name the client reports — not by
-searching for our own marker specifically. If SABnzbd truncates away the real trailing
-marker *and* the truncated remainder happens to end in a same-shaped bracketed substring
-that the release's own title supplied, that substring is read as the label instead, and a
-ref could attach to the wrong download. This requires our app-namespaced string to appear
-literally in an indexer title and truncation to land at exactly that offset — reproduced
-under test, but the preconditions make it vanishingly unlikely in practice. Not fixed;
-recorded here rather than complicating the marker format.
+- [A finished job is dropped from the client, with its files](https://github.com/chad3814/pickarr/issues/27) — The client is asked to delete rather than Pickarr doing it; failed, untracked and still-running jobs are left alone.
+- [Labels are unique only within one database, so two Pickarr instances sharing a SABnzbd category can recover each other's jobs](https://github.com/chad3814/pickarr/issues/28) — `downloadLabel` is `pickarr-<id>` with no per-installation salt. Give each instance its own SABnzbd category.
+- [The `nzbname` round-trip is unverified against a real server](https://github.com/chad3814/pickarr/issues/29) — If SABnzbd renames jobs instead of surfacing our label, recovery silently never fires and the same NZB can be submitted twice.
+- [A release title ending in something shaped like `[pickarr-N]`, plus truncation at exactly that offset, can misattribute a ref](https://github.com/chad3814/pickarr/issues/30) — Reproduced under test, but the preconditions make it vanishingly unlikely in practice.
 
 ## Web and API
 
-`/api/downloads` returns every download row ever created, unpaginated, with one query per
-row, and the SPA polls it every three seconds. Fine for a few hundred rows; not for a few
-thousand.
-
-The browse search parameter is interpolated into a `LIKE '%…%'` with no `ESCAPE`, so a
-query containing `%` or `_` matches more than intended.
-
-A malformed pagination cursor silently restarts from the first page instead of erroring,
-which would present as an infinite scroll that never terminates.
-
-Picks always go to `downloadClients[0]` regardless of which feed produced the release, and
-only that client's untracked entries are exposed. The config accepts several clients with
-no indication that more than one is only half-wired.
+- [`/api/downloads` returns every download row unpaginated, one query per row, and the SPA polls it every three seconds](https://github.com/chad3814/pickarr/issues/31) — Fine for a few hundred rows; not for a few thousand.
+- [The browse search parameter is interpolated into a LIKE with no ESCAPE, so `%` and `_` match more than intended](https://github.com/chad3814/pickarr/issues/32) — A query containing `%` or `_` matches more than intended.
+- [A malformed pagination cursor silently restarts from the first page instead of erroring](https://github.com/chad3814/pickarr/issues/33) — Would present as an infinite scroll that never terminates.
+- [Picks always go to `downloadClients[0]` regardless of which feed produced the release](https://github.com/chad3814/pickarr/issues/34) — The config accepts several clients with no indication that more than one is only half-wired.
 
 ## Operational notes
 
-**There is no authentication.** Put Pickarr behind a reverse proxy or keep it on a LAN.
+- [There is no authentication](https://github.com/chad3814/pickarr/issues/35) — Put Pickarr behind a reverse proxy or keep it on a LAN.
+- [Pickarr never empties `trashDir`](https://github.com/chad3814/pickarr/issues/36) — Deliberate: it is the only destructive operation in the system, so reclaiming the space stays a manual decision.
+- [There is no library scanning](https://github.com/chad3814/pickarr/issues/37) — Pickarr only knows about media it picked itself. Files already on disk are invisible to it.
+- [A chronically unparseable feed logs its cap of 50 parse-failure lines every tick, indefinitely](https://github.com/chad3814/pickarr/issues/38) — `MAX_REPORTED_PARSE_FAILURES` bounds one tick but not the feed's whole lifetime.
 
-**Pickarr never empties `trashDir`.** Superseded files accumulate there until you delete
-them. That is deliberate — it is the only destructive operation in the system, so
-reclaiming the space stays a manual decision.
+## Manual metadata
 
-**No library scanning.** Pickarr only knows about media it picked itself. Files already on
-disk are invisible to it.
+- [A group ingested before its site was learned re-keys itself on a save that changed nothing](https://github.com/chad3814/pickarr/issues/39) — Opening that group's Edit form and pressing Save without touching a field rebuilds `bangbros:2026-08-03:…` as `bang-bros:2026-08-03:…`.
 
-**A chronically unparseable feed logs its cap every tick, indefinitely.** Each ingest
-tick logs up to `MAX_REPORTED_PARSE_FAILURES` (50) individual parse-failure lines, which
-bounds one tick but not the feed's whole lifetime — a feed whose title format changed and
-now fails to parse anything logs 50 lines every interval forever, not just once. That is
-the intended tradeoff (each line is the raw title you need to fix the parser, and there is
-no per-title dedup to complicate), but it is worth knowing before deciding a feed's
-interval or where its log ends up.
+## Test-suite blind spots
+
+These are hazards for whoever writes the next test rather than tracked work, so they are
+not filed as issues and stay here in full. The one exception is the last of them, which is
+mechanically preventable and has an issue of its own:
+[Add a lint rule or shared helper banning `assert.equal(screen.queryByText(x), null)` in web tests](https://github.com/chad3814/pickarr/issues/40).
+
+These are not product defects. They are ways this repo's tests have been green while
+proving less than they appeared to, each found by mutating the source and watching nothing
+fail. They are recorded because all three will recur.
+
+**A round-trip assertion cannot pin any property of a helper shared by both directions.**
+`parse(name) → toManualValues → fromManualValues === parse(name)` looks like a strong
+property, and it is — until the two directions are deduplicated onto one function, which is
+otherwise the right thing to do. After that, changing the shared helper moves both sides
+together and the assertion still holds: `.toSorted()` was deleted from
+`sceneSlugFromParts` and the round-trip tests stayed green. Absolute-value assertions on
+the key are what actually pin it. Deduplicate anyway — but replace the redundancy you just
+removed.
+
+**Mutation coverage flatters itself when every mutant targets contents and never the
+wrapper.** `inTransaction` in `manual/operations.ts` was surrounded by 22 mutants that all
+passed through it and none that attacked it; replacing its whole `BEGIN`/`COMMIT`/`ROLLBACK`
+body with `return body()` left 302 tests green. A wrapper is invisible on every happy path,
+so it needs a fault injected deliberately — for that one, a `BEFORE DELETE` trigger raising
+`ABORT`, which fails the statement and leaves the transaction to the caller the way a real
+constraint failure does. `RAISE(ROLLBACK)` unwinds first and tests SQLite instead of you.
+
+**A test whose fixtures all come from the code under test cannot see that code's history.**
+Every test of the manual-edit prefill seeded its rows from the *fixed* parser, so none
+could observe a row written by the parser before the fix — and the defect that survived
+into the final review lived exactly there. When behaviour changes and stored data does not,
+hand-build a fixture in the old shape.
+
+**`assert.equal(screen.queryByText(x), null)` OOM-kills the web test run.** When the node
+exists, node:assert deep-inspects a live DOM element to format the failure. Inside a
+`waitFor` that happens on every retry; even outside one it burns about 75 seconds and takes
+the file with it. Either way it presents as a bare SIGKILL naming no test, which costs an
+hour to trace. Compare booleans — `packages/web/test/Browse.test.tsx` has a `gone()` helper
+for exactly this.

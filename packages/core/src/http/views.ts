@@ -1,8 +1,14 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { DisplayFields, QualityTokens } from '@pickarr/plugin-api';
+import type {
+  DisplayFields,
+  MediaTypePlugin,
+  ParsedRelease,
+  QualityTokens,
+} from '@pickarr/plugin-api';
 import type { GroupRow } from '../db/groups.ts';
 import { releasesForGroup } from '../db/releases.ts';
 import type { DownloadRow } from '../db/downloads.ts';
+import type { FeedItemRow } from '../db/feed-items.ts';
 import type { UntrackedEntry } from '../pipeline/reconcile.ts';
 import { str, type SqlRow } from '../db/row.ts';
 
@@ -12,6 +18,8 @@ export interface ReleaseView {
   quality: QualityTokens;
   releaseName: string;
   publishedAt: number | null;
+  /** The quality half of an edit form, prefilled. Absent when the plugin has no `toManualValues`. */
+  manualValues?: Record<string, string>;
 }
 
 export interface GroupView {
@@ -23,11 +31,61 @@ export interface GroupView {
   upgradeReleaseId: number | null;
   listRankAt: number;
   releases: ReleaseView[];
+  /** The identity half of an edit form, prefilled. Absent when the plugin has no `toManualValues`. */
+  manualValues?: Record<string, string>;
 }
 
 export interface BrowseResponse {
   groups: GroupView[];
   nextCursor: string | null;
+}
+
+/** One name the parser refused, and everything a human needs to describe it. */
+export interface FailedItemView {
+  id: number;
+  feedId: string;
+  /** The plugin id, so the SPA picks the right schema. Empty when the feed has left configuration. */
+  plugin: string;
+  rawTitle: string;
+  link: string;
+  parseError: string;
+  firstSeenAt: number;
+  publishedAt: number | null;
+  suggestedValues: Record<string, string>;
+  dismissedAt: number | null;
+}
+
+export interface FailedResponse {
+  items: FailedItemView[];
+  nextCursor: string | null;
+}
+
+export interface ResolveResponse {
+  group: GroupView;
+  joinedExisting: boolean;
+}
+
+/**
+ * `group` is the *surviving* group, which on a merge is the target rather than
+ * the one that was patched. `mergedInto` names it, and is null when nothing
+ * merged; the client knows the source id because it sent it, so those two
+ * together are what let it drop one card and replace another.
+ */
+export interface GroupEditResponse {
+  group: GroupView;
+  mergedInto: number | null;
+}
+
+/**
+ * `group` is the edited release's group as the browse list sees it afterwards,
+ * and null means it left: rescoring re-derives the upgrade flag, and a picked
+ * group listed only because something better was on offer drops out when the
+ * edit takes that away. Same contract as `PickResponse`, for the same reason —
+ * a client that cannot be told keeps showing a card whose Pick queues an
+ * upgrade over the file it just downgraded.
+ */
+export interface ReleaseEditResponse {
+  group: GroupView | null;
 }
 
 export interface DownloadView {
@@ -64,32 +122,148 @@ export interface PickResponse {
   group: GroupView | null;
 }
 
-export function toGroupView(db: DatabaseSync, group: GroupRow): GroupView {
+/**
+ * An edit form's prefill, or nothing at all.
+ *
+ * Nothing, rather than an empty object, for a plugin that cannot read values
+ * back: the field's absence is how the SPA decides whether to offer an Edit
+ * control, so an empty object would put a form in front of a plugin that has
+ * no `fromManualValues` to save it with.
+ *
+ * The catch is not the guard `suggestManualValues` needs — that hook's contract
+ * forbids throwing — but the one this call site needs. `toManualValues` makes
+ * no such promise, and it is called here once per group and once per release on
+ * every browse page: unguarded, one plugin that throws on one stored record
+ * takes down the whole list rather than one card's Edit button.
+ */
+function manualValuesFor(
+  plugin: MediaTypePlugin | undefined,
+  media: ParsedRelease,
+): Record<string, string> | undefined {
+  const toValues = plugin?.toManualValues;
+  if (plugin === undefined || toValues === undefined) return undefined;
+  try {
+    return toValues.call(plugin, media);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `plugin` is the one registered for `group.plugin`, or undefined when no
+ * plugin claims that id any more — a group outlives the package that made it.
+ *
+ * The prefill values are assembled here rather than nearer the rows they
+ * describe because `toManualValues` takes a whole `ParsedRelease`: a release
+ * carries only the quality half, and the identity half lives on the group. This
+ * is the only place both are in hand.
+ */
+export function toGroupView(
+  db: DatabaseSync,
+  group: GroupRow,
+  plugin: MediaTypePlugin | undefined,
+): GroupView {
+  const display = JSON.parse(group.display) as DisplayFields;
+
   const releases = releasesForGroup(db, group.id).map((release) => {
     const feedItem = db
       .prepare('SELECT raw_title, published_at FROM feed_items WHERE id = ?')
       .get(release.feedItemId);
-    return {
+    const quality = JSON.parse(release.quality) as QualityTokens;
+    const manualValues = manualValuesFor(plugin, {
+      identityKey: group.identityKey,
+      display,
+      quality,
+    });
+    const view: ReleaseView = {
       id: release.id,
       score: release.score,
-      quality: JSON.parse(release.quality) as QualityTokens,
+      quality,
       releaseName: feedItem === undefined ? '' : str(feedItem as SqlRow, 'raw_title'),
       publishedAt:
         feedItem === undefined || (feedItem as SqlRow)['published_at'] === null
           ? null
           : Number((feedItem as SqlRow)['published_at']),
     };
+    // Set only when there is one. Never assigned `undefined`: the field is
+    // absent or it is a value, and the SPA reads the difference.
+    if (manualValues !== undefined) view.manualValues = manualValues;
+    return view;
   });
 
-  return {
+  // An empty quality, because a group has none — quality is release-level — and
+  // because `editGroup` hands the plugin exactly the same empty one when it
+  // merges the submitted values over the current record. A prefill built from
+  // anything else would not round-trip through the save it feeds.
+  const manualValues = manualValuesFor(plugin, {
+    identityKey: group.identityKey,
+    display,
+    quality: {},
+  });
+
+  const view: GroupView = {
     id: group.id,
     plugin: group.plugin,
-    display: JSON.parse(group.display) as DisplayFields,
+    display,
     state: group.state,
     pickedReleaseId: group.pickedReleaseId,
     upgradeReleaseId: group.upgradeReleaseId,
     listRankAt: group.listRankAt,
     releases,
+  };
+  if (manualValues !== undefined) view.manualValues = manualValues;
+  return view;
+}
+
+/**
+ * A prefill guess for a name the parser refused, or nothing at all.
+ *
+ * The hook's contract says it must never throw — and the guard is here anyway,
+ * for the same reason `manualValuesFor` has one: a contract states what a
+ * plugin owes, not what it does, and this call site is the one that pays. It
+ * runs once per row on the Failed page, so a single plugin throwing on a
+ * single refused name would 500 the whole endpoint and take down the worklist
+ * of broken names — the one screen a broken plugin most needs to be visible
+ * on, and the only route from a refusal to a correction.
+ *
+ * An empty object rather than `undefined`, because unlike `manualValues` this
+ * field is not a signal: the SPA offers the Fix form from the plugin's field
+ * schema, and a missing suggestion just means an empty form.
+ */
+function suggestedValuesFor(
+  plugin: MediaTypePlugin | null,
+  rawTitle: string,
+): Record<string, string> {
+  const suggest = plugin?.suggestManualValues;
+  if (plugin === null || suggest === undefined) return {};
+  try {
+    return suggest.call(plugin, rawTitle);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * `plugin` is the one configured for the item's feed, or null when that feed
+ * has left configuration.
+ */
+export function toFailedItemView(
+  row: FeedItemRow,
+  plugin: MediaTypePlugin | null,
+): FailedItemView {
+  return {
+    id: row.id,
+    feedId: row.feedId,
+    plugin: plugin?.id ?? '',
+    rawTitle: row.rawTitle,
+    link: row.link,
+    // Never null in practice: `failedFeedItems` selects on `parse_error IS NOT
+    // NULL`. The fallback keeps that guarantee out of the wire format.
+    parseError: row.parseError ?? '',
+    firstSeenAt: row.firstSeenAt,
+    publishedAt: row.publishedAt,
+    suggestedValues: suggestedValuesFor(plugin, row.rawTitle),
+    dismissedAt: row.dismissedAt,
   };
 }
 

@@ -16,3 +16,13 @@ nav a.active { font-weight: 600; text-decoration: underline; }
 .release-current { font-weight: 600; }
 .download-row.untracked { opacity: 0.5; font-style: italic; }
 .download-error, .error { color: #b91c1c; }
+.failed { list-style: none; margin: 0; padding: 0; }
+.failed-row { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+.failed-row h2 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.failed-reason, .failed-feed { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
+.failed-actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+.manual-field { display: flex; gap: 0.5rem; align-items: baseline; margin-top: 0.5rem; }
+.manual-field label { min-width: 8rem; font-size: 0.9rem; }
+.manual-help { opacity: 0.6; font-size: 0.8rem; }
+.manual-preview { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+.manual-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }

@@ -1,10 +1,18 @@
 import type { MediaTypePlugin, PluginConfig, PluginFactory } from '@pickarr/plugin-api';
 import {
+  buildRelease,
   lastRefusalReason,
   parseSceneRelease,
   sceneSiteCandidates,
+  slug,
   type SceneParseOptions,
 } from './parse.ts';
+import {
+  sceneFromManualValues,
+  sceneManualFields,
+  sceneSuggestManualValues,
+  sceneToManualValues,
+} from './manual.ts';
 import { scoreScene } from './score.ts';
 import { planSceneImport } from './plan-import.ts';
 import { DEFAULT_PATH_TEMPLATE } from './path-template.ts';
@@ -44,6 +52,17 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
     planImport: (media, files) => planSceneImport(media, files, { pathTemplate }),
     siteCandidates: (releaseName: string) => sceneSiteCandidates(releaseName, options),
     refusalReason: () => lastRefusalReason(),
+    manualFields: () => sceneManualFields(),
+    // `options` is reassigned by `learnSites`, so each hook reads it when it
+    // runs rather than closing over the value it had at construction — a site
+    // discovered since startup has to reach a hand-entered release too, or the
+    // manual form keys it under a spelling the parser has stopped using.
+    // `toManualValues` needs the list for the opposite reason: it checks the
+    // site it is about to prefill against the key it came from, and that check
+    // is only meaningful against the list as it stands at Edit time.
+    fromManualValues: (values) => sceneFromManualValues(values, options),
+    toManualValues: (media) => sceneToManualValues(media, options),
+    suggestManualValues: (releaseName) => sceneSuggestManualValues(releaseName, options),
     learnSites(sites: readonly string[]) {
       const known = new Set(options.sites ?? []);
       const merged = [...(options.sites ?? [])];
@@ -59,4 +78,16 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
 };
 
 export default createScenesPlugin;
-export { lastRefusalReason, parseSceneRelease, sceneSiteCandidates, scoreScene, planSceneImport };
+export {
+  buildRelease,
+  lastRefusalReason,
+  parseSceneRelease,
+  sceneFromManualValues,
+  sceneManualFields,
+  sceneSiteCandidates,
+  sceneSuggestManualValues,
+  sceneToManualValues,
+  scoreScene,
+  planSceneImport,
+  slug,
+};
