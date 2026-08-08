@@ -3,7 +3,9 @@ import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import { clearParseError, getFeedItem, setDismissedAt } from '../db/feed-items.ts';
 import {
   deleteGroup,
+  earnsListBump,
   findGroup,
+  flagUpgrade,
   getGroup,
   groupHistory,
   markGroupEdited,
@@ -12,7 +14,12 @@ import {
   updateGroupIdentity,
   type GroupRow,
 } from '../db/groups.ts';
-import { getRelease, markReleaseEdited, updateReleaseQuality } from '../db/releases.ts';
+import {
+  getRelease,
+  markReleaseEdited,
+  releasesForGroup,
+  updateReleaseQuality,
+} from '../db/releases.ts';
 import {
   commitRelease,
   validateIdentity,
@@ -138,8 +145,10 @@ function mediaFor(group: GroupRow, quality: string): ParsedRelease {
  * bump rule, so the rule for when a group returns to the top of the browse
  * list cannot come to exist twice.
  *
- * That bump is deliberate here and absent from the two edits below: a resolve
- * is a release *arriving*, just by a slower route through a human.
+ * That bump is deliberate: a resolve is a release *arriving*, just by a slower
+ * route through a human. The merge in `editGroup` bumps for the same reason
+ * and under the same guard; the edits that only correct an existing record do
+ * not, because they introduce no release the group did not already have.
  */
 export function resolveFeedItem(
   deps: ManualDeps,
@@ -273,11 +282,33 @@ export function editGroup(
         );
       }
 
+      // Asked *before* the move, and it has to be: `earnsListBump` compares
+      // against the target's own pick and flag, and once these releases sit
+      // under the target they are part of what it already knows about — the
+      // comparison would then be against a group that contains them (and
+      // `releasesForGroup(source)` would be empty besides).
+      // `releasesForGroup` orders by score descending, so the first row is the
+      // best thing this merge brings in.
+      const best = releasesForGroup(db, group.id)[0];
+      const bumps = best !== undefined && earnsListBump(db, target, best.score);
+
       // Order matters and the foreign key enforces it: the releases move
       // first, then the target's flag is re-derived over them, and the emptied
       // source is deleted last — the one statement here that can throw.
       moveReleasesToGroup(db, group.id, target.id);
-      refreshUpgradeFlag(db, target.id);
+      // A release moving into a group and beating its pick *is* an arrival at
+      // that group. It merely took a slower route, in through a human, exactly
+      // as a resolve does — and a resolve bumps (§7.1). Reaching the same
+      // scene by the Failed tab and by an identity correction must not leave
+      // it ordered two different ways.
+      //
+      // The rule that an edit does not bump still holds for the two cases it
+      // was written for — correcting a group's display, and correcting a
+      // release's quality — because neither introduces a release the group did
+      // not already have. A merge that brings in nothing better does not bump
+      // either: moving a pair of also-ran encodes across is not an arrival.
+      if (bumps) flagUpgrade(db, target.id, now);
+      else refreshUpgradeFlag(db, target.id);
       // The stamp goes on the surviving group. The target's own display and
       // search text deliberately stand: the submitted values were the user's
       // way of naming which existing scene this is, not a rewrite of it.

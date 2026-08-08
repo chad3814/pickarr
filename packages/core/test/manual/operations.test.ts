@@ -179,6 +179,59 @@ function seedTwoGroups(db: DatabaseSync): void {
   ).run();
 }
 
+/**
+ * A merge that brings in nothing better: group 1 is picked on a 2160, group 2
+ * holds a 1080 and a 720. Both `list_rank_at` values are distinct from `NOW`,
+ * so a bump cannot pass for a coincidence.
+ */
+function seedWorseSource(db: DatabaseSync): void {
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'T1', 'https://indexer.invalid/1.nzb', 100),
+            (2, 'f', 'g2', 'T2', 'https://indexer.invalid/2.nzb', 100),
+            (3, 'f', 'g3', 'T3', 'https://indexer.invalid/3.nzb', 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state,
+                               picked_release_id, created_at, list_rank_at)
+     VALUES (1, 'test', 'k1', '{"title":"G1","fields":[]}', 'g1', 'picked', 1,    100, 500),
+            (2, 'test', 'k2', '{"title":"G2","fields":[]}', 'g2', 'new',    NULL, 100, 600)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (1, 1, 1, '{"resolution":2160}', 2160, 100),
+            (2, 2, 2, '{"resolution":1080}', 1080, 100),
+            (3, 2, 3, '{"resolution":720}',   720, 100)`,
+  ).run();
+}
+
+/**
+ * A target already offering an upgrade: group 1 is picked on a 720 with its
+ * own 2160 flagged; group 2 holds a second 2160. The incoming release beats
+ * the pick and ties the flag, which is the boundary the flagged-score
+ * comparison is strict for.
+ */
+function seedFlaggedTarget(db: DatabaseSync): void {
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'T1', 'https://indexer.invalid/1.nzb', 100),
+            (2, 'f', 'g2', 'T2', 'https://indexer.invalid/2.nzb', 100),
+            (3, 'f', 'g3', 'T3', 'https://indexer.invalid/3.nzb', 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state,
+                               picked_release_id, upgrade_release_id, created_at, list_rank_at)
+     VALUES (1, 'test', 'k1', '{"title":"G1","fields":[]}', 'g1', 'picked', 1,    2,    100, 500),
+            (2, 'test', 'k2', '{"title":"G2","fields":[]}', 'g2', 'new',    NULL, NULL, 100, 600)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (1, 1, 1, '{"resolution":720}',   720, 100),
+            (2, 1, 2, '{"resolution":2160}', 2160, 100),
+            (3, 2, 3, '{"resolution":2160}', 2160, 100)`,
+  ).run();
+}
+
 /** One group, picked on the better of its two releases. */
 function seedEditableReleases(db: DatabaseSync): void {
   db.prepare(
@@ -475,7 +528,59 @@ test('editing the key to another group merges into it and deletes the source', (
   assert.equal(target.upgradeReleaseId, 2);
   // The stamp goes on the surviving group.
   assert.equal(target.editedAt, NOW);
+  // And the 2160 arriving is worth a bump — see the three ordering tests below
+  // for the rule and its two boundaries.
+  assert.equal(target.listRankAt, NOW);
+  db.close();
+});
+
+test('a merge bumps list_rank_at when an incoming release beats the target pick', () => {
+  const db = openTestDatabase();
+  seedTwoGroups(db);
+
+  ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
+
+  const target = getGroup(db, 1)!;
+  // The 2160 moving in beats the picked 720, so it is an *arrival* at group 1:
+  // the same event ingest bumps for, reached by a slower route through a
+  // human, exactly as a resolve is. The same scene fixed from the Failed tab
+  // bumps, and these two routes must not order it differently.
+  assert.equal(target.listRankAt, NOW);
+  assert.equal(target.upgradeReleaseId, 2);
+  db.close();
+});
+
+test('a merge that brings in nothing better than the pick does not bump', () => {
+  const db = openTestDatabase();
+  seedWorseSource(db);
+
+  ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
+
+  const target = getGroup(db, 1)!;
+  // Moving two also-ran encodes into a group is not an arrival: there is
+  // nothing here the user would want the list to lift the group up for.
   assert.equal(target.listRankAt, 500);
+  assert.equal(target.upgradeReleaseId, null);
+  assert.equal(releasesForGroup(db, 1).length, 3);
+  db.close();
+});
+
+test('a merge that ties an already-flagged upgrade does not bump', () => {
+  const db = openTestDatabase();
+  seedFlaggedTarget(db);
+
+  ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
+
+  const target = getGroup(db, 1)!;
+  // The incoming 2160 beats the picked 720 but only equals the 2160 already
+  // flagged, and the group is already in the browse list on that flag's
+  // account. Bumping would re-sort the list around an arrival that offers the
+  // user nothing new — which is exactly why ingest's guard compares against
+  // the flagged score too, and strictly.
+  assert.equal(target.listRankAt, 500);
+  // Something better than the pick is still on offer; which of the two tied
+  // 2160s carries the flag is `deriveUpgradeReleaseId`'s business.
+  assert.notEqual(target.upgradeReleaseId, null);
   db.close();
 });
 
