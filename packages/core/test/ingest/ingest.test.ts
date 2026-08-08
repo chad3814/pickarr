@@ -436,3 +436,37 @@ test('search_text is lowercased and includes every display value', () => {
   assert.equal(text, text.toLowerCase());
   db.close();
 });
+
+test("a plugin's own refusal reason reaches the parse_error row", () => {
+  // `unrecognized` is a count; the plugin knows which rule refused and that is
+  // what makes the log a worklist.
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = {
+    id: 'test',
+    displayName: 'Test',
+    parse: () => null,
+    score: () => 0,
+    planImport: () => null,
+    refusalReason: () => 'no date, and the site is not in the known list',
+  };
+
+  const result = ingestEntries(db, plugin, FEED, [entry('g1', 'Whatever.2160p')], 1000);
+  assert.equal(result.parseErrors, 1);
+  assert.deepEqual(result.parseFailures, [
+    { title: 'Whatever.2160p', reason: 'no date, and the site is not in the known list' },
+  ]);
+});
+
+test('a plugin that keeps no reason still records one', () => {
+  const db = openTestDatabase();
+  const plugin: MediaTypePlugin = {
+    id: 'test',
+    displayName: 'Test',
+    parse: () => null,
+    score: () => 0,
+    planImport: () => null,
+  };
+
+  const result = ingestEntries(db, plugin, FEED, [entry('g1', 'Whatever.2160p')], 1000);
+  assert.deepEqual(result.parseFailures, [{ title: 'Whatever.2160p', reason: 'unrecognized' }]);
+});

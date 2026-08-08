@@ -95,7 +95,11 @@ function prepareSafely(
 ): { prepared: PreparedRelease } | { error: string } {
   try {
     const parsed: ParsedRelease | null = plugin.parse(title);
-    if (parsed === null) return { error: 'unrecognized' };
+    if (parsed === null) {
+      // The plugin's own account of why, when it keeps one. Without this the
+      // log reports a count where it could report a worklist.
+      return { error: plugin.refusalReason?.() ?? 'unrecognized' };
+    }
 
     if (typeof parsed.identityKey !== 'string' || parsed.identityKey.length === 0) {
       return { error: 'invalid parse result: identityKey must be a non-empty string' };

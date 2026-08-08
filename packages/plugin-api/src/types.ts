@@ -96,6 +96,16 @@ export interface MediaTypePlugin {
    * host may call it repeatedly.
    */
   learnSites?(sites: readonly string[]): void;
+
+  /**
+   * Why the most recent `parse` returned `null`.
+   *
+   * `null` alone cannot say what to fix. A log reading `unrecognized` eight
+   * times is a count; `no date, and the site is not in the known list` is a
+   * worklist. Valid only immediately after the `parse` call it describes, and
+   * purely descriptive — nothing may depend on it.
+   */
+  refusalReason?(): string | null;
 }
 
 /**
