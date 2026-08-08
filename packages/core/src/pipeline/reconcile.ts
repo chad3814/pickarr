@@ -1,3 +1,5 @@
+import { rm } from 'node:fs/promises';
+import { basename, dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClient } from '../clients/types.ts';
 import { linkForRelease, titleForRelease } from '../db/releases.ts';
@@ -44,6 +46,41 @@ export interface ReconcileDeps {
   importDownload(download: DownloadRow): Promise<void>;
   /** Optional; only used to surface cleanup failures, which are not fatal. */
   log?(message: string): void;
+  /** Injectable for tests, as `rename` is in import.ts. Defaults to the real one. */
+  rm?: (path: string, options: { recursive: boolean; force: boolean }) => Promise<void>;
+}
+
+/**
+ * The directory the client made for this job, or `null` when nothing at the
+ * storage path can be *proved* to be it.
+ *
+ * SABnzbd deletes the files it knows about and leaves the folder standing, so
+ * removing the folder is Pickarr's job — and it is the one piece of cleanup
+ * that can destroy something it did not create. The proof required is the
+ * label Pickarr itself put in the job name: `clientJobName` appends
+ * `[pickarr-<id>]`, SABnzbd names the folder after the job, and this checks
+ * that the folder in hand carries *this* download's label.
+ *
+ * Both shapes of storage path are covered, because both occur: the directory
+ * itself, and — for a job that unpacked to a single file — the file inside it,
+ * whose parent is then the directory. The label is what tells them apart, not
+ * a filesystem probe.
+ *
+ * What the check is really guarding against is a client configured to put
+ * completed files straight into the category directory with no per-job folder.
+ * The storage path is then `<category>/scene.mp4`, whose parent is a directory
+ * shared with every other job — including other people's. That parent carries
+ * no label, so it is refused, and the worst case is a folder left behind
+ * rather than a category wiped out.
+ */
+function jobDirectory(id: number, storagePath: string | null): string | null {
+  if (storagePath === null) return null;
+  const label = downloadLabel(id);
+  const path = storagePath.replace(/\/+$/, '');
+  if (path.length === 0) return null;
+  if (extractLabel(basename(path)) === label) return path;
+  const parent = dirname(path);
+  return extractLabel(basename(parent)) === label ? parent : null;
 }
 
 /**
@@ -349,21 +386,30 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
   //
   // Runs last, after every status change this tick, so a download imported a
   // few lines above is cleaned up in the same tick rather than the next.
-  const importedRefs = new Set<string>(
+  const removeDir = deps.rm ?? rm;
+  const importedJobs = new Map<string, { id: number; directory: string | null }>(
     db
       .prepare(
-        `SELECT client_ref FROM downloads
+        `SELECT id, client_ref, storage_path FROM downloads
          WHERE client_id = ? AND status = 'imported' AND client_ref IS NOT NULL`,
       )
       .all(client.id)
-      .map((row) => String(row['client_ref'])),
+      .map((row) => {
+        const id = Number(row['id']);
+        const storagePath = row['storage_path'];
+        return [
+          String(row['client_ref']),
+          { id, directory: jobDirectory(id, storagePath === null ? null : String(storagePath)) },
+        ] as const;
+      }),
   );
 
   for (const entry of snapshot.history) {
     // Ours, and finished with. A stranger's job in a shared category is never
     // touched, and a failure is left where it is — deleting it would destroy
     // the evidence for why it failed.
-    if (!importedRefs.has(entry.ref)) continue;
+    const job = importedJobs.get(entry.ref);
+    if (job === undefined) continue;
     try {
       // eslint-disable-next-line no-await-in-loop -- one call per finished job, and the list is short
       await client.remove(entry.ref, true);
@@ -372,6 +418,32 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       // Never a download failure: the import already succeeded and the file is
       // in place. The cost of giving up here is disk space, not data.
       deps.log?.(`reconcile ${client.id}: could not remove ${entry.ref}: ${(error as Error).message}`);
+      continue;
+    }
+
+    // `del_files` reclaims the files; the folder itself is left standing, so
+    // this is what actually frees the job's directory. Recursive, because the
+    // point is to leave nothing behind — and safe to be recursive only because
+    // `jobDirectory` has already proved the folder is this download's own.
+    // `force`, so a directory a previous tick already removed is not an error.
+    if (job.directory === null) {
+      // Once per job, not once per tick: the entry is gone from history now,
+      // so this loop will not see it again.
+      deps.log?.(
+        `reconcile ${client.id}: removed ${entry.ref} but left its directory in place; ` +
+          `nothing at its storage path carries the ${downloadLabel(job.id)} label`,
+      );
+      continue;
+    }
+    try {
+      // eslint-disable-next-line no-await-in-loop -- paired with the removal above
+      await removeDir(job.directory, { recursive: true, force: true });
+    } catch (error) {
+      // Disk space again, not data: the import is done and the client's entry
+      // is already gone, so there is nothing to retry and nothing at risk.
+      deps.log?.(
+        `reconcile ${client.id}: could not remove ${job.directory}: ${(error as Error).message}`,
+      );
     }
   }
 
