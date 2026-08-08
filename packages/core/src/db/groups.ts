@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { releaseScore } from './releases.ts';
 import { maybeNum, num, str, type SqlRow } from './row.ts';
 
 export type GroupState = 'new' | 'picked';
@@ -118,12 +119,45 @@ function deriveUpgradeReleaseId(
 }
 
 /**
+ * Whether a release scoring `score` beats everything the group already knows
+ * about — its pick, and anything already flagged as better than that pick.
+ * This is the one condition under which `list_rank_at` moves.
+ *
+ * Written here once and shared by ingest (`commitRelease`) and the manual
+ * merge (`editGroup`) because those are the same event seen twice: a release
+ * *arriving* at this group. A merge's releases merely took a slower route, in
+ * through a human, exactly as a resolve's do. Two copies of this expression is
+ * how the same scene, corrected by hand, ends up ordered differently from the
+ * one that arrived on its own.
+ *
+ * An unpicked group never earns a bump: `state = 'new'` alone already keeps it
+ * in the browse list, so there is nothing to lift it back to — and its pick is
+ * NULL, so without this every release it holds would qualify.
+ *
+ * Both comparisons are strict, and the flagged one is the interesting half. A
+ * release that merely ties the flagged upgrade offers the user nothing they
+ * are not already being offered — the group is in the browse list on that
+ * flag's account — so bumping for it would re-sort the list around an arrival
+ * that changed nothing. A NULL on either side reads as "no bar to clear", not
+ * as "nothing clears it": `releaseScore` answers null for an unset pointer or
+ * a release that has since gone, and negative infinity is what that means
+ * here.
+ */
+export function earnsListBump(db: DatabaseSync, group: GroupRow, score: number): boolean {
+  if (group.state !== 'picked') return false;
+  const pickedScore = releaseScore(db, group.pickedReleaseId) ?? Number.NEGATIVE_INFINITY;
+  const flaggedScore = releaseScore(db, group.upgradeReleaseId) ?? Number.NEGATIVE_INFINITY;
+  return score > pickedScore && score > flaggedScore;
+}
+
+/**
  * Re-derives the flag *and* moves list_rank_at — the only write in the system
- * that does the latter. Ingest calls this when a newly arrived release beats
- * both the pick and anything already flagged, which is the sole event the spec
- * says should lift a group back to the top of the browse list. The flag itself
- * is recomputed from the same rule every other write uses, so this is that
- * rule plus a bump, not a second mechanism that could disagree with it.
+ * that does the latter. Its callers — ingest, and the merge half of a group
+ * edit — reach it only through `earnsListBump` above, which is the sole event
+ * the spec says should lift a group back to the top of the browse list: a
+ * release arriving that beats both the pick and anything already flagged. The
+ * flag itself is recomputed from the same rule every other write uses, so this
+ * is that rule plus a bump, not a second mechanism that could disagree with it.
  */
 export function flagUpgrade(db: DatabaseSync, groupId: number, now: number): void {
   const group = getGroup(db, groupId);
@@ -143,8 +177,9 @@ export function flagUpgrade(db: DatabaseSync, groupId: number, now: number): voi
  * arrival.
  *
  * A missing group is silence rather than an error: the callers that reach here
- * — a release edit, a merge — have already resolved the group, and re-deriving
- * a flag for a row that is gone has nothing to say.
+ * — a release edit, a merge that brought in nothing better than the target
+ * already had — have already resolved the group, and re-deriving a flag for a
+ * row that is gone has nothing to say.
  */
 export function refreshUpgradeFlag(db: DatabaseSync, groupId: number): void {
   const group = getGroup(db, groupId);

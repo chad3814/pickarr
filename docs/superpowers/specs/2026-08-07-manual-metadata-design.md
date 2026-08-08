@@ -250,10 +250,11 @@ class of duplication is what `deriveUpgradeReleaseId` was introduced to end.
 Joining an existing group is the expected case, not an edge case: a failure is very often
 a scene already present from another release.
 
-**A resolve may move `list_rank_at`, and the two edits below may not.** Resolving is a
-release *arriving* — it just took a slower route through a human — so if it beats a
-picked release it earns its group a place at the top of the list, exactly as ingest
-would have. Correcting an existing record is not an arrival.
+**A resolve may move `list_rank_at`.** Resolving is a release *arriving* — it just took a
+slower route through a human — so if it beats a picked release it earns its group a place
+at the top of the list, exactly as ingest would have. Correcting an existing record is not
+an arrival and does not. The merge branch of §7.3 is the third case that bumps, and for
+this same reason: it brings a release into a group that did not have it.
 
 ### 7.2 Dismiss a failed item
 
@@ -270,8 +271,32 @@ about an item that parsed.
    the target.
 4. Otherwise update `identity_key`, `display`, `search_text`.
 
-In all cases set `edited_at` — on the surviving group, which for a merge is the target —
-and never touch `list_rank_at`: an edit is not an arrival.
+In all cases set `edited_at` — on the surviving group, which for a merge is the target.
+
+**A merge may move `list_rank_at`; the other two branches may not.** A release moving into
+a group and beating its pick *is* an arrival at that group — it merely took a slower route,
+in through a human, exactly as a resolve does (§7.1). The motivating case is one scene
+downloaded at 1080p and later re-encoded at 2160p under a name the parser reads
+differently: correcting the second group's identity merges it in and flags the upgrade, and
+if the group does not rise in the browse list the user has to go looking for the thing they
+just fixed. The same scene fixed from the Failed tab bumps, and one outcome reached two ways
+must not be ordered two ways.
+
+The guard is **ingest's, shared rather than restated** — `earnsListBump` in `db/groups.ts`,
+called by both `commitRelease` and the merge: bump only when a release being moved in beats
+*both* the target's picked release and anything already flagged on it, and strictly on both
+sides. A merge that brings in nothing better does not bump; moving a pair of also-ran encodes
+across is not an arrival. Neither is a release that only ties an already-flagged upgrade —
+the group is in the browse list on that flag's account already, so bumping would re-sort the
+list around an arrival that offers nothing new. The bumping merge calls `flagUpgrade`, the
+rest `refreshUpgradeFlag`.
+
+The scores must be read **before** `moveReleasesToGroup` runs, or the comparison is against a
+target that already holds the incoming releases.
+
+**The rule that an edit does not bump still holds for the two cases it was written for** —
+correcting a group's display (step 2/4 above) and correcting a release's quality (§7.4) —
+because neither introduces a release the group did not already have.
 
 **A merge does not overwrite the target's display.** The submitted values were the user's
 way of *naming* which existing scene this is, and the target is already that scene,
@@ -392,8 +417,10 @@ parsed ones for the same content.
 **Core.** Resolve creating a group; resolve joining an existing group; resolve rejected
 for an item that already parsed. Dismiss, and its 409. Group edit: display-only, key
 change, merge, merge refused for a group with a download, merge refused for a group with
-an imported file. Release edit: rescored, upgrade flag re-derived, `list_rank_at`
-unchanged. A plugin implementing none of the hooks: no crash, no manual values, dismiss
+an imported file. The merge's bump rule and both of its boundaries: an incoming release
+that beats the target's pick bumps `list_rank_at`, one that beats nothing does not, and
+one that beats the pick but only ties an already-flagged upgrade does not. Release edit:
+rescored, upgrade flag re-derived, `list_rank_at` unchanged. A plugin implementing none of the hooks: no crash, no manual values, dismiss
 still works.
 
 **Web.** Failed tab renders and paginates; Fix submits and removes the row; Dismiss

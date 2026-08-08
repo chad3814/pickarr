@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DisplayFields, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
-import { findGroup, flagUpgrade, insertGroup } from '../db/groups.ts';
-import { insertRelease, releaseScore } from '../db/releases.ts';
+import { earnsListBump, findGroup, flagUpgrade, insertGroup } from '../db/groups.ts';
+import { insertRelease } from '../db/releases.ts';
 
 function isText(value: string | undefined): boolean {
   return typeof value === 'string';
@@ -201,20 +201,17 @@ export function commitRelease(
     createdAt: now,
   });
 
+  // `earnsListBump` decides whether the *bump* is earned — whether this newly
+  // arrived release is better than everything the group already knows about.
+  // It lives in `db/groups.ts` beside `flagUpgrade` because a merge asks the
+  // same question of the releases it moves in, and the two must not drift.
+  // Which release ends up flagged is not decided here: `flagUpgrade`
+  // re-derives that from the group's own releases, so the flag cannot disagree
+  // with the table it summarizes.
   let upgradeFlagged = false;
-  if (existing !== null && existing.state === 'picked') {
-    const pickedScore = releaseScore(db, existing.pickedReleaseId) ?? Number.NEGATIVE_INFINITY;
-    const flaggedScore = releaseScore(db, existing.upgradeReleaseId) ?? Number.NEGATIVE_INFINITY;
-
-    // This comparison decides whether the *bump* is earned — whether a
-    // newly arrived release is better than everything the group already
-    // knows about. Which release ends up flagged is not decided here;
-    // flagUpgrade re-derives that from the group's own releases, so the
-    // flag cannot disagree with the table it summarizes.
-    if (prepared.score > pickedScore && prepared.score > flaggedScore) {
-      flagUpgrade(db, groupId, now);
-      upgradeFlagged = true;
-    }
+  if (existing !== null && earnsListBump(db, existing, prepared.score)) {
+    flagUpgrade(db, groupId, now);
+    upgradeFlagged = true;
   }
 
   return { groupId, releaseId, groupCreated: existing === null, upgradeFlagged };
