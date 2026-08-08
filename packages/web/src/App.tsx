@@ -2,6 +2,7 @@ import { NavLink, Route, Routes } from 'react-router';
 import { Browse } from './routes/Browse.tsx';
 import { Picks } from './routes/Picks.tsx';
 import { Downloads } from './routes/Downloads.tsx';
+import { Failed } from './routes/Failed.tsx';
 
 export function App() {
   return (
@@ -10,12 +11,14 @@ export function App() {
         <NavLink to="/">Browse</NavLink>
         <NavLink to="/picks">Picks</NavLink>
         <NavLink to="/downloads">Downloads</NavLink>
+        <NavLink to="/failed">Failed</NavLink>
       </nav>
       <main>
         <Routes>
           <Route path="/" element={<Browse />} />
           <Route path="/picks" element={<Picks />} />
           <Route path="/downloads" element={<Downloads />} />
+          <Route path="/failed" element={<Failed />} />
         </Routes>
       </main>
     </div>

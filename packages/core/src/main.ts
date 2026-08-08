@@ -1,5 +1,6 @@
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { loadConfig } from './config/load.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins } from './plugins/registry.ts';
@@ -121,12 +122,23 @@ async function main(): Promise<void> {
   const here = dirname(fileURLToPath(import.meta.url));
   const webRoot = process.env['PICKARR_WEB_ROOT'] ?? resolve(join(here, 'web'));
 
+  // Feeds name their plugin by package and the manual routes need it by feed
+  // id, a mapping only configuration holds. Resolved once here rather than per
+  // request: `loadConfig` has already refused any feed naming a package that is
+  // not configured, and `loadPlugins` registered every configured package, so
+  // every lookup below succeeds.
+  const pluginsByFeed = new Map<string, MediaTypePlugin>(
+    config.feeds.map((feed) => [feed.id, registry.byPackage(feed.plugin)]),
+  );
+
   const server = buildServer({
     db,
     defaultClient,
     untrackedFor: (clientId) => scheduler.untrackedFor(clientId),
     now: () => Date.now(),
     webRoot,
+    registry,
+    pluginForFeed: (feedId) => pluginsByFeed.get(feedId) ?? null,
   });
 
   await server.listen({ port: config.server.port, host: '0.0.0.0' });

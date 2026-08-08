@@ -70,6 +70,36 @@ export function releasesForGroup(db: DatabaseSync, groupId: number): ReleaseRow[
     .map((row) => toReleaseRow(row as SqlRow));
 }
 
+/**
+ * Quality and score move together or not at all. `score` is the plugin's
+ * function of `quality`, and every ordering in the system — the upgrade rule,
+ * the browse list, the pick — reads the score, so a row where the two disagree
+ * is a row that sorts by a quality it no longer claims.
+ *
+ * The caller re-derives the group's upgrade flag afterwards, through
+ * `refreshUpgradeFlag` rather than `flagUpgrade`: a correction is not an
+ * arrival and must not bump `list_rank_at`.
+ */
+export function updateReleaseQuality(
+  db: DatabaseSync,
+  release: { id: number; quality: string; score: number },
+): void {
+  db.prepare('UPDATE releases SET quality = ?, score = ? WHERE id = ?').run(
+    release.quality,
+    release.score,
+    release.id,
+  );
+}
+
+/**
+ * Separate from `updateReleaseQuality` because a resolve stamps a release it
+ * inserted rather than rewrote, and because a quality edit and its stamp are
+ * two different facts about the row.
+ */
+export function markReleaseEdited(db: DatabaseSync, releaseId: number, editedAt: number): void {
+  db.prepare('UPDATE releases SET edited_at = ? WHERE id = ?').run(editedAt, releaseId);
+}
+
 export function linkForRelease(db: DatabaseSync, releaseId: number): string | null {
   const row = db
     .prepare(

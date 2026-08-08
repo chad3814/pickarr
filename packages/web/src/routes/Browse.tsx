@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type GroupView } from '../api/client.ts';
+import { api, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
 import { MediaCard } from '../components/MediaCard.tsx';
 
 export function Browse() {
   const [groups, setGroups] = useState<GroupView[]>([]);
+  const [fields, setFields] = useState<ManualFieldsResponse>({});
   const [cursor, setCursor] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [search, setSearch] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadPage = useCallback(
@@ -28,6 +30,26 @@ export function Browse() {
     void loadPage(null, search, true);
   }, [loadPage, search]);
 
+  // The schemas are configuration, one map for every card on every page, so
+  // they are fetched once for the screen rather than per group.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load(): Promise<void> {
+      try {
+        const next = await api.manualFields();
+        if (!cancelled) setFields(next);
+      } catch (cause) {
+        if (!cancelled) setError((cause as Error).message);
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function pick(groupId: number, releaseId: number): Promise<void> {
     try {
       // Patch the one card that changed. Refetching the first page instead
@@ -42,9 +64,78 @@ export function Browse() {
           ? previous.filter((existing) => existing.id !== groupId)
           : previous.map((existing) => (existing.id === groupId ? group : existing)),
       );
+      setNotice(null);
       setError(null);
     } catch (cause) {
+      setNotice(null);
       setError((cause as Error).message);
+    }
+  }
+
+  /**
+   * Corrects a group's identity and display, and answers whether it saved.
+   *
+   * The response is patched in for the same reason a pick's is: refetching the
+   * first page discards every page loaded past it. A merge is the one case
+   * where two cards change — the edited group is gone, its releases now under
+   * the group whose identity the new values matched, and that group is what
+   * came back. The target is patched only if it is loaded; where it belongs in
+   * a list ordered by rank is the server's answer to give, not one to guess
+   * from here.
+   *
+   * That is also why a merge says so out loud. When the target is on a page
+   * nobody has loaded, the card disappears and nothing else on screen changes,
+   * so the notice is the only account of where the releases went — the same
+   * thing the Failed tab reports when a fix joins an existing group.
+   */
+  async function editGroup(groupId: number, values: Record<string, string>): Promise<boolean> {
+    try {
+      const { group, mergedInto } = await api.editGroup(groupId, values);
+      setGroups((previous) => {
+        const kept =
+          mergedInto === null ? previous : previous.filter((existing) => existing.id !== groupId);
+        return kept.map((existing) => (existing.id === group.id ? group : existing));
+      });
+      setNotice(mergedInto === null ? null : `Releases moved into ${group.display.title}`);
+      setError(null);
+      return true;
+    } catch (cause) {
+      setNotice(null);
+      setError((cause as Error).message);
+      return false;
+    }
+  }
+
+  /**
+   * Corrects one release's quality, which rescores it and re-derives the
+   * group's upgrade flag — so the server answers with the whole group, already
+   * in its new order, and the card becomes it.
+   *
+   * A null group is the server saying the group left this list: a picked group
+   * is listed only while something better is on offer, and downgrading that
+   * something is exactly what takes the flag away. Patching the card back in
+   * would leave a Pick button that queues an *upgrade* to the release the user
+   * just marked as worse, which on import trashes the file they already have.
+   */
+  async function editRelease(
+    groupId: number,
+    releaseId: number,
+    values: Record<string, string>,
+  ): Promise<boolean> {
+    try {
+      const { group } = await api.editRelease(releaseId, values);
+      setGroups((previous) =>
+        group === null
+          ? previous.filter((existing) => existing.id !== groupId)
+          : previous.map((existing) => (existing.id === group.id ? group : existing)),
+      );
+      setNotice(null);
+      setError(null);
+      return true;
+    } catch (cause) {
+      setNotice(null);
+      setError((cause as Error).message);
+      return false;
     }
   }
 
@@ -57,6 +148,7 @@ export function Browse() {
         value={search}
         onChange={(event) => setSearch(event.target.value)}
       />
+      {notice !== null && <p className="notice">{notice}</p>}
       {error !== null && <p className="error">{error}</p>}
 
       {groups.map((group) => (
@@ -64,6 +156,12 @@ export function Browse() {
           key={group.id}
           group={group}
           onPick={(releaseId) => void pick(group.id, releaseId)}
+          // A plugin with no manual hooks is *missing* from this map, and a
+          // group can outlive the package that made it; either way the card
+          // finds no schema and offers no editing.
+          fields={fields[group.plugin]}
+          onEditGroup={(values) => editGroup(group.id, values)}
+          onEditRelease={(releaseId, values) => editRelease(group.id, releaseId, values)}
         />
       ))}
 
