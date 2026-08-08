@@ -30,9 +30,19 @@ export function Browse() {
 
   async function pick(groupId: number, releaseId: number): Promise<void> {
     try {
-      await api.pick(groupId, releaseId);
-      // Refetch rather than patch: picking can remove the group from this list.
-      await loadPage(null, search, true);
+      // Patch the one card that changed. Refetching the first page instead
+      // discarded every page loaded past it, so a pick made after "Load more"
+      // snapped the list back to its original length. The server says whether
+      // the group still belongs here — picking the best release takes it out,
+      // picking a lesser one leaves it with the better release still offered —
+      // so nothing here has to re-derive that rule.
+      const { group } = await api.pick(groupId, releaseId);
+      setGroups((previous) =>
+        group === null
+          ? previous.filter((existing) => existing.id !== groupId)
+          : previous.map((existing) => (existing.id === groupId ? group : existing)),
+      );
+      setError(null);
     } catch (cause) {
       setError((cause as Error).message);
     }

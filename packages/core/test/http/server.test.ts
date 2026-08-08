@@ -118,6 +118,10 @@ test('a picked group with no upgrade drops out of browse and appears in picks', 
     payload: { releaseId: 2 },
   });
   assert.equal(pick.statusCode, 200);
+  // And the response says so, so a paginated browse can drop that one card
+  // instead of refetching its first page and losing the rest.
+  assert.equal(pick.json()['group'], null);
+  assert.equal(pick.json()['download']['groupId'], 1);
 
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
   assert.deepEqual(
@@ -128,6 +132,35 @@ test('a picked group with no upgrade drops out of browse and appears in picks', 
   const picks = (await server.inject({ method: 'GET', url: '/api/picks' })).json();
   assert.equal(picks['groups'].length, 1);
   assert.equal(picks['groups'][0]['pickedReleaseId'], 2);
+  await server.close();
+  db.close();
+});
+
+test('picking a lesser release keeps the group in browse, with the better one still offered', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  // Release 1 is the 1080p; release 2 (2160p) scores higher and remains an
+  // upgrade, which is what keeps the group listed.
+  const pick = await server.inject({
+    method: 'POST',
+    url: '/api/groups/1/pick',
+    payload: { releaseId: 1 },
+  });
+
+  assert.equal(pick.statusCode, 200);
+  const group = pick.json()['group'];
+  assert.equal(group['id'], 1);
+  assert.equal(group['state'], 'picked');
+  assert.equal(group['pickedReleaseId'], 1);
+  assert.equal(group['upgradeReleaseId'], 2);
+
+  // The same group the browse list itself would return — the client patches
+  // this straight in, so the two must agree.
+  const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
+  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 1);
+  assert.deepEqual(listed, group);
   await server.close();
   db.close();
 });
@@ -192,6 +225,33 @@ test('retrying a failed import resumes at completed', async () => {
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.json()['status'], 'completed');
+  await server.close();
+  db.close();
+});
+
+test('retry takes no body, and is not refused for having none', async () => {
+  // The route always worked; the SPA could never reach it. Its fetch helper
+  // set `content-type: application/json` on every request including this
+  // bodyless POST, and Fastify's JSON parser answers that with a 400
+  // (FST_ERR_CTP_EMPTY_JSON_BODY) before any handler runs — so the button had
+  // never once retried anything. Asserting the shape the browser actually
+  // sends is what would have caught it; the test above sends no header at all.
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+  db.prepare(
+    "UPDATE downloads SET status = 'failed', error = 'ENOTDIR', storage_path = '/x' WHERE id = 1",
+  ).run();
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/downloads/1/retry',
+    headers: { 'content-type': 'application/json' },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(getDownload(db, 1)?.status, 'completed');
   await server.close();
   db.close();
 });

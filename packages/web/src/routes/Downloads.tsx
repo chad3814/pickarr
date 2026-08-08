@@ -35,9 +35,24 @@ export function Downloads() {
     };
   }, []);
 
+  /**
+   * A rejection here used to go nowhere: the call site is `void retry(id)`, so
+   * a refused retry (409 on a row that is no longer `failed`, a 404, a dropped
+   * connection) left the button looking like it had done nothing at all.
+   *
+   * A retry that is *accepted* and then fails again on the next reconcile tick
+   * still looks like nothing happened — the row returns to `failed` inside one
+   * poll interval. That is the retry working and the underlying fault
+   * repeating, and the row's error message is where it says so.
+   */
   async function retry(downloadId: number): Promise<void> {
-    await api.retry(downloadId);
-    setData(await api.downloads());
+    try {
+      await api.retry(downloadId);
+      setData(await api.downloads());
+      setError(null);
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
   }
 
   return (
