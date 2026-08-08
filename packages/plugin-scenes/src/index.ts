@@ -43,6 +43,7 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
     score: scoreScene,
     planImport: (media, files) => planSceneImport(media, files, { pathTemplate }),
     siteCandidates: (releaseName: string) => sceneSiteCandidates(releaseName, options),
+    refusalReason: () => lastRefusalReason(),
     learnSites(sites: readonly string[]) {
       const known = new Set(options.sites ?? []);
       const merged = [...(options.sites ?? [])];
