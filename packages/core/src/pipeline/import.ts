@@ -1,6 +1,6 @@
 import { copyFile, lstat, mkdir, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile, ImportFile, ParsedRelease } from '@pickarr/plugin-api';
 import type { PluginRegistry } from '../plugins/registry.ts';
@@ -51,7 +51,30 @@ export async function lstatOrNull(path: string): Promise<Stats | null> {
   }
 }
 
+/**
+ * Everything the completed download left behind, as the plugin sees it.
+ *
+ * The storage path a client reports is usually the job's directory, but it is
+ * not required to be one and SABnzbd routinely reports the *file* instead —
+ * for a job that unpacked to a single video, `storage` is that video's full
+ * path. `readdir` on it fails with ENOTDIR, and since the failure happens
+ * before `planImport` is ever called, the download fails with a filesystem
+ * error naming a path that plainly exists. It is not an error at all: the
+ * client has told us exactly which file it produced, which is more than the
+ * directory form says. Handled here rather than by second-guessing the client
+ * in `sabnzbd.ts` — a storage path that names one file is a legitimate answer
+ * from any client, and the listing is where the two shapes converge.
+ *
+ * The single file is given its own basename as `relativePath`, matching what
+ * a one-file directory would have produced, so the plugin's junk-name and
+ * depth heuristics see the same input either way.
+ */
 async function listFiles(root: string): Promise<DownloadedFile[]> {
+  const rootStat = await stat(root);
+  if (rootStat.isFile()) {
+    return [{ absolutePath: root, relativePath: basename(root), sizeBytes: rootStat.size }];
+  }
+
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   const files: DownloadedFile[] = [];
 

@@ -90,6 +90,46 @@ test('imports the planned file and records it', async () => {
   }
 });
 
+test('a storage path naming one file is a listing of one file', async () => {
+  // SABnzbd reports `storage` as the video itself when a job unpacked to a
+  // single file, and readdir on that is ENOTDIR — a filesystem error naming a
+  // path that plainly exists, raised before planImport ever runs.
+  const root = await tempDir();
+  try {
+    const downloadDir = join(root, 'complete', 'Release [pickarr-1]');
+    await mkdir(downloadDir, { recursive: true });
+    const source = join(downloadDir, 'scene.mp4');
+    await writeFile(source, 'video-bytes');
+
+    const library = join(root, 'library');
+    const db = openTestDatabase();
+    seed(db, source);
+
+    let offered: readonly { relativePath: string; sizeBytes: number }[] = [];
+    const registry = registryFor(
+      plugin((_media, files): ImportPlan => {
+        offered = files;
+        return { files: [{ source, destination: 'Site/scene.mp4' }] };
+      }),
+      library,
+    );
+
+    await importDownload(deps(db, registry, join(root, 'trash')), getDownload(db, 1)!);
+
+    // The plugin sees what a one-file directory would have given it, so its
+    // junk-name and depth heuristics read the same either way.
+    assert.deepEqual(
+      offered.map((file) => ({ relativePath: file.relativePath, sizeBytes: file.sizeBytes })),
+      [{ relativePath: 'scene.mp4', sizeBytes: 11 }],
+    );
+    assert.equal(await readFile(join(library, 'Site', 'scene.mp4'), 'utf8'), 'video-bytes');
+    assert.equal(getDownload(db, 1)?.status, 'imported');
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('move removes the source, copy leaves it', async () => {
   for (const mode of ['move', 'copy'] as const) {
     const root = await tempDir();
