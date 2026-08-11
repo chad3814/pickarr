@@ -405,6 +405,75 @@ function rekeySiteSegments(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Metadata a group has been given by a remote service, and the queue of
+ * groups still waiting to be asked about.
+ *
+ * A `group_metadata` row means *answered*. `state = 'none'` is a real answer —
+ * "the service was asked and knows no such scene" — and is what stops a lazy,
+ * browse-driven trigger from re-asking the same question on every page view.
+ * The reasoning is `discovered_sites`', one table up, applied to scenes.
+ *
+ * `state` is a column rather than something inferred from `source_uuid IS
+ * NULL`, because `discovered_sites` had to make its uuid nullable for a
+ * provider that publishes no identifier: nullability there already means
+ * "no identifier", so it cannot also mean "no match".
+ *
+ * A queue row is deleted the moment an answer is written, so the table stays
+ * proportional to outstanding work rather than to history, and *pending* is
+ * exactly *has a queue row*.
+ *
+ * `metadata_candidates` holds what was rejected and why. Nothing displays it.
+ * It exists so a later merge-suggestion feature has evidence, and so the
+ * confirmation rule can be measured rather than argued about.
+ *
+ * `discovered_sites.source_id` is the site's *integer* id. Migration 2 stored
+ * only the uuid, reasoning that `GET /sites/<id>` and `GET /sites/<uuid>`
+ * return the same record so a second column would be two columns for one
+ * fact. True of fetching a site; not true of filtering scenes, where
+ * `GET /scenes?site_id=` accepts only the integer. Nullable, and backfilled
+ * for free from the `site` object embedded in any scene response.
+ */
+const SCENE_METADATA = `
+CREATE TABLE group_metadata (
+  group_id     INTEGER PRIMARY KEY REFERENCES media_groups (id),
+  state        TEXT    NOT NULL,
+  source       TEXT    NOT NULL,
+  source_uuid  TEXT,
+  title        TEXT,
+  performers   TEXT,
+  release_date TEXT,
+  duration_s   INTEGER,
+  synopsis     TEXT,
+  poster_url   TEXT,
+  poster_path  TEXT,
+  fetched_at   INTEGER NOT NULL
+);
+
+CREATE TABLE metadata_queue (
+  group_id     INTEGER PRIMARY KEY REFERENCES media_groups (id),
+  requested_at INTEGER NOT NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  next_at      INTEGER NOT NULL,
+  last_error   TEXT
+);
+CREATE INDEX metadata_queue_due ON metadata_queue (next_at);
+
+CREATE TABLE metadata_candidates (
+  id          INTEGER PRIMARY KEY,
+  group_id    INTEGER NOT NULL REFERENCES media_groups (id),
+  source      TEXT    NOT NULL,
+  source_uuid TEXT,
+  title       TEXT    NOT NULL,
+  scene_date  TEXT,
+  reason      TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX metadata_candidates_group ON metadata_candidates (group_id);
+
+ALTER TABLE discovered_sites ADD COLUMN source_id INTEGER;
+`;
+
 export const migrations: Migration[] = [
   {
     version: 1,
@@ -441,6 +510,16 @@ export const migrations: Migration[] = [
     version: 5,
     up(db) {
       db.exec(DOWNLOADS_BY_RELEASE);
+    },
+  },
+  // 6, and the same story a second time: this was written as `version: 5` while
+  // the index above was taking that number on `main`. It is the second instance
+  // of the collision the comment above describes, which is the argument for the
+  // duplicate-version guard being a check in code rather than a convention.
+  {
+    version: 6,
+    up(db) {
+      db.exec(SCENE_METADATA);
     },
   },
 ];
