@@ -177,38 +177,46 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
   const { confirmed } = input;
   db.exec('BEGIN');
   try {
-    db.prepare(
-      `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
-       ON CONFLICT (group_id) DO NOTHING`,
-    ).run(
-      input.groupId,
-      confirmed === null ? 'none' : 'confirmed',
-      input.source,
-      confirmed?.sourceUuid ?? null,
-      confirmed?.title ?? null,
-      confirmed === null ? null : JSON.stringify(confirmed.performers),
-      confirmed?.date ?? null,
-      confirmed?.durationSeconds ?? null,
-      confirmed?.synopsis ?? null,
-      confirmed?.posterUrl ?? null,
-      input.now,
-    );
-
-    const candidate = db.prepare(
-      `INSERT INTO metadata_candidates
-         (group_id, source, source_uuid, title, scene_date, reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    );
-    for (const miss of input.nearMisses) {
-      candidate.run(
+    const answer = db
+      .prepare(
+        `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+         ON CONFLICT (group_id) DO NOTHING`,
+      )
+      .run(
         input.groupId,
+        confirmed === null ? 'none' : 'confirmed',
         input.source,
-        miss.candidate.sourceUuid,
-        miss.candidate.title,
-        miss.candidate.date,
-        miss.reason,
+        confirmed?.sourceUuid ?? null,
+        confirmed?.title ?? null,
+        confirmed === null ? null : JSON.stringify(confirmed.performers),
+        confirmed?.date ?? null,
+        confirmed?.durationSeconds ?? null,
+        confirmed?.synopsis ?? null,
+        confirmed?.posterUrl ?? null,
         input.now,
       );
+
+    // The ON CONFLICT above makes a second call for the same group a no-op:
+    // `changes` is 0 when a row already existed. Candidate rows must be
+    // gated on that, or a retried answer duplicates every near-miss it
+    // already recorded — the accumulation this function's contract forbids.
+    if (Number(answer.changes) > 0) {
+      const candidate = db.prepare(
+        `INSERT INTO metadata_candidates
+           (group_id, source, source_uuid, title, scene_date, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const miss of input.nearMisses) {
+        candidate.run(
+          input.groupId,
+          input.source,
+          miss.candidate.sourceUuid,
+          miss.candidate.title,
+          miss.candidate.date,
+          miss.reason,
+          input.now,
+        );
+      }
     }
 
     db.prepare('DELETE FROM metadata_queue WHERE group_id = ?').run(input.groupId);
