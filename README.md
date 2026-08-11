@@ -113,9 +113,12 @@ rather than overwritten by path. Drop `{resolution}` and `{group}` and the two s
 path instead, which also works — the importer refuses an occupied destination until the
 old file has been trashed.
 
-Every value comes from the identity key rather than from the release name, which is what
-keeps two encodes of one scene landing on one path. Two *different* scenes can never
-collide under any template — there are tests pinning both directions.
+Every value comes from the identity key or from the group's own record, never from the
+individual release name, which is what keeps two encodes of one scene landing on one
+path. (`{site}`, `{Site}` and `{SiteName}` are the group-record ones: the key's site
+segment has no word boundaries, so they read the site's canonical name instead. It is
+one value per group, so two encodes still render one path.) Two *different* scenes can
+never collide under any template — there are tests pinning both directions.
 
 ### Naming your sites
 
@@ -153,9 +156,12 @@ The longest match wins, so listing both a network and its sub-site files scenes 
 the sub-site. Separators and case do not have to match the release: releases write
 `Bang Bros` as `BangBros`, `bangbros` and `Bang.Bros`, and all three match a site
 configured as any one of those. **The spelling you configure is the one you get** — it
-becomes the canonical name, so it decides both the directory and the identity key.
-Configure `Bang Bros` and scenes land in `Bang Bros/`; configure `BangBros` and they
-land in `BangBros/`. Pick one and keep it.
+becomes the canonical name, so it decides the directory. Configure `Bang Bros` and
+scenes land in `Bang Bros/`; configure `BangBros` and they land in `BangBros/`.
+
+Re-spelling a site does *not* move its identity key: the key holds the separator-free
+form all of those spellings collapse to, the same one matching compares. So a site
+confirmed after some of its scenes were already ingested still collates with them.
 
 **The list is optional.** Without it Pickarr treats the first word as the site, which
 files `Anal Only`'s scenes under `Anal/`. That is a wrong directory, never a wrong
@@ -219,9 +225,11 @@ name falls back to its first word for that tick. That key is durable: the group 
 where it landed even after lookups recover. Pickarr logs a line naming each affected
 title so you can see when it happened.
 
-Changing a site's name — in the config list or by deleting a `discovered_sites` row —
-changes the identity key of its scenes, so anything already picked reappears as a new
-entry rather than as an upgrade. Settle the naming before a long run, not during one.
+Changing a site's name only re-spaces or re-cases it — `Bang Bros` to `BangBros` — costs
+nothing: the identity key is separator-free, so the group stays put and only the
+directory name changes on future imports. Changing it to a *different* name changes the
+identity key of its scenes, so anything already picked reappears as a new entry rather
+than as an upgrade. Settle the naming before a long run, not during one.
 
 ## Operational notes
 

@@ -157,7 +157,7 @@ test('a confirmed two-word site is learned and used by the next parse', async ()
   assert.deepEqual(result.confirmed, ['Anal Only']);
   assert.equal(
     plugin.parse(ANAL_ONLY)?.identityKey,
-    'anal-only:2022-09-29:getting-in-savannahs-booty-savannah-bond',
+    'analonly:2022-09-29:getting-in-savannahs-booty-savannah-bond',
   );
 });
 
@@ -343,7 +343,7 @@ test('a site learned in one pass survives into a fresh plugin via the database',
   restarted.learnSites?.(knownSiteNames(context.db));
   assert.equal(
     restarted.parse(ANAL_ONLY)?.identityKey,
-    'anal-only:2022-09-29:getting-in-savannahs-booty-savannah-bond',
+    'analonly:2022-09-29:getting-in-savannahs-booty-savannah-bond',
   );
 });
 

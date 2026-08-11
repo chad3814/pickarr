@@ -165,7 +165,7 @@ const CORPUS: Entry[] = [
   {
     name: 'KarupsPC.com_13.10.14.Chelsey.Lanette',
     scene: 'karupspc-com/chelsey-lanette',
-    key: 'karupspc-com:2013-10-14:chelsey-lanette',
+    key: 'karupspccom:2013-10-14:chelsey-lanette',
     title: 'Chelsey Lanette',
     quality: '-|-|-|-|-|-',
     isNew: true,
@@ -574,7 +574,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Pure Taboo - Sarah Arabic, Lily LaBeau - A Costly Divorce (June 24, 2025) [1080p HEVC x265]',
     scene: 'pure-taboo/a-costly-divorce',
-    key: 'pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau',
+    key: 'puretaboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau',
     title: 'Sarah Arabic, Lily LaBeau - A Costly Divorce',
     quality: '1080|-|x265|-|-|-',
     isNew: true,
@@ -582,7 +582,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Pure Taboo - A Costly Divorce - Sarah Arabic, Lily LaBeau - 2025-06-24 - 2160p',
     scene: 'pure-taboo/a-costly-divorce',
-    key: 'pure-taboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau',
+    key: 'puretaboo:2025-06-24:a-costly-divorce--sarah-arabic-lily-labeau',
     title: 'A Costly Divorce - Sarah Arabic, Lily LaBeau',
     quality: '2160|-|-|-|-|-',
     isNew: true,
@@ -590,7 +590,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Pure Taboo - Sarah Arabic - A Different Divorce (Jun 24, 2025) [1080p]',
     scene: 'pure-taboo/a-different-divorce',
-    key: 'pure-taboo:2025-06-24:a-different-divorce--sarah-arabic',
+    key: 'puretaboo:2025-06-24:a-different-divorce--sarah-arabic',
     title: 'Sarah Arabic - A Different Divorce',
     quality: '1080|-|-|-|-|-',
     isNew: true,
@@ -842,7 +842,7 @@ const CORPUS: Entry[] = [
   {
     name: '4K.Media.23.04.15.Alex.Coal.XXX.1080p.MP4-G',
     scene: '4k-media/alex-coal',
-    key: '4k-media:2023-04-15:alex-coal',
+    key: '4kmedia:2023-04-15:alex-coal',
     title: 'Alex Coal',
     quality: '1080|-|-|mp4|-|G',
     isNew: false,
@@ -858,7 +858,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Tushy.com.23.04.15.Emily.Willis.XXX.1080p-G',
     scene: 'tushy-com/emily-willis',
-    key: 'tushy-com:2023-04-15:emily-willis',
+    key: 'tushycom:2023-04-15:emily-willis',
     title: 'Emily Willis',
     quality: '1080|-|-|-|-|G',
     isNew: false,
@@ -866,7 +866,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Vintage.1979.Collection.23.04.15.Alex.Coal.XXX.1080p.MP4-G',
     scene: 'vintage-1979-collection/alex-coal',
-    key: 'vintage-1979-collection:2023-04-15:alex-coal',
+    key: 'vintage1979collection:2023-04-15:alex-coal',
     title: 'Alex Coal',
     quality: '1080|-|-|mp4|-|G',
     isNew: false,
@@ -880,7 +880,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Bang.com - Alex Coal - Deep - 2023-01-01 - 1080p',
     scene: 'bang-com/alex-coal-deep',
-    key: 'bang-com:2023-01-01:alex-coal--deep',
+    key: 'bangcom:2023-01-01:alex-coal--deep',
     title: 'Alex Coal - Deep',
     quality: '1080|-|-|-|-|-',
     isNew: true,
@@ -888,7 +888,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Deeper.com - Alex Coal - Deep - 2023-01-01 - 1080p',
     scene: 'deeper-com/alex-coal-deep',
-    key: 'deeper-com:2023-01-01:alex-coal--deep',
+    key: 'deepercom:2023-01-01:alex-coal--deep',
     title: 'Alex Coal - Deep',
     quality: '1080|-|-|-|-|-',
     isNew: true,
@@ -896,7 +896,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Private.com - Alex Coal - Deep - 2023-01-01 - 1080p',
     scene: 'private-com/alex-coal-deep',
-    key: 'private-com:2023-01-01:alex-coal--deep',
+    key: 'privatecom:2023-01-01:alex-coal--deep',
     title: 'Alex Coal - Deep',
     quality: '1080|-|-|-|-|-',
     isNew: true,
@@ -904,7 +904,7 @@ const CORPUS: Entry[] = [
   {
     name: 'Nubiles.net - Alex Coal - Deep - 2023-01-01 - 1080p',
     scene: 'nubiles-net/alex-coal-deep',
-    key: 'nubiles-net:2023-01-01:alex-coal--deep',
+    key: 'nubilesnet:2023-01-01:alex-coal--deep',
     title: 'Alex Coal - Deep',
     quality: '1080|-|-|-|-|-',
     isNew: true,
@@ -912,7 +912,7 @@ const CORPUS: Entry[] = [
   {
     name: '[Bang.com] - Alex Coal - Deep - 2023-01-01 - 1080p',
     scene: 'bang-com/alex-coal-deep',
-    key: 'bang-com:2023-01-01:alex-coal--deep',
+    key: 'bangcom:2023-01-01:alex-coal--deep',
     title: 'Alex Coal - Deep',
     quality: '1080|-|-|-|-|-',
     isNew: true,
@@ -982,7 +982,7 @@ const CORPUS: Entry[] = [
   {
     name: '[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.1080p.MP4-WRB',
     scene: 'empornium-brazzers/alex-coal',
-    key: 'empornium-brazzers:2023-04-15:alex-coal',
+    key: 'emporniumbrazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
     quality: '1080|-|-|mp4|-|WRB',
     isNew: true,
@@ -990,7 +990,7 @@ const CORPUS: Entry[] = [
   {
     name: '[EmpornIum] Brazzers.2023.04.15.Alex.Coal.XXX.2160p.HEVC.MP4-WRB',
     scene: 'empornium-brazzers/alex-coal',
-    key: 'empornium-brazzers:2023-04-15:alex-coal',
+    key: 'emporniumbrazzers:2023-04-15:alex-coal',
     title: 'Alex Coal',
     quality: '2160|-|h265|mp4|-|WRB',
     isNew: true,
@@ -1389,7 +1389,10 @@ test('a studio named after its domain keeps the studio as the site', () => {
   for (const studio of studios) {
     const release = parsed(`${studio} - Alex Coal - Deep - 2023-01-01 - 1080p`);
     assert.equal(release.display.subtitle, studio, studio);
-    assert.equal(release.identityKey.split(':')[0], studio.toLowerCase().replace('.', '-'), studio);
+    // The key's site segment is the separator-free form, so the dot of the
+    // domain is deleted rather than turned into a `-`. The studio's real
+    // spelling is on `display.subtitle`, asserted above.
+    assert.equal(release.identityKey.split(':')[0], studio.toLowerCase().replace('.', ''), studio);
     keys.add(release.identityKey);
   }
   assert.equal(keys.size, studios.length, `${JSON.stringify([...keys])}`);
