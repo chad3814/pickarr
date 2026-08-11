@@ -17,7 +17,7 @@ function parsed(name: string, sites?: readonly string[]) {
 
 test('a configured site is matched as a prefix and split off from the title', () => {
   const result = parsed(ANAL_ONLY, ['Anal Only']);
-  assert.equal(result.identityKey, 'anal-only:2022-09-29:getting-in-savannahs-booty-savannah-bond');
+  assert.equal(result.identityKey, 'analonly:2022-09-29:getting-in-savannahs-booty-savannah-bond');
   assert.equal(result.display.subtitle, 'Anal Only');
   assert.equal(result.display.title, 'Getting In Savannahs Booty Savannah Bond');
 });
@@ -52,12 +52,21 @@ test('site matching ignores case and the separators the configured name uses', (
   }
 });
 
-test('the configured spelling is the canonical one and decides the key', () => {
-  // Matching is separator-insensitive, but the key is not invented — it comes
-  // from how the site is configured. Configure it solid and you get a solid
-  // directory; the tradeoff is stated in the README rather than guessed at.
-  assert.equal(parsed(ANAL_ONLY, ['Anal Only']).identityKey.split(':')[0], 'anal-only');
-  assert.equal(parsed(ANAL_ONLY, ['ANALONLY']).identityKey.split(':')[0], 'analonly');
+test('the configured spelling decides the directory but no longer the key', () => {
+  // This test used to assert the opposite of its second half: `Anal Only` gave
+  // `anal-only` and `ANALONLY` gave `analonly`, so re-spelling a site in config
+  // — or having `learnSites` discover it mid-run — moved every scene's key.
+  // Matching was already separator-insensitive; only the key was not. Now both
+  // are, so the two spellings are one identity.
+  const spaced = parsed(ANAL_ONLY, ['Anal Only']);
+  const solid = parsed(ANAL_ONLY, ['ANALONLY']);
+  assert.equal(spaced.identityKey.split(':')[0], 'analonly');
+  assert.equal(solid.identityKey.split(':')[0], 'analonly');
+
+  // What the configured spelling still decides is everything the user sees,
+  // which is what the library path is rendered from — see `path-template.ts`.
+  assert.equal(spaced.display.subtitle, 'Anal Only');
+  assert.equal(solid.display.subtitle, 'ANALONLY');
 });
 
 test('one site written several ways by different releases collates to one group', () => {
@@ -73,7 +82,7 @@ test('one site written several ways by different releases collates to one group'
   ].map((name) => parsed(name, sites).identityKey);
 
   assert.equal(new Set(keys).size, 1, `expected one key, got ${JSON.stringify(keys)}`);
-  assert.equal(keys[0], 'bang-bros:2026-08-03:chloe-upgrades-her-butt');
+  assert.equal(keys[0], 'bangbros:2026-08-03:chloe-upgrades-her-butt');
 });
 
 test('the canonical spelling is used even when the release is written solid', () => {
@@ -88,7 +97,7 @@ test('a solid-written site is still found when only its spaced name is known', (
   // confirmed site is learned and then never used.
   assert.equal(
     parsed(BANGBROS, ['Bang Bros']).identityKey,
-    'bang-bros:2026-08-03:ass-parade-chloe-upgrades-her-butt-toy-to-chevalier-a-bbc-chloe-chevalier',
+    'bangbros:2026-08-03:ass-parade-chloe-upgrades-her-butt-toy-to-chevalier-a-bbc-chloe-chevalier',
   );
 });
 
@@ -140,7 +149,7 @@ test('a single non-encode token after the date rules the shape out', () => {
   // readings disagree about the identity, which is why the shape test has to
   // be positive rather than a count.
   const result = parsed('Site.Name.Here.2022.09.29.Bonus.2160p', ['Site Name']);
-  assert.equal(result.identityKey, 'site-name-here:2022-09-29:bonus');
+  assert.equal(result.identityKey, 'sitenamehere:2022-09-29:bonus');
   assert.equal(result.display.subtitle, 'Site Name Here');
   assert.equal(result.display.title, 'Bonus');
 });
@@ -163,7 +172,7 @@ const BRALESS = 'BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p';
 
 test('a dateless release parses once its site is known', () => {
   const result = parsed(BRALESS, ['Braless Forever']);
-  assert.equal(result.identityKey, 'braless-forever::emma-g-and-rocky-beach-days');
+  assert.equal(result.identityKey, 'bralessforever::emma-g-and-rocky-beach-days');
   assert.equal(result.display.subtitle, 'Braless Forever');
   assert.equal(result.display.title, 'Emma G and Rocky Beach Days');
 });
@@ -435,7 +444,7 @@ test("an indexer's trailing runtime stamp is stripped", () => {
   // It sits behind the group tag, so the encode run stops reaching the end
   // and the whole name is refused over three characters of metadata.
   const result = parsed('Bang.Surprise.19.10.29.Katya.Rodriguez.XXX.1080p.MP4-KTR [06:32:12]');
-  assert.equal(result.identityKey, 'bang-surprise:2019-10-29:katya-rodriguez');
+  assert.equal(result.identityKey, 'bangsurprise:2019-10-29:katya-rodriguez');
   assert.equal(result.quality.releaseGroup, 'KTR');
   assert.equal(
     result.identityKey,
@@ -592,7 +601,7 @@ test('a dateless name with no encode section parses once its site is known', () 
   // all, so there was no boundary to work from. A confirmed site is the
   // boundary: everything after it is the title.
   const result = parsed('TripForFuck - Hiyori JAPANESE 2', ['Trip For Fuck']);
-  assert.equal(result.identityKey, 'trip-for-fuck::hiyori-japanese-2');
+  assert.equal(result.identityKey, 'tripforfuck::hiyori-japanese-2');
   assert.equal(result.display.subtitle, 'Trip For Fuck');
   assert.equal(result.display.title, 'Hiyori JAPANESE 2');
 });
@@ -613,7 +622,7 @@ test('the site still has to be confirmed, boundary or not', () => {
 test('a dateless name with an encode section still strips it', () => {
   // The encode path is tried first; the site-only path is the fallback.
   const result = parsed('BralessForever.com.Emma.G.Beach.Days.2160p', ['Braless Forever']);
-  assert.equal(result.identityKey, 'braless-forever::emma-g-beach-days');
+  assert.equal(result.identityKey, 'bralessforever::emma-g-beach-days');
   assert.equal(result.quality.resolution, 2160);
 });
 
@@ -677,7 +686,7 @@ test('a configured spelling reaches every shape, not just the ones that look sit
     '4K.kleo.34ans.de.clapiers',
   ].map((name) => parsed(name, sites).identityKey.split(':')[0]);
   assert.equal(new Set(keys).size, 1, JSON.stringify(keys));
-  assert.equal(keys[0], 'jacquie-et-michel-tv');
+  assert.equal(keys[0], 'jacquieetmicheltv');
 });
 
 test('the delimited form canonicalises its site too', () => {

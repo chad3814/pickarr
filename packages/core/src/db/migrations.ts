@@ -135,6 +135,258 @@ CREATE INDEX feed_items_failed
   ON feed_items (first_seen_at DESC, id) WHERE parse_error IS NOT NULL;
 `;
 
+/**
+ * The identity key's site segment, with its separators dropped.
+ *
+ * This is a frozen copy of `siteComparisonKey` (plugin-scenes/src/parse.ts),
+ * deliberately not an import. A migration has to keep producing the keys it
+ * produced the day it shipped; the plugin's helper belongs to code that is free
+ * to change, and importing a plugin into core's schema history would also point
+ * the dependency the wrong way round.
+ *
+ * Only the first segment is touched. A key is `site:anchor:scene-slug`, and the
+ * scene slug's hyphens are word boundaries in a title that is *not* mutable —
+ * stripping those too would collide scenes that are genuinely different. A key
+ * with no colon at all is treated as a bare site segment, which is what the
+ * shape says it would be.
+ */
+function rekeyedIdentity(identityKey: string): string {
+  const colon = identityKey.indexOf(':');
+  const site = colon === -1 ? identityKey : identityKey.slice(0, colon);
+  const rest = colon === -1 ? '' : identityKey.slice(colon);
+  return site.toLowerCase().replace(/[^a-z0-9]+/g, '') + rest;
+}
+
+interface ClusterMember {
+  id: number;
+  identityKey: string;
+  pickedReleaseId: number | null;
+}
+
+/**
+ * What makes two groups the same group.
+ *
+ * `UNIQUE (plugin, identity_key)` is a *pair*, so a cluster keyed on the new
+ * identity alone is not the set of rows that would collide — it is a superset,
+ * and merging over it deletes one plugin's group into another's.
+ *
+ * A newline is the separator because no plugin id and no identity key can hold
+ * one — both are built from a parsed release name — so no pair of rows can
+ * forge a cluster boundary between them.
+ */
+function clusterKey(plugin: string, identityKey: string): string {
+  return `${plugin}\n${identityKey}`;
+}
+
+/**
+ * `deriveUpgradeReleaseId` (db/groups.ts) written as one statement.
+ *
+ * Spelled out here rather than imported for the same reason as
+ * `rekeyedIdentity`: what this migration does must not change when the
+ * application's rule does. It has to be re-derived rather than carried across a
+ * merge because the flag names a release id, and which release is the best one
+ * available depends on the whole merged set — the survivor's old flag was
+ * derived against half of it.
+ *
+ * Both NULL cases fall out of SQL's own semantics, and match the function:
+ * with no pick, the inner subquery yields no row, `score > NULL` is NULL, no
+ * release qualifies, and the flag becomes NULL. The `>` is strict, so a release
+ * that merely ties the pick is not an upgrade.
+ */
+const DERIVE_UPGRADE_FLAG = `
+  UPDATE media_groups
+     SET upgrade_release_id = (
+           SELECT r.id FROM releases r
+            WHERE r.group_id = media_groups.id
+              AND r.score > (SELECT p.score FROM releases p
+                              WHERE p.id = media_groups.picked_release_id)
+            ORDER BY r.score DESC, r.id DESC
+            LIMIT 1)
+   WHERE id = ?
+`;
+
+/**
+ * Re-keys every group the old rule split, merging the ones that now collide.
+ *
+ * The bug: site *matching* compares alphanumerics only, so `TouchMyWife` and
+ * `Touch My Wife` are one site, but the key's site segment was a slug that kept
+ * separators as `-`, so they keyed as two. Any site confirmed after its first
+ * release had been ingested therefore has its scenes in two groups. The key now
+ * holds the separator-free form; this brings existing databases with it.
+ *
+ * Two separate things keep other plugins out, and they are not the same thing:
+ *
+ * - `clusterKey` puts the plugin in the cluster identity. This is *correctness*.
+ *   `UNIQUE (plugin, identity_key)` is a pair, so two rows with the same new key
+ *   under different plugins do not collide and must not merge; clustering on the
+ *   key alone would delete one plugin's group into another's, silently.
+ * - `WHERE plugin = 'scenes'` is *scope*. The scenes plugin is the one whose key
+ *   rule changed; another plugin's first segment means whatever that plugin says
+ *   it means, and a historical migration has no business rewriting an identity
+ *   nothing asked it to rewrite.
+ *
+ * Removing the filter is therefore safe *only while `clusterKey` really does
+ * carry the plugin* — the two are stated separately above because they are
+ * separate reasons, not because either is redundant. Take the filter out with
+ * the plugin missing from the cluster identity and one plugin's group is
+ * deleted into another's. `a key collision across plugins is not a collision,
+ * and does not merge` fails whichever of the two is removed, which is what
+ * makes this comment checkable rather than a promise.
+ *
+ * The order inside a merge is not free. Every referencing row moves first —
+ * `releases`, `downloads` and `imported_files`, all three, or `PRAGMA
+ * foreign_keys = ON` turns the delete into an error and, worse, a delete that
+ * did succeed would have taken a user's import history with it. The losers are
+ * then deleted, and only then does the survivor take the new key: until the
+ * losers are gone one of them may still be sitting on it, and
+ * `UNIQUE (plugin, identity_key)` would reject the update.
+ *
+ * Three columns deliberately stand, on the survivor and on a lone re-key alike:
+ *
+ * - `list_rank_at`. Only a release *arriving* lifts a group to the top of the
+ *   browse list. These releases were already in the user's database; bumping
+ *   would re-sort the whole list on upgrade.
+ * - `created_at`. The survivor was created when it was created. Taking a
+ *   loser's would date the row from a group that no longer exists.
+ * - `edited_at`. It records that the current values were *typed* rather than
+ *   parsed, so a future re-parse pass knows which rows not to overwrite. A
+ *   migration is not a human, and stamping it would immunise every re-keyed
+ *   group against that pass.
+ */
+function rekeySiteSegments(db: DatabaseSync): void {
+  const clusters = new Map<string, { newKey: string; members: ClusterMember[] }>();
+  // Ascending id, so "the lowest id" is simply the first member of a cluster.
+  for (const row of db
+    .prepare(
+      `SELECT id, plugin, identity_key, picked_release_id
+         FROM media_groups WHERE plugin = 'scenes' ORDER BY id`,
+    )
+    .all()) {
+    const identityKey = String(row['identity_key']);
+    const picked = row['picked_release_id'];
+    const member: ClusterMember = {
+      id: Number(row['id']),
+      identityKey,
+      pickedReleaseId: picked === null || picked === undefined ? null : Number(picked),
+    };
+    const newKey = rekeyedIdentity(identityKey);
+    const key = clusterKey(String(row['plugin']), newKey);
+    const cluster = clusters.get(key);
+    if (cluster === undefined) clusters.set(key, { newKey, members: [member] });
+    else cluster.members.push(member);
+  }
+
+  // A *live* imported file, unlike `groupHistory`'s question. The two ask
+  // different things of the same table: `groupHistory` asks "has anything ever
+  // happened to this group", for which a trashed file counts, while the rule
+  // below asks "whose name is on a file that is on disk right now", for which
+  // it does not. Every read path in `db/imported-files.ts` and the
+  // `imported_files_live` index draw the same line.
+  const history = db.prepare(
+    `SELECT EXISTS (SELECT 1 FROM imported_files
+                     WHERE group_id = ? AND trashed_at IS NULL) AS imported,
+            EXISTS (SELECT 1 FROM downloads WHERE group_id = ?) AS downloaded`,
+  );
+  const hasHistory = (groupId: number, column: 'imported' | 'downloaded'): boolean =>
+    Number(history.get(groupId, groupId)?.[column]) !== 0;
+
+  // A pick is only a pick if it names a release the group actually holds. Run
+  // after the move, so "holds" means the merged set.
+  const heldRelease = db.prepare('SELECT 1 AS held FROM releases WHERE id = ? AND group_id = ?');
+  const holds = (releaseId: number | null, groupId: number): boolean =>
+    releaseId !== null && heldRelease.get(releaseId, groupId) !== undefined;
+
+  const moveReleases = db.prepare('UPDATE releases SET group_id = ? WHERE group_id = ?');
+  const moveDownloads = db.prepare('UPDATE downloads SET group_id = ? WHERE group_id = ?');
+  const moveImportedFiles = db.prepare('UPDATE imported_files SET group_id = ? WHERE group_id = ?');
+  const adoptPick = db.prepare(
+    "UPDATE media_groups SET state = 'picked', picked_release_id = ? WHERE id = ?",
+  );
+  const deleteGroup = db.prepare('DELETE FROM media_groups WHERE id = ?');
+  const setKey = db.prepare('UPDATE media_groups SET identity_key = ? WHERE id = ?');
+  const deriveUpgradeFlag = db.prepare(DERIVE_UPGRADE_FLAG);
+
+  for (const { newKey, members } of clusters.values()) {
+    const first = members[0];
+    if (first === undefined) continue;
+
+    if (members.length === 1) {
+      // A key whose site segment never held separators is left exactly as it
+      // was — no write at all, so nothing about the row can drift.
+      if (first.identityKey !== newKey) setKey.run(newKey, first.id);
+      continue;
+    }
+
+    // The group with a live imported file first: its name is on a file on disk,
+    // under a path rendered from it. Then the group with a download recorded
+    // against it. Then the oldest, which is the one the rest of the system has
+    // had longest.
+    //
+    // `display` is deliberately not consulted, though it is what
+    // `path-template.ts` now renders `{site}`, `{Site}` and `{SiteName}` from.
+    // `buildRelease` always sets `display.subtitle`, so a group without one
+    // needs a hand-edited database, and even then the template falls back to
+    // the key's site segment — which this migration has just corrected. The
+    // cost of the case is a run-together word in a path that is otherwise
+    // right; adding a clause to the survivor rule for it would be choosing a
+    // survivor by cosmetics over one that has files on disk.
+    const survivor =
+      members.find((m) => hasHistory(m.id, 'imported')) ??
+      members.find((m) => hasHistory(m.id, 'downloaded')) ??
+      first;
+    const losers = members.filter((m) => m.id !== survivor.id);
+
+    for (const loser of losers) {
+      moveReleases.run(survivor.id, loser.id);
+      moveDownloads.run(survivor.id, loser.id);
+      moveImportedFiles.run(survivor.id, loser.id);
+    }
+
+    // A pick names a release the user owns a file for. That release has just
+    // changed groups, not disappeared, so a survivor with nothing picked adopts
+    // it — dropping it would tell the user they no longer have a file they do.
+    // `state` travels with it: a row holding a pick while still reading 'new'
+    // is off the Picks page and back in Browse, which is the same loss wearing
+    // a different hat.
+    //
+    // Only a pick that resolves counts, on either side. A `picked_release_id`
+    // naming a release that no longer exists is already broken, and this is the
+    // one moment it could be made worse: adopted onto an unpicked survivor it
+    // would take a working group *out* of Browse and point it at nothing, and
+    // held by the survivor it would outrank a loser's real pick. This does not
+    // repair a dangling pick the survivor already had — the migration did not
+    // create it, and clearing a pick is a change nothing asked for — but it
+    // will not spread one.
+    const donors = losers.filter((m) => holds(m.pickedReleaseId, survivor.id));
+    let pickedReleaseId = holds(survivor.pickedReleaseId, survivor.id)
+      ? survivor.pickedReleaseId
+      : null;
+    if (pickedReleaseId === null) {
+      const donor = donors[0];
+      if (donor !== undefined) {
+        pickedReleaseId = donor.pickedReleaseId;
+        adoptPick.run(pickedReleaseId, survivor.id);
+      }
+    }
+    for (const donor of donors) {
+      if (donor.pickedReleaseId === pickedReleaseId) continue;
+      // The only place this migration discards anything. Two groups that were
+      // always one scene both had a release picked; there can be one pick, so
+      // the survivor's stands and the other release stays an ordinary member of
+      // the group. Said out loud because no other record of it survives.
+      console.warn(
+        `pickarr: migration 4 merged group ${donor.id} into group ${survivor.id} under ` +
+          `identity '${newKey}'; both had a pick, so release ${donor.pickedReleaseId} is no ` +
+          `longer picked and release ${pickedReleaseId} stands.`,
+      );
+    }
+
+    for (const loser of losers) deleteGroup.run(loser.id);
+    if (survivor.identityKey !== newKey) setKey.run(newKey, survivor.id);
+    deriveUpgradeFlag.run(survivor.id);
+  }
+}
+
 export const migrations: Migration[] = [
   {
     version: 1,
@@ -152,6 +404,12 @@ export const migrations: Migration[] = [
     version: 3,
     up(db) {
       db.exec(MANUAL_METADATA);
+    },
+  },
+  {
+    version: 4,
+    up(db) {
+      rekeySiteSegments(db);
     },
   },
 ];
