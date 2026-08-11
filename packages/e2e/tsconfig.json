@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Playwright's own types reach for DOM declarations (`page.evaluate`
+    // callbacks run in the browser), so this project needs them even though
+    // nothing here executes in a browser context.
+    "lib": ["es2023", "dom", "dom.iterable"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "playwright.config.ts"]
+}
