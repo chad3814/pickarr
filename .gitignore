@@ -7,5 +7,9 @@ dist/
 /config/
 /secrets/
 
+# Playwright run output (traces, screenshots, HTML report)
+test-results/
+playwright-report/
+
 # SDD process scratch (ledgers, briefs, review packages)
 .superpowers/
