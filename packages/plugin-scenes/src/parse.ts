@@ -68,19 +68,19 @@ import type {
  *
  * # Why this is correct in general
  *
- * The identity is `slug(pre-date text) : ISO date : slug(post-date text minus
- * an encode suffix)`. Two names collide only if all three agree. The first two
- * are exact — no vocabulary is consulted for the site, and the date is
- * self-verifying. So a collision requires two post-date regions that differ
- * *only* inside a suffix that (a) reaches the end of the name, (b) consists
- * entirely of closed-vocabulary encode tokens, and (c) is introduced by the
- * `XXX` marker or by a resolution/source anchor. "Differs only in trailing
- * encode tokens" is the definition of "two encodes of one release" — so the
- * rule collapses exactly the set it is supposed to collapse. The residual
- * risk is a scene whose genuine title *ends* in an anchor-introduced run of
- * encode words; the parser refuses whenever that run is interrupted rather
- * than guessing, which is why names like `Site.23.04.15.The.1080p.Club.MP4-G`
- * return `null`.
+ * The identity is `siteComparisonKey(pre-date text) : ISO date :
+ * slug(post-date text minus an encode suffix)`. Two names collide only if all
+ * three agree. The first two are exact — no vocabulary is consulted for the
+ * site, and the date is self-verifying. So a collision requires two post-date
+ * regions that differ *only* inside a suffix that (a) reaches the end of the
+ * name, (b) consists entirely of closed-vocabulary encode tokens, and (c) is
+ * introduced by the `XXX` marker or by a resolution/source anchor. "Differs
+ * only in trailing encode tokens" is the definition of "two encodes of one
+ * release" — so the rule collapses exactly the set it is supposed to collapse.
+ * The residual risk is a scene whose genuine title *ends* in an
+ * anchor-introduced run of encode words; the parser refuses whenever that run
+ * is interrupted rather than guessing, which is why names like
+ * `Site.23.04.15.The.1080p.Club.MP4-G` return `null`.
  */
 
 /**
@@ -830,6 +830,19 @@ function stripFileExtension(name: string): string {
  * rather than dropped so the key always has three parts and consumers can go
  * on splitting on `:`; a slug can never be empty, so an empty middle is
  * unambiguous. The display omits the date entirely instead of showing a blank.
+ *
+ * The site segment is spelled differently from the scene segment — it is
+ * `siteComparisonKey`, alphanumerics only, where the scene is a `slug` that
+ * keeps its word boundaries as `-`. The asymmetry is deliberate: the site's
+ * *name* is mutable and the scene's is not. A site's name arrives from
+ * whatever confirmed it — ThePornDB, or the user's config — and it can arrive
+ * late, or change, or be edited; the same release that read `TouchMyWife`
+ * before the site was learned reads `Touch My Wife` after. Its *identity* must
+ * not move underneath the groups already keyed by it. So the key holds the one
+ * form every spelling collapses to, which is exactly the form site matching
+ * already compares. Two spellings that match as one site now key as one site.
+ * The canonical spelling is not lost — it is `display.subtitle`, which is what
+ * the user sees and what `path-template.ts` renders.
  */
 export function buildRelease(
   site: string,
@@ -838,7 +851,7 @@ export function buildRelease(
   sceneSlug: string,
   quality: QualityTokens,
 ): ParsedRelease | null {
-  const siteSlug = slug(site);
+  const siteSlug = siteComparisonKey(site);
   if (siteSlug.length === 0) return refuse('site slug is empty');
   if (sceneSlug.length === 0) return refuse('scene slug is empty');
 
@@ -988,8 +1001,13 @@ export function findSceneDate(tokens: Token[]): AnchorSpan | null {
  * say `BangBros` or `bangbros`, and a minority say `Bang.Bros`. A slug would
  * make those three different sites (`bang-bros` vs `bangbros`); this makes
  * them one.
+ *
+ * Exported because `buildRelease` spells the identity key's site segment with
+ * it. Matching and keying have to be the same rule or a site can match as one
+ * and key as two, which is exactly the bug that put this here: two expressions
+ * for one rule drifted apart.
  */
-function siteComparisonKey(value: string): string {
+export function siteComparisonKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
