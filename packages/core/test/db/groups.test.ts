@@ -9,6 +9,7 @@ import {
   getGroup,
   markPicked,
   pickedGroups,
+  refreshUpgradeFlag,
 } from '../../src/db/groups.ts';
 
 // `upgrade_release_id` is an invariant, not an event log: it names the
@@ -131,6 +132,124 @@ test('flagUpgrade re-derives the same invariant and is the only write that moves
 
   const group = getGroup(db, 1)!;
   assert.equal(group.upgradeReleaseId, 4);
+  assert.equal(group.listRankAt, 7000);
+  db.close();
+});
+
+// --- A release that cannot be downloaded is not an upgrade -------------
+//
+// The flag is what puts a picked group back on Browse and what the card
+// advertises. Flagging a release whose download just failed offers the user a
+// button that fails again — the reported loop, in which the only escape from a
+// failed 2160p was to pick the 1080p and be offered the 2160p straight back.
+// The rule is the *most recent* download, so a retry that succeeds makes the
+// release eligible again without anything having to clear a marker.
+
+/**
+ * Appends a download for a release. Ids are assigned by the table, so a second
+ * call for the same release is the more recent attempt — which is the whole of
+ * what "most recent" means here.
+ */
+function addDownload(db: DatabaseSync, releaseId: number, status: string): void {
+  db.prepare(
+    `INSERT INTO downloads (release_id, group_id, client_id, kind, status, created_at, updated_at)
+     VALUES (?, 1, 'sab', 'initial', ?, 1, 1)`,
+  ).run(releaseId, status);
+}
+
+test('a better release nobody has tried is still flagged', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+
+  markPicked(db, 1, 1);
+
+  // "Never downloaded" and "downloaded fine" are the same answer — not failed.
+  // A NULL leaking out of the failure test instead of a 0 would make an
+  // untried release, which is every release in a fresh group, fail the
+  // eligibility check and leave nothing ever flagged.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, 4);
+  db.close();
+});
+
+test('a better release whose latest download failed is passed over for the next best', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  addDownload(db, 4, 'failed');
+
+  markPicked(db, 1, 1);
+
+  // Release 4 outscores 3, so it is what the old rule flagged. It cannot be
+  // downloaded; release 3 is the best thing left that might be.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, 3);
+  db.close();
+});
+
+test('when every better release has failed, nothing is flagged', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  for (const releaseId of [2, 3, 4]) addDownload(db, releaseId, 'failed');
+
+  markPicked(db, 1, 1);
+
+  // The group leaves Browse rather than advertising a loop. It is picked, so
+  // it lives on the Picks tab, where a scene you own belongs.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
+  db.close();
+});
+
+test('a release retried successfully after a failure is flagged again', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  addDownload(db, 4, 'failed');
+  addDownload(db, 4, 'imported');
+
+  markPicked(db, 1, 1);
+
+  // Only the most recent attempt counts, so recovery needs no separate write:
+  // the release becomes eligible again the moment a later attempt is not a
+  // failure.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, 4);
+  db.close();
+});
+
+test("the pick's own failure does not suppress the alternatives it needs", () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  addDownload(db, 1, 'failed');
+
+  refreshUpgradeFlag(db, 1);
+
+  // The failure test is asked about each *candidate*, not about the pick. Ask
+  // it about the pick — the shape the ordering rule uses — and a group whose
+  // pick failed would have every alternative suppressed at once, which is the
+  // opposite of what such a group needs.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, 4);
+  db.close();
+});
+
+test('a failed download on a release worse than the pick changes nothing', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 3);
+  addDownload(db, 1, 'failed');
+  addDownload(db, 2, 'failed');
+
+  refreshUpgradeFlag(db, 1);
+
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, 4);
+  db.close();
+});
+
+test('flagUpgrade passes over a failed release too, and still moves list_rank_at', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 2);
+  addDownload(db, 4, 'failed');
+
+  flagUpgrade(db, 1, 7000);
+
+  // Every write that re-derives the flag goes through one expression, so an
+  // arrival cannot re-advertise what a pick just ruled out.
+  const group = getGroup(db, 1)!;
+  assert.equal(group.upgradeReleaseId, 3);
   assert.equal(group.listRankAt, 7000);
   db.close();
 });

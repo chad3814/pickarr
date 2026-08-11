@@ -14,6 +14,7 @@ import {
   setStatus,
   setStoragePath,
 } from '../../src/db/downloads.ts';
+import { getGroup } from '../../src/db/groups.ts';
 
 const BAD_ID = 9999;
 
@@ -64,6 +65,66 @@ test('failDownload throws on a bad id', () => {
   const db = openTestDatabase();
   seed(db);
   assert.throws(() => failDownload(db, BAD_ID, 'boom', 2), /failDownload.*9999/);
+  db.close();
+});
+
+test('failDownload also re-derives the group upgrade flag, so a failed release stops being advertised', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  // A second, better release, flagged as the upgrade on offer.
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (2, 'f', 'g2', 'Better', 'https://indexer.invalid/2.nzb', 1)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (2, 1, 2, '{}', 200, 1)`,
+  ).run();
+  db.prepare(
+    "UPDATE media_groups SET state = 'picked', picked_release_id = 1, upgrade_release_id = 2 WHERE id = 1",
+  ).run();
+  const upgrade = insertDownload(db, {
+    releaseId: 2,
+    groupId: 1,
+    clientId: 'sab',
+    kind: 'upgrade',
+    createdAt: 2,
+  });
+
+  failDownload(db, upgrade, 'Repair failed, not enough repair blocks (92 short)', 3);
+
+  // Not at some later unrelated write: at the moment of failure. Advertising
+  // "Upgrade available" for a release that has just proved undownloadable is
+  // the loop this closes.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
+  assert.equal(getDownload(db, id)?.status, 'queued', 'the unrelated download is untouched');
+  db.close();
+});
+
+test('failDownload is atomic: a failure re-deriving the flag rolls the status write back', () => {
+  // The status write and the re-derivation are two statements, and the comment
+  // on `failDownload` claims they are one instant. Without a transaction that
+  // is false for a crash landing between them, which is exactly the stale-flag
+  // state the re-derivation exists to prevent — the download reads `failed`
+  // while the group still advertises the release that failed.
+  //
+  // The abort is injected at the database rather than by stubbing, because the
+  // second statement is reached through an import that no seam exposes. A
+  // trigger that raises on the `media_groups` update is the same shape of
+  // failure a crash produces: the first statement has run, the second cannot.
+  const db = openTestDatabase();
+  const id = seed(db);
+  db.prepare(
+    "UPDATE media_groups SET state = 'picked', picked_release_id = 1 WHERE id = 1",
+  ).run();
+  db.exec(`CREATE TRIGGER no_flag BEFORE UPDATE ON media_groups
+           BEGIN SELECT RAISE(ABORT, 'flag write refused'); END`);
+
+  assert.throws(() => failDownload(db, id, 'Repair failed', 3), /flag write refused/);
+
+  // Rolled back whole. Left un-transacted this reads 'failed'.
+  assert.equal(getDownload(db, id)?.status, 'queued');
+  assert.equal(getDownload(db, id)?.error, null);
   db.close();
 });
 

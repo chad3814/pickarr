@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { refreshUpgradeFlag } from './groups.ts';
 import { maybeStr, num, str, type SqlRow } from './row.ts';
 
 export type DownloadStatus =
@@ -234,11 +235,67 @@ export function setStoragePath(
   requireAffected('setStoragePath', id, result.changes);
 }
 
+/**
+ * Re-derives the group's upgrade flag as well as writing the status, because
+ * failing is one of the writes that changes a side of that comparison:
+ * `deriveUpgradeReleaseId` will not flag a release whose latest download
+ * failed, and `upgrade_release_id` is a stored column that only says so once
+ * something recomputes it.
+ *
+ * Without this the exclusion took effect at an arbitrary later moment — the
+ * next unrelated write that happened to call `refreshUpgradeFlag`, perhaps a
+ * quality edit days afterwards — at which point the group dropped off Browse
+ * for a reason having nothing to do with the edit that triggered it. Doing it
+ * here makes the two halves one instant: the group stops being advertised on
+ * Browse with the release that just failed, and appears at the top of Picks
+ * with that release marked, on the same write. Evicted from one screen and
+ * surfaced on another, rather than quietly absent from both.
+ *
+ * That is a claim about the *eviction* direction only, and only that direction
+ * is fixed. The inverse still lags: `resetForRetry` makes a failed release
+ * eligible again without re-deriving, so between a retry and the next unrelated
+ * write the release is advertised on neither screen. That window is correct
+ * rather than merely tolerated — it coincides exactly with "already
+ * downloading", and picking a mid-download release is refused anyway
+ * (`inFlightForRelease`, which excludes only 'failed'), so there is nothing to
+ * advertise while it lasts.
+ *
+ * It lives in this function rather than at the seven `failDownload` call sites
+ * in reconcile.ts for the reason `deriveUpgradeReleaseId` exists at all: an
+ * invariant re-derived by whichever caller remembers is an invariant that holds
+ * on some paths. This is the only writer of `status = 'failed'` in the package,
+ * so every failure path inherits the re-derivation by construction.
+ *
+ * Both statements go in one transaction so the "one instant" above is true of a
+ * crash too, not merely of a reader — nothing here awaits, so no query can
+ * observe the gap, but a process that died between them would leave exactly the
+ * stale flag this exists to prevent. No caller holds a transaction open
+ * (reconcile, the only one, opens none), so this is never nested.
+ *
+ * The re-derivation reads the row back for its `group_id` instead of taking one
+ * from the caller — the id it must use is the one the download itself records,
+ * and a second parameter would be a second thing that could be wrong.
+ */
 export function failDownload(db: DatabaseSync, id: number, error: string, now: number): void {
-  const result = db
-    .prepare("UPDATE downloads SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
-    .run(error, now, id);
-  requireAffected('failDownload', id, result.changes);
+  db.exec('BEGIN');
+  try {
+    const result = db
+      .prepare("UPDATE downloads SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
+      .run(error, now, id);
+    requireAffected('failDownload', id, result.changes);
+    const download = getDownload(db, id);
+    // `requireAffected` has already thrown if no row matched, so this cannot be
+    // null. It is the type system's branch, not a real one — same shape, and
+    // the same wording, as `bumpAttempts` uses for the same impossibility.
+    if (download === null) {
+      throw new Error(`failDownload: download ${id} vanished after its own update`);
+    }
+    refreshUpgradeFlag(db, download.groupId);
+    db.exec('COMMIT');
+  } catch (error_) {
+    db.exec('ROLLBACK');
+    throw error_;
+  }
 }
 
 export function recordError(db: DatabaseSync, id: number, error: string, now: number): void {

@@ -82,9 +82,52 @@ export function insertGroup(db: DatabaseSync, group: NewGroup): number {
 }
 
 /**
+ * 1 when the most recent download of the release named by `releaseId` failed,
+ * 0 otherwise.
+ *
+ * A SQL fragment parameterised by the *expression* naming the release rather
+ * than by a release id, because its callers name it differently: the upgrade
+ * derivation correlates against `releases.id` of the candidate row it is
+ * judging, `failedReleasesOf` against `releases.id` of a whole group's worth,
+ * and a bare `?` binds one release directly. Whatever is passed has to resolve
+ * in the query this is embedded in, which means every such query must select
+ * from that table by name. One function rather than several spellings: "this
+ * cannot be downloaded" decides which group the user is sent to, which release
+ * on that card is marked, and which alternatives are advertised — three
+ * answers that must be the same answer, or the user is sent to a group to be
+ * offered the very thing that failed.
+ *
+ * *Most recent* is the whole of it. Re-picking a release whose earlier attempt
+ * failed inserts a second `downloads` row rather than reviving the first
+ * (`inFlightForRelease` excludes only 'failed', so nothing stops the pick), so
+ * a later attempt is how a release recovers — no marker to clear, no write to
+ * remember to make. `ORDER BY id DESC LIMIT 1` is that: downloads ids are
+ * monotonic, so the highest is the latest attempt. `updated_at` is not used —
+ * it moves on every poll, so a stalled retry could be stamped older than the
+ * failure it replaced.
+ *
+ * `COALESCE(..., 0)` is load-bearing, differently for each caller. A release
+ * with no downloads makes the subquery NULL and `NULL = 'failed'` is NULL:
+ * as a sort key that would separate "never downloaded" from "downloaded fine"
+ * and reorder two groups that are equally not-failed; as an eligibility test
+ * it is not true, so an untried release — which is every release in a fresh
+ * group — would be judged ineligible and nothing would ever be flagged. Both
+ * cases want the same answer, and it is 0.
+ */
+function latestDownloadFailed(releaseId: string): string {
+  return `COALESCE(
+    (SELECT status FROM downloads
+     WHERE release_id = ${releaseId}
+     ORDER BY id DESC LIMIT 1) = 'failed',
+    0
+  )`;
+}
+
+/**
  * The invariant `upgrade_release_id` is supposed to express: the
  * highest-scoring release in the group that is strictly better than
- * `picked_release_id`, or NULL when there is none.
+ * `picked_release_id` *and* not already known to be undownloadable, or NULL
+ * when there is none.
  *
  * Deriving it, rather than remembering whichever arrival last noticed
  * something better, is what makes the flag survive the two writes that change
@@ -101,6 +144,24 @@ export function insertGroup(db: DatabaseSync, group: NewGroup): number {
  * alternative is not an upgrade. A picked release that no longer exists makes
  * the subquery NULL, and `score > NULL` is NULL, so the result is correctly
  * "nothing flagged" rather than "everything is better".
+ *
+ * A release whose most recent download failed is not a candidate. The flag is
+ * what puts a picked group back in the browse list and what its card
+ * advertises, so flagging a release that has already proved undownloadable
+ * offers the user a button that fails again — and, once the pick has moved off
+ * it, offers it forever. That is the reported loop: a 2160p failed with "not
+ * enough repair blocks", the 1080p was picked instead, and the group came
+ * straight back advertising the 2160p. The judgement is asked about each
+ * *candidate*, never about the pick — asking it about the pick would suppress
+ * every alternative at once, for exactly the group that most needs one.
+ *
+ * It does not hide the failed release. A failed *candidate* stays on the card
+ * with its Pick button, so retrying it is one click, and an attempt that
+ * succeeds makes the release eligible again on its own — no marker to clear
+ * (see `latestDownloadFailed`). A failed *pick* has no Pick button, because
+ * `ReleaseRow` gives the current release none; it is retried from the
+ * Downloads tab instead. Either way the row is marked `Failed` and the release
+ * merely stops being advertised as an upgrade.
  */
 function deriveUpgradeReleaseId(
   db: DatabaseSync,
@@ -112,6 +173,7 @@ function deriveUpgradeReleaseId(
     .prepare(
       `SELECT id FROM releases
        WHERE group_id = ? AND score > (SELECT score FROM releases WHERE id = ?)
+             AND ${latestDownloadFailed('releases.id')} = 0
        ORDER BY score DESC, id DESC LIMIT 1`,
     )
     .get(groupId, pickedReleaseId);
@@ -286,16 +348,77 @@ export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
 }
 
 /**
- * Same tiebreak as `browseGroups`, for the same reason: within one
- * `list_rank_at` tie, ascending `id` is newest-first, because ingest walks
- * an RSS batch newest-first and the newest item gets the lowest id. This has
- * no cursor, so there is no paired comparison to keep in step — but it must
+ * The ids of the releases in one group whose latest download failed, as a
+ * `SELECT` correlated on whatever expression names the group.
+ *
+ * *Any* release, not just the pick. The narrower reading — only
+ * `picked_release_id` — was the first version of this and it missed the case
+ * that matters most: own a 1080p, a 2160p arrives and is flagged as an
+ * upgrade, the user picks it, and `pickRelease` records that as an upgrade so
+ * `picked_release_id` still names the 1080p. When the 2160p then fails, the
+ * pick is a release that imported perfectly well, so "did the pick fail" is
+ * *false* — and the group sits on Browse advertising the release that just
+ * failed, with nothing anywhere saying so. A group is worth surfacing when
+ * something in it failed, whichever release that was.
+ *
+ * The same select answers both questions the callers have, which is why it
+ * yields ids rather than a bare flag: `EXISTS` over it is the group-level sort
+ * key, and the ids themselves say which row on the card to mark. Two queries
+ * could drift; a group hoisted to the top of Picks with no release on it
+ * marked would be exactly the drift that matters.
+ */
+function failedReleasesOf(groupId: string): string {
+  return `SELECT id FROM releases
+     WHERE group_id = ${groupId} AND ${latestDownloadFailed('releases.id')} = 1`;
+}
+
+/** 1 when any release in the group has a failed latest download, 0 otherwise. */
+const HAS_FAILED_DOWNLOAD = `EXISTS (${failedReleasesOf('media_groups.id')})`;
+
+/**
+ * Which of a group's releases have a failed latest download — empty for a
+ * healthy group.
+ *
+ * A set rather than a boolean because the view needs both facts and this is
+ * the one query that carries them: `size > 0` is the group flag, membership is
+ * the per-release flag. Asking twice would be two chances to disagree, and the
+ * same `failedReleasesOf` that answers here is what `pickedGroups` sorts on, so
+ * the ordering and the marking cannot come apart.
+ */
+export function failedReleaseIds(db: DatabaseSync, groupId: number): Set<number> {
+  const rows = db.prepare(failedReleasesOf('?')).all(groupId);
+  return new Set(rows.map((row) => num(row as SqlRow, 'id')));
+}
+
+/**
+ * Groups with a failed download first, because for the group that prompted this
+ * nothing else in the app points at it: a picked group holding no *other*
+ * flagged upgrade is off browse (see `BROWSABLE`), so this list is where it has
+ * to be findable and the top is where the user lands. Not an invariant, only
+ * the case worth designing for — a group can hold a failure and still be
+ * browsable, if some third release is flagged (pick the 1080p, the 2160p fails,
+ * a 4K REMUX arrives and is flagged), and then it is simply on both screens.
+ * The eviction from browse and the arrival here are the same instant —
+ * `failDownload` re-derives the upgrade flag in the same transaction — so a
+ * group is never briefly absent from both.
+ *
+ * Underneath that, the same tiebreak as `browseGroups`, for the same reason:
+ * within one `list_rank_at` tie, ascending `id` is newest-first, because ingest
+ * walks an RSS batch newest-first and the newest item gets the lowest id. This
+ * has no cursor, so there is no paired comparison to keep in step — but it must
  * still agree with `browseGroups` on order, or the same tied groups render
  * in opposite order on the Picks page versus Browse.
+ *
+ * Ordered in SQL rather than re-sorted by the caller: this returns rows
+ * straight to a view, and a second sort pass would be a second place the order
+ * is decided.
  */
 export function pickedGroups(db: DatabaseSync): GroupRow[] {
   return db
-    .prepare(`${SELECT} WHERE state = 'picked' ORDER BY list_rank_at DESC, id ASC`)
+    .prepare(
+      `${SELECT} WHERE state = 'picked'
+       ORDER BY ${HAS_FAILED_DOWNLOAD} DESC, list_rank_at DESC, id ASC`,
+    )
     .all()
     .map((row) => toGroupRow(row as SqlRow));
 }

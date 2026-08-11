@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClient } from '../clients/types.ts';
 import { getGroup, markPicked } from '../db/groups.ts';
+import { liveFilesForGroup } from '../db/imported-files.ts';
 import { getRelease, linkForRelease, titleForRelease } from '../db/releases.ts';
 import {
   clientJobName,
@@ -21,14 +22,39 @@ export interface PickRequest {
 /**
  * Marks the group picked and starts the download.
  *
- * `kind` is derived here, not accepted from the caller: a group already in
- * state 'picked' yields an upgrade, anything else yields an initial pick.
- * Accepting `kind` as an input made correctness depend on every caller
- * deriving it correctly — in particular, nothing stopped a second `initial`
- * pick of a *different* release on an already-picked group from silently
- * repointing picked_release_id and orphaning the first download. Deriving it
- * from the group's own state removes that failure mode outright rather than
- * adding a check for it.
+ * `kind` is derived here, not accepted from the caller. Accepting it as an
+ * input made correctness depend on every caller deriving it correctly — in
+ * particular, nothing stopped a second `initial` pick of a *different* release
+ * on an already-picked group from silently repointing picked_release_id and
+ * orphaning the first download. Deriving it here removes that failure mode
+ * outright rather than adding a check for it.
+ *
+ * What it is derived *from* is whether the group has a file on disk, not
+ * whether it is in state 'picked'. An upgrade means "replace the file you
+ * have": it defers moving the pick until the replacement imports, and on
+ * import it trashes what it superseded. A group whose only download failed is
+ * still 'picked' — a failed download does not release the pick, the user still
+ * wants the content — but it holds nothing, so neither behaviour applies and
+ * both are actively wrong: there is no file to trash, and deferring the
+ * pointer would leave the group pointed at the release that just failed.
+ * `liveFilesForGroup` is the question asked, so trashed rows do not count;
+ * the file they describe is gone.
+ *
+ * This also changes a case beyond the failed one, and changes it on disk, not
+ * merely in a pointer: picking a second release while the first is still
+ * downloading is now 'initial' rather than 'upgrade'. If both then import, the
+ * old rule trashed the first file as the second superseded it; the new one
+ * leaves **both files live** in the library under one group. That is a real
+ * regression in that ordering, accepted here because the reverse ordering —
+ * second import first, then the first — already left both files live under the
+ * old rule, so this is a pre-existing hole being widened rather than opened,
+ * and it is filed separately. Nothing in this function cancels the abandoned
+ * download, which is the actual missing step. What the change does buy is that
+ * the group ends up pointed at what the user last asked for instead of at a
+ * release they moved off.
+ *
+ * Choosing a *lower*-scoring release while holding a file is still an upgrade,
+ * because it does replace that file.
  *
  * picked_release_id is written here rather than at import time because the
  * ingest rule compares incoming releases against it, and needs something to
@@ -58,7 +84,8 @@ export async function pickRelease(
     throw new Error(`Release ${request.releaseId} already has download ${existing.id}`);
   }
 
-  const kind: DownloadKind = group.state === 'picked' ? 'upgrade' : 'initial';
+  const kind: DownloadKind =
+    liveFilesForGroup(db, request.groupId).length > 0 ? 'upgrade' : 'initial';
 
   let downloadId: number;
   db.exec('BEGIN');

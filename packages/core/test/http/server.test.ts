@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { getDownload } from '../../src/db/downloads.ts';
+import { failDownload, getDownload } from '../../src/db/downloads.ts';
+import { getGroup } from '../../src/db/groups.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
+import type { FastifyInstance } from 'fastify';
 import type { DownloadClient } from '../../src/clients/types.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 import type { UntrackedEntry } from '../../src/pipeline/reconcile.ts';
@@ -153,6 +155,94 @@ test('a picked group with no upgrade drops out of browse and appears in picks', 
   const picks = (await server.inject({ method: 'GET', url: '/api/picks' })).json();
   assert.equal(picks['groups'].length, 1);
   assert.equal(picks['groups'][0]['pickedReleaseId'], 2);
+  await server.close();
+  db.close();
+});
+
+/** The groups `/api/picks` returns, in the order it returned them. */
+interface PickedGroup {
+  id: number;
+  pickedReleaseId: number | null;
+  releases: { id: number; downloadFailed?: boolean }[];
+}
+
+async function picksOf(server: FastifyInstance): Promise<PickedGroup[]> {
+  const body = (await server.inject({ method: 'GET', url: '/api/picks' })).json();
+  return body['groups'] as PickedGroup[];
+}
+
+test('picks flags a group whose download failed, marks the release, and says nothing at all otherwise', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+  await server.inject({ method: 'POST', url: '/api/groups/2/pick', payload: { releaseId: 3 } });
+  failDownload(db, 1, 'Repair failed, not enough repair blocks (92 short)', 2000);
+
+  const groups = await picksOf(server);
+
+  // Alpha's download failed, so it leads the list even though Beta ranks newer.
+  assert.deepEqual(groups.map((group) => group.id), [1, 2]);
+  // The order *is* the group-level statement — there is no group-level field,
+  // and nothing on the client re-derives one.
+  // The card is told *which* release, which is the part a screen reads.
+  const alpha = groups[0]?.releases ?? [];
+  assert.equal(alpha.find((release) => release.id === 2)?.downloadFailed, true);
+  // Absent, not `false`, on the healthy sibling release and on the healthy
+  // group alike: a payload with nothing wrong with it is byte-for-byte what it
+  // was before either field existed, which is what lets the SPA ignore them
+  // wherever it does not care.
+  assert.equal(Object.hasOwn(alpha.find((release) => release.id === 1) ?? {}, 'downloadFailed'), false);
+  assert.equal(Object.hasOwn(groups[1]?.releases[0] ?? {}, 'downloadFailed'), false);
+  await server.close();
+  db.close();
+});
+
+test('a failed upgrade flags its group even though the pick imported fine, and leaves browse at once', async () => {
+  // The case that scoped out the first version of this rule, which asked only
+  // whether `picked_release_id` had failed. Own a 1080p; a 2160p arrives and is
+  // flagged; pick it. That is an upgrade, so the pick deliberately stays on the
+  // 1080p until the replacement imports — and when the 2160p fails, the pick is
+  // a release that imported perfectly well. Under the narrow rule the group had
+  // no flag, no badge and no sort, and sat on Browse advertising the very
+  // release that had just failed.
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 1 } });
+  // The 1080p lands: a live file is what makes the next pick an upgrade rather
+  // than a fresh initial download.
+  db.prepare("UPDATE downloads SET status = 'imported' WHERE id = 1").run();
+  db.prepare(
+    `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+     VALUES (1, 1, '/dl/a.mkv', '/library/a.mkv', 10, 1)`,
+  ).run();
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, 2, 'the 2160p should be flagged as an upgrade');
+
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+  assert.equal(getDownload(db, 2)?.kind, 'upgrade');
+  failDownload(db, 2, 'Repair failed, not enough repair blocks (92 short)', 3000);
+
+  const alpha = (await picksOf(server)).find((group) => group.id === 1);
+  // The pick is untouched — the user still has the 1080p and still wants the
+  // content — but the group is flagged and the 2160p is the release marked.
+  assert.equal(alpha?.pickedReleaseId, 1);
+  assert.equal(alpha?.releases.find((release) => release.id === 2)?.downloadFailed, true);
+  assert.equal(
+    Object.hasOwn(alpha?.releases.find((release) => release.id === 1) ?? {}, 'downloadFailed'),
+    false,
+  );
+
+  // Off Browse in the same instant it appeared on Picks, not at whatever later
+  // write next happened to re-derive the flag. Advertising "Upgrade available"
+  // for a release that has just proved undownloadable is the reported loop.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
+  const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
+  assert.deepEqual(
+    browse['groups'].map((group: { display: { title: string } }) => group.display.title),
+    ['Beta'],
+  );
   await server.close();
   db.close();
 });
