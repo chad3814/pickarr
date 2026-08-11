@@ -192,7 +192,12 @@ test('retry refreshes the row immediately, without waiting on the poll', async (
     });
   }) as unknown as typeof fetch;
 
-  render(<Downloads />);
+  // `routed`, like every other render here. This test arrived from `main`,
+  // where `DownloadRow` had no `<Link>` and needed no Router; this branch gave
+  // the title one. Git merged both files without a conflict and the result did
+  // not render at all — an empty body, and a missing button rather than a
+  // missing Router. CI found it; neither branch could have.
+  render(routed(<Downloads />));
   await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
   fireEvent.click(screen.getByRole('button', { name: /retry/i }));
 
