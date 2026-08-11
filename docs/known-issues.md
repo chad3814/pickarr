@@ -94,8 +94,11 @@ therefore compares alphanumerics only, so all of those find one site — a slug 
 made `bang-bros` and `bangbros` two different sites, which was a live bug the first time
 this ran against the real API. The *matched* name then replaces whatever the release
 wrote, so one site cannot become three groups depending on spelling. The corollary is
-that the configured (or discovered) spelling decides the directory and the key, and
-`ANALONLY` is a legitimate if ugly choice.
+that the configured (or discovered) spelling decides the directory, and `ANALONLY` is a
+legitimate if ugly choice. It does *not* decide the key: the key's site segment is that
+same alphanumerics-only form, so matching and keying cannot disagree. They used to — the
+key was a slug — and a site confirmed after some of its scenes had been ingested split
+them into two groups that could never merge.
 
 - [A sub-site is only found when it is the name's leading run](https://github.com/chad3814/pickarr/issues/6) — `Bangbros.Ass.Parade....` resolves to `Bang Bros`, not to `Ass Parade`.
 - [A confirmed site's own name must be at least four characters, and the cache outlives the rule](https://github.com/chad3814/pickarr/issues/7) — `Big.Boobs.For.The.Win` resolved to the site `BIG`; entries confirmed before the floor existed need clearing from `discovered_sites` by hand.
@@ -311,11 +314,15 @@ then never import — the same collision the `--` boundary exists to prevent, re
 one layer down for the third time. Words contain neither `.` nor `-`, so the rendering
 still decodes uniquely.
 
-Every value is derived from `identityKey`, never from the release's display strings, so
-two encodes of one scene render one path under any template. `{sitename}` and
-`{SiteName}` run the words together and are the one pair that is not injective —
-`bang-bros` and `bangbros` both give `bangbros` — but those cannot be two different
-sites, because site matching compares exactly that separator-free form.
+Every value is derived from `identityKey` or from the *group's* display record, never
+from the individual release's display strings, so two encodes of one scene render one
+path under any template. `{site}`, `{Site}` and `{SiteName}` are the group-record ones:
+the key's site segment is separator-free, so deriving them from it would rewrite
+`Bang Bros/` as `Bangbros/` in every existing library. There is one display record per
+group, so this reintroduces no per-release variation. `{sitename}` and `{SiteName}` run
+the words together and are the one pair that is not injective — `bang-bros` and
+`bangbros` both give `bangbros` — but those cannot be two different sites, because site
+matching compares exactly that separator-free form.
 
 **A constraint, not a defect: `--` inside a scene slug is a component boundary, and
 two files have to agree about that.** Where a release names its parts separately —
@@ -372,7 +379,35 @@ structure, it held.
 
 ## Manual metadata
 
-- [A group ingested before its site was learned re-keys itself on a save that changed nothing](https://github.com/chad3814/pickarr/issues/39) — Opening that group's Edit form and pressing Save without touching a field rebuilds `bangbros:2026-08-03:…` as `bang-bros:2026-08-03:…`.
+**Closed: a group ingested before its site was learned no longer re-keys itself on a
+save that changed nothing.** This was #39, and the root cause was the identity key
+itself — see the "Site matching drops separators" entry above. Once the key's site
+segment held `siteComparisonKey`'s separator-free form, the same form site matching
+already used, no spelling `learnSites` adds afterward could disagree with the key
+built from an earlier spelling, so the re-key this issue reported cannot happen.
+
+That fix left a residual in `sceneToManualValues`'s manual-edit prefill.
+`siteForKeySegment` decided what to show in the Edit form's site field by probing
+whether the stored display name, or failing that the key segment's own spelling,
+would reproduce the key — and if *neither* did, fell back to the display name
+anyway, since a prefill has to return something. That third case was believed
+irreducible at the time: under the old key shape (`slug`, which keeps separators)
+a spelling learned between ingest and Edit could make both probes fail at once,
+and #39 was the record of it happening.
+
+It is provably unreachable now, and the reason is short. Every writer of an
+identity key in this codebase — `buildRelease`, for anything parsed or hand-entered,
+and the migration that re-keyed every group predating this shape — produces the
+site segment by calling `siteComparisonKey` directly. `siteComparisonKey` is
+idempotent: it strips exactly the characters a second pass would strip, so a string
+it already produced is unchanged by producing it again. That makes the key's own
+spelling a guaranteed answer whenever the display name's does not, with nothing left
+for a third case to guard. The dead branch was removed only after a test drove the
+reported shape end to end — a release parsed with no site list, whose group is read
+back for editing after `learnSites` grew the list — and confirmed the round trip
+holds and the fallback the removed branch used to reach is never taken.
+
+#39 is closed by this branch and should be marked closed on merge.
 
 ## Test-suite blind spots
 

@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ManualField, ParsedRelease } from '@pickarr/plugin-api';
-import { canonicalSiteName, parseSceneRelease, sceneSlugFromParts, slug } from '../src/parse.ts';
+import {
+  canonicalSiteName,
+  parseSceneRelease,
+  sceneSlugFromParts,
+  siteComparisonKey,
+} from '../src/parse.ts';
 import createScenesPlugin from '../src/index.ts';
 import {
   sceneManualFields,
@@ -21,8 +26,10 @@ const OPTIONS = { sites: ['Bang Bros', 'Brazzers', 'Trip For Fuck'] };
 // release was parsed under — and a check run against a single list cannot tell
 // a value read off the identity key from one copied out of the display.
 // `In The Crack` is the interesting entry: it canonicalises the release's own
-// `InTheCrack` to a spelling that slugs differently, which is exactly the
-// mechanism the site check exists for.
+// `InTheCrack` to a spelling that *slugs* differently. That no longer moves the
+// key — the key's site segment deletes separators — which is the point: the
+// prefill has to keep working under a list that re-spells a site, and now it
+// does so without the fallback firing.
 const MORE_OPTIONS = {
   sites: [...OPTIONS.sites, 'Vixen', 'In The Crack', 'Swallowed', 'Blacked', 'Site'],
 };
@@ -209,14 +216,29 @@ test('a stored site that disagrees with its own key does not re-key the group', 
     quality: { extras: {} },
   };
 
-  // No configured site claims this key's class, so the key's own spelling is a
-  // prefill that rebuilds it. Trusting the subtitle instead keys `bang-bros`.
+  // `Bang Bros` and `bangbros` are no longer a disagreement: the key's site
+  // segment is separator-free, so the stored subtitle rebuilds it and the
+  // prefill can offer the real name. This used to fall through to the key's
+  // own spelling, because `slug('Bang Bros')` was `bang-bros`.
   const values = sceneToManualValues(stored, { sites: [] });
-  assert.equal(values['site'], 'bangbros');
+  assert.equal(values['site'], 'Bang Bros');
 
   const rebuilt = sceneFromManualValues(values, { sites: [] });
   assert.ok('media' in rebuilt);
   assert.equal(rebuilt.media.identityKey, stored.identityKey);
+
+  // A subtitle that disagrees about more than separators still has to be
+  // caught — `media_groups.display` is written once and never rewritten, so a
+  // row edited into this state stays that way. The key's own spelling is the
+  // prefill that rebuilds it.
+  const wrong = sceneToManualValues(
+    { ...stored, display: { ...stored.display, subtitle: 'Brazzers' } },
+    { sites: [] },
+  );
+  assert.equal(wrong['site'], 'bangbros');
+  const rebuiltWrong = sceneFromManualValues(wrong, { sites: [] });
+  assert.ok('media' in rebuiltWrong);
+  assert.equal(rebuiltWrong.media.identityKey, stored.identityKey);
 
   // A missing subtitle is the same failure with nothing to copy: before the
   // check it produced an empty required field, which the form rejects.
@@ -227,24 +249,18 @@ test('a stored site that disagrees with its own key does not re-key the group', 
   assert.equal(blank['site'], 'bangbros');
 });
 
-test('a site spelling learned after ingest cannot silently be applied by a prefill', () => {
-  // The reviewer's case, and the limit of what a prefill can do about it.
+test('a site spelling learned after ingest does not move the key through a prefill', () => {
+  // The reviewer's case. It used to be a documented hole and is now closed.
   //
   // These two parse with no site list at all, so they key under the spelling
   // their own release names use. `learnSites` then adds the metadata service's
   // `Bang Bros` on some later feed batch, and the Edit form opens against that
-  // longer list. `canonicalSiteName` matches on `siteComparisonKey`, which
-  // deletes separators, while the key is built with `slug`, which keeps them as
-  // `-` — so the two spellings are one site for matching and two for keying.
-  //
-  // What is asserted here is the *narrowed* invariant `sceneToManualValues`
-  // documents: the prefill preserves the key whenever any value of the site
-  // field could, and never emits a slug that would not have helped. When a
-  // learned spelling has collapsed the key's whole comparison class onto a
-  // different slug, no value can — `canonicalSiteName` is constant on that
-  // class — so the field keeps showing the group's own name and the rebuild
-  // re-keys. Closing that needs the identity model or the edit path to change,
-  // not this function; see `siteForKeySegment`.
+  // longer list. Matching has always been on `siteComparisonKey`, which deletes
+  // separators; the key used to be built with `slug`, which keeps them as `-`,
+  // so the two spellings were one site for matching and two for keying and a
+  // no-op save re-keyed the group from `bangbros` to `bang-bros`. The key's
+  // site segment is `siteComparisonKey` now, so both spellings reduce to the
+  // one identity and there is nothing for the prefill to lose.
   const learned = { sites: ['Bang Bros'] };
   const cases: [string, string][] = [
     ['Bangbros.Chloe.Upgrades.her.Butt.2026.08.03.2160p.MP4-WRB', 'Bangbros'],
@@ -258,21 +274,60 @@ test('a site spelling learned after ingest cannot silently be applied by a prefi
 
     const segment = parsed.identityKey.split(':')[0] ?? '';
     // The test of whether *any* value could hold the key, applied to the one
-    // value that works if one does — see the proof in `siteForKeySegment`.
-    const recoverable = slug(canonicalSiteName(segment, learned.sites)) === segment;
-    assert.equal(recoverable, false, name);
+    // value that works if one does — see the proof in `siteForKeySegment`. It
+    // has to spell the segment the way `buildRelease` does, or it answers about
+    // a slug the key no longer holds.
+    const recoverable = siteComparisonKey(canonicalSiteName(segment, learned.sites)) === segment;
+    assert.equal(recoverable, true, name);
 
+    // The learned spelling reaches the field, because it is now the one that
+    // both displays correctly and rebuilds the key.
     const values = sceneToManualValues(parsed, learned);
     assert.equal(values['site'], subtitle, name);
 
     const rebuilt = sceneFromManualValues(values, learned);
     assert.ok('media' in rebuilt, name);
-    assert.equal(
-      rebuilt.media.identityKey,
-      parsed.identityKey.replace(/^bangbros/, 'bang-bros'),
-      name,
-    );
+    assert.equal(rebuilt.media.identityKey, parsed.identityKey, name);
   }
+});
+
+test('the exact case that motivated the third fallback stays on the display spelling', () => {
+  // The reported bug that opened issue #39, driven end to end: a release
+  // parsed before ThePornDB confirmed its site, whose group is read back for
+  // editing after `learnSites` added the confirmed spelling to the list. Under
+  // the old key shape (`slug`) no value of the site field could reproduce this
+  // group's key, so `siteForKeySegment` needed a third answer — return the
+  // subtitle anyway — for exactly this shape of input. That branch is gone
+  // now; this proves it was never needed for this case, rather than assuming
+  // it from the algebra alone.
+  const name =
+    'TouchMyWife.25.02.07.Anna.Claire.Clouds.Wife.Makes.Dirty.Video.For.Hubby.XXX.2160p.MP4-VSEX';
+  const stored = parseSceneRelease(name, { sites: [] });
+  assert.ok(stored !== null);
+  assert.equal(stored.display.subtitle, 'TouchMyWife');
+  assert.equal(stored.identityKey, 'touchmywife:2025-02-07:anna-claire-clouds-wife-makes-dirty-video-for-hubby');
+
+  const learned = { sites: ['Touch My Wife'] };
+  const values = sceneToManualValues(stored, learned);
+
+  // The property the round trip has to keep: opening this group's Edit form
+  // after the site was learned and pressing Save without touching a field
+  // must not move it. Asserted below by rebuilding, but the key segment being
+  // separator-free is what makes the assertion meaningful — under the old key
+  // shape this exact save is what silently re-keyed `touchmywife` groups to
+  // `touch-my-wife`.
+  const rebuilt = sceneFromManualValues(values, learned);
+  assert.ok('media' in rebuilt);
+  assert.equal(rebuilt.media.identityKey, stored.identityKey);
+
+  // The fallback this test is really about: if either probe had failed here,
+  // `siteForKeySegment` would have emitted the bare key segment
+  // (`touchmywife`) rather than the stored display spelling (`TouchMyWife`).
+  // Distinguishable only because they differ in case — which is exactly what
+  // a human would notice on an Edit form that had quietly started showing
+  // slugs instead of names.
+  assert.equal(values['site'], 'TouchMyWife');
+  assert.notEqual(values['site'], stored.identityKey.split(':')[0]);
 });
 
 test('the key-derived fallbacks do not fire on a well-formed release', () => {
@@ -374,7 +429,7 @@ test('a configured site spelling wins over what was typed', () => {
   );
   assert.ok('media' in result);
   assert.equal(result.media.display.subtitle, 'Bang Bros');
-  assert.equal(result.media.identityKey, 'bang-bros::some-scene');
+  assert.equal(result.media.identityKey, 'bangbros::some-scene');
 });
 
 test('each rejection names the field at fault', () => {
@@ -462,23 +517,20 @@ test('the hooks see a site learned after the plugin was built', () => {
   });
   assert.ok(result !== undefined && 'media' in result);
   assert.equal(result.media.display.subtitle, 'Bang Bros');
-  assert.equal(result.media.identityKey, 'bang-bros::some-scene');
+  assert.equal(result.media.identityKey, 'bangbros::some-scene');
 
-  // `toManualValues` reads the list too, and for the opposite purpose: it
-  // checks the site it is about to prefill against the key that site has to
-  // rebuild. Captured at construction it would check against the empty list,
-  // which is a check that always passes. Asserted through the plugin rather
-  // than the bare function because the wiring is the thing that can regress —
-  // `learnSites` reassigns `options`, so the hook has to read it per call.
-  //
-  // `Bangbros` beside `bang-bros` is the pair that tells the two apart. Against
-  // the empty list the subtitle slugs to `bangbros` and does not rebuild the
-  // key, so the check falls back to the key's own spelling; against the learned
-  // list `canonicalSiteName` turns it into `Bang Bros`, it does rebuild the
-  // key, and the display spelling is kept. A captured list gives the first
-  // answer forever.
+  // `toManualValues` used to need the list for the opposite reason: it
+  // checked the site it was about to prefill against the key that site had to
+  // rebuild, and a captured-at-construction list could make that check answer
+  // differently once `learnSites` grew it — the empty list would fail the
+  // check and fall back to the key's own spelling where the current list
+  // would have kept the display name. It no longer can: `siteForKeySegment`'s
+  // answer does not depend on which list it runs under, per the proof there,
+  // so there is nothing left for a stale list to get wrong. This only shows
+  // the hook still returns the display spelling when called after
+  // `learnSites`, not that a stale list would have mattered.
   const stored: ParsedRelease = {
-    identityKey: 'bang-bros:2023-04-15:alex-coal',
+    identityKey: 'bangbros:2023-04-15:alex-coal',
     display: { title: 'Alex Coal', subtitle: 'Bangbros', date: '2023-04-15', fields: [] },
     quality: { extras: {} },
   };
