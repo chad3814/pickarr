@@ -269,6 +269,47 @@ export const test = base.extend<{ harness: Harness }>({
   baseURL: async ({ harness }, use) => {
     await use(harness.baseURL);
   },
+
+  // Overridden so every spec inherits this without adding it itself. Before
+  // this, nothing in the suite listened for either signal: `manual.spec`'s
+  // duplicate-key bug happened to move the DOM (an orphaned card), which is
+  // what its assertions actually caught, but a React warning — or any
+  // uncaught exception in the SPA that does not move the DOM — passed
+  // silently across all four specs.
+  //
+  // `pageerror` (an uncaught exception in the page) always fails the test:
+  // there is no reading of "the SPA threw and that's fine".
+  //
+  // `console.error` also fails the test, which is a narrower call. React logs
+  // dev warnings — including the duplicate-key warning this suite is named
+  // for — through `console.error`, not `console.warn`, so leaving it out
+  // would reopen exactly the gap this fixture exists to close. The obvious
+  // risk with failing on it is a noisy third-party script tripping every
+  // spec; that doesn't apply here, because the page under test is one SPA we
+  // own, served with no third-party or ad script on it, so `console.error`
+  // is a signal from our own code, not the browser's stray complaints. If
+  // that ever stops being true, filter here rather than removing the check.
+  page: async ({ page }, use) => {
+    const errors: string[] = [];
+    page.on('pageerror', (error) => {
+      errors.push(`uncaught page error: ${error.stack ?? error.message}`);
+    });
+    page.on('console', (message) => {
+      if (message.type() === 'error') {
+        errors.push(`console.error: ${message.text()}`);
+      }
+    });
+
+    await use(page);
+
+    // Checked after the test body runs rather than as each event arrives, so
+    // a spec's own assertion failure is what's reported when both happen —
+    // and so one throw here reports every error the test triggered, not just
+    // the first.
+    if (errors.length > 0) {
+      throw new Error(`browser reported ${String(errors.length)} error(s):\n${errors.join('\n')}`);
+    }
+  },
 });
 
 export { expect } from '@playwright/test';
