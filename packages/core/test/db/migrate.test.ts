@@ -905,3 +905,38 @@ test('a survivor with no subtitle still wins on files, and its key is the path f
   assert.equal(group?.['identity_key'], 'touchmywife:2025-02-07:s');
   db.close();
 });
+
+// --- Migration 5: the metadata tables and the site's integer id -------------
+
+test('migration 6 creates the metadata tables and the site id column', () => {
+  const db = openTestDatabase();
+
+  const tables = new Set(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all()
+      .map((row) => String(row['name'])),
+  );
+  assert.ok(tables.has('group_metadata'));
+  assert.ok(tables.has('metadata_queue'));
+  assert.ok(tables.has('metadata_candidates'));
+
+  const columns = db
+    .prepare('PRAGMA table_info(discovered_sites)')
+    .all()
+    .map((row) => String(row['name']));
+  assert.ok(columns.includes('source_id'));
+  db.close();
+});
+
+test('migration 6 is idempotent across a second run', () => {
+  // `openTestDatabase` already migrates, so this is the second run.
+  const db = openTestDatabase();
+  migrate(db);
+  const applied = db
+    .prepare('SELECT version FROM schema_migrations ORDER BY version')
+    .all()
+    .map((row) => Number(row['version']));
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6]);
+  db.close();
+});
