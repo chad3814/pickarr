@@ -92,6 +92,60 @@ export interface ManualField {
   readonly help?: string;
 }
 
+/** A group as a metadata lookup sees it: its key, and what it displays. */
+export interface GroupIdentity {
+  readonly identityKey: string;
+  readonly display: DisplayFields;
+}
+
+/**
+ * What to ask a scene-metadata service about a group, and the axes an answer
+ * must corroborate.
+ *
+ * The same shape of seam as `siteCandidates`: the plugin says what to ask and
+ * what would count, the host decides how and when to ask. A group with no site
+ * yields `null` rather than a title-only query — searching a title across every
+ * site a service knows is how you confirm the wrong scene.
+ */
+export interface MetadataQuery {
+  /** Search strings to try, in order. The first yielding a confirmation wins. */
+  readonly queries: readonly string[];
+  /** Canonical site name. The host resolves it to a provider id from its own cache. */
+  readonly siteName?: string;
+  /** The group's own date, ISO `yyyy-mm-dd`, when it has one. */
+  readonly date?: string;
+}
+
+/** One scene as the metadata service describes it. */
+export interface MetadataCandidate {
+  readonly sourceUuid: string | null;
+  readonly title: string;
+  readonly siteUuid: string | null;
+  readonly siteId: number | null;
+  readonly siteName: string;
+  readonly date: string | null;
+  readonly performers: readonly string[];
+  readonly durationSeconds: number | null;
+  readonly synopsis: string | null;
+  readonly posterUrl: string | null;
+}
+
+/** A candidate that was not believed, and the reason it was not. */
+export interface MetadataRejection {
+  readonly candidate: MetadataCandidate;
+  readonly reason: string;
+}
+
+/**
+ * `confirmed: null` with a populated `nearMisses` is the interesting outcome:
+ * the service answered, nothing was believed, and the reasons are recorded so
+ * the rule can be measured instead of argued about.
+ */
+export interface MetadataVerdict {
+  readonly confirmed: MetadataCandidate | null;
+  readonly nearMisses: readonly MetadataRejection[];
+}
+
 export interface MediaTypePlugin {
   readonly id: string;
   readonly displayName: string;
@@ -118,6 +172,28 @@ export interface MediaTypePlugin {
    * host may call it repeatedly.
    */
   learnSites?(sites: readonly string[]): void;
+
+  /**
+   * What to ask a scene-metadata service about this group. `null` means the
+   * group cannot be looked up — no site, typically — and it is then never
+   * queued.
+   *
+   * Unlike `siteCandidates`, nothing here reaches the identity key, which is
+   * what makes the lookup safe to perform long after the group was created.
+   */
+  metadataQuery?(group: GroupIdentity): MetadataQuery | null;
+
+  /**
+   * Which candidate, if any, is this group's scene.
+   *
+   * Must be strict: a wrong confirmation puts another scene's performers on a
+   * card and never says so, while a missed one merely leaves the card as it is
+   * today. Rejections are returned rather than discarded.
+   */
+  confirmMetadata?(
+    candidates: readonly MetadataCandidate[],
+    query: MetadataQuery,
+  ): MetadataVerdict;
 
   /**
    * Why the most recent `parse` returned `null`.
