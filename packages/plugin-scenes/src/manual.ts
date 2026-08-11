@@ -13,6 +13,7 @@ import {
   matchSitePrefix,
   SCENE_COMPONENT_BOUNDARY,
   sceneSlugFromParts,
+  siteComparisonKey,
   slug,
   toIsoDate,
   tokensOf,
@@ -148,70 +149,76 @@ function titleForSceneSlug(displayTitle: string, sceneSlug: string, order: strin
 }
 
 /**
- * The site to prefill: the stored subtitle when it actually rebuilds the key
- * segment it sits beside, the segment's own spelling when that rebuilds it
- * instead, and the subtitle again when *nothing* can — see the proof below for
- * why those three branches are the whole space.
+ * The site to prefill: the stored subtitle when it rebuilds the key segment it
+ * sits beside, and the segment's own spelling when it does not.
  *
  * Why this is checked rather than trusted, and why the site needs its own
  * check even though the title already has one. `sceneToManualValues` reads
  * every structural fact off the key; the site was the last field still copied
  * from `media.display.subtitle`, and the rebuild does not use it raw — it runs
- * it through `canonicalSiteName` first. That function matches on
- * `siteComparisonKey`, which deletes separators, while the key is built with
- * `slug`, which keeps them as `-`. So `Bangbros` and `Bang Bros` compare as one
- * site and key as two (`bangbros` vs `bang-bros`). `learnSites` grows the site
- * list from the metadata service on every feed batch, so the list at Edit time
- * is routinely not the list at ingest time, and a spelling learned in between
- * turns a prefill into a re-key.
+ * it through `canonicalSiteName` first. `learnSites` grows the site list from
+ * the metadata service on every feed batch, so the list at Edit time is
+ * routinely not the list at ingest time, and the check has to hold against
+ * whichever list it runs under.
  *
- * Why the record's own key wins over the newly-learned spelling. There is a
- * real argument the other way: the parser now keys that site `bang-bros`, so
- * that is where the group's future siblings land, and converging on it is where
- * the data wants to go. But it must not happen on a save the user believes
- * changed nothing. A no-op save is a no-op. A user who wants the new spelling
- * can retype the site and watch the identity preview show the new key before
- * committing to it — that is a decision, whereas a prefill that quietly rebuilds
- * a different key moves a group, and the library directory under it, with
- * nothing on screen to say so.
+ * The probe has to spell the key's site segment the same way `buildRelease`
+ * does, which is `siteComparisonKey` — separators deleted — and not `slug`.
+ * It used to say `slug`, and that mismatch was the bug an earlier version of
+ * this function was written to survive: `Bangbros` and `Bang Bros` compared as
+ * one site and keyed as two, so a spelling learned between ingest and Edit
+ * turned a prefill into a re-key. The identity model that comment asked for
+ * has since landed — the key's site segment *is* `siteComparisonKey` now — so
+ * the mismatch is gone and the probe follows it.
+ *
+ * Why the record's own key wins over the newly-learned spelling, when the
+ * subtitle disagrees. There is a real argument the other way: converging a
+ * group on the parser's current spelling is where the data wants to go. But it
+ * must not happen on a save the user believes changed nothing. A no-op save is
+ * a no-op. A user who wants the new spelling can retype the site and watch the
+ * identity preview show the new key before committing to it — that is a
+ * decision, whereas a prefill that quietly rebuilds a different key moves a
+ * group, and the library directory under it, with nothing on screen to say so.
  *
  * What the fallback gives up, and why that is the right trade. The key holds a
- * slug, so the second branch loses the display casing: `Bang Bros` comes back
- * as `bang-bros`, `Bangbros` as `bangbros`. Exactly the cost `titleForSceneSlug`
+ * comparison key, so the fallback loses the display spelling entirely:
+ * `Bang Bros` comes back as `bangbros`. Exactly the cost `titleForSceneSlug`
  * pays, for exactly the same reason — the value is on screen in front of a
  * human who can correct it, whereas a prefill that rebuilds the wrong key is
  * acted on silently.
  *
- * Why two probes exhaust the possibilities. Write `C(v)` for
- * `slug(canonicalSiteName(v, sites))` and `s` for the key's site segment. Note
- * first that `siteComparisonKey(v)` is exactly `slug(v)` with its `-` removed —
- * both erase the same character class — so any `v` with `slug(v) === s` has the
- * same comparison key as `s` and therefore lands in the same match class.
- * `canonicalSiteName` maps a whole class to one string, so `C` is constant on
- * the class: either some configured site matches, in which case every member
- * yields that site's prettified spelling, or none does, in which case `C(v)` is
- * `slug(v)`. Either way, if any value `v` satisfies `C(v) === s` then `s`
- * itself does. Probing the subtitle and then `s` therefore finds a
- * key-preserving prefill whenever one exists, and the third branch is not a
- * missed case but a proof that the key cannot be expressed at all: a site
- * spelling has been learned that collapses this key's class onto a different
- * slug. Restoring the key there is not something a prefill can do — it needs
- * either an identity model whose site segment is separator-insensitive (i.e.
- * `siteComparisonKey`, which is already what "same site" means everywhere else)
- * or an edit path that hands the plugin the key it is editing. Both are larger
- * changes than a prefill; until one lands, that case behaves exactly as it did
- * before this check existed, which is why the third branch returns the subtitle
- * rather than a slug the rebuild would discard anyway.
+ * Why the fallback needs no probe of its own — closing a documented hole.
+ * Write `C(v)` for `siteComparisonKey(canonicalSiteName(v, sites))`.
+ * `canonicalSiteName` matches on `siteComparisonKey` and returns either a
+ * configured site from `v`'s class or `v` itself, so `C(v) === siteComparisonKey(v)`
+ * for every `v` and every `sites` list. A third branch — return `subtitle`
+ * again when *nothing* rebuilds — used to sit here, because `C(v) === siteSlug`
+ * for *some* `v` requires `siteSlug` itself to already be a fixed point of
+ * `siteComparisonKey` (plugging `v = siteSlug` gives
+ * `C(siteSlug) === siteComparisonKey(siteSlug)`, so it equals `siteSlug` exactly
+ * when `siteComparisonKey` leaves `siteSlug` unchanged), and under the old key
+ * shape — `slug`, which keeps separators — that could fail: this is issue #39,
+ * where no value of the site field could reproduce a key whose site segment
+ * disagreed with what `canonicalSiteName` would answer for anything in its own
+ * match class.
+ *
+ * That failure mode is gone, unconditionally, because `siteSlug` is now always
+ * a fixed point of `siteComparisonKey`. Every writer of an identity key in this
+ * system produces the site segment by calling `siteComparisonKey` directly —
+ * `buildRelease`, for anything parsed or hand-entered through this file — and
+ * the migration that re-keyed every group predating this shape did the same.
+ * `siteComparisonKey` strips exactly the characters it would strip on a second
+ * pass, so a string it already produced is unchanged by producing it again.
+ * `C(siteSlug) === siteSlug` therefore holds with no case left over, so
+ * offering `siteSlug` back needs no verification and the third branch has
+ * nothing left to guard.
  */
 function siteForKeySegment(
   subtitle: string,
   siteSlug: string,
   sites: readonly string[],
 ): string {
-  const rebuilds = (value: string): boolean => slug(canonicalSiteName(value, sites)) === siteSlug;
-  if (rebuilds(subtitle)) return subtitle;
-  if (rebuilds(siteSlug)) return siteSlug;
-  return subtitle;
+  const rebuiltFromSubtitle = siteComparisonKey(canonicalSiteName(subtitle, sites)) === siteSlug;
+  return rebuiltFromSubtitle ? subtitle : siteSlug;
 }
 
 /**
@@ -339,15 +346,18 @@ export function sceneFromManualValues(
  * title and the site are each rebuilt and compared before they are offered.
  *
  * The guarantee holds unconditionally for the anchor, the title order and the
- * title. For the site it holds whenever *any* set of values could hold it, and
- * `siteForKeySegment` proves that is the strongest statement available to a
- * prefill: once `learnSites` has added a spelling that shares this key's site
- * class but slugs differently, `canonicalSiteName` collapses every value the
- * field could carry onto that spelling, and the rebuild re-keys whatever is
- * typed. Closing that needs a change to the identity model or to the edit path,
- * not to this function — see `siteForKeySegment` for both. The narrow wording
- * is deliberate: a comment claiming a property the code does not have is worse
- * than no comment.
+ * title. For the site it also holds unconditionally now, but only because the
+ * identity model changed underneath this function: the key's site segment is
+ * `siteComparisonKey`, the same separator-insensitive form `canonicalSiteName`
+ * matches on, so no spelling `learnSites` can add moves a site's key. It used
+ * to be a slug, and then a spelling learned between ingest and Edit could
+ * collapse the key's whole class onto a different slug and re-key whatever the
+ * field carried — the narrow wording that stood here recorded that hole
+ * honestly. `siteForKeySegment` no longer needs to hedge that with a probe of
+ * the key's own spelling: every writer of an identity key in this system —
+ * `buildRelease` and the migration that re-keyed groups predating this
+ * shape — produces that segment with `siteComparisonKey`, so offering it
+ * back is unconditionally safe; see the proof there.
  *
  * `options` is taken rather than closed over because `learnSites` reassigns the
  * plugin's options object, and the whole point of the check is to compare
