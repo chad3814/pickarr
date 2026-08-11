@@ -30,6 +30,35 @@ CI.
 The run builds the SPA once (`npm run build -w @pickarr/web`) in
 `src/global-setup.ts`, then each test starts its own server.
 
+## In CI
+
+`.github/workflows/ci.yml` runs this suite as its own `e2e` job on every push
+to `main` and every pull request, in parallel with the `check` job. The job does
+the browser download for you — `npx playwright install --with-deps chromium`,
+Chromium only, cached on the Playwright version resolved from
+`package-lock.json` — so a green local run and a green CI run are running the
+same browser against the same built bundle.
+
+Two things differ from a local run, both because `CI` is set:
+
+- `forbidOnly` is on, so a stray `test.only` fails the job instead of quietly
+  skipping every other spec. Take `.only` off before you push.
+- the reporters are `line` plus `html`, rather than `list`.
+
+When the job fails it uploads a `playwright-failure-<run id>` artefact holding
+`test-results/` and `playwright-report/`, kept for 7 days. Download it, unzip
+it, and:
+
+```
+npx playwright show-trace <the unzipped>/test-results/<spec>/trace.zip
+```
+
+That trace is the whole point of `trace: 'retain-on-failure'` in
+`playwright.config.ts` — it is the only way to see what the browser was looking
+at on a runner you cannot log into. The setting has to stay paired with
+`retries: 0`: the old `on-first-retry` produced no trace at all, because with
+retries off there is never a first retry.
+
 ## What a test gets
 
 `src/harness.ts` exports a `test` whose `harness` fixture gives each test:

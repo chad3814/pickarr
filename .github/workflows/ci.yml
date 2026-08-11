@@ -1,0 +1,103 @@
+name: CI
+
+# Every push to the trunk and every pull request. Until now the checks in this
+# repo ran only when somebody remembered to run them, which held because the
+# work happened in long sessions with a full `npm run check` between tasks —
+# a property of who was driving, not of the repo.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default. Neither job writes to the repository, so nothing here
+# needs a token that could.
+permissions:
+  contents: read
+
+# Two jobs, not one, and deliberately not chained. `check` finishes in about a
+# minute; `e2e` has to download a browser and build the SPA first. Making `e2e`
+# wait on `check` would mean a lint error and a client/server seam failure are
+# reported minutes apart, when they are independent facts about the same
+# commit. Running them in parallel costs nothing — GitHub schedules them on
+# separate runners — and each one answers its own question as soon as it can.
+jobs:
+  check:
+    name: Lint, typecheck, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # `node-version-file` rather than a literal: `.nvmrc` is what a developer
+      # gets from `nvm use`, so CI and the workstation cannot drift apart.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # `ci`, not `install`: install exactly what the lockfile pins and fail if
+      # the lockfile and package.json disagree.
+      - run: npm ci
+
+      # One command, not three. `check` is already `lint && typecheck && test`
+      # in package.json, where the developer running it locally reads the same
+      # definition. Enumerating its parts here would be a second definition of
+      # "checked" that silently drifts from the one people actually run.
+      - run: npm run check
+
+  e2e:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # Derived from the lockfile, never hardcoded: the cache key has to change
+      # when the dependency does, or a Playwright bump would reuse a browser
+      # build that the new Playwright did not install. If the dependency is ever
+      # moved or renamed this expression throws and the job stops, which is the
+      # right outcome — a silently empty key would cache everything under one
+      # name forever.
+      - name: Resolve the Playwright version from the lockfile
+        id: playwright
+        run: |
+          echo "version=$(node -p "require('./package-lock.json').packages['node_modules/@playwright/test'].version")" >> "$GITHUB_OUTPUT"
+
+      # No `restore-keys`: a prefix match would hand this job a browser build
+      # from a different Playwright, which is the exact failure the version in
+      # the key exists to prevent. A miss is only slower, never wrong.
+      - name: Cache the Chromium build
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      # Chromium alone. `playwright.config.ts` declares a single `chromium`
+      # project — these are contract tests across the client/server seam, and a
+      # browser matrix would triple the download to re-prove the same thing.
+      # Run this even on a cache hit: the download is skipped when the build is
+      # already present, but `--with-deps` still installs the system libraries
+      # Chromium needs, and those are not part of the cached directory.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run e2e
+
+      # A failure here happens on a machine nobody can log into, so the trace
+      # and screenshot that `playwright.config.ts` now retains have to leave the
+      # runner or they die with it. Short retention on purpose: this is evidence
+      # about one red build, not history worth keeping for three months.
+      - name: Upload the Playwright report and traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-failure-${{ github.run_id }}
+          path: |
+            packages/e2e/test-results/
+            packages/e2e/playwright-report/
+          retention-days: 7
