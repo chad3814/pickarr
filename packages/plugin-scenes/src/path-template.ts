@@ -1,4 +1,5 @@
 import type { ParsedRelease } from '@pickarr/plugin-api';
+import { slug } from './parse.ts';
 
 /**
  * Renders a library path from a template.
@@ -9,6 +10,26 @@ import type { ParsedRelease } from '@pickarr/plugin-api';
  * and letting that variation reach the path would split one scene's files
  * across two destinations. `plan-import.ts` has the long version of this
  * argument; the same rule binds here.
+ *
+ * `site`, `Site` and `SiteName` are the exception: they read
+ * `display.subtitle`, the site's canonical name. They have to, because the
+ * key's site segment no longer carries word boundaries — it is the
+ * separator-free form every spelling of a site collapses to, so that learning
+ * a site's name late cannot move its identity (see `buildRelease`). Derived
+ * from the key, `Site` would render `Touchmywife` where it renders
+ * `Touch My Wife` today, and every library on a template using it would
+ * silently relocate.
+ *
+ * The reason above does not apply to them. `planImport` is handed a
+ * `ParsedRelease` whose `display` comes from the **group** row, not from the
+ * release being imported (`pipeline/import.ts` builds it from `group.display`
+ * and only `quality` from the release). So there is no per-release variation
+ * here to leak: every release in a group sees one subtitle and renders one
+ * path. The rule exists to stop two spellings of one scene reaching two
+ * destinations, and a single group-level value cannot do that.
+ *
+ * `sitename` still reads the key. Its documented meaning is the run-together
+ * form, which is now exactly what the key's segment holds.
  *
  * Placeholders are `{name}`. An unknown name is left alone rather than
  * silently deleted, so a typo shows up in the path instead of quietly
@@ -125,11 +146,20 @@ export function templateValues(media: ParsedRelease): Record<string, string> {
   const resolution = media.quality.resolution;
   const container = media.quality.extras?.['container'];
 
+  // The word boundaries the key's site segment no longer carries. Slugging the
+  // canonical name reproduces, byte for byte, what the segment used to be —
+  // it was `slug(site)` and the subtitle is that same `site` — so the three
+  // placeholders below render exactly what they rendered before the key
+  // changed. `subtitle` is optional on `DisplayFields`; with none there is no
+  // canonical name to recover and the run-together key is the best available.
+  const siteName = media.display.subtitle;
+  const siteWords = siteName === undefined || siteName.length === 0 ? siteSlug : slug(siteName);
+
   return {
-    site: lowerJoin(siteSlug),
-    Site: titleJoin(siteSlug),
+    site: lowerJoin(siteWords),
+    Site: titleJoin(siteWords),
     sitename: siteSlug.replaceAll('-', ''),
-    SiteName: pascalJoin(siteSlug),
+    SiteName: pascalJoin(siteWords),
     title: lowerJoin(sceneSlug),
     Title: titleJoin(sceneSlug),
     titledots: dotJoin(sceneSlug, false),
