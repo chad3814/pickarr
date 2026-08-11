@@ -1,9 +1,45 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import type { ReactNode } from 'react';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { DownloadRow } from '../src/components/DownloadRow.tsx';
 import { Downloads } from '../src/routes/Downloads.tsx';
-import { api, type DownloadsResponse } from '../src/api/client.ts';
+// `groupAnchorHref` is deliberately *not* imported: both hrefs below are
+// spelled out, because an expectation the code under test computes cannot
+// detect that code changing.
+import { api, type DownloadView, type DownloadsResponse } from '../src/api/client.ts';
+
+/**
+ * Unmount between tests rather than at the end of each one. `<Downloads />`
+ * polls on an interval that only unmounting clears, so a test that failed
+ * before its own `cleanup()` used to leave the timer running and the whole
+ * file hung with no failure reported.
+ */
+afterEach(cleanup);
+
+/**
+ * A row's title is a router link now, and a `<Link>` outside a router throws.
+ * Every render of a tracked row goes through here.
+ */
+function routed(node: ReactNode) {
+  return <MemoryRouter>{node}</MemoryRouter>;
+}
+
+function download(over: Partial<DownloadView> = {}): DownloadView {
+  return {
+    id: 1,
+    groupId: 1,
+    releaseId: 1,
+    title: 'Alex Coal',
+    kind: 'initial',
+    status: 'downloading',
+    error: null,
+    attempts: 0,
+    updatedAt: 1,
+    ...over,
+  };
+}
 
 // Run unconditionally, unlike the per-test `cleanup()` calls this replaces:
 // the new retry test below mounts `Downloads` with its 3-second poll timer
@@ -14,42 +50,56 @@ import { api, type DownloadsResponse } from '../src/api/client.ts';
 afterEach(cleanup);
 
 test('a tracked row shows status and offers retry only when failed', () => {
-  const { rerender } = render(
-    <DownloadRow
-      download={{
-        id: 1,
-        groupId: 1,
-        releaseId: 1,
-        title: 'Alex Coal',
-        kind: 'initial',
-        status: 'downloading',
-        error: null,
-        attempts: 0,
-        updatedAt: 1,
-      }}
-      onRetry={() => {}}
-    />,
-  );
+  const { rerender } = render(routed(<DownloadRow download={download()} onRetry={() => {}} />));
   assert.equal(screen.queryByRole('button', { name: /retry/i }), null);
 
   rerender(
-    <DownloadRow
-      download={{
-        id: 1,
-        groupId: 1,
-        releaseId: 1,
-        title: 'Alex Coal',
-        kind: 'initial',
-        status: 'failed',
-        error: 'disk full',
-        attempts: 1,
-        updatedAt: 1,
-      }}
-      onRetry={() => {}}
-    />,
+    routed(
+      <DownloadRow
+        download={download({ status: 'failed', error: 'disk full', attempts: 1 })}
+        onRetry={() => {}}
+      />,
+    ),
   );
   assert.ok(screen.getByRole('button', { name: /retry/i }));
   assert.ok(screen.getByText(/disk full/));
+});
+
+test('a failed download links to its group on the Picks tab', () => {
+  // The failure named a title and stopped there: the group holding the
+  // untried alternatives sat unreachable in a long list. The title is now the
+  // way across.
+  render(
+    routed(
+      <DownloadRow
+        download={download({
+          groupId: 42,
+          status: 'failed',
+          error: 'Repair failed, not enough repair blocks (92 short)',
+        })}
+        onRetry={() => {}}
+      />,
+    ),
+  );
+  // The literal, not `groupAnchorHref(42)`. An expectation computed by calling
+  // the code under test cannot detect that code changing: made to return a
+  // constant, `groupAnchor` passed this whole suite because both ends of the
+  // link agreed on the wrong string. See the matching literal in
+  // `MediaCard.test.tsx` — between them the two ids pin the mapping, not just
+  // its consistency.
+  assert.equal(
+    screen.getByRole('link', { name: 'Alex Coal' }).getAttribute('href'),
+    '/picks#group-42',
+  );
+});
+
+test('a healthy download links too', () => {
+  // The link is navigation, not an error affordance: "what is this a download
+  // of?" is a fair question about a row that is downloading normally.
+  render(routed(<DownloadRow download={download({ groupId: 7 })} onRetry={() => {}} />));
+  // A second literal, a second group id: together with the one above, no
+  // constant and no mapping other than the real one satisfies both.
+  assert.equal(screen.getByRole('link', { name: 'Alex Coal' }).getAttribute('href'), '/picks#group-7');
 });
 
 test('a bodyless request carries no json content-type', async () => {
@@ -96,7 +146,7 @@ test('a refused retry surfaces instead of vanishing', async () => {
           { headers: { 'content-type': 'application/json' } },
         )) as unknown as typeof fetch;
 
-  render(<Downloads />);
+  render(routed(<Downloads />));
   await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
   fireEvent.click(screen.getByRole('button', { name: /retry/i }));
 
@@ -142,7 +192,12 @@ test('retry refreshes the row immediately, without waiting on the poll', async (
     });
   }) as unknown as typeof fetch;
 
-  render(<Downloads />);
+  // `routed`, like every other render here. This test arrived from `main`,
+  // where `DownloadRow` had no `<Link>` and needed no Router; this branch gave
+  // the title one. Git merged both files without a conflict and the result did
+  // not render at all — an empty body, and a missing button rather than a
+  // missing Router. CI found it; neither branch could have.
+  render(routed(<Downloads />));
   await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
   fireEvent.click(screen.getByRole('button', { name: /retry/i }));
 
@@ -163,7 +218,7 @@ test('untracked entries render inert and labelled', async () => {
       headers: { 'content-type': 'application/json' },
     })) as typeof fetch;
 
-  render(<Downloads />);
+  render(routed(<Downloads />));
 
   await waitFor(() => assert.ok(screen.getByText('Someone Elses')));
   assert.ok(screen.getByText(/not managed by pickarr/i));

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { GroupView, ManualField } from '../api/client.ts';
+import { groupAnchor } from '../api/anchors.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
 import { ManualForm, seed } from './ManualForm.tsx';
 import { ReleaseRow } from './ReleaseRow.tsx';
@@ -77,7 +78,11 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   }
 
   return (
-    <article className="media-card">
+    // The id is what a Downloads row's link aims at. Given unconditionally
+    // rather than only on Picks: it is derived from the group id, so it is the
+    // same string wherever the card is drawn, and only one list is mounted at
+    // a time — there is no arrangement in which two cards claim it.
+    <article className="media-card" id={groupAnchor(group.id)}>
       <header>
         <h2>{display.title}</h2>
         {display.subtitle !== undefined && <p className="subtitle">{display.subtitle}</p>}
@@ -124,6 +129,13 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
             key={release.id}
             release={release}
             isCurrent={release.id === group.pickedReleaseId}
+            // Per release, not per group: an upgrade that failed leaves
+            // `pickedReleaseId` on the file the user still has, so the row to
+            // mark is frequently not the current one. Absent means "not
+            // failed" — the server omits the field rather than sending
+            // `false`, so a card built from a response that predates it reads
+            // exactly as it did before.
+            hasFailed={release.downloadFailed}
             onPick={onPick}
             fields={qualityFields}
             onEdit={

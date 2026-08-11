@@ -57,6 +57,12 @@ export interface ReleaseView {
    * `toManualValues`, and its absence is what says "offer no Edit control".
    */
   manualValues?: Record<string, string>;
+  /**
+   * True when this release's most recent download failed, and **absent**
+   * otherwise — never `false`. The row reads `Failed`, in red, instead of
+   * claiming the user has the file.
+   */
+  downloadFailed?: boolean;
 }
 
 export interface GroupView {
@@ -70,6 +76,13 @@ export interface GroupView {
   releases: ReleaseView[];
   /** The identity half of an edit form, prefilled. Absent as on `ReleaseView`. */
   manualValues?: Record<string, string>;
+  // Nothing group-level about failures. `/api/picks` already returns failed
+  // groups first, so the order carries that fact; which row to mark is
+  // `ReleaseView.downloadFailed`. The failed release is frequently not the
+  // pick — an upgrade that failed leaves `pickedReleaseId` on the file the user
+  // still has, and the pick is untouched by a failure either way: the user
+  // still wants the content, so the group stays picked and its alternatives
+  // stay on offer.
 }
 
 /** One name the parser refused, and everything a human needs to describe it. */

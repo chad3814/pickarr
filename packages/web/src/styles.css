@@ -15,7 +15,7 @@ nav a.active { font-weight: 600; text-decoration: underline; }
 .release-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.6; }
 .release-current { font-weight: 600; }
 .download-row.untracked { opacity: 0.5; font-style: italic; }
-.download-error, .error { color: #b91c1c; }
+.download-error, .error, .release-failed { color: #b91c1c; }
 .failed { list-style: none; margin: 0; padding: 0; }
 .failed-row { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
 .failed-row h2 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
