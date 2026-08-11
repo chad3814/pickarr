@@ -1,0 +1,274 @@
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
+import { test as base } from '@playwright/test';
+import createScenesPlugin from '../../plugin-scenes/src/index.ts';
+import type { ClientSnapshot, DownloadClient } from '../../core/src/clients/types.ts';
+import { configSchema, type FeedConfig } from '../../core/src/config/schema.ts';
+import { openDatabase } from '../../core/src/db/open.ts';
+import type { FeedEntry } from '../../core/src/feeds/parse-rss.ts';
+import { buildServer } from '../../core/src/http/server.ts';
+import { ingestEntries, type IngestResult } from '../../core/src/ingest/ingest.ts';
+import { loadPlugins } from '../../core/src/plugins/registry.ts';
+import { importDownload } from '../../core/src/pipeline/import.ts';
+import {
+  reconcileClient,
+  type ReconcileResult,
+  type UntrackedEntry,
+} from '../../core/src/pipeline/reconcile.ts';
+import { webDist } from './paths.ts';
+
+/**
+ * The scenes plugin is the only one shipped, and it is the one whose parser
+ * every seeded title goes through. Named by *package* because that is the
+ * identifier config and `registry.byPackage` use.
+ */
+const SCENES_PACKAGE = '@pickarr/plugin-scenes';
+
+/**
+ * A fixed epoch for seeded rows, so that list order is a function of the
+ * seeding calls a spec makes and not of when the spec happened to run.
+ * 2023-11-14T22:13:20Z, chosen only for being round and in the past.
+ */
+const CLOCK_ORIGIN = 1_700_000_000_000;
+
+export interface AddedUrl {
+  url: string;
+  /** The job name Pickarr asked the client to use, marker and all. */
+  name: string;
+  /** The reference the fake handed back, which the download row now stores. */
+  ref: string;
+}
+
+/**
+ * A `DownloadClient` that records what was sent to it and reports back
+ * whatever the test decided.
+ *
+ * This is what makes the download half of the app testable without usenet: a
+ * spec can drive a picked release all the way to `failed` by setting a history
+ * entry and calling `reconcile()`, which is the same code path the scheduler
+ * runs in production.
+ */
+export interface FakeDownloadClient extends DownloadClient {
+  /** Every `addUrl` call, in order. */
+  readonly added: readonly AddedUrl[];
+  /** Every `remove` call's ref, in order. */
+  readonly removed: readonly string[];
+  /** What the next `snapshot()` will return. */
+  setSnapshot(snapshot: ClientSnapshot): void;
+}
+
+export interface Harness {
+  /** `http://127.0.0.1:<the port the OS actually assigned>`. */
+  readonly baseURL: string;
+  /** The test's own database. Direct SQL, for states ingest cannot reach. */
+  readonly db: DatabaseSync;
+  readonly client: FakeDownloadClient;
+  /** This test's temp directory; removed when the test ends. */
+  readonly workDir: string;
+  readonly libraryRoot: string;
+  /** The single feed every seeded title arrives on. */
+  readonly feed: FeedConfig;
+
+  /**
+   * Seeds releases by running raw feed titles through the *real* ingest path —
+   * the real scenes parser, the real grouping and scoring. A spec therefore
+   * cannot assert against a fixture the parser would never produce.
+   *
+   * Each call is one feed tick with one timestamp, as a real tick is; call it
+   * repeatedly when a spec needs a strict ordering between groups.
+   */
+  ingest(titles: readonly string[]): IngestResult;
+
+  /**
+   * One poll of the fake client through the real reconcile pipeline — the same
+   * function the scheduler calls, so state transitions in a spec are the ones
+   * production performs, not ones the test wrote by hand.
+   */
+  reconcile(): Promise<ReconcileResult>;
+}
+
+function createFakeClient(id: string, importMode: 'move' | 'copy'): FakeDownloadClient {
+  const added: AddedUrl[] = [];
+  const removed: string[] = [];
+  let snapshot: ClientSnapshot = { queue: [], history: [] };
+
+  return {
+    id,
+    importMode,
+    added,
+    removed,
+    setSnapshot(next) {
+      snapshot = next;
+    },
+    addUrl: async (url, name) => {
+      const ref = `nzo_${String(added.length + 1)}`;
+      added.push({ url, name, ref });
+      return ref;
+    },
+    snapshot: async () => snapshot,
+    remove: async (ref) => {
+      removed.push(ref);
+    },
+    // No path mapping: the fake's "client paths" are already paths this
+    // process can open, because the spec that set them made them.
+    mapPath: (path) => path,
+  };
+}
+
+async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<void> }> {
+  // One temp directory per test holding the database, the library and the
+  // trash. Tests that share a database share failures, and this suite exists
+  // to isolate a cause.
+  const workDir = await mkdtemp(join(tmpdir(), 'pickarr-e2e-'));
+  const libraryRoot = join(workDir, 'library');
+  const trashDir = join(workDir, 'trash');
+  await mkdir(libraryRoot, { recursive: true });
+  await mkdir(trashDir, { recursive: true });
+
+  // Parsed rather than hand-built, so the harness cannot configure the app in
+  // a shape `loadConfig` would refuse at boot.
+  const config = configSchema.parse({
+    database: { path: join(workDir, 'pickarr.db') },
+    trashDir,
+    plugins: { [SCENES_PACKAGE]: { libraryRoot } },
+    downloadClients: [
+      {
+        id: 'fake',
+        type: 'sabnzbd',
+        url: 'http://download-client.invalid',
+        apiKey: 'e2e-api-key-not-a-secret',
+        category: 'pickarr-e2e',
+        importMode: 'move',
+      },
+    ],
+    feeds: [{ id: 'e2e', url: 'https://feed.invalid/rss', plugin: SCENES_PACKAGE }],
+  });
+
+  const clientConfig = config.downloadClients[0];
+  const feed = config.feeds[0];
+  if (clientConfig === undefined || feed === undefined) {
+    throw new Error('harness config lost its download client or feed');
+  }
+
+  // `openDatabase` runs every migration, so a fresh file starts at the current
+  // schema with no rows.
+  const db = openDatabase(config.database.path);
+
+  // The real registry, given the real plugin directly rather than through
+  // `import()`: the workspace is not installed under its package name in a way
+  // a bare import would resolve to source, and going through the factory is
+  // what actually matters — a misconfigured `sites` list still throws here.
+  const registry = await loadPlugins(config, async () => ({ default: createScenesPlugin }));
+
+  const client = createFakeClient(clientConfig.id, clientConfig.importMode);
+
+  // Reconcile reports jobs in the client that Pickarr has no row for; the
+  // scheduler holds that list in production and the server reads it back.
+  // Nothing here schedules, so the last reconcile's list stands in.
+  let untracked: UntrackedEntry[] = [];
+
+  // Same mapping main.ts builds, for the same reason: feeds name their plugin
+  // by package and the manual routes need it by feed id.
+  const pluginsByFeed = new Map(
+    config.feeds.map((entry) => [entry.id, registry.byPackage(entry.plugin)]),
+  );
+
+  const server = buildServer({
+    db,
+    defaultClient: client,
+    untrackedFor: () => untracked,
+    now: () => Date.now(),
+    webRoot: webDist,
+    registry,
+    pluginForFeed: (feedId) => pluginsByFeed.get(feedId) ?? null,
+  });
+
+  // Port 0, then read back what the OS assigned. A fixed port collides between
+  // parallel workers and between two developers on one machine. Loopback only:
+  // nothing about this suite should be reachable off the box.
+  const baseURL = await server.listen({ port: 0, host: '127.0.0.1' });
+
+  const plugin = registry.byPackage(feed.plugin);
+  let tick = 0;
+
+  const harness: Harness = {
+    baseURL,
+    db,
+    client,
+    workDir,
+    libraryRoot,
+    feed,
+    ingest(titles) {
+      tick += 1;
+      const now = CLOCK_ORIGIN + tick * 1000;
+      const entries: FeedEntry[] = titles.map((title, index) => ({
+        guid: `e2e-${String(tick)}-${String(index)}`,
+        title,
+        link: `https://indexer.invalid/${String(tick)}-${String(index)}.nzb`,
+        publishedAt: now,
+      }));
+      return ingestEntries(db, plugin, feed, entries, now);
+    },
+    async reconcile() {
+      const result = await reconcileClient({
+        db,
+        client,
+        now: () => Date.now(),
+        importDownload: (download) =>
+          importDownload(
+            {
+              db,
+              registry,
+              importMode: client.importMode,
+              trashDir: config.trashDir,
+              now: () => Date.now(),
+            },
+            download,
+          ),
+      });
+      untracked = result.untracked;
+      return result;
+    },
+  };
+
+  return {
+    harness,
+    stop: async () => {
+      await server.close();
+      db.close();
+      // `force` because a test that never opened the database still has a
+      // directory to remove, and WAL/SHM siblings may or may not exist.
+      await rm(workDir, { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * The suite's `test`. Every test gets its own server, on its own port, against
+ * its own database, serving the SPA `global-setup.ts` built for the run.
+ */
+export const test = base.extend<{ harness: Harness }>({
+  // Playwright reads a fixture's dependencies out of this destructuring
+  // pattern, so the pattern is required even when — as here — there are none.
+  // The linter's worry (destructuring null) cannot happen: Playwright always
+  // passes an object.
+  // eslint-disable-next-line no-empty-pattern
+  harness: async ({}, use) => {
+    const { harness, stop } = await startHarness();
+    try {
+      await use(harness);
+    } finally {
+      await stop();
+    }
+  },
+
+  // Overridden so `page.goto('/')` and the `request` fixture reach this test's
+  // server without every spec repeating the port.
+  baseURL: async ({ harness }, use) => {
+    await use(harness.baseURL);
+  },
+});
+
+export { expect } from '@playwright/test';
