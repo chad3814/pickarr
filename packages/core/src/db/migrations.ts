@@ -135,6 +135,24 @@ CREATE INDEX feed_items_failed
   ON feed_items (first_seen_at DESC, id) WHERE parse_error IS NOT NULL;
 `;
 
+/**
+ * The index `latestDownloadFailed` needs.
+ *
+ * That predicate is `SELECT status FROM downloads WHERE release_id = ?
+ * ORDER BY id DESC LIMIT 1`, and it is evaluated once per candidate release in
+ * `deriveUpgradeReleaseId` and once per group on `/api/browse` and `/api/picks`
+ * — so a table scan per release, over a table that only grows. `downloads` was
+ * indexed on `group_id` but not `release_id`.
+ *
+ * `release_id` alone is enough for the `ORDER BY` too: SQLite appends the
+ * rowid to every non-unique index entry, `downloads.id` *is* the rowid
+ * (INTEGER PRIMARY KEY), so entries for one release are already ordered by id
+ * and the descending limit is a backwards seek rather than a sort.
+ */
+const DOWNLOADS_BY_RELEASE = `
+CREATE INDEX downloads_release ON downloads (release_id);
+`;
+
 export const migrations: Migration[] = [
   {
     version: 1,
@@ -152,6 +170,17 @@ export const migrations: Migration[] = [
     version: 3,
     up(db) {
       db.exec(MANUAL_METADATA);
+    },
+  },
+  // 5, not 4. `main` (f4d3e3a, merging site-identity-key) already ships a
+  // `version: 4` that re-keys site segments, and it landed first. The gap this
+  // leaves in *this* branch is deliberate and closes on merge; `migrate` skips
+  // nothing on account of it, and `assertUniqueVersions` is what makes a repeat
+  // of the collision loud instead of silent.
+  {
+    version: 5,
+    up(db) {
+      db.exec(DOWNLOADS_BY_RELEASE);
     },
   },
 ];

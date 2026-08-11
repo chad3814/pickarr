@@ -6,6 +6,17 @@ import { ManualForm } from './ManualForm.tsx';
 interface Props {
   release: ReleaseView;
   isCurrent: boolean;
+  /**
+   * This release's most recent download failed.
+   *
+   * Read whether or not the row is current, because the failed release
+   * frequently is not the pick: an upgrade that fails leaves
+   * `pickedReleaseId` on the file the user still has, and the version that
+   * failed is one of the alternatives further down the card.
+   *
+   * Optional so that every caller written before this existed keeps working.
+   */
+  hasFailed?: boolean | undefined;
   onPick(releaseId: number): void;
   /** The quality half of the plugin's schema; absent when it has no manual hooks. */
   fields?: ManualField[] | undefined;
@@ -20,7 +31,7 @@ interface Props {
   onEdit?: ((values: Record<string, string>) => Promise<boolean>) | undefined;
 }
 
-export function ReleaseRow({ release, isCurrent, onPick, fields, onEdit }: Props) {
+export function ReleaseRow({ release, isCurrent, hasFailed, onPick, fields, onEdit }: Props) {
   const [editing, setEditing] = useState(false);
   // Absence, not emptiness: the server omits `manualValues` for a plugin that
   // cannot read a release back into form values, and an empty map is a
@@ -40,8 +51,25 @@ export function ReleaseRow({ release, isCurrent, onPick, fields, onEdit }: Props
       <span className="release-name" title={release.releaseName}>
         {release.releaseName}
       </span>
+      {/*
+       * A failed *current* release reads `Failed` in place of `Current`, and
+       * still offers no Pick button: `Current` is the wrong word for a file the
+       * user does not have, but the pick has not been released either, so the
+       * offer to make is one of the alternatives below — a retry of this one
+       * belongs to the Downloads tab, which has a Retry control for it.
+       *
+       * A failed *alternative* reads `Failed` beside its Pick button rather
+       * than instead of it. That button is how a user retries from this screen,
+       * and it is the reason they were sent here; removing it would leave the
+       * card stating a problem and offering no way out of it.
+       */}
+      {hasFailed === true && (
+        <span className={isCurrent ? 'release-current release-failed' : 'release-failed'}>
+          Failed
+        </span>
+      )}
       {isCurrent ? (
-        <span className="release-current">Current</span>
+        hasFailed !== true && <span className="release-current">Current</span>
       ) : (
         <button type="button" onClick={() => onPick(release.id)}>
           Pick

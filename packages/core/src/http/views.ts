@@ -5,7 +5,7 @@ import type {
   ParsedRelease,
   QualityTokens,
 } from '@pickarr/plugin-api';
-import type { GroupRow } from '../db/groups.ts';
+import { failedReleaseIds, type GroupRow } from '../db/groups.ts';
 import { releasesForGroup } from '../db/releases.ts';
 import type { DownloadRow } from '../db/downloads.ts';
 import type { FeedItemRow } from '../db/feed-items.ts';
@@ -20,6 +20,13 @@ export interface ReleaseView {
   publishedAt: number | null;
   /** The quality half of an edit form, prefilled. Absent when the plugin has no `toManualValues`. */
   manualValues?: Record<string, string>;
+  /**
+   * True when this release's most recent download failed, and **absent**
+   * otherwise — never `false`. Per release rather than per group because the
+   * card has to say *which* version failed: the group flag only gets the user
+   * to the card.
+   */
+  downloadFailed?: boolean;
 }
 
 export interface GroupView {
@@ -33,6 +40,12 @@ export interface GroupView {
   releases: ReleaseView[];
   /** The identity half of an edit form, prefilled. Absent when the plugin has no `toManualValues`. */
   manualValues?: Record<string, string>;
+  // No group-level "something here failed" field. There was one, and nothing
+  // read it: the card marks rows from `ReleaseView.downloadFailed`, and the
+  // ordering it would have explained is decided in SQL by `pickedGroups`, which
+  // the client never re-derives. A payload field whose only exercise is a test
+  // asserting something no screen consumes is a field to add when a screen
+  // wants it.
 }
 
 export interface BrowseResponse {
@@ -165,6 +178,11 @@ export function toGroupView(
 ): GroupView {
   const display = JSON.parse(group.display) as DisplayFields;
 
+  // Asked once for the group, not once per release, and by the same query
+  // `pickedGroups` sorts on — so a card hoisted to the top of Picks always has
+  // the row on it that explains why.
+  const failed = failedReleaseIds(db, group.id);
+
   const releases = releasesForGroup(db, group.id).map((release) => {
     const feedItem = db
       .prepare('SELECT raw_title, published_at FROM feed_items WHERE id = ?')
@@ -184,6 +202,9 @@ export function toGroupView(
         feedItem === undefined || (feedItem as SqlRow)['published_at'] === null
           ? null
           : Number((feedItem as SqlRow)['published_at']),
+      // Present only when true, as `manualValues` is: absent means "not
+      // failed", so a healthy release serialises to exactly what it always did.
+      ...(failed.has(release.id) ? { downloadFailed: true } : {}),
     };
     // Set only when there is one. Never assigned `undefined`: the field is
     // absent or it is a value, and the SPA reads the difference.

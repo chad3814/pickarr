@@ -2,11 +2,31 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { MediaCard } from '../src/components/MediaCard.tsx';
+import { groupAnchor } from '../src/api/anchors.ts';
 import type { GroupView, ManualField } from '../src/api/client.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its card behind, and every later query sees two.
 afterEach(cleanup);
+
+/**
+ * Absence, as a boolean.
+ *
+ * `assert.equal(screen.queryByText(x), null)` is the obvious spelling and it
+ * kills the run: node:assert deep-inspects a live DOM element to build the
+ * failure message, which burns ~75s and takes the whole file down without
+ * naming a test. See the same helper in `Browse.test.tsx`.
+ */
+function gone(text: string | RegExp): boolean {
+  return screen.queryByText(text) === null;
+}
+
+/** The card element itself, which is where the anchor id lives. */
+function card(title: string): HTMLElement {
+  const element = screen.getByText(title).closest('article');
+  assert.ok(element !== null, `no card for ${title}`);
+  return element;
+}
 
 const GROUP: GroupView = {
   id: 1,
@@ -108,4 +128,93 @@ test('the release you already own is marked and not offered again', () => {
   );
   assert.ok(screen.getByText(/current/i));
   assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
+  // No `downloadFailed` on any release, so nothing claims a failure. The server
+  // omits the field for a healthy release rather than sending `false`.
+  assert.equal(gone(/failed/i), true);
+});
+
+test('a card carries the anchor a Downloads row links to', () => {
+  // The id is what makes `/picks#…` land somewhere.
+  //
+  // Asserted as a *literal*, not as `groupAnchor(GROUP.id)`. Computing the
+  // expectation by calling the code under test is how `groupAnchor` came to be
+  // pinned by nothing: made to return a constant `group-x` it passed every test
+  // in this suite, including the end-to-end one — both ends agreed, on the
+  // wrong string, and every card on the page claimed the same DOM id, so a
+  // Downloads link scrolled to whichever rendered first. Two different ids are
+  // spelled out here and in `Downloads.test.tsx`, which no constant and no
+  // non-identity mapping can satisfy.
+  const { rerender } = render(<MediaCard group={GROUP} onPick={() => {}} />);
+  assert.equal(card('Alex Coal').id, 'group-1');
+
+  // Stable across renders: a link followed after the list refreshes has to
+  // find the same element, so the id cannot be per-mount or generated.
+  rerender(<MediaCard group={{ ...GROUP, listRankAt: 200 }} onPick={() => {}} />);
+  assert.equal(card('Alex Coal').id, 'group-1');
+
+  // Derived from the group, so two cards never collide. `groupAnchor` here
+  // rather than a literal on purpose: this assertion is about the card
+  // agreeing with the shared function, which the literals above have already
+  // pinned to a value.
+  cleanup();
+  render(<MediaCard group={{ ...GROUP, id: 7 }} onPick={() => {}} />);
+  assert.equal(card('Alex Coal').id, groupAnchor(7));
+  assert.notEqual(groupAnchor(7), groupAnchor(1));
+});
+
+/** `GROUP`'s releases with `downloadFailed` set on the ids named. */
+function failing(...ids: number[]): GroupView['releases'] {
+  return GROUP.releases.map((release) =>
+    ids.includes(release.id) ? { ...release, downloadFailed: true } : release,
+  );
+}
+
+test('a pick whose download failed reads Failed, not Current', () => {
+  // `Current` is exactly the wrong word for a file the user does not have.
+  // The colour is the stylesheet's business; what is asserted here is the word
+  // a human reads.
+  render(
+    <MediaCard
+      group={{ ...GROUP, state: 'picked', pickedReleaseId: 1, releases: failing(1) }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(screen.getByText('Failed'));
+  assert.equal(gone(/current/i), true);
+  // The pick is not released — the user still wants the content — so the
+  // failed release keeps its slot and the untried versions keep their Pick
+  // buttons. That is the whole reason for linking here.
+  assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
+});
+
+test('a failed release that is not the pick reads Failed and keeps its Pick button', () => {
+  // The case that widened the rule: the user owns release 1, asked to upgrade
+  // to release 2, and that failed. `pickedReleaseId` never moved — an upgrade
+  // defers it until the replacement imports — so the failure is on a row that
+  // is not the current one, and the card has to be able to say so.
+  render(
+    <MediaCard
+      group={{ ...GROUP, state: 'picked', pickedReleaseId: 1, releases: failing(2) }}
+      onPick={() => {}}
+    />,
+  );
+
+  assert.ok(screen.getByText('Failed'));
+  // Release 1 still imported fine, so it is still the current file.
+  assert.ok(screen.getByText('Current'));
+  // Beside the label, not instead of it: picking it again is how a user retries
+  // from this screen, and it is why they were sent here.
+  assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
+});
+
+test('only the release that failed is marked', () => {
+  // One `Failed`, not one per row: the flag is per release, and a card that
+  // marked every row would tell the user nothing about which version to avoid.
+  render(
+    <MediaCard
+      group={{ ...GROUP, state: 'picked', pickedReleaseId: 1, releases: failing(2) }}
+      onPick={() => {}}
+    />,
+  );
+  assert.equal(screen.getAllByText('Failed').length, 1);
 });
