@@ -2,8 +2,8 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { migrate } from '../../src/db/migrate.ts';
-import { migrations } from '../../src/db/migrations.ts';
+import { assertUniqueVersions, migrate } from '../../src/db/migrate.ts';
+import { migrations, type Migration } from '../../src/db/migrations.ts';
 
 test('migrate creates every table', () => {
   const db = openTestDatabase();
@@ -150,6 +150,122 @@ test('an upgraded database gets the partial index the failed listing pages on', 
     assert.match(String(row?.['sql']), /WHERE parse_error IS NOT NULL/);
     db.close();
   }
+});
+
+test('an upgraded database gets the index the failed-download predicate seeks on', () => {
+  const upgraded = databaseAtVersion(3);
+  migrate(upgraded);
+  const fresh = openTestDatabase();
+
+  // Both paths, as above: the upgrade runs migration 5's CREATE INDEX against a
+  // table that already holds downloads, the fresh create against an empty one.
+  // Without it `WHERE release_id = ? ORDER BY id DESC LIMIT 1` scans the whole
+  // downloads table, once per candidate release in `deriveUpgradeReleaseId` and
+  // once per group on every browse and picks page.
+  for (const db of [upgraded, fresh]) {
+    const row = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get('downloads_release');
+    assert.ok(row !== undefined, 'downloads_release index is missing');
+    assert.match(String(row?.['sql']), /downloads\s*\(release_id\)/);
+    db.close();
+  }
+});
+
+test('the failed-download predicate uses that index rather than scanning', () => {
+  // The index is only worth having if the planner picks it, and the query it
+  // has to serve is the one embedded in `latestDownloadFailed`. Asserting the
+  // plan rather than the index's existence is what makes this a test of the
+  // lookup instead of a restatement of the migration.
+  const db = openTestDatabase();
+  const plan = db
+    .prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT status FROM downloads WHERE release_id = ? ORDER BY id DESC LIMIT 1`,
+    )
+    .all()
+    .map((row) => String(row['detail']))
+    .join('\n');
+
+  assert.match(plan, /USING INDEX downloads_release/);
+  assert.doesNotMatch(plan, /SCAN downloads/);
+  db.close();
+});
+
+// --- Version numbering -------------------------------------------------
+//
+// Two branches developed in parallel both claimed `version: 4`. Nothing caught
+// it: `git merge` put its conflict markers *inside* migration 4's `up()` body,
+// so it read as "pick one implementation" rather than "you have two migration
+// 4s", and no test looked at the numbering at all.
+
+test('the shipped migration list has no repeated version', () => {
+  // The collision itself, as an assertion. Everything below tests the guard;
+  // this tests the list the guard is pointed at.
+  assert.doesNotThrow(() => assertUniqueVersions(migrations));
+});
+
+test('a repeated version is refused by name, before any statement runs', () => {
+  const applied: number[] = [];
+  const collide = [
+    { version: 1, up: () => applied.push(1) },
+    { version: 4, up: () => applied.push(4) },
+    { version: 4, up: () => applied.push(44) },
+  ];
+
+  // Named, so the message says what to renumber. Left to SQLite this surfaces
+  // as `UNIQUE constraint failed: schema_migrations.version`, which names a
+  // table and not the mistake.
+  assert.throws(() => assertUniqueVersions(collide), /Duplicate migration version 4/);
+  // And nothing ran: `migrate` calls this before it touches the database, so a
+  // half-applied schema is not among the outcomes.
+  assert.deepEqual(applied, []);
+});
+
+test('migrate itself refuses a duplicate, and refuses it before SQLite would', () => {
+  // The guard is only worth having if `migrate` runs it. Asserting
+  // `assertUniqueVersions` in isolation leaves the *call* unpinned — deleting it
+  // was a mutation nothing caught until this test existed.
+  const db = new DatabaseSync(':memory:');
+  const ran: number[] = [];
+  const collide: Migration[] = [
+    { version: 1, up: () => { ran.push(1); } },
+    { version: 1, up: () => { ran.push(2); } },
+  ];
+
+  // Our message, not `UNIQUE constraint failed: schema_migrations.version`.
+  // Reaching SQLite's version means the first migration has already run and
+  // been recorded, so the failure arrives mid-schema and names a table rather
+  // than the mistake.
+  assert.throws(() => migrate(db, collide), /Duplicate migration version 1/);
+  assert.deepEqual(ran, [], 'nothing may run before the list is validated');
+  db.close();
+});
+
+test('a database carrying another branch’s migration 4 still gets ours', () => {
+  // The case that made the collision dangerous rather than merely noisy, and
+  // the one `databaseAtVersion` could not reach: a real deployment that has
+  // already run *someone else's* 4. Numbered 4 ourselves, `migrate` reads the
+  // version as applied and skips us in silence — no index, no error, and
+  // `latestDownloadFailed` back to scanning the whole downloads table in
+  // production. Numbered 5, we still run.
+  const db = databaseAtVersion(3);
+  db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (4, 1)').run();
+
+  migrate(db);
+
+  const index = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
+    .get('downloads_release');
+  assert.ok(index !== undefined, 'our migration was skipped by a foreign version 4');
+  // The foreign 4 is left alone — it is not ours to re-run or to remove.
+  const versions = db
+    .prepare('SELECT version FROM schema_migrations ORDER BY version')
+    .all()
+    .map((row) => Number(row['version']));
+  assert.ok(versions.includes(4));
+  assert.ok(versions.includes(5));
+  db.close();
 });
 
 test('feed_items rejects a duplicate guid within a feed', () => {

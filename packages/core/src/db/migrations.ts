@@ -136,6 +136,24 @@ CREATE INDEX feed_items_failed
 `;
 
 /**
+ * The index `latestDownloadFailed` needs.
+ *
+ * That predicate is `SELECT status FROM downloads WHERE release_id = ?
+ * ORDER BY id DESC LIMIT 1`, and it is evaluated once per candidate release in
+ * `deriveUpgradeReleaseId` and once per group on `/api/browse` and `/api/picks`
+ * — so a table scan per release, over a table that only grows. `downloads` was
+ * indexed on `group_id` but not `release_id`.
+ *
+ * `release_id` alone is enough for the `ORDER BY` too: SQLite appends the
+ * rowid to every non-unique index entry, `downloads.id` *is* the rowid
+ * (INTEGER PRIMARY KEY), so entries for one release are already ordered by id
+ * and the descending limit is a backwards seek rather than a sort.
+ */
+const DOWNLOADS_BY_RELEASE = `
+CREATE INDEX downloads_release ON downloads (release_id);
+`;
+
+/**
  * The identity key's site segment, with its separators dropped.
  *
  * This is a frozen copy of `siteComparisonKey` (plugin-scenes/src/parse.ts),
@@ -410,6 +428,19 @@ export const migrations: Migration[] = [
     version: 4,
     up(db) {
       rekeySiteSegments(db);
+    },
+  },
+  // 5, not 4. This index was written while `main` was independently taking a
+  // `version: 4` that re-keys site segments, and that one landed first. Two
+  // migrations claiming one number is worse than it sounds: on a fresh database
+  // the second is a UNIQUE violation that stops the process, and on a database
+  // already carrying the other it is skipped in silence, leaving the index
+  // absent and the query it exists for scanning the table. `migrate` now
+  // refuses duplicate versions by name rather than leaving SQLite to report it.
+  {
+    version: 5,
+    up(db) {
+      db.exec(DOWNLOADS_BY_RELEASE);
     },
   },
 ];
