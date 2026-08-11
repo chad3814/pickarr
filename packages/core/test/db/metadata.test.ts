@@ -36,6 +36,10 @@ test('enqueueing is idempotent and never re-asks an answered group', () => {
   });
   const third = enqueueMetadata(db, [ids[0]!], 4_000);
   assert.deepEqual(third, { queued: 0, alreadyAnswered: 1, pending: 0 });
+  // The counts alone don't prove nothing landed in the queue table — check it directly.
+  // ids[1] and ids[2] are still legitimately pending, so check the answered one by name.
+  const due = dueMetadataQueue(db, 4_000, 10).map((row) => row.groupId);
+  assert.equal(due.includes(ids[0]!), false, 'an answered group must never be queued');
 });
 
 test('an answer replaces the queue row in one transaction', () => {
@@ -90,6 +94,35 @@ test('near-misses are written with the answer and are not the answer', () => {
     .all(groupId);
   assert.equal(rows.length, 1);
   assert.equal(String(rows[0]?.['reason']), 'date outside window');
+});
+
+test('a retried answer for the same group does not duplicate its candidate rows', () => {
+  const { db, ids } = withGroups(1);
+  const groupId = ids[0]!;
+  enqueueMetadata(db, [groupId], 1_000);
+
+  const nearMiss = {
+    candidate: {
+      sourceUuid: 'other', title: 'Another Scene', siteUuid: null, siteId: null,
+      siteName: 'Elsewhere', date: '2021-11-20', performers: [], durationSeconds: null,
+      synopsis: null, posterUrl: null,
+    },
+    reason: 'date outside window',
+  };
+
+  recordMetadataAnswer(db, {
+    groupId, source: 'theporndb', confirmed: null, nearMisses: [nearMiss], now: 2_000,
+  });
+  // A second call for a group already answered — a retry racing the first, or a
+  // caller that didn't check first — must be a no-op, not a second set of rows.
+  recordMetadataAnswer(db, {
+    groupId, source: 'theporndb', confirmed: null, nearMisses: [nearMiss], now: 3_000,
+  });
+
+  const rows = db
+    .prepare('SELECT reason FROM metadata_candidates WHERE group_id = ?')
+    .all(groupId);
+  assert.equal(rows.length, 1, 'candidate rows must not accumulate across retries');
 });
 
 test('a deferral keeps the queue row, counts the attempt, and moves next_at', () => {
