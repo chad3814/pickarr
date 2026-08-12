@@ -183,6 +183,10 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     webRoot: webDist,
     registry,
     pluginForFeed: (feedId) => pluginsByFeed.get(feedId) ?? null,
+    // Under the work directory like everything else the harness creates, so a
+    // run leaves nothing behind. Nothing writes here unless a test caches a
+    // poster; the poster route serves from it and 404s while it is empty.
+    artworkDir: join(workDir, 'artwork'),
   });
 
   // Port 0, then read back what the OS assigned. A fixed port collides between
