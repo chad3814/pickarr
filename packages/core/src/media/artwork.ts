@@ -30,6 +30,62 @@ export interface ArtworkDeps {
 }
 
 /**
+ * Reads a response body a chunk at a time, refusing to buffer past the cap.
+ *
+ * This is the point of streaming: a hostile or broken response must not be
+ * fully read into memory just to discover it is too large. The moment the
+ * running total exceeds `MAX_POSTER_BYTES`, the reader is cancelled — which
+ * releases the underlying connection — and the function returns `null`
+ * without ever finding out how large the body actually was.
+ *
+ * Returns the concatenated bytes when the whole body arrived within the cap,
+ * or `null` when the body was missing or oversize (already logged).
+ */
+async function readBodyWithinCap(
+  response: Response,
+  groupId: number,
+  log: (message: string) => void,
+): Promise<Uint8Array | null> {
+  const body = response.body;
+  if (body === null) {
+    log(`poster for group ${groupId}: response had no body`);
+    return null;
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  for (;;) {
+    // Chunks of a single stream must be read one at a time, in order — there
+    // is nothing here to parallelise.
+    // eslint-disable-next-line no-await-in-loop
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    chunks.push(value);
+    total += value.byteLength;
+
+    // A chunk can straddle the limit, so the total is checked after adding
+    // each one, not before.
+    if (total > MAX_POSTER_BYTES) {
+      // eslint-disable-next-line no-await-in-loop -- one cancellation, ending the loop; nothing to batch it with
+      await reader.cancel();
+      log(`poster for group ${groupId}: exceeded ${MAX_POSTER_BYTES} bytes, aborted`);
+      return null;
+    }
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/**
  * Downloads one poster, returning the filename stored or `null`.
  *
  * Never throws: a poster is decoration, and a group's metadata answer must be
@@ -62,11 +118,20 @@ export async function cachePoster(
       return null;
     }
 
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > MAX_POSTER_BYTES) {
-      deps.log(`poster for group ${groupId}: ${bytes.byteLength} bytes exceeds the cap`);
+    // Content-Length is attacker-controlled — absent under chunked encoding,
+    // and nothing stops a hostile server sending a small one alongside a huge
+    // body — so this is an optimisation to skip reading an already-too-large
+    // response, never the boundary itself. The running total checked while
+    // streaming below is that boundary.
+    const declaredLengthHeader = response.headers.get('content-length');
+    const declaredLength = declaredLengthHeader === null ? null : Number(declaredLengthHeader);
+    if (declaredLength !== null && Number.isFinite(declaredLength) && declaredLength > MAX_POSTER_BYTES) {
+      deps.log(`poster for group ${groupId}: declared ${declaredLength} bytes exceeds the cap`);
       return null;
     }
+
+    const bytes = await readBodyWithinCap(response, groupId, deps.log);
+    if (bytes === null) return null;
 
     // Temp then rename: a crash between the two leaves a dotfile, never a
     // truncated image that reads as valid.
