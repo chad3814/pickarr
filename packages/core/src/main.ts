@@ -104,6 +104,12 @@ async function main(): Promise<void> {
     `recovery: ${recovery.importsReset} imports reset, ${recovery.pendingAddUrl} awaiting addurl`,
   );
 
+  // Resolved unconditionally, not just when the worker is wired up: the HTTP
+  // poster route needs to know this directory regardless of whether metadata
+  // is currently enabled, since a poster cached during an earlier run must
+  // stay servable after the feature is turned off.
+  const artworkDir = resolveArtworkDir(config.database.path, config.metadata.artworkDir);
+
   // `runMetadata` stays `undefined` — and the scheduler never gets a third
   // timer — when the feature is off or there is no client to ask, exactly as
   // an absent `runMetadata` already means "don't register this timer" to
@@ -121,7 +127,7 @@ async function main(): Promise<void> {
   } else {
     const client = tpdbClient;
     const artwork: ArtworkDeps = {
-      dir: resolveArtworkDir(config.database.path, config.metadata.artworkDir),
+      dir: artworkDir,
       fetchImpl: fetch,
       log,
     };
@@ -220,6 +226,7 @@ async function main(): Promise<void> {
     webRoot,
     registry,
     pluginForFeed: (feedId) => pluginsByFeed.get(feedId) ?? null,
+    artworkDir,
   });
 
   await server.listen({ port: config.server.port, host: '0.0.0.0' });

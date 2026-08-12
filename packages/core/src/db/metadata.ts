@@ -145,6 +145,24 @@ export function enqueueMetadata(
   return result;
 }
 
+/**
+ * Which of these groups have a `metadata_queue` row, in one query for the
+ * whole batch — the same reasoning `metadataForGroups` documents, applied to
+ * the other table `GET /api/metadata` has to consult to tell `pending` from
+ * `absent`.
+ */
+export function queuedGroupIds(db: DatabaseSync, groupIds: readonly number[]): Set<number> {
+  const found = new Set<number>();
+  if (groupIds.length === 0) return found;
+  const holes = groupIds.map(() => '?').join(', ');
+  for (const row of db
+    .prepare(`SELECT group_id FROM metadata_queue WHERE group_id IN (${holes})`)
+    .all(...groupIds)) {
+    found.add(num(row as SqlRow, 'group_id'));
+  }
+  return found;
+}
+
 export function dueMetadataQueue(
   db: DatabaseSync,
   now: number,

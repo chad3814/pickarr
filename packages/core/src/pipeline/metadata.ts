@@ -87,9 +87,45 @@ const UNASKED_SOURCE = 'unasked';
  * unbuildable or empty query, or one that has exhausted its retries — as
  * `state = 'none'`. Leaving such a row queued would mean it is retried, and
  * fails to be answered, on every single pass forever.
+ *
+ * Exported so the HTTP layer can settle the same question the same way: a
+ * request to look up a group this worker could never answer must not leave a
+ * row in `metadata_queue` for the worker to discard on its next pass.
  */
-function answerUnaskable(db: DatabaseSync, groupId: number, now: number): void {
+export function answerUnaskable(db: DatabaseSync, groupId: number, now: number): void {
   recordMetadataAnswer(db, { groupId, source: UNASKED_SOURCE, confirmed: null, nearMisses: [], now });
+}
+
+/** Whether `runMetadataPass` could ever answer this group, short of asking a provider. */
+export type MetadataAnswerability = 'askable' | 'unaskable';
+
+/**
+ * Whether a group is worth a `metadata_queue` row at all.
+ *
+ * Mirrors the early exits `lookUpOne` takes *before* it ever calls
+ * `client.searchScenes`: no plugin, a plugin missing either metadata hook, a
+ * query the plugin declines to build (`null`), or a query with nothing to
+ * search for. Every one of those is answered `'none'` by `lookUpOne` itself
+ * without spending a request — so a caller that queued the same group would
+ * only be handing the worker a row it can only immediately discard.
+ *
+ * A plugin that *throws* building the query is deliberately treated as
+ * `'askable'`, not `'unaskable'`: that is the transient-or-deterministic-fault
+ * case `deferOrGiveUp` already handles by retrying (and eventually giving up
+ * after `MAX_METADATA_ATTEMPTS`), and a row worth retrying is a row worth
+ * queueing.
+ */
+export function metadataAnswerability(
+  plugin: MediaTypePlugin | null,
+  group: { identityKey: string; display: string },
+): MetadataAnswerability {
+  if (plugin === null || plugin.metadataQuery === undefined || plugin.confirmMetadata === undefined) {
+    return 'unaskable';
+  }
+  const built = safeMetadataQuery(plugin, group);
+  if ('error' in built) return 'askable';
+  if (built.query === null || built.query.queries.length === 0) return 'unaskable';
+  return 'askable';
 }
 
 /**
