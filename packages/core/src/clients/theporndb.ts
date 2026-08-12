@@ -11,6 +11,11 @@ export interface SiteSearchResult {
    * address it directly rather than searching by name again. May be absent.
    */
   readonly sourceUuid: string | null;
+  /**
+   * The service's *integer* id for this site. `GET /scenes?site_id=` accepts
+   * only this form, never the uuid, which is why both are kept.
+   */
+  readonly sourceId: number | null;
 }
 
 /**
@@ -82,11 +87,14 @@ function readSites(body: unknown): SiteSearchResult[] {
       name?: unknown;
       short_name?: unknown;
       uuid?: unknown;
+      id?: unknown;
     };
     const name = typeof record.name === 'string' ? record.name : '';
     const shortName = typeof record.short_name === 'string' ? record.short_name : '';
     const sourceUuid = typeof record.uuid === 'string' && record.uuid.length > 0 ? record.uuid : null;
-    if (name.length > 0 || shortName.length > 0) sites.push({ name, shortName, sourceUuid });
+    const rawId = record.id;
+    const sourceId = typeof rawId === 'number' && Number.isInteger(rawId) ? rawId : null;
+    if (name.length > 0 || shortName.length > 0) sites.push({ name, shortName, sourceUuid, sourceId });
   }
   return sites;
 }

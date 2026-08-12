@@ -32,6 +32,7 @@ function fakeLookup(known: string[]): SiteLookupClient & { asked: string[] } {
             name: site,
             shortName: solid(site),
             sourceUuid: `uuid-${solid(site)}`,
+            sourceId: null,
           })),
       );
     },
@@ -59,8 +60,8 @@ function deps(plugin: MediaTypePlugin, client: SiteLookupClient | undefined, log
 test('a site longer than the query is found, because prefixes are what match', () => {
   // q="2 Chicks" returns both of these; nothing is named "2 Chicks".
   const results = [
-    { name: '2 Chicks Same Time', shortName: '2chickssametime', sourceUuid: 'uuid-2chickssametime' },
-    { name: '2 Chicks 1 Dick', shortName: '2chicks1dick', sourceUuid: 'uuid-2chicks1dick' },
+    { name: '2 Chicks Same Time', shortName: '2chickssametime', sourceUuid: 'uuid-2chickssametime', sourceId: null },
+    { name: '2 Chicks 1 Dick', shortName: '2chicks1dick', sourceUuid: 'uuid-2chicks1dick', sourceId: null },
   ];
   const prefixes = ['2 Chicks Same Time Scene', '2 Chicks Same Time', '2 Chicks Same', '2 Chicks', '2'];
   assert.equal(pickSite(results, prefixes)?.name, '2 Chicks Same Time');
@@ -69,17 +70,17 @@ test('a site longer than the query is found, because prefixes are what match', (
 test('a site spelled solid is found from a spaced query', () => {
   // q="Free Use" returns "Freeuse Fantasy" among six others.
   const results = [
-    { name: 'Freeuse Twink', shortName: 'freeusetwink', sourceUuid: 'uuid-freeusetwink' },
-    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy', sourceUuid: 'uuid-freeusefantasy' },
-    { name: 'Free Use MILF', shortName: 'freeusemilf', sourceUuid: 'uuid-freeusemilf' },
+    { name: 'Freeuse Twink', shortName: 'freeusetwink', sourceUuid: 'uuid-freeusetwink', sourceId: null },
+    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy', sourceUuid: 'uuid-freeusefantasy', sourceId: null },
+    { name: 'Free Use MILF', shortName: 'freeusemilf', sourceUuid: 'uuid-freeusemilf', sourceId: null },
   ];
   assert.equal(pickSite(results, ['Free Use Fantasy Scene', 'Free Use Fantasy', 'Free Use', 'Free'])?.name, 'Freeuse Fantasy');
 });
 
 test('the longest prefix wins over a shorter one that also matches', () => {
   const results = [
-    { name: 'Free', shortName: 'free', sourceUuid: 'uuid-free' },
-    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy', sourceUuid: 'uuid-freeusefantasy' },
+    { name: 'Free', shortName: 'free', sourceUuid: 'uuid-free', sourceId: null },
+    { name: 'Freeuse Fantasy', shortName: 'freeusefantasy', sourceUuid: 'uuid-freeusefantasy', sourceId: null },
   ];
   assert.equal(pickSite(results, ['Free Use Fantasy', 'Free Use', 'Free'])?.name, 'Freeuse Fantasy');
 });
@@ -89,7 +90,7 @@ test('a real but wrong site is not confirmed when it is not the longest match', 
   // rather than by the release's own prefixes confirmed it for
   // Free.Use.Fantasy..., filing the scene under Free/ with title "Use
   // Fantasy". Only the prefixes rule out that answer.
-  const results = [{ name: 'Free', shortName: 'free', sourceUuid: 'uuid-free' }];
+  const results = [{ name: 'Free', shortName: 'free', sourceUuid: 'uuid-free', sourceId: null }];
   assert.equal(pickSite(results, ['Free Use Fantasy', 'Free Use']), null);
   // ...but a release that really is from "Free" still resolves.
   assert.equal(pickSite(results, ['Free Some Scene', 'Free Some', 'Free'])?.name, 'Free');
@@ -97,14 +98,14 @@ test('a real but wrong site is not confirmed when it is not the longest match', 
 
 test('results that merely contain a prefix do not match it', () => {
   const results = [
-    { name: 'Getting In Deep', shortName: 'gettingindeep', sourceUuid: 'uuid-gettingindeep' },
-    { name: 'Getting Into It', shortName: 'gettingintoit', sourceUuid: 'uuid-gettingintoit' },
+    { name: 'Getting In Deep', shortName: 'gettingindeep', sourceUuid: 'uuid-gettingindeep', sourceId: null },
+    { name: 'Getting Into It', shortName: 'gettingintoit', sourceUuid: 'uuid-gettingintoit', sourceId: null },
   ];
   assert.equal(pickSite(results, ['Getting In Savannahs', 'Getting In', 'Getting']), null);
 });
 
 test('short_name alone can carry the match, and the display name is preferred', () => {
-  const results = [{ name: 'Bang Bros', shortName: 'bangbros', sourceUuid: 'uuid-bangbros' }];
+  const results = [{ name: 'Bang Bros', shortName: 'bangbros', sourceUuid: 'uuid-bangbros', sourceId: null }];
   assert.equal(pickSite(results, ['Bangbros'])?.name, 'Bang Bros');
 });
 
@@ -207,11 +208,12 @@ test('a negative answer identifies nothing and stores null identifiers', async (
 
 test('pickSite carries the uuid of the result it chose, not another', async () => {
   const results = [
-    { name: 'Free', shortName: 'free', sourceUuid: 'uuid-free' },
+    { name: 'Free', shortName: 'free', sourceUuid: 'uuid-free', sourceId: null },
     {
       name: 'Freeuse Fantasy',
       shortName: 'freeusefantasy',
       sourceUuid: 'uuid-freeusefantasy',
+      sourceId: null,
     },
   ];
   const picked = pickSite(results, ['Free Use Fantasy', 'Free Use', 'Free']);
@@ -269,7 +271,9 @@ test('a failed lookup is not recorded as a negative and is retried next pass', a
     searchSites(query) {
       if (failing) return Promise.reject(new Error('ECONNREFUSED'));
       return Promise.resolve(
-        query === 'Anal Only' ? [{ name: 'Anal Only', shortName: 'analonly', sourceUuid: 'uuid-analonly' }] : [],
+        query === 'Anal Only'
+          ? [{ name: 'Anal Only', shortName: 'analonly', sourceUuid: 'uuid-analonly', sourceId: null }]
+          : [],
       );
     },
   };
@@ -365,7 +369,7 @@ test('a site whose whole name is very short is not confirmed', () => {
   // from an ordinary first word. Big.Boobs.For.The.Win resolved to the site
   // "BIG" with the title "Boobs For The Win".
   for (const short of ['BIG', 'DP', 'Ex', 'Rk']) {
-    const results = [{ name: short, shortName: short.toLowerCase(), sourceUuid: 'u' }];
+    const results = [{ name: short, shortName: short.toLowerCase(), sourceUuid: 'u', sourceId: null }];
     assert.equal(pickSite(results, [short]), null, short);
   }
 });
@@ -374,7 +378,7 @@ test('a four-character site is still confirmed', () => {
   // The floor has to clear BIG without clearing Kink or Vixen, both of which
   // resolve correctly in the corpus.
   for (const name of ['Kink', 'Pure', 'Vixen', 'MILFY']) {
-    const results = [{ name, shortName: name.toLowerCase(), sourceUuid: 'u' }];
+    const results = [{ name, shortName: name.toLowerCase(), sourceUuid: 'u', sourceId: null }];
     assert.equal(pickSite(results, [name])?.name, name);
   }
 });
@@ -382,6 +386,6 @@ test('a four-character site is still confirmed', () => {
 test('a short query still finds a longer site', () => {
   // The floor bounds the answer, not the question: searching "2 Chicks" is
   // how "2 Chicks Same Time" is found.
-  const results = [{ name: '2 Chicks Same Time', shortName: '2chickssametime', sourceUuid: 'u' }];
+  const results = [{ name: '2 Chicks Same Time', shortName: '2chickssametime', sourceUuid: 'u', sourceId: null }];
   assert.equal(pickSite(results, ['2 Chicks Same Time', '2 Chicks'])?.name, '2 Chicks Same Time');
 });
