@@ -7,9 +7,13 @@ docs
 *.db-wal
 *.db-shm
 
-# The browser-test harness is dev-only and its dependencies are not installed
-# here — the build stage copies four workspace manifests and this is not one of
-# them. Without this, `COPY . .` drags the workspace in anyway and
-# `npm run typecheck --workspaces` finds one whose `@playwright/test` does not
-# exist, failing the image build for a package the image does not ship.
+# The browser-test harness is dev-only: the image neither builds it nor ships
+# it. Excluded so that editing a spec does not invalidate the `COPY . .` layer
+# and rebuild everything after it.
+#
+# It also used to be load-bearing. While the build stage ran
+# `npm run typecheck --workspaces`, this workspace — whose `@playwright/test`
+# the stage has no reason to install — failed the production image build. That
+# stage now only builds, so the coupling is gone and this is an optimisation
+# again rather than a fix.
 packages/e2e
