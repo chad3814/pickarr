@@ -6,6 +6,13 @@ import { createMutex } from './mutex.ts';
 
 export const RECONCILE_INTERVAL_MS = 10_000;
 
+/**
+ * Used only when `runMetadata` is supplied without `metadataIntervalMs` —
+ * matches `metadataSchema`'s own default in config/schema.ts, since main.ts
+ * always derives one from config when metadata is actually enabled.
+ */
+export const DEFAULT_METADATA_INTERVAL_MS = 5_000;
+
 export interface SchedulerDeps {
   db: DatabaseSync;
   feeds: FeedConfig[];
@@ -13,6 +20,14 @@ export interface SchedulerDeps {
   ingestFeed(feed: FeedConfig): Promise<IngestResult>;
   reconcile(clientId: string): Promise<ReconcileResult>;
   log(message: string): void;
+  /**
+   * Runs one metadata pass. Absent when metadata is disabled or has no
+   * client configured — main.ts decides that once at startup, not here, so
+   * this scheduler only has to ask "is there a runner" rather than re-derive
+   * why there might not be one.
+   */
+  runMetadata?: () => Promise<void>;
+  metadataIntervalMs?: number;
 }
 
 export interface Scheduler {
@@ -27,6 +42,7 @@ export interface Scheduler {
 export function createScheduler(deps: SchedulerDeps): Scheduler {
   const ingestMutex = createMutex();
   const reconcileMutex = createMutex();
+  const metadataMutex = createMutex();
   const untracked = new Map<string, UntrackedEntry[]>();
   const timers: NodeJS.Timeout[] = [];
 
@@ -119,6 +135,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }, RECONCILE_INTERVAL_MS);
       reconcileTimer.unref();
       timers.push(reconcileTimer);
+
+      // No `runMetadata` means metadata is disabled or has no client —
+      // main.ts already decided that once at startup, so there is nothing
+      // for a timer to do here; registering one anyway would just tick
+      // forever calling nothing.
+      const runMetadata = deps.runMetadata;
+      if (runMetadata !== undefined) {
+        // `tryRun`, for exactly the reason the reconcile timer above is:
+        // a metadata tick is a sample, not a work item, and has nothing to
+        // contribute over a busy pass that the next tick won't.
+        const metadataTimer = setInterval(() => {
+          void metadataMutex.tryRun(runMetadata);
+        }, deps.metadataIntervalMs ?? DEFAULT_METADATA_INTERVAL_MS);
+        metadataTimer.unref();
+        timers.push(metadataTimer);
+      }
     },
 
     stop() {
