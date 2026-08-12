@@ -26,6 +26,14 @@ test('a group with no site is not askable', () => {
   assert.equal(query, null, 'a title-only search across every site confirms the wrong scene');
 });
 
+test('a group with an empty-string subtitle is not askable either', () => {
+  const query = sceneMetadataQuery({
+    identityKey: ':2021-11-15:x',
+    display: { title: 'Some Scene', subtitle: '', fields: [] },
+  });
+  assert.equal(query, null, 'an empty subtitle is still no site, not a site named ""');
+});
+
 test('a dateless group still asks, and omits date rather than sending undefined', () => {
   const query = sceneMetadataQuery({
     identityKey: 'bralessforever::emma-g',
