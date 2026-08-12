@@ -1,3 +1,4 @@
+import type { MetadataCandidate } from '@pickarr/plugin-api';
 import type { SiteLookupConfig } from '../config/schema.ts';
 
 /** One site as the metadata service describes it. */
@@ -122,8 +123,126 @@ function redactToken(message: string, apiKey: string): string {
   return apiKey.length === 0 ? withoutHeader : withoutHeader.replaceAll(apiKey, '***');
 }
 
-/** Searches sites in ThePornDB. */
-export function createTpdbClient(config: SiteLookupConfig, fetchImpl: FetchImpl): SiteLookupClient {
+export interface SceneLookupClient {
+  readonly source: string;
+  /** `siteId` narrows the search; null when the site's integer id is unknown. */
+  searchScenes(query: string, siteId: number | null): Promise<readonly MetadataCandidate[]>;
+}
+
+/**
+ * A rate limit, distinguished from every other failure by its own type.
+ *
+ * The worker treats it differently: an ordinary failure defers one group, while
+ * this one stops the whole pass. Five rows each spending a request to discover
+ * the same limit is the thing being avoided, so the caller has to be able to
+ * tell the two apart without parsing a message.
+ */
+export class RateLimited extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super(`rate limited for ${retryAfterMs}ms`);
+    this.name = 'RateLimited';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** `Retry-After` in seconds, defaulting to a minute when absent or unreadable. */
+function retryAfterMs(header: string | null): number {
+  const seconds = Number(header);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 60_000;
+}
+
+/**
+ * Poster sources in preference order.
+ *
+ * TPDB's own CDN first: the studio CDN fields (`image`, `poster_image`) point
+ * at the site's own hosting, which is likelier to rotate paths or refuse a
+ * foreign referrer. The documented `image` is 1279x719, so nothing downstream
+ * may assume a portrait aspect ratio.
+ */
+function readPosterUrl(record: Record<string, unknown>): string | null {
+  const posters = record['posters'];
+  if (posters !== null && typeof posters === 'object') {
+    for (const size of ['large', 'full'] as const) {
+      const url = (posters as Record<string, unknown>)[size];
+      if (typeof url === 'string' && url.length > 0) return url;
+    }
+  }
+  for (const key of ['poster', 'image'] as const) {
+    const url = record[key];
+    if (typeof url === 'string' && url.length > 0) return url;
+  }
+  return null;
+}
+
+function readPerformerNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') continue;
+    // `name`, never `full_name` — the latter carries a disambiguation suffix
+    // such as `Jessica Jaymes (2005)`.
+    const name = (entry as { name?: unknown }).name;
+    if (typeof name === 'string' && name.length > 0) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Reads scenes out of a response body, tolerating everything we do not use.
+ *
+ * Note the id naming, which is inverted between the two objects and is not a
+ * mistake to correct: on a **scene**, `id` is the uuid string and `_id` is the
+ * integer; on the nested **site**, `uuid` is the uuid and `id` is the integer.
+ */
+function readScenes(body: unknown): MetadataCandidate[] {
+  if (body === null || typeof body !== 'object') return [];
+  const data = (body as { data?: unknown }).data;
+  if (!Array.isArray(data)) return [];
+
+  const scenes: MetadataCandidate[] = [];
+  for (const entry of data) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+
+    const title = record['title'];
+    if (typeof title !== 'string' || title.length === 0) continue;
+
+    const site = record['site'];
+    const siteRecord = site !== null && typeof site === 'object'
+      ? (site as Record<string, unknown>)
+      : {};
+    const siteName = siteRecord['name'];
+    const siteUuid = siteRecord['uuid'];
+    const siteId = siteRecord['id'];
+    const uuid = record['id'];
+    const date = record['date'];
+    const duration = record['duration'];
+    const synopsis = record['description'];
+
+    scenes.push({
+      sourceUuid: typeof uuid === 'string' && uuid.length > 0 ? uuid : null,
+      title,
+      siteUuid: typeof siteUuid === 'string' && siteUuid.length > 0 ? siteUuid : null,
+      siteId: typeof siteId === 'number' && Number.isInteger(siteId) ? siteId : null,
+      siteName: typeof siteName === 'string' ? siteName : '',
+      date: typeof date === 'string' && date.length > 0 ? date : null,
+      performers: readPerformerNames(record['performers']),
+      durationSeconds:
+        typeof duration === 'number' && Number.isFinite(duration) ? duration : null,
+      synopsis: typeof synopsis === 'string' && synopsis.length > 0 ? synopsis : null,
+      posterUrl: readPosterUrl(record),
+    });
+  }
+  return scenes;
+}
+
+/** Searches sites and scenes in ThePornDB. */
+export function createTpdbClient(
+  config: SiteLookupConfig,
+  fetchImpl: FetchImpl,
+): SiteLookupClient & SceneLookupClient {
   const base = config.baseUrl.replace(/\/+$/, '');
 
   return {
@@ -181,6 +300,51 @@ export function createTpdbClient(config: SiteLookupConfig, fetchImpl: FetchImpl)
       }
 
       return collected;
+    },
+
+    /**
+     * One page only, unlike `searchSites`. That walks up to `MAX_PAGES`
+     * because one-word site queries return hundreds of results and the answer
+     * can sit anywhere in them. A scene query is a full title plus a site
+     * filter: a match that is not on page one is one the confirmation rule was
+     * going to reject anyway, so paging would spend requests collecting
+     * candidates we then discard.
+     */
+    async searchScenes(query: string, siteId: number | null) {
+      if (query.trim().length === 0) return [];
+      const site = siteId === null ? '' : `&site_id=${siteId}`;
+      const url = `${base}/scenes?q=${encodeURIComponent(query)}${site}&per_page=${PER_PAGE}`;
+
+      let response: Response;
+      try {
+        response = await fetchImpl(url, {
+          headers: { Authorization: `Bearer ${config.apiKey}`, Accept: 'application/json' },
+        });
+      } catch (error) {
+        throw new Error(
+          `scene search for "${query}" failed: ${redactToken((error as Error).message, config.apiKey)}`,
+        );
+      }
+
+      if (response.status === 429) {
+        throw new RateLimited(retryAfterMs(response.headers.get('retry-after')));
+      }
+      if (!response.ok) {
+        throw new Error(
+          `scene search for "${query}" returned HTTP ${response.status} ${response.statusText}`,
+        );
+      }
+
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch (error) {
+        throw new Error(
+          `scene search for "${query}" returned unreadable JSON: ${redactToken((error as Error).message, config.apiKey)}`,
+        );
+      }
+
+      return readScenes(body);
     },
   };
 }

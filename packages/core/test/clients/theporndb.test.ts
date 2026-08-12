@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTpdbClient, type FetchImpl } from '../../src/clients/theporndb.ts';
+import { createTpdbClient, RateLimited, type FetchImpl } from '../../src/clients/theporndb.ts';
 import type { SiteLookupConfig } from '../../src/config/schema.ts';
 
 const API_KEY = 'tpdb-secret-key-0123456789abcdef';
@@ -11,12 +11,21 @@ const CONFIG: SiteLookupConfig = {
   baseUrl: 'https://api.theporndb.net',
 };
 
-function respondWith(body: unknown, init?: ResponseInit): FetchImpl {
-  return async () =>
-    new Response(JSON.stringify(body), {
+/**
+ * `urls` records every request made through this fake, in order — needed by
+ * tests that assert on the query string built (e.g. `site_id=`) or on how
+ * many requests a single search cost.
+ */
+function respondWith(body: unknown, init?: ResponseInit): FetchImpl & { urls: string[] } {
+  const urls: string[] = [];
+  const impl: FetchImpl = async (url) => {
+    urls.push(url);
+    return new Response(JSON.stringify(body), {
       headers: { 'content-type': 'application/json' },
       ...init,
     });
+  };
+  return Object.assign(impl, { urls });
 }
 
 function site(name: string, shortName: string): Record<string, unknown> {
@@ -303,4 +312,123 @@ test('a trailing slash on the base url does not double up', async () => {
   });
   await client.searchSites('x');
   assert.ok(seen.startsWith('https://api.theporndb.net/sites?'), seen);
+});
+
+// --- Scene search ------------------------------------------------------------
+
+const SCENE_BODY = {
+  data: [{
+    id: 'd284e2a0-789d-4e6c-beb9-6e61c24e8b84',
+    _id: 0,
+    title: 'Smokin Hot Brunette Silvia Saige',
+    description: "Silvia Saige has been Sam's therapist for a while",
+    date: '2021-11-15',
+    duration: 1000,
+    poster: 'https://thumb.theporndb.net/office-couch.jpg',
+    posters: { full: 'https://cdn/full.jpg', large: 'https://cdn/large.jpg' },
+    image: 'https://images1.naughtycdn.com/h.jpg',
+    performers: [{ name: 'Jessica Jaymes', full_name: 'Jessica Jaymes (2005)' }],
+    site: { uuid: 'site-uuid', id: 1, name: 'Naughty Office', short_name: 'naughtyoffice' },
+  }],
+  meta: { total: 1, per_page: 25, current_page: 1, last: 1 },
+};
+
+test('a scene search maps the documented payload', async () => {
+  const client = createTpdbClient(CONFIG, respondWith(SCENE_BODY));
+  const [scene] = await client.searchScenes('Smokin Hot Brunette', 1);
+
+  assert.equal(scene?.sourceUuid, 'd284e2a0-789d-4e6c-beb9-6e61c24e8b84',
+    'a scene id is the uuid string; _id is the integer');
+  assert.equal(scene?.siteId, 1);
+  assert.equal(scene?.siteUuid, 'site-uuid');
+  assert.equal(scene?.date, '2021-11-15');
+  assert.equal(scene?.durationSeconds, 1000);
+  assert.deepEqual(scene?.performers, ['Jessica Jaymes'],
+    'name, not full_name, which carries a disambiguation suffix');
+  assert.equal(scene?.posterUrl, 'https://cdn/large.jpg', 'posters.large is preferred');
+});
+
+test('the site id narrows the query and is omitted when unknown', async () => {
+  const withId = respondWith(SCENE_BODY);
+  const client = createTpdbClient(CONFIG, withId);
+  await client.searchScenes('x', 1);
+  assert.ok(withId.urls[0]?.includes('site_id=1'));
+
+  const without = respondWith(SCENE_BODY);
+  await createTpdbClient(CONFIG, without).searchScenes('x', null);
+  assert.ok(!without.urls[0]?.includes('site_id'));
+});
+
+test('only one page is requested', async () => {
+  const full = { ...SCENE_BODY, meta: { total: 210, per_page: 25, current_page: 1, last: 10 } };
+  const fetchImpl = respondWith(full);
+  await createTpdbClient(CONFIG, fetchImpl).searchScenes('x', 1);
+  assert.equal(fetchImpl.urls.length, 1,
+    'a title plus a site filter ranks the match on page one or the rule rejects it anyway');
+});
+
+test('a structurally broken entry yields no candidate rather than a partial one', async () => {
+  const client = createTpdbClient(CONFIG, respondWith({ data: [{ id: 5 }, null, 'nonsense'] }));
+  assert.deepEqual(await client.searchScenes('x', null), []);
+});
+
+test('further malformed shapes are tolerated: a bare number, and a site given as a string', async () => {
+  // Guards readScenes against exactly the shapes the brief calls out: an
+  // entry that is a bare number, and a `site` that is not an object at all.
+  // Neither may throw or produce a half-populated candidate.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({ data: [7, { title: 'Only A Title', site: 'not-an-object' }] }),
+  );
+  const results = await client.searchScenes('x', null);
+  assert.deepEqual(results, [{
+    sourceUuid: null,
+    title: 'Only A Title',
+    siteUuid: null,
+    siteId: null,
+    siteName: '',
+    date: null,
+    performers: [],
+    durationSeconds: null,
+    synopsis: null,
+    posterUrl: null,
+  }]);
+});
+
+test('a scene search failure redacts the bearer token', async () => {
+  const client = createTpdbClient(CONFIG, () => {
+    throw new Error(`connect failed with Bearer ${CONFIG.apiKey}`);
+  });
+  await assert.rejects(client.searchScenes('x', null), (error: Error) => {
+    assert.ok(!error.message.includes(CONFIG.apiKey));
+    return true;
+  });
+});
+
+test('a 429 raises RateLimited rather than a generic error', async () => {
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({ message: 'Too Many Attempts.' }, { status: 429, headers: { 'retry-after': '30' } }),
+  );
+  await assert.rejects(client.searchScenes('x', null), (error: unknown) => {
+    assert.ok(error instanceof RateLimited);
+    assert.equal(error.retryAfterMs, 30_000);
+    return true;
+  });
+});
+
+test('a 429 with no usable retry-after defaults to a minute', async () => {
+  const client = createTpdbClient(CONFIG, respondWith({}, { status: 429 }));
+  await assert.rejects(client.searchScenes('x', null), (error: unknown) => {
+    assert.ok(error instanceof RateLimited);
+    assert.equal(error.retryAfterMs, 60_000);
+    return true;
+  });
+});
+
+test('an empty scene query is refused without a request', async () => {
+  const fetchImpl = respondWith(SCENE_BODY);
+  const client = createTpdbClient(CONFIG, fetchImpl);
+  assert.deepEqual(await client.searchScenes('   ', null), []);
+  assert.equal(fetchImpl.urls.length, 0);
 });
