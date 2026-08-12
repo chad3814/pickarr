@@ -12,7 +12,12 @@ import { dueMetadataQueue, enqueueMetadata, getGroupMetadata } from '../../src/d
 import { getDiscoveredSite, recordDiscoveredSite } from '../../src/db/sites.ts';
 import { RateLimited, type FetchImpl, type SceneLookupClient } from '../../src/clients/theporndb.ts';
 import type { ArtworkDeps } from '../../src/media/artwork.ts';
-import { MAX_BACKOFF_MS, runMetadataPass, type MetadataPassDeps } from '../../src/pipeline/metadata.ts';
+import {
+  MAX_BACKOFF_MS,
+  MAX_METADATA_ATTEMPTS,
+  runMetadataPass,
+  type MetadataPassDeps,
+} from '../../src/pipeline/metadata.ts';
 
 const scenesPlugin: MediaTypePlugin = createScenesPlugin({ libraryRoot: '/m', sites: [] });
 
@@ -330,4 +335,78 @@ test('a group whose plugin offers no hooks is answered, not retried forever', as
   assert.equal(result.none, 1);
   assert.equal(client.asked.length, 0);
   assert.equal(dueMetadataQueue(db, 999_999, 10).length, 0, 'a hookless plugin must not retry forever');
+});
+
+test('a row whose answer write throws is deferred, not stuck first in the queue forever', async () => {
+  const db = openTestDatabase();
+  // Poisoned deliberately, from outside the code under test: a trigger that
+  // aborts only the one insert this row will cause. This is what a broken
+  // constraint or a full disk looks like from `recordMetadataAnswer`'s
+  // point of view — an exception thrown mid-transaction, which its own
+  // ROLLBACK already unwinds cleanly. The row's own attempts/next_at,
+  // stored in a different table, are untouched by that rollback, which is
+  // exactly the gap this test exists to close.
+  const poisonedId = makeGroup(db, 'Poison', 'Some Site');
+  const fineId = makeGroup(db, 'Fine', 'Some Site');
+  db.exec(
+    `CREATE TRIGGER poison_row BEFORE INSERT ON group_metadata
+     FOR EACH ROW WHEN NEW.group_id = ${poisonedId}
+     BEGIN SELECT RAISE(ABORT, 'poisoned row'); END;`,
+  );
+  enqueueMetadata(db, [poisonedId, fineId], 1_000);
+
+  const client = fakeSceneClient((entry) => [candidate({ title: entry.query, siteName: 'Some Site' })]);
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  // The row behind the poisoned one was still reached and answered in the
+  // same pass.
+  assert.equal(client.asked.length, 2, 'the poisoned row must not stop the pass from reaching the next one');
+  assert.equal(result.confirmed, 1);
+  assert.equal(result.deferred, 1);
+  assert.equal(getGroupMetadata(db, poisonedId), undefined, 'the failed write must not be cached as an answer');
+  assert.equal(getGroupMetadata(db, fineId)?.state, 'confirmed');
+
+  const poisonedRow = db.prepare('SELECT attempts, next_at FROM metadata_queue WHERE group_id = ?').get(poisonedId);
+  assert.equal(Number(poisonedRow?.['attempts']), 1, 'the attempt must be counted despite the rollback');
+  assert.ok(
+    Number(poisonedRow?.['next_at']) > 1_000,
+    'next_at must move so the row is not due again immediately',
+  );
+
+  // A second pass at the same `now` must not see it again — proof it is no
+  // longer first in line forever.
+  const second = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+  assert.equal(second.looked, 0, 'the poisoned row must not be due again at the same instant');
+});
+
+test('an attempts ceiling stops a permanently poisoned row from deferring forever', async () => {
+  const db = openTestDatabase();
+  const client = fakeSceneClient(() => {
+    throw new Error('boom');
+  });
+
+  // One short of the ceiling: still deferred.
+  const belowId = makeGroup(db, 'Below', 'Some Site');
+  enqueueMetadata(db, [belowId], 1_000);
+  db.prepare('UPDATE metadata_queue SET attempts = ? WHERE group_id = ?').run(MAX_METADATA_ATTEMPTS - 2, belowId);
+
+  const belowResult = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+  assert.equal(belowResult.deferred, 1);
+  assert.equal(getGroupMetadata(db, belowId), undefined, 'still not answered');
+  const belowRow = db.prepare('SELECT attempts FROM metadata_queue WHERE group_id = ?').get(belowId);
+  assert.equal(Number(belowRow?.['attempts']), MAX_METADATA_ATTEMPTS - 1);
+
+  // At the ceiling: answered and leaves, rather than deferred again.
+  const atId = makeGroup(db, 'At', 'Some Site');
+  enqueueMetadata(db, [atId], 1_000);
+  db.prepare('UPDATE metadata_queue SET attempts = ? WHERE group_id = ?').run(MAX_METADATA_ATTEMPTS - 1, atId);
+
+  const atResult = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+  assert.equal(atResult.none, 1);
+  assert.equal(getGroupMetadata(db, atId)?.state, 'none');
+  assert.equal(
+    dueMetadataQueue(db, 999_999, 10).find((row) => row.groupId === atId),
+    undefined,
+    'the exhausted row must leave the queue rather than defer again',
+  );
 });
