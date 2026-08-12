@@ -12,7 +12,14 @@ COPY packages/web/package.json           packages/web/
 RUN npm ci
 
 COPY . .
-RUN npm run lint && npm run typecheck && npm run build
+
+# Build only. Linting and typechecking are CI's job, and running them here as
+# well bought nothing: every image build repeated them, and the coupling was
+# not free — adding a dev-only browser-test workspace broke the *production*
+# image, because `npm run typecheck --workspaces` found a package the image
+# neither builds nor ships and whose dependencies it had no reason to install.
+# An image build should fail when the image cannot be built.
+RUN npm run build
 
 FROM node:24-alpine AS runtime
 WORKDIR /app
