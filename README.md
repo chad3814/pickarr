@@ -54,6 +54,11 @@ immediately rather than starting in a broken state.
 | `siteLookup.type` | site lookup | `"theporndb"` is the only supported value. |
 | `siteLookup.apiKey` | site lookup | The service's API key, or a `file:/run/secrets/<name>` reference. Sent as a bearer token, never in a URL. |
 | `siteLookup.baseUrl` | site lookup | Defaults to `https://api.theporndb.net`. |
+| `metadata` | top level | Optional. Configures the scene-metadata worker described in "Scene metadata" below. |
+| `metadata.enabled` | metadata | Defaults to `true`. Set `false` to turn the worker off entirely, regardless of whether `siteLookup` is configured. |
+| `metadata.intervalSeconds` | metadata | How often the worker wakes up to drain its queue. Defaults to 5. |
+| `metadata.perTick` | metadata | Groups looked up per wake-up. Defaults to 5 — with the default interval, a ceiling of one request per second before backoff or a rate-limit cooldown slows it further. |
+| `metadata.artworkDir` | metadata | Where cached posters are written. Defaults to an `artwork/` directory next to `database.path`. |
 | `feeds[]` | top level | One or more RSS feeds to poll. |
 | `feeds[].url` | feed | The RSS feed URL, including any indexer API key. |
 | `feeds[].plugin` | feed | Which configured plugin package interprets this feed's entries. |
@@ -230,6 +235,56 @@ nothing: the identity key is separator-free, so the group stays put and only the
 directory name changes on future imports. Changing it to a *different* name changes the
 identity key of its scenes, so anything already picked reappears as a new entry rather
 than as an upgrade. Settle the naming before a long run, not during one.
+
+## Scene metadata
+
+With `siteLookup` configured, a background worker looks up each scene in ThePornDB and
+adds a poster, synopsis, and performer list to its card. **Nothing about identity or
+grouping changes.** The card's title stays whatever the parser decided; the provider's
+answer renders underneath as a second opinion, never a replacement.
+
+**It is lazy.** Nothing is looked up until you browse it. Opening Browse tells the server
+which groups are actually on screen, and only those are queued for a lookup — a library
+with ten thousand groups you never scroll to costs nothing. This is the opposite of site
+lookup above, which runs proactively on every feed tick because it has to: a release needs
+its site settled before it can even be grouped, while a scene's poster and synopsis are
+decoration a card can live without until someone is looking at it.
+
+Credentials come from the `siteLookup` block already documented above — the metadata
+worker and the site lookup both talk to the same service with the same key, so there is
+only one place to configure it. **No `siteLookup` means no metadata**, exactly as it
+already means no automatic site lookup; `metadata.enabled` defaulting to `true` does
+nothing without it, and Pickarr logs that it is idle rather than pretending otherwise.
+
+**A group with no confirmed site is never looked up.** The query sent to ThePornDB is a
+title plus a site name, and a group without one has nothing to send but the title — and
+searching a title alone across every site the provider knows is how you confirm the wrong
+scene wearing the right name. Such a group simply carries no metadata; nothing retries it
+once it gains a site.
+
+**A "no match" answer is cached and never retried.** The first lookup that comes back with
+nothing settles the question for that group forever — the same reasoning `discovered_sites`
+already applies to a site prefix that isn't a site. Without this, a scene the provider
+genuinely does not have would be re-queried and re-refused every time anyone ever browsed
+its page.
+
+**The poster cache grows and is never evicted**, the same as `trashDir` below: every
+confirmed scene with a poster writes one file under `metadata.artworkDir`, and nothing here
+ever deletes one. Reclaiming that space is a decision you make, not one Pickarr makes for
+you. If you clear the directory by hand, the affected cards lose their posters, because the
+database still records that one was fetched and the poster route will 404 for a file that
+is no longer there. Tell it to forget:
+
+```sql
+UPDATE group_metadata SET poster_path = NULL WHERE poster_path IS NOT NULL;
+```
+
+The title, synopsis, performers and confirmation are untouched by that — only the poster
+is asked for again the next time the group is browsed.
+
+**Picks does not show metadata.** The panel only ever appears on Browse. A picked group on
+the Picks screen renders exactly as it always has, with no poster, synopsis or performer
+list — a real, current limitation rather than an oversight to work around.
 
 ## Operational notes
 

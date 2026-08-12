@@ -409,6 +409,44 @@ holds and the fallback the removed branch used to reach is never taken.
 
 #39 is closed by this branch and should be marked closed on merge.
 
+## Scene metadata
+
+**The confirmation rule refuses rather than guesses when candidates tie.**
+`confirmSceneMetadata` only confirms a candidate once every weaker one has been
+filtered out by site, then by date window, and — where a date window still
+leaves more than one — by how close it lands, with title breaking the
+remaining tie. When two or more candidates survive that whole run with nothing
+left to separate them — a dateless group whose title key matches two on-site
+scenes, or a dated one where two are exactly the same distance inside the
+window and neither's title matches the query — the group is answered
+`confirmed: null` and every tied candidate is recorded as a near miss with
+`reason: 'ambiguous: ...'`, so the tie is visible rather than silently broken
+by array order. This is the same asymmetry the site-lookup rule elsewhere in
+this document is already built around: a wrong confirmation attaches another
+scene's performers and synopsis to a card and never says so, while an
+unconfirmed one just leaves the card exactly as it was. The two outcomes cost
+differently, so the rule is built to fail toward the one you can see.
+
+**The artwork cache grows and is never evicted, for the same reason `trashDir`
+is never emptied.** Every confirmed scene with a poster caches one file under
+`metadata.artworkDir`, and nothing here ever deletes one — not when a group is
+edited or merged away, not on any schedule. Reclaiming that space is a manual
+decision, exactly like emptying `trashDir`: it is disk usage a human should
+choose to give back, not something Pickarr silently prunes out from under a
+poster someone might still be looking at. Deleting the directory by hand
+leaves the affected cards without their posters, because `group_metadata`
+still records a `poster_path` that now points at nothing — the poster route
+will 404 for it rather than serve one. Clear those rows the same way an
+emptied `trashDir` needs no cleanup of its own:
+
+```sql
+UPDATE group_metadata SET poster_path = NULL WHERE poster_path IS NOT NULL;
+```
+
+That is a metadata refetch, not a metadata loss: the row's title, synopsis,
+performers and confirmation stay put, and only the poster is asked for again
+the next time the group is browsed.
+
 ## Test-suite blind spots
 
 These are hazards for whoever writes the next test rather than tracked work, so they are

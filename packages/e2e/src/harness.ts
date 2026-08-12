@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test as base } from '@playwright/test';
+import type { MetadataCandidate } from '@pickarr/plugin-api';
 import createScenesPlugin from '../../plugin-scenes/src/index.ts';
+import type { SceneLookupClient } from '../../core/src/clients/theporndb.ts';
 import type { ClientSnapshot, DownloadClient } from '../../core/src/clients/types.ts';
 import { configSchema, type FeedConfig } from '../../core/src/config/schema.ts';
 import { openDatabase } from '../../core/src/db/open.ts';
@@ -12,6 +14,7 @@ import { buildServer } from '../../core/src/http/server.ts';
 import { ingestEntries, type IngestResult } from '../../core/src/ingest/ingest.ts';
 import { loadPlugins } from '../../core/src/plugins/registry.ts';
 import { importDownload } from '../../core/src/pipeline/import.ts';
+import { runMetadataPass, type MetadataPassResult } from '../../core/src/pipeline/metadata.ts';
 import {
   reconcileClient,
   type ReconcileResult,
@@ -59,12 +62,34 @@ export interface FakeDownloadClient extends DownloadClient {
   setSnapshot(snapshot: ClientSnapshot): void;
 }
 
+export interface MetadataSearch {
+  readonly query: string;
+  readonly siteId: number | null;
+}
+
+/**
+ * A `SceneLookupClient` that records what it was asked and hands back
+ * whatever the test decided — the metadata equivalent of `FakeDownloadClient`.
+ *
+ * Real ThePornDB credentials are never involved: `runMetadataPass` only ever
+ * sees this client, and a spec drives a confirmation (or a deliberate
+ * near-miss) by calling `setCandidates` before running a pass.
+ */
+export interface FakeMetadataClient extends SceneLookupClient {
+  /** Every `searchScenes` call, in order. */
+  readonly searched: readonly MetadataSearch[];
+  /** What the next `searchScenes` call will return. */
+  setCandidates(candidates: readonly MetadataCandidate[]): void;
+}
+
 export interface Harness {
   /** `http://127.0.0.1:<the port the OS actually assigned>`. */
   readonly baseURL: string;
   /** The test's own database. Direct SQL, for states ingest cannot reach. */
   readonly db: DatabaseSync;
   readonly client: FakeDownloadClient;
+  /** The scene-metadata provider `runMetadataPass` asks. Never the real service. */
+  readonly metadataClient: FakeMetadataClient;
   /** This test's temp directory; removed when the test ends. */
   readonly workDir: string;
   readonly libraryRoot: string;
@@ -87,6 +112,16 @@ export interface Harness {
    * production performs, not ones the test wrote by hand.
    */
   reconcile(): Promise<ReconcileResult>;
+
+  /**
+   * One drain of the metadata queue through the real `runMetadataPass` — the
+   * same function `main.ts` puts on a timer, called directly here because the
+   * harness builds a server with no scheduler behind it. A spec calls this
+   * once its request has reached the queue (`POST /api/metadata/request`,
+   * which the SPA's `useGroupMetadata` hook issues on its own) to answer it
+   * deterministically instead of waiting on a timer the harness never starts.
+   */
+  runMetadataPass(): Promise<MetadataPassResult>;
 }
 
 function createFakeClient(id: string, importMode: 'move' | 'copy'): FakeDownloadClient {
@@ -114,6 +149,28 @@ function createFakeClient(id: string, importMode: 'move' | 'copy'): FakeDownload
     // No path mapping: the fake's "client paths" are already paths this
     // process can open, because the spec that set them made them.
     mapPath: (path) => path,
+  };
+}
+
+function createFakeMetadataClient(): FakeMetadataClient {
+  const searched: MetadataSearch[] = [];
+  // Every call returns the same set until a spec changes it — good enough for
+  // this suite, which only ever has one group queued at a time.
+  let candidates: readonly MetadataCandidate[] = [];
+
+  return {
+    // Never `'theporndb'`: a source string this suite wrote itself, so a
+    // `group_metadata.source` value in a failing test's database can never be
+    // mistaken for a row the real service actually answered.
+    source: 'e2e-fake-tpdb',
+    searched,
+    setCandidates(next) {
+      candidates = next;
+    },
+    searchScenes: async (query, siteId) => {
+      searched.push({ query, siteId });
+      return candidates;
+    },
   };
 }
 
@@ -163,6 +220,11 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
   const registry = await loadPlugins(config, async () => ({ default: createScenesPlugin }));
 
   const client = createFakeClient(clientConfig.id, clientConfig.importMode);
+  const metadataClient = createFakeMetadataClient();
+
+  // Shared with `runMetadataPass` below, so a poster a test caches through the
+  // pass lands exactly where the poster route serves it from.
+  const artworkDir = join(workDir, 'artwork');
 
   // Reconcile reports jobs in the client that Pickarr has no row for; the
   // scheduler holds that list in production and the server reads it back.
@@ -186,7 +248,7 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     // Under the work directory like everything else the harness creates, so a
     // run leaves nothing behind. Nothing writes here unless a test caches a
     // poster; the poster route serves from it and 404s while it is empty.
-    artworkDir: join(workDir, 'artwork'),
+    artworkDir,
   });
 
   // Port 0, then read back what the OS assigned. A fixed port collides between
@@ -201,6 +263,7 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     baseURL,
     db,
     client,
+    metadataClient,
     workDir,
     libraryRoot,
     feed,
@@ -234,6 +297,23 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
       });
       untracked = result.untracked;
       return result;
+    },
+    runMetadataPass() {
+      return runMetadataPass({
+        db,
+        client: metadataClient,
+        // `byId`, never `byPackage`: `media_groups.plugin` stores the id
+        // (see `main.ts`'s `pluginById`, which this mirrors), and a group
+        // whose plugin has since left config resolves to `null` here exactly
+        // as it would in production.
+        pluginFor: (id) => registry.byId(id) ?? null,
+        artwork: { dir: artworkDir, fetchImpl: fetch, log: () => undefined },
+        // Comfortably above one, so a spec queuing a couple of groups in one
+        // tick still clears them in a single call.
+        perTick: 10,
+        now: () => Date.now(),
+        log: () => undefined,
+      });
     },
   };
 
