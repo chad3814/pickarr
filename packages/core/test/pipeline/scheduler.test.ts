@@ -158,6 +158,103 @@ test('an ingest failure on one feed does not stop the others', async () => {
   db.close();
 });
 
+// Mirrors the reconcile-overlap test above: a metadata tick is a sample, not
+// a work item, so a tick landing on a still-running pass must be dropped,
+// not queued behind it.
+test('a metadata tick that lands while the previous one is still running is dropped, not queued', async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  const db = openTestDatabase();
+  let calls = 0;
+  let finishFirstTick: () => void = () => {};
+  const inFlight = new Promise<void>((resolve) => {
+    finishFirstTick = resolve;
+  });
+
+  const scheduler = createScheduler({
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => NO_RECONCILE_WORK,
+    clientIds: [],
+    log: () => {},
+    runMetadata: async () => {
+      calls += 1;
+      await inFlight;
+    },
+    metadataIntervalMs: 1_000,
+  });
+
+  try {
+    scheduler.start();
+
+    mock.timers.tick(1_000);
+    await settle();
+    assert.equal(calls, 1, 'the first tick starts a metadata pass');
+
+    // Three more ticks while the first is still blocked.
+    for (let tick = 0; tick < 3; tick += 1) mock.timers.tick(1_000);
+    await settle();
+    assert.equal(calls, 1, 'ticks arriving during a run must not start a second one');
+
+    finishFirstTick();
+    await settle();
+    assert.equal(calls, 1, 'and must not have queued up behind it either');
+
+    // Not wedged: the next tick after the run finishes still works.
+    mock.timers.tick(1_000);
+    await settle();
+    assert.equal(calls, 2);
+  } finally {
+    scheduler.stop();
+    mock.timers.reset();
+    db.close();
+  }
+});
+
+// `runMetadata` absent is how main.ts represents "metadata is disabled, or
+// there is no client to ask" — the scheduler must not register a timer for
+// it in that case, not just decline to call a function it doesn't have.
+test('no metadata timer is registered when runMetadata is not supplied', (t) => {
+  const db = openTestDatabase();
+  const timerSpy = t.mock.method(global, 'setInterval');
+
+  const baseDeps = {
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => NO_RECONCILE_WORK,
+    clientIds: [],
+    log: () => {},
+  };
+
+  const withoutMetadata = createScheduler(baseDeps);
+  withoutMetadata.start();
+  const callsWithoutMetadata = timerSpy.mock.calls.length;
+  withoutMetadata.stop();
+
+  timerSpy.mock.resetCalls();
+
+  const withMetadata = createScheduler({
+    ...baseDeps,
+    runMetadata: async () => {},
+    metadataIntervalMs: 1_000,
+  });
+  withMetadata.start();
+  const callsWithMetadata = timerSpy.mock.calls.length;
+  withMetadata.stop();
+
+  assert.equal(
+    callsWithMetadata,
+    callsWithoutMetadata + 1,
+    'supplying runMetadata must register exactly one additional timer',
+  );
+  db.close();
+});
+
 // The count on IngestResult (parseErrors) says *that* names failed to parse;
 // it never says *which* ones, so there was nothing to act on. Each failure
 // the ingest function reports has to be logged on its own line so the raw

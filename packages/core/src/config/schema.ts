@@ -71,6 +71,30 @@ export const siteLookupSchema = z.object({
 
 export type SiteLookupConfig = z.infer<typeof siteLookupSchema>;
 
+/**
+ * The asynchronous scene-metadata worker.
+ *
+ * Credentials come from `siteLookup`, which already carries the key and base
+ * URL for the same service; no `siteLookup` means no metadata, exactly as it
+ * already means no site lookup. Renaming that block for accuracy would break
+ * every documented config for a cosmetic gain.
+ */
+export const metadataSchema = z.object({
+  enabled: z.boolean().default(true),
+  intervalSeconds: z.number().int().positive().default(5),
+  /**
+   * Groups looked up per pass. With the default interval that is a ceiling of
+   * one request per second, before backoff or a rate-limit cooldown.
+   */
+  perTick: z.number().int().positive().default(5),
+  // Left unresolved here deliberately: the default (an `artwork/` directory
+  // beside the database) needs `config.database.path`, which this schema
+  // cannot see in isolation — resolved once in main.ts instead.
+  artworkDir: z.string().min(1).optional(),
+});
+
+export type MetadataConfig = z.infer<typeof metadataSchema>;
+
 export const configSchema = z.object({
   server: z.object({ port: z.number().int().positive().default(8080) }).default({ port: 8080 }),
   database: z.object({ path: z.string().min(1) }),
@@ -88,6 +112,7 @@ export const configSchema = z.object({
   downloadClients: z.array(downloadClientSchema).min(1),
   feeds: z.array(feedSchema).min(1),
   siteLookup: siteLookupSchema.optional(),
+  metadata: metadataSchema.default({}),
 });
 
 export type PickarrConfig = z.infer<typeof configSchema>;

@@ -151,3 +151,25 @@ test('two feeds sharing an id is rejected', async () => {
     await assert.rejects(loadConfig(path), /duplicate feed id/i);
   });
 });
+
+test('the metadata block defaults when absent', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    await writeFile(path, JSON.stringify(VALID));
+    const config = await loadConfig(path);
+    assert.equal(config.metadata.enabled, true);
+    assert.equal(config.metadata.intervalSeconds, 5);
+    assert.equal(config.metadata.perTick, 5);
+    assert.equal(config.metadata.artworkDir, undefined);
+  });
+});
+
+test('a non-positive perTick is refused at startup', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    const broken = structuredClone(VALID) as Record<string, unknown>;
+    broken['metadata'] = { perTick: 0 };
+    await writeFile(path, JSON.stringify(broken));
+    await assert.rejects(loadConfig(path), /perTick/);
+  });
+});

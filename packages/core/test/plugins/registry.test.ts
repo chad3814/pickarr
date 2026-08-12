@@ -27,6 +27,7 @@ function configWith(plugins: Record<string, Record<string, string>>): PickarrCon
     plugins,
     downloadClients: [],
     feeds: [],
+    metadata: { enabled: true, intervalSeconds: 5, perTick: 5 },
   } as PickarrConfig;
 }
 
