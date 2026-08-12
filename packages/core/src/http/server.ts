@@ -20,7 +20,6 @@ import {
   getGroupMetadata,
   metadataForGroups,
   queuedGroupIds,
-  type EnqueueResult,
   type GroupMetadata,
 } from '../db/metadata.ts';
 import { validateIdentity } from '../ingest/commit.ts';
@@ -44,6 +43,7 @@ import {
   type FailedResponse,
   type GroupEditResponse,
   type GroupView,
+  type MetadataRequestResponse,
   type MetadataView,
   type PickResponse,
   type ReleaseEditResponse,
@@ -104,12 +104,36 @@ const POSTER_CONTENT_TYPES: Record<string, string> = {
   '.webp': 'image/webp',
 };
 
-/** The same `"1,2,3"` format the SPA already builds cursors and ids with elsewhere. `null` on anything that is not a positive integer. */
+/**
+ * A digit-only positive integer, stricter than `Number()`/`z.coerce.number()`.
+ * Those accept `"+1"`, `"1e3"`, `"0x10"`, and surrounding whitespace, and —
+ * worse — two different huge digit strings past `Number.MAX_SAFE_INTEGER`
+ * ("9007199254740993" and "9007199254740992") silently collapse to the same
+ * value. `/^\d+$/` plus `Number.isSafeInteger` rejects all of that at the
+ * boundary, so a malformed id 400s instead of quietly meaning some other id.
+ */
+function parsePositiveInt(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * The same `"1,2,3"` format the SPA already builds cursors and ids with
+ * elsewhere. `null` on anything that is not a positive integer, or on a list
+ * longer than a browse page could ever put on screen at once — this is an
+ * unauthenticated GET on a LAN-exposed service, and an unbounded id list
+ * turns into an unbounded `IN (...)` built twice (once each for
+ * `metadataForGroups` and `queuedGroupIds`), which is wasted work at best and
+ * `ERR_SQLITE_ERROR: too many SQL variables` at worst.
+ */
 function parseIds(raw: string): number[] | null {
+  const parts = raw.split(',');
+  if (parts.length > MAX_PAGE_LIMIT) return null;
   const ids: number[] = [];
-  for (const part of raw.split(',')) {
-    const id = Number(part.trim());
-    if (!Number.isInteger(id) || id <= 0) return null;
+  for (const part of parts) {
+    const id = parsePositiveInt(part.trim());
+    if (id === null) return null;
     ids.push(id);
   }
   return ids;
@@ -124,7 +148,21 @@ const failedQuerySchema = z.object({
 });
 
 const pickBodySchema = z.object({ releaseId: z.number().int().positive() });
-const idParamsSchema = z.object({ id: z.coerce.number().int().positive() });
+// `z.coerce.number()` used to sit here, and accepted `"+1"` and `"%201"`
+// (a decoded leading space) as id 1 — no escape, since every id is used only
+// as a bound SQL parameter or a lookup key, but not the id the caller sent
+// either, which matters for the poster route, whose id names the very file
+// on disk. `parsePositiveInt` rejects both instead of coercing them.
+const idParamsSchema = z.object({
+  id: z.string().transform((value, ctx) => {
+    const parsed = parsePositiveInt(value);
+    if (parsed === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'must be a positive integer' });
+      return z.NEVER;
+    }
+    return parsed;
+  }),
+});
 const valuesBodySchema = z.object({ values: z.record(z.string(), z.string()) });
 const previewBodySchema = z.object({
   plugin: z.string().min(1),
@@ -287,7 +325,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     if (!body.success) return reply.code(400).send({ error: 'Invalid request' });
 
     const now = deps.now();
-    const result: EnqueueResult = { queued: 0, alreadyAnswered: 0, pending: 0 };
+    const result: MetadataRequestResponse = { queued: 0, alreadyAnswered: 0, pending: 0, missing: 0 };
     const askable: number[] = [];
 
     for (const groupId of body.data.groupIds) {
@@ -300,10 +338,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
       const group = getGroup(db, groupId);
       // A group that no longer exists cannot be queued — `metadata_queue`'s
-      // foreign key forbids it — and there is nothing to answer either, so it
-      // is excluded rather than counted in any of the three buckets; none of
-      // them was built to describe "no such group".
-      if (group === null) continue;
+      // foreign key forbids it — and there is nothing to answer either, so
+      // it is its own counter rather than folded into one of the other
+      // three: the caller needs to be able to tell "discarded" from
+      // "accepted", and the four counters together are meant to sum to the
+      // number of ids sent.
+      if (group === null) {
+        result.missing += 1;
+        continue;
+      }
 
       const plugin = deps.registry.byId(group.plugin) ?? null;
       if (metadataAnswerability(plugin, group) === 'unaskable') {
