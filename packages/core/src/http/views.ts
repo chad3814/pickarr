@@ -43,6 +43,23 @@ export type MetadataView =
  * `metadata_queue`; browse never does; the default keeps its groups reading
  * `'absent'` rather than a `'pending'` it has no evidence for.
  */
+/**
+ * The answer to `POST /api/metadata/request`. Four counters, not three: an id
+ * naming a group that no longer exists is neither queued, answered, nor
+ * waiting, and folding it into any of those would claim something false
+ * (`alreadyAnswered` asserts a settled answer that was never recorded;
+ * `queued` is simply untrue — nothing was inserted). `missing` names it
+ * instead, which also keeps the four counters an honest partition of the
+ * request: `queued + alreadyAnswered + pending + missing` always equals the
+ * number of ids sent.
+ */
+export interface MetadataRequestResponse {
+  queued: number;
+  alreadyAnswered: number;
+  pending: number;
+  missing: number;
+}
+
 export function metadataViewOf(metadata: GroupMetadata | undefined, queued = false): MetadataView {
   if (metadata === undefined) return queued ? { state: 'pending' } : { state: 'absent' };
   if (metadata.state === 'none') return { state: 'none' };

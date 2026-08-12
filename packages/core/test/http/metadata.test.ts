@@ -38,7 +38,7 @@ const ASKABLE: MediaTypePlugin = {
   parse: () => null,
   score: () => 0,
   planImport: () => null,
-  metadataQuery: (group) => ({ queries: [group.display.title], siteName: 'Some Site' }),
+  metadataQuery: (identity) => ({ queries: [identity.display.title], siteName: 'Some Site' }),
   confirmMetadata: () => ({ confirmed: null, nearMisses: [] }),
 };
 
@@ -134,7 +134,7 @@ test('requesting metadata queues only the unanswered', async () => {
   });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { queued: 2, alreadyAnswered: 0, pending: 0 });
+  assert.deepEqual(response.json(), { queued: 2, alreadyAnswered: 0, pending: 0, missing: 0 });
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 2);
 
   await server.close();
@@ -155,7 +155,7 @@ test('a request for a group whose plugin cannot look up is answered, not queued'
   });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { queued: 0, alreadyAnswered: 3, pending: 0 });
+  assert.deepEqual(response.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0 });
 
   // Settled as an answer, not left in the queue for the worker to discard.
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 0);
@@ -171,7 +171,7 @@ test('a request for a group whose plugin cannot look up is answered, not queued'
     url: '/api/metadata/request',
     payload: { groupIds: [noHooks, nullQuery, noPlugin] },
   });
-  assert.deepEqual(again.json(), { queued: 0, alreadyAnswered: 3, pending: 0 });
+  assert.deepEqual(again.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0 });
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 0);
 
   await server.close();
@@ -189,6 +189,30 @@ test('an oversized id list is refused', async () => {
   });
 
   assert.equal(response.statusCode, 400);
+
+  await server.close();
+  db.close();
+});
+
+test('a request naming a group that no longer exists reports it as missing, not silently dropped', async () => {
+  const db = openTestDatabase();
+  const askable = group(db, 'askable', 'Alpha');
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/request',
+    // 999999 was never inserted, so getGroup answers null for it.
+    payload: { groupIds: [askable, 999_999] },
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json() as { queued: number; alreadyAnswered: number; pending: number; missing: number };
+  assert.deepEqual(body, { queued: 1, alreadyAnswered: 0, pending: 0, missing: 1 });
+  // The four counters are meant to be an honest partition of the request: a
+  // caller can detect a bug in this arithmetic without knowing anything else
+  // about what was sent.
+  assert.equal(body.queued + body.alreadyAnswered + body.pending + body.missing, 2);
 
   await server.close();
   db.close();
@@ -242,6 +266,62 @@ test('metadata reads report pending, none and confirmed distinctly', async () =>
   db.close();
 });
 
+test('an id list at the page cap succeeds; one over is refused, not a 500', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  // MAX_PAGE_LIMIT is 100 (the same ceiling browse and the request cap use);
+  // none of these ids need to exist for `parseIds` to accept or reject them —
+  // that check runs before any query touches the database.
+  const atCap = Array.from({ length: 100 }, (_, i) => i + 1).join(',');
+  const overCap = Array.from({ length: 101 }, (_, i) => i + 1).join(',');
+
+  const ok = await server.inject({ method: 'GET', url: `/api/metadata?ids=${atCap}` });
+  assert.equal(ok.statusCode, 200);
+
+  const refused = await server.inject({ method: 'GET', url: `/api/metadata?ids=${overCap}` });
+  assert.equal(refused.statusCode, 400, 'one id over the cap must be a 400, not a 500 from SQLite');
+
+  await server.close();
+  db.close();
+});
+
+test('malformed ids are refused rather than coerced to a different id', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  // Each of these is something `Number()` (and so bare `z.coerce.number()`)
+  // would happily parse into *some* number, which is exactly the problem:
+  // "0x10" silently becoming 16, or a number past MAX_SAFE_INTEGER silently
+  // colliding with a different one, would answer a question the caller never
+  // asked instead of refusing it. `+1` is deliberately not tested here: a
+  // literal `+` in a query string is already decoded to a space before this
+  // handler ever sees it (that's `application/x-www-form-urlencoded`, not
+  // this code's doing), and `" 1"` trimming down to a valid `"1"` is correct
+  // — the poster route's own id param does not get that treatment, which is
+  // exactly why `+1` is tested there instead, below.
+  for (const malformed of ['0x10', '1e3', '1.5', '9007199254740993']) {
+    const response = await server.inject({ method: 'GET', url: `/api/metadata?ids=${malformed}` });
+    assert.equal(response.statusCode, 400, `"${malformed}" must be refused`);
+  }
+
+  await server.close();
+  db.close();
+});
+
+test('the poster route refuses a coerced id, not just a traversal attempt', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  for (const malformed of ['+1', '%201', '1.5', '0x1']) {
+    const response = await server.inject({ method: 'GET', url: `/api/groups/${malformed}/poster` });
+    assert.equal(response.statusCode, 400, `"${malformed}" must be refused, not coerced to a group id`);
+  }
+
+  await server.close();
+  db.close();
+});
+
 test('browse carries metadata and reads it in one query', async () => {
   const db = openTestDatabase();
   db.prepare(
@@ -270,19 +350,37 @@ test('browse carries metadata and reads it in one query', async () => {
 
   const server = buildServer(deps(db));
 
-  // Count every statement touching group_metadata: browse must issue exactly
-  // one for the whole page, never one per group (issue #31's defect).
+  // Count *executions* against group_metadata, not merely calls to
+  // `db.prepare` — a regression that prepares one statement and then calls
+  // `.get()` on it once per group in a loop would still show one `prepare`
+  // call and slip past a counter that only wraps that method. Wrapping the
+  // statement's own `.all`/`.get` catches that shape of regression too.
   const originalPrepare = db.prepare.bind(db);
-  let groupMetadataQueries = 0;
+  let groupMetadataExecutions = 0;
   db.prepare = ((sql: string) => {
-    if (sql.includes('group_metadata')) groupMetadataQueries += 1;
-    return originalPrepare(sql);
+    const statement = originalPrepare(sql);
+    if (!sql.includes('group_metadata')) return statement;
+    const originalAll = statement.all.bind(statement);
+    const originalGet = statement.get.bind(statement);
+    statement.all = ((...args: Parameters<typeof statement.all>) => {
+      groupMetadataExecutions += 1;
+      return originalAll(...args);
+    }) as typeof statement.all;
+    statement.get = ((...args: Parameters<typeof statement.get>) => {
+      groupMetadataExecutions += 1;
+      return originalGet(...args);
+    }) as typeof statement.get;
+    return statement;
   }) as typeof db.prepare;
 
   const response = await server.inject({ method: 'GET', url: '/api/browse?limit=10' });
 
   assert.equal(response.statusCode, 200);
-  assert.equal(groupMetadataQueries, 1, 'browse must read group_metadata in one query for the whole page');
+  assert.equal(
+    groupMetadataExecutions,
+    1,
+    'browse must read group_metadata in one query execution for the whole page',
+  );
 
   const body = response.json() as { groups: { id: number; metadata: unknown }[] };
   const byId = new Map(body.groups.map((g) => [g.id, g.metadata]));
