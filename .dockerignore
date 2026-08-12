@@ -6,3 +6,10 @@ docs
 *.db
 *.db-wal
 *.db-shm
+
+# The browser-test harness is dev-only and its dependencies are not installed
+# here — the build stage copies four workspace manifests and this is not one of
+# them. Without this, `COPY . .` drags the workspace in anyway and
+# `npm run typecheck --workspaces` finds one whose `@playwright/test` does not
+# exist, failing the image build for a package the image does not ship.
+packages/e2e
