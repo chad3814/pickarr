@@ -57,6 +57,7 @@ function group(title: string): GroupView {
     upgradeReleaseId: null,
     listRankAt: 1700,
     releases: [],
+    metadata: { state: 'absent' },
   };
 }
 

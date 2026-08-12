@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { MediaCard } from '../src/components/MediaCard.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
-import type { GroupView, ManualField } from '../src/api/client.ts';
+import type { GroupView, ManualField, MetadataView } from '../src/api/client.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its card behind, and every later query sees two.
@@ -45,6 +45,17 @@ const GROUP: GroupView = {
     { id: 2, score: 2160, quality: { resolution: 2160 }, releaseName: 'R2', publishedAt: null },
     { id: 1, score: 1080, quality: { resolution: 1080 }, releaseName: 'R1', publishedAt: null },
   ],
+  metadata: { state: 'absent' },
+};
+
+const CONFIRMED: MetadataView = {
+  state: 'confirmed',
+  title: 'A Different Title',
+  performers: ['Alex Coal', 'Jane Doe'],
+  releaseDate: '2023-04-15',
+  durationSeconds: 1800,
+  synopsis: 'A synopsis from the provider.',
+  hasPoster: true,
 };
 
 test('renders the display fields', () => {
@@ -217,4 +228,64 @@ test('only the release that failed is marked', () => {
     />,
   );
   assert.equal(screen.getAllByText('Failed').length, 1);
+});
+
+test('the metadata panel renders only once the answer is confirmed', () => {
+  const unconfirmed: MetadataView[] = [{ state: 'absent' }, { state: 'pending' }, { state: 'none' }];
+  for (const metadata of unconfirmed) {
+    const { unmount } = render(<MediaCard group={{ ...GROUP, metadata }} onPick={() => {}} />);
+    // #40: never `assert.equal(screen.queryByText(x), null)` — it OOM-kills
+    // the web test run inside `waitFor`, and the same failure mode applies to
+    // any assertion node:assert would have to deep-inspect a live element to
+    // report on.
+    assert.ok(!screen.queryByText('A synopsis from the provider.'));
+    assert.ok(!screen.queryByRole('img'));
+    unmount();
+  }
+
+  render(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
+  assert.ok(screen.getByText('A synopsis from the provider.'));
+});
+
+test('the parsed title stays the card title when metadata disagrees', () => {
+  // Phase 1 is deliberately non-destructive: the panel is a second opinion,
+  // never a replacement. `display.title` is what the parser produced, and
+  // `CONFIRMED.title` is a deliberately different string from the provider.
+  render(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
+
+  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'Alex Coal');
+  // The provider's disagreeing title is still shown — just not as *the* title.
+  assert.ok(screen.getByText('A Different Title'));
+});
+
+test('the panel tolerates a missing poster, synopsis and empty performers independently', () => {
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        metadata: { ...CONFIRMED, hasPoster: false, synopsis: null, performers: [] },
+      }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(!screen.queryByRole('img'));
+  assert.ok(!screen.queryByText('A synopsis from the provider.'));
+  // The title, which the same record still carries, proves the panel itself
+  // rendered — the three tolerances above are independent absences, not one
+  // that took the whole panel down with it.
+  assert.ok(screen.getByText('A Different Title'));
+
+  const { unmount } = render(
+    <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, synopsis: null } }} onPick={() => {}} />,
+  );
+  assert.ok(screen.getByRole('img'));
+  assert.ok(!screen.queryByText('A synopsis from the provider.'));
+  assert.ok(screen.getByText('Alex Coal', { selector: 'li' }));
+  unmount();
+
+  render(
+    <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, performers: [] } }} onPick={() => {}} />,
+  );
+  assert.ok(screen.getByRole('img'));
+  assert.ok(screen.getByText('A synopsis from the provider.'));
 });

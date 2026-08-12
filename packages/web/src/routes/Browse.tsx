@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
+import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { MediaCard } from '../components/MediaCard.tsx';
 
 export function Browse() {
@@ -10,6 +11,14 @@ export function Browse() {
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Every group ever loaded onto this screen, not just the current page: a
+  // page loaded earlier via "Load more" is still on screen, and its cards
+  // still need their answers polled while any of them is pending. The cap on
+  // `POST /api/metadata/request` and `GET /api/metadata` is per *request*, not
+  // per page, so the hook itself chunks a list this long rather than the
+  // caller having to.
+  const liveMetadata = useGroupMetadata(groups.map((group) => group.id));
 
   const loadPage = useCallback(
     async (from: string | null, term: string, replace: boolean): Promise<void> => {
@@ -154,7 +163,12 @@ export function Browse() {
       {groups.map((group) => (
         <MediaCard
           key={group.id}
-          group={group}
+          // The live answer once the poll has one, falling back to what
+          // browse already carried (typically `absent`, since nothing has
+          // asked yet): the fallback is what lets the very first paint show
+          // whatever the last page load already knew, rather than every card
+          // flashing "no metadata" until the hook's first request lands.
+          group={{ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata }}
           onPick={(releaseId) => void pick(group.id, releaseId)}
           // A plugin with no manual hooks is *missing* from this map, and a
           // group can outlive the package that made it; either way the card

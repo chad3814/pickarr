@@ -146,6 +146,44 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           />
         ))}
       </ul>
+
+      {/*
+       * A second opinion, never a replacement: `display.title` above stays
+       * the card's title even when the provider disagrees with it — adopting
+       * a provider value is later work (this phase is deliberately
+       * non-destructive). Rendered only once the answer is `confirmed`: a
+       * `pending` or `absent` group has nothing to show, and `none` means the
+       * provider was asked and came back with nothing, which is likewise
+       * nothing to show. The provider populates poster, synopsis and
+       * performers unevenly, so each is checked and rendered on its own —
+       * one being missing says nothing about the others.
+       */}
+      {group.metadata.state === 'confirmed' && (
+        <section className="metadata" aria-label="Scene metadata">
+          {group.metadata.hasPoster && (
+            // No fixed aspect ratio: the provider's images are frequently
+            // landscape (a documented example is 1279x719), not portrait.
+            <img
+              className="metadata-poster"
+              src={`/api/groups/${group.id}/poster`}
+              alt={`Poster for ${display.title}`}
+            />
+          )}
+          {group.metadata.title !== null && (
+            <p className="metadata-title">{group.metadata.title}</p>
+          )}
+          {group.metadata.synopsis !== null && (
+            <p className="metadata-synopsis">{group.metadata.synopsis}</p>
+          )}
+          {group.metadata.performers.length > 0 && (
+            <ul className="metadata-performers">
+              {group.metadata.performers.map((performer) => (
+                <li key={performer}>{performer}</li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
     </article>
   );
 }
