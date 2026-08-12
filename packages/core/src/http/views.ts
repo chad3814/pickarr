@@ -9,8 +9,53 @@ import { failedReleaseIds, type GroupRow } from '../db/groups.ts';
 import { releasesForGroup } from '../db/releases.ts';
 import type { DownloadRow } from '../db/downloads.ts';
 import type { FeedItemRow } from '../db/feed-items.ts';
+import type { GroupMetadata } from '../db/metadata.ts';
 import type { UntrackedEntry } from '../pipeline/reconcile.ts';
 import { str, type SqlRow } from '../db/row.ts';
+
+/**
+ * What browse (and `GET /api/metadata`) can say about a group's scene
+ * metadata. `'pending'` and `'absent'` only ever come from the standalone
+ * metadata endpoint — it is the only caller that also consults
+ * `metadata_queue` to tell "asked, not yet answered" from "never asked" —
+ * while `metadataViewOf` answers browse's simpler question (is there a
+ * recorded answer at all) from `group_metadata` alone.
+ */
+export type MetadataView =
+  | {
+      state: 'confirmed';
+      title: string | null;
+      performers: string[];
+      releaseDate: string | null;
+      durationSeconds: number | null;
+      synopsis: string | null;
+      hasPoster: boolean;
+    }
+  | { state: 'none' }
+  | { state: 'pending' }
+  | { state: 'absent' };
+
+/**
+ * `metadata` is what `metadataForGroups` found for this one group, already
+ * read for the whole page in a single query — never fetched here per group,
+ * which is exactly the `/api/downloads` defect (issue #31) this file must not
+ * reacquire. `queued` is only meaningful to a caller that has also checked
+ * `metadata_queue`; browse never does; the default keeps its groups reading
+ * `'absent'` rather than a `'pending'` it has no evidence for.
+ */
+export function metadataViewOf(metadata: GroupMetadata | undefined, queued = false): MetadataView {
+  if (metadata === undefined) return queued ? { state: 'pending' } : { state: 'absent' };
+  if (metadata.state === 'none') return { state: 'none' };
+  return {
+    state: 'confirmed',
+    title: metadata.title,
+    performers: metadata.performers,
+    releaseDate: metadata.releaseDate,
+    durationSeconds: metadata.durationSeconds,
+    synopsis: metadata.synopsis,
+    hasPoster: metadata.posterPath !== null,
+  };
+}
 
 export interface ReleaseView {
   id: number;
@@ -38,6 +83,7 @@ export interface GroupView {
   upgradeReleaseId: number | null;
   listRankAt: number;
   releases: ReleaseView[];
+  metadata: MetadataView;
   /** The identity half of an edit form, prefilled. Absent when the plugin has no `toManualValues`. */
   manualValues?: Record<string, string>;
   // No group-level "something here failed" field. There was one, and nothing
@@ -175,6 +221,7 @@ export function toGroupView(
   db: DatabaseSync,
   group: GroupRow,
   plugin: MediaTypePlugin | undefined,
+  metadata: GroupMetadata | undefined,
 ): GroupView {
   const display = JSON.parse(group.display) as DisplayFields;
 
@@ -231,6 +278,7 @@ export function toGroupView(
     upgradeReleaseId: group.upgradeReleaseId,
     listRankAt: group.listRankAt,
     releases,
+    metadata: metadataViewOf(metadata),
   };
   if (manualValues !== undefined) view.manualValues = manualValues;
   return view;

@@ -1,5 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
+import { readFile } from 'node:fs/promises';
+import { extname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type { ManualField, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
@@ -13,6 +15,14 @@ import {
 } from '../db/groups.ts';
 import { allDownloads, getDownload, resetForRetry } from '../db/downloads.ts';
 import { failedFeedItems } from '../db/feed-items.ts';
+import {
+  enqueueMetadata,
+  getGroupMetadata,
+  metadataForGroups,
+  queuedGroupIds,
+  type EnqueueResult,
+  type GroupMetadata,
+} from '../db/metadata.ts';
 import { validateIdentity } from '../ingest/commit.ts';
 import {
   dismissFeedItem,
@@ -21,10 +31,12 @@ import {
   resolveFeedItem,
   type ManualDeps,
 } from '../manual/operations.ts';
+import { answerUnaskable, metadataAnswerability } from '../pipeline/metadata.ts';
 import { pickRelease } from '../pipeline/pick.ts';
 import type { PluginRegistry } from '../plugins/registry.ts';
 import type { UntrackedEntry } from '../pipeline/reconcile.ts';
 import {
+  metadataViewOf,
   toDownloadView,
   toFailedItemView,
   toGroupView,
@@ -32,6 +44,7 @@ import {
   type FailedResponse,
   type GroupEditResponse,
   type GroupView,
+  type MetadataView,
   type PickResponse,
   type ReleaseEditResponse,
   type ResolveResponse,
@@ -52,13 +65,55 @@ export interface ServerDeps {
    * only be mapped to a plugin by something holding the feed list.
    */
   pluginForFeed(feedId: string): MediaTypePlugin | null;
+  /**
+   * Where `cachePoster` writes files, resolved once by `resolveArtworkDir` in
+   * main.ts. Injected rather than recomputed here: `config.database.path` is
+   * not otherwise anything this module needs to know about, and computing the
+   * same default twice is how the two copies eventually disagree.
+   */
+  artworkDir: string;
 }
+
+/**
+ * The largest page `/api/browse` will ever hand back, and therefore the
+ * largest batch of ids a client can ever have on screen at once to ask
+ * `/api/metadata/request` about. Reused, not duplicated, as the cap on that
+ * body: a second, independently-chosen number here would either be wrong (too
+ * small for a real page) or pointless (bigger than any real request), and
+ * would drift from this one the day only it changed.
+ */
+const MAX_PAGE_LIMIT = 100;
 
 const browseQuerySchema = z.object({
   cursor: z.string().optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(30),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(30),
   q: z.string().min(1).optional(),
 });
+
+const metadataRequestBodySchema = z.object({
+  groupIds: z.array(z.number().int().positive()).max(MAX_PAGE_LIMIT),
+});
+
+const metadataQuerySchema = z.object({
+  ids: z.string().min(1),
+});
+
+const POSTER_CONTENT_TYPES: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+};
+
+/** The same `"1,2,3"` format the SPA already builds cursors and ids with elsewhere. `null` on anything that is not a positive integer. */
+function parseIds(raw: string): number[] | null {
+  const ids: number[] = [];
+  for (const part of raw.split(',')) {
+    const id = Number(part.trim());
+    if (!Number.isInteger(id) || id <= 0) return null;
+    ids.push(id);
+  }
+  return ids;
+}
 
 const failedQuerySchema = z.object({
   cursor: z.string().optional(),
@@ -130,17 +185,26 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     now: () => deps.now(),
   };
 
-  /** A group as the browse list would render it, prefill values and all. */
-  const viewOf = (group: GroupRow): GroupView =>
-    toGroupView(db, group, deps.registry.byId(group.plugin));
+  /**
+   * A group as the browse list would render it, prefill values and all.
+   * `metadata` is the answer `metadataForGroups` already found for this group
+   * — read once for the whole page by every caller below, never per group
+   * here, which is the point: a second per-group query into `group_metadata`
+   * from inside this function would reintroduce, for metadata, exactly the
+   * defect issue #31 records for `/api/downloads`.
+   */
+  const viewOf = (group: GroupRow, metadata: GroupMetadata | undefined): GroupView =>
+    toGroupView(db, group, deps.registry.byId(group.plugin), metadata);
 
   /**
    * The group a manual operation left behind, read back after it committed —
-   * on a merge that is the target, not the group the request named.
+   * on a merge that is the target, not the group the request named. One group,
+   * so one `getGroupMetadata` lookup here is not the per-page N+1 pattern
+   * `viewOf`'s callers below have to avoid.
    */
   const groupAfter = (groupId: number): GroupView | null => {
     const group = getGroup(db, groupId);
-    return group === null ? null : viewOf(group);
+    return group === null ? null : viewOf(group, getGroupMetadata(db, groupId));
   };
 
   /**
@@ -153,7 +217,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   const listedAfter = (groupId: number): { missing: true } | { listed: GroupView | null } => {
     if (getGroup(db, groupId) === null) return { missing: true };
     const listed = browsableGroup(db, groupId);
-    return { listed: listed === null ? null : viewOf(listed) };
+    return { listed: listed === null ? null : viewOf(listed, getGroupMetadata(db, groupId)) };
   };
 
   // An empty body with `content-type: application/json` reads as `{}` rather
@@ -196,15 +260,122 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const hasMore = overFetched.length > query.data.limit;
     const groups = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
 
+    // One query for the whole page, not one per group: see `metadataForGroups`
+    // and the `viewOf` doc comment above. Issue #31 is the defect this must
+    // not repeat.
+    const metadata = metadataForGroups(db, groups.map((group) => group.id));
+
     const last = groups.at(-1);
     const response: BrowseResponse = {
-      groups: groups.map(viewOf),
+      groups: groups.map((group) => viewOf(group, metadata.get(group.id))),
       nextCursor: hasMore && last !== undefined ? `${last.listRankAt}:${last.id}` : null,
     };
     return response;
   });
 
-  server.get('/api/picks', async () => ({ groups: pickedGroups(db).map(viewOf) }));
+  server.get('/api/picks', async () => {
+    const groups = pickedGroups(db);
+    const metadata = metadataForGroups(db, groups.map((group) => group.id));
+    return { groups: groups.map((group) => viewOf(group, metadata.get(group.id))) };
+  });
+
+  // The lazy half of this feature: browse never enqueues anything on its own
+  // (a GET must stay a pure read), so the SPA asks for what it actually
+  // rendered with an explicit POST, exactly like every other write here.
+  server.post('/api/metadata/request', async (request, reply) => {
+    const body = metadataRequestBodySchema.safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'Invalid request' });
+
+    const now = deps.now();
+    const result: EnqueueResult = { queued: 0, alreadyAnswered: 0, pending: 0 };
+    const askable: number[] = [];
+
+    for (const groupId of body.data.groupIds) {
+      // Already settled — cheaper to notice here than to let `enqueueMetadata`
+      // notice it again per id inside its own transaction below.
+      if (getGroupMetadata(db, groupId) !== undefined) {
+        result.alreadyAnswered += 1;
+        continue;
+      }
+
+      const group = getGroup(db, groupId);
+      // A group that no longer exists cannot be queued — `metadata_queue`'s
+      // foreign key forbids it — and there is nothing to answer either, so it
+      // is excluded rather than counted in any of the three buckets; none of
+      // them was built to describe "no such group".
+      if (group === null) continue;
+
+      const plugin = deps.registry.byId(group.plugin) ?? null;
+      if (metadataAnswerability(plugin, group) === 'unaskable') {
+        // Answered directly, the same way `lookUpOne` would answer it: never
+        // queued, because the worker could only ever discard the row. From
+        // the client's side the question is just as settled either way.
+        answerUnaskable(db, groupId, now);
+        result.alreadyAnswered += 1;
+        continue;
+      }
+      askable.push(groupId);
+    }
+
+    // `enqueueMetadata` is itself idempotent — it treats an id that is
+    // already answered or already waiting as `alreadyAnswered`/`pending`
+    // rather than inserting a duplicate row — so a repeat of the same request
+    // (the whole point of a lazy, client-driven trigger) is safe to re-issue.
+    const enqueued = enqueueMetadata(db, askable, now);
+    result.queued += enqueued.queued;
+    result.alreadyAnswered += enqueued.alreadyAnswered;
+    result.pending += enqueued.pending;
+    return result;
+  });
+
+  server.get('/api/metadata', async (request, reply) => {
+    const query = metadataQuerySchema.safeParse(request.query);
+    if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
+    const ids = parseIds(query.data.ids);
+    if (ids === null) return reply.code(400).send({ error: 'Invalid ids' });
+
+    // Two queries total for however many ids were asked about — one for
+    // answers, one for queue membership — never one pair per id.
+    const answered = metadataForGroups(db, ids);
+    const queued = queuedGroupIds(db, ids);
+    const response: Record<number, MetadataView> = {};
+    for (const id of ids) {
+      response[id] = metadataViewOf(answered.get(id), queued.has(id));
+    }
+    return response;
+  });
+
+  // Registered as its own route, deliberately not as a static handler pointed
+  // at `deps.artworkDir`: a static handler serves anything under its root, and
+  // `posterPath` is not the only thing in that directory forever (a `.part`
+  // temp file mid-write, say). This route reads exactly one column and joins
+  // it onto the directory itself — nothing caller-supplied ever reaches the
+  // filesystem, since `posterPath` is always `<group_id>.<ext>` written by
+  // `cachePoster`, and the id in the URL is validated as a positive integer by
+  // `idParamsSchema` *before* it is used for anything, so a traversal attempt
+  // in the id segment is rejected by zod and never reaches `getGroupMetadata`.
+  server.get('/api/groups/:id/poster', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid id' });
+
+    const metadata = getGroupMetadata(db, params.data.id);
+    if (metadata === undefined || metadata.posterPath === null) {
+      return reply.code(404).send({ error: 'No poster' });
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(join(deps.artworkDir, metadata.posterPath));
+    } catch {
+      // The row can outlive the file on disk — a volume wipe, a manual
+      // cleanup of the artwork directory — and that is a 404 like any other
+      // missing poster, not a 500.
+      return reply.code(404).send({ error: 'No poster' });
+    }
+
+    const contentType = POSTER_CONTENT_TYPES[extname(metadata.posterPath)] ?? 'application/octet-stream';
+    return reply.type(contentType).send(bytes);
+  });
 
   server.post('/api/groups/:id/pick', async (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
@@ -232,7 +403,8 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       const stillListed = browsableGroup(db, params.data.id);
       const response: PickResponse = {
         download: toDownloadView(db, download),
-        group: stillListed === null ? null : viewOf(stillListed),
+        group:
+          stillListed === null ? null : viewOf(stillListed, getGroupMetadata(db, params.data.id)),
       };
       return response;
     } catch (error) {
