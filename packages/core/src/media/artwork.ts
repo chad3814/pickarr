@@ -1,4 +1,5 @@
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { FetchImpl } from '../clients/theporndb.ts';
 
@@ -15,7 +16,9 @@ export const MAX_POSTER_BYTES = 5 * 1024 * 1024;
  * Content types accepted, and the extension each is stored under.
  *
  * The extension is derived from the *validated* type and never from the URL,
- * so a URL ending `.php`, or containing `..%2f`, cannot steer the path.
+ * so a URL ending `.php`, or containing `..%2f`, cannot steer the path. Keys
+ * are lowercase because RFC 9110 media types are case-insensitive, and a
+ * server is free to send `IMAGE/JPEG`.
  */
 const POSTER_EXTENSIONS = new Map<string, string>([
   ['image/jpeg', 'jpg'],
@@ -101,19 +104,30 @@ export async function cachePoster(
   groupId: number,
   url: string,
 ): Promise<string | null> {
-  const temp = join(deps.dir, `.${groupId}.part`);
+  // Unique per call, not just per group: this pipeline will process groups in
+  // a loop, and two overlapping downloads for the same group (a retry racing
+  // the original, say) must not share one temp path. A shared path lets the
+  // second writer's bytes land under the first writer's rename, or the
+  // second rename fail ENOENT because the first already moved the file out
+  // from under it — silently mixing two posters' content.
+  const temp = join(deps.dir, `.${groupId}.${randomUUID()}.part`);
   try {
     await mkdir(deps.dir, { recursive: true });
 
     const response = await deps.fetchImpl(url);
     if (!response.ok) {
+      await response.body?.cancel();
       deps.log(`poster for group ${groupId}: HTTP ${response.status}`);
       return null;
     }
 
-    const contentType = (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? '';
+    // Media types are case-insensitive (RFC 9110): lowercase before lookup so
+    // `IMAGE/JPEG` is treated the same as `image/jpeg`.
+    const contentType =
+      (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
     const extension = POSTER_EXTENSIONS.get(contentType);
     if (extension === undefined) {
+      await response.body?.cancel();
       deps.log(`poster for group ${groupId}: refused content type ${contentType || 'none'}`);
       return null;
     }
@@ -126,6 +140,7 @@ export async function cachePoster(
     const declaredLengthHeader = response.headers.get('content-length');
     const declaredLength = declaredLengthHeader === null ? null : Number(declaredLengthHeader);
     if (declaredLength !== null && Number.isFinite(declaredLength) && declaredLength > MAX_POSTER_BYTES) {
+      await response.body?.cancel();
       deps.log(`poster for group ${groupId}: declared ${declaredLength} bytes exceeds the cap`);
       return null;
     }
@@ -133,15 +148,26 @@ export async function cachePoster(
     const bytes = await readBodyWithinCap(response, groupId, deps.log);
     if (bytes === null) return null;
 
-    // Temp then rename: a crash between the two leaves a dotfile, never a
-    // truncated image that reads as valid.
+    // Temp then rename: both are on the same filesystem, and POSIX/NTFS
+    // rename is atomic, so a reader can never observe a partially-written
+    // file at the final name — a crash mid-write leaves an orphaned temp
+    // file, never a truncated `<group_id>.<ext>`. This says nothing about
+    // durability: neither the file nor its directory entry is fsync'd, so a
+    // power loss immediately after a successful rename can still lose the
+    // write and later show a missing or zero-length file.
     const name = `${groupId}.${extension}`;
     await writeFile(temp, bytes);
     await rename(temp, join(deps.dir, name));
     return name;
   } catch (error) {
-    deps.log(`poster for group ${groupId} failed: ${(error as Error).message}`);
+    // Clean up before logging: a logger that itself throws (or a caller
+    // whose `log` has side effects) must not orphan the temp file.
     await rm(temp, { force: true }).catch(() => undefined);
+    // `error` is not necessarily an Error — a rejected promise can carry
+    // anything, and this function must never throw regardless of what it
+    // carries.
+    const message = error instanceof Error ? error.message : String(error);
+    deps.log(`poster for group ${groupId} failed: ${message}`);
     return null;
   }
 }
