@@ -273,18 +273,32 @@ confirmed scene with a poster writes one file under `metadata.artworkDir`, and n
 ever deletes one. Reclaiming that space is a decision you make, not one Pickarr makes for
 you. If you clear the directory by hand, the affected cards lose their posters, because the
 database still records that one was fetched and the poster route will 404 for a file that
-is no longer there. Tell it to forget:
+is no longer there.
+
+Clearing the path does **not** bring the poster back:
 
 ```sql
 UPDATE group_metadata SET poster_path = NULL WHERE poster_path IS NOT NULL;
 ```
 
-The title, synopsis, performers and confirmation are untouched by that — only the poster
-is asked for again the next time the group is browsed.
+That statement only stops the 404 — it does not queue a re-fetch, because the group's
+`group_metadata` row still exists, and a group with a row is exactly what the lazy request
+endpoint treats as already answered. Nothing re-asks a group that has already been
+answered, poster or no poster. Recovering the poster means deleting the group's
+`group_metadata` row (and any `metadata_candidates` rows for it) so the group looks
+unanswered again, which gets it re-queued the next time it is browsed — a full re-fetch of
+title, synopsis, performers and confirmation, not just the poster, and one that can in
+principle land on a different verdict than the one already stored. There is no built-in
+command for this today; a self-healing re-fetch that keeps everything but the poster is the
+obvious phase-2 improvement.
 
-**Picks does not show metadata.** The panel only ever appears on Browse. A picked group on
-the Picks screen renders exactly as it always has, with no poster, synopsis or performer
-list — a real, current limitation rather than an oversight to work around.
+**Picks never triggers a lookup, and never polls.** `GET /api/picks` reads the same
+`group_metadata` table browse does, so a group that was already answered before it was
+picked shows its poster, title, synopsis and performers on Picks exactly as it does on
+Browse — that part is not a limitation. What Picks does not do is ask: it never calls
+`POST /api/metadata/request` and never polls `GET /api/metadata`, so a group that was never
+browsed stays blank on Picks, and a lookup still in flight at the moment you pick a card
+will not show up there until you reload the page or find the same card on Browse.
 
 ## Operational notes
 

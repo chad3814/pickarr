@@ -267,11 +267,10 @@ export function deferMetadata(
  * Every row this schema keeps about one group's metadata — its answer, its
  * queue entry, and the candidates rejected on the way to that answer — gone.
  *
- * Called from the merge path in `db/groups.ts`/`manual/operations.ts` (and
- * from the migration that re-keys site segments, for the same reason) right
- * before the source's `media_groups` row is deleted, so that delete does not
- * meet a foreign key none of these three tables' `ON DELETE` clauses (there
- * are none) would otherwise satisfy. It has to run in the same transaction as
+ * Called from the merge path in `manual/operations.ts` right before the
+ * source's `media_groups` row is deleted, so that delete does not meet a
+ * foreign key none of these three tables' `ON DELETE` clauses (there are
+ * none) would otherwise satisfy. It has to run in the same transaction as
  * that delete: an eviction that committed while the delete rolled back — or
  * the reverse — would leave a group either gone-but-still-answered-for or
  * present-but-forgotten, and every read here uses `group_id` as its only key.

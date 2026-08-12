@@ -249,6 +249,10 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     // run leaves nothing behind. Nothing writes here unless a test caches a
     // poster; the poster route serves from it and 404s while it is empty.
     artworkDir,
+    // The harness always wires up `metadataClient` and drives
+    // `runMetadataPass` directly (see below) — there is always a worker able
+    // to drain a queue row here, so the request endpoint must always queue.
+    metadataAvailable: true,
   });
 
   // Port 0, then read back what the OS assigned. A fixed port collides between

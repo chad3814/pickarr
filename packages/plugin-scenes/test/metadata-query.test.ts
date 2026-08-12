@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { GroupIdentity } from '@pickarr/plugin-api';
-import { sceneMetadataQuery, siteSegmentOf } from '../src/metadata.ts';
+import { sceneMetadataQuery } from '../src/metadata.ts';
 
 const DATED: GroupIdentity = {
   identityKey: 'naughtyoffice:2021-11-15:smokin-hot-brunette',
@@ -41,9 +41,4 @@ test('a dateless group still asks, and omits date rather than sending undefined'
   });
   assert.equal(query?.date, undefined);
   assert.ok(!('date' in (query ?? {})), 'exactOptionalPropertyTypes: omit, do not set undefined');
-});
-
-test('the key exposes the site segment in comparison-key form', () => {
-  assert.equal(siteSegmentOf('naughtyoffice:2021-11-15:x'), 'naughtyoffice');
-  assert.equal(siteSegmentOf('::x'), '');
 });

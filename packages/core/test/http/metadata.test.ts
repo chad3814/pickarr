@@ -77,7 +77,7 @@ function registryWith(plugins: readonly MediaTypePlugin[]): PluginRegistry {
 
 function deps(
   db: DatabaseSync,
-  overrides: Partial<Pick<ServerDeps, 'registry' | 'artworkDir'>> = {},
+  overrides: Partial<Pick<ServerDeps, 'registry' | 'artworkDir' | 'metadataAvailable'>> = {},
 ): ServerDeps {
   return {
     db,
@@ -88,6 +88,7 @@ function deps(
     registry: overrides.registry ?? registryWith([ASKABLE, NO_HOOKS, NULL_QUERY]),
     pluginForFeed: () => null,
     artworkDir: overrides.artworkDir ?? '/tmp/pickarr-metadata-test-unused-artwork',
+    metadataAvailable: overrides.metadataAvailable ?? true,
   };
 }
 
@@ -134,8 +135,59 @@ test('requesting metadata queues only the unanswered', async () => {
   });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { queued: 2, alreadyAnswered: 0, pending: 0, missing: 0 });
+  assert.deepEqual(response.json(), { queued: 2, alreadyAnswered: 0, pending: 0, missing: 0, unavailable: 0 });
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 2);
+
+  await server.close();
+  db.close();
+});
+
+test('metadata unavailable server-wide: the request endpoint does not queue', async () => {
+  // Finding 6: with the worker disabled, or enabled with no client, browsing
+  // still inserted a `metadata_queue` row per group with nothing to ever
+  // drain it, and the SPA polled those rows at its 8s floor for as long as
+  // Browse stayed mounted. `metadataAvailable: false` is main.ts's own
+  // "would a timer even be registered" decision, passed in rather than
+  // re-derived here.
+  const db = openTestDatabase();
+  const askable = group(db, 'askable', 'Alpha');
+  const server = buildServer(deps(db, { metadataAvailable: false }));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/request',
+    payload: { groupIds: [askable] },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(
+    dueMetadataQueue(db, NOW, 10).length,
+    0,
+    'nothing may be queued when there is no worker to ever drain it',
+  );
+  assert.equal(
+    getGroupMetadata(db, askable),
+    undefined,
+    'unavailability is not a permanent answer either — it must not be cached as one',
+  );
+
+  await server.close();
+  db.close();
+});
+
+test('metadata available: the request endpoint queues normally', async () => {
+  const db = openTestDatabase();
+  const askable = group(db, 'askable', 'Alpha');
+  const server = buildServer(deps(db, { metadataAvailable: true }));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/request',
+    payload: { groupIds: [askable] },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(dueMetadataQueue(db, NOW, 10).length, 1);
 
   await server.close();
   db.close();
@@ -155,7 +207,7 @@ test('a request for a group whose plugin cannot look up is answered, not queued'
   });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0 });
+  assert.deepEqual(response.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0, unavailable: 0 });
 
   // Settled as an answer, not left in the queue for the worker to discard.
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 0);
@@ -171,7 +223,7 @@ test('a request for a group whose plugin cannot look up is answered, not queued'
     url: '/api/metadata/request',
     payload: { groupIds: [noHooks, nullQuery, noPlugin] },
   });
-  assert.deepEqual(again.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0 });
+  assert.deepEqual(again.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0, unavailable: 0 });
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 0);
 
   await server.close();
@@ -207,12 +259,21 @@ test('a request naming a group that no longer exists reports it as missing, not 
   });
 
   assert.equal(response.statusCode, 200);
-  const body = response.json() as { queued: number; alreadyAnswered: number; pending: number; missing: number };
-  assert.deepEqual(body, { queued: 1, alreadyAnswered: 0, pending: 0, missing: 1 });
-  // The four counters are meant to be an honest partition of the request: a
+  const body = response.json() as {
+    queued: number;
+    alreadyAnswered: number;
+    pending: number;
+    missing: number;
+    unavailable: number;
+  };
+  assert.deepEqual(body, { queued: 1, alreadyAnswered: 0, pending: 0, missing: 1, unavailable: 0 });
+  // The five counters are meant to be an honest partition of the request: a
   // caller can detect a bug in this arithmetic without knowing anything else
   // about what was sent.
-  assert.equal(body.queued + body.alreadyAnswered + body.pending + body.missing, 2);
+  assert.equal(
+    body.queued + body.alreadyAnswered + body.pending + body.missing + body.unavailable,
+    2,
+  );
 
   await server.close();
   db.close();
@@ -443,6 +504,7 @@ test('a poster route serves the cached file and 404s when absent', async () => {
     const ok = await server.inject({ method: 'GET', url: `/api/groups/${withPoster}/poster` });
     assert.equal(ok.statusCode, 200);
     assert.equal(ok.headers['content-type'], 'image/jpeg');
+    assert.equal(ok.headers['cache-control'], 'public, max-age=86400');
     assert.deepEqual(ok.rawPayload, bytes);
 
     const neverAnswered = await server.inject({ method: 'GET', url: `/api/groups/${noAnswer}/poster` });

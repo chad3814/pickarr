@@ -72,6 +72,19 @@ export interface ServerDeps {
    * same default twice is how the two copies eventually disagree.
    */
   artworkDir: string;
+  /**
+   * Whether a metadata lookup could ever be produced right now — `true` only
+   * when `config.metadata.enabled` and a `siteLookup` client both hold, the
+   * same test main.ts already makes once at startup to decide whether to
+   * register the worker's scheduler timer at all (`runMetadata !==
+   * undefined`). Derived there and passed in here rather than re-derived from
+   * config a second time, so the two decisions cannot drift apart.
+   *
+   * `POST /api/metadata/request` reads this to decide whether to queue at
+   * all: queueing with no worker running to drain the queue would give the
+   * SPA a row that polls forever at its 8s ceiling and is never answered.
+   */
+  metadataAvailable: boolean;
 }
 
 /**
@@ -325,7 +338,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     if (!body.success) return reply.code(400).send({ error: 'Invalid request' });
 
     const now = deps.now();
-    const result: MetadataRequestResponse = { queued: 0, alreadyAnswered: 0, pending: 0, missing: 0 };
+    const result: MetadataRequestResponse = {
+      queued: 0,
+      alreadyAnswered: 0,
+      pending: 0,
+      missing: 0,
+      unavailable: 0,
+    };
     const askable: number[] = [];
 
     for (const groupId of body.data.groupIds) {
@@ -340,11 +359,23 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       // A group that no longer exists cannot be queued — `metadata_queue`'s
       // foreign key forbids it — and there is nothing to answer either, so
       // it is its own counter rather than folded into one of the other
-      // three: the caller needs to be able to tell "discarded" from
-      // "accepted", and the four counters together are meant to sum to the
+      // ones: the caller needs to be able to tell "discarded" from
+      // "accepted", and the five counters together are meant to sum to the
       // number of ids sent.
       if (group === null) {
         result.missing += 1;
+        continue;
+      }
+
+      // No worker is running to ever drain a row this would create — see
+      // `ServerDeps.metadataAvailable`. This is deliberately *not* answered
+      // with `answerUnaskable`: unlike a plugin with no metadata hooks, this
+      // is not a fact about the group, it is a fact about how Pickarr is
+      // currently configured, and configuration can change. Caching it as a
+      // permanent `state = 'none'` would mean turning metadata on later
+      // never re-asks about a single group browsed while it was off.
+      if (!deps.metadataAvailable) {
+        result.unavailable += 1;
         continue;
       }
 
@@ -397,6 +428,18 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // `cachePoster`, and the id in the URL is validated as a positive integer by
   // `idParamsSchema` *before* it is used for anything, so a traversal attempt
   // in the id segment is rejected by zod and never reaches `getGroupMetadata`.
+  //
+  // Spec §11.1 says `sendFile`, and this reads the whole file into memory
+  // instead — a deliberate deviation, not an oversight. `reply.sendFile`
+  // streams from the root a `@fastify/static` instance is registered
+  // against, and the only one already registered here is `deps.webRoot` (the
+  // built SPA); pointing it at the artwork directory too would need a second
+  // `@fastify/static` registration and its own prefix, for a route that
+  // still has to keep this handler's own existence check and 404 handling
+  // either way. On a single-user LAN service with posters capped at 5 MiB
+  // (see `cachePoster`), buffering one poster per request is not worth that
+  // second registration. `Cache-Control` below is what actually matters at
+  // this scale, since a browser can then skip re-reading the file at all.
   server.get('/api/groups/:id/poster', async (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Invalid id' });
@@ -417,7 +460,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     }
 
     const contentType = POSTER_CONTENT_TYPES[extname(metadata.posterPath)] ?? 'application/octet-stream';
-    return reply.type(contentType).send(bytes);
+    // The file at this id never changes content without the id's own
+    // `group_metadata` row changing (a re-fetch after the row is cleared and
+    // asked about again), so a day is cheap to cache and costs nothing when
+    // it's wrong: the worst case is one stale poster for a day, on a scene
+    // this feature never re-checks anyway (§2 of the design: metadata is
+    // fetched once).
+    return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
   });
 
   server.post('/api/groups/:id/pick', async (request, reply) => {

@@ -258,6 +258,52 @@ test('the parsed title stays the card title when metadata disagrees', () => {
   assert.ok(screen.getByText('A Different Title'));
 });
 
+test('the panel renders the provider release date and a human-formatted running time', () => {
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        metadata: { ...CONFIRMED, releaseDate: '2023-05-01', durationSeconds: 5400 },
+      }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(screen.getByText('2023-05-01'));
+  assert.ok(screen.getByText('1h 30m'));
+});
+
+test('a missing release date or running time is independently absent from the panel', () => {
+  render(
+    <MediaCard
+      group={{ ...GROUP, metadata: { ...CONFIRMED, releaseDate: null, durationSeconds: null } }}
+      onPick={() => {}}
+    />,
+  );
+  // #40: never `assert.equal(screen.queryByText(x), null)`.
+  assert.ok(!screen.queryByText('1h 30m'));
+  assert.ok(!screen.queryByText('30m'));
+  // The rest of the panel still rendered — proof neither absence took the
+  // whole panel down with it.
+  assert.ok(screen.getByText('A Different Title'));
+
+  const { unmount } = render(
+    <MediaCard
+      group={{ ...GROUP, metadata: { ...CONFIRMED, releaseDate: null, durationSeconds: 1800 } }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(screen.getByText('30m'));
+  unmount();
+
+  render(
+    <MediaCard
+      group={{ ...GROUP, metadata: { ...CONFIRMED, releaseDate: '2023-05-01', durationSeconds: null } }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(screen.getByText('2023-05-01'));
+});
+
 test('the panel tolerates a missing poster, synopsis and empty performers independently', () => {
   render(
     <MediaCard

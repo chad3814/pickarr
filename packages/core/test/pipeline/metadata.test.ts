@@ -13,6 +13,7 @@ import { getDiscoveredSite, recordDiscoveredSite } from '../../src/db/sites.ts';
 import { RateLimited, type FetchImpl, type SceneLookupClient } from '../../src/clients/theporndb.ts';
 import type { ArtworkDeps } from '../../src/media/artwork.ts';
 import {
+  createMetadataRunner,
   MAX_BACKOFF_MS,
   MAX_METADATA_ATTEMPTS,
   runMetadataPass,
@@ -377,6 +378,72 @@ test('a row whose answer write throws is deferred, not stuck first in the queue 
   // longer first in line forever.
   const second = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
   assert.equal(second.looked, 0, 'the poisoned row must not be due again at the same instant');
+});
+
+test('a runner holds a 429 cooldown across ticks: no request while it stands, resumes once it lapses', async () => {
+  // `runMetadataPass` itself already proves a single pass stops early on a
+  // 429 (see the test above). This is the wiring finding 1 found broken:
+  // main.ts awaited that pass and threw the returned `cooldownUntil` away,
+  // so only the one row that hit the 429 was deferred — every other due row
+  // kept its `next_at`, and the very next tick spent another request
+  // rediscovering the same rate limit. `createMetadataRunner` is the fix:
+  // it holds the cooldown in its own closure, across calls, and the whole
+  // point of this test is to drive it across more than one call.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  enqueueMetadata(db, [groupId], 1_000);
+
+  let now = 1_000;
+  const client = fakeSceneClient(() => {
+    throw new RateLimited(30_000);
+  });
+
+  const runner = createMetadataRunner(deps({ db, client, now: () => now }));
+
+  await runner();
+  assert.equal(client.asked.length, 1, 'the first tick makes the request that discovers the limit');
+
+  now = 5_000; // well inside the cooldown (until 1_000 + 30_000 = 31_000)
+  await runner();
+  assert.equal(client.asked.length, 1, 'a tick inside the cooldown must issue no provider request at all');
+
+  now = 20_000; // still inside it
+  await runner();
+  assert.equal(client.asked.length, 1, 'still no request while the cooldown stands');
+
+  now = 31_000; // the moment it lapses
+  await runner();
+  assert.equal(client.asked.length, 2, 'a tick once the cooldown has passed must resume');
+});
+
+test('a runner logs a cooldown skip once, not on every tick it is skipped for', async () => {
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  enqueueMetadata(db, [groupId], 1_000);
+
+  let now = 1_000;
+  const client = fakeSceneClient(() => {
+    throw new RateLimited(30_000);
+  });
+  const logs: string[] = [];
+
+  const runner = createMetadataRunner(deps({ db, client, now: () => now, log: (message) => logs.push(message) }));
+
+  await runner(); // hits the 429, sets the cooldown
+  const afterFirstPass = logs.length;
+
+  now = 5_000;
+  await runner(); // skipped: cooldown standing
+  now = 10_000;
+  await runner(); // skipped again: still standing
+  now = 15_000;
+  await runner(); // skipped a third time
+
+  assert.equal(
+    logs.length,
+    afterFirstPass + 1,
+    'three skipped ticks in a row must add exactly one log line, not three',
+  );
 });
 
 test('an attempts ceiling stops a permanently poisoned row from deferring forever', async () => {

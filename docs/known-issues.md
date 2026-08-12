@@ -443,9 +443,18 @@ emptied `trashDir` needs no cleanup of its own:
 UPDATE group_metadata SET poster_path = NULL WHERE poster_path IS NOT NULL;
 ```
 
-That is a metadata refetch, not a metadata loss: the row's title, synopsis,
-performers and confirmation stay put, and only the poster is asked for again
-the next time the group is browsed.
+That is a metadata loss, not a metadata refetch, and it is worth being precise about
+that: the group's `group_metadata` row still exists after this statement runs, and
+`enqueueMetadata` treats any group with a row — poster or no poster — as already
+answered, so nothing ever re-queues it. Clearing `poster_path` only stops the poster
+route 404ing for a file that is gone; it does not bring the poster back. The row's
+title, synopsis, performers and confirmation are indeed untouched, but "untouched"
+here means "also never re-fetched," not "refreshed for free." Getting a poster back
+means deleting the group's `group_metadata` row (and its `metadata_candidates` rows)
+so the group looks unasked again and gets picked up the next time it is browsed —
+which redoes the whole lookup, not just the poster, and is not itself automated by
+anything in this codebase today. Self-healing re-fetch is the obvious phase-2
+improvement; this phase documents the footgun instead of hiding it.
 
 ## Test-suite blind spots
 
