@@ -101,3 +101,32 @@ jobs:
             packages/e2e/test-results/
             packages/e2e/playwright-report/
           retention-days: 7
+
+  # The image is the artefact that actually ships, and until now nothing built
+  # it here. It broke the day a dev-only workspace was added — the build stage
+  # copies four workspace manifests, `COPY . .` brought in a fifth whose
+  # dependencies were therefore absent, and `npm run typecheck --workspaces`
+  # failed on a package the image does not ship. `check` and `e2e` were both
+  # green throughout, because neither builds an image.
+  #
+  # No push, no registry, no credentials: building is what catches this, and
+  # publishing is a separate decision with a separate blast radius.
+  container:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # GitHub Actions' cache, rather than a registry, so this needs no
+      # secrets. `mode=max` keeps the intermediate build stage too — without it
+      # only the runtime layers are cached and the expensive half, `npm ci`
+      # plus the full build, is repeated every run.
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
