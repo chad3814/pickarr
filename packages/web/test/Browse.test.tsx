@@ -8,6 +8,8 @@ import type {
   GroupView,
   ManualField,
   ManualFieldsResponse,
+  MetadataRequestResponse,
+  MetadataView,
   PickResponse,
   ReleaseEditResponse,
   ReleaseView,
@@ -68,6 +70,10 @@ function group(id: number, title: string, over: Overrides = {}): GroupView {
     upgradeReleaseId: null,
     listRankAt: 1000 - id,
     releases: [release],
+    // What a fresh browse page carries before anything has asked the
+    // metadata endpoint about this group — matches the server's own default
+    // for a group `metadataForGroups` found nothing for.
+    metadata: { state: 'absent' },
   };
   // A group has no quality of its own, so the server builds its prefill from an
   // empty one.
@@ -126,6 +132,24 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
   function respond(url: URL, init: RequestInit | undefined): unknown {
     if (url.pathname === '/api/browse') return pages.get(url.searchParams.get('cursor') ?? '');
     if (url.pathname === '/api/manual-fields') return { scenes: FIELDS } satisfies ManualFieldsResponse;
+    if (url.pathname === '/api/metadata/request') {
+      const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
+      return {
+        queued: 0,
+        alreadyAnswered: body.groupIds.length,
+        pending: 0,
+        missing: 0,
+      } satisfies MetadataRequestResponse;
+    }
+    if (url.pathname === '/api/metadata') {
+      // Every id answers `'none'` — settled, so `useGroupMetadata` never polls
+      // again for it. These tests are about browse and edit flows, not the
+      // metadata panel, so nothing here needs a `'confirmed'` answer.
+      const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
+      const response: Record<number, MetadataView> = {};
+      for (const id of ids) response[Number(id)] = { state: 'none' };
+      return response;
+    }
     if (url.pathname === '/api/manual-preview') {
       // Echoes what it was asked, so a test can tell that the live draft is
       // what reached the server.

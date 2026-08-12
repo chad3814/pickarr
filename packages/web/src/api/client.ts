@@ -65,6 +65,45 @@ export interface ReleaseView {
   downloadFailed?: boolean;
 }
 
+/**
+ * What the server can say about a group's scene metadata. Mirrors `MetadataView`
+ * in `packages/core/src/http/views.ts` — duplicated rather than imported, the
+ * same way `DisplayFields` and `QualityTokens` already are, because the web
+ * package does not depend on core.
+ *
+ * `'pending'` and `'absent'` only ever come from `GET /api/metadata`, which is
+ * the only endpoint that also consults the metadata queue to tell "asked, not
+ * yet answered" from "never asked"; `GroupView.metadata` (from browse) reads
+ * `group_metadata` alone and so is never `'pending'` there.
+ */
+export type MetadataView =
+  | {
+      state: 'confirmed';
+      title: string | null;
+      performers: string[];
+      releaseDate: string | null;
+      durationSeconds: number | null;
+      synopsis: string | null;
+      hasPoster: boolean;
+    }
+  | { state: 'none' }
+  | { state: 'pending' }
+  | { state: 'absent' };
+
+/**
+ * The answer to `POST /api/metadata/request`. Four counters: an id naming a
+ * group that no longer exists is neither queued, answered, nor waiting, so it
+ * gets its own counter (`missing`) rather than being folded into one of the
+ * other three. `queued + alreadyAnswered + pending + missing` always equals
+ * the number of ids sent.
+ */
+export interface MetadataRequestResponse {
+  queued: number;
+  alreadyAnswered: number;
+  pending: number;
+  missing: number;
+}
+
 export interface GroupView {
   id: number;
   plugin: string;
@@ -74,6 +113,7 @@ export interface GroupView {
   upgradeReleaseId: number | null;
   listRankAt: number;
   releases: ReleaseView[];
+  metadata: MetadataView;
   /** The identity half of an edit form, prefilled. Absent as on `ReleaseView`. */
   manualValues?: Record<string, string>;
   // Nothing group-level about failures. `/api/picks` already returns failed
@@ -253,4 +293,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ plugin, values }),
     }),
+  /**
+   * The explicit enqueue: the server never fetches metadata as a side effect
+   * of a read, so this is the only thing that ever puts a group on the queue.
+   * `signal` is threaded through (rather than folded into a fixed `init`)
+   * so `useGroupMetadata` can abort an in-flight request on unmount without
+   * `exactOptionalPropertyTypes` objecting to an explicitly-`undefined`
+   * `signal` on the common, non-aborting call sites.
+   */
+  requestMetadata: (groupIds: number[], signal?: AbortSignal) => {
+    const init: RequestInit = { method: 'POST', body: JSON.stringify({ groupIds }) };
+    return request<MetadataRequestResponse>(
+      '/api/metadata/request',
+      signal === undefined ? init : { ...init, signal },
+    );
+  },
+  /** `ids` is joined the same `"1,2,3"` way `/api/metadata` expects. */
+  metadata: (ids: number[], signal?: AbortSignal) =>
+    request<Record<number, MetadataView>>(
+      `/api/metadata?ids=${ids.join(',')}`,
+      signal === undefined ? undefined : { signal },
+    ),
 };
