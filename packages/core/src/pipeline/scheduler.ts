@@ -145,8 +145,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // `tryRun`, for exactly the reason the reconcile timer above is:
         // a metadata tick is a sample, not a work item, and has nothing to
         // contribute over a busy pass that the next tick won't.
+        //
+        // `.catch()`, like the ingest timer above and unlike the reconcile
+        // timer: `reconcilePass` already swallows every per-client failure
+        // internally, so it never rejects, but `runMetadata` can — its own
+        // per-row work is guarded by `deferOrGiveUp` inside `runMetadataPass`,
+        // yet the query that finds the due rows in the first place is not.
+        // An uncaught rejection here would be an unhandled rejection on the
+        // process, which crashes it by default; a transient database fault
+        // must cost one skipped tick, not the whole container.
         const metadataTimer = setInterval(() => {
-          void metadataMutex.tryRun(runMetadata);
+          void metadataMutex
+            .tryRun(runMetadata)
+            .catch((error: Error) => deps.log(`metadata pass failed: ${error.message}`));
         }, deps.metadataIntervalMs ?? DEFAULT_METADATA_INTERVAL_MS);
         metadataTimer.unref();
         timers.push(metadataTimer);

@@ -47,7 +47,7 @@ export interface MetadataPassDeps {
    * that is no longer configured — which is a normal outcome, not a bug: a
    * plugin can be removed from config after groups it created already exist.
    */
-  pluginFor(pluginPackage: string): MediaTypePlugin | null;
+  pluginFor(pluginId: string): MediaTypePlugin | null;
   artwork: ArtworkDeps;
   perTick: number;
   now: () => number;

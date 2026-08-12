@@ -213,6 +213,58 @@ test('a metadata tick that lands while the previous one is still running is drop
   }
 });
 
+// `runMetadataPass` guards its own per-row work, but the query that finds due
+// rows in the first place is not guarded, so `runMetadata` can reject. Unlike
+// `reconcilePass`, which never rejects because it swallows every per-client
+// failure itself, this timer has to catch at its own call site — an uncaught
+// rejection here is an unhandled rejection on the process, which crashes it
+// by default. A transient failure must cost one skipped tick, not the
+// container.
+test('a metadata pass that rejects is logged, not thrown, and the timer survives it', async () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  const db = openTestDatabase();
+  const logged: string[] = [];
+  let calls = 0;
+
+  const scheduler = createScheduler({
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => NO_RECONCILE_WORK,
+    clientIds: [],
+    log: (message) => logged.push(message),
+    runMetadata: async () => {
+      calls += 1;
+      throw new Error('database is unavailable');
+    },
+    metadataIntervalMs: 1_000,
+  });
+
+  try {
+    scheduler.start();
+
+    mock.timers.tick(1_000);
+    await settle();
+    assert.equal(calls, 1);
+    assert.ok(
+      logged.some((line) => line.includes('database is unavailable')),
+      'the rejection is logged',
+    );
+
+    // Not wedged, and the process did not crash on an unhandled rejection:
+    // the next tick after a failure still runs.
+    mock.timers.tick(1_000);
+    await settle();
+    assert.equal(calls, 2);
+  } finally {
+    scheduler.stop();
+    mock.timers.reset();
+    db.close();
+  }
+});
+
 // `runMetadata` absent is how main.ts represents "metadata is disabled, or
 // there is no client to ask" — the scheduler must not register a timer for
 // it in that case, not just decline to call a function it doesn't have.
