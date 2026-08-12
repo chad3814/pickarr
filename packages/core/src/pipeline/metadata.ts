@@ -25,6 +25,20 @@ function backoffFor(attempts: number): number {
   return Math.min(60_000 * 2 ** attempts, MAX_BACKOFF_MS);
 }
 
+/**
+ * How many failed attempts a row may accumulate before the worker gives up
+ * on it and answers `state = 'none'` instead of deferring forever.
+ *
+ * Backoff ramps to its six-hour cap in nine attempts (1, 2, 4, ... 256
+ * minutes), so every attempt past that costs a full six hours. Fifty spans
+ * roughly ten days past the ramp — long enough that a genuine multi-day
+ * provider outage still recovers once it clears, short enough that a row
+ * poisoned by a deterministic fault (a corrupt `display`, a plugin bug that
+ * throws on every call) eventually stops consuming a `perTick` slot four
+ * times a day forever.
+ */
+export const MAX_METADATA_ATTEMPTS = 50;
+
 export interface MetadataPassDeps {
   db: DatabaseSync;
   client: SceneLookupClient | undefined;
@@ -56,13 +70,26 @@ export interface MetadataPassResult {
 const EMPTY_VERDICT: MetadataVerdict = { confirmed: null, nearMisses: [] };
 
 /**
- * Answers a row the worker can never look up — no plugin, no hooks, or a
- * query the plugin declined to build — as `state = 'none'`. Leaving such a
- * row queued would mean it is retried, and fails to be answered, on every
- * single pass forever.
+ * `group_metadata.source` for a row answered without ever asking a provider
+ * — no plugin, no hooks, a query the plugin declined to build, an empty
+ * query list, or a row the worker gave up retrying. Deliberately not
+ * `'none'`: that string already means something in this table (`state =
+ * 'none'`), and `source = 'none', state = 'none'` would read as a tautology
+ * rather than telling anyone anything. `'unasked'` shares a column with
+ * `metadata_candidates.source` and `discovered_sites.source`, both of which
+ * only ever hold a provider's name today — it has to mean the same thing
+ * there too, not just here: no provider was ever consulted for this answer.
  */
-function answerUnaskable(db: DatabaseSync, groupId: number, source: string, now: number): void {
-  recordMetadataAnswer(db, { groupId, source, confirmed: null, nearMisses: [], now });
+const UNASKED_SOURCE = 'unasked';
+
+/**
+ * Answers a row the worker can never look up — no plugin, no hooks, an
+ * unbuildable or empty query, or one that has exhausted its retries — as
+ * `state = 'none'`. Leaving such a row queued would mean it is retried, and
+ * fails to be answered, on every single pass forever.
+ */
+function answerUnaskable(db: DatabaseSync, groupId: number, now: number): void {
+  recordMetadataAnswer(db, { groupId, source: UNASKED_SOURCE, confirmed: null, nearMisses: [], now });
 }
 
 /**
@@ -72,7 +99,10 @@ function answerUnaskable(db: DatabaseSync, groupId: number, source: string, now:
  * become a deferral — the retry that follows costs one row's backoff, while
  * treating it as an answer would discard information (a bug or a transient
  * issue in the plugin) permanently, and letting it propagate would abort
- * every row still waiting behind this one.
+ * every row still waiting behind this one. A deterministic throw (a plugin
+ * bug, or `display` that can never parse) does not loop forever either:
+ * `deferOrGiveUp` below still counts these deferrals toward the attempts
+ * ceiling.
  */
 function safeMetadataQuery(
   plugin: MediaTypePlugin,
@@ -96,6 +126,46 @@ function safeConfirmMetadata(
   } catch (error) {
     return { error: `plugin threw confirming metadata: ${(error as Error).message}` };
   }
+}
+
+/**
+ * What happened to one queued row. `cooldownUntil` is independent of `kind`:
+ * a row can be given up on *and* still be the one that just proved the
+ * service is rate limited, in which case the pass must still stop, even
+ * though this particular row will not be retried again.
+ */
+interface RowOutcome {
+  kind: 'confirmed' | 'none' | 'deferred';
+  cooldownUntil: number | null;
+}
+
+/**
+ * Defers a row, unless it has now failed `MAX_METADATA_ATTEMPTS` times, in
+ * which case it is answered `'none'` instead so it stops costing a `perTick`
+ * slot on every pass forever. Either way this is a fresh statement — not
+ * nested inside whatever transaction the caller may just have watched fail
+ * — so it commits even when the failure that led here rolled its own
+ * transaction back.
+ */
+function deferOrGiveUp(
+  deps: MetadataPassDeps,
+  row: MetadataQueueRow,
+  now: number,
+  message: string,
+  nextAt: number,
+  cooldownUntil: number | null = null,
+): RowOutcome {
+  const attemptsAfter = row.attempts + 1;
+  if (attemptsAfter >= MAX_METADATA_ATTEMPTS) {
+    deps.log(
+      `metadata pass: group ${row.groupId} given up after ${attemptsAfter} attempts: ${message}`,
+    );
+    answerUnaskable(deps.db, row.groupId, now);
+    return { kind: 'none', cooldownUntil };
+  }
+  deps.log(`metadata pass: group ${row.groupId} deferred (attempt ${attemptsAfter}): ${message}`);
+  deferMetadata(deps.db, row.groupId, message, nextAt);
+  return { kind: 'deferred', cooldownUntil };
 }
 
 /**
@@ -124,28 +194,37 @@ export async function runMetadataPass(deps: MetadataPassDeps): Promise<MetadataP
   const due = dueMetadataQueue(deps.db, now, deps.perTick);
   if (due.length === 0) return result;
 
-  // Attached to every answer this pass writes, including the "never asked"
-  // ones (no plugin, no hooks, no query) — `group_metadata.source` is
-  // NOT NULL, and there is no other candidate value once a client exists.
-  const source = deps.client?.source ?? 'none';
-
   for (const row of due) {
     result.looked += 1;
-    // eslint-disable-next-line no-await-in-loop -- rows are answered one at a time, deliberately sequential
-    const outcome = await lookUpOne(deps, row, source, now);
 
-    if (outcome === 'confirmed') result.confirmed += 1;
-    else if (outcome === 'none') result.none += 1;
-    else if (outcome.kind === 'deferred') {
-      result.deferred += 1;
-      if (outcome.cooldownUntil !== null) {
-        result.cooldownUntil = outcome.cooldownUntil;
-        // A 429 means the whole pass is rate limited, not just this row.
-        // Rows not yet reached keep their existing next_at and are picked up
-        // normally once the cooldown passes; asking each of them anyway would
-        // spend one request per row rediscovering a limit already known.
-        break;
-      }
+    let outcome: RowOutcome;
+    try {
+      // eslint-disable-next-line no-await-in-loop -- rows are answered one at a time, deliberately sequential
+      outcome = await lookUpOne(deps, row, now);
+    } catch (error) {
+      // A database failure while answering or deferring this one row — a
+      // constraint the row's own data trips, a full disk — must not take
+      // the rest of the queue down with it, and must not leave the row
+      // permanently first in line: `dueMetadataQueue` orders by
+      // (requested_at, group_id), so a row whose attempts/next_at never
+      // moved would abort every pass on the same row forever, and nothing
+      // behind it would ever be looked at. `deferOrGiveUp` bumps them here,
+      // outside whatever transaction just failed and rolled itself back.
+      const message = (error as Error).message;
+      outcome = deferOrGiveUp(deps, row, now, `unexpected failure: ${message}`, now + backoffFor(row.attempts));
+    }
+
+    if (outcome.kind === 'confirmed') result.confirmed += 1;
+    else if (outcome.kind === 'none') result.none += 1;
+    else result.deferred += 1;
+
+    if (outcome.cooldownUntil !== null) {
+      result.cooldownUntil = outcome.cooldownUntil;
+      // A 429 means the whole pass is rate limited, not just this row.
+      // Rows not yet reached keep their existing next_at and are picked up
+      // normally once the cooldown passes; asking each of them anyway would
+      // spend one request per row rediscovering a limit already known.
+      break;
     }
   }
 
@@ -157,14 +236,7 @@ export async function runMetadataPass(deps: MetadataPassDeps): Promise<MetadataP
   return result;
 }
 
-type RowOutcome = 'confirmed' | 'none' | { kind: 'deferred'; cooldownUntil: number | null };
-
-async function lookUpOne(
-  deps: MetadataPassDeps,
-  row: MetadataQueueRow,
-  source: string,
-  now: number,
-): Promise<RowOutcome> {
+async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: number): Promise<RowOutcome> {
   const group = getGroup(deps.db, row.groupId);
   // A missing group cannot happen through the foreign key `metadata_queue`
   // holds on `media_groups`, but a group whose plugin has since been removed
@@ -172,60 +244,73 @@ async function lookUpOne(
   // group would if it somehow existed.
   const plugin = group === null ? null : deps.pluginFor(group.plugin);
   if (group === null || plugin === null) {
-    answerUnaskable(deps.db, row.groupId, source, now);
-    return 'none';
+    answerUnaskable(deps.db, row.groupId, now);
+    return { kind: 'none', cooldownUntil: null };
   }
 
   if (plugin.metadataQuery === undefined || plugin.confirmMetadata === undefined) {
-    answerUnaskable(deps.db, row.groupId, source, now);
-    return 'none';
+    answerUnaskable(deps.db, row.groupId, now);
+    return { kind: 'none', cooldownUntil: null };
   }
 
   const built = safeMetadataQuery(plugin, group);
   if ('error' in built) {
-    deps.log(`metadata query for group ${row.groupId} failed: ${built.error}`);
-    deferMetadata(deps.db, row.groupId, built.error, now + backoffFor(row.attempts));
-    return { kind: 'deferred', cooldownUntil: null };
+    return deferOrGiveUp(deps, row, now, built.error, now + backoffFor(row.attempts));
   }
   if (built.query === null) {
-    answerUnaskable(deps.db, row.groupId, source, now);
-    return 'none';
+    answerUnaskable(deps.db, row.groupId, now);
+    return { kind: 'none', cooldownUntil: null };
   }
   const query = built.query;
+
+  if (query.queries.length === 0) {
+    // No search string to try is the same as no query at all: answer it and
+    // move on, rather than asking a bare `q=` that matches everything.
+    answerUnaskable(deps.db, row.groupId, now);
+    return { kind: 'none', cooldownUntil: null };
+  }
 
   if (deps.client === undefined) {
     // Configured with no client is the same "nothing was learned" case a
     // network failure is: the row must be retried, not answered.
-    const message = 'no metadata client configured';
-    deps.log(`metadata lookup for group ${row.groupId} failed: ${message}`);
-    deferMetadata(deps.db, row.groupId, message, now + backoffFor(row.attempts));
-    return { kind: 'deferred', cooldownUntil: null };
+    return deferOrGiveUp(
+      deps,
+      row,
+      now,
+      'no metadata client configured',
+      now + backoffFor(row.attempts),
+    );
   }
   const client = deps.client;
 
   const siteId = query.siteName === undefined ? null : siteIdForName(deps.db, query.siteName);
 
+  // Only the first query is ever tried, even though `MetadataQuery.queries`
+  // is documented as a list to try in order until one confirms — the same
+  // contract `siteCandidates`' `queries` uses. The scenes plugin returns
+  // exactly one query today, so this is latent rather than broken, but it is
+  // not yet honoured: a future plugin returning several must not assume the
+  // rest are ever consulted. Trying them in sequence would multiply API
+  // calls per group, which this worker deliberately does not do.
+  const candidateQuery = query.queries[0]!;
+
   let candidates: readonly MetadataCandidate[];
   try {
-    candidates = await client.searchScenes(query.queries[0] ?? '', siteId);
+    candidates = await client.searchScenes(candidateQuery, siteId);
   } catch (error) {
     if (error instanceof RateLimited) {
-      const cooldownUntil = now + error.retryAfterMs;
-      deps.log(`metadata lookup rate limited; cooldown until ${cooldownUntil}`);
-      deferMetadata(deps.db, row.groupId, error.message, cooldownUntil);
-      return { kind: 'deferred', cooldownUntil };
+      // Read the clock again rather than reusing the pass's `now`: this
+      // request may have taken a while, and a cooldown computed from a
+      // stale timestamp would expire earlier than the provider intended.
+      const cooldownUntil = deps.now() + error.retryAfterMs;
+      return deferOrGiveUp(deps, row, now, error.message, cooldownUntil, cooldownUntil);
     }
-    const message = (error as Error).message;
-    deps.log(`metadata lookup for group ${row.groupId} failed: ${message}`);
-    deferMetadata(deps.db, row.groupId, message, now + backoffFor(row.attempts));
-    return { kind: 'deferred', cooldownUntil: null };
+    return deferOrGiveUp(deps, row, now, (error as Error).message, now + backoffFor(row.attempts));
   }
 
   const confirmation = safeConfirmMetadata(plugin, candidates, query);
   if ('error' in confirmation) {
-    deps.log(`metadata confirmation for group ${row.groupId} failed: ${confirmation.error}`);
-    deferMetadata(deps.db, row.groupId, confirmation.error, now + backoffFor(row.attempts));
-    return { kind: 'deferred', cooldownUntil: null };
+    return deferOrGiveUp(deps, row, now, confirmation.error, now + backoffFor(row.attempts));
   }
   const { confirmed, nearMisses } = confirmation.verdict;
 
@@ -252,5 +337,5 @@ async function lookUpOne(
     if (posterPath !== null) setPosterPath(deps.db, row.groupId, posterPath);
   }
 
-  return confirmed === null ? 'none' : 'confirmed';
+  return { kind: confirmed === null ? 'none' : 'confirmed', cooldownUntil: null };
 }
