@@ -15,6 +15,9 @@ function group(id: number, title: string, over: Partial<GroupView> = {}): GroupV
     plugin: 'scenes',
     display: { title, fields: [] },
     state: 'picked',
+    // Required since browse and picks share `GroupView`. Picks does not poll
+    // for metadata, so 'absent' is what its cards genuinely carry.
+    metadata: { state: 'absent' },
     pickedReleaseId: id * 10,
     upgradeReleaseId: null,
     listRankAt: 1000 - id,
