@@ -14,6 +14,7 @@ import {
   updateGroupIdentity,
   type GroupRow,
 } from '../db/groups.ts';
+import { clearGroupMetadata } from '../db/metadata.ts';
 import {
   getRelease,
   markReleaseEdited,
@@ -313,6 +314,12 @@ export function editGroup(
       // search text deliberately stand: the submitted values were the user's
       // way of naming which existing scene this is, not a rewrite of it.
       markGroupEdited(db, target.id, now);
+      // Metadata is derived, disposable data with no foreign key of its own to
+      // enforce moving it first — but it references the source by `group_id`
+      // exactly as `releases` did, so it has to be gone before the delete
+      // below for the same reason: nothing else clears it, and the delete is
+      // the statement that would otherwise discover that the hard way.
+      clearGroupMetadata(db, group.id);
       deleteGroup(db, group.id);
 
       return { ok: { groupId: target.id, mergedInto: target.id } };

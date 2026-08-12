@@ -263,6 +263,49 @@ export function deferMetadata(
   ).run(error, nextAt, groupId);
 }
 
+/**
+ * Every row this schema keeps about one group's metadata — its answer, its
+ * queue entry, and the candidates rejected on the way to that answer — gone.
+ *
+ * Called from the merge path in `db/groups.ts`/`manual/operations.ts` (and
+ * from the migration that re-keys site segments, for the same reason) right
+ * before the source's `media_groups` row is deleted, so that delete does not
+ * meet a foreign key none of these three tables' `ON DELETE` clauses (there
+ * are none) would otherwise satisfy. It has to run in the same transaction as
+ * that delete: an eviction that committed while the delete rolled back — or
+ * the reverse — would leave a group either gone-but-still-answered-for or
+ * present-but-forgotten, and every read here uses `group_id` as its only key.
+ *
+ * Deletion, not relocation, and deliberately so:
+ *
+ * - `group_metadata.group_id` is that table's primary key, so moving the
+ *   source's row onto the target's id would collide the moment the target
+ *   already has an answer of its own.
+ * - Even where it wouldn't collide, a merge is a human correcting the
+ *   system's belief that the source ever needed answering on its own — its
+ *   `group_metadata` row is an answer *about the source's identity*, which is
+ *   precisely the thing the merge just concluded was wrong. Carrying it onto
+ *   the target would attach it to a scene it never described.
+ *
+ * The target keeps whatever it already has, or has none and gets asked again
+ * next time browse renders it — cheap, since asking is exactly what a lazy,
+ * browse-driven trigger already does for any group it has never answered.
+ *
+ * This does not weaken the no-cascade choice for `downloads` and
+ * `imported_files`. Those tables record something that happened — a file was
+ * fetched, imported, is sitting on disk under the source's name — and
+ * `groupHistory` uses the foreign key that would otherwise fire as the
+ * deliberate backstop that refuses the merge outright rather than silently
+ * discard that record. Metadata records no event at all, only a cached,
+ * disposable answer to "what does a remote service call this", so there is
+ * nothing here worth refusing a merge to protect.
+ */
+export function clearGroupMetadata(db: DatabaseSync, groupId: number): void {
+  db.prepare('DELETE FROM group_metadata WHERE group_id = ?').run(groupId);
+  db.prepare('DELETE FROM metadata_queue WHERE group_id = ?').run(groupId);
+  db.prepare('DELETE FROM metadata_candidates WHERE group_id = ?').run(groupId);
+}
+
 export function setPosterPath(db: DatabaseSync, groupId: number, posterPath: string): void {
   db.prepare('UPDATE group_metadata SET poster_path = ? WHERE group_id = ?').run(
     posterPath,
