@@ -139,6 +139,7 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
         alreadyAnswered: body.groupIds.length,
         pending: 0,
         missing: 0,
+        unavailable: 0,
       } satisfies MetadataRequestResponse;
     }
     if (url.pathname === '/api/metadata') {

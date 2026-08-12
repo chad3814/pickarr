@@ -69,6 +69,7 @@ function deps(db: DatabaseSync, untracked: UntrackedEntry[] = []): ServerDeps {
     registry: emptyRegistry(),
     pluginForFeed: () => null,
     artworkDir: '/tmp/pickarr-server-test-unused-artwork',
+    metadataAvailable: true,
   };
 }
 

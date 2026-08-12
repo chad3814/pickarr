@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { GroupView, ManualField } from '../api/client.ts';
 import { groupAnchor } from '../api/anchors.ts';
+import { formatDuration } from '../api/format.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
 import { ManualForm, seed } from './ManualForm.tsx';
 import { ReleaseRow } from './ReleaseRow.tsx';
@@ -154,9 +155,10 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
        * non-destructive). Rendered only once the answer is `confirmed`: a
        * `pending` or `absent` group has nothing to show, and `none` means the
        * provider was asked and came back with nothing, which is likewise
-       * nothing to show. The provider populates poster, synopsis and
-       * performers unevenly, so each is checked and rendered on its own —
-       * one being missing says nothing about the others.
+       * nothing to show. The provider populates poster, synopsis,
+       * performers, release date and running time unevenly, so each is
+       * checked and rendered on its own — one being missing says nothing
+       * about the others.
        */}
       {group.metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">
@@ -171,6 +173,12 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           )}
           {group.metadata.title !== null && (
             <p className="metadata-title">{group.metadata.title}</p>
+          )}
+          {group.metadata.releaseDate !== null && (
+            <p className="metadata-release-date">{group.metadata.releaseDate}</p>
+          )}
+          {group.metadata.durationSeconds !== null && (
+            <p className="metadata-duration">{formatDuration(group.metadata.durationSeconds)}</p>
           )}
           {group.metadata.synopsis !== null && (
             <p className="metadata-synopsis">{group.metadata.synopsis}</p>

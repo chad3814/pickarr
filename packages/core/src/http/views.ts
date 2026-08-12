@@ -44,20 +44,30 @@ export type MetadataView =
  * `'absent'` rather than a `'pending'` it has no evidence for.
  */
 /**
- * The answer to `POST /api/metadata/request`. Four counters, not three: an id
- * naming a group that no longer exists is neither queued, answered, nor
- * waiting, and folding it into any of those would claim something false
- * (`alreadyAnswered` asserts a settled answer that was never recorded;
- * `queued` is simply untrue — nothing was inserted). `missing` names it
- * instead, which also keeps the four counters an honest partition of the
- * request: `queued + alreadyAnswered + pending + missing` always equals the
- * number of ids sent.
+ * The answer to `POST /api/metadata/request`. Five counters: an id naming a
+ * group that no longer exists is neither queued, answered, nor waiting, and
+ * folding it into any of those would claim something false (`alreadyAnswered`
+ * asserts a settled answer that was never recorded; `queued` is simply untrue
+ * — nothing was inserted). `missing` names it instead.
+ *
+ * `unavailable` is the fifth, and is a different kind of non-answer again: it
+ * counts ids that were skipped only because there is currently no worker
+ * running to ever drain a queue row for them (`ServerDeps.metadataAvailable`
+ * is false), not because anything is known about the group itself. It is
+ * deliberately not folded into `alreadyAnswered` — nothing was answered, and
+ * nothing was cached, so a later request once metadata is available again
+ * must be free to queue the same id.
+ *
+ * The five counters are an honest partition of the request:
+ * `queued + alreadyAnswered + pending + missing + unavailable` always equals
+ * the number of ids sent.
  */
 export interface MetadataRequestResponse {
   queued: number;
   alreadyAnswered: number;
   pending: number;
   missing: number;
+  unavailable: number;
 }
 
 export function metadataViewOf(metadata: GroupMetadata | undefined, queued = false): MetadataView {

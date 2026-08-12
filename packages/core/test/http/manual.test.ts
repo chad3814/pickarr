@@ -133,6 +133,7 @@ function deps(db: DatabaseSync, plugin: MediaTypePlugin = PLUGIN): ServerDeps {
     registry: registryFor(plugin),
     pluginForFeed: (feedId) => (feedId === 'f' ? plugin : null),
     artworkDir: '/tmp/pickarr-manual-test-unused-artwork',
+    metadataAvailable: true,
   };
 }
 

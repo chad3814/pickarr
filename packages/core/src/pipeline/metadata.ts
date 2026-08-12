@@ -272,6 +272,46 @@ export async function runMetadataPass(deps: MetadataPassDeps): Promise<MetadataP
   return result;
 }
 
+/**
+ * Wraps `runMetadataPass` with the cooldown a 429 sets, held here across
+ * calls rather than discarded the instant one pass returns it — which is
+ * what main.ts did before this existed: `MetadataPassResult.cooldownUntil`
+ * was computed and then thrown away, so only the one row that hit the 429
+ * was deferred. Every other due row kept its `next_at`, and the very next
+ * tick spent another request rediscovering the same rate limit, forever.
+ *
+ * A tick inside the cooldown makes **no** provider request at all — it never
+ * calls `runMetadataPass`, so `dueMetadataQueue` is never even read — and
+ * logs that fact once per cooldown, not once per tick: a multi-hour cooldown
+ * at a five-second `intervalSeconds` would otherwise write thousands of
+ * identical lines.
+ *
+ * This is main.ts's closure, factored out so it can be driven directly by a
+ * test rather than only indirectly through the whole scheduler.
+ */
+export function createMetadataRunner(deps: MetadataPassDeps): () => Promise<void> {
+  let cooldownUntil = 0;
+  let loggedSkip = false;
+  return async () => {
+    const now = deps.now();
+    if (now < cooldownUntil) {
+      if (!loggedSkip) {
+        deps.log(
+          `metadata pass: skipped, cooling down until ${new Date(cooldownUntil).toISOString()}`,
+        );
+        loggedSkip = true;
+      }
+      return;
+    }
+    loggedSkip = false;
+    const result = await runMetadataPass(deps);
+    // `?? 0` clears a cooldown that has already lapsed as readily as it holds
+    // one that has not: a pass with nothing to report (`cooldownUntil: null`)
+    // must not leave a stale cooldown from an earlier call still standing.
+    cooldownUntil = result.cooldownUntil ?? 0;
+  };
+}
+
 async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: number): Promise<RowOutcome> {
   const group = getGroup(deps.db, row.groupId);
   // A missing group cannot happen through the foreign key `metadata_queue`

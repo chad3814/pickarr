@@ -21,3 +21,17 @@ export function formatBytes(bytes: number): string {
   }
   return `${value.toFixed(1)} ${UNITS[unit]}`;
 }
+
+/**
+ * A running time in seconds, as `1h 30m` (or `30m` under an hour) — the
+ * provider stores `duration_s`, but nobody reading a card wants to do
+ * seconds-to-minutes arithmetic in their head. Rounded to the nearest minute
+ * rather than truncated, so a duration a few seconds shy of a boundary does
+ * not read as a whole minute shorter than it is.
+ */
+export function formatDuration(seconds: number): string {
+  const totalMinutes = Math.round(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours === 0 ? `${minutes}m` : `${hours}h ${minutes}m`;
+}

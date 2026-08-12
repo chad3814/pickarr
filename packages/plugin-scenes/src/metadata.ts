@@ -7,16 +7,6 @@ import type {
 } from '@pickarr/plugin-api';
 
 /**
- * The key's site segment, which since migration 4 is exactly the
- * comparison-key form — lowercased, alphanumerics only. `parse.ts` builds it
- * with the same expression `siteComparisonKey` uses, so a provider's site name
- * can be compared against it with no normalisation on our side.
- */
-export function siteSegmentOf(identityKey: string): string {
-  return identityKey.split(':')[0] ?? '';
-}
-
-/**
  * A group is askable only when it has a site. `display.subtitle` is that site's
  * canonical name; a group without one came from a release whose site could not
  * be settled, and those are exactly the names the README says need a configured
@@ -65,6 +55,14 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * confirm a scene on no evidence at all. Every comparison below requires both
  * sides to be a non-null key, so an unusable key can never equal another one —
  * including another unusable one.
+ *
+ * This happens to be, character for character, the same normalisation
+ * migration 4 uses to build an identity key's site segment (`parse.ts`'s
+ * `value.toLowerCase().replace(/[^a-z0-9]+/g, '')`, pinned by
+ * `site-key.test.ts`). This file never reads `identityKey` itself — `sameSite`
+ * below compares `display.subtitle` — but that equivalence is why comparing
+ * through `comparisonKey` here needs no extra normalisation to agree with the
+ * key's own segment: both are built from the same site name the same way.
  */
 function comparisonKey(text: string): string | null {
   const key = text.toLowerCase().replace(/[^a-z0-9]+/g, '');

@@ -16,7 +16,7 @@ import { reconcileClient } from './pipeline/reconcile.ts';
 import { importDownload } from './pipeline/import.ts';
 import { recoverInterruptedWork } from './pipeline/recover.ts';
 import { createScheduler } from './pipeline/scheduler.ts';
-import { runMetadataPass } from './pipeline/metadata.ts';
+import { createMetadataRunner } from './pipeline/metadata.ts';
 import type { ArtworkDeps } from './media/artwork.ts';
 import { buildServer } from './http/server.ts';
 
@@ -132,17 +132,19 @@ async function main(): Promise<void> {
       log,
     };
     const pluginFor = pluginById(registry);
-    runMetadata = async () => {
-      await runMetadataPass({
-        db,
-        client,
-        pluginFor,
-        artwork,
-        perTick: config.metadata.perTick,
-        now: () => Date.now(),
-        log,
-      });
-    };
+    // `createMetadataRunner` holds the cooldown a 429 sets across ticks, in
+    // its own closure — see its doc comment in pipeline/metadata.ts for why
+    // that has to happen here rather than being recomputed inside
+    // `runMetadataPass` itself, which has no memory of the previous tick.
+    runMetadata = createMetadataRunner({
+      db,
+      client,
+      pluginFor,
+      artwork,
+      perTick: config.metadata.perTick,
+      now: () => Date.now(),
+      log,
+    });
     log(`metadata: enabled, every ${config.metadata.intervalSeconds}s, ${config.metadata.perTick} per tick`);
   }
 
@@ -227,6 +229,12 @@ async function main(): Promise<void> {
     registry,
     pluginForFeed: (feedId) => pluginsByFeed.get(feedId) ?? null,
     artworkDir,
+    // The same decision that governs whether the scheduler gets a metadata
+    // timer at all: `runMetadata` stays `undefined` exactly when there is no
+    // worker that could ever drain a `metadata_queue` row. Derived once, here,
+    // rather than a second time from `config.metadata`/`tpdbClient` — two
+    // copies of that decision are how they eventually disagree.
+    metadataAvailable: runMetadata !== undefined,
   });
 
   await server.listen({ port: config.server.port, host: '0.0.0.0' });

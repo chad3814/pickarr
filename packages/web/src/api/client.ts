@@ -91,17 +91,25 @@ export type MetadataView =
   | { state: 'absent' };
 
 /**
- * The answer to `POST /api/metadata/request`. Four counters: an id naming a
- * group that no longer exists is neither queued, answered, nor waiting, so it
- * gets its own counter (`missing`) rather than being folded into one of the
- * other three. `queued + alreadyAnswered + pending + missing` always equals
- * the number of ids sent.
+ * The answer to `POST /api/metadata/request`. Mirrors `MetadataRequestResponse`
+ * in `packages/core/src/http/views.ts`. Five counters: an id naming a group
+ * that no longer exists is neither queued, answered, nor waiting, so it gets
+ * its own counter (`missing`); an id skipped only because there is currently
+ * no worker to drain a queue row for it — metadata disabled, or enabled with
+ * no client — gets `unavailable`, deliberately distinct from
+ * `alreadyAnswered` since nothing was cached and a later request must still
+ * be free to queue it. `queued + alreadyAnswered + pending + missing +
+ * unavailable` always equals the number of ids sent. The SPA does not
+ * currently read any of these counts — `useGroupMetadata` only cares whether
+ * the call succeeded — but the shape is kept accurate rather than loosened to
+ * `Record<string, number>`.
  */
 export interface MetadataRequestResponse {
   queued: number;
   alreadyAnswered: number;
   pending: number;
   missing: number;
+  unavailable: number;
 }
 
 export interface GroupView {
