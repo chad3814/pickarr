@@ -59,6 +59,11 @@ test('an exact date beats a nearer-titled neighbour inside the window', () => {
   );
   assert.equal(verdict.confirmed?.sourceUuid, 'exact');
   assert.equal(verdict.nearMisses.length, 1, 'the loser is still recorded');
+  assert.equal(
+    verdict.nearMisses[0]?.reason,
+    'lost tiebreak',
+    'a decided tiebreak loser is not the same thing as an ambiguous one',
+  );
 });
 
 test('with no exact date the closest wins', () => {
@@ -81,6 +86,7 @@ test('equally close candidates are broken by title', () => {
     DATED,
   );
   assert.equal(verdict.confirmed?.sourceUuid, 'right-title');
+  assert.equal(verdict.nearMisses[0]?.reason, 'lost tiebreak');
 });
 
 test('two indistinguishable candidates confirm nothing', () => {
@@ -116,4 +122,73 @@ test('no candidates is a clean negative, not an error', () => {
   const verdict = confirmSceneMetadata([], DATED);
   assert.equal(verdict.confirmed, null);
   assert.equal(verdict.nearMisses.length, 0);
+});
+
+// --- Review findings on the code above: these pin the fixes, not the brief. ---
+
+test('two dateless candidates sharing a title key confirm nothing', () => {
+  const query: MetadataQuery = { queries: ['Emma G'], siteName: 'Naughty Office' };
+  const verdict = confirmSceneMetadata(
+    [
+      candidate({ sourceUuid: 'old', title: 'Emma G', date: null }),
+      candidate({ sourceUuid: 'new', title: 'emma-g!', date: null }),
+    ],
+    query,
+  );
+  assert.equal(
+    verdict.confirmed,
+    null,
+    'confirming the first would be guessing by array position, with no date to catch it',
+  );
+  assert.equal(verdict.nearMisses.length, 2);
+  assert.ok(
+    verdict.nearMisses.every((m) => m.reason === 'ambiguous: 2 candidates share this title'),
+  );
+});
+
+test('an empty query cannot be satisfied by an equally empty title', () => {
+  const emptyQueries = confirmSceneMetadata(
+    [candidate({ title: '', date: null })],
+    { queries: [], siteName: 'Naughty Office' },
+  );
+  assert.equal(emptyQueries.confirmed, null, "'' must never equal '' as evidence");
+
+  const emptyStringQuery = confirmSceneMetadata(
+    [candidate({ title: '???', date: null })],
+    { queries: [''], siteName: 'Naughty Office' },
+  );
+  assert.equal(emptyStringQuery.confirmed, null, 'punctuation-only text is also an unusable key');
+});
+
+test('punctuation-only site names do not match each other', () => {
+  const verdict = confirmSceneMetadata(
+    [candidate({ siteName: '---' })],
+    { queries: ['Smokin Hot Brunette'], siteName: '!!!', date: '2021-11-15' },
+  );
+  assert.equal(verdict.confirmed, null);
+  assert.equal(verdict.nearMisses[0]?.reason, 'site differed');
+});
+
+test('a truncated date is not silently completed to the first of the month', () => {
+  const verdict = confirmSceneMetadata(
+    [candidate({ date: '2021-11' })],
+    { queries: ['x'], siteName: 'Naughty Office', date: '2021-11-01' },
+  );
+  assert.equal(verdict.confirmed, null, '"2021-11" must not parse as "2021-11-01"');
+  assert.equal(verdict.nearMisses[0]?.reason, 'date outside window');
+});
+
+test('an overflowing date is not silently rolled into the next month', () => {
+  const verdict = confirmSceneMetadata(
+    [
+      candidate({ sourceUuid: 'fabricated', date: '2021-02-30', title: 'Something Else' }),
+      candidate({ sourceUuid: 'genuine', date: '2021-03-01', title: 'Smokin Hot Brunette' }),
+    ],
+    { queries: ['Smokin Hot Brunette'], siteName: 'Naughty Office', date: '2021-03-02' },
+  );
+  assert.equal(
+    verdict.confirmed?.sourceUuid,
+    'genuine',
+    '"2021-02-30" must not roll into 2021-03-02 and fabricate an exact match',
+  );
 });
