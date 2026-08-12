@@ -5,6 +5,7 @@ import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { getFeedItem } from '../../src/db/feed-items.ts';
 import { getGroup } from '../../src/db/groups.ts';
+import { getGroupMetadata, recordMetadataAnswer } from '../../src/db/metadata.ts';
 import { getRelease, releasesForGroup } from '../../src/db/releases.ts';
 import { maybeNum, type SqlRow } from '../../src/db/row.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
@@ -633,6 +634,72 @@ test('a merge that fails at the delete leaves nothing behind', () => {
   // The rollback also has to close the transaction it opened, or the next
   // operation on this connection begins inside a doomed one.
   assert.equal(db.isTransaction, false);
+  db.close();
+});
+
+test('merging a group that has been browsed does not 500, and leaves the target metadata untouched', () => {
+  const db = openTestDatabase();
+  seedTwoGroups(db);
+
+  // The target has its own answer already; a merge must not disturb it — the
+  // target's answer describes the target's identity, which the merge does not
+  // question.
+  recordMetadataAnswer(db, {
+    groupId: 1,
+    source: 'theporndb',
+    confirmed: {
+      sourceUuid: 'target-uuid', title: 'Target Scene', siteUuid: null, siteId: null,
+      siteName: 'Site', date: '2020-01-01', performers: [], durationSeconds: null,
+      synopsis: null, posterUrl: null,
+    },
+    nearMisses: [],
+    now: 1000,
+  });
+
+  // The source has been browsed too, and picked up all three rows a browse can
+  // leave behind: a confirmed answer, a rejected candidate recorded alongside
+  // it, and — inserted directly, since `recordMetadataAnswer` would not leave
+  // one — a queue row, so the fix is proved against every table `media_groups`
+  // is referenced from, not just whichever one a real sequence happens to hit.
+  recordMetadataAnswer(db, {
+    groupId: 2,
+    source: 'theporndb',
+    confirmed: null,
+    nearMisses: [
+      {
+        candidate: {
+          sourceUuid: 'rejected', title: 'Rejected Scene', siteUuid: null, siteId: null,
+          siteName: 'Site', date: '2020-01-01', performers: [], durationSeconds: null,
+          synopsis: null, posterUrl: null,
+        },
+        reason: 'date outside window',
+      },
+    ],
+    now: 1000,
+  });
+  db.prepare(
+    `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+     VALUES (2, 2000, 0, 2000)`,
+  ).run();
+
+  const result = ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
+  assert.deepEqual(result, { groupId: 1, mergedInto: 1 });
+
+  // The source's own rows describe an identity the merge just concluded was
+  // wrong, and must not survive it, in any of the three tables.
+  assert.equal(getGroupMetadata(db, 2), undefined);
+  assert.equal(db.prepare('SELECT 1 FROM metadata_queue WHERE group_id = ?').get(2), undefined);
+  assert.equal(
+    db.prepare('SELECT 1 FROM metadata_candidates WHERE group_id = ?').get(2),
+    undefined,
+  );
+
+  // The target kept its own answer — a merge is not a reason to forget it or
+  // to re-ask the question.
+  const targetMetadata = getGroupMetadata(db, 1);
+  assert.equal(targetMetadata?.state, 'confirmed');
+  assert.equal(targetMetadata?.title, 'Target Scene');
+
   db.close();
 });
 
