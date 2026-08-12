@@ -412,13 +412,13 @@ holds and the fallback the removed branch used to reach is never taken.
 ## Test-suite blind spots
 
 These are hazards for whoever writes the next test rather than tracked work, so they are
-not filed as issues and stay here in full. The one exception is the last of them, which is
-mechanically preventable and has an issue of its own:
+not filed as issues and stay here in full. One exception is mechanically preventable and
+has an issue of its own:
 [Add a lint rule or shared helper banning `assert.equal(screen.queryByText(x), null)` in web tests](https://github.com/chad3814/pickarr/issues/40).
 
 These are not product defects. They are ways this repo's tests have been green while
 proving less than they appeared to, each found by mutating the source and watching nothing
-fail. They are recorded because all three will recur.
+fail. They are recorded because every one of them has already recurred at least once.
 
 **A round-trip assertion cannot pin any property of a helper shared by both directions.**
 `parse(name) → toManualValues → fromManualValues === parse(name)` looks like a strong
@@ -449,3 +449,37 @@ exists, node:assert deep-inspects a live DOM element to format the failure. Insi
 the file with it. Either way it presents as a bare SIGKILL naming no test, which costs an
 hour to trace. Compare booleans — `packages/web/test/Browse.test.tsx` has a `gone()` helper
 for exactly this.
+
+**A test whose expected value is computed by the code under test cannot detect that code
+changing.** `groupAnchor` was mutated to return a constant `group-x` — every card claiming
+one DOM id, so a Downloads link scrolls to whichever card renders first — and **all 70 web
+tests passed, the end-to-end one included.** Eight separate sites, across three files,
+built their expectation by calling `groupAnchor(...)`. Nothing asserted the literal string.
+An off-by-one variant is just as invisible, so "check it isn't a constant" is not the
+lesson; spelling at least one end literally is.
+
+Two things make this worth its own entry rather than folding into the fixture one above.
+It survived a reviewer who had *correctly identified the same pattern* one level up, in
+`groupAnchorHref` — and then wrote the shared `groupAnchor` the fix depended on without
+pinning it. And it has a subtler form: **pinning a pure function does not pin that anyone
+calls it.** `migrate`'s duplicate-version guard had a passing test and deleting the guard's
+*call site* broke nothing, because the test exercised the function directly. Give the call
+site something drivable.
+
+**A mutant that crashes proves nothing.** Four mutants that copied a column from a
+merge loser to its survivor were first written to read the row *after* the delete, which
+raised `NOT NULL` and failed every test in the file. That looks like overwhelming
+evidence and is none: a mutant must change one behaviour, not break the code. Rewritten to
+copy before the delete, each produced a single targeted failure. The same trap in SQL —
+a narrowing mutant put `WHERE id = media_groups.id` inside a subquery already correlated on
+`media_groups`, so the inner name shadowed the outer and the query was broken rather than
+narrowed. When a mutant fails everything, suspect the mutant.
+
+**A failing web test that skips its cleanup hangs the whole file, and the hang names no
+test.** Three variants so far, all the same shape. `<Downloads />` polls every three
+seconds, so a test that threw before its own `cleanup()` left the interval running and the
+file sat for 180 seconds. A test that mocked `setInterval` and threw left the *reverted*
+mock's timer running for real, ~70 seconds. And the `queryByText` OOM above is the third.
+Use `afterEach(cleanup)`, which runs whether the test passed or threw —
+`Failed.test.tsx`, `Browse.test.tsx` and `Downloads.test.tsx` all do. Per-test `cleanup()`
+calls only run on the happy path, which is the path that did not need them.
