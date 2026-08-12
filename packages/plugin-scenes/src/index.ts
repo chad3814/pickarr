@@ -16,7 +16,7 @@ import {
 import { scoreScene } from './score.ts';
 import { planSceneImport } from './plan-import.ts';
 import { DEFAULT_PATH_TEMPLATE } from './path-template.ts';
-import { sceneMetadataQuery } from './metadata.ts';
+import { confirmSceneMetadata, sceneMetadataQuery } from './metadata.ts';
 
 /**
  * Reads the optional `sites` list out of plugin config.
@@ -53,6 +53,7 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
     planImport: (media, files) => planSceneImport(media, files, { pathTemplate }),
     siteCandidates: (releaseName: string) => sceneSiteCandidates(releaseName, options),
     metadataQuery: (group) => sceneMetadataQuery(group),
+    confirmMetadata: (candidates, query) => confirmSceneMetadata(candidates, query),
     refusalReason: () => lastRefusalReason(),
     manualFields: () => sceneManualFields(),
     // `options` is reassigned by `learnSites`, so each hook reads it when it
