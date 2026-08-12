@@ -1,5 +1,6 @@
+import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { loadConfig } from './config/load.ts';
 import { openDatabase } from './db/open.ts';
@@ -44,11 +45,13 @@ export function resolveArtworkDir(databasePath: string, configured: string | und
  * `plugin: plugin.id`), never a package name, so this must go through
  * `registry.byId` — never `registry.byPackage`, which throws on a lookup key
  * it does not recognise as a package name. Wiring this to `byPackage` would
- * not throw at startup, or even on the first tick that matters: `byPackage`
- * would simply fail to find the id under any package name, so every group
- * would resolve to no plugin and every row would be silently answered
- * `'none'` — the feature running, doing nothing, and logging nothing that
- * looks like a failure.
+ * not fail quietly: it throws on every single row, `lookUpOne`'s catch turns
+ * that into a deferral logged as `unexpected failure: ...`, and only once a
+ * row has retried and failed `MAX_METADATA_ATTEMPTS` times does it finally
+ * get answered `'none'`. The bug is real either way — every group ends up
+ * with no plugin — but it announces itself as fifty rounds of retried
+ * failures per row instead of as a crash, which is exactly the shape of
+ * thing a glance at the logs is likely to miss.
  */
 export function pluginById(registry: PluginRegistry): (id: string) => MediaTypePlugin | null {
   return (id) => registry.byId(id) ?? null;
@@ -238,13 +241,49 @@ async function main(): Promise<void> {
   }
 }
 
-// Guarded so this module can be imported — by tests, for the small pure
-// functions above — without also booting the whole application. `argv[1]` is
-// the script Node was actually asked to run; comparing it against this
-// module's own URL is the standard way to tell "run directly" apart from
-// "imported".
+/**
+ * Fallback for `import.meta.main` on a Node build where it is not yet a
+ * boolean (see `isEntryPoint` below) — the same "is this the script Node was
+ * actually asked to run" question, answered by comparing `argv[1]` against
+ * this module's own path instead.
+ *
+ * Both sides are realpathed before comparing. `import.meta.url` already
+ * names this module with symlinks resolved; `argv[1]` does not, so running
+ * through a symlink (`node /some/link/main.js` pointing at this file) would
+ * otherwise compare a resolved path against an unresolved one, find them
+ * unequal, and boot into "imported, do nothing" — the worst outcome here,
+ * since the process still exits 0 having started nothing.
+ *
+ * Wrapped in a `try`/`catch` so a missing or unreadable `argv[1]` cannot
+ * itself throw during startup; either failure mode conservatively answers
+ * "not the entry point" rather than crashing on what should be a yes/no
+ * question.
+ *
+ * `realpathSync`, not `fs.promises.realpath`: this runs once at module load,
+ * before anything else is on the event loop to be blocked by it — the same
+ * exception this project's async-over-sync rule already carves out for
+ * build-time and startup-time work that has nothing else to wait on.
+ */
+export function entryFromArgv(): boolean {
+  const argv1 = process.argv[1];
+  if (argv1 === undefined) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+// `import.meta.main` is symlink-correct and is what Node itself recommends
+// for this check, but this package's `engines` field only requires Node
+// >=24, and `import.meta.main` is `undefined` — not `false` — on 24.0 and
+// 24.1, before it shipped. Trusting it unconditionally would make
+// `isEntryPoint` falsy everywhere on those versions and the application
+// would never start; checked at runtime with `typeof`, not by version
+// number, since that is what actually determines whether the value means
+// anything.
 const isEntryPoint =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+  typeof import.meta.main === 'boolean' ? import.meta.main : entryFromArgv();
 
 if (isEntryPoint) {
   main().catch((error: Error) => {
