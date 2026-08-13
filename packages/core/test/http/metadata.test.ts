@@ -13,8 +13,11 @@ import {
   getGroupMetadata,
   recordMetadataAnswer,
   setPosterPath,
+  type GroupMetadata,
 } from '../../src/db/metadata.ts';
+import { upsertPerformers, setPerformerArtwork, type PerformerRow } from '../../src/db/performers.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
+import { metadataViewOf } from '../../src/http/views.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 import type { DownloadClient } from '../../src/clients/types.ts';
 
@@ -114,13 +117,111 @@ function candidate(overrides: Partial<MetadataCandidate> = {}): MetadataCandidat
     siteId: 1,
     siteName: 'Some Site',
     date: '2024-01-01',
-    performers: ['Jane Doe'],
+    performers: [],
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     posterUrl: 'https://example.invalid/poster.jpg',
+    slug: null,
     ...overrides,
   };
 }
+
+/** A confirmed `GroupMetadata`, for exercising `metadataViewOf` directly. */
+function confirmedMetadata(overrides: Partial<GroupMetadata> = {}): GroupMetadata {
+  return {
+    groupId: 1,
+    state: 'confirmed',
+    source: 'theporndb',
+    sourceUuid: 'scene-uuid',
+    title: 'A Scene',
+    performers: [],
+    releaseDate: '2024-01-01',
+    durationSeconds: 1200,
+    synopsis: 'A synopsis',
+    posterUrl: null,
+    posterPath: null,
+    sceneSlug: null,
+    fetchedAt: NOW,
+    ...overrides,
+  };
+}
+
+/** A `PerformerRow`, for exercising `metadataViewOf` directly. */
+function row(overrides: Partial<PerformerRow> = {}): PerformerRow {
+  return {
+    id: 1,
+    sourceUuid: 'performer-uuid',
+    slug: 'alice-maze',
+    name: 'Alice Maze',
+    kind: 'performer',
+    faceUrl: null,
+    facePath: null,
+    imageUrl: null,
+    imagePath: null,
+    ...overrides,
+  };
+}
+
+test('a performer links to /performers/ and a site performer to /performer-sites/', () => {
+  const view = metadataViewOf(confirmedMetadata(), [
+    row({ id: 1, slug: 'alice-maze', kind: 'performer' }),
+    row({ id: 2, slug: '6061-alice-maze', kind: 'performer-site' }),
+  ]);
+  assert.ok(view.state === 'confirmed');
+  // Literal URLs. An expectation built by calling the same helper the view
+  // calls would pass against any consistent-but-wrong mapping.
+  assert.deepEqual(view.performers.map((p) => p.url), [
+    'https://theporndb.net/performers/alice-maze',
+    'https://theporndb.net/performer-sites/6061-alice-maze',
+  ]);
+});
+
+test('a scene slug becomes a scene url, and its absence a null', () => {
+  const withScene = metadataViewOf(confirmedMetadata({ sceneSlug: 'my-scene' }), []);
+  assert.ok(withScene.state === 'confirmed');
+  assert.equal(withScene.sceneUrl, 'https://theporndb.net/scenes/my-scene');
+
+  const withoutScene = metadataViewOf(confirmedMetadata({ sceneSlug: null }), []);
+  assert.ok(withoutScene.state === 'confirmed');
+  assert.equal(withoutScene.sceneUrl, null);
+});
+
+test('a group with no performer rows falls back to the stored names', () => {
+  // Groups answered before migration 7 keep their cast as plain names until
+  // their refetch lands, rather than losing it.
+  const view = metadataViewOf(confirmedMetadata({ performers: ['Alice Maze'] }), []);
+  assert.ok(view.state === 'confirmed');
+  assert.deepEqual(view.performerNames, ['Alice Maze']);
+  assert.deepEqual(view.performers, []);
+});
+
+test('a group with performer rows reports no fallback names', () => {
+  // Both populated would leave the card to choose, and two lists that can
+  // disagree is exactly what the separate field exists to avoid.
+  const view = metadataViewOf(confirmedMetadata({ performers: ['Alice Maze'] }), [row({ id: 1 })]);
+  assert.ok(view.state === 'confirmed');
+  assert.deepEqual(view.performerNames, []);
+  assert.equal(view.performers.length, 1);
+});
+
+test('a performer reports which of its two images are cached', () => {
+  // Both directions, both fields. `hasAvatar` is what decides whether the
+  // card draws an avatar at all, so a derivation stuck at false removes the
+  // feature everywhere while every other assertion in this file still holds:
+  // the fixtures elsewhere leave both paths null, which is the value a broken
+  // derivation returns anyway.
+  const view = metadataViewOf(confirmedMetadata(), [
+    row({ id: 1, facePath: 'performer-face-1.jpg', imagePath: 'performer-image-1.jpg' }),
+    row({ id: 2, facePath: 'performer-face-2.jpg', imagePath: null }),
+    row({ id: 3, facePath: null, imagePath: 'performer-image-3.jpg' }),
+    row({ id: 4, facePath: null, imagePath: null }),
+  ]);
+  assert.ok(view.state === 'confirmed');
+  assert.deepEqual(
+    view.performers.map((performer) => [performer.hasAvatar, performer.hasImage]),
+    [[true, true], [true, false], [false, true], [false, false]],
+  );
+});
 
 test('requesting metadata queues only the unanswered', async () => {
   const db = openTestDatabase();
@@ -313,11 +414,13 @@ test('metadata reads report pending, none and confirmed distinctly', async () =>
   assert.deepEqual(body[String(confirmed)], {
     state: 'confirmed',
     title: 'A Scene',
-    performers: ['Jane Doe'],
+    performers: [],
+    performerNames: [],
     releaseDate: '2024-01-01',
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     hasPoster: false,
+    sceneUrl: null,
   });
   assert.deepEqual(body[String(none)], { state: 'none' });
   // enqueueMetadata (via the `pending` group() call above) inserted the queue
@@ -493,14 +596,62 @@ test('browse carries metadata and reads it in one query', async () => {
   assert.deepEqual(byId.get(g1), {
     state: 'confirmed',
     title: 'Alpha Scene',
-    performers: ['Jane Doe'],
+    performers: [],
+    performerNames: [],
     releaseDate: '2024-01-01',
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     hasPoster: false,
+    sceneUrl: null,
   });
   assert.deepEqual(byId.get(g2), { state: 'none' });
   assert.deepEqual(byId.get(g3), { state: 'absent' });
+
+  await server.close();
+  db.close();
+});
+
+test('browse gives each group its own cast, never the other one\'s', async () => {
+  // `performers.get(group.id) ?? []` on the same line as the already-tested
+  // `metadata.get(group.id)` — this is the case that would notice the two
+  // groups' maps getting crossed, which an empty-cast fixture never can.
+  const db = openTestDatabase();
+  const g1 = group(db, 'askable', 'Alpha');
+  const g2 = group(db, 'askable', 'Beta');
+
+  recordMetadataAnswer(db, {
+    groupId: g1,
+    source: 'theporndb',
+    confirmed: candidate({
+      performers: [
+        { sourceUuid: 'p1', slug: 'alice-maze', name: 'Alice Maze', kind: 'performer', faceUrl: null, imageUrl: null },
+      ],
+    }),
+    nearMisses: [],
+    now: NOW,
+  });
+  recordMetadataAnswer(db, {
+    groupId: g2,
+    source: 'theporndb',
+    confirmed: candidate({
+      performers: [
+        { sourceUuid: 'p2', slug: 'bella-rolland', name: 'Bella Rolland', kind: 'performer', faceUrl: null, imageUrl: null },
+      ],
+    }),
+    nearMisses: [],
+    now: NOW,
+  });
+
+  const server = buildServer(deps(db));
+  const response = await server.inject({ method: 'GET', url: '/api/browse?limit=10' });
+  assert.equal(response.statusCode, 200);
+
+  const body = response.json() as {
+    groups: { id: number; metadata: { performers: { name: string }[] } }[];
+  };
+  const namesById = new Map(body.groups.map((g) => [g.id, g.metadata.performers.map((p) => p.name)]));
+  assert.deepEqual(namesById.get(g1), ['Alice Maze']);
+  assert.deepEqual(namesById.get(g2), ['Bella Rolland']);
 
   await server.close();
   db.close();
@@ -577,6 +728,115 @@ test('the poster route cannot escape the artwork directory', async () => {
     url: '/api/groups/..%2f..%2fetc%2fpasswd/poster',
   });
   assert.equal(response.statusCode, 400, 'the id param is an integer schema, so this never reaches the filesystem');
+
+  await server.close();
+  db.close();
+});
+
+test('the avatar route serves the cached face and 404s without one', async () => {
+  // …mirroring the poster route's tests, including the cache-control header.
+  const db = openTestDatabase();
+  const artworkDir = await mkdtemp(join(tmpdir(), 'pickarr-avatar-'));
+  try {
+    const [withFace] = upsertPerformers(db, 'theporndb', [
+      { sourceUuid: 'u1', slug: 'has-face', name: 'Has Face', kind: 'performer', faceUrl: 'https://example.invalid/f.jpg', imageUrl: null },
+    ], NOW);
+    const [neverFetched] = upsertPerformers(db, 'theporndb', [
+      { sourceUuid: 'u2', slug: 'no-face', name: 'No Face', kind: 'performer', faceUrl: null, imageUrl: null },
+    ], NOW);
+    const [missingFile] = upsertPerformers(db, 'theporndb', [
+      { sourceUuid: 'u3', slug: 'missing-file', name: 'Missing File', kind: 'performer', faceUrl: 'https://example.invalid/f.jpg', imageUrl: null },
+    ], NOW);
+
+    const bytes = Buffer.from('not-really-a-jpeg');
+    await writeFile(join(artworkDir, `performer-face-${withFace}.jpg`), bytes);
+    setPerformerArtwork(db, withFace!, 'face', `performer-face-${withFace}.jpg`);
+    setPerformerArtwork(db, missingFile!, 'face', `performer-face-${missingFile}.jpg`); // never written to disk
+
+    const server = buildServer(deps(db, { artworkDir }));
+
+    const ok = await server.inject({ method: 'GET', url: `/api/performers/${withFace}/avatar` });
+    assert.equal(ok.statusCode, 200);
+    assert.equal(ok.headers['content-type'], 'image/jpeg');
+    assert.equal(ok.headers['cache-control'], 'public, max-age=86400');
+    assert.deepEqual(ok.rawPayload, bytes);
+
+    const noSuchPerformer = await server.inject({ method: 'GET', url: '/api/performers/999999/avatar' });
+    assert.equal(noSuchPerformer.statusCode, 404);
+
+    const noFace = await server.inject({ method: 'GET', url: `/api/performers/${neverFetched}/avatar` });
+    assert.equal(noFace.statusCode, 404);
+
+    const gone = await server.inject({ method: 'GET', url: `/api/performers/${missingFile}/avatar` });
+    assert.equal(gone.statusCode, 404);
+
+    await server.close();
+  } finally {
+    db.close();
+    await rm(artworkDir, { recursive: true, force: true });
+  }
+});
+
+test('the avatar route refuses a traversal in the id', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({ method: 'GET', url: '/api/performers/..%2f..%2fetc/avatar' });
+  assert.equal(response.statusCode, 400);
+
+  await server.close();
+  db.close();
+});
+
+test('the image route serves the cached image and 404s without one', async () => {
+  const db = openTestDatabase();
+  const artworkDir = await mkdtemp(join(tmpdir(), 'pickarr-image-'));
+  try {
+    const [withImage] = upsertPerformers(db, 'theporndb', [
+      { sourceUuid: 'u1', slug: 'has-image', name: 'Has Image', kind: 'performer', faceUrl: null, imageUrl: 'https://example.invalid/i.jpg' },
+    ], NOW);
+    const [neverFetched] = upsertPerformers(db, 'theporndb', [
+      { sourceUuid: 'u2', slug: 'no-image', name: 'No Image', kind: 'performer', faceUrl: null, imageUrl: null },
+    ], NOW);
+    const [missingFile] = upsertPerformers(db, 'theporndb', [
+      { sourceUuid: 'u3', slug: 'missing-file', name: 'Missing File', kind: 'performer', faceUrl: null, imageUrl: 'https://example.invalid/i.jpg' },
+    ], NOW);
+
+    const bytes = Buffer.from('not-really-a-jpeg');
+    await writeFile(join(artworkDir, `performer-image-${withImage}.jpg`), bytes);
+    setPerformerArtwork(db, withImage!, 'image', `performer-image-${withImage}.jpg`);
+    setPerformerArtwork(db, missingFile!, 'image', `performer-image-${missingFile}.jpg`); // never written to disk
+
+    const server = buildServer(deps(db, { artworkDir }));
+
+    const ok = await server.inject({ method: 'GET', url: `/api/performers/${withImage}/image` });
+    assert.equal(ok.statusCode, 200);
+    assert.equal(ok.headers['content-type'], 'image/jpeg');
+    assert.equal(ok.headers['cache-control'], 'public, max-age=86400');
+    assert.deepEqual(ok.rawPayload, bytes);
+
+    const noSuchPerformer = await server.inject({ method: 'GET', url: '/api/performers/999999/image' });
+    assert.equal(noSuchPerformer.statusCode, 404);
+
+    const noImage = await server.inject({ method: 'GET', url: `/api/performers/${neverFetched}/image` });
+    assert.equal(noImage.statusCode, 404);
+
+    const gone = await server.inject({ method: 'GET', url: `/api/performers/${missingFile}/image` });
+    assert.equal(gone.statusCode, 404);
+
+    await server.close();
+  } finally {
+    db.close();
+    await rm(artworkDir, { recursive: true, force: true });
+  }
+});
+
+test('the image route refuses a traversal in the id', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({ method: 'GET', url: '/api/performers/..%2f..%2fetc/image' });
+  assert.equal(response.statusCode, 400);
 
   await server.close();
   db.close();

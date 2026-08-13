@@ -4,11 +4,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaTypePlugin, MetadataCandidate } from '@pickarr/plugin-api';
+import type { MediaTypePlugin, MetadataCandidate, MetadataPerformer } from '@pickarr/plugin-api';
 import createScenesPlugin from '@pickarr/plugin-scenes';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { insertGroup } from '../../src/db/groups.ts';
 import { dueMetadataQueue, enqueueMetadata, getGroupMetadata } from '../../src/db/metadata.ts';
+import { performersForGroups } from '../../src/db/performers.ts';
 import { getDiscoveredSite, recordDiscoveredSite } from '../../src/db/sites.ts';
 import { RateLimited, type FetchImpl, type SceneLookupClient } from '../../src/clients/theporndb.ts';
 import type { ArtworkDeps } from '../../src/media/artwork.ts';
@@ -77,10 +78,23 @@ function candidate(overrides: Partial<MetadataCandidate> = {}): MetadataCandidat
     siteId: 1,
     siteName: 'Some Site',
     date: null,
-    performers: ['Jane Doe'],
+    performers: [],
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     posterUrl: null,
+    slug: null,
+    ...overrides,
+  };
+}
+
+function performer(overrides: Partial<MetadataPerformer> = {}): MetadataPerformer {
+  return {
+    sourceUuid: 'performer-uuid',
+    slug: 'a-performer',
+    name: 'A Performer',
+    kind: 'performer',
+    faceUrl: null,
+    imageUrl: null,
     ...overrides,
   };
 }
@@ -122,6 +136,32 @@ const fetchJpeg: FetchImpl = () =>
   );
 
 const fetchNotFound: FetchImpl = () => Promise.resolve(new Response(null, { status: 404 }));
+
+/** Serves `image/jpeg` for every request, recording the url each call asked for. */
+function trackingFetchJpeg(fetched: string[]): FetchImpl {
+  return (url) => {
+    fetched.push(url);
+    return Promise.resolve(
+      new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+    );
+  };
+}
+
+/**
+ * Serves `image/jpeg` for every url except those named in `notFoundUrls`,
+ * which 404 — and records every url asked for, successful or not.
+ */
+function trackingFetchExcept(fetched: string[], notFoundUrls: readonly string[]): FetchImpl {
+  return (url) => {
+    fetched.push(url);
+    if (notFoundUrls.includes(url)) {
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    return Promise.resolve(
+      new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+    );
+  };
+}
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-metadata-'));
@@ -304,6 +344,231 @@ test('a poster failure still writes the metadata row', async () => {
     const stored = getGroupMetadata(db, groupId);
     assert.equal(stored?.state, 'confirmed');
     assert.equal(stored?.posterPath, null, 'a poster failure must not fail the metadata answer');
+  });
+});
+
+test('a group already holding a poster is not made to download it again', async () => {
+  // The poster half of 'a performer already holding artwork is not
+  // refetched'. Migration 7 queues every confirmed group in the library, and
+  // `cacheImage` keys the poster on the group id, so without the cached-path
+  // guard the backfill spends one full image download per group to overwrite
+  // a byte-identical file — the whole library's worth, on first boot after
+  // the upgrade, and no test would have noticed.
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    const groupId = makeGroup(db, 'A Scene', 'Some Site');
+    enqueueMetadata(db, [groupId], 1_000);
+
+    const scene = candidate({
+      title: 'A Scene',
+      siteName: 'Some Site',
+      posterUrl: 'https://example.test/poster.jpg',
+    });
+
+    const firstPassFetches: string[] = [];
+    await runMetadataPass(
+      deps({
+        db,
+        client: fakeSceneClient(() => [scene]),
+        now: () => 1_000,
+        artwork: { dir, fetchImpl: trackingFetchJpeg(firstPassFetches), log: () => undefined },
+      }),
+    );
+    assert.deepEqual(firstPassFetches, ['https://example.test/poster.jpg']);
+
+    // Re-queued the way migration 7 does it — straight into the table, past
+    // `enqueueMetadata`'s already-answered guard, which is exactly the path
+    // that makes this cost real rather than hypothetical.
+    db.prepare(
+      `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at) VALUES (?, ?, 0, ?)`,
+    ).run(groupId, 2_000, 2_000);
+
+    const secondPassFetches: string[] = [];
+    const result = await runMetadataPass(
+      deps({
+        db,
+        client: fakeSceneClient(() => [scene]),
+        now: () => 2_000,
+        artwork: { dir, fetchImpl: trackingFetchJpeg(secondPassFetches), log: () => undefined },
+      }),
+    );
+
+    assert.equal(result.confirmed, 1);
+    assert.deepEqual(secondPassFetches, [], 'the poster is already on disk under this group id');
+    assert.equal(getGroupMetadata(db, groupId)?.posterPath, `${groupId}.jpg`);
+  });
+});
+
+test('a confirmed answer caches each performer\'s face and image', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    const groupId = makeGroup(db, 'A Scene', 'Some Site');
+    enqueueMetadata(db, [groupId], 1_000);
+
+    const cast = performer({
+      sourceUuid: 'performer-1',
+      faceUrl: 'https://f/face.jpg',
+      imageUrl: 'https://i/image.jpg',
+    });
+    const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [cast] });
+    const client = fakeSceneClient(() => [scene]);
+
+    const fetched: string[] = [];
+    const result = await runMetadataPass(
+      deps({ db, client, now: () => 1_000, artwork: { dir, fetchImpl: trackingFetchJpeg(fetched), log: () => undefined } }),
+    );
+
+    assert.equal(result.confirmed, 1);
+    assert.deepEqual(fetched.toSorted(), ['https://f/face.jpg', 'https://i/image.jpg']);
+
+    const found = performersForGroups(db, [groupId]).get(groupId)!;
+    assert.equal(found.length, 1);
+    const stored = found[0]!;
+    assert.equal(stored.facePath, `performer-face-${stored.id}.jpg`);
+    assert.equal(stored.imagePath, `performer-image-${stored.id}.jpg`);
+  });
+});
+
+test('a performer already holding artwork is not refetched', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+
+    const cast = performer({
+      sourceUuid: 'shared-performer',
+      faceUrl: 'https://f/face.jpg',
+      imageUrl: 'https://i/image.jpg',
+    });
+
+    const groupOneId = makeGroup(db, 'Scene One', 'Some Site');
+    enqueueMetadata(db, [groupOneId], 1_000);
+    const sceneOne = candidate({ title: 'Scene One', siteName: 'Some Site', performers: [cast] });
+    const clientOne = fakeSceneClient(() => [sceneOne]);
+
+    const firstPassFetches: string[] = [];
+    await runMetadataPass(
+      deps({
+        db,
+        client: clientOne,
+        now: () => 1_000,
+        artwork: { dir, fetchImpl: trackingFetchJpeg(firstPassFetches), log: () => undefined },
+      }),
+    );
+    assert.deepEqual(firstPassFetches.toSorted(), ['https://f/face.jpg', 'https://i/image.jpg']);
+
+    const groupTwoId = makeGroup(db, 'Scene Two', 'Some Site');
+    enqueueMetadata(db, [groupTwoId], 2_000);
+    const sceneTwo = candidate({ title: 'Scene Two', siteName: 'Some Site', performers: [cast] });
+    const clientTwo = fakeSceneClient(() => [sceneTwo]);
+
+    const secondPassFetches: string[] = [];
+    const result = await runMetadataPass(
+      deps({
+        db,
+        client: clientTwo,
+        now: () => 2_000,
+        artwork: { dir, fetchImpl: trackingFetchJpeg(secondPassFetches), log: () => undefined },
+      }),
+    );
+
+    assert.equal(result.confirmed, 1);
+    assert.deepEqual(secondPassFetches, [], 'the shared performer already has artwork; nothing should be fetched');
+
+    const groupTwoPerformers = performersForGroups(db, [groupTwoId]).get(groupTwoId)!;
+    assert.equal(groupTwoPerformers.length, 1);
+    assert.equal(groupTwoPerformers[0]!.facePath, `performer-face-${groupTwoPerformers[0]!.id}.jpg`);
+  });
+});
+
+test('a performer with one kind cached and the other still missing is refetched only for the missing kind', async () => {
+  // `performersNeedingArtwork`'s WHERE clause is an OR across the two
+  // url/path pairs, so a performer with a cached face but no image yet is
+  // still returned by it — the outer filter alone cannot tell the two kinds
+  // apart. Only the inner per-kind `path !== null` check stops the already-
+  // cached face from being fetched again once that row comes back through.
+  // This is the state the "already holding artwork" test above never
+  // reaches, because its performer is fully cached on both kinds after pass
+  // one.
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+
+    const faceUrl = 'https://f/face.jpg';
+    const imageUrl = 'https://i/image.jpg';
+    const cast = performer({ sourceUuid: 'half-cached-performer', faceUrl, imageUrl });
+
+    const groupOneId = makeGroup(db, 'Scene One', 'Some Site');
+    enqueueMetadata(db, [groupOneId], 1_000);
+    const sceneOne = candidate({ title: 'Scene One', siteName: 'Some Site', performers: [cast] });
+    const clientOne = fakeSceneClient(() => [sceneOne]);
+
+    const firstPassFetches: string[] = [];
+    // The image 404s on this pass; the face succeeds — leaving the performer
+    // with a face_path but a still-null image_path.
+    await runMetadataPass(
+      deps({
+        db,
+        client: clientOne,
+        now: () => 1_000,
+        artwork: { dir, fetchImpl: trackingFetchExcept(firstPassFetches, [imageUrl]), log: () => undefined },
+      }),
+    );
+    assert.deepEqual(firstPassFetches.toSorted(), [faceUrl, imageUrl]);
+    const afterFirstPass = performersForGroups(db, [groupOneId]).get(groupOneId)![0]!;
+    assert.equal(afterFirstPass.facePath, `performer-face-${afterFirstPass.id}.jpg`);
+    assert.equal(afterFirstPass.imagePath, null, 'the image must still be missing going into pass two');
+
+    const groupTwoId = makeGroup(db, 'Scene Two', 'Some Site');
+    enqueueMetadata(db, [groupTwoId], 2_000);
+    const sceneTwo = candidate({ title: 'Scene Two', siteName: 'Some Site', performers: [cast] });
+    const clientTwo = fakeSceneClient(() => [sceneTwo]);
+
+    const secondPassFetches: string[] = [];
+    // Both urls succeed this time — if the cached face were wrongly
+    // refetched, it would show up in `secondPassFetches` too.
+    const result = await runMetadataPass(
+      deps({
+        db,
+        client: clientTwo,
+        now: () => 2_000,
+        artwork: { dir, fetchImpl: trackingFetchExcept(secondPassFetches, []), log: () => undefined },
+      }),
+    );
+
+    assert.equal(result.confirmed, 1);
+    assert.deepEqual(
+      secondPassFetches,
+      [imageUrl],
+      'only the still-missing image must be fetched; the already-cached face must not be',
+    );
+
+    const groupTwoPerformers = performersForGroups(db, [groupTwoId]).get(groupTwoId)!;
+    assert.equal(groupTwoPerformers[0]!.facePath, `performer-face-${groupTwoPerformers[0]!.id}.jpg`);
+    assert.equal(groupTwoPerformers[0]!.imagePath, `performer-image-${groupTwoPerformers[0]!.id}.jpg`);
+  });
+});
+
+test('an artwork failure does not fail the answer', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    const groupId = makeGroup(db, 'A Scene', 'Some Site');
+    enqueueMetadata(db, [groupId], 1_000);
+
+    const cast = performer({
+      sourceUuid: 'performer-404',
+      faceUrl: 'https://f/missing-face.jpg',
+      imageUrl: 'https://i/missing-image.jpg',
+    });
+    const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [cast] });
+    const client = fakeSceneClient(() => [scene]);
+
+    const result = await runMetadataPass(
+      deps({ db, client, now: () => 1_000, artwork: { dir, fetchImpl: fetchNotFound, log: () => undefined } }),
+    );
+
+    assert.equal(result.confirmed, 1);
+    assert.equal(getGroupMetadata(db, groupId)?.state, 'confirmed');
+    const found = performersForGroups(db, [groupId]).get(groupId)!;
+    assert.equal(found[0]!.facePath, null);
+    assert.equal(found[0]!.imagePath, null);
   });
 });
 

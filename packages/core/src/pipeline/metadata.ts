@@ -7,15 +7,17 @@ import type {
   MetadataVerdict,
 } from '@pickarr/plugin-api';
 import { RateLimited, type SceneLookupClient } from '../clients/theporndb.ts';
-import { cachePoster, type ArtworkDeps } from '../media/artwork.ts';
+import { cacheImage, performerArtworkKey, type ArtworkDeps } from '../media/artwork.ts';
 import { getGroup } from '../db/groups.ts';
 import {
   deferMetadata,
   dueMetadataQueue,
+  getGroupMetadata,
   recordMetadataAnswer,
   setPosterPath,
   type MetadataQueueRow,
 } from '../db/metadata.ts';
+import { performersForGroups, performersNeedingArtwork, setPerformerArtwork } from '../db/performers.ts';
 import { rememberSiteId, siteIdForName } from '../db/sites.ts';
 
 /** Doubling backoff from one minute, capped so a long outage never stops retrying. */
@@ -409,10 +411,59 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   recordMetadataAnswer(deps.db, { groupId: row.groupId, source: client.source, confirmed, nearMisses, now });
 
   // A poster failure is not a metadata failure: the answer above is already
-  // written, and `cachePoster` never throws, so nothing here can undo it.
-  if (confirmed !== null && confirmed.posterUrl !== null) {
-    const posterPath = await cachePoster(deps.artwork, row.groupId, confirmed.posterUrl);
+  // written, and `cacheImage` never throws, so nothing here can undo it.
+  //
+  // Skipped when a path is already stored, which is the same rule
+  // `performersNeedingArtwork` applies to avatars twenty lines below, for the
+  // same reason and now stated once for both. Without it, migration 7's
+  // backfill spends one full image download per confirmed group in the
+  // library to overwrite a byte-identical file: `cacheImage` keys the poster
+  // on the group id alone, so a refetch of the same scene writes the same
+  // bytes to the same name.
+  //
+  // The cost of the rule is that a poster the provider *moved* is not
+  // re-fetched — the stored path still names the old file, which is stale
+  // decoration rather than a wrong answer. Telling the two apart would mean
+  // reading the previous `poster_url` before the upsert overwrites it, and
+  // the same argument then applies to `face_url` and `image_url`; it is worth
+  // doing for all three or none, and this branch is not the place to widen
+  // it. The row's `poster_url` is kept current either way, so a future pass
+  // has what it needs.
+  const cachedPoster = getGroupMetadata(deps.db, row.groupId)?.posterPath ?? null;
+  if (confirmed !== null && confirmed.posterUrl !== null && cachedPoster === null) {
+    const posterPath = await cacheImage(deps.artwork, String(row.groupId), confirmed.posterUrl);
     if (posterPath !== null) setPosterPath(deps.db, row.groupId, posterPath);
+  }
+
+  // Performer artwork, on the same terms as the poster above: the answer is
+  // already written, `cacheImage` never throws, and a missing avatar is not a
+  // missing scene.
+  //
+  // `performersNeedingArtwork` and the per-kind check below guard different
+  // things. The query's WHERE is an OR across the two url/path pairs, so it
+  // skips only a performer who needs neither image — the common case, once
+  // most of the table is already cached — sparing that performer the loop
+  // below entirely. It still returns a performer who needs just one of the
+  // two, because the OR is satisfied by either half. The per-kind `path !==
+  // null` check is what stops that performer's *other*, already-cached half
+  // from being fetched again: one url succeeding while the other 404s or
+  // times out is an ordinary partial failure, not a hypothetical, and this
+  // is the only thing standing between it and a repeat fetch every time a
+  // later group names the same performer.
+  const performerIds = (performersForGroups(deps.db, [row.groupId]).get(row.groupId) ?? [])
+    .map((performer) => performer.id);
+  for (const performer of performersNeedingArtwork(deps.db, performerIds)) {
+    for (const kind of ['face', 'image'] as const) {
+      const url = kind === 'face' ? performer.faceUrl : performer.imageUrl;
+      const path = kind === 'face' ? performer.facePath : performer.imagePath;
+      if (url === null || path !== null) continue;
+      // Sequential on purpose: these are remote fetches against one provider,
+      // and the pass already walks groups one at a time rather than opening
+      // the throttle this file's cooldown logic exists to respect.
+      // eslint-disable-next-line no-await-in-loop -- one provider, one group at a time; not batched on purpose
+      const stored = await cacheImage(deps.artwork, performerArtworkKey(performer.id, kind), url);
+      if (stored !== null) setPerformerArtwork(deps.db, performer.id, kind, stored);
+    }
   }
 
   return { kind: confirmed === null ? 'none' : 'confirmed', cooldownUntil: null };

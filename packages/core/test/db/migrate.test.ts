@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { assertUniqueVersions, migrate } from '../../src/db/migrate.ts';
 import { migrations, type Migration } from '../../src/db/migrations.ts';
+import { dueMetadataQueue, enqueueMetadata } from '../../src/db/metadata.ts';
 
 test('migrate creates every table', () => {
   const db = openTestDatabase();
@@ -937,6 +938,79 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7]);
   db.close();
+});
+
+// --- Migration 7: performer identities and the refetch backfill -------------
+
+test('migration 7 re-queues confirmed groups so they refetch with performers', () => {
+  const db = databaseAtVersion(6);
+  db.prepare(`INSERT INTO media_groups (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+              VALUES (1,'t','a','{}','a',1,1), (2,'t','b','{}','b',1,1), (3,'t','c','{}','c',1,1)`).run();
+  db.prepare(`INSERT INTO group_metadata (group_id, state, source, fetched_at)
+              VALUES (1,'confirmed','theporndb',1), (2,'none','theporndb',1)`).run();
+
+  migrations.find((m) => m.version === 7)!.up(db);
+
+  // Confirmed only. A 'none' answer has nothing to enrich — re-asking it is
+  // the loop `enqueueMetadata`'s guard exists to prevent — and group 3 was
+  // never asked, so it queues on its own when someone browses to it.
+  const queued = db.prepare('SELECT group_id FROM metadata_queue ORDER BY group_id').all();
+  assert.deepEqual(queued.map((r) => (r as { group_id: number }).group_id), [1]);
+});
+
+test('a backfilled row is due at once but yields to anything requested after the upgrade', () => {
+  // `dueMetadataQueue` filters on `next_at` and orders by `requested_at`, and
+  // the backfill uses the two columns against each other on purpose. Stamping
+  // `requested_at` from `fetched_at` — the group's own answer time, the
+  // obvious choice — puts every backfill row ahead of every request made
+  // after the upgrade, so at the worker's ~1 group/s a few thousand groups
+  // means hours in which a freshly ingested group the user is looking at sits
+  // at `pending` behind the whole backlog.
+  const db = databaseAtVersion(6);
+  db.prepare(`INSERT INTO media_groups (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+              VALUES (1,'t','a','{}','a',1,1), (2,'t','b','{}','b',1,1)`).run();
+  db.prepare(`INSERT INTO group_metadata (group_id, state, source, fetched_at)
+              VALUES (1,'confirmed','theporndb',1000)`).run();
+
+  migrations.find((m) => m.version === 7)!.up(db);
+
+  // Group 2 is browsed after the upgrade, at a real clock reading.
+  const now = 1_760_000_000_000;
+  enqueueMetadata(db, [2], now);
+
+  assert.deepEqual(
+    dueMetadataQueue(db, now, 10).map((r) => r.groupId),
+    [2, 1],
+    'the newly browsed group goes first, and the backfilled one is still due behind it',
+  );
+});
+
+test('migration 7 adds the performer tables and the scene slug', () => {
+  const db = databaseAtVersion(7);
+  // Literal column lists, not a shape read back out of the schema: an
+  // assertion derived from the thing under test cannot detect it changing.
+  const columns = db.prepare('SELECT name FROM pragma_table_info(?)');
+  assert.deepEqual(
+    columns.all('performers').map((r) => (r as { name: string }).name),
+    ['id', 'source', 'source_uuid', 'slug', 'name', 'kind', 'face_url', 'face_path', 'image_url', 'image_path', 'fetched_at'],
+  );
+  assert.deepEqual(
+    columns.all('group_performers').map((r) => (r as { name: string }).name),
+    ['group_id', 'performer_id', 'position'],
+  );
+  assert.ok(
+    columns.all('group_metadata').some((r) => (r as { name: string }).name === 'scene_slug'),
+  );
+});
+
+test('two performers cannot share one source uuid', () => {
+  const db = databaseAtVersion(7);
+  const insert = db.prepare(
+    `INSERT INTO performers (source, source_uuid, slug, name, kind, fetched_at)
+     VALUES ('theporndb', 'u', ?, 'N', 'performer', 1)`,
+  );
+  insert.run('a');
+  assert.throws(() => insert.run('b'), /UNIQUE/);
 });

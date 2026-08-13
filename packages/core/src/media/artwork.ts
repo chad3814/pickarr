@@ -5,13 +5,13 @@ import { abortRejection } from '../abort.ts';
 import type { FetchImpl } from '../clients/theporndb.ts';
 
 /**
- * The largest poster that will be written.
+ * The largest image that will be written.
  *
  * This is the only place Pickarr writes remote binary content to disk, so the
  * ceiling is a hard one: without it a hostile or merely broken response fills
  * the volume the SQLite database lives on.
  */
-export const MAX_POSTER_BYTES = 5 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /**
  * Content types accepted, and the extension each is stored under.
@@ -21,14 +21,14 @@ export const MAX_POSTER_BYTES = 5 * 1024 * 1024;
  * are lowercase because RFC 9110 media types are case-insensitive, and a
  * server is free to send `IMAGE/JPEG`.
  */
-const POSTER_EXTENSIONS = new Map<string, string>([
+const IMAGE_EXTENSIONS = new Map<string, string>([
   ['image/jpeg', 'jpg'],
   ['image/png', 'png'],
   ['image/webp', 'webp'],
 ]);
 
 /**
- * Total-operation deadline for one poster download — the fetch, its headers,
+ * Total-operation deadline for one image download — the fetch, its headers,
  * and reading the *entire* streamed body, all against one clock.
  *
  * This is deliberately not a per-chunk timeout. A per-chunk timeout only
@@ -38,13 +38,13 @@ const POSTER_EXTENSIONS = new Map<string, string>([
  * indefinitely while looking, to any per-chunk watchdog, perfectly healthy.
  * A single deadline covering the whole transfer has no such gap to exploit.
  *
- * The value is sized off `MAX_POSTER_BYTES`: at a conservative 100 KB/s —
+ * The value is sized off `MAX_IMAGE_BYTES`: at a conservative 100 KB/s —
  * slower than any connection this service is expected to run over — the full
  * 5 MiB cap takes about 51 seconds to arrive. 60 seconds gives that a little
  * margin without leaving a stalled connection tying up a worker tick for
  * minutes.
  */
-export const POSTER_TIMEOUT_MS = 60_000;
+export const IMAGE_TIMEOUT_MS = 60_000;
 
 export interface ArtworkDeps {
   readonly dir: string;
@@ -57,7 +57,7 @@ export interface ArtworkDeps {
  *
  * This is the point of streaming: a hostile or broken response must not be
  * fully read into memory just to discover it is too large. The moment the
- * running total exceeds `MAX_POSTER_BYTES`, the reader is cancelled — which
+ * running total exceeds `MAX_IMAGE_BYTES`, the reader is cancelled — which
  * releases the underlying connection — and the function returns `null`
  * without ever finding out how large the body actually was.
  *
@@ -66,13 +66,13 @@ export interface ArtworkDeps {
  */
 async function readBodyWithinCap(
   response: Response,
-  groupId: number,
+  key: string,
   log: (message: string) => void,
   timedOut: Promise<never>,
 ): Promise<Uint8Array | null> {
   const body = response.body;
   if (body === null) {
-    log(`poster for group ${groupId}: response had no body`);
+    log(`image ${key}: response had no body`);
     return null;
   }
 
@@ -96,10 +96,10 @@ async function readBodyWithinCap(
 
       // A chunk can straddle the limit, so the total is checked after adding
       // each one, not before.
-      if (total > MAX_POSTER_BYTES) {
+      if (total > MAX_IMAGE_BYTES) {
         // eslint-disable-next-line no-await-in-loop -- one cancellation, ending the loop; nothing to batch it with
         await reader.cancel();
-        log(`poster for group ${groupId}: exceeded ${MAX_POSTER_BYTES} bytes, aborted`);
+        log(`image ${key}: exceeded ${MAX_IMAGE_BYTES} bytes, aborted`);
         return null;
       }
     }
@@ -107,7 +107,7 @@ async function readBodyWithinCap(
     // The deadline fired mid-stream (or some other read failure occurred):
     // release the reader so the underlying socket is not pinned open
     // indefinitely, then let the caller's catch log this and return null the
-    // same way every other poster failure does.
+    // same way every other image failure does.
     await reader.cancel().catch(() => undefined);
     throw error;
   }
@@ -122,35 +122,32 @@ async function readBodyWithinCap(
 }
 
 /**
- * Downloads one poster, returning the filename stored or `null`.
+ * Downloads one image, returning the filename stored or `null`.
  *
- * Never throws: a poster is decoration, and a group's metadata answer must be
+ * Never throws: an image is decoration, and a group's metadata answer must be
  * written whether or not its image could be fetched.
  *
- * The filename is `<group_id>.<ext>` — an integer from our own database, which
- * cannot contain a path separator. That is safer than sanitising a
- * provider-supplied string and needs no argument about whether the sanitising
- * is exhaustive.
+ * The filename is `<key>.<ext>`. The key is composed by the caller from
+ * integers of our own — a group id, or a performer id via
+ * `performerArtworkKey` — which cannot contain a path separator. That is
+ * safer than sanitising a provider-supplied string and needs no argument
+ * about whether the sanitising is exhaustive.
  */
-export async function cachePoster(
-  deps: ArtworkDeps,
-  groupId: number,
-  url: string,
-): Promise<string | null> {
-  // Unique per call, not just per group: this pipeline will process groups in
-  // a loop, and two overlapping downloads for the same group (a retry racing
+export async function cacheImage(deps: ArtworkDeps, key: string, url: string): Promise<string | null> {
+  // Unique per call, not just per key: this pipeline will process groups in
+  // a loop, and two overlapping downloads for the same key (a retry racing
   // the original, say) must not share one temp path. A shared path lets the
   // second writer's bytes land under the first writer's rename, or the
   // second rename fail ENOENT because the first already moved the file out
-  // from under it — silently mixing two posters' content.
-  const temp = join(deps.dir, `.${groupId}.${randomUUID()}.part`);
+  // from under it — silently mixing two images' content.
+  const temp = join(deps.dir, `.${key}.${randomUUID()}.part`);
   // One deadline for the fetch and everything read from its body below — see
-  // the comment on POSTER_TIMEOUT_MS for why that must be a single
+  // the comment on IMAGE_TIMEOUT_MS for why that must be a single
   // total-operation budget rather than a per-chunk one. Started before the
   // first `await` in this function (rather than immediately before the fetch
   // call) so nothing this function does — including the `mkdir` below — can
-  // push the deadline later than the moment `cachePoster` was called.
-  const signal = AbortSignal.timeout(POSTER_TIMEOUT_MS);
+  // push the deadline later than the moment `cacheImage` was called.
+  const signal = AbortSignal.timeout(IMAGE_TIMEOUT_MS);
   const timedOut = abortRejection(signal);
   try {
     await mkdir(deps.dir, { recursive: true });
@@ -158,7 +155,7 @@ export async function cachePoster(
     const response = await Promise.race([deps.fetchImpl(url, { signal }), timedOut]);
     if (!response.ok) {
       await response.body?.cancel();
-      deps.log(`poster for group ${groupId}: HTTP ${response.status}`);
+      deps.log(`image ${key}: HTTP ${response.status}`);
       return null;
     }
 
@@ -166,10 +163,10 @@ export async function cachePoster(
     // `IMAGE/JPEG` is treated the same as `image/jpeg`.
     const contentType =
       (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
-    const extension = POSTER_EXTENSIONS.get(contentType);
+    const extension = IMAGE_EXTENSIONS.get(contentType);
     if (extension === undefined) {
       await response.body?.cancel();
-      deps.log(`poster for group ${groupId}: refused content type ${contentType || 'none'}`);
+      deps.log(`image ${key}: refused content type ${contentType || 'none'}`);
       return null;
     }
 
@@ -180,23 +177,23 @@ export async function cachePoster(
     // streaming below is that boundary.
     const declaredLengthHeader = response.headers.get('content-length');
     const declaredLength = declaredLengthHeader === null ? null : Number(declaredLengthHeader);
-    if (declaredLength !== null && Number.isFinite(declaredLength) && declaredLength > MAX_POSTER_BYTES) {
+    if (declaredLength !== null && Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_BYTES) {
       await response.body?.cancel();
-      deps.log(`poster for group ${groupId}: declared ${declaredLength} bytes exceeds the cap`);
+      deps.log(`image ${key}: declared ${declaredLength} bytes exceeds the cap`);
       return null;
     }
 
-    const bytes = await readBodyWithinCap(response, groupId, deps.log, timedOut);
+    const bytes = await readBodyWithinCap(response, key, deps.log, timedOut);
     if (bytes === null) return null;
 
     // Temp then rename: both are on the same filesystem, and POSIX/NTFS
     // rename is atomic, so a reader can never observe a partially-written
     // file at the final name — a crash mid-write leaves an orphaned temp
-    // file, never a truncated `<group_id>.<ext>`. This says nothing about
+    // file, never a truncated `<key>.<ext>`. This says nothing about
     // durability: neither the file nor its directory entry is fsync'd, so a
     // power loss immediately after a successful rename can still lose the
     // write and later show a missing or zero-length file.
-    const name = `${groupId}.${extension}`;
+    const name = `${key}.${extension}`;
     await writeFile(temp, bytes);
     await rename(temp, join(deps.dir, name));
     return name;
@@ -208,7 +205,12 @@ export async function cachePoster(
     // anything, and this function must never throw regardless of what it
     // carries.
     const message = error instanceof Error ? error.message : String(error);
-    deps.log(`poster for group ${groupId} failed: ${message}`);
+    deps.log(`image ${key} failed: ${message}`);
     return null;
   }
+}
+
+/** Keys for a performer's two cached images. Integers only, by construction. */
+export function performerArtworkKey(performerId: number, kind: 'face' | 'image'): string {
+  return `performer-${kind}-${performerId}`;
 }
