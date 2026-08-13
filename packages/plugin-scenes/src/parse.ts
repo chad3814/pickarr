@@ -199,6 +199,46 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
 
 
 /**
+ * Language names and codes. Exported and split out of `NON_GROUP_TERMS`
+ * because they answer a second question the other half cannot: a language is
+ * not a title word either, so it may be dropped from the end of a title —
+ * see `isTitleSuffixToken`.
+ *
+ * `DUTCH` and `JAPANESE` were absent before this split, which is why a release
+ * ending in either had it detached as a release group, merging two language
+ * cuts of one scene. Adding them fixes that and is the only membership change
+ * the split makes.
+ *
+ * Measured: seven of these occur at the end of a parsed title in the corpus —
+ * `GERMAN` 13, `DUTCH` 11, `SPANISH`, `FRENCH`, `ITALIAN`, `JAPANESE`, `JAP` —
+ * and every occurrence is a tag rather than a title word. `ENGLISH` and
+ * `RUSSIAN` never occur there and are the two that are also ordinary
+ * adjectives; if a title is ever wrongly truncated, they are the first
+ * entries to suspect.
+ */
+export const LANGUAGE_TERMS = new Set([
+  'ENGLISH', 'FRENCH', 'GERMAN', 'SPANISH', 'ITALIAN', 'RUSSIAN', 'DUTCH', 'JAPANESE',
+  'ENG', 'FRA', 'GER', 'ESP', 'ITA', 'RUS', 'JAP', 'JPN',
+]);
+
+/**
+ * The rest of `NON_GROUP_TERMS`: edit, cut and distribution notes.
+ *
+ * These are emphatically *not* droppable from a title, which is the whole
+ * reason the split exists. The corpus ends real titles with three of them —
+ * `Leona Mia Beauty In Full`, `Alaina Dawson Compilation`, `Jessica Jans Bonus
+ * Scene` — so a rule that treated this half as suffix noise would render the
+ * first as `Beauty In`. The union's own comment makes the same point from the
+ * other direction: each names a different cut or different content, so
+ * detaching one as a group would merge two things that are not the same scene.
+ */
+export const NON_GROUP_EDIT_TERMS = new Set([
+  'SUB', 'SUBS', 'SUBBED', 'DUBBED', 'UNCUT', 'UNRATED', 'EXTENDED', 'DIRECTORS',
+  'UNCENSORED', 'DIRECTORSCUT', 'COMPILATION', 'REMUX', 'PART', 'PT', 'CD', 'DISC',
+  'SCENE', 'FULL', 'HQ', 'LQ',
+]);
+
+/**
  * Short words that are *not* release groups even though they have a group's
  * shape. Languages, edit tags and distribution notes all trail an encode
  * section the way a group does; treating one as a group would silently merge
@@ -208,46 +248,7 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
  * `Uncut` and `uncut`. This list is what catches the ones the word-shape test
  * cannot — a term shouted in caps looks nothing like a word.
  */
-const NON_GROUP_TERMS = new Set([
-  'ENGLISH',
-  'FRENCH',
-  'GERMAN',
-  'SPANISH',
-  'ITALIAN',
-  'RUSSIAN',
-  'ENG',
-  'FRA',
-  'GER',
-  'ESP',
-  'ITA',
-  'RUS',
-  'JAP',
-  'JPN',
-  'SUB',
-  'SUBS',
-  'SUBBED',
-  'DUBBED',
-  'UNCUT',
-  'UNRATED',
-  'EXTENDED',
-  'DIRECTORS',
-  // 9-12 characters: refused by the length cap until it was raised to 12, so
-  // these entries are what keeps them refused now. Each names a different cut
-  // or different content, which is why detaching one as a group would merge
-  // two things that are not the same scene.
-  'UNCENSORED',
-  'DIRECTORSCUT',
-  'COMPILATION',
-  'REMUX',
-  'PART',
-  'PT',
-  'CD',
-  'DISC',
-  'SCENE',
-  'FULL',
-  'HQ',
-  'LQ',
-]);
+export const NON_GROUP_TERMS = new Set([...LANGUAGE_TERMS, ...NON_GROUP_EDIT_TERMS]);
 
 /** File extensions a downloader or indexer may have appended to a name. */
 const MEDIA_EXTENSIONS = new Set([
