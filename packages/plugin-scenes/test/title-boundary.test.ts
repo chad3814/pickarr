@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findTitleBoundary, suffixOffset, tokensOf, detachReleaseGroup } from '../src/parse.ts';
+import { findTitleBoundary, suffixOffset, tokensOf, detachReleaseGroup, isEncodeToken, isTitleSuffixToken } from '../src/parse.ts';
 
 test('the two indices diverge, and the quality haystack starts at the later one', () => {
   const name = 'Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB';
@@ -55,11 +55,30 @@ test('undetached tokens with trailing group tag returns null', () => {
   assert.equal(boundary, null);
 });
 
-test('both boundaries agree about what an encode token is', () => {
-  // If findTitleEnd and findEncodeSuffixStart used different encode
-  // predicates, the gap between the indices would fill with tokens that reach
-  // extractQuality, and nothing would say so. With one predicate, a name whose
-  // whole suffix is encode tokens has both indices at the same place.
+test('isTitleSuffixToken accepts every encode token, except a bare digit', () => {
+  // The two boundary searches must agree about encode tokens, or the gap
+  // between titleEnd and encodeStart fills with tokens that reach
+  // extractQuality. Asserted as a property over the vocabulary rather than
+  // inferred from two indices happening to match on one fixture: a partial
+  // divergence leaves both indices non-null and merely different, which an
+  // index comparison on a single name does not catch.
+  for (const t of ['1080p', '2160p', '4K', 'UHD', 'WEB-DL', 'SiteRip', 'BluRay',
+                   'x265', 'HEVC', 'AAC', 'MP4', 'MKV', 'REPACK', 'HDR']) {
+    assert.equal(isEncodeToken(t), true, `${t} should be an encode token`);
+    assert.equal(isTitleSuffixToken(t, 'word'), true, `${t} must be crossable`);
+  }
+  // The one deliberate divergence, and the reason it is safe: a lone digit is
+  // an encode token but not a suffix token, so a sequel number survives.
+  assert.equal(isEncodeToken('4'), true);
+  assert.equal(isTitleSuffixToken('4', 'sarasota'), false);
+});
+
+test('both boundaries land at the same place when suffix is entirely encode tokens', () => {
+  // When the whole suffix consists of encode tokens, titleEnd and encodeStart
+  // both point to the first one. This test uses two indices on one fixture,
+  // so it does not prove the functions agree—see the property test for that.
+  // What this test asserts is the weaker but still useful property that
+  // boundaries can coincide without error.
   const name = 'Alex.Coal.1080p.MP4-WRB';
   const detached = detachReleaseGroup(tokensOf(name), name);
   const boundary = findTitleBoundary(detached.tokens, 1);
