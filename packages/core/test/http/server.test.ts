@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openTestDatabase } from '../../src/db/open.ts';
@@ -13,7 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import type { DownloadClient } from '../../src/clients/types.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 import type { UntrackedEntry } from '../../src/pipeline/reconcile.ts';
-import type { JsonObject, JsonValue } from '../../src/json.ts';
+import { asJsonArray, asJsonObject, type JsonObject, type JsonValue } from '../../src/json.ts';
 
 function seedGroups(db: DatabaseSync): void {
   db.prepare(
@@ -602,6 +602,129 @@ test('GET /api/config answers 500 with the reason when the file is unparseable',
     const response = await server.inject({ method: 'GET', url: '/api/config' });
     assert.equal(response.statusCode, 500);
     assert.match(response.json()['error'], /not valid JSON/);
+    await server.close();
+  });
+});
+
+/** A submission matching CONFIG_DOCUMENT, keeping the api key that is on disk. */
+function configSubmission(): Record<string, JsonValue> {
+  return {
+    server: { port: 8080 },
+    database: { path: '/config/pickarr.db' },
+    trashDir: '/data/trash',
+    plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes' } },
+    downloadClients: [
+      {
+        id: 'sab',
+        type: 'sabnzbd',
+        url: 'http://sabnzbd:8080',
+        apiKey: { kind: 'keep' },
+        category: 'pickarr',
+        importMode: 'move',
+        pathMappings: [],
+      },
+    ],
+    feeds: [
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900 },
+    ],
+    siteLookup: null,
+    metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
+  };
+}
+
+test('PUT /api/config writes the change and keeps the secret on disk', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    body['trashDir'] = '/data/elsewhere';
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json()['restartRequired'], true);
+
+    const written = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, JsonValue>;
+    assert.equal(written['trashDir'], '/data/elsewhere');
+    const clients = asJsonArray(written['downloadClients']);
+    assert.equal(asJsonObject(clients[0])?.['apiKey'], '0f1e2d3c4b5a69788796a5b4c3d2e1f0');
+    await server.close();
+  });
+});
+
+test('PUT /api/config leaves no temporary file behind', async () => {
+  await withConfigDir(async ({ dir, deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    await server.inject({ method: 'PUT', url: '/api/config', payload: configSubmission() });
+    assert.deepEqual(await readdir(dir), ['config.json']);
+    await server.close();
+  });
+});
+
+// The property that matters most: a refused save must not have touched the file
+// the container boots from.
+test('a rejected PUT leaves the file byte-identical', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const before = await readFile(configPath, 'utf8');
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    body['trashDir'] = '';
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.json()['error'], /trashDir/);
+    assert.equal(await readFile(configPath, 'utf8'), before);
+    await server.close();
+  });
+});
+
+// The rehearsal: this document parses, but boot would die resolving the secret.
+test('a PUT whose file: secret cannot be resolved is refused before the write', async () => {
+  await withConfigDir(async ({ dir, configPath, deps: configDeps }) => {
+    const before = await readFile(configPath, 'utf8');
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    const clients = asJsonArray(body['downloadClients']);
+    asJsonObject(clients[0])!['apiKey'] = { kind: 'file', path: join(dir, 'absent-secret') };
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.json()['error'], /absent-secret/);
+    assert.equal(await readFile(configPath, 'utf8'), before);
+    await server.close();
+  });
+});
+
+test('a PUT keeping a secret for a renamed client is refused with a usable message', async () => {
+  await withConfigDir(async ({ deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    const clients = asJsonArray(body['downloadClients']);
+    asJsonObject(clients[0])!['id'] = 'sab-renamed';
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.json()['error'], /sab-renamed/);
+    await server.close();
+  });
+});
+
+test('a PUT against an unparseable file on disk is refused', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    await writeFile(configPath, '{ not json');
+    const server = buildServer(configDeps);
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: configSubmission() });
+    assert.equal(response.statusCode, 500);
+    assert.match(response.json()['error'], /not valid JSON/);
+    await server.close();
+  });
+});
+
+test('a malformed PUT body is a 400 and writes nothing', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const before = await readFile(configPath, 'utf8');
+    const server = buildServer(configDeps);
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: { nope: true } });
+    assert.equal(response.statusCode, 400);
+    assert.equal(await readFile(configPath, 'utf8'), before);
     await server.close();
   });
 });
