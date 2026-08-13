@@ -58,6 +58,13 @@ const CONFIRMED: MetadataView = {
   hasPoster: true,
 };
 
+function withMetadata(over: Partial<Extract<MetadataView, { state: 'confirmed' }>>): GroupView {
+  return {
+    ...GROUP,
+    metadata: { ...(CONFIRMED as Extract<MetadataView, { state: 'confirmed' }>), ...over },
+  };
+}
+
 test('renders the display fields', () => {
   render(<MediaCard group={GROUP} onPick={() => {}} />);
   assert.ok(screen.getByText('Alex Coal'));
@@ -376,4 +383,82 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
   );
   assert.ok(screen.getByRole('img'));
   assert.ok(screen.getByText('A synopsis from the provider.'));
+});
+
+test('the poster is a button that opens the modal, and the modal closes', () => {
+  render(<MediaCard group={withMetadata({ hasPoster: true })} onPick={() => {}} />);
+  assert.equal(screen.queryByRole('dialog'), null);
+  fireEvent.click(screen.getByRole('button', { name: /poster/i }));
+  assert.ok(screen.getByRole('dialog'));
+  fireEvent.click(screen.getByRole('button', { name: /close/i }));
+  assert.equal(screen.queryByRole('dialog'), null);
+});
+
+test('a performer shows an avatar, and their name links to their page', () => {
+  render(<MediaCard group={withMetadata({ performers: [
+    { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
+      hasAvatar: true, hasImage: true },
+  ] })} onPick={() => {}} />);
+
+  const link = screen.getByRole('link', { name: 'Alice Maze' });
+  // A literal, not the value from the fixture: both ends agreeing on a wrong
+  // string is the failure this style of assertion exists to catch.
+  assert.equal(link.getAttribute('href'), 'https://theporndb.net/performers/alice-maze');
+  assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
+  assert.equal(screen.getByRole('img', { name: /alice maze/i }).getAttribute('src'),
+    '/api/performers/4/avatar');
+});
+
+test('a performer with no cached avatar renders a name and no image', () => {
+  render(<MediaCard group={withMetadata({ performers: [
+    { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
+      hasAvatar: false, hasImage: false },
+  ] })} onPick={() => {}} />);
+  assert.ok(screen.getByRole('link', { name: 'Alice Maze' }));
+  assert.equal(screen.queryByRole('img', { name: /alice maze/i }), null);
+});
+
+test('a performer avatar opens the full image, not the face', () => {
+  // Two sizes exist for a reason: the thumbnail is a 500x500 crop, the modal
+  // wants the poster.
+  render(<MediaCard group={withMetadata({ performers: [
+    { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
+      hasAvatar: true, hasImage: true },
+  ] })} onPick={() => {}} />);
+
+  fireEvent.click(screen.getByRole('button', { name: /alice maze/i }));
+  assert.equal(screen.getByRole('dialog').querySelector('img')?.getAttribute('src'),
+    '/api/performers/4/image');
+});
+
+test('a performer with an avatar but no full image is not clickable', () => {
+  // Opening a modal onto a 404 is worse than not offering it. The avatar is
+  // still shown — this asserts the button is absent, not the image.
+  render(<MediaCard group={withMetadata({ performers: [
+    { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
+      hasAvatar: true, hasImage: false },
+  ] })} onPick={() => {}} />);
+
+  assert.ok(screen.getByRole('img', { name: /alice maze/i }));
+  assert.equal(screen.queryByRole('button', { name: /alice maze/i }), null);
+});
+
+test('legacy metadata renders plain names with no links or avatars', () => {
+  render(<MediaCard group={withMetadata({ performers: [], performerNames: ['Alice Maze'] })}
+                    onPick={() => {}} />);
+  assert.ok(screen.getByText('Alice Maze'));
+  assert.equal(screen.queryByRole('link', { name: 'Alice Maze' }), null);
+});
+
+test('the metadata title links to the scene when a url is known', () => {
+  render(<MediaCard group={withMetadata({ title: 'Scene', sceneUrl: 'https://theporndb.net/scenes/s' })}
+                    onPick={() => {}} />);
+  assert.equal(screen.getByRole('link', { name: 'Scene' }).getAttribute('href'),
+    'https://theporndb.net/scenes/s');
+});
+
+test('the metadata title without a url is not a link', () => {
+  render(<MediaCard group={withMetadata({ title: 'Scene', sceneUrl: null })} onPick={() => {}} />);
+  assert.ok(screen.getByText('Scene'));
+  assert.equal(screen.queryByRole('link', { name: 'Scene' }), null);
 });
