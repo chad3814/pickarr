@@ -243,6 +243,7 @@ async function main(): Promise<void> {
     metadataAvailable: runMetadata !== undefined,
     configPath: CONFIG_PATH,
     bootConfigDocument,
+    databasePath: config.database.path,
   });
 
   await server.listen({ port: config.server.port, host: '0.0.0.0' });

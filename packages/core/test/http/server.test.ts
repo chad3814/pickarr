@@ -13,7 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import type { DownloadClient } from '../../src/clients/types.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 import type { UntrackedEntry } from '../../src/pipeline/reconcile.ts';
-import type { JsonValue } from '../../src/json.ts';
+import type { JsonObject, JsonValue } from '../../src/json.ts';
 
 function seedGroups(db: DatabaseSync): void {
   db.prepare(
@@ -82,7 +82,7 @@ function deps(db: DatabaseSync, untracked: UntrackedEntry[] = []): ServerDeps {
   };
 }
 
-const CONFIG_DOCUMENT = {
+const CONFIG_DOCUMENT: JsonObject = {
   server: { port: 8080 },
   database: { path: '/config/pickarr.db' },
   trashDir: '/data/trash',
@@ -109,7 +109,7 @@ const CONFIG_DOCUMENT = {
  */
 async function withConfigDir(
   fn: (context: { dir: string; configPath: string; deps: ServerDeps }) => Promise<void>,
-  document: JsonValue = structuredClone(CONFIG_DOCUMENT) as unknown as JsonValue,
+  document: JsonValue = structuredClone(CONFIG_DOCUMENT),
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-http-config-'));
   const configPath = join(dir, 'config.json');
@@ -569,6 +569,25 @@ test('GET /api/config reports PICKARR_PORT as an override', async () => {
       const server = buildServer(configDeps);
       const response = await server.inject({ method: 'GET', url: '/api/config' });
       assert.equal(response.json()['portOverride'], 9999);
+      await server.close();
+    } finally {
+      delete process.env['PICKARR_PORT'];
+    }
+  });
+});
+
+// `loadConfig` refuses a malformed PICKARR_PORT at boot; this route only
+// reports the override, so it must not repeat that refusal — a bad env var
+// should not 500 the whole Settings screen.
+test('GET /api/config reports a malformed PICKARR_PORT as no override, not an error', async () => {
+  await withConfigDir(async ({ deps: configDeps }) => {
+    process.env['PICKARR_PORT'] = 'abc';
+    try {
+      const server = buildServer(configDeps);
+      const response = await server.inject({ method: 'GET', url: '/api/config' });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json()['portOverride'], null);
+      assert.equal(response.json()['config']['server']['port'], 8080);
       await server.close();
     } finally {
       delete process.env['PICKARR_PORT'];

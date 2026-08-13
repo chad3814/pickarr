@@ -25,6 +25,30 @@ async function resolveSecret(value: string, field: string): Promise<string> {
 }
 
 /**
+ * The config file as a JSON document, with no schema or cross-field checks
+ * applied yet.
+ *
+ * Exported so `GET`/`PUT /api/config` can read the same file `loadConfig`
+ * would, and get the same two messages for the same two failures — an
+ * unreadable file and invalid JSON — that `loadConfig` has always produced.
+ * The Settings screen shows these verbatim, and a second, HTTP-layer copy of
+ * this read-then-parse logic is exactly how the two would drift.
+ */
+export async function readConfigDocument(path: string): Promise<JsonValue> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch {
+    throw new Error(`Could not read config file at ${path}`);
+  }
+  try {
+    return JSON.parse(raw) as JsonValue;
+  } catch (error) {
+    throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
+  }
+}
+
+/**
  * Schema and cross-field validation, with no filesystem access at all.
  *
  * Separate from `loadConfig` because `PUT /api/config` has to apply exactly
@@ -100,20 +124,7 @@ export async function resolveSecrets(config: PickarrConfig): Promise<void> {
 }
 
 export async function loadConfig(path: string): Promise<PickarrConfig> {
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch {
-    throw new Error(`Could not read config file at ${path}`);
-  }
-
-  let json: JsonValue;
-  try {
-    json = JSON.parse(raw) as JsonValue;
-  } catch (error) {
-    throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
-  }
-
+  const json = await readConfigDocument(path);
   const config = parseConfig(json, path);
   await resolveSecrets(config);
 
