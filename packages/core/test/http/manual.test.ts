@@ -134,6 +134,8 @@ function deps(db: DatabaseSync, plugin: MediaTypePlugin = PLUGIN): ServerDeps {
     pluginForFeed: (feedId) => (feedId === 'f' ? plugin : null),
     artworkDir: '/tmp/pickarr-manual-test-unused-artwork',
     metadataAvailable: true,
+    configPath: '/tmp/pickarr-manual-test-unused-config.json',
+    bootConfigDocument: null,
   };
 }
 

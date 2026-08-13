@@ -3,9 +3,14 @@ import fastifyStatic from '@fastify/static';
 import { readFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ManualField, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import type { DownloadClient } from '../clients/types.ts';
+import { toEditableConfig } from '../config/editable.ts';
+import { parseConfig } from '../config/load.ts';
+import type { PickarrConfig } from '../config/schema.ts';
+import type { JsonValue } from '../json.ts';
 import {
   browsableGroup,
   browseGroups,
@@ -41,6 +46,7 @@ import {
   toFailedItemView,
   toGroupView,
   type BrowseResponse,
+  type ConfigResponse,
   type FailedResponse,
   type GroupEditResponse,
   type GroupView,
@@ -86,6 +92,43 @@ export interface ServerDeps {
    * SPA a row that polls forever at its 8s ceiling and is never answered.
    */
   metadataAvailable: boolean;
+  /**
+   * The `config.json` the Settings screen reads and writes — `PICKARR_CONFIG`,
+   * resolved once in main.ts. Injected rather than re-read from the environment
+   * here so a test can point the config routes at a temp directory, and so the
+   * two places that name this file cannot disagree.
+   */
+  configPath: string;
+  /**
+   * The parsed document this process booted from, captured before anything
+   * could rewrite it. Compared against the file on disk to answer
+   * `restartRequired`; parsed rather than textual, so reindenting the file by
+   * hand does not read as a pending restart.
+   */
+  bootConfigDocument: JsonValue;
+  /**
+   * The SQLite file `deps.db` was opened from, needed because the backup copy
+   * is written beside it — same filesystem, so nothing crosses a device
+   * boundary. `DatabaseSync` does not expose the path it was opened with, so
+   * this cannot be recovered from `db`.
+   *
+   * Optional here: no route in this file uses it yet — it is wired up by the
+   * backup route, added later — but the test file's `deps()` helper carries it
+   * from here on, so that helper only has to be edited once for all three
+   * fields these last two routes need.
+   */
+  databasePath?: string;
+  /**
+   * Shuts the process down cleanly so that whatever supervises it starts a new
+   * one — in main.ts, the same function the signal handlers use.
+   *
+   * Injected so that `process.exit` stays out of the HTTP layer: a route that
+   * called it directly could not be tested at all, and the one thing worth
+   * testing here is that a restart is asked for exactly once.
+   *
+   * Optional for the same reason `databasePath` is: no route calls it yet.
+   */
+  requestRestart?(): void;
 }
 
 /**
@@ -130,6 +173,25 @@ function parsePositiveInt(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
   const value = Number(raw);
   return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * The config file as a JSON document, with the same two messages `loadConfig`
+ * produces for an unreadable file and for invalid JSON — the Settings screen
+ * shows these verbatim, so they should read the same wherever they came from.
+ */
+async function readConfigDocument(path: string): Promise<JsonValue> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch {
+    throw new Error(`Could not read config file at ${path}`);
+  }
+  try {
+    return JSON.parse(raw) as JsonValue;
+  } catch (error) {
+    throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
+  }
 }
 
 /**
@@ -310,6 +372,38 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   );
 
   server.get('/api/health', async () => ({ status: 'ok' }));
+
+  /**
+   * Reads the file fresh on every request rather than serving a cached copy, so
+   * an edit made by hand on the host shows up here. A file that cannot be read,
+   * parsed or validated is a 500 carrying the reason: there is no document to
+   * fold edits into, and answering with a fabricated one would mean a later
+   * save discarding whatever is actually on disk.
+   */
+  server.get('/api/config', async (_request, reply) => {
+    let document: JsonValue;
+    try {
+      document = await readConfigDocument(deps.configPath);
+    } catch (error) {
+      return reply.code(500).send({ error: (error as Error).message });
+    }
+
+    let config: PickarrConfig;
+    try {
+      config = parseConfig(document, deps.configPath);
+    } catch (error) {
+      return reply.code(500).send({ error: (error as Error).message });
+    }
+
+    const rawOverride = process.env['PICKARR_PORT'];
+    const override = rawOverride === undefined ? Number.NaN : Number.parseInt(rawOverride, 10);
+    const response: ConfigResponse = {
+      config: toEditableConfig(config),
+      portOverride: Number.isNaN(override) ? null : override,
+      restartRequired: !isDeepStrictEqual(document, deps.bootConfigDocument),
+    };
+    return response;
+  });
 
   server.get('/api/browse', async (request, reply) => {
     const query = browseQuerySchema.safeParse(request.query);

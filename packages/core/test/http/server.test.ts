@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { failDownload, getDownload } from '../../src/db/downloads.ts';
 import { getGroup } from '../../src/db/groups.ts';
@@ -10,6 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import type { DownloadClient } from '../../src/clients/types.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 import type { UntrackedEntry } from '../../src/pipeline/reconcile.ts';
+import type { JsonValue } from '../../src/json.ts';
 
 function seedGroups(db: DatabaseSync): void {
   db.prepare(
@@ -71,7 +75,56 @@ function deps(db: DatabaseSync, untracked: UntrackedEntry[] = []): ServerDeps {
     pluginForFeed: () => null,
     artworkDir: '/tmp/pickarr-server-test-unused-artwork',
     metadataAvailable: true,
+    configPath: '/tmp/pickarr-server-test-unused-config.json',
+    bootConfigDocument: null,
+    databasePath: '/tmp/pickarr-server-test-unused.db',
+    requestRestart: () => {},
   };
+}
+
+const CONFIG_DOCUMENT = {
+  server: { port: 8080 },
+  database: { path: '/config/pickarr.db' },
+  trashDir: '/data/trash',
+  plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes' } },
+  downloadClients: [
+    {
+      id: 'sab',
+      type: 'sabnzbd',
+      url: 'http://sabnzbd:8080',
+      apiKey: '0f1e2d3c4b5a69788796a5b4c3d2e1f0',
+      category: 'pickarr',
+      importMode: 'move',
+      pathMappings: [],
+    },
+  ],
+  feeds: [
+    { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900 },
+  ],
+};
+
+/**
+ * A temp directory holding a `config.json`, plus deps pointed at it. Every
+ * config route test goes through here so none of them can touch a real config.
+ */
+async function withConfigDir(
+  fn: (context: { dir: string; configPath: string; deps: ServerDeps }) => Promise<void>,
+  document: JsonValue = structuredClone(CONFIG_DOCUMENT) as unknown as JsonValue,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-http-config-'));
+  const configPath = join(dir, 'config.json');
+  await writeFile(configPath, JSON.stringify(document, null, 2));
+  const db = openTestDatabase();
+  try {
+    await fn({
+      dir,
+      configPath,
+      deps: { ...deps(db), configPath, bootConfigDocument: structuredClone(document) },
+    });
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 test('health responds ok', async () => {
@@ -463,4 +516,73 @@ test('no route ever returns the client api key', async () => {
   }
   await server.close();
   db.close();
+});
+
+test('GET /api/config redacts a literal api key', async () => {
+  await withConfigDir(async ({ deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    const response = await server.inject({ method: 'GET', url: '/api/config' });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json()['config']['downloadClients'][0]['apiKey'], { kind: 'set' });
+    assert.doesNotMatch(response.body, /0f1e2d3c4b5a69788796a5b4c3d2e1f0/);
+    await server.close();
+  });
+});
+
+test('GET /api/config reports no pending restart when the file matches boot', async () => {
+  await withConfigDir(async ({ deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    const response = await server.inject({ method: 'GET', url: '/api/config' });
+    assert.equal(response.json()['restartRequired'], false);
+    await server.close();
+  });
+});
+
+// Reformatting by hand must not read as a pending restart: the comparison is of
+// parsed documents, not of bytes.
+test('GET /api/config ignores whitespace-only differences from the boot document', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    await writeFile(configPath, JSON.stringify(CONFIG_DOCUMENT));
+    const server = buildServer(configDeps);
+    const response = await server.inject({ method: 'GET', url: '/api/config' });
+    assert.equal(response.json()['restartRequired'], false);
+    await server.close();
+  });
+});
+
+test('GET /api/config reports a pending restart when the file has really changed', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const changed = structuredClone(CONFIG_DOCUMENT);
+    changed.trashDir = '/data/elsewhere';
+    await writeFile(configPath, JSON.stringify(changed, null, 2));
+    const server = buildServer(configDeps);
+    const response = await server.inject({ method: 'GET', url: '/api/config' });
+    assert.equal(response.json()['restartRequired'], true);
+    await server.close();
+  });
+});
+
+test('GET /api/config reports PICKARR_PORT as an override', async () => {
+  await withConfigDir(async ({ deps: configDeps }) => {
+    process.env['PICKARR_PORT'] = '9999';
+    try {
+      const server = buildServer(configDeps);
+      const response = await server.inject({ method: 'GET', url: '/api/config' });
+      assert.equal(response.json()['portOverride'], 9999);
+      await server.close();
+    } finally {
+      delete process.env['PICKARR_PORT'];
+    }
+  });
+});
+
+test('GET /api/config answers 500 with the reason when the file is unparseable', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    await writeFile(configPath, '{ not json');
+    const server = buildServer(configDeps);
+    const response = await server.inject({ method: 'GET', url: '/api/config' });
+    assert.equal(response.statusCode, 500);
+    assert.match(response.json()['error'], /not valid JSON/);
+    await server.close();
+  });
 });

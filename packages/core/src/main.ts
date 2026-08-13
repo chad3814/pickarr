@@ -1,8 +1,10 @@
 import { realpathSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { loadConfig } from './config/load.ts';
+import type { JsonValue } from './json.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins, type PluginRegistry } from './plugins/registry.ts';
 import { createSabnzbdClient } from './clients/sabnzbd.ts';
@@ -59,6 +61,10 @@ export function pluginById(registry: PluginRegistry): (id: string) => MediaTypeP
 
 async function main(): Promise<void> {
   const config = await loadConfig(CONFIG_PATH);
+  // Captured before the server can rewrite the file, and parsed rather than
+  // held as text: `restartRequired` asks whether the *settings* changed, and a
+  // reindent is not a settings change.
+  const bootConfigDocument = JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as JsonValue;
   const db = openDatabase(config.database.path);
   const registry = await loadPlugins(config);
 
@@ -235,6 +241,8 @@ async function main(): Promise<void> {
     // rather than a second time from `config.metadata`/`tpdbClient` — two
     // copies of that decision are how they eventually disagree.
     metadataAvailable: runMetadata !== undefined,
+    configPath: CONFIG_PATH,
+    bootConfigDocument,
   });
 
   await server.listen({ port: config.server.port, host: '0.0.0.0' });

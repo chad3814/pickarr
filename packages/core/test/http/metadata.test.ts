@@ -92,6 +92,8 @@ function deps(
     pluginForFeed: () => null,
     artworkDir: overrides.artworkDir ?? '/tmp/pickarr-metadata-test-unused-artwork',
     metadataAvailable: overrides.metadataAvailable ?? true,
+    configPath: '/tmp/pickarr-metadata-test-unused-config.json',
+    bootConfigDocument: null,
   };
 }
 
