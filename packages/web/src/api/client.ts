@@ -300,6 +300,122 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** Mirrors `SecretView` in `packages/core/src/config/editable.ts`. */
+export type SecretView = { kind: 'file'; path: string } | { kind: 'set' };
+
+/** Mirrors `SecretEdit` in `packages/core/src/config/editable.ts`. */
+export type SecretEdit = { kind: 'keep' } | { kind: 'file'; path: string } | { kind: 'literal'; value: string };
+
+/** Mirrors `EditablePathMapping` in `packages/core/src/config/editable.ts`. */
+export interface EditablePathMapping {
+  from: string;
+  to: string;
+}
+
+/** Mirrors `EditableDownloadClient` in `packages/core/src/config/editable.ts`. */
+export interface EditableDownloadClient {
+  id: string;
+  type: 'sabnzbd';
+  url: string;
+  apiKey: SecretView;
+  category: string;
+  importMode: 'move' | 'copy';
+  pathMappings: EditablePathMapping[];
+}
+
+/** Mirrors `EditableFeed` in `packages/core/src/config/editable.ts`. */
+export interface EditableFeed {
+  id: string;
+  url: string;
+  plugin: string;
+  intervalSeconds: number;
+}
+
+/** Mirrors `EditableSiteLookup` in `packages/core/src/config/editable.ts`. */
+export interface EditableSiteLookup {
+  type: 'theporndb';
+  apiKey: SecretView;
+  baseUrl: string;
+}
+
+/** Mirrors `EditableMetadata` in `packages/core/src/config/editable.ts`. */
+export interface EditableMetadata {
+  enabled: boolean;
+  intervalSeconds: number;
+  perTick: number;
+  artworkDir: string | null;
+}
+
+/** Mirrors `PluginSettingValue` in `packages/core/src/config/editable.ts`. */
+export type PluginSettingValue = string | number | boolean | string[];
+
+/** Mirrors `EditableConfig` in `packages/core/src/config/editable.ts`. */
+export interface EditableConfig {
+  server: { port: number };
+  database: { path: string };
+  trashDir: string;
+  plugins: Record<string, Record<string, PluginSettingValue>>;
+  downloadClients: EditableDownloadClient[];
+  feeds: EditableFeed[];
+  siteLookup: EditableSiteLookup | null;
+  metadata: EditableMetadata;
+}
+
+/** Mirrors `SubmittedDownloadClient` in `packages/core/src/config/editable.ts`. */
+export interface SubmittedDownloadClient {
+  id: string;
+  type: 'sabnzbd';
+  url: string;
+  apiKey: SecretEdit;
+  category: string;
+  importMode: 'move' | 'copy';
+  pathMappings: EditablePathMapping[];
+}
+
+/** Mirrors `SubmittedSiteLookup` in `packages/core/src/config/editable.ts`. */
+export interface SubmittedSiteLookup {
+  type: 'theporndb';
+  apiKey: SecretEdit;
+  baseUrl: string;
+}
+
+/** Mirrors `SubmittedConfig` in `packages/core/src/config/editable.ts`. */
+export interface SubmittedConfig {
+  server: { port: number };
+  database: { path: string };
+  trashDir: string;
+  plugins: Record<string, Record<string, PluginSettingValue>>;
+  downloadClients: SubmittedDownloadClient[];
+  feeds: EditableFeed[];
+  siteLookup: SubmittedSiteLookup | null;
+  metadata: EditableMetadata;
+}
+
+/** Mirrors `ConfigResponse` in `packages/core/src/http/views.ts`. */
+export interface ConfigResponse {
+  config: EditableConfig;
+  portOverride: number | null;
+  restartRequired: boolean;
+}
+
+/**
+ * Mirrors `ConfigSaveResponse` in `packages/core/src/http/views.ts`.
+ * `restartRequired` is `boolean`, not the literal `true`: a save that writes
+ * back exactly what the process booted from needs no restart, and
+ * `GET /api/config` computes that the same way, so the two endpoints must not
+ * be able to contradict each other.
+ */
+export interface ConfigSaveResponse {
+  savedAt: number;
+  restartRequired: boolean;
+}
+
+/** What `api.backupDatabase` resolves to: the file, and the name it arrived with. */
+export interface DatabaseBackup {
+  blob: Blob;
+  filename: string;
+}
+
 export const api = {
   browse: (cursor: string | null, search: string) => {
     const params = new URLSearchParams();
@@ -369,4 +485,29 @@ export const api = {
       `/api/metadata?ids=${ids.join(',')}`,
       signal === undefined ? undefined : { signal },
     ),
+  config: () => request<ConfigResponse>('/api/config'),
+  saveConfig: (submitted: SubmittedConfig) =>
+    request<ConfigSaveResponse>('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify(submitted),
+    }),
+  restart: () => request<{ restarting: boolean }>('/api/restart', { method: 'POST' }),
+  /**
+   * Not routed through `request`, which always reads the body as JSON. A backup
+   * is bytes, and the filename lives in a header rather than in a payload.
+   *
+   * Fetched into a blob rather than being left to an `<a download>`: an anchor
+   * gives nowhere to report a backup that failed, and a failed backup answers
+   * with a JSON error the page should be able to show.
+   */
+  backupDatabase: async (): Promise<DatabaseBackup> => {
+    const response = await fetch('/api/database/backup');
+    if (!response.ok) {
+      const body: { error?: string } = await response.json().catch(() => ({}));
+      throw new Error(body.error ?? `Backup failed with ${response.status}`);
+    }
+    const disposition = response.headers.get('content-disposition') ?? '';
+    const matched = /filename="([^"]+)"/.exec(disposition);
+    return { blob: await response.blob(), filename: matched?.[1] ?? 'pickarr-backup.db' };
+  },
 };
