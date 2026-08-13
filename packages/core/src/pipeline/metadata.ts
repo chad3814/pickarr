@@ -7,7 +7,7 @@ import type {
   MetadataVerdict,
 } from '@pickarr/plugin-api';
 import { RateLimited, type SceneLookupClient } from '../clients/theporndb.ts';
-import { cacheImage, type ArtworkDeps } from '../media/artwork.ts';
+import { cacheImage, performerArtworkKey, type ArtworkDeps } from '../media/artwork.ts';
 import { getGroup } from '../db/groups.ts';
 import {
   deferMetadata,
@@ -16,6 +16,7 @@ import {
   setPosterPath,
   type MetadataQueueRow,
 } from '../db/metadata.ts';
+import { performersForGroups, performersNeedingArtwork, setPerformerArtwork } from '../db/performers.ts';
 import { rememberSiteId, siteIdForName } from '../db/sites.ts';
 
 /** Doubling backoff from one minute, capped so a long outage never stops retrying. */
@@ -413,6 +414,29 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   if (confirmed !== null && confirmed.posterUrl !== null) {
     const posterPath = await cacheImage(deps.artwork, String(row.groupId), confirmed.posterUrl);
     if (posterPath !== null) setPosterPath(deps.db, row.groupId, posterPath);
+  }
+
+  // Performer artwork, on the same terms as the poster above: the answer is
+  // already written, `cacheImage` never throws, and a missing avatar is not a
+  // missing scene.
+  //
+  // `performersNeedingArtwork` is what makes the table pay for itself — a
+  // performer appearing in fifty groups is fetched once, and every later
+  // group that names them finds the files already there.
+  const performerIds = (performersForGroups(deps.db, [row.groupId]).get(row.groupId) ?? [])
+    .map((performer) => performer.id);
+  for (const performer of performersNeedingArtwork(deps.db, performerIds)) {
+    for (const kind of ['face', 'image'] as const) {
+      const url = kind === 'face' ? performer.faceUrl : performer.imageUrl;
+      const path = kind === 'face' ? performer.facePath : performer.imagePath;
+      if (url === null || path !== null) continue;
+      // Sequential on purpose: these are remote fetches against one provider,
+      // and the pass already walks groups one at a time rather than opening
+      // the throttle this file's cooldown logic exists to respect.
+      // eslint-disable-next-line no-await-in-loop
+      const stored = await cacheImage(deps.artwork, performerArtworkKey(performer.id, kind), url);
+      if (stored !== null) setPerformerArtwork(deps.db, performer.id, kind, stored);
+    }
   }
 
   return { kind: confirmed === null ? 'none' : 'confirmed', cooldownUntil: null };
