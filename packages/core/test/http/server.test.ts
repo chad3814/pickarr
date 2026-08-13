@@ -804,6 +804,10 @@ test('the backup route streams an openable copy and leaves nothing behind', asyn
       'attachment; filename="pickarr-1970-01-01.db"',
     );
     assert.equal(response.headers['content-type'], 'application/octet-stream');
+    // Makes the intent explicit rather than merely implied by the row count
+    // check below: a truncated stream would still be non-empty, so this is
+    // the assertion that actually pins the byte count to the real file size.
+    assert.equal(response.headers['content-length'], String(response.rawPayload.length));
 
     // A real SQLite file, and one that actually holds the seeded rows.
     const copyPath = join(dir, 'downloaded.db');
