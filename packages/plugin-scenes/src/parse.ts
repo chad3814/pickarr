@@ -859,6 +859,17 @@ function findEncodeSuffixStart(tokens: Token[], minIndex: number): number | null
  * remove. Issue #13 is what copying it would cost: `REMASTERED` sat in the
  * encode vocabulary and the non-group list at once and refused 14 corpus
  * titles.
+ *
+ * Bare digits are excluded from encode tokens because `ANCILLARY_TOKEN` matches
+ * single digits (`\d`), but a lone digit like `1` is not a suffix token unless it
+ * meets the numeric ID threshold (250+), checked separately below. Without this
+ * exclusion, `Rispetto 1 JAP` would incorrectly lose the `1`.
+ *
+ * Release group tags are recognized when they follow an encode token. This handles
+ * the tokenization where `MP4-WRB` splits into `['MP4', 'WRB']` due to the hyphen
+ * separator. The gate on previous being an encode token ensures the group is not
+ * reached until the encode section is exhausted, and ensures minIndex is respected
+ * by virtue of living inside the walk loop.
  */
 function isTitleSuffixToken(text: string, previous: string | undefined): boolean {
   return (
@@ -866,7 +877,8 @@ function isTitleSuffixToken(text: string, previous: string | undefined): boolean
     text.toUpperCase() === MARKER_TOKEN ||
     isContentTypeTerm(text) ||
     isLanguageTerm(text) ||
-    isNumericIdToken(text, previous)
+    isNumericIdToken(text, previous) ||
+    (looksLikeGroupTag(text, 1) && isEncodeToken(previous ?? ''))
   );
 }
 
@@ -883,17 +895,6 @@ function isTitleSuffixToken(text: string, previous: string | undefined): boolean
  */
 export function findTitleEnd(tokens: Token[], minIndex: number): number {
   let end = tokens.length;
-
-  // Skip a trailing release group if present: a token that looks like a group tag
-  // and immediately follows an encode token.
-  if (
-    end >= 2 &&
-    looksLikeGroupTag(tokens[end - 1]?.text ?? '', 1) &&
-    isEncodeToken(tokens[end - 2]?.text ?? '')
-  ) {
-    end -= 1;
-  }
-
   while (end > minIndex) {
     const token = tokens[end - 1];
     if (token === undefined) break;
