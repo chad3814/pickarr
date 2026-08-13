@@ -41,6 +41,12 @@ function toPerformer(row: SqlRow): PerformerRow {
  *
  * The urls *are* updated: if the provider moved the image, the next artwork
  * pass should fetch the new one.
+ *
+ * Several statements, no transaction of its own: this is meant to be called
+ * from inside `recordMetadataAnswer`'s existing `BEGIN`/`COMMIT`, and
+ * `node:sqlite` throws `cannot start a transaction within a transaction` on a
+ * nested `BEGIN`. A future caller writing outside such a transaction has to
+ * open its own around this call.
  */
 export function upsertPerformers(
   db: DatabaseSync,
@@ -71,17 +77,37 @@ export function upsertPerformers(
  * not leave the previous one attached, and `position` is assigned here from
  * the array order rather than stored by the caller — the order is the
  * provider's billing order, and there is one place that knows it.
+ *
+ * `performerIds` may legitimately repeat: `upsertPerformers` keys on the
+ * parent uuid, so two site-alias credits for one canonical performer both
+ * resolve to the same id. `group_performers`' primary key is `(group_id,
+ * performer_id)`, so linking that id twice would throw a UNIQUE violation —
+ * and, called from inside `recordMetadataAnswer`'s transaction, that throw
+ * would roll back the whole answer, including the queue row's removal,
+ * leaving the group to retry (and fail the same way) forever. Each id is
+ * therefore linked once, at the earliest position it was billed at; a later
+ * repeat is dropped rather than moved or re-inserted.
+ *
+ * Several statements, no transaction of its own — see `upsertPerformers`'s
+ * doc comment; the same contract applies here.
  */
 export function setGroupPerformers(
   db: DatabaseSync,
   groupId: number,
   performerIds: readonly number[],
 ): void {
+  const seen = new Set<number>();
+  const deduped = performerIds.filter((id) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+
   db.prepare('DELETE FROM group_performers WHERE group_id = ?').run(groupId);
   const link = db.prepare(
     'INSERT INTO group_performers (group_id, performer_id, position) VALUES (?, ?, ?)',
   );
-  performerIds.forEach((performerId, index) => link.run(groupId, performerId, index));
+  deduped.forEach((performerId, index) => link.run(groupId, performerId, index));
 }
 
 /**
