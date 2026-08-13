@@ -92,23 +92,33 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
     // same string wherever the card is drawn, and only one list is mounted at
     // a time — there is no arrangement in which two cards claim it.
     <article className="media-card" id={groupAnchor(group.id)}>
-      <header>
-        <h2>{display.title}</h2>
-        {display.subtitle !== undefined && <p className="subtitle">{display.subtitle}</p>}
-        {display.date !== undefined && <p className="date">{display.date}</p>}
-        {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
-      </header>
+      {/*
+       * The title block and the poster share a flex row so the row is as tall
+       * as whichever is taller. The poster used to be positioned absolutely
+       * against the card, which reserved no height for it at all: on a card
+       * whose header was shorter than the poster — the common case, since a
+       * title, a subtitle and a date come to about four lines — the image
+       * hung down over the release rows and covered their Pick buttons.
+       */}
+      <div className="card-head">
+        <header>
+          <h2>{display.title}</h2>
+          {display.subtitle !== undefined && <p className="subtitle">{display.subtitle}</p>}
+          {display.date !== undefined && <p className="date">{display.date}</p>}
+          {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
+        </header>
 
-      {group.metadata.state === 'confirmed' && group.metadata.hasPoster && (
-        <button
-          type="button"
-          className="poster-thumb"
-          onClick={() => setModal({ src: `/api/groups/${group.id}/poster`,
-                                    alt: `Poster for ${display.title}` })}
-        >
-          <img src={`/api/groups/${group.id}/poster`} alt={`Poster for ${display.title}`} />
-        </button>
-      )}
+        {group.metadata.state === 'confirmed' && group.metadata.hasPoster && (
+          <button
+            type="button"
+            className="poster-thumb"
+            onClick={() => setModal({ src: `/api/groups/${group.id}/poster`,
+                                      alt: `Poster for ${display.title}` })}
+          >
+            <img src={`/api/groups/${group.id}/poster`} alt={`Poster for ${display.title}`} />
+          </button>
+        )}
+      </div>
 
       {values !== undefined &&
         identityFields !== undefined &&
