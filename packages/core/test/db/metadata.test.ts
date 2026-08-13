@@ -252,6 +252,8 @@ test('the answer writes the cast, and a later answer replaces it', () => {
     ] }) });
 
   assert.deepEqual(performersForGroups(db, [1]).get(1)?.map((p) => p.name), ['B']);
+  assert.deepEqual(getGroupMetadata(db, 1)?.performers, ['B'],
+    'the legacy name column is the pre-refetch fallback and must stay populated');
 });
 
 test('a none answer clears any cast the group had', () => {
@@ -266,4 +268,25 @@ test('a none answer clears any cast the group had', () => {
   // Otherwise a group that stopped being confirmed keeps a cast nothing
   // supports, and the card renders performers under a 'none' state.
   assert.equal(performersForGroups(db, [1]).get(1), undefined);
+});
+
+test('a refetch keeps the poster already cached for the group', () => {
+  // `poster_path` is deliberately absent from the upsert's DO UPDATE list:
+  // the INSERT writes it as a literal NULL, and only `setPosterPath` ever
+  // fills it in, so including it here would blank a cached poster on every
+  // refetch — and migration 7 queues every confirmed group for exactly that.
+  // Nothing would throw and nothing else would notice, which is why this
+  // test exists rather than a comment alone.
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  recordMetadataAnswer(db, { groupId: 1, source: 's', now: 1, nearMisses: [],
+    confirmed: candidate({ title: 'First' }) });
+  setPosterPath(db, 1, '1.jpg');
+
+  recordMetadataAnswer(db, { groupId: 1, source: 's', now: 2, nearMisses: [],
+    confirmed: candidate({ title: 'Second' }) });
+
+  const row = getGroupMetadata(db, 1)!;
+  assert.equal(row.posterPath, '1.jpg');
+  assert.equal(row.title, 'Second', 'the rest of the answer did update');
 });

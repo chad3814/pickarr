@@ -209,6 +209,12 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
   const { confirmed } = input;
   db.exec('BEGIN');
   try {
+    // poster_path is deliberately absent from the DO UPDATE SET list below:
+    // it names a file already fetched to disk, not something a provider
+    // answer carries (the INSERT writes it as a literal NULL), and only
+    // setPosterPath ever fills it in. Updating it here from excluded would
+    // blank a cached poster on every refetch — which migration 7 is about to
+    // run for every already-confirmed group in the database.
     db.prepare(
       `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
        ON CONFLICT (group_id) DO UPDATE SET
