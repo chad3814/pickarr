@@ -296,15 +296,20 @@ git commit -m "Read performers from their parent, where the images are"
 
 - [ ] **Step 1: Write the failing test**
 
+The file's helper is `databaseAtVersion(version)` (`migrate.test.ts:76`),
+which applies every migration up to and including `version`. To exercise a
+backfill you build the database one version short, seed it, then apply the
+migration under test by hand — there is no `migrateTo`:
+
 ```ts
 test('migration 7 re-queues confirmed groups so they refetch with performers', () => {
-  const db = openMigratedTo(db_, 6);   // follow the file's existing helper
+  const db = databaseAtVersion(6);
   db.prepare(`INSERT INTO media_groups (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
               VALUES (1,'t','a','{}','a',1,1), (2,'t','b','{}','b',1,1), (3,'t','c','{}','c',1,1)`).run();
   db.prepare(`INSERT INTO group_metadata (group_id, state, source, fetched_at)
               VALUES (1,'confirmed','theporndb',1), (2,'none','theporndb',1)`).run();
 
-  migrateTo(db, 7);
+  migrations.find((m) => m.version === 7)!.up(db);
 
   // Confirmed only. A 'none' answer has nothing to enrich — re-asking it is
   // the loop `enqueueMetadata`'s guard exists to prevent — and group 3 was
@@ -314,7 +319,7 @@ test('migration 7 re-queues confirmed groups so they refetch with performers', (
 });
 
 test('migration 7 adds the performer tables and the scene slug', () => {
-  const db = openMigratedTo(db_, 7);
+  const db = databaseAtVersion(7);
   // Literal column lists, not a shape read back out of the schema: an
   // assertion derived from the thing under test cannot detect it changing.
   const columns = db.prepare('SELECT name FROM pragma_table_info(?)');
@@ -332,7 +337,7 @@ test('migration 7 adds the performer tables and the scene slug', () => {
 });
 
 test('two performers cannot share one source uuid', () => {
-  const db = openMigratedTo(db_, 7);
+  const db = databaseAtVersion(7);
   const insert = db.prepare(
     `INSERT INTO performers (source, source_uuid, slug, name, kind, fetched_at)
      VALUES ('theporndb', 'u', ?, 'N', 'performer', 1)`,
@@ -1346,6 +1351,18 @@ will have moved.
 
 - [ ] **Step 1: Write the failing tests**
 
+The file already has a `GROUP: GroupView` and a `CONFIRMED: MetadataView`
+(`MediaCard.test.tsx:31` and `:51`). Add one helper beside them rather than
+inventing fixtures per test — and note `CONFIRMED.performers` is currently the
+legacy `string[]`, so it becomes `performers: []` plus
+`performerNames: ['Alex Coal', 'Jane Doe']` when Task 7's shape lands:
+
+```ts
+function withMetadata(over: Partial<Extract<MetadataView, { state: 'confirmed' }>>): GroupView {
+  return { ...GROUP, metadata: { ...CONFIRMED, ...over } };
+}
+```
+
 ```ts
 test('the poster is a button that opens the modal, and the modal closes', () => {
   render(<MediaCard group={withMetadata({ hasPoster: true })} onPick={() => {}} />);
@@ -1383,13 +1400,25 @@ test('a performer with no cached avatar renders a name and no image', () => {
 test('a performer avatar opens the full image, not the face', () => {
   // Two sizes exist for a reason: the thumbnail is a 500x500 crop, the modal
   // wants the poster.
+  render(<MediaCard group={withMetadata({ performers: [
+    { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
+      hasAvatar: true, hasImage: true },
+  ] })} onPick={() => {}} />);
+
   fireEvent.click(screen.getByRole('button', { name: /alice maze/i }));
   assert.equal(screen.getByRole('dialog').querySelector('img')?.getAttribute('src'),
     '/api/performers/4/image');
 });
 
-test('a performer with no full image is not clickable', () => {
-  // Opening a modal onto a 404 is worse than not offering it.
+test('a performer with an avatar but no full image is not clickable', () => {
+  // Opening a modal onto a 404 is worse than not offering it. The avatar is
+  // still shown — this asserts the button is absent, not the image.
+  render(<MediaCard group={withMetadata({ performers: [
+    { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
+      hasAvatar: true, hasImage: false },
+  ] })} onPick={() => {}} />);
+
+  assert.ok(screen.getByRole('img', { name: /alice maze/i }));
   assert.equal(screen.queryByRole('button', { name: /alice maze/i }), null);
 });
 
