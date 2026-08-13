@@ -1,4 +1,5 @@
 import type { MetadataCandidate } from '@pickarr/plugin-api';
+import { abortRejection } from '../abort.ts';
 import type { SiteLookupConfig } from '../config/schema.ts';
 
 /** One site as the metadata service describes it. */
@@ -84,29 +85,6 @@ const MAX_TOTAL_TO_WALK = 1_000;
  * enough that one stalled page does not tie up a worker tick for minutes.
  */
 export const PROVIDER_REQUEST_TIMEOUT_MS = 20_000;
-
-/**
- * Turns a signal's eventual `abort` into a promise rejection.
- *
- * `fetchImpl` is an injected dependency, not necessarily the real `fetch` —
- * a test double (or some other wrapper) may never look at `init.signal` at
- * all. Racing every provider call against this promise bounds it by the
- * deadline regardless of whether the implementation underneath honours the
- * signal; an implementation that does honour it settles — by rejecting on
- * its own — before this promise ever would.
- */
-function abortRejection(signal: AbortSignal): Promise<never> {
-  const rejection = new Promise<never>((_resolve, reject) => {
-    signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true });
-  });
-  // Attaching a no-op handler immediately marks `rejection` as handled for
-  // Node's unhandled-rejection bookkeeping without changing what it resolves
-  // to; see the longer version of this comment in media/artwork.ts, where the
-  // gap between creating this promise and racing it is wide enough (a real
-  // `mkdir`) to make the difference observable.
-  rejection.catch(() => undefined);
-  return rejection;
-}
 
 /**
  * Pulls the fields we compare out of a response body, tolerating everything

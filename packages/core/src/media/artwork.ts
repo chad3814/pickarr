@@ -1,6 +1,7 @@
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { abortRejection } from '../abort.ts';
 import type { FetchImpl } from '../clients/theporndb.ts';
 
 /**
@@ -44,31 +45,6 @@ const POSTER_EXTENSIONS = new Map<string, string>([
  * minutes.
  */
 export const POSTER_TIMEOUT_MS = 60_000;
-
-/**
- * Turns a signal's eventual `abort` into a promise rejection.
- *
- * `fetchImpl` is an injected dependency, not necessarily the real `fetch` —
- * a test double may never look at `init.signal` at all, and even a real
- * `fetch`'s body reader is a separate object from the request promise.
- * Racing both the fetch and every subsequent stream read against this one
- * promise bounds the whole operation by the deadline regardless of whether
- * the pieces underneath honour the signal themselves.
- */
-function abortRejection(signal: AbortSignal): Promise<never> {
-  const rejection = new Promise<never>((_resolve, reject) => {
-    signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true });
-  });
-  // There is real async work (`mkdir`, the fetch itself) between creating
-  // this promise and racing it, so it can reject before anything has raced
-  // it yet — Node reports that as an unhandled rejection even though the
-  // eventual `Promise.race` below handles it a tick later. Attaching a no-op
-  // handler here only marks `rejection` as handled for that bookkeeping; the
-  // same `rejection` object, with the same eventual value, is what every
-  // race below actually runs against.
-  rejection.catch(() => undefined);
-  return rejection;
-}
 
 export interface ArtworkDeps {
   readonly dir: string;
