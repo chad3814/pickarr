@@ -155,6 +155,34 @@ guard exists so a *lazy browse trigger* cannot re-ask forever
 (`db/metadata.ts:104`); a one-time backfill is not that, and routing it
 through the guard would mean weakening the guard.
 
+**`recordMetadataAnswer` must become an upsert for any of this to work.** It
+is currently `INSERT … ON CONFLICT (group_id) DO NOTHING`, so a queued refetch
+of an already-answered group would run the whole lookup, spend the API call,
+and then silently write nothing. The queue row would be deleted and the group
+would look refetched while holding its old data — the worst of the available
+failure modes, because nothing reports it.
+
+Two changes, together:
+
+- `ON CONFLICT (group_id) DO UPDATE SET` every column except `group_id`.
+- The near-miss insert is currently gated on `changes > 0`, which under
+  `DO NOTHING` meant "this is the first answer". Under `DO UPDATE` that gate
+  is always true, so it is replaced by
+  `DELETE FROM metadata_candidates WHERE group_id = ?` immediately before the
+  inserts. Same guarantee — candidates never accumulate across answers — by a
+  mechanism that survives a group being answered more than once.
+
+That invalidates the function's stated invariant, "a group is answered exactly
+once", which was true when nothing could re-queue an answered group. The
+comment must be rewritten rather than left to mislead: a group is now answered
+*at most once per queue entry*, and each answer replaces the last.
+
+On refetch the poster is re-downloaded and overwrites `<group_id>.<ext>`. If
+the provider has switched format since, the old file is orphaned under its old
+extension while `poster_path` moves to the new one. Harmless, bounded by one
+file per group, and cleaning it up belongs with the avatar-orphan issue noted
+under Out of Scope.
+
 ## Fetching and caching
 
 `readPerformerNames` becomes `readPerformers`, returning the new shape and
@@ -177,9 +205,20 @@ packages are versioned together in one repo and `plugin-scenes` is the only
 implementor.
 
 `cachePoster` generalises to `cacheImage(deps, key, url)`. Its streaming size
-cap, content-type allow-list, temp-then-rename and never-throws contract are
-already correct and none of them are poster-specific; only the log wording and
-the filename's provenance are. `MAX_POSTER_BYTES` becomes `MAX_IMAGE_BYTES`.
+cap, content-type allow-list, temp-then-rename, total-operation deadline and
+never-throws contract are already correct and none of them are
+poster-specific; only the log wording and the filename's provenance are.
+`MAX_POSTER_BYTES` becomes `MAX_IMAGE_BYTES` and `POSTER_TIMEOUT_MS` becomes
+`IMAGE_TIMEOUT_MS`.
+
+The deadline machinery added on main — an `AbortSignal.timeout` turned into a
+rejection by `abortRejection` and raced against both the fetch and every body
+read — is carried across unchanged. It is what stops a dribbling host from
+holding the metadata worker's `tryRun` mutex open forever, and avatars are
+fetched from the same provider in the same pass, so they need it at least as
+much as the poster does. `IMAGE_TIMEOUT_MS` keeps the 60s value and its
+sizing argument (5 MiB at a conservative 100 KB/s ≈ 51s), which is unchanged
+because the cap it is derived from is unchanged.
 
 Two images are cached per performer: `face` (a 500×500 smart crop) for the
 thumbnail and `image` (the full poster) for the modal. Roughly 140 KB per
@@ -215,6 +254,21 @@ poster route gives (the file at an id never changes without the row changing).
 Absolute URLs are built server-side so the namespace rule
 (`/performers/` vs `/performer-sites/`) lives in one place rather than being
 re-derived in the browser from a `kind` the client would have to understand.
+
+`metadataViewOf`'s signature becomes
+`(metadata, performers: readonly PerformerRow[], queuedNextAt?: number)`. The
+performers go *second*, ahead of the existing optional `queuedNextAt`, and are
+required: an optional third parameter would let every current call site keep
+compiling while silently reporting an empty cast. There are two call sites —
+`toGroupView` (browse and picks) and `GET /api/metadata` — and both must read
+performers for the whole page with `performersForGroups`, never per group.
+
+In the **web** mirror of this type, the three new fields are declared
+optional. That follows the precedent main set for `nextAttemptAt`: the web
+type describes what a *response* can contain, and a response can come from a
+server that predates the field — a tab left open across a rollback, or a stale
+bundle. The card treats an absent `performers` as an empty list rather than
+trusting it to mean anything.
 
 Groups still on the legacy JSON fallback are reported through a *separate*
 field, `performerNames: string[]`, rather than through `performers` with
@@ -269,6 +323,13 @@ corner, positioned against `article.media-card` (which is already the anchor
 target and so already a positioned box's natural owner). It keeps its
 unconstrained aspect ratio — the provider's images are frequently landscape,
 as the existing comment notes.
+
+The card now also renders a `pending` note above the metadata section, added
+on main. It stays where it is: an absolutely positioned poster is out of flow,
+so the two do not compete, and the note is about a state in which there is no
+poster to show anyway. The card is rendered by both Browse and Picks, and
+since main wired Picks to poll for metadata too, everything here appears on
+both screens.
 
 Performers become a list of rows: avatar (about two lines high, fixed square,
 `object-fit: cover`) followed by the name as an `<a>` to its TPDb page,
