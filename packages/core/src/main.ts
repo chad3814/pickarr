@@ -273,14 +273,27 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log(`${reason}, shutting down`);
     scheduler.stop();
-    void server.close().then(() => {
-      db.close();
-      // Zero, not one: this is a clean, intentional stop. Under the documented
-      // `restart: unless-stopped` compose policy that is a restart; under
-      // `restart: on-failure` it would not be, which is why the UI presents
-      // this as an explicit action rather than something a save does silently.
-      process.exit(0);
-    });
+    void server
+      .close()
+      .then(() => {
+        db.close();
+        // Zero, not one: this is a clean, intentional stop. Under the documented
+        // `restart: unless-stopped` compose policy that is a restart; under
+        // `restart: on-failure` it would not be, which is why the UI presents
+        // this as an explicit action rather than something a save does silently.
+        process.exit(0);
+      })
+      .catch((error: Error) => {
+        // Without this, a rejected `close()` would leave `shuttingDown` true
+        // forever: `db.close()` and `process.exit` above never run, so every
+        // later signal or restart request is silently ignored. Exiting
+        // non-zero here (rather than falling through to the 0 above) is what
+        // lets `restart: unless-stopped` actually restart the container on
+        // this path, since a container that exits 0 is left stopped instead.
+        log(`shutdown failed: ${error.message}`);
+        db.close();
+        process.exit(1);
+      });
   };
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
