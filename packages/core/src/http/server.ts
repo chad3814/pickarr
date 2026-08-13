@@ -520,7 +520,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
    * closes, so the download still works while there is no longer a name for
    * the copy on disk — which means an aborted download, a disconnected
    * client, or a killed process cannot strand a multi-megabyte file in the
-   * config volume. Nothing needs pruning because nothing is ever left.
+   * config volume. The one exception is a failed unlink itself: see the
+   * inner catch below, which leaves the file in place on purpose rather than
+   * failing a backup that has already succeeded.
    *
    * The handle is opened with `open()` and unlinked only once its own
    * `createReadStream()` exists, never by calling `createReadStream(path)`
@@ -529,11 +531,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
    * an immediate `rm` can win the race and the deferred open then fails with
    * ENOENT. Going through the handle makes the open happen first, provably.
    *
-   * `handle` and `stream` are declared above the `try` rather than inside
-   * it, and the catch below closes whichever of them exists: once `open()`
-   * has succeeded, something is holding a descriptor, and a later failure
-   * (`stat`, `createReadStream`) must not leak it just because the failure
-   * happened after the point of no return for the unlink-while-open trick.
+   * `handle` is declared above the `try` rather than inside it, so the catch
+   * below can close it if `open()` succeeded but a later step failed first.
+   * `stream` is declared alongside it only so both can be typed together and
+   * so it is in scope for the `return` after the `try`; the catch never
+   * needs to touch `stream` itself — see the reachability note there.
    *
    * A GET, not a POST: it does not change the database, and a plain GET is what
    * lets the browser use the filename chosen below.
@@ -568,12 +570,21 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         // Failing the whole request over a failed `rm` here would discard a
         // backup that actually succeeded, over a problem no worse than the
         // temp file occasionally outliving this one request instead of
-        // disappearing the instant its descriptor opened.
+        // disappearing the instant its descriptor opened. Logged, not just
+        // swallowed: this is the one path where the file genuinely needs
+        // pruning by hand, and silence here would be the only way to never
+        // find that out.
+        console.warn(`pickarr: could not remove backup temp file ${temporary}; leaving it in place`);
       }
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => {});
-      if (stream !== undefined) stream.destroy();
-      else if (handle !== undefined) await handle.close().catch(() => {});
+      // `stream` is never reachable from here: everything from
+      // `createReadStream()` onward either succeeds or is caught by the
+      // inner catch above and never rethrows. So the only descriptor a
+      // failure landing in this catch can find open is `handle` itself —
+      // `open()` succeeded but `handle.stat()` (or, in principle,
+      // `createReadStream()`) then threw.
+      if (handle !== undefined) await handle.close().catch(() => {});
       return reply.code(500).send({ error: `Backup failed: ${(error as Error).message}` });
     }
 

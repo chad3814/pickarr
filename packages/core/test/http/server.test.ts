@@ -789,6 +789,33 @@ test('POST /api/restart acknowledges and asks for exactly one restart', async ()
   db.close();
 });
 
+test('a backup that cannot be written answers 500 and leaves no temp file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-backup-fail-'));
+  const db = openTestDatabase();
+  try {
+    seedGroups(db);
+    // A `databasePath` whose directory does not exist: `backup()` cannot
+    // create its destination there and rejects deterministically — this
+    // failure needs no fault injection, unlike the ones further into the
+    // handler that only occur strictly after a successful `open()`.
+    const databasePath = join(dir, 'missing', 'pickarr.db');
+    const server = buildServer({ ...deps(db), databasePath });
+
+    const response = await server.inject({ method: 'GET', url: '/api/database/backup' });
+    assert.equal(response.statusCode, 500);
+    assert.match(response.json()['error'], /Backup failed/);
+
+    // The directory backup() would have written into never came to exist,
+    // so there is nothing here for it to have left behind either.
+    assert.deepEqual(await readdir(dir), []);
+
+    await server.close();
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('the backup route streams an openable copy and leaves nothing behind', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-backup-'));
   const databasePath = join(dir, 'pickarr.db');
