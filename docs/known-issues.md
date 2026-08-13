@@ -427,6 +427,44 @@ scene's performers and synopsis to a card and never says so, while an
 unconfirmed one just leaves the card exactly as it was. The two outcomes cost
 differently, so the rule is built to fail toward the one you can see.
 
+**A stored answer is settled only while the question is fixed, so anything that
+changes the question has to invalidate the answer.** A `group_metadata` row
+means the provider has been asked, and `state = 'none'` is one of the answers it
+can have given; `enqueueMetadata` therefore refuses to queue any group that has
+one. That rule is what makes lazy, browse-driven fetching viable at all —
+without it every page view re-queries every card on it, forever, including the
+cards the provider has already said it knows nothing about. It has exactly one
+assumption, and it is unstated in the rule itself: that the question does not
+move. The question is built from the group's display — the site from
+`subtitle`, the title, the date — so anything that rewrites a group's display
+or deletes the group has moved it, and the row left behind is an answer to
+something nobody asked.
+
+Two paths have broken this, both found after the feature shipped rather than
+while it was being designed. A **merge** deletes the group the answer belonged
+to: the three metadata tables reference `media_groups (id)` with no cascade, so
+merging any group that had ever been browsed failed the foreign key and
+returned a 500 — a normal action, broken by an invisible row. An **edit**
+rewrites the identity the answer described: nothing cleared the row, so the
+card kept showing the poster, performers and synopsis of whatever scene the
+reading the human had just overruled happened to match, with no way for them to
+clear it. `clearGroupMetadata` is the hook for both, and for whatever the third
+one turns out to be — a path that mutates a group's identity or display, or
+deletes a group, has to call it, in the same transaction as the change itself.
+
+There is a trap in how this looks in `editGroup`, and it is what made the
+second bug easy to miss: that function *already* called `clearGroupMetadata`
+before either fix, in its merge branch. Read the call and it is a foreign-key
+precondition for the `deleteGroup` two lines below it, not a statement that the
+answer had become wrong — so its presence made the plain-edit path look
+covered on a skim while nothing in that path cleared anything. The edit fix
+clears rather than re-queues, because it runs inside the edit's transaction and
+the next browse asks anyway; and it is conditional on something actually having
+changed, so a save that rewrites nothing does not blank a card's panel to
+rediscover the same answer. That condition compares the **display**, not just
+the identity key, because a title correction can reduce to the same slug — the
+key survives while the question the display produces does not.
+
 **The artwork cache grows and is never evicted, for the same reason `trashDir`
 is never emptied.** Every confirmed scene with a poster caches one file under
 `metadata.artworkDir`, and nothing here ever deletes one — not when a group is
