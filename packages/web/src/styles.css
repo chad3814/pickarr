@@ -16,8 +16,16 @@ nav a.active { font-weight: 600; text-decoration: underline; }
 .release-current { font-weight: 600; }
 .download-row.untracked { opacity: 0.5; font-style: italic; }
 .metadata-pending { opacity: 0.6; font-style: italic; }
-.poster-thumb, .avatar-thumb { padding: 0; border: none; background: none; cursor: pointer; }
+/* Only the interactive thumbnails get the pointer cursor: `button.avatar-thumb`
+   (has a full image behind it) rather than `.avatar-thumb` by class alone,
+   which would also match the plain `<img class="avatar-thumb">` shown for a
+   performer with no full image — that one is deliberately not clickable, and
+   a pointer cursor is exactly the affordance that promises a click it can't
+   answer. */
+.poster-thumb, button.avatar-thumb { padding: 0; border: none; background: none; cursor: pointer; }
 .poster-thumb { position: absolute; top: 1rem; right: 1rem; max-width: 6rem; max-height: 8rem; }
+/* No fixed aspect ratio: the provider's images are frequently landscape (a
+   documented example is 1279x719), not portrait. */
 .poster-thumb img { display: block; max-width: 100%; max-height: 100%; }
 .metadata-performers { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; align-items: center; }
 .metadata-performers li { display: flex; align-items: center; gap: 0.35rem; }
