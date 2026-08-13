@@ -203,7 +203,8 @@ export function dueMetadataQueue(
  * the queue row as one transaction. A group is answered at most once per
  * queue entry, but the migration that introduced performers re-queues every
  * group already answered, so re-answering is routine, not a retry to guard
- * against: each answer replaces the last in full.
+ * against: each answer replaces the last — except that it never downgrades a
+ * standing confirmation, for which see the upsert's WHERE below.
  */
 export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInput): void {
   const { confirmed } = input;
@@ -215,7 +216,30 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // setPosterPath ever fills it in. Updating it here from excluded would
     // blank a cached poster on every refetch — which migration 7 is about to
     // run for every already-confirmed group in the database.
-    db.prepare(
+    //
+    // The WHERE on the upsert generalises that same protection to the whole
+    // row, and the asymmetry is worth recording: blanking a cached *poster*
+    // was judged unacceptable and given a regression test, while losing the
+    // entire answer — title, date, synopsis, slug and cast — had no guard at
+    // all. It is strictly the worse loss.
+    //
+    // A confirmed answer only ever yields to another confirmed answer. A
+    // refetch that comes back `confirmed: null` is an absence of evidence,
+    // not evidence of absence, and there are ordinary ways to get one:
+    // `answerUnaskable` when the group's plugin no longer produces a query
+    // (a user edited the display and dropped the site), `deferOrGiveUp` at
+    // MAX_METADATA_ATTEMPTS, or `confirmSceneMetadata` going ambiguous
+    // because one new same-site scene landed inside the ±2-day window with a
+    // matching title key. Migration 7 re-queues every confirmed group, so
+    // without this clause each of those runs library-wide on first boot after
+    // the upgrade — and there is no recovery: `enqueueMetadata` counts the
+    // resulting `state: 'none'` as `alreadyAnswered`, so the group is never
+    // asked again and no manual refresh exists.
+    //
+    // The second disjunct is what still lets an ordinary answer through: a
+    // row that is not currently confirmed can be rewritten by anything,
+    // including another 'none' that only refreshes `fetched_at`.
+    const written = db.prepare(
       `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
        ON CONFLICT (group_id) DO UPDATE SET
          state = excluded.state, source = excluded.source,
@@ -223,7 +247,8 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
          performers = excluded.performers, release_date = excluded.release_date,
          duration_s = excluded.duration_s, synopsis = excluded.synopsis,
          poster_url = excluded.poster_url, scene_slug = excluded.scene_slug,
-         fetched_at = excluded.fetched_at`,
+         fetched_at = excluded.fetched_at
+       WHERE excluded.state = 'confirmed' OR group_metadata.state <> 'confirmed'`,
     ).run(
       input.groupId,
       confirmed === null ? 'none' : 'confirmed',
@@ -248,6 +273,12 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // guarantee — near misses never accumulate — by a mechanism that
     // survives a group being answered more than once, which the migration's
     // refetch now makes routine.
+    //
+    // Unconditional, unlike the cast below, even when the upsert above
+    // declined to overwrite a standing confirmation. Nothing reads this table
+    // back; it is a forensic record of the most recent run, and the run whose
+    // near misses are most worth having is exactly the one that failed to
+    // re-confirm and left the old answer in place.
     db.prepare('DELETE FROM metadata_candidates WHERE group_id = ?').run(input.groupId);
     const candidate = db.prepare(
       `INSERT INTO metadata_candidates
@@ -266,15 +297,30 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
       );
     }
 
-    // The cast, replaced wholesale for the same reason. A 'none' answer
-    // clears it: a group that stopped being confirmed must not keep a cast
-    // nothing supports.
-    const performerIds =
-      confirmed === null
-        ? []
-        : upsertPerformers(db, input.source, confirmed.performers, input.now);
-    setGroupPerformers(db, input.groupId, performerIds);
+    // The cast, replaced wholesale for the same reason — but only when the
+    // answer above was actually written. `changes` is the single source of
+    // truth for that: re-deriving the upsert's WHERE in JavaScript would be
+    // two conditions that can drift apart, and this one is read straight off
+    // the statement that made the decision. An update the WHERE declined
+    // reports 0; a fresh insert and a real overwrite both report 1.
+    //
+    // Skipping matters as much as the row itself. `setGroupPerformers` with
+    // an empty list is a DELETE, so running it here would leave the standing
+    // confirmation intact on screen with its cast stripped off — the same
+    // loss the WHERE exists to prevent, arriving by the back door.
+    if (written.changes > 0) {
+      const performerIds =
+        confirmed === null
+          ? []
+          : upsertPerformers(db, input.source, confirmed.performers, input.now);
+      setGroupPerformers(db, input.groupId, performerIds);
+    }
 
+    // Unconditional, and deliberately so even when the answer was declined: a
+    // group whose queue row survived a refetch that changed nothing is a
+    // group the worker picks up again on the next pass, forever. The question
+    // was asked and answered; that the answer was worse than the one already
+    // held is not a reason to keep asking it.
     db.prepare('DELETE FROM metadata_queue WHERE group_id = ?').run(input.groupId);
     db.exec('COMMIT');
   } catch (error) {
