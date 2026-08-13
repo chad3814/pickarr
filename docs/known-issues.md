@@ -456,6 +456,36 @@ which redoes the whole lookup, not just the poster, and is not itself automated 
 anything in this codebase today. Self-healing re-fetch is the obvious phase-2
 improvement; this phase documents the footgun instead of hiding it.
 
+**A card can settle with its poster and avatars missing until the page is reloaded.**
+`runMetadataPass` writes the answer and deletes the queue row *first*, then caches the
+poster and each performer's two images — all in the same call, but not the same instant.
+`GET /api/metadata` reads `group_metadata` alone, so for the length of those downloads
+the group already reports `state: 'confirmed'` with `hasPoster` and every `hasAvatar`
+still `false`. `useGroupMetadata` re-polls only the ids it last saw as `'pending'`, so a
+poll that lands inside that window takes the answer as final and never asks again: the
+card renders its title, date and synopsis with no images, and stays that way until
+something reloads the page.
+
+This is a missing decoration, not a wrong record. Nothing is persisted incorrectly, the
+files do finish downloading, and the next load shows them — which is why it was judged
+not to block the branch it was found on. It is written down because the branch's own
+end-to-end suite is *shaped around* it rather than against it:
+`packages/e2e/tests/metadata-modal.spec.ts` seeds and drains the queue before
+`page.goto` precisely so its page never mounts inside the window, and a comment there
+says so. A suite that avoids a defect is not evidence the defect is absent.
+
+The obvious fix does not work. Keeping the queue row until the artwork lands changes
+nothing, because `metadataViewOf` reports `'confirmed'` from `group_metadata` whether or
+not a queue row exists — the queue is only consulted to distinguish `'pending'` from
+`'absent'`, and both of those require the answer row to be *missing*. Closing it needs
+one of two things: a settling state on the view (a `confirmed` answer that still reports
+itself as not-yet-final while its images are outstanding, which the SPA would keep
+polling), or caching the artwork before the answer becomes visible at all — writing the
+row and the images in one transaction, or staging the answer and publishing it once the
+downloads finish. The second is the cleaner contract and the more invasive change: it
+moves image downloads inside the write path, where a slow or hanging fetch delays the
+metadata answer itself rather than just its decoration.
+
 ## Test-suite blind spots
 
 These are hazards for whoever writes the next test rather than tracked work, so they are
