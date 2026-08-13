@@ -35,6 +35,7 @@ export function SecretField({ label, view, value, onChange }: SecretFieldProps) 
           value={value.path}
           onChange={(event) => onChange({ kind: 'file', path: event.target.value })}
         />
+        <span className="manual-help">A path to a file holding the key.</span>
       </div>
     );
   }
@@ -54,9 +55,14 @@ export function SecretField({ label, view, value, onChange }: SecretFieldProps) 
           `view` rather than `value`: a client just added in this form has no
           key on disk, so `keep` would be refused by the server with a 400 —
           offering the button there would be offering a guaranteed failure.
+
+          `aria-label` names the field explicitly: a page renders one
+          SecretField per download client (Task 11), so a rotor/forms-mode
+          list of controls would otherwise show several identical "Keep
+          existing" entries with no way to tell them apart.
         */}
         {view.kind === 'set' && (
-          <button type="button" onClick={() => onChange({ kind: 'keep' })}>
+          <button type="button" aria-label={`Keep existing ${label}`} onClick={() => onChange({ kind: 'keep' })}>
             Keep existing
           </button>
         )}
@@ -67,17 +73,20 @@ export function SecretField({ label, view, value, onChange }: SecretFieldProps) 
   // value.kind === 'keep': a key is held on disk and the server never sent
   // it, so there is nothing here that could be read back as the key — only a
   // marker and a button that starts a deliberate replacement from empty.
-  // There is no input for the label to point to here, and pointing `htmlFor`
-  // at the button would replace the button's own accessible name ("Replace")
-  // with the label's, which is wrong for a button whose text already says
-  // what it does. So this label carries no `htmlFor`: it stays a real
-  // `<label>` (the CSS column width is keyed off the tag, not the attribute)
-  // but, deliberately, an unconnected one rather than a dangling one.
+  // There is no input for the label to point to, so it carries no `htmlFor`
+  // (pointing it at the button would replace the button's own accessible
+  // name with the label's text). It stays a real `<label>` regardless: the
+  // `.manual-field label` CSS column width is keyed off the tag, not `for`.
   return (
     <div className="manual-field">
       <label>{label}</label>
       <span className="secret-set">A key is set.</span>
-      <button type="button" onClick={() => onChange({ kind: 'literal', value: '' })}>
+      {/*
+        Named explicitly for the same reason as "Keep existing" above: one of
+        these renders per download client, and "Replace" alone is not enough
+        to tell them apart outside reading order.
+      */}
+      <button type="button" aria-label={`Replace ${label}`} onClick={() => onChange({ kind: 'literal', value: '' })}>
         Replace
       </button>
     </div>
