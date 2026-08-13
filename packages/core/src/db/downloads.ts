@@ -251,14 +251,22 @@ export function setStoragePath(
  * with that release marked, on the same write. Evicted from one screen and
  * surfaced on another, rather than quietly absent from both.
  *
- * That is a claim about the *eviction* direction only, and only that direction
- * is fixed. The inverse still lags: `resetForRetry` makes a failed release
- * eligible again without re-deriving, so between a retry and the next unrelated
- * write the release is advertised on neither screen. That window is correct
- * rather than merely tolerated — it coincides exactly with "already
- * downloading", and picking a mid-download release is refused anyway
- * (`inFlightForRelease`, which excludes only 'failed'), so there is nothing to
- * advertise while it lasts.
+ * That is a claim about the *eviction* direction only. The inverse needs no
+ * such write: `resetForRetry` makes a failed release eligible again without
+ * re-deriving, but the release is now being downloaded, and
+ * `deriveUpgradeReleaseId` does not advertise a release the group has already
+ * committed to. So the stale flag and the freshly derived one agree — both say
+ * "not on offer" — and the release becomes advertisable again only if that
+ * retry fails too, which comes back through here.
+ *
+ * This used to be a lag argued to be harmless: the flag was left stale until
+ * some unrelated write recomputed it, on the grounds that picking a
+ * mid-download release is refused anyway (`inFlightForRelease`, which excludes
+ * only 'failed'). The reasoning was right and the derivation did not implement
+ * it — it compared candidates against the pick alone, so a release being
+ * downloaded *was* advertised, with a Pick button that could only return
+ * `already has download`. `committedScore` makes the two agree by
+ * construction.
  *
  * It lives in this function rather than at the seven `failDownload` call sites
  * in reconcile.ts for the reason `deriveUpgradeReleaseId` exists at all: an

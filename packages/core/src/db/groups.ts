@@ -124,10 +124,63 @@ function latestDownloadFailed(releaseId: string): string {
 }
 
 /**
+ * 1 when the release named by the expression has a download that has not
+ * failed, 0 otherwise.
+ *
+ * Deliberately the same predicate as `inFlightForRelease` — `status !=
+ * 'failed'`, not a list of live statuses — spelled as SQL so that "cannot be
+ * picked" and "is not advertised" cannot come apart. Those two are one
+ * question asked in two places: the API refuses a pick on a release that
+ * already has a download, so advertising such a release offers a button whose
+ * only outcome is an error message.
+ */
+function hasUnfailedDownload(releaseId: string): string {
+  return `EXISTS (SELECT 1 FROM downloads WHERE release_id = ${releaseId} AND status != 'failed')`;
+}
+
+/**
+ * The score to beat: the best release this group has *committed to* — its
+ * pick, and anything with a download that has not failed.
+ *
+ * The pick alone was the bar, and it is the wrong bar for the whole window
+ * between picking an upgrade and that upgrade importing. An upgrade
+ * deliberately leaves `picked_release_id` on the old release until the
+ * replacement is on disk (see `pickRelease`), so during that window the
+ * downloading release still scores above the pick — still looked like an
+ * upgrade on offer, still put the group in the browse list, still drew a Pick
+ * button whose only possible outcome was `already has download`. That is the
+ * reported bug: picking an upgrade did not remove the card.
+ *
+ * A release being downloaded is one the user has already said yes to. Folding
+ * those into the bar alongside the pick is what makes "is there something
+ * better on offer" mean *better than everything already asked for*, and it
+ * subsumes the candidate exclusion rather than needing one: an unfailed
+ * download's own release is in this set, so its score cannot be strictly
+ * greater than the maximum over the set.
+ *
+ * It also decides the case where the two disagree, and decides it the way the
+ * user asked for. With a 2160p downloading as an upgrade over a 480p, a 1080p
+ * arriving is better than the pick but worse than what is already coming; the
+ * old bar advertised it, which invited a second concurrent upgrade of the same
+ * group. Something better than the in-flight upgrade still flags normally —
+ * that is the case `completeUpgrade` exists to preserve — so only the strictly
+ * worse arrivals are suppressed.
+ *
+ * `MAX` over an empty set is NULL and `score > NULL` is NULL, which keeps the
+ * pre-existing answer for a `picked_release_id` naming a release that no
+ * longer exists: nothing flagged, rather than everything.
+ */
+function committedScore(groupId: string, pickedReleaseId: string): string {
+  return `(SELECT MAX(score) FROM releases committed
+     WHERE committed.group_id = ${groupId}
+           AND (committed.id = ${pickedReleaseId} OR ${hasUnfailedDownload('committed.id')}))`;
+}
+
+/**
  * The invariant `upgrade_release_id` is supposed to express: the
- * highest-scoring release in the group that is strictly better than
- * `picked_release_id` *and* not already known to be undownloadable, or NULL
- * when there is none.
+ * highest-scoring release in the group that is strictly better than everything
+ * the group has already committed to *and* not already known to be
+ * undownloadable, or NULL when there is none.
  *
  * Deriving it, rather than remembering whichever arrival last noticed
  * something better, is what makes the flag survive the two writes that change
@@ -140,10 +193,9 @@ function latestDownloadFailed(releaseId: string): string {
  * it again. Both are the same defect — a fact treated as an event — and one
  * rule replaces both mechanisms.
  *
- * Ties do not count: `score > picked` is strict, so an equal-scoring
- * alternative is not an upgrade. A picked release that no longer exists makes
- * the subquery NULL, and `score > NULL` is NULL, so the result is correctly
- * "nothing flagged" rather than "everything is better".
+ * Ties do not count: the comparison is strict, so an equal-scoring alternative
+ * is not an upgrade. What it is strict *against* is `committedScore` above,
+ * not the pick alone.
  *
  * A release whose most recent download failed is not a candidate. The flag is
  * what puts a picked group back in the browse list and what its card
@@ -172,11 +224,11 @@ function deriveUpgradeReleaseId(
   const row = db
     .prepare(
       `SELECT id FROM releases
-       WHERE group_id = ? AND score > (SELECT score FROM releases WHERE id = ?)
+       WHERE group_id = ? AND score > ${committedScore('?', '?')}
              AND ${latestDownloadFailed('releases.id')} = 0
        ORDER BY score DESC, id DESC LIMIT 1`,
     )
-    .get(groupId, pickedReleaseId);
+    .get(groupId, groupId, pickedReleaseId);
   return row === undefined ? null : num(row as SqlRow, 'id');
 }
 
