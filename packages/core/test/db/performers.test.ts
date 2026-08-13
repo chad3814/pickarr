@@ -63,15 +63,18 @@ test('a renamed slug updates the row it already had, keeping its id and artwork'
 test('a group\'s performers come back in billing order', () => {
   const db = openTestDatabase();
   seedGroup(db, 1);
-  const ids = upsertPerformers(db, 'theporndb', [
-    { sourceUuid: 'b', slug: 'b', name: 'Second', kind: 'performer', faceUrl: null, imageUrl: null },
+  // Ids ascend in upsert order; the cast is billed in the opposite order. That
+  // is what makes this test able to fail: `ORDER BY position` answers
+  // ['Second', 'First'] and `ORDER BY performers.id` answers ['First',
+  // 'Second'], so the two are no longer the same assertion. A fixture that
+  // links performers in the order it created them makes insertion order,
+  // position and id identical and leaves the ordering unpinned.
+  const [first, second] = upsertPerformers(db, 'theporndb', [
     { sourceUuid: 'a', slug: 'a', name: 'First',  kind: 'performer', faceUrl: null, imageUrl: null },
+    { sourceUuid: 'b', slug: 'b', name: 'Second', kind: 'performer', faceUrl: null, imageUrl: null },
   ], 1);
-  setGroupPerformers(db, 1, ids);
+  setGroupPerformers(db, 1, [second!, first!]);
 
-  // The order TPDb gave, not id order and not alphabetical: 'Second' was
-  // billed first and has the higher-sorting uuid, so any accidental sort
-  // shows up here.
   assert.deepEqual(
     performersForGroups(db, [1]).get(1)?.map((p) => p.name),
     ['Second', 'First'],
@@ -93,6 +96,33 @@ test('setGroupPerformers replaces the previous cast rather than adding to it', (
   // A refetch that corrected the cast must not leave the old cast attached:
   // the whole point of the backfill is that the answer is replaced.
   assert.deepEqual(performersForGroups(db, [1]).get(1)?.map((p) => p.name), ['B']);
+});
+
+test('a performer credited twice under different site aliases links once, at its earliest billing position', () => {
+  // The duplicate comes from `upsertPerformers` keying on the parent uuid: two
+  // site-alias credits for the same canonical performer both resolve to one
+  // row and one id, so `performerIds` handed to `setGroupPerformers` can
+  // legitimately repeat an id. `group_performers`' primary key is (group_id,
+  // performer_id), so inserting that id twice would throw a UNIQUE violation
+  // and, inside recordMetadataAnswer's transaction, roll back the whole
+  // metadata answer.
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  const [alias, other] = upsertPerformers(db, 'theporndb', [
+    { sourceUuid: 'a', slug: 'a', name: 'A', kind: 'performer', faceUrl: null, imageUrl: null },
+    { sourceUuid: 'b', slug: 'b', name: 'B', kind: 'performer', faceUrl: null, imageUrl: null },
+  ], 1);
+
+  setGroupPerformers(db, 1, [alias!, other!, alias!]);
+
+  const rows = db
+    .prepare('SELECT performer_id, position FROM group_performers WHERE group_id = ? ORDER BY position')
+    .all(1);
+  assert.deepEqual(
+    rows.map((row) => ({ performerId: row['performer_id'], position: row['position'] })),
+    [{ performerId: alias, position: 0 }, { performerId: other, position: 1 }],
+    'the earliest billing position wins; the later repeat is dropped, not re-linked',
+  );
 });
 
 test('performersForGroups reads a whole page in one query', () => {
