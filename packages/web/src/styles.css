@@ -9,11 +9,20 @@ nav a.active { font-weight: 600; text-decoration: underline; }
 /* The title block beside the poster, as tall as the taller of the two. The
    card carried `position: relative` for as long as the poster was absolute;
    nothing else in the card is positioned, so it went with it. */
-.card-head { display: flex; align-items: flex-start; gap: 1rem; }
+/* The gap before the releases belongs to the row, not to the fields list
+   inside it. It used to come from `.fields`' own bottom margin, which works
+   only while the left column is the taller of the two: when the poster is
+   taller — a 8rem image against a title, an Edit button and one line of
+   fields, which is the ordinary case — that margin is interior to the
+   shorter column and contributes nothing, leaving the poster flush against
+   the first release row's rule. Zeroing it there and spacing the row itself
+   makes the gap the same whichever side wins. */
+.card-head { display: flex; align-items: flex-start; gap: 1rem; margin-bottom: 0.5rem; }
 /* `min-width: 0` because a flex item's default `min-width: auto` refuses to
    shrink below its content, and a long unbroken release title would otherwise
    push the poster off the card rather than wrap. */
-.card-head header { flex: 1; min-width: 0; }
+.card-head-main { flex: 1; min-width: 0; }
+.card-head-main .fields { margin-bottom: 0; }
 .subtitle, .date { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
 .badge { display: inline-block; margin-top: 0.4rem; padding: 0.1rem 0.5rem; border-radius: 0.25rem; background: #b45309; color: white; font-size: 0.8rem; }
 .fields { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; font-size: 0.85rem; }
