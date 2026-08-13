@@ -562,7 +562,7 @@ export interface Token {
   readonly start: number;
 }
 
-function isEncodeToken(text: string): boolean {
+export function isEncodeToken(text: string): boolean {
   return RESOLUTION_TOKEN.test(text) || SOURCE_TOKEN.test(text) || ANCILLARY_TOKEN.test(text);
 }
 
@@ -871,7 +871,7 @@ function findEncodeSuffixStart(tokens: Token[], minIndex: number): number | null
  * reached until the encode section is exhausted, and ensures minIndex is respected
  * by virtue of living inside the walk loop.
  */
-function isTitleSuffixToken(text: string, previous: string | undefined): boolean {
+export function isTitleSuffixToken(text: string, previous: string | undefined): boolean {
   return (
     (isEncodeToken(text) && !/^\d+$/.test(text)) ||
     text.toUpperCase() === MARKER_TOKEN ||
