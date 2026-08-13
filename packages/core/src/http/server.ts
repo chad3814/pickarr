@@ -1,9 +1,10 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { randomUUID } from 'node:crypto';
-import { readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { extname, join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import type { ReadStream } from 'node:fs';
+import { open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, extname, join } from 'node:path';
+import { backup, type DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ManualField, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
@@ -505,6 +506,67 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       deps.requestRestart();
     });
     return reply.code(202).send({ restarting: true });
+  });
+
+  /**
+   * A consistent copy of the database, streamed as a download.
+   *
+   * `backup` is SQLite's online backup API: it is safe against a WAL database
+   * with writers active, which is the entire reason this is worth offering
+   * instead of telling someone to `cp` the file and hope.
+   *
+   * The temporary file is unlinked as soon as its read stream is backed by an
+   * open file handle. POSIX keeps the bytes alive until the last descriptor
+   * closes, so the download still works while there is no longer a name for
+   * the copy on disk — which means an aborted download, a disconnected
+   * client, or a killed process cannot strand a multi-megabyte file in the
+   * config volume. Nothing needs pruning because nothing is ever left.
+   *
+   * The handle is opened with `open()` and unlinked only once its own
+   * `createReadStream()` exists, never by calling `createReadStream(path)`
+   * and then unlinking the path: that function schedules the underlying
+   * open on the libuv threadpool rather than performing it synchronously, so
+   * an immediate `rm` can win the race and the deferred open then fails with
+   * ENOENT. Going through the handle makes the open happen first, provably.
+   *
+   * A GET, not a POST: it does not change the database, and a plain GET is what
+   * lets the browser use the filename chosen below.
+   */
+  server.get('/api/database/backup', async (_request, reply) => {
+    const stamp = new Date(deps.now()).toISOString().slice(0, 10);
+    const temporary = join(
+      dirname(deps.databasePath),
+      `.pickarr-backup-${process.pid}-${deps.now()}.tmp`,
+    );
+
+    try {
+      await backup(deps.db, temporary);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      return reply.code(500).send({ error: `Backup failed: ${(error as Error).message}` });
+    }
+
+    let bytes: number;
+    let stream: ReadStream;
+    try {
+      const handle = await open(temporary, 'r');
+      bytes = (await handle.stat()).size;
+      // The read stream now holds its own file descriptor, so the copy's
+      // bytes survive losing their name; see the doc comment above. The
+      // stream closes the handle itself once it ends, so nothing here leaks
+      // a descriptor and nothing here needs an explicit close.
+      stream = handle.createReadStream();
+      await rm(temporary, { force: true });
+    } catch (error) {
+      await rm(temporary, { force: true });
+      return reply.code(500).send({ error: `Backup failed: ${(error as Error).message}` });
+    }
+
+    return reply
+      .type('application/octet-stream')
+      .header('content-disposition', `attachment; filename="pickarr-${stamp}.db"`)
+      .header('content-length', bytes)
+      .send(stream);
   });
 
   server.get('/api/browse', async (request, reply) => {

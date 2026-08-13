@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openTestDatabase } from '../../src/db/open.ts';
+import { openDatabase, openTestDatabase } from '../../src/db/open.ts';
 import { failDownload, getDownload } from '../../src/db/downloads.ts';
 import { getGroup } from '../../src/db/groups.ts';
 import { insertImportedFile } from '../../src/db/imported-files.ts';
@@ -787,4 +787,43 @@ test('POST /api/restart acknowledges and asks for exactly one restart', async ()
 
   await server.close();
   db.close();
+});
+
+test('the backup route streams an openable copy and leaves nothing behind', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-backup-'));
+  const databasePath = join(dir, 'pickarr.db');
+  const db = openDatabase(databasePath);
+  try {
+    seedGroups(db);
+    const server = buildServer({ ...deps(db), databasePath });
+
+    const response = await server.inject({ method: 'GET', url: '/api/database/backup' });
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      response.headers['content-disposition'],
+      'attachment; filename="pickarr-1970-01-01.db"',
+    );
+    assert.equal(response.headers['content-type'], 'application/octet-stream');
+
+    // A real SQLite file, and one that actually holds the seeded rows.
+    const copyPath = join(dir, 'downloaded.db');
+    await writeFile(copyPath, response.rawPayload);
+    const copy = openDatabase(copyPath);
+    try {
+      const rows = copy.prepare('SELECT COUNT(*) AS n FROM media_groups').get();
+      assert.equal(rows?.['n'], 2);
+    } finally {
+      copy.close();
+    }
+
+    // Nothing temporary survives: the only files here are the database, its WAL
+    // sidecars, and the copy this test wrote itself.
+    const left = (await readdir(dir)).filter((name) => name.startsWith('.'));
+    assert.deepEqual(left, []);
+
+    await server.close();
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
