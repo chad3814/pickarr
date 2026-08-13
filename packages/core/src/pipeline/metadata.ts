@@ -420,9 +420,17 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   // already written, `cacheImage` never throws, and a missing avatar is not a
   // missing scene.
   //
-  // `performersNeedingArtwork` is what makes the table pay for itself — a
-  // performer appearing in fifty groups is fetched once, and every later
-  // group that names them finds the files already there.
+  // `performersNeedingArtwork` and the per-kind check below guard different
+  // things. The query's WHERE is an OR across the two url/path pairs, so it
+  // skips only a performer who needs neither image — the common case, once
+  // most of the table is already cached — sparing that performer the loop
+  // below entirely. It still returns a performer who needs just one of the
+  // two, because the OR is satisfied by either half. The per-kind `path !==
+  // null` check is what stops that performer's *other*, already-cached half
+  // from being fetched again: one url succeeding while the other 404s or
+  // times out is an ordinary partial failure, not a hypothetical, and this
+  // is the only thing standing between it and a repeat fetch every time a
+  // later group names the same performer.
   const performerIds = (performersForGroups(deps.db, [row.groupId]).get(row.groupId) ?? [])
     .map((performer) => performer.id);
   for (const performer of performersNeedingArtwork(deps.db, performerIds)) {
@@ -433,7 +441,7 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
       // Sequential on purpose: these are remote fetches against one provider,
       // and the pass already walks groups one at a time rather than opening
       // the throttle this file's cooldown logic exists to respect.
-      // eslint-disable-next-line no-await-in-loop
+      // eslint-disable-next-line no-await-in-loop -- one provider, one group at a time; not batched on purpose
       const stored = await cacheImage(deps.artwork, performerArtworkKey(performer.id, kind), url);
       if (stored !== null) setPerformerArtwork(deps.db, performer.id, kind, stored);
     }

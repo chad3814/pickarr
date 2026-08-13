@@ -147,6 +147,22 @@ function trackingFetchJpeg(fetched: string[]): FetchImpl {
   };
 }
 
+/**
+ * Serves `image/jpeg` for every url except those named in `notFoundUrls`,
+ * which 404 — and records every url asked for, successful or not.
+ */
+function trackingFetchExcept(fetched: string[], notFoundUrls: readonly string[]): FetchImpl {
+  return (url) => {
+    fetched.push(url);
+    if (notFoundUrls.includes(url)) {
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    return Promise.resolve(
+      new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+    );
+  };
+}
+
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-metadata-'));
   try {
@@ -408,6 +424,73 @@ test('a performer already holding artwork is not refetched', async () => {
     const groupTwoPerformers = performersForGroups(db, [groupTwoId]).get(groupTwoId)!;
     assert.equal(groupTwoPerformers.length, 1);
     assert.equal(groupTwoPerformers[0]!.facePath, `performer-face-${groupTwoPerformers[0]!.id}.jpg`);
+  });
+});
+
+test('a performer with one kind cached and the other still missing is refetched only for the missing kind', async () => {
+  // `performersNeedingArtwork`'s WHERE clause is an OR across the two
+  // url/path pairs, so a performer with a cached face but no image yet is
+  // still returned by it — the outer filter alone cannot tell the two kinds
+  // apart. Only the inner per-kind `path !== null` check stops the already-
+  // cached face from being fetched again once that row comes back through.
+  // This is the state the "already holding artwork" test above never
+  // reaches, because its performer is fully cached on both kinds after pass
+  // one.
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+
+    const faceUrl = 'https://f/face.jpg';
+    const imageUrl = 'https://i/image.jpg';
+    const cast = performer({ sourceUuid: 'half-cached-performer', faceUrl, imageUrl });
+
+    const groupOneId = makeGroup(db, 'Scene One', 'Some Site');
+    enqueueMetadata(db, [groupOneId], 1_000);
+    const sceneOne = candidate({ title: 'Scene One', siteName: 'Some Site', performers: [cast] });
+    const clientOne = fakeSceneClient(() => [sceneOne]);
+
+    const firstPassFetches: string[] = [];
+    // The image 404s on this pass; the face succeeds — leaving the performer
+    // with a face_path but a still-null image_path.
+    await runMetadataPass(
+      deps({
+        db,
+        client: clientOne,
+        now: () => 1_000,
+        artwork: { dir, fetchImpl: trackingFetchExcept(firstPassFetches, [imageUrl]), log: () => undefined },
+      }),
+    );
+    assert.deepEqual(firstPassFetches.toSorted(), [faceUrl, imageUrl]);
+    const afterFirstPass = performersForGroups(db, [groupOneId]).get(groupOneId)![0]!;
+    assert.equal(afterFirstPass.facePath, `performer-face-${afterFirstPass.id}.jpg`);
+    assert.equal(afterFirstPass.imagePath, null, 'the image must still be missing going into pass two');
+
+    const groupTwoId = makeGroup(db, 'Scene Two', 'Some Site');
+    enqueueMetadata(db, [groupTwoId], 2_000);
+    const sceneTwo = candidate({ title: 'Scene Two', siteName: 'Some Site', performers: [cast] });
+    const clientTwo = fakeSceneClient(() => [sceneTwo]);
+
+    const secondPassFetches: string[] = [];
+    // Both urls succeed this time — if the cached face were wrongly
+    // refetched, it would show up in `secondPassFetches` too.
+    const result = await runMetadataPass(
+      deps({
+        db,
+        client: clientTwo,
+        now: () => 2_000,
+        artwork: { dir, fetchImpl: trackingFetchExcept(secondPassFetches, []), log: () => undefined },
+      }),
+    );
+
+    assert.equal(result.confirmed, 1);
+    assert.deepEqual(
+      secondPassFetches,
+      [imageUrl],
+      'only the still-missing image must be fetched; the already-cached face must not be',
+    );
+
+    const groupTwoPerformers = performersForGroups(db, [groupTwoId]).get(groupTwoId)!;
+    assert.equal(groupTwoPerformers[0]!.facePath, `performer-face-${groupTwoPerformers[0]!.id}.jpg`);
+    assert.equal(groupTwoPerformers[0]!.imagePath, `performer-image-${groupTwoPerformers[0]!.id}.jpg`);
   });
 });
 
