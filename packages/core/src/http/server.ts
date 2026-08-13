@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
+import { randomUUID } from 'node:crypto';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -121,15 +122,8 @@ export interface ServerDeps {
    * Injected so that `process.exit` stays out of the HTTP layer: a route that
    * called it directly could not be tested at all, and the one thing worth
    * testing here is that a restart is asked for exactly once.
-   *
-   * Temporarily optional, unlike `databasePath` above: `main.ts` already has
-   * `config.database.path` in scope when it builds these deps, but it has
-   * nothing to pass here yet — the `shutdown` function this will call is only
-   * definable after `server` itself exists, which is `main.ts`'s ordering
-   * problem to solve, not this route's. It becomes required once the restart
-   * route is added and `main.ts` extracts `shutdown` to pass in.
    */
-  requestRestart?(): void;
+  requestRestart(): void;
 }
 
 /**
@@ -472,7 +466,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       return reply.code(400).send({ error: (error as Error).message });
     }
 
-    const temporary = `${deps.configPath}.tmp-${process.pid}`;
+    // `process.pid` alone is not unique enough: two overlapping saves in this
+    // same process would both write `${configPath}.tmp-${pid}`, and whichever
+    // `rename` loses would 500 with `ENOENT` for a save that otherwise
+    // succeeded. `randomUUID()` gives each save its own file regardless of how
+    // many are in flight at once.
+    const temporary = `${deps.configPath}.tmp-${process.pid}-${randomUUID()}`;
     try {
       await writeFile(temporary, `${JSON.stringify(merged.document, null, 2)}\n`, 'utf8');
       await rename(temporary, deps.configPath);
@@ -483,8 +482,29 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       return reply.code(500).send({ error: `Could not write ${deps.configPath}: ${(error as Error).message}` });
     }
 
-    const response: ConfigSaveResponse = { savedAt: deps.now(), restartRequired: true };
+    // Computed the same way `GET /api/config` computes it — against the
+    // document this process booted from — so the two routes can never
+    // contradict each other. A save that writes back exactly what boot saw
+    // (including one that keeps every secret) needs no restart, and the SPA
+    // reads both responses.
+    const response: ConfigSaveResponse = {
+      savedAt: deps.now(),
+      restartRequired: !isDeepStrictEqual(merged.document, deps.bootConfigDocument),
+    };
     return response;
+  });
+
+  /**
+   * 202, then shut down — in that order, and that is the whole subtlety. The
+   * restart is hung off the reply's `finish` event so the acknowledgement is on
+   * the wire before teardown begins; restarting first would give the browser a
+   * dropped connection, which is indistinguishable from a crash.
+   */
+  server.post('/api/restart', async (_request, reply) => {
+    reply.raw.once('finish', () => {
+      deps.requestRestart();
+    });
+    return reply.code(202).send({ restarting: true });
   });
 
   server.get('/api/browse', async (request, reply) => {

@@ -468,8 +468,14 @@ export interface ConfigResponse {
   restartRequired: boolean;
 }
 
-/** `restartRequired` is always true: a save cannot change the running process. */
+/**
+ * `restartRequired` is computed the same way `ConfigResponse.restartRequired`
+ * is — against the document this process booted from — so the two routes
+ * never contradict each other. A save that writes back exactly what boot saw
+ * (the common case for a form that only touched a field it then reverted, or
+ * one that only re-confirmed a secret) needs no restart; anything else does.
+ */
 export interface ConfigSaveResponse {
   savedAt: number;
-  restartRequired: true;
+  restartRequired: boolean;
 }

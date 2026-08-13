@@ -137,6 +137,7 @@ function deps(db: DatabaseSync, plugin: MediaTypePlugin = PLUGIN): ServerDeps {
     configPath: '/tmp/pickarr-manual-test-unused-config.json',
     bootConfigDocument: null,
     databasePath: '/tmp/pickarr-manual-test-unused.db',
+    requestRestart: () => {},
   };
 }
 
