@@ -26,7 +26,7 @@ const RELEASE = 'Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR';
  * A scene on-site and within the query's date window, which is all
  * `confirmSceneMetadata` requires to confirm without any title comparison:
  * exactly one candidate inside the window settles it. `posterUrl: null`
- * keeps this test out of `cachePoster`'s file-writing path entirely — the
+ * keeps this test out of `cacheImage`'s file-writing path entirely — the
  * poster route is `MediaCard.test.tsx`'s and `metadata.test.ts`'s job, not
  * this one's.
  */

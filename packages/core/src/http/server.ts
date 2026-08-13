@@ -66,7 +66,7 @@ export interface ServerDeps {
    */
   pluginForFeed(feedId: string): MediaTypePlugin | null;
   /**
-   * Where `cachePoster` writes files, resolved once by `resolveArtworkDir` in
+   * Where `cacheImage` writes files, resolved once by `resolveArtworkDir` in
    * main.ts. Injected rather than recomputed here: `config.database.path` is
    * not otherwise anything this module needs to know about, and computing the
    * same default twice is how the two copies eventually disagree.
@@ -426,7 +426,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // temp file mid-write, say). This route reads exactly one column and joins
   // it onto the directory itself — nothing caller-supplied ever reaches the
   // filesystem, since `posterPath` is always `<group_id>.<ext>` written by
-  // `cachePoster`, and the id in the URL is validated as a positive integer by
+  // `cacheImage`, and the id in the URL is validated as a positive integer by
   // `idParamsSchema` *before* it is used for anything, so a traversal attempt
   // in the id segment is rejected by zod and never reaches `getGroupMetadata`.
   //
@@ -438,7 +438,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // `@fastify/static` registration and its own prefix, for a route that
   // still has to keep this handler's own existence check and 404 handling
   // either way. On a single-user LAN service with posters capped at 5 MiB
-  // (see `cachePoster`), buffering one poster per request is not worth that
+  // (see `cacheImage`), buffering one poster per request is not worth that
   // second registration. `Cache-Control` below is what actually matters at
   // this scale, since a browser can then skip re-reading the file at all.
   server.get('/api/groups/:id/poster', async (request, reply) => {
