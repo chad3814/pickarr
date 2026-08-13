@@ -1,18 +1,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findTitleEnd, tokensOf } from '../src/parse.ts';
+import { detachReleaseGroup, findTitleBoundary, findTitleEnd, tokensOf } from '../src/parse.ts';
 
-/** The title text the walk leaves behind, for readable assertions. */
+/**
+ * The title text the composed walk leaves behind, for readable assertions.
+ * Exercises the real composition: a caller detaches a trailing release-group
+ * tag first (as every real call site does — `findEncodeSuffixStart` returns
+ * `null` for undetached tokens with one), then `findEncodeSuffixStart` finds
+ * the boundary `findTitleEnd` walks back from, exactly as `findTitleBoundary`
+ * does it.
+ */
 function titleOf(name: string, minIndex = 0): string {
-  const tokens = tokensOf(name);
-  const end = findTitleEnd(tokens, minIndex);
-  return tokens.slice(0, end).map((t) => t.text).join(' ');
+  const detached = detachReleaseGroup(tokensOf(name), name);
+  const boundary = findTitleBoundary(detached.tokens, minIndex);
+  if (boundary === null) return 'REFUSED';
+  return detached.tokens.slice(0, boundary.titleEnd).map((t) => t.text).join(' ');
 }
 
-test('the walk crosses the XXX marker to reach what is behind it', () => {
-  // The whole change depends on this: XXX is neither an encode token nor a
-  // boundary anchor, so a walk that stopped there would never see `42466` or
-  // `Solo`, which is where most affected titles keep their junk.
+test('the walk starts after the XXX marker, so it reaches what is behind it', () => {
+  // Renamed from "crosses the XXX marker": under the new order the walk never
+  // crosses XXX at all. `findEncodeSuffixStart` cuts at the marker itself, so
+  // the vocabulary walk starts one token behind it and still reaches `42466`
+  // and `Solo`, which is where most affected titles keep their junk.
   assert.equal(titleOf('Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB'), 'Suki Sin');
 });
 
@@ -40,32 +49,44 @@ test('a kept token blocks the walk from reaching suffix tokens behind it', () =>
 });
 
 test('a title word ends the walk immediately', () => {
-  assert.equal(titleOf('Alex.Coal.Some.Title'), 'Alex Coal Some Title');
+  // No encode section at all, so findEncodeSuffixStart returns null and the
+  // composed helper reports REFUSED — this fixture exercises findTitleEnd's
+  // own floor behaviour directly instead.
+  const tokens = tokensOf('Alex.Coal.Some.Title');
+  assert.equal(findTitleEnd(tokens, 0, tokens.length), tokens.length);
 });
 
 test('minIndex stops the walk, so the title can never empty', () => {
   // Every token is a suffix token; minIndex is the only thing left.
-  assert.equal(titleOf('Solo.Hardcore.Lesbian', 1), 'Solo');
-  assert.equal(titleOf('Solo.Hardcore.Lesbian', 2), 'Solo Hardcore');
+  const tokens = tokensOf('Solo.Hardcore.Lesbian');
+  assert.equal(findTitleEnd(tokens, 1, tokens.length), 1);
+  assert.equal(findTitleEnd(tokens, 2, tokens.length), 2);
 });
 
 test('mid-title tags are untouched, because the walk only sees the end', () => {
-  assert.equal(titleOf('Solo.Adventure.Begins'), 'Solo Adventure Begins');
-  assert.equal(titleOf('The.Hardcore.Truth'), 'The Hardcore Truth');
+  const tokens1 = tokensOf('Solo.Adventure.Begins');
+  assert.equal(findTitleEnd(tokens1, 0, tokens1.length), tokens1.length);
+  const tokens2 = tokensOf('The.Hardcore.Truth');
+  assert.equal(findTitleEnd(tokens2, 0, tokens2.length), tokens2.length);
 });
 
-test('minIndex floor is never crossed, even with a release group', () => {
-  // Ensure the floor holds when a group tag would be removed. findTitleEnd must
-  // return minIndex, not fall below it, because the caller passes the result as
-  // the floor to findEncodeSuffixStart.
-  const tokens = tokensOf('Alex.FLAC.WRB');
-  assert.equal(findTitleEnd(tokens, 3), 3);
-  assert.equal(findTitleEnd(tokens, 2), 2);
-  assert.equal(findTitleEnd(tokens, 1), 1);
+test('minIndex floor is never crossed, walking back from a given index', () => {
+  // The walk's floor guarantee no longer needs a release-group fixture to
+  // exercise it: findTitleEnd only ever crosses vocabulary tokens now, and a
+  // release group is entirely findEncodeSuffixStart's business, reached via
+  // detachReleaseGroup upstream rather than by this predicate. Ordinary
+  // suffix vocabulary proves the same thing: minIndex stops the walk at
+  // every floor, not just the one nearest the end.
+  const tokens = tokensOf('Alex.Solo.Hardcore');
+  assert.equal(findTitleEnd(tokens, 3, tokens.length), 3);
+  assert.equal(findTitleEnd(tokens, 2, tokens.length), 2);
+  assert.equal(findTitleEnd(tokens, 1, tokens.length), 1);
 });
 
-test('a name whose entire tail is a group tag after an encode token resolves correctly', () => {
-  // Edge case: only performer/title before encode section. The group is
-  // recognized, removed, and the walk continues through the encode.
-  assert.equal(titleOf('Name.MP4-WRB'), 'Name');
+test('a name with only performer/title before a resolution anchor resolves correctly', () => {
+  // The shortest case that exercises the full composition: findEncodeSuffixStart
+  // finds `1080p` as a boundary anchor, and findTitleEnd walks back one token
+  // from it to the floor. Release-group detachment is a separate concern,
+  // covered by detachReleaseGroup and suffix-parse.test.ts, not by this file.
+  assert.equal(titleOf('Name.1080p'), 'Name');
 });

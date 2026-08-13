@@ -55,22 +55,18 @@ test('undetached tokens with trailing group tag returns null', () => {
   assert.equal(boundary, null);
 });
 
-test('isTitleSuffixToken accepts every encode token, except a bare digit', () => {
-  // The two boundary searches must agree about encode tokens, or the gap
-  // between titleEnd and encodeStart fills with tokens that reach
-  // extractQuality. Asserted as a property over the vocabulary rather than
-  // inferred from two indices happening to match on one fixture: a partial
-  // divergence leaves both indices non-null and merely different, which an
-  // index comparison on a single name does not catch.
+test('the vocabulary walk never claims an encode token', () => {
+  // The two searches no longer share a predicate; they divide the name. The
+  // encode search owns everything from `encodeStart` on, and the walk only ever
+  // examines tokens before it, so a token being encode information is not the
+  // walk's business at all. What must hold is the converse: nothing the walk
+  // crosses may be an encode token, or the two would be claiming the same
+  // token and the gap between the indices would be ambiguous.
   for (const t of ['1080p', '2160p', '4K', 'UHD', 'WEB-DL', 'SiteRip', 'BluRay',
                    'x265', 'HEVC', 'AAC', 'MP4', 'MKV', 'REPACK', 'HDR']) {
     assert.equal(isEncodeToken(t), true, `${t} should be an encode token`);
-    assert.equal(isTitleSuffixToken(t, 'word'), true, `${t} must be crossable`);
+    assert.equal(isTitleSuffixToken(t, 'word'), false, `${t} is not the walk's business`);
   }
-  // The one deliberate divergence, and the reason it is safe: a lone digit is
-  // an encode token but not a suffix token, so a sequel number survives.
-  assert.equal(isEncodeToken('4'), true);
-  assert.equal(isTitleSuffixToken('4', 'sarasota'), false);
 });
 
 test('both boundaries land at the same place when suffix is entirely encode tokens', () => {
