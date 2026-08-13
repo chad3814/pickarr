@@ -1,14 +1,14 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { readFile } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ManualField, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import type { DownloadClient } from '../clients/types.ts';
-import { toEditableConfig } from '../config/editable.ts';
-import { parseConfig, readConfigDocument } from '../config/load.ts';
+import { applyEdits, toEditableConfig } from '../config/editable.ts';
+import { parseConfig, readConfigDocument, resolveSecrets } from '../config/load.ts';
 import type { PickarrConfig } from '../config/schema.ts';
 import type { JsonValue } from '../json.ts';
 import {
@@ -47,6 +47,7 @@ import {
   toGroupView,
   type BrowseResponse,
   type ConfigResponse,
+  type ConfigSaveResponse,
   type FailedResponse,
   type GroupEditResponse,
   type GroupView,
@@ -226,6 +227,54 @@ const previewBodySchema = z.object({
   values: z.record(z.string(), z.string()),
 });
 
+const secretEditSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('keep') }),
+  z.object({ kind: z.literal('file'), path: z.string().min(1) }),
+  z.object({ kind: z.literal('literal'), value: z.string() }),
+]);
+
+// Shape only. Every *rule* about the values — port ranges, url formats, minimum
+// key lengths, duplicate ids — belongs to `parseConfig`, which the handler runs
+// on the merged document. Duplicating any of it here would give the same
+// mistake two different error messages depending on which check saw it first.
+const configSubmissionSchema = z.object({
+  server: z.object({ port: z.number() }),
+  database: z.object({ path: z.string() }),
+  trashDir: z.string(),
+  plugins: z.record(
+    z.string(),
+    z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string())])),
+  ),
+  downloadClients: z.array(
+    z.object({
+      id: z.string(),
+      type: z.literal('sabnzbd'),
+      url: z.string(),
+      apiKey: secretEditSchema,
+      category: z.string(),
+      importMode: z.enum(['move', 'copy']),
+      pathMappings: z.array(z.object({ from: z.string(), to: z.string() })),
+    }),
+  ),
+  feeds: z.array(
+    z.object({
+      id: z.string(),
+      url: z.string(),
+      plugin: z.string(),
+      intervalSeconds: z.number(),
+    }),
+  ),
+  siteLookup: z
+    .object({ type: z.literal('theporndb'), apiKey: secretEditSchema, baseUrl: z.string() })
+    .nullable(),
+  metadata: z.object({
+    enabled: z.boolean(),
+    intervalSeconds: z.number(),
+    perTick: z.number(),
+    artworkDir: z.string().nullable(),
+  }),
+});
+
 function parseCursor(raw: string | undefined): { listRankAt: number; id: number } | null {
   if (raw === undefined) return null;
   const [rank, id] = raw.split(':');
@@ -383,6 +432,58 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       portOverride: Number.isNaN(override) ? null : override,
       restartRequired: !isDeepStrictEqual(document, deps.bootConfigDocument),
     };
+    return response;
+  });
+
+  /**
+   * Validate everything, then write once.
+   *
+   * The order is the substance: fold the submission over the document on disk,
+   * run `parseConfig`, then *rehearse* `resolveSecrets` and throw the result
+   * away, and only then touch the filesystem. Every check boot applies has
+   * therefore been applied before a byte is written, which is what stops a save
+   * from producing a config that crash-loops the container — and that matters
+   * because `POST /api/restart` puts a boot behind a button.
+   *
+   * The write itself is temp-file-then-rename, so a process killed mid-save
+   * leaves either the old file or the new one and never a truncated one.
+   */
+  server.put('/api/config', async (request, reply) => {
+    const body = configSubmissionSchema.safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'Invalid request' });
+
+    let document: JsonValue;
+    try {
+      document = await readConfigDocument(deps.configPath);
+    } catch (error) {
+      return reply.code(500).send({ error: (error as Error).message });
+    }
+
+    const merged = applyEdits(document, body.data);
+    if ('error' in merged) return reply.code(400).send({ error: merged.error });
+
+    try {
+      const candidate = parseConfig(merged.document, deps.configPath);
+      // Discarded on purpose: this call is here for its failures, not its
+      // result. It is what catches a `file:` reference that is missing or
+      // empty — a document that parses but that boot cannot survive.
+      await resolveSecrets(candidate);
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message });
+    }
+
+    const temporary = `${deps.configPath}.tmp-${process.pid}`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(merged.document, null, 2)}\n`, 'utf8');
+      await rename(temporary, deps.configPath);
+    } catch (error) {
+      // Best-effort: if the rename is what failed, the temp file is still
+      // there, and leaving it beside a live config.json is its own small mess.
+      await rm(temporary, { force: true });
+      return reply.code(500).send({ error: `Could not write ${deps.configPath}: ${(error as Error).message}` });
+    }
+
+    const response: ConfigSaveResponse = { savedAt: deps.now(), restartRequired: true };
     return response;
   });
 
