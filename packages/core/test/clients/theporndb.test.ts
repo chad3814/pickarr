@@ -1,7 +1,27 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTpdbClient, RateLimited, type FetchImpl } from '../../src/clients/theporndb.ts';
+import {
+  createTpdbClient,
+  PROVIDER_REQUEST_TIMEOUT_MS,
+  RateLimited,
+  type FetchImpl,
+} from '../../src/clients/theporndb.ts';
 import type { SiteLookupConfig } from '../../src/config/schema.ts';
+
+/**
+ * Node's test runner has supported mocking `AbortSignal.timeout` for a
+ * while, but `@types/node@24`'s `MockTimersOptions['apis']` has not caught
+ * up to it — confirmed against the actual runtime this repo targets, which
+ * does honour it. Only the argument is widened (via `unknown`, since the
+ * literal union types don't otherwise overlap) — `enable` is still called as
+ * a method on `t.mock.timers`, not detached from it, since detaching it
+ * loses the `this` its implementation relies on.
+ */
+type TimerApis = Parameters<TestContext['mock']['timers']['enable']>[0];
+
+function enableAbortTimeoutMock(t: TestContext): void {
+  t.mock.timers.enable({ apis: ['AbortSignal.timeout'] } as unknown as TimerApis);
+}
 
 const API_KEY = 'tpdb-secret-key-0123456789abcdef';
 
@@ -432,3 +452,49 @@ test('an empty scene query is refused without a request', async () => {
   assert.deepEqual(await client.searchScenes('   ', null), []);
   assert.equal(fetchImpl.urls.length, 0);
 });
+
+// --- Timeouts ----------------------------------------------------------------
+//
+// A host that accepts the connection and then sends nothing must not hang
+// these calls forever: the metadata worker runs its pass under a `tryRun`
+// mutex, so one hung lookup silently stops every metadata lookup after it
+// (see the comment on PROVIDER_REQUEST_TIMEOUT_MS). `fetchImpl` below never
+// settles and never looks at `init.signal` — the worst case, a test double
+// that is not even aware a timeout exists — so a passing test here proves
+// the deadline is enforced by this client itself, not merely honoured by a
+// cooperative fetch implementation. Node's fake timers stand in for real
+// time so the test resolves instantly rather than actually waiting out the
+// deadline, and the explicit per-test `timeout` bounds the test in case the
+// deadline is not actually enforced and the promise never settles.
+
+test(
+  'a site search that never gets a response is abandoned rather than hung forever',
+  { timeout: 2_000 },
+  async (t) => {
+    enableAbortTimeoutMock(t);
+    const client = createTpdbClient(CONFIG, () => new Promise(() => undefined));
+
+    const pending = assert.rejects(client.searchSites('bangbros'));
+    t.mock.timers.tick(PROVIDER_REQUEST_TIMEOUT_MS);
+    await pending;
+  },
+);
+
+test(
+  'a scene search that never gets a response is abandoned rather than hung forever, ' +
+    'and is not mistaken for a rate limit',
+  { timeout: 2_000 },
+  async (t) => {
+    enableAbortTimeoutMock(t);
+    const client = createTpdbClient(CONFIG, () => new Promise(() => undefined));
+
+    const pending = assert.rejects(client.searchScenes('bangbros', null), (error: unknown) => {
+      // A slow host must defer one row, not abort the whole pass the way a
+      // 429 does — so a timeout must never surface as RateLimited.
+      assert.ok(!(error instanceof RateLimited), 'a timeout must not be treated as a rate limit');
+      return true;
+    });
+    t.mock.timers.tick(PROVIDER_REQUEST_TIMEOUT_MS);
+    await pending;
+  },
+);
