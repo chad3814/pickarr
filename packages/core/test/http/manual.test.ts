@@ -136,6 +136,7 @@ function deps(db: DatabaseSync, plugin: MediaTypePlugin = PLUGIN): ServerDeps {
     metadataAvailable: true,
     configPath: '/tmp/pickarr-manual-test-unused-config.json',
     bootConfigDocument: null,
+    databasePath: '/tmp/pickarr-manual-test-unused.db',
   };
 }
 

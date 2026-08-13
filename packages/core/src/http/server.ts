@@ -8,7 +8,7 @@ import { z } from 'zod';
 import type { ManualField, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import type { DownloadClient } from '../clients/types.ts';
 import { toEditableConfig } from '../config/editable.ts';
-import { parseConfig } from '../config/load.ts';
+import { parseConfig, readConfigDocument } from '../config/load.ts';
 import type { PickarrConfig } from '../config/schema.ts';
 import type { JsonValue } from '../json.ts';
 import {
@@ -111,13 +111,8 @@ export interface ServerDeps {
    * is written beside it — same filesystem, so nothing crosses a device
    * boundary. `DatabaseSync` does not expose the path it was opened with, so
    * this cannot be recovered from `db`.
-   *
-   * Optional here: no route in this file uses it yet — it is wired up by the
-   * backup route, added later — but the test file's `deps()` helper carries it
-   * from here on, so that helper only has to be edited once for all three
-   * fields these last two routes need.
    */
-  databasePath?: string;
+  databasePath: string;
   /**
    * Shuts the process down cleanly so that whatever supervises it starts a new
    * one — in main.ts, the same function the signal handlers use.
@@ -126,7 +121,12 @@ export interface ServerDeps {
    * called it directly could not be tested at all, and the one thing worth
    * testing here is that a restart is asked for exactly once.
    *
-   * Optional for the same reason `databasePath` is: no route calls it yet.
+   * Temporarily optional, unlike `databasePath` above: `main.ts` already has
+   * `config.database.path` in scope when it builds these deps, but it has
+   * nothing to pass here yet — the `shutdown` function this will call is only
+   * definable after `server` itself exists, which is `main.ts`'s ordering
+   * problem to solve, not this route's. It becomes required once the restart
+   * route is added and `main.ts` extracts `shutdown` to pass in.
    */
   requestRestart?(): void;
 }
@@ -173,25 +173,6 @@ function parsePositiveInt(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
   const value = Number(raw);
   return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-
-/**
- * The config file as a JSON document, with the same two messages `loadConfig`
- * produces for an unreadable file and for invalid JSON — the Settings screen
- * shows these verbatim, so they should read the same wherever they came from.
- */
-async function readConfigDocument(path: string): Promise<JsonValue> {
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch {
-    throw new Error(`Could not read config file at ${path}`);
-  }
-  try {
-    return JSON.parse(raw) as JsonValue;
-  } catch (error) {
-    throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
-  }
 }
 
 /**

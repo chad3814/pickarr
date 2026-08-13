@@ -259,6 +259,7 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     // a file would live if one existed.
     configPath: join(workDir, 'config.json'),
     bootConfigDocument: null,
+    databasePath: config.database.path,
   });
 
   // Port 0, then read back what the OS assigned. A fixed port collides between

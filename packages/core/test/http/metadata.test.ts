@@ -94,6 +94,7 @@ function deps(
     metadataAvailable: overrides.metadataAvailable ?? true,
     configPath: '/tmp/pickarr-metadata-test-unused-config.json',
     bootConfigDocument: null,
+    databasePath: '/tmp/pickarr-metadata-test-unused.db',
   };
 }
 
