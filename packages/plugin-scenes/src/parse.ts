@@ -672,7 +672,7 @@ function looksLikeGroupTag(text: string, minLength: number): boolean {
   return !isEncodeToken(text);
 }
 
-interface Detached {
+export interface Detached {
   readonly tokens: Token[];
   readonly group: string | undefined;
 }
@@ -765,7 +765,7 @@ function dottedGroupRun(tokens: Token[], text: string): Token[] | undefined {
   return undefined;
 }
 
-function detachReleaseGroup(tokens: Token[], text: string): Detached {
+export function detachReleaseGroup(tokens: Token[], text: string): Detached {
   const last = tokens.at(-1);
   const previous = tokens.at(-2);
   if (last === undefined || previous === undefined) return { tokens, group: undefined };
@@ -902,6 +902,45 @@ export function findTitleEnd(tokens: Token[], minIndex: number): number {
     end -= 1;
   }
   return end;
+}
+
+/**
+ * Where the title stops and where the encode section starts. Two numbers
+ * because they are no longer the same one: the tokens between them are the
+ * suffix `findTitleEnd` removed, and they must reach neither the title nor
+ * `extractQuality`.
+ */
+export interface TitleBoundary {
+  readonly titleEnd: number;
+  readonly encodeStart: number;
+}
+
+/**
+ * Pairs the title walk with the existing encode-boundary search.
+ *
+ * `findEncodeSuffixStart` is unchanged and receives `titleEnd` as its
+ * `minIndex`, which already means "the first index the cut may fall on". A
+ * `null` return means what it has always meant — no recognisable encode
+ * section — so every caller's existing refusal path still applies.
+ *
+ * Tokens are passed whole rather than sliced. Callers cut the original name
+ * string with `token.start`, and slicing the array would shift indices while
+ * those offsets stayed absolute.
+ */
+export function findTitleBoundary(tokens: Token[], minIndex: number): TitleBoundary | null {
+  const titleEnd = findTitleEnd(tokens, minIndex);
+  const encodeStart = findEncodeSuffixStart(tokens, titleEnd);
+  if (encodeStart === null) return null;
+  return { titleEnd, encodeStart };
+}
+
+/**
+ * The offset in `text` at which the token at `index` begins, or the end of
+ * `text` when `index` is past the last token — which happens whenever a name
+ * carries no suffix at all.
+ */
+export function suffixOffset(tokens: Token[], index: number, text: string): number {
+  return tokens[index]?.start ?? text.length;
 }
 
 /**
