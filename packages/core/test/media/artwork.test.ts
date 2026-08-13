@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cachePoster, MAX_POSTER_BYTES, POSTER_TIMEOUT_MS } from '../../src/media/artwork.ts';
+import { cacheImage, MAX_IMAGE_BYTES, IMAGE_TIMEOUT_MS, performerArtworkKey } from '../../src/media/artwork.ts';
 
 /**
  * Node's test runner has supported mocking `AbortSignal.timeout` for a
@@ -44,7 +44,7 @@ function imageResponse(bytes: Uint8Array, contentType: string): Response {
  * tell whether it was drained to completion or cancelled partway through.
  *
  * `state.chunksYielded` is the count of chunks the *source* actually produced
- * — not the count `cachePoster` chose to read — so it only rises below the
+ * — not the count `cacheImage` chose to read — so it only rises below the
  * full chunk count when the reader was cancelled before pulling the rest.
  * That is what distinguishes a streaming implementation from one that reads
  * the whole body regardless of size: a buffering implementation drains every
@@ -80,11 +80,32 @@ function chunkedResponse(
   return { response, state };
 }
 
+test('a cached image is named from the key it was given', async () => {
+  await withTempDir(async (dir) => {
+    const name = await cacheImage(
+      { dir, fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array([1, 2, 3]), 'image/png')), log() {} },
+      'performer-face-7',
+      'https://example.invalid/a.png',
+    );
+    // The extension comes from the validated content type, never the URL.
+    assert.equal(name, 'performer-face-7.png');
+  });
+});
+
+test('a key is never taken from provider input', () => {
+  // Not a behavioural test of cacheImage — a guard on its callers. Both
+  // compose the key from integers of our own, so no separator can reach it.
+  // If this ever needs relaxing, the sanitising argument `cacheImage`
+  // deliberately avoided has to be made explicitly instead.
+  assert.equal(performerArtworkKey(7, 'face'), 'performer-face-7');
+  assert.equal(performerArtworkKey(7, 'image'), 'performer-image-7');
+});
+
 test('a jpeg is stored under the group id with the type-derived extension', async () => {
   await withTempDir(async (dir) => {
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array([1, 2, 3]), 'image/jpeg')), log() {} },
-      7,
+      '7',
       'https://example.test/whatever.php',
     );
     assert.equal(name, '7.jpg', 'the extension comes from the content type, never the URL');
@@ -94,9 +115,9 @@ test('a jpeg is stored under the group id with the type-derived extension', asyn
 
 test('a non-image content type is refused', async () => {
   await withTempDir(async (dir) => {
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array([1]), 'text/html')), log() {} },
-      7,
+      '7',
       'https://example.test/p.jpg',
     );
     assert.equal(name, null);
@@ -106,9 +127,9 @@ test('a non-image content type is refused', async () => {
 
 test('a content type is matched case-insensitively', async () => {
   await withTempDir(async (dir) => {
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array([1, 2, 3]), 'IMAGE/JPEG')), log() {} },
-      7,
+      '7',
       'https://example.test/p.jpg',
     );
     assert.equal(name, '7.jpg', 'RFC 9110 media types are case-insensitive');
@@ -117,13 +138,13 @@ test('a content type is matched case-insensitively', async () => {
 
 test('a content type with a parameter is still matched', async () => {
   await withTempDir(async (dir) => {
-    const name = await cachePoster(
+    const name = await cacheImage(
       {
         dir,
         fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array([1, 2, 3]), 'image/jpeg; charset=utf-8')),
         log() {},
       },
-      7,
+      '7',
       'https://example.test/p.jpg',
     );
     assert.equal(name, '7.jpg');
@@ -132,10 +153,10 @@ test('a content type with a parameter is still matched', async () => {
 
 test('a response past the byte cap is abandoned and leaves nothing behind', async () => {
   await withTempDir(async (dir) => {
-    const huge = new Uint8Array(MAX_POSTER_BYTES + 1);
-    const name = await cachePoster(
+    const huge = new Uint8Array(MAX_IMAGE_BYTES + 1);
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(imageResponse(huge, 'image/png')), log() {} },
-      7,
+      '7',
       'https://example.test/p.png',
     );
     assert.equal(name, null);
@@ -150,9 +171,9 @@ test('a streamed oversize body is cancelled before it is fully read', async () =
     const chunks = Array.from({ length: totalChunks }, () => new Uint8Array(chunkSize));
     const { response, state } = chunkedResponse(chunks, 'image/png');
 
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(response), log() {} },
-      7,
+      '7',
       'https://example.test/p.png',
     );
 
@@ -168,15 +189,15 @@ test('a streamed oversize body is cancelled before it is fully read', async () =
 
 test('a body exactly at the cap is accepted', async () => {
   await withTempDir(async (dir) => {
-    const exact = new Uint8Array(MAX_POSTER_BYTES);
-    const name = await cachePoster(
+    const exact = new Uint8Array(MAX_IMAGE_BYTES);
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(imageResponse(exact, 'image/png')), log() {} },
-      7,
+      '7',
       'https://example.test/p.png',
     );
     assert.equal(name, '7.png', 'reaching the cap exactly must not be treated as exceeding it');
     const stored = await readFile(join(dir, '7.png'));
-    assert.equal(stored.byteLength, MAX_POSTER_BYTES);
+    assert.equal(stored.byteLength, MAX_IMAGE_BYTES);
   });
 });
 
@@ -187,9 +208,9 @@ test('a lying Content-Length does not exempt an oversize body from the running-t
     const chunks = Array.from({ length: totalChunks }, () => new Uint8Array(chunkSize));
     const { response } = chunkedResponse(chunks, 'image/png', { 'content-length': '10' });
 
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(response), log() {} },
-      7,
+      '7',
       'https://example.test/p.png',
     );
 
@@ -201,7 +222,7 @@ test('a lying Content-Length does not exempt an oversize body from the running-t
 test('the response body is cancelled, not left dangling, on a non-ok status', async () => {
   await withTempDir(async (dir) => {
     const { response, state } = chunkedResponse([new Uint8Array([1, 2, 3])], 'image/jpeg', {}, 404);
-    const name = await cachePoster({ dir, fetchImpl: () => Promise.resolve(response), log() {} }, 7, 'https://example.test/p.jpg');
+    const name = await cacheImage({ dir, fetchImpl: () => Promise.resolve(response), log() {} }, '7', 'https://example.test/p.jpg');
     assert.equal(name, null);
     assert.equal(state.cancelled, true, 'a rejected response must not pin the underlying connection open');
   });
@@ -210,7 +231,7 @@ test('the response body is cancelled, not left dangling, on a non-ok status', as
 test('the response body is cancelled, not left dangling, on a refused content type', async () => {
   await withTempDir(async (dir) => {
     const { response, state } = chunkedResponse([new Uint8Array([1, 2, 3])], 'text/html');
-    const name = await cachePoster({ dir, fetchImpl: () => Promise.resolve(response), log() {} }, 7, 'https://example.test/p.jpg');
+    const name = await cacheImage({ dir, fetchImpl: () => Promise.resolve(response), log() {} }, '7', 'https://example.test/p.jpg');
     assert.equal(name, null);
     assert.equal(state.cancelled, true, 'a refused content type must not pin the underlying connection open');
   });
@@ -219,9 +240,9 @@ test('the response body is cancelled, not left dangling, on a refused content ty
 test('the response body is cancelled, not left dangling, when Content-Length already exceeds the cap', async () => {
   await withTempDir(async (dir) => {
     const { response, state } = chunkedResponse([new Uint8Array([1, 2, 3])], 'image/png', {
-      'content-length': String(MAX_POSTER_BYTES + 1),
+      'content-length': String(MAX_IMAGE_BYTES + 1),
     });
-    const name = await cachePoster({ dir, fetchImpl: () => Promise.resolve(response), log() {} }, 7, 'https://example.test/p.png');
+    const name = await cacheImage({ dir, fetchImpl: () => Promise.resolve(response), log() {} }, '7', 'https://example.test/p.png');
     assert.equal(name, null);
     assert.equal(
       state.cancelled,
@@ -237,14 +258,14 @@ test('two concurrent downloads for the same group do not interleave', async () =
     const pngBytes = new Uint8Array([4, 5, 6, 7, 8]);
 
     const [jpegName, pngName] = await Promise.all([
-      cachePoster(
+      cacheImage(
         { dir, fetchImpl: () => Promise.resolve(imageResponse(jpegBytes, 'image/jpeg')), log() {} },
-        7,
+        '7',
         'https://example.test/a.jpg',
       ),
-      cachePoster(
+      cacheImage(
         { dir, fetchImpl: () => Promise.resolve(imageResponse(pngBytes, 'image/png')), log() {} },
-        7,
+        '7',
         'https://example.test/b.png',
       ),
     ]);
@@ -272,9 +293,9 @@ test('a write or rename failure still removes the temp file', async () => {
     // is written on those paths at all.
     await mkdir(join(dir, '7.jpg'));
 
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array([1, 2, 3]), 'image/jpeg')), log() {} },
-      7,
+      '7',
       'https://example.test/p.jpg',
     );
 
@@ -292,7 +313,7 @@ test('the temp file is removed before the logger runs, so a throwing logger cann
 
     let thrown: unknown;
     try {
-      await cachePoster(
+      await cacheImage(
         {
           dir,
           fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array([1, 2, 3]), 'image/jpeg')),
@@ -300,7 +321,7 @@ test('the temp file is removed before the logger runs, so a throwing logger cann
             throw new Error('logger is broken');
           },
         },
-        7,
+        '7',
         'https://example.test/p.jpg',
       );
     } catch (error) {
@@ -320,9 +341,9 @@ test('the temp file is removed before the logger runs, so a throwing logger cann
 test('a fetch failure is reported, not thrown', async () => {
   await withTempDir(async (dir) => {
     const logged: string[] = [];
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.reject(new Error('offline')), log: (m) => logged.push(m) },
-      7,
+      '7',
       'https://example.test/p.jpg',
     );
     assert.equal(name, null, 'a poster failure must not fail the metadata answer');
@@ -335,9 +356,9 @@ test('a fetch rejection with a non-Error value is reported, not thrown', async (
     const logged: string[] = [];
     // Nothing requires a rejected promise to carry an Error — this must not
     // crash on a cast that assumes it does.
-    const name = await cachePoster(
+    const name = await cacheImage(
       { dir, fetchImpl: () => Promise.reject(null), log: (m) => logged.push(m) },
-      7,
+      '7',
       'https://example.test/p.jpg',
     );
     assert.equal(name, null, 'a poster failure must not fail the metadata answer, whatever shape it takes');
@@ -349,10 +370,10 @@ test('a fetch rejection with a non-Error value is reported, not thrown', async (
 // --- Timeout -------------------------------------------------------------
 //
 // A host that accepts the connection and then sends nothing must not hang
-// this call forever — see the comment on POSTER_TIMEOUT_MS. `fetchImpl`
+// this call forever — see the comment on IMAGE_TIMEOUT_MS. `fetchImpl`
 // below never settles and never looks at its `init.signal`, the worst case:
 // a caller that is not even aware a timeout exists. A passing test here
-// proves the deadline is enforced by `cachePoster` itself. Node's fake
+// proves the deadline is enforced by `cacheImage` itself. Node's fake
 // timers stand in for real time so this resolves instantly, and the
 // explicit per-test `timeout` bounds the test in case the deadline is not
 // actually enforced and the promise never settles.
@@ -365,12 +386,12 @@ test(
       enableAbortTimeoutMock(t);
       const logged: string[] = [];
 
-      const pending = cachePoster(
+      const pending = cacheImage(
         { dir, fetchImpl: () => new Promise(() => undefined), log: (m) => logged.push(m) },
-        7,
+        '7',
         'https://example.test/p.jpg',
       );
-      t.mock.timers.tick(POSTER_TIMEOUT_MS);
+      t.mock.timers.tick(IMAGE_TIMEOUT_MS);
       const name = await pending;
 
       assert.equal(

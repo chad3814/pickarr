@@ -7,7 +7,7 @@ import type {
   MetadataVerdict,
 } from '@pickarr/plugin-api';
 import { RateLimited, type SceneLookupClient } from '../clients/theporndb.ts';
-import { cachePoster, type ArtworkDeps } from '../media/artwork.ts';
+import { cacheImage, type ArtworkDeps } from '../media/artwork.ts';
 import { getGroup } from '../db/groups.ts';
 import {
   deferMetadata,
@@ -409,9 +409,9 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   recordMetadataAnswer(deps.db, { groupId: row.groupId, source: client.source, confirmed, nearMisses, now });
 
   // A poster failure is not a metadata failure: the answer above is already
-  // written, and `cachePoster` never throws, so nothing here can undo it.
+  // written, and `cacheImage` never throws, so nothing here can undo it.
   if (confirmed !== null && confirmed.posterUrl !== null) {
-    const posterPath = await cachePoster(deps.artwork, row.groupId, confirmed.posterUrl);
+    const posterPath = await cacheImage(deps.artwork, String(row.groupId), confirmed.posterUrl);
     if (posterPath !== null) setPosterPath(deps.db, row.groupId, posterPath);
   }
 
