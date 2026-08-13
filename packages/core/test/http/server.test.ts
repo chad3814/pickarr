@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { failDownload, getDownload } from '../../src/db/downloads.ts';
 import { getGroup } from '../../src/db/groups.ts';
+import { insertImportedFile } from '../../src/db/imported-files.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
 import type { FastifyInstance } from 'fastify';
 import type { DownloadClient } from '../../src/clients/types.ts';
@@ -274,6 +275,53 @@ test('picking a lesser release keeps the group in browse, with the better one st
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
   const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 1);
   assert.deepEqual(listed, group);
+  await server.close();
+  db.close();
+});
+
+test('picking an upgrade answers with no group, and browse stops listing it', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  // Take the 1080p and let it land, so the group holds a file and the 2160p
+  // is what browse is offering. Picking it is an upgrade rather than a fresh
+  // acquisition.
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 1 } });
+  insertImportedFile(db, {
+    downloadId: 1,
+    groupId: 1,
+    sourcePath: '/downloads/alpha.mp4',
+    destPath: '/library/Alpha/alpha.mp4',
+    sizeBytes: 1,
+    createdAt: 1,
+  });
+
+  const pick = await server.inject({
+    method: 'POST',
+    url: '/api/groups/1/pick',
+    payload: { releaseId: 2 },
+  });
+
+  assert.equal(pick.statusCode, 200);
+  // A null group is the whole contract the SPA acts on: `Browse` filters the
+  // card out on exactly this. It used to come back non-null — still flagged
+  // with the release now downloading — so the card stayed on screen offering
+  // a Pick button that could only answer `already has download`.
+  assert.equal(pick.json()['group'], null);
+
+  // And the list agrees, which is the point of the route answering at all:
+  // the client patches this response straight in, so a disagreement here is a
+  // client view that has quietly stopped matching the database.
+  const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
+  assert.deepEqual(
+    browse['groups'].map((candidate: { id: number }) => candidate.id),
+    [2],
+  );
+
+  // The pick itself has not moved — the replacement is still downloading, and
+  // moving it early is what would trash the wrong file on import.
+  assert.equal(getGroup(db, 1)?.pickedReleaseId, 1);
   await server.close();
   db.close();
 });

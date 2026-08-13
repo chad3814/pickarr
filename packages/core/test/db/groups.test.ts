@@ -197,20 +197,86 @@ test('when every better release has failed, nothing is flagged', () => {
   db.close();
 });
 
-test('a release retried successfully after a failure is flagged again', () => {
+test('a release retried after a failure is not advertised while the retry runs', () => {
   const db = openTestDatabase();
   seedGroup(db, 1);
   addDownload(db, 4, 'failed');
-  addDownload(db, 4, 'imported');
+  addDownload(db, 4, 'queued');
 
   markPicked(db, 1, 1);
 
-  // Only the most recent attempt counts, so recovery needs no separate write:
-  // the release becomes eligible again the moment a later attempt is not a
-  // failure.
+  // Release 4 is no longer *failed* — only the most recent attempt counts, so
+  // recovery needs no separate write — but it is being downloaded, and a
+  // release being downloaded is not something to offer. This is the reachable
+  // half of what this test used to assert with an `imported` row: an import is
+  // what moves `picked_release_id` onto the release, so "imported yet not
+  // picked" is a state the pipeline does not produce, and the answer it was
+  // pinning (flag release 4) is the bug — a card advertising an upgrade whose
+  // Pick button can only return `already has download`.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
+  db.close();
+});
+
+// The invariant that makes that whole class of bug unreachable, stated
+// directly and over every status the pick route refuses. `inFlightForRelease`
+// rejects a pick on any download that is not 'failed', so the flag must skip
+// exactly the same set: any release the flag advertises but the route refuses
+// is a button whose only outcome is an error message. 'failed' is the one
+// status deliberately absent: it is the case where the two answers legitimately
+// differ — a failed release stays pickable on the card so a retry is one click
+// — and it is covered above, by `latestDownloadFailed` rather than by this
+// rule.
+for (const status of ['queued', 'downloading', 'completed', 'importing', 'imported']) {
+  test(`a release with a '${status}' download is never flagged as an upgrade`, () => {
+    const db = openTestDatabase();
+    seedGroup(db, 1);
+    addDownload(db, 4, status);
+
+    markPicked(db, 1, 1);
+
+    assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
+
+    // The control, in the same fixture: take the download away and release 4
+    // is flagged again. Without it this test would pass just as well against a
+    // rule that had stopped flagging anything at all — the assertion above is
+    // an absence, and an absence proves nothing on its own.
+    db.prepare('DELETE FROM downloads').run();
+    refreshUpgradeFlag(db, 1);
+    assert.equal(getGroup(db, 1)?.upgradeReleaseId, 4);
+    db.close();
+  });
+}
+
+test('an arrival worse than the upgrade already downloading is not advertised', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  // Holding release 1 (100), with release 4 (400) downloading as an upgrade.
+  addDownload(db, 4, 'downloading');
+  markPicked(db, 1, 1);
+
+  // Release 3 (300) beats the pick, so the old rule — which compared against
+  // the pick alone — advertised it, inviting a second concurrent upgrade of
+  // the same group while the first was still in flight. It is worse than what
+  // is already coming, so it is not an upgrade on offer.
+  assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
+  db.close();
+});
+
+test('an arrival better than the upgrade already downloading is still advertised', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  // Same shape, one rung down: release 3 (300) is downloading, and release 4
+  // (400) beats it.
+  addDownload(db, 3, 'downloading');
+  markPicked(db, 1, 1);
+
+  // The bar rises to what is already coming — it does not become a blackout.
+  // This is the case `completeUpgrade` exists to preserve: something better
+  // arriving mid-download must survive to be flagged when that download lands.
   assert.equal(getGroup(db, 1)?.upgradeReleaseId, 4);
   db.close();
 });
+
 
 test("the pick's own failure does not suppress the alternatives it needs", () => {
   const db = openTestDatabase();
