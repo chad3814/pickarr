@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClient } from '../clients/types.ts';
-import { getGroup, markPicked } from '../db/groups.ts';
+import { getGroup, markPicked, refreshUpgradeFlag } from '../db/groups.ts';
 import { liveFilesForGroup } from '../db/imported-files.ts';
 import { getRelease, linkForRelease, titleForRelease } from '../db/releases.ts';
 import {
@@ -90,7 +90,6 @@ export async function pickRelease(
   let downloadId: number;
   db.exec('BEGIN');
   try {
-    if (kind === 'initial') markPicked(db, request.groupId, request.releaseId);
     downloadId = insertDownload(db, {
       releaseId: request.releaseId,
       groupId: request.groupId,
@@ -98,6 +97,22 @@ export async function pickRelease(
       kind,
       createdAt: now,
     });
+    // Both branches re-derive the upgrade flag, and both do it *after* the
+    // insert above: a release with a download is one the group has committed
+    // to, and `deriveUpgradeReleaseId` reads exactly that. Ordered the other
+    // way round the derivation would run against a group that had not yet
+    // asked for anything, and answer as though this pick had not happened.
+    //
+    // The upgrade branch is the fix for the reported bug. It used to write
+    // nothing at all — an upgrade deliberately leaves `picked_release_id` on
+    // the old release until the replacement imports, and leaving the pointer
+    // alone was mistaken for having nothing to record. But
+    // `upgrade_release_id` is a stored column, and it still named the release
+    // now downloading, so the group stayed in the browse list (`BROWSABLE`
+    // reads that column) advertising the very thing the user had just asked
+    // for. Clicking Pick on an upgrade left the card exactly where it was.
+    if (kind === 'initial') markPicked(db, request.groupId, request.releaseId);
+    else refreshUpgradeFlag(db, request.groupId);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');

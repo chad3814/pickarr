@@ -8,7 +8,7 @@ import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { pickRelease } from '../../src/pipeline/pick.ts';
 import { importDownload } from '../../src/pipeline/import.ts';
-import { getGroup } from '../../src/db/groups.ts';
+import { browsableGroup, getGroup } from '../../src/db/groups.ts';
 import {
   extractLabel,
   failDownload,
@@ -162,6 +162,39 @@ test('a pick on a group holding a live file is an upgrade and leaves the pick un
   assert.equal(second.kind, 'upgrade');
   // The file on disk is still release 1's, so that is still what the group
   // has; the pointer moves when the replacement actually lands.
+  assert.equal(getGroup(db, groupId)?.pickedReleaseId, 1);
+  db.close();
+});
+
+test('picking an upgrade takes the group out of the browse list', async () => {
+  const db = openTestDatabase();
+  const { groupId } = seed(db);
+  addRelease(db, 2, 200);
+
+  const first = await pickRelease(db, fakeClient(), { groupId, releaseId: 1 }, 500);
+  addLiveFile(db, first.id);
+  // Holding release 1, release 2 is the better one on offer — which is exactly
+  // what puts this picked group in the browse list at all (`BROWSABLE` is
+  // "unpicked, or something better available").
+  assert.equal(browsableGroup(db, groupId)?.upgradeReleaseId, 2);
+
+  await pickRelease(db, fakeClient(), { groupId, releaseId: 2 }, 600);
+
+  // The reported bug. An upgrade deliberately leaves `picked_release_id` on
+  // release 1 until the replacement imports, and that was mistaken for having
+  // nothing to write — so `upgrade_release_id` went on naming release 2 and
+  // the card stayed put, advertising the release the user had just asked for.
+  // Clicking its Pick button again could only return `already has download`.
+  //
+  // Asserted through `browsableGroup` rather than the column, because that is
+  // the function the route answers the SPA with: a null here is what makes
+  // Browse drop the card.
+  assert.equal(browsableGroup(db, groupId), null);
+  assert.equal(getGroup(db, groupId)?.upgradeReleaseId, null);
+  // ...and the pick is still deferred, which is the behaviour that made this
+  // path skip the write in the first place. Both facts at once, or the fix
+  // could be "move the pick early", which would trash the wrong file on
+  // import.
   assert.equal(getGroup(db, groupId)?.pickedReleaseId, 1);
   db.close();
 });
