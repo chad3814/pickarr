@@ -101,4 +101,17 @@ test('a tall poster grows the card head instead of covering the releases', async
   if (headingBox === null) throw new Error('no heading box');
   expect(posterBox.x).toBeGreaterThan(headingBox.x + headingBox.width - 1);
   expect(posterBox.y).toBeLessThan(headingBox.y + headingBox.height);
+
+  // The poster is beside the *whole* identity block, not just the title. The
+  // fields row is the last thing in that column, so a poster whose span still
+  // reaches it is one sharing a row with everything above it too — which is
+  // what keeps the column tall enough to avoid a band of empty space beneath
+  // it. Moving the Edit control or the fields back out of the column, below
+  // the row, would leave the poster's span ending above them and fail here
+  // while every no-overlap assertion above still passed.
+  const fields = page.locator('.fields').first();
+  const fieldsBox = await fields.boundingBox();
+  if (fieldsBox === null) throw new Error('no fields box');
+  expect(fieldsBox.x).toBeLessThan(posterBox.x);
+  expect(posterBox.y + posterBox.height).toBeGreaterThan(fieldsBox.y);
 });
