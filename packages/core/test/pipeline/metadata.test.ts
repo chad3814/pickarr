@@ -347,6 +347,58 @@ test('a poster failure still writes the metadata row', async () => {
   });
 });
 
+test('a group already holding a poster is not made to download it again', async () => {
+  // The poster half of 'a performer already holding artwork is not
+  // refetched'. Migration 7 queues every confirmed group in the library, and
+  // `cacheImage` keys the poster on the group id, so without the cached-path
+  // guard the backfill spends one full image download per group to overwrite
+  // a byte-identical file — the whole library's worth, on first boot after
+  // the upgrade, and no test would have noticed.
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    const groupId = makeGroup(db, 'A Scene', 'Some Site');
+    enqueueMetadata(db, [groupId], 1_000);
+
+    const scene = candidate({
+      title: 'A Scene',
+      siteName: 'Some Site',
+      posterUrl: 'https://example.test/poster.jpg',
+    });
+
+    const firstPassFetches: string[] = [];
+    await runMetadataPass(
+      deps({
+        db,
+        client: fakeSceneClient(() => [scene]),
+        now: () => 1_000,
+        artwork: { dir, fetchImpl: trackingFetchJpeg(firstPassFetches), log: () => undefined },
+      }),
+    );
+    assert.deepEqual(firstPassFetches, ['https://example.test/poster.jpg']);
+
+    // Re-queued the way migration 7 does it — straight into the table, past
+    // `enqueueMetadata`'s already-answered guard, which is exactly the path
+    // that makes this cost real rather than hypothetical.
+    db.prepare(
+      `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at) VALUES (?, ?, 0, ?)`,
+    ).run(groupId, 2_000, 2_000);
+
+    const secondPassFetches: string[] = [];
+    const result = await runMetadataPass(
+      deps({
+        db,
+        client: fakeSceneClient(() => [scene]),
+        now: () => 2_000,
+        artwork: { dir, fetchImpl: trackingFetchJpeg(secondPassFetches), log: () => undefined },
+      }),
+    );
+
+    assert.equal(result.confirmed, 1);
+    assert.deepEqual(secondPassFetches, [], 'the poster is already on disk under this group id');
+    assert.equal(getGroupMetadata(db, groupId)?.posterPath, `${groupId}.jpg`);
+  });
+});
+
 test('a confirmed answer caches each performer\'s face and image', async () => {
   await withTempDir(async (dir) => {
     const db = openTestDatabase();

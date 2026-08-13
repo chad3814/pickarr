@@ -12,6 +12,7 @@ import { getGroup } from '../db/groups.ts';
 import {
   deferMetadata,
   dueMetadataQueue,
+  getGroupMetadata,
   recordMetadataAnswer,
   setPosterPath,
   type MetadataQueueRow,
@@ -411,7 +412,25 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
 
   // A poster failure is not a metadata failure: the answer above is already
   // written, and `cacheImage` never throws, so nothing here can undo it.
-  if (confirmed !== null && confirmed.posterUrl !== null) {
+  //
+  // Skipped when a path is already stored, which is the same rule
+  // `performersNeedingArtwork` applies to avatars twenty lines below, for the
+  // same reason and now stated once for both. Without it, migration 7's
+  // backfill spends one full image download per confirmed group in the
+  // library to overwrite a byte-identical file: `cacheImage` keys the poster
+  // on the group id alone, so a refetch of the same scene writes the same
+  // bytes to the same name.
+  //
+  // The cost of the rule is that a poster the provider *moved* is not
+  // re-fetched — the stored path still names the old file, which is stale
+  // decoration rather than a wrong answer. Telling the two apart would mean
+  // reading the previous `poster_url` before the upsert overwrites it, and
+  // the same argument then applies to `face_url` and `image_url`; it is worth
+  // doing for all three or none, and this branch is not the place to widen
+  // it. The row's `poster_url` is kept current either way, so a future pass
+  // has what it needs.
+  const cachedPoster = getGroupMetadata(deps.db, row.groupId)?.posterPath ?? null;
+  if (confirmed !== null && confirmed.posterUrl !== null && cachedPoster === null) {
     const posterPath = await cacheImage(deps.artwork, String(row.groupId), confirmed.posterUrl);
     if (posterPath !== null) setPosterPath(deps.db, row.groupId, posterPath);
   }

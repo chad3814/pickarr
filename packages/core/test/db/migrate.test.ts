@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { assertUniqueVersions, migrate } from '../../src/db/migrate.ts';
 import { migrations, type Migration } from '../../src/db/migrations.ts';
+import { dueMetadataQueue, enqueueMetadata } from '../../src/db/metadata.ts';
 
 test('migrate creates every table', () => {
   const db = openTestDatabase();
@@ -957,6 +958,33 @@ test('migration 7 re-queues confirmed groups so they refetch with performers', (
   // never asked, so it queues on its own when someone browses to it.
   const queued = db.prepare('SELECT group_id FROM metadata_queue ORDER BY group_id').all();
   assert.deepEqual(queued.map((r) => (r as { group_id: number }).group_id), [1]);
+});
+
+test('a backfilled row is due at once but yields to anything requested after the upgrade', () => {
+  // `dueMetadataQueue` filters on `next_at` and orders by `requested_at`, and
+  // the backfill uses the two columns against each other on purpose. Stamping
+  // `requested_at` from `fetched_at` — the group's own answer time, the
+  // obvious choice — puts every backfill row ahead of every request made
+  // after the upgrade, so at the worker's ~1 group/s a few thousand groups
+  // means hours in which a freshly ingested group the user is looking at sits
+  // at `pending` behind the whole backlog.
+  const db = databaseAtVersion(6);
+  db.prepare(`INSERT INTO media_groups (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+              VALUES (1,'t','a','{}','a',1,1), (2,'t','b','{}','b',1,1)`).run();
+  db.prepare(`INSERT INTO group_metadata (group_id, state, source, fetched_at)
+              VALUES (1,'confirmed','theporndb',1000)`).run();
+
+  migrations.find((m) => m.version === 7)!.up(db);
+
+  // Group 2 is browsed after the upgrade, at a real clock reading.
+  const now = 1_760_000_000_000;
+  enqueueMetadata(db, [2], now);
+
+  assert.deepEqual(
+    dueMetadataQueue(db, now, 10).map((r) => r.groupId),
+    [2, 1],
+    'the newly browsed group goes first, and the backfilled one is still due behind it',
+  );
 });
 
 test('migration 7 adds the performer tables and the scene slug', () => {
