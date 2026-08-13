@@ -77,10 +77,11 @@ function candidate(overrides: Partial<MetadataCandidate> = {}): MetadataCandidat
     siteId: 1,
     siteName: 'Some Site',
     date: null,
-    performers: ['Jane Doe'],
+    performers: [],
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     posterUrl: null,
+    slug: null,
     ...overrides,
   };
 }

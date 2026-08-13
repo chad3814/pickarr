@@ -650,7 +650,7 @@ test('merging a group that has been browsed does not 500, and leaves the target 
     confirmed: {
       sourceUuid: 'target-uuid', title: 'Target Scene', siteUuid: null, siteId: null,
       siteName: 'Site', date: '2020-01-01', performers: [], durationSeconds: null,
-      synopsis: null, posterUrl: null,
+      synopsis: null, posterUrl: null, slug: null,
     },
     nearMisses: [],
     now: 1000,
@@ -670,7 +670,7 @@ test('merging a group that has been browsed does not 500, and leaves the target 
         candidate: {
           sourceUuid: 'rejected', title: 'Rejected Scene', siteUuid: null, siteId: null,
           siteName: 'Site', date: '2020-01-01', performers: [], durationSeconds: null,
-          synopsis: null, posterUrl: null,
+          synopsis: null, posterUrl: null, slug: null,
         },
         reason: 'date outside window',
       },

@@ -52,8 +52,9 @@ test('an answer replaces the queue row in one transaction', () => {
     source: 'theporndb',
     confirmed: {
       sourceUuid: 'scene-uuid', title: 'A Scene', siteUuid: 'site-uuid', siteId: 1,
-      siteName: 'Naughty Office', date: '2021-11-15', performers: ['Silvia Saige'],
+      siteName: 'Naughty Office', date: '2021-11-15', performers: [],
       durationSeconds: 1000, synopsis: 'A synopsis', posterUrl: 'https://example.test/p.jpg',
+      slug: 'a-scene',
     },
     nearMisses: [],
     now: 2_000,
@@ -62,7 +63,7 @@ test('an answer replaces the queue row in one transaction', () => {
   assert.equal(dueMetadataQueue(db, 9_999, 10).length, 0);
   const stored = getGroupMetadata(db, groupId);
   assert.equal(stored?.state, 'confirmed');
-  assert.deepEqual(stored?.performers, ['Silvia Saige']);
+  assert.deepEqual(stored?.performers, []);
   assert.equal(stored?.durationSeconds, 1000);
 });
 
@@ -80,7 +81,7 @@ test('near-misses are written with the answer and are not the answer', () => {
         candidate: {
           sourceUuid: 'other', title: 'Another Scene', siteUuid: null, siteId: null,
           siteName: 'Elsewhere', date: '2021-11-20', performers: [], durationSeconds: null,
-          synopsis: null, posterUrl: null,
+          synopsis: null, posterUrl: null, slug: null,
         },
         reason: 'date outside window',
       },
@@ -105,7 +106,7 @@ test('a retried answer for the same group does not duplicate its candidate rows'
     candidate: {
       sourceUuid: 'other', title: 'Another Scene', siteUuid: null, siteId: null,
       siteName: 'Elsewhere', date: '2021-11-20', performers: [], durationSeconds: null,
-      synopsis: null, posterUrl: null,
+      synopsis: null, posterUrl: null, slug: null,
     },
     reason: 'date outside window',
   };

@@ -8,7 +8,7 @@ const NAUGHTY = { siteUuid: 'site-uuid', siteId: 1, siteName: 'Naughty Office' }
 function candidate(over: Partial<MetadataCandidate> = {}): MetadataCandidate {
   return {
     sourceUuid: 'scene-1', title: 'Smokin Hot Brunette', date: '2021-11-15',
-    performers: ['Silvia Saige'], durationSeconds: 1000, synopsis: null, posterUrl: null,
+    performers: [], durationSeconds: 1000, synopsis: null, posterUrl: null, slug: null,
     ...NAUGHTY, ...over,
   };
 }

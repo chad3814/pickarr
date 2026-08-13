@@ -114,10 +114,11 @@ function candidate(overrides: Partial<MetadataCandidate> = {}): MetadataCandidat
     siteId: 1,
     siteName: 'Some Site',
     date: '2024-01-01',
-    performers: ['Jane Doe'],
+    performers: [],
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     posterUrl: 'https://example.invalid/poster.jpg',
+    slug: null,
     ...overrides,
   };
 }
@@ -313,7 +314,7 @@ test('metadata reads report pending, none and confirmed distinctly', async () =>
   assert.deepEqual(body[String(confirmed)], {
     state: 'confirmed',
     title: 'A Scene',
-    performers: ['Jane Doe'],
+    performers: [],
     releaseDate: '2024-01-01',
     durationSeconds: 1200,
     synopsis: 'A synopsis',
@@ -493,7 +494,7 @@ test('browse carries metadata and reads it in one query', async () => {
   assert.deepEqual(byId.get(g1), {
     state: 'confirmed',
     title: 'Alpha Scene',
-    performers: ['Jane Doe'],
+    performers: [],
     releaseDate: '2024-01-01',
     durationSeconds: 1200,
     synopsis: 'A synopsis',
