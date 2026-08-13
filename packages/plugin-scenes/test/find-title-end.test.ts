@@ -53,3 +53,19 @@ test('mid-title tags are untouched, because the walk only sees the end', () => {
   assert.equal(titleOf('Solo.Adventure.Begins'), 'Solo Adventure Begins');
   assert.equal(titleOf('The.Hardcore.Truth'), 'The Hardcore Truth');
 });
+
+test('minIndex floor is never crossed, even with a release group', () => {
+  // Ensure the floor holds when a group tag would be removed. findTitleEnd must
+  // return minIndex, not fall below it, because the caller passes the result as
+  // the floor to findEncodeSuffixStart.
+  const tokens = tokensOf('Alex.FLAC.WRB');
+  assert.equal(findTitleEnd(tokens, 3), 3);
+  assert.equal(findTitleEnd(tokens, 2), 2);
+  assert.equal(findTitleEnd(tokens, 1), 1);
+});
+
+test('a name whose entire tail is a group tag after an encode token resolves correctly', () => {
+  // Edge case: only performer/title before encode section. The group is
+  // recognized, removed, and the walk continues through the encode.
+  assert.equal(titleOf('Name.MP4-WRB'), 'Name');
+});
