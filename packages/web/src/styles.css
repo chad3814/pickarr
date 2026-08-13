@@ -4,6 +4,7 @@ body { margin: 0; }
 nav { display: flex; gap: 1rem; padding-bottom: 1rem; }
 nav a { text-decoration: none; }
 nav a.active { font-weight: 600; text-decoration: underline; }
+.nav-separator { opacity: 0.4; user-select: none; }
 input.search { margin-bottom: 1rem; }
 .media-card { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; opacity: 0.95; }
 .media-card h2 { margin: 0; font-size: 1.1rem; }
