@@ -5,7 +5,13 @@ import { MemoryRouter } from 'react-router';
 import { App } from '../src/App.tsx';
 import { Picks } from '../src/routes/Picks.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
-import type { DownloadsResponse, GroupView, PicksResponse } from '../src/api/client.ts';
+import type {
+  DownloadsResponse,
+  GroupView,
+  MetadataRequestResponse,
+  MetadataView,
+  PicksResponse,
+} from '../src/api/client.ts';
 
 afterEach(cleanup);
 
@@ -15,8 +21,11 @@ function group(id: number, title: string, over: Partial<GroupView> = {}): GroupV
     plugin: 'scenes',
     display: { title, fields: [] },
     state: 'picked',
-    // Required since browse and picks share `GroupView`. Picks does not poll
-    // for metadata, so 'absent' is what its cards genuinely carry.
+    // Required since browse and picks share `GroupView`. `'absent'` is what
+    // `/api/picks` genuinely carries for a group nothing has asked about yet
+    // — Picks now polls `useGroupMetadata` for a live answer the same as
+    // Browse does, but that hook's own tests cover the polling itself; this
+    // fixture is just the value the route starts from before a poll lands.
     metadata: { state: 'absent' },
     pickedReleaseId: id * 10,
     upgradeReleaseId: null,
@@ -57,13 +66,52 @@ function failedPick(healthy: GroupView): GroupView {
 }
 
 /**
+ * Every `groupIds` array `serve()`'s mock has seen on `POST
+ * /api/metadata/request`, reset at the start of each `serve()` call. A test
+ * that only cares about `/api/picks` and picking never reads this; the ones
+ * about metadata batching do.
+ */
+const metadataRequestBodies: number[][] = [];
+
+/**
  * `/api/picks` answers `first`, and every load after the first answers
  * `reloaded` when one is given — which is how a test tells a re-render apart
  * from the render it started with.
+ *
+ * Also answers the two metadata endpoints `useGroupMetadata` now calls for
+ * every group Picks renders: `'none'` for every id on `GET /api/metadata`,
+ * settled so the hook never polls again for it, the same default
+ * `Browse.test.tsx` uses for the same reason — these tests are about picking
+ * and reloading, not the metadata panel.
  */
 function serve(first: GroupView[], reloaded?: GroupView[]): void {
   let loads = 0;
-  globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+  metadataRequestBodies.length = 0;
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://test.invalid');
+
+    if (url.pathname === '/api/metadata/request') {
+      const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
+      metadataRequestBodies.push(body.groupIds);
+      return new Response(
+        JSON.stringify({
+          queued: 0,
+          alreadyAnswered: body.groupIds.length,
+          pending: 0,
+          missing: 0,
+          unavailable: 0,
+        } satisfies MetadataRequestResponse),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.pathname === '/api/metadata') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
+      const response: Record<number, MetadataView> = {};
+      for (const id of ids) response[Number(id)] = { state: 'none' };
+      return new Response(JSON.stringify(response), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     // A pick POSTs and then reloads; its response body goes unread.
     if (init?.method === 'POST') {
       return new Response('{}', { headers: { 'content-type': 'application/json' } });
@@ -190,10 +238,38 @@ test('a failed download on Downloads reaches its group on Picks', async () => {
   const picks: PicksResponse = {
     groups: [failedPick(group(2, 'Beta')), group(1, 'Alpha')],
   };
-  globalThis.fetch = (async (input: string) =>
-    new Response(JSON.stringify(input.startsWith('/api/downloads') ? downloads : picks), {
-      headers: { 'content-type': 'application/json' },
-    })) as unknown as typeof fetch;
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/downloads') {
+      return new Response(JSON.stringify(downloads), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    // The Picks route this test navigates to now polls for metadata too; see
+    // `serve()`'s own comment for why `'none'` is the right answer here.
+    if (url.pathname === '/api/metadata/request') {
+      const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
+      return new Response(
+        JSON.stringify({
+          queued: 0,
+          alreadyAnswered: body.groupIds.length,
+          pending: 0,
+          missing: 0,
+          unavailable: 0,
+        } satisfies MetadataRequestResponse),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.pathname === '/api/metadata') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
+      const response: Record<number, MetadataView> = {};
+      for (const id of ids) response[Number(id)] = { state: 'none' };
+      return new Response(JSON.stringify(response), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(picks), { headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
 
   render(
     <MemoryRouter initialEntries={['/downloads']}>
@@ -224,4 +300,159 @@ test('a failed pick reads Failed on the Picks tab', async () => {
 
   await waitFor(() => assert.ok(screen.getByText('Failed')));
   assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
+});
+
+test('a page of ids is requested once, not once per card', async () => {
+  // The invariant `useGroupMetadata`'s own tests guard in isolation, proven
+  // here at the point it actually matters: that wiring the hook into Picks
+  // hands it one array for the whole list, not a per-card effect.
+  serve([group(1, 'Alpha'), group(2, 'Beta'), group(3, 'Gamma')]);
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Gamma')));
+  await waitFor(() => assert.equal(metadataRequestBodies.length, 1));
+  assert.deepEqual(metadataRequestBodies[0], [1, 2, 3]);
+});
+
+test('a reload that keeps the same groups costs no extra metadata request', async () => {
+  // Picking an alternative reloads the list (§7.3's "leave it listed, updated"
+  // case), and the ids on screen afterwards are exactly what they were before.
+  // `useGroupMetadata` keys its effect on the id list's content precisely so a
+  // reload like this does not look like a fresh page to ask about again — this
+  // is that guard exercised through Picks rather than through the hook alone.
+  serve([group(1, 'Alpha')], [{ ...group(1, 'Alpha'), upgradeReleaseId: 11 }]);
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  await waitFor(() => assert.equal(metadataRequestBodies.length, 1));
+
+  fireEvent.click(screen.getAllByRole('button', { name: /pick/i })[0]!);
+  await waitFor(() => assert.ok(screen.getByText(/upgrade available/i)));
+
+  // Comfortably longer than the hook would take to re-ask if the reload had
+  // been mistaken for a new page.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(metadataRequestBodies.length, 1);
+});
+
+test('polling stops once nothing is pending', async () => {
+  let getCalls = 0;
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/picks') {
+      const body: PicksResponse = { groups: [group(5, 'Echo')] };
+      return new Response(JSON.stringify(body), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.pathname === '/api/metadata/request') {
+      return new Response(
+        JSON.stringify({
+          queued: 1,
+          alreadyAnswered: 0,
+          pending: 0,
+          missing: 0,
+          unavailable: 0,
+        } satisfies MetadataRequestResponse),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.pathname === '/api/metadata') {
+      getCalls += 1;
+      // Pending on the first answer (the worker has not run yet), confirmed on
+      // every one after — a group's answer settles and stays settled.
+      const view: MetadataView =
+        getCalls === 1
+          ? { state: 'pending' }
+          : {
+              state: 'confirmed',
+              title: 'Echo title',
+              performers: [],
+              releaseDate: null,
+              durationSeconds: null,
+              synopsis: null,
+              hasPoster: false,
+            };
+      return new Response(JSON.stringify({ 5: view }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected request to ${url.pathname}`);
+  }) as unknown as typeof fetch;
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Echo title')), { timeout: 3_000 });
+
+  const callsOnceConfirmed = getCalls;
+  // Comfortably longer than the hook's own backoff would wait before polling
+  // again, so a poller that failed to stop would have already made another
+  // call by the time this checks.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  assert.equal(getCalls, callsOnceConfirmed);
+});
+
+test('does not poll forever when metadata is unavailable server-wide', async () => {
+  // `POST /api/metadata/request` refuses to queue when the worker is disabled
+  // or no `siteLookup` is configured (packages/core/src/http/server.ts), and
+  // reports those ids `unavailable` rather than `queued`. `GET /api/metadata`
+  // then has nothing answered and nothing queued for them, so it answers
+  // `absent` — settled, not `pending` — which is what stops the poll rather
+  // than any special case in the hook for `unavailable` itself.
+  let getCalls = 0;
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/picks') {
+      const body: PicksResponse = { groups: [group(9, 'Nine')] };
+      return new Response(JSON.stringify(body), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.pathname === '/api/metadata/request') {
+      return new Response(
+        JSON.stringify({
+          queued: 0,
+          alreadyAnswered: 0,
+          pending: 0,
+          missing: 0,
+          unavailable: 1,
+        } satisfies MetadataRequestResponse),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.pathname === '/api/metadata') {
+      getCalls += 1;
+      return new Response(JSON.stringify({ 9: { state: 'absent' } } satisfies Record<number, MetadataView>), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected request to ${url.pathname}`);
+  }) as unknown as typeof fetch;
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Nine')));
+  await waitFor(() => assert.equal(getCalls, 1));
+
+  // Long enough that a poller which failed to stop on `absent` would have
+  // already made a second call.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  assert.equal(getCalls, 1);
 });
