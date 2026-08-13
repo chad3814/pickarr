@@ -244,6 +244,11 @@ async function main(): Promise<void> {
     configPath: CONFIG_PATH,
     bootConfigDocument,
     databasePath: config.database.path,
+    // `shutdown` closes over `server`, which does not exist until the call
+    // below returns — so this cannot pass `shutdown` itself, only a function
+    // that will call it once `shutdown` is in scope. The arrow is never
+    // invoked until `POST /api/restart` fires, by which point it is.
+    requestRestart: () => shutdown('restart requested'),
   });
 
   await server.listen({ port: config.server.port, host: '0.0.0.0' });
@@ -253,15 +258,33 @@ async function main(): Promise<void> {
   void scheduler.ingestAllNow();
   void scheduler.reconcileNow();
 
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.on(signal, () => {
-      log(`${signal} received, shutting down`);
-      scheduler.stop();
-      void server.close().then(() => {
-        db.close();
-        process.exit(0);
-      });
+  // One shutdown, three triggers: SIGINT, SIGTERM, and `POST /api/restart`
+  // via the `requestRestart` passed into `buildServer` above. Previously this
+  // body was written inline inside the signal loop, duplicated nowhere else;
+  // now that a second caller needs the exact same sequence, a second copy of
+  // it is how the two would come to differ about, say, whether the database
+  // gets closed.
+  let shuttingDown = false;
+  const shutdown = (reason: string): void => {
+    // A second trigger during teardown — a SIGTERM arriving while a requested
+    // restart is already tearing down — must not start a second
+    // `server.close()`.
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`${reason}, shutting down`);
+    scheduler.stop();
+    void server.close().then(() => {
+      db.close();
+      // Zero, not one: this is a clean, intentional stop. Under the documented
+      // `restart: unless-stopped` compose policy that is a restart; under
+      // `restart: on-failure` it would not be, which is why the UI presents
+      // this as an explicit action rather than something a save does silently.
+      process.exit(0);
     });
+  };
+
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => shutdown(`${signal} received`));
   }
 }
 

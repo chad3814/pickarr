@@ -694,7 +694,8 @@ test('a PUT whose file: secret cannot be resolved is refused before the write', 
 });
 
 test('a PUT keeping a secret for a renamed client is refused with a usable message', async () => {
-  await withConfigDir(async ({ deps: configDeps }) => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const before = await readFile(configPath, 'utf8');
     const server = buildServer(configDeps);
     const body = configSubmission();
     const clients = asJsonArray(body['downloadClients']);
@@ -703,6 +704,49 @@ test('a PUT keeping a secret for a renamed client is refused with a usable messa
     const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
     assert.equal(response.statusCode, 400);
     assert.match(response.json()['error'], /sab-renamed/);
+    assert.equal(await readFile(configPath, 'utf8'), before);
+    await server.close();
+  });
+});
+
+// The PUT and GET routes compute `restartRequired` the same way — against
+// `bootConfigDocument` — so they must never contradict each other on the same
+// disk state. Fix 3: `restartRequired` used to be hardcoded `true` on every
+// save, even one that changed nothing a boot would notice.
+//
+// `applyEdits` always writes a `metadata` object and always deletes an absent
+// `siteLookup`, whether or not the document on disk already had them — so the
+// document the base `CONFIG_DOCUMENT` fixture produces is *not* a fixed point
+// of `configSubmission()`. This test needs a document that already is one.
+test('PUT /api/config answers restartRequired: false when the save matches the boot document', async () => {
+  const unchanged: JsonObject = {
+    ...structuredClone(CONFIG_DOCUMENT),
+    metadata: { enabled: true, intervalSeconds: 5, perTick: 5 },
+  };
+  await withConfigDir(async ({ deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    // Submits exactly what's on disk (and what boot document holds), so the
+    // resulting document is unchanged.
+    const response = await server.inject({
+      method: 'PUT',
+      url: '/api/config',
+      payload: configSubmission(),
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json()['restartRequired'], false);
+    await server.close();
+  }, unchanged);
+});
+
+test('PUT /api/config answers restartRequired: true when the save actually changes something', async () => {
+  await withConfigDir(async ({ deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    body['trashDir'] = '/data/elsewhere';
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json()['restartRequired'], true);
     await server.close();
   });
 });
@@ -727,4 +771,20 @@ test('a malformed PUT body is a 400 and writes nothing', async () => {
     assert.equal(await readFile(configPath, 'utf8'), before);
     await server.close();
   });
+});
+
+test('POST /api/restart acknowledges and asks for exactly one restart', async () => {
+  const db = openTestDatabase();
+  let restarts = 0;
+  const server = buildServer({ ...deps(db), requestRestart: () => { restarts += 1; } });
+
+  const response = await server.inject({ method: 'POST', url: '/api/restart' });
+  assert.equal(response.statusCode, 202);
+  assert.equal(response.json()['restarting'], true);
+  // `inject` resolves once the reply has finished, which is exactly the event
+  // the handler hangs the restart on.
+  assert.equal(restarts, 1);
+
+  await server.close();
+  db.close();
 });

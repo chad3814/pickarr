@@ -260,6 +260,10 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     configPath: join(workDir, 'config.json'),
     bootConfigDocument: null,
     databasePath: config.database.path,
+    // The harness never restarts the process it's testing against; a real
+    // restart route firing `process.exit` mid-suite would take the whole
+    // e2e run down with it.
+    requestRestart: () => {},
   });
 
   // Port 0, then read back what the OS assigned. A fixed port collides between
