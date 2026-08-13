@@ -28,6 +28,17 @@ test('a title word after an audio token survives', () => {
   );
 });
 
+test('a doubled XXX marker keeps the in-title one, not just the walk-adjacent one', () => {
+  // `findEncodeSuffixStart` places `encodeStart` at the marker immediately
+  // before the trailing encode run — the *last* XXX when there are two, not
+  // necessarily the only one. If `isTitleSuffixToken` ever regains a
+  // MARKER_TOKEN clause, the walk would reach past `encodeStart` and cross
+  // the first, in-title XXX too, silently truncating the title from
+  // `Name XXX` to `Name`. No other fixture in this suite has two markers, so
+  // nothing else catches that regression — this one exists specifically to.
+  assert.equal(titleOf('Site.26.08.05.Name.XXX.Solo.XXX.1080p.MP4-WRB'), 'Name XXX');
+});
+
 test('a content-type tag and an id both leave the title', () => {
   assert.equal(titleOf('PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB'),
     'Suki Sin');
