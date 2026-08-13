@@ -389,31 +389,62 @@ test('a runner holds a 429 cooldown across ticks: no request while it stands, re
   // rediscovering the same rate limit. `createMetadataRunner` is the fix:
   // it holds the cooldown in its own closure, across calls, and the whole
   // point of this test is to drive it across more than one call.
+  //
+  // A single queued row cannot tell the runner's cooldown apart from the
+  // per-row `next_at` deferral `runMetadataPass` already applies to the row
+  // that hit the 429: with only one row, both mechanisms produce the exact
+  // same observed requests. Two rows can tell them apart. Row B is never
+  // touched by the 429 — only row A's `next_at` is deferred — so row B stays
+  // "due" for as long as the queue is concerned. If the runner's own
+  // cooldown were broken (or absent), a tick during the cooldown window
+  // would still call `runMetadataPass`, which would find row B due and ask
+  // it. Only the runner-level cooldown can keep row B unasked through those
+  // ticks.
   const db = openTestDatabase();
-  const groupId = makeGroup(db, 'A Scene', 'Some Site');
-  enqueueMetadata(db, [groupId], 1_000);
+  const groupA = makeGroup(db, 'A Scene', 'Some Site');
+  const groupB = makeGroup(db, 'B Scene', 'Some Site');
+  enqueueMetadata(db, [groupA, groupB], 1_000);
+
+  // Throws only on the very first request ever made, regardless of which
+  // row it is for, so a later tick that reaches a row a second time does
+  // not re-trigger the limit and mask whether row B was ever reached.
+  let hasFailedOnce = false;
+  const client = fakeSceneClient(() => {
+    if (!hasFailedOnce) {
+      hasFailedOnce = true;
+      throw new RateLimited(30_000);
+    }
+    return [];
+  });
+  const askedTitles = () => client.asked.map((entry) => entry.query);
 
   let now = 1_000;
-  const client = fakeSceneClient(() => {
-    throw new RateLimited(30_000);
-  });
-
   const runner = createMetadataRunner(deps({ db, client, now: () => now }));
 
   await runner();
   assert.equal(client.asked.length, 1, 'the first tick makes the request that discovers the limit');
+  assert.deepEqual(askedTitles(), ['A Scene'], 'row A hit the limit; row B was never reached this pass');
 
   now = 5_000; // well inside the cooldown (until 1_000 + 30_000 = 31_000)
   await runner();
   assert.equal(client.asked.length, 1, 'a tick inside the cooldown must issue no provider request at all');
+  assert.ok(
+    !askedTitles().includes('B Scene'),
+    'row B is due (its own next_at was never deferred) but must still not be asked while the cooldown stands',
+  );
 
   now = 20_000; // still inside it
   await runner();
   assert.equal(client.asked.length, 1, 'still no request while the cooldown stands');
+  assert.ok(!askedTitles().includes('B Scene'), 'row B still must not be asked');
 
   now = 31_000; // the moment it lapses
   await runner();
-  assert.equal(client.asked.length, 2, 'a tick once the cooldown has passed must resume');
+  assert.ok(client.asked.length > 1, 'a tick once the cooldown has passed must resume making requests');
+  assert.ok(
+    askedTitles().includes('B Scene'),
+    'row B — the due row the cooldown was holding back — must be asked once the cooldown lapses',
+  );
 });
 
 test('a runner logs a cooldown skip once, not on every tick it is skipped for', async () => {

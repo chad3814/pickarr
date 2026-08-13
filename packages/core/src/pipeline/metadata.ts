@@ -266,7 +266,9 @@ export async function runMetadataPass(deps: MetadataPassDeps): Promise<MetadataP
 
   deps.log(
     `metadata pass: ${result.confirmed} confirmed, ${result.none} none, ${result.deferred} deferred` +
-      (result.cooldownUntil === null ? '' : `, cooldown until ${result.cooldownUntil}`),
+      (result.cooldownUntil === null
+        ? ''
+        : `, cooldown until ${new Date(result.cooldownUntil).toISOString()}`),
   );
 
   return result;
