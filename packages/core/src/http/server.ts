@@ -19,7 +19,7 @@ import {
   enqueueMetadata,
   getGroupMetadata,
   metadataForGroups,
-  queuedGroupIds,
+  queuedMetadataNextAt,
   type GroupMetadata,
 } from '../db/metadata.ts';
 import { validateIdentity } from '../ingest/commit.ts';
@@ -137,8 +137,8 @@ function parsePositiveInt(raw: string): number | null {
  * longer than a browse page could ever put on screen at once — this is an
  * unauthenticated GET on a LAN-exposed service, and an unbounded id list
  * turns into an unbounded `IN (...)` built twice (once each for
- * `metadataForGroups` and `queuedGroupIds`), which is wasted work at best and
- * `ERR_SQLITE_ERROR: too many SQL variables` at worst.
+ * `metadataForGroups` and `queuedMetadataNextAt`), which is wasted work at
+ * best and `ERR_SQLITE_ERROR: too many SQL variables` at worst.
  */
 function parseIds(raw: string): number[] | null {
   const parts = raw.split(',');
@@ -409,12 +409,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     if (ids === null) return reply.code(400).send({ error: 'Invalid ids' });
 
     // Two queries total for however many ids were asked about — one for
-    // answers, one for queue membership — never one pair per id.
+    // answers, one for queue rows (and each pending id's next_at) — never one
+    // pair per id.
     const answered = metadataForGroups(db, ids);
-    const queued = queuedGroupIds(db, ids);
+    const queuedNextAt = queuedMetadataNextAt(db, ids);
     const response: Record<number, MetadataView> = {};
     for (const id of ids) {
-      response[id] = metadataViewOf(answered.get(id), queued.has(id));
+      response[id] = metadataViewOf(answered.get(id), queuedNextAt.get(id));
     }
     return response;
   });

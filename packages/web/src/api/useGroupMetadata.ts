@@ -20,10 +20,72 @@ const MAX_DELAY_MS = 8_000;
  */
 const BATCH_LIMIT = 100;
 
+/**
+ * The floor under a server-driven sleep. `nextAttemptAt` is usually very
+ * close to now — a group waiting behind others the worker hasn't reached yet
+ * this tick, not one deferred for an outage — and without a floor that reads
+ * as "poll again immediately", a hot loop once `next_at` is in the past by
+ * even a millisecond. The worker's own default `intervalSeconds` is 5 (see
+ * the README's `metadata.intervalSeconds`), so nothing this hook could learn
+ * by asking again sooner than that has actually changed server-side; 5s is
+ * the fastest polling can possibly be useful, not an arbitrary round number.
+ */
+const MIN_SERVER_DELAY_MS = 5_000;
+
+/**
+ * The ceiling on a server-driven sleep, independent of `MAX_DELAY_MS` (the
+ * ceiling for the *ladder*, used only when the server gives no `next_at` to
+ * trust). The worker's own per-row backoff caps at six hours
+ * (`deferMetadata`'s caller), and sleeping that long in a live tab would mean
+ * a poster that finally arrives, a server restart that resets in-memory
+ * queue state, or a browser reload none of them get noticed until the tab is
+ * closed and reopened. Five minutes bounds the staleness a still-open tab can
+ * ever show without hammering anything: at most one request every five
+ * minutes per still-pending page, forever, during the worst outage.
+ */
+const MAX_SERVER_DELAY_MS = 5 * 60_000;
+
 function chunk(ids: readonly number[], size: number): number[][] {
   const batches: number[][] = [];
   for (let start = 0; start < ids.length; start += size) batches.push(ids.slice(start, start + size));
   return batches;
+}
+
+/**
+ * How long to sleep before re-checking `ids`, all of which `found` reported
+ * `pending` a moment ago — or `undefined` to say "trust none of this, fall
+ * back to the escalating ladder instead".
+ *
+ * Every one of them needs a `nextAttemptAt` for this hook to trust the
+ * server's clock at all — a mixed batch where even one id lacks it (talking
+ * to a server that predates this field; see the note on `MetadataView`)
+ * falls the *whole* poll back to the ladder, rather than trusting the ids
+ * that do have one and guessing for the rest. A single page is one request
+ * either way, so there is no way to sleep two different amounts for two ids
+ * in it, and silently ignoring the ids with no answer would be worse than
+ * the ladder this hook already had.
+ *
+ * Among ids that do carry it, the earliest `nextAttemptAt` wins, not an
+ * average or the latest: any one of them becoming ready is news for that
+ * card, and the whole point of reading the server's clock is to be
+ * responsive to whichever group is closest to answered. Waiting for the
+ * *slowest* of several pending ids would silently delay a card that could
+ * have updated minutes sooner just because it happened to share a page load
+ * with one deferred for hours.
+ */
+function serverDelayFor(found: ReadonlyMap<number, MetadataView>, ids: readonly number[]): number | undefined {
+  let earliest: number | undefined;
+  for (const id of ids) {
+    const view = found.get(id);
+    if (view?.state !== 'pending') continue;
+    if (view.nextAttemptAt === undefined) return undefined;
+    earliest = earliest === undefined ? view.nextAttemptAt : Math.min(earliest, view.nextAttemptAt);
+  }
+  // `ids` is always the still-pending subset the caller just computed, so
+  // `earliest` is only ever undefined if `ids` is empty — which `poll`
+  // already guards against before scheduling anything. Purely defensive.
+  if (earliest === undefined) return undefined;
+  return Math.min(Math.max(earliest - Date.now(), MIN_SERVER_DELAY_MS), MAX_SERVER_DELAY_MS);
 }
 
 /**
@@ -103,6 +165,20 @@ export function useGroupMetadata(groupIds: readonly number[]): Map<number, Metad
       commit(found);
       const stillPending = ids.filter((id) => found.get(id)?.state === 'pending');
       if (stillPending.length === 0) return;
+
+      const serverWait = serverDelayFor(found, stillPending);
+      if (serverWait !== undefined) {
+        // Every still-pending id trusted the server's clock, so sleep to
+        // roughly the earliest of them rather than guess. `delay` (the
+        // ladder's own state) is threaded through unchanged rather than
+        // advanced: the ladder is dormant while the server keeps answering
+        // with a `nextAttemptAt`, so if some later response ever drops the
+        // field, the ladder resumes from where it left off rather than from
+        // wherever server-driven sleeps happened to leave a doubled value.
+        timer = setTimeout(() => void poll(stillPending, delay), serverWait);
+        return;
+      }
+
       const nextDelay = Math.min(delay * 2, MAX_DELAY_MS);
       timer = setTimeout(() => void poll(stillPending, nextDelay), delay);
     }

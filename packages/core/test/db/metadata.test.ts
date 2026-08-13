@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
   dueMetadataQueue, enqueueMetadata, getGroupMetadata, metadataForGroups,
-  recordMetadataAnswer, deferMetadata, setPosterPath,
+  queuedMetadataNextAt, recordMetadataAnswer, deferMetadata, setPosterPath,
 } from '../../src/db/metadata.ts';
 
 function withGroups(count: number) {
@@ -150,6 +150,23 @@ test('metadataForGroups reads a page in one query', () => {
   const found = metadataForGroups(db, ids);
   assert.equal(found.size, 3);
   assert.equal(metadataForGroups(db, []).size, 0, 'no ids must not build an empty IN ()');
+});
+
+test('queuedMetadataNextAt reads a page of queue rows in one query, and reports a deferral\'s moved next_at', () => {
+  const { db, ids } = withGroups(3);
+  const [waiting, deferred, answered] = ids as [number, number, number];
+  enqueueMetadata(db, [waiting, deferred], 1_000);
+  deferMetadata(db, deferred, 'ECONNRESET', 60_000);
+  recordMetadataAnswer(db, {
+    groupId: answered, source: 'theporndb', confirmed: null, nearMisses: [], now: 1_000,
+  });
+
+  const found = queuedMetadataNextAt(db, ids);
+  assert.equal(found.size, 2, 'the answered group has no queue row left');
+  assert.equal(found.get(waiting), 1_000, 'still waiting its turn, next_at unchanged');
+  assert.equal(found.get(deferred), 60_000, 'deferred: next_at moved to the retry time');
+  assert.equal(found.has(answered), false);
+  assert.equal(queuedMetadataNextAt(db, []).size, 0, 'no ids must not build an empty IN ()');
 });
 
 test('a poster path is set independently of the answer', () => {
