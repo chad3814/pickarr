@@ -703,6 +703,108 @@ test('merging a group that has been browsed does not 500, and leaves the target 
   db.close();
 });
 
+test('an identity edit forgets metadata confirmed against the identity it replaced', () => {
+  const db = openTestDatabase();
+  seedTwoGroups(db);
+
+  // Answered while the group still claimed `k2`, so this row describes
+  // whatever scene the *old* identity matched — which is the reading the human
+  // is about to overrule.
+  recordMetadataAnswer(db, {
+    groupId: 2,
+    source: 'theporndb',
+    confirmed: {
+      sourceUuid: 'stale-uuid',
+      title: 'The Scene The Wrong Parse Matched',
+      siteUuid: null,
+      siteId: null,
+      siteName: 'Site',
+      date: '2020-01-01',
+      performers: ['Somebody Else Entirely'],
+      durationSeconds: null,
+      synopsis: null,
+      posterUrl: null,
+    },
+    nearMisses: [
+      {
+        candidate: {
+          sourceUuid: 'rejected-uuid',
+          title: 'A Rejected Candidate',
+          siteUuid: null,
+          siteId: null,
+          siteName: 'Site',
+          date: '2020-01-09',
+          performers: [],
+          durationSeconds: null,
+          synopsis: null,
+          posterUrl: null,
+        },
+        reason: 'date outside window',
+      },
+    ],
+    now: 1000,
+  });
+
+  // `k9` collides with nothing, so this takes the plain-edit path rather than
+  // the merge one. The merge path already clears metadata — but only as a
+  // foreign-key precondition for deleting the source row, which is why this
+  // path was never given the same treatment.
+  ok(editGroup(makeDeps(db), 2, { key: 'k9' }));
+
+  // The row has to be gone rather than merely stale. `enqueueMetadata` counts
+  // *any* `group_metadata` row as answered, so one that survives is never
+  // re-asked: the card would keep showing the wrong scene's performers and
+  // poster for as long as the group exists.
+  assert.equal(getGroupMetadata(db, 2), undefined);
+
+  // The rejected candidates were evidence about the old identity too, and are
+  // no more true of the new one than the answer was.
+  assert.equal(
+    db.prepare('SELECT 1 FROM metadata_candidates WHERE group_id = ?').get(2),
+    undefined,
+  );
+
+  db.close();
+});
+
+test('a save that changes nothing keeps the metadata it already had', () => {
+  const db = openTestDatabase();
+  seedTwoGroups(db);
+
+  recordMetadataAnswer(db, {
+    groupId: 2,
+    source: 'theporndb',
+    confirmed: {
+      sourceUuid: 'good-uuid',
+      title: 'Still Correct',
+      siteUuid: null,
+      siteId: null,
+      siteName: 'Site',
+      date: '2020-01-01',
+      performers: [],
+      durationSeconds: null,
+      synopsis: null,
+      posterUrl: null,
+    },
+    nearMisses: [],
+    now: 1000,
+  });
+
+  // The key and the title the group already holds, so both the identity and
+  // the rendered display come back byte-identical.
+  ok(editGroup(makeDeps(db), 2, { key: 'k2', title: 'G2' }));
+
+  // Nothing the lookup asks about changed, so forgetting the answer would cost
+  // a request and blank the card's panel until the worker replied — as the
+  // price of a save that did nothing. #39 records the same lesson about a
+  // no-op save having effects.
+  const kept = getGroupMetadata(db, 2);
+  assert.equal(kept?.state, 'confirmed');
+  assert.equal(kept?.title, 'Still Correct');
+
+  db.close();
+});
+
 test('a merge is refused when the source group has a download', () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
