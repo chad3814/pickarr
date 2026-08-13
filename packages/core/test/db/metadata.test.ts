@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { DatabaseSync } from 'node:sqlite';
+import type { MetadataCandidate } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
   dueMetadataQueue, enqueueMetadata, getGroupMetadata, metadataForGroups,
   queuedMetadataNextAt, recordMetadataAnswer, deferMetadata, setPosterPath,
 } from '../../src/db/metadata.ts';
+import { performersForGroups } from '../../src/db/performers.ts';
 
 function withGroups(count: number) {
   const db = openTestDatabase();
@@ -18,6 +21,31 @@ function withGroups(count: number) {
     ids.push(Number(db.prepare('SELECT last_insert_rowid() AS id').get()?.['id']));
   }
   return { db, ids };
+}
+
+function seedGroup(db: DatabaseSync, id: number): void {
+  db.prepare(
+    `INSERT INTO media_groups
+       (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+     VALUES (?, '@pickarr/plugin-scenes', ?, '{}', '', 0, 0)`,
+  ).run(id, `key-${id}`);
+}
+
+function candidate(over: Partial<MetadataCandidate> = {}): MetadataCandidate {
+  return {
+    sourceUuid: 'scene-uuid',
+    title: 'A Scene',
+    siteUuid: 'site-uuid',
+    siteId: 1,
+    siteName: 'Naughty Office',
+    date: '2021-11-15',
+    performers: [],
+    durationSeconds: 1000,
+    synopsis: 'A synopsis',
+    posterUrl: 'https://example.test/p.jpg',
+    slug: 'a-scene',
+    ...over,
+  };
 }
 
 test('enqueueing is idempotent and never re-asks an answered group', () => {
@@ -178,4 +206,64 @@ test('a poster path is set independently of the answer', () => {
   });
   setPosterPath(db, groupId, '7.jpg');
   assert.equal(getGroupMetadata(db, groupId)?.posterPath, '7.jpg');
+});
+
+test('a second answer replaces the first instead of being dropped', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  recordMetadataAnswer(db, { groupId: 1, source: 's', now: 1, nearMisses: [],
+    confirmed: candidate({ title: 'Old', performers: [], slug: 'old' }) });
+  recordMetadataAnswer(db, { groupId: 1, source: 's', now: 2, nearMisses: [],
+    confirmed: candidate({ title: 'New', performers: [], slug: 'new' }) });
+
+  // The migration re-queues answered groups; ON CONFLICT DO NOTHING would
+  // spend the API call and write nothing, leaving the group looking
+  // refetched while holding its old data.
+  const row = getGroupMetadata(db, 1)!;
+  assert.equal(row.title, 'New');
+  assert.equal(row.sceneSlug, 'new');
+  assert.equal(row.fetchedAt, 2);
+});
+
+test('near misses do not accumulate across answers', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  const miss = { candidate: candidate({ title: 'X' }), reason: 'wrong date' };
+  for (const now of [1, 2, 3]) {
+    recordMetadataAnswer(db, { groupId: 1, source: 's', now, nearMisses: [miss],
+      confirmed: candidate({ title: 'T' }) });
+  }
+  assert.equal(
+    db.prepare('SELECT count(*) c FROM metadata_candidates WHERE group_id = 1').get()?.['c'],
+    1,
+  );
+});
+
+test('the answer writes the cast, and a later answer replaces it', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  recordMetadataAnswer(db, { groupId: 1, source: 'theporndb', now: 1, nearMisses: [],
+    confirmed: candidate({ performers: [
+      { sourceUuid: 'a', slug: 'a', name: 'A', kind: 'performer', faceUrl: null, imageUrl: null },
+    ] }) });
+  recordMetadataAnswer(db, { groupId: 1, source: 'theporndb', now: 2, nearMisses: [],
+    confirmed: candidate({ performers: [
+      { sourceUuid: 'b', slug: 'b', name: 'B', kind: 'performer', faceUrl: null, imageUrl: null },
+    ] }) });
+
+  assert.deepEqual(performersForGroups(db, [1]).get(1)?.map((p) => p.name), ['B']);
+});
+
+test('a none answer clears any cast the group had', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  recordMetadataAnswer(db, { groupId: 1, source: 's', now: 1, nearMisses: [],
+    confirmed: candidate({ performers: [
+      { sourceUuid: 'a', slug: 'a', name: 'A', kind: 'performer', faceUrl: null, imageUrl: null },
+    ] }) });
+  recordMetadataAnswer(db, { groupId: 1, source: 's', now: 2, nearMisses: [], confirmed: null });
+
+  // Otherwise a group that stopped being confirmed keeps a cast nothing
+  // supports, and the card renders performers under a 'none' state.
+  assert.equal(performersForGroups(db, [1]).get(1), undefined);
 });

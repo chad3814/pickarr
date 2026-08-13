@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { MetadataCandidate, MetadataRejection } from '@pickarr/plugin-api';
 import { maybeNum, maybeStr, num, str, type SqlRow } from './row.ts';
+import { upsertPerformers, setGroupPerformers } from './performers.ts';
 
 export interface GroupMetadata {
   groupId: number;
@@ -14,6 +15,7 @@ export interface GroupMetadata {
   synopsis: string | null;
   posterUrl: string | null;
   posterPath: string | null;
+  sceneSlug: string | null;
   fetchedAt: number;
 }
 
@@ -68,12 +70,13 @@ function toMetadata(row: SqlRow): GroupMetadata {
     synopsis: maybeStr(row, 'synopsis'),
     posterUrl: maybeStr(row, 'poster_url'),
     posterPath: maybeStr(row, 'poster_path'),
+    sceneSlug: maybeStr(row, 'scene_slug'),
     fetchedAt: num(row, 'fetched_at'),
   };
 }
 
 const COLUMNS = `group_id, state, source, source_uuid, title, performers, release_date,
-                 duration_s, synopsis, poster_url, poster_path, fetched_at`;
+                 duration_s, synopsis, poster_url, poster_path, scene_slug, fetched_at`;
 
 export function getGroupMetadata(db: DatabaseSync, groupId: number): GroupMetadata | undefined {
   const row = db.prepare(`SELECT ${COLUMNS} FROM group_metadata WHERE group_id = ?`).get(groupId);
@@ -196,55 +199,75 @@ export function dueMetadataQueue(
 }
 
 /**
- * Writes the answer, its rejected candidates, and the removal of the queue row
- * as one transaction. A group is answered exactly once, so the candidate rows
- * cannot accumulate across retries.
+ * Writes the answer, its rejected candidates, its cast, and the removal of
+ * the queue row as one transaction. A group is answered at most once per
+ * queue entry, but the migration that introduced performers re-queues every
+ * group already answered, so re-answering is routine, not a retry to guard
+ * against: each answer replaces the last in full.
  */
 export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInput): void {
   const { confirmed } = input;
   db.exec('BEGIN');
   try {
-    const answer = db
-      .prepare(
-        `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
-         ON CONFLICT (group_id) DO NOTHING`,
-      )
-      .run(
+    db.prepare(
+      `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+       ON CONFLICT (group_id) DO UPDATE SET
+         state = excluded.state, source = excluded.source,
+         source_uuid = excluded.source_uuid, title = excluded.title,
+         performers = excluded.performers, release_date = excluded.release_date,
+         duration_s = excluded.duration_s, synopsis = excluded.synopsis,
+         poster_url = excluded.poster_url, scene_slug = excluded.scene_slug,
+         fetched_at = excluded.fetched_at`,
+    ).run(
+      input.groupId,
+      confirmed === null ? 'none' : 'confirmed',
+      input.source,
+      confirmed?.sourceUuid ?? null,
+      confirmed?.title ?? null,
+      // The legacy name array stays written: it is the fallback the view
+      // uses for groups whose refetch has not landed, and keeping it
+      // current costs one JSON.stringify.
+      confirmed === null ? null : JSON.stringify(confirmed.performers.map((p) => p.name)),
+      confirmed?.date ?? null,
+      confirmed?.durationSeconds ?? null,
+      confirmed?.synopsis ?? null,
+      confirmed?.posterUrl ?? null,
+      confirmed?.slug ?? null,
+      input.now,
+    );
+
+    // Candidates are cleared and rewritten rather than gated on "this is the
+    // first answer". That gate was `changes > 0`, which meant something under
+    // ON CONFLICT DO NOTHING and means nothing under DO UPDATE. Same
+    // guarantee — near misses never accumulate — by a mechanism that
+    // survives a group being answered more than once, which the migration's
+    // refetch now makes routine.
+    db.prepare('DELETE FROM metadata_candidates WHERE group_id = ?').run(input.groupId);
+    const candidate = db.prepare(
+      `INSERT INTO metadata_candidates
+         (group_id, source, source_uuid, title, scene_date, reason, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const miss of input.nearMisses) {
+      candidate.run(
         input.groupId,
-        confirmed === null ? 'none' : 'confirmed',
         input.source,
-        confirmed?.sourceUuid ?? null,
-        confirmed?.title ?? null,
-        confirmed === null ? null : JSON.stringify(confirmed.performers),
-        confirmed?.date ?? null,
-        confirmed?.durationSeconds ?? null,
-        confirmed?.synopsis ?? null,
-        confirmed?.posterUrl ?? null,
+        miss.candidate.sourceUuid,
+        miss.candidate.title,
+        miss.candidate.date,
+        miss.reason,
         input.now,
       );
-
-    // The ON CONFLICT above makes a second call for the same group a no-op:
-    // `changes` is 0 when a row already existed. Candidate rows must be
-    // gated on that, or a retried answer duplicates every near-miss it
-    // already recorded — the accumulation this function's contract forbids.
-    if (Number(answer.changes) > 0) {
-      const candidate = db.prepare(
-        `INSERT INTO metadata_candidates
-           (group_id, source, source_uuid, title, scene_date, reason, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      );
-      for (const miss of input.nearMisses) {
-        candidate.run(
-          input.groupId,
-          input.source,
-          miss.candidate.sourceUuid,
-          miss.candidate.title,
-          miss.candidate.date,
-          miss.reason,
-          input.now,
-        );
-      }
     }
+
+    // The cast, replaced wholesale for the same reason. A 'none' answer
+    // clears it: a group that stopped being confirmed must not keep a cast
+    // nothing supports.
+    const performerIds =
+      confirmed === null
+        ? []
+        : upsertPerformers(db, input.source, confirmed.performers, input.now);
+    setGroupPerformers(db, input.groupId, performerIds);
 
     db.prepare('DELETE FROM metadata_queue WHERE group_id = ?').run(input.groupId);
     db.exec('COMMIT');
