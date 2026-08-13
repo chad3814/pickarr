@@ -22,6 +22,7 @@ import {
   queuedMetadataNextAt,
   type GroupMetadata,
 } from '../db/metadata.ts';
+import { getPerformer, performersForGroups, type PerformerRow } from '../db/performers.ts';
 import { validateIdentity } from '../ingest/commit.ts';
 import {
   dismissFeedItem,
@@ -239,13 +240,26 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   /**
    * A group as the browse list would render it, prefill values and all.
    * `metadata` is the answer `metadataForGroups` already found for this group
-   * — read once for the whole page by every caller below, never per group
-   * here, which is the point: a second per-group query into `group_metadata`
-   * from inside this function would reintroduce, for metadata, exactly the
-   * defect issue #31 records for `/api/downloads`.
+   * and `performers` is its cast from `performersForGroups` — both read once
+   * for the whole page by every caller below, never per group here, which is
+   * the point: a second per-group query into `group_metadata` or
+   * `group_performers` from inside this function would reintroduce exactly
+   * the defect issue #31 records for `/api/downloads`.
    */
-  const viewOf = (group: GroupRow, metadata: GroupMetadata | undefined): GroupView =>
-    toGroupView(db, group, deps.registry.byId(group.plugin), metadata);
+  const viewOf = (
+    group: GroupRow,
+    metadata: GroupMetadata | undefined,
+    performers: readonly PerformerRow[],
+  ): GroupView => toGroupView(db, group, deps.registry.byId(group.plugin), metadata, performers);
+
+  /**
+   * This one group's cast, in one query. Fine to call once per group from the
+   * single-group call sites below (`groupAfter`, `listedAfter`, the pick
+   * route): each is already one `getGroupMetadata` lookup for one group, not
+   * the per-page loop `viewOf`'s other callers have to avoid.
+   */
+  const performersFor = (groupId: number): PerformerRow[] =>
+    performersForGroups(db, [groupId]).get(groupId) ?? [];
 
   /**
    * The group a manual operation left behind, read back after it committed —
@@ -255,7 +269,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
    */
   const groupAfter = (groupId: number): GroupView | null => {
     const group = getGroup(db, groupId);
-    return group === null ? null : viewOf(group, getGroupMetadata(db, groupId));
+    return group === null ? null : viewOf(group, getGroupMetadata(db, groupId), performersFor(groupId));
   };
 
   /**
@@ -268,7 +282,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   const listedAfter = (groupId: number): { missing: true } | { listed: GroupView | null } => {
     if (getGroup(db, groupId) === null) return { missing: true };
     const listed = browsableGroup(db, groupId);
-    return { listed: listed === null ? null : viewOf(listed, getGroupMetadata(db, groupId)) };
+    return {
+      listed: listed === null ? null : viewOf(listed, getGroupMetadata(db, groupId), performersFor(groupId)),
+    };
   };
 
   // An empty body with `content-type: application/json` reads as `{}` rather
@@ -315,10 +331,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // and the `viewOf` doc comment above. Issue #31 is the defect this must
     // not repeat.
     const metadata = metadataForGroups(db, groups.map((group) => group.id));
+    const performers = performersForGroups(db, groups.map((group) => group.id));
 
     const last = groups.at(-1);
     const response: BrowseResponse = {
-      groups: groups.map((group) => viewOf(group, metadata.get(group.id))),
+      groups: groups.map((group) => viewOf(group, metadata.get(group.id), performers.get(group.id) ?? [])),
       nextCursor: hasMore && last !== undefined ? `${last.listRankAt}:${last.id}` : null,
     };
     return response;
@@ -327,7 +344,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/picks', async () => {
     const groups = pickedGroups(db);
     const metadata = metadataForGroups(db, groups.map((group) => group.id));
-    return { groups: groups.map((group) => viewOf(group, metadata.get(group.id))) };
+    const performers = performersForGroups(db, groups.map((group) => group.id));
+    return {
+      groups: groups.map((group) => viewOf(group, metadata.get(group.id), performers.get(group.id) ?? [])),
+    };
   });
 
   // The lazy half of this feature: browse never enqueues anything on its own
@@ -408,14 +428,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const ids = parseIds(query.data.ids);
     if (ids === null) return reply.code(400).send({ error: 'Invalid ids' });
 
-    // Two queries total for however many ids were asked about — one for
-    // answers, one for queue rows (and each pending id's next_at) — never one
-    // pair per id.
+    // Three queries total for however many ids were asked about — one for
+    // answers, one for queue rows (and each pending id's next_at), one for
+    // the cast — never a query per id.
     const answered = metadataForGroups(db, ids);
     const queuedNextAt = queuedMetadataNextAt(db, ids);
+    const performers = performersForGroups(db, ids);
     const response: Record<number, MetadataView> = {};
     for (const id of ids) {
-      response[id] = metadataViewOf(answered.get(id), queuedNextAt.get(id));
+      response[id] = metadataViewOf(answered.get(id), performers.get(id) ?? [], queuedNextAt.get(id));
     }
     return response;
   });
@@ -470,6 +491,57 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
   });
 
+  // The same shape as the poster route above, mirrored deliberately: the same
+  // id validation (so a traversal attempt in the id segment is rejected by
+  // zod before it ever reaches `getPerformer`), the same whole-file buffering
+  // rather than a second `@fastify/static` registration, the same 404 rather
+  // than 500 when the row's path and the file on disk disagree, and the same
+  // day-long `Cache-Control` for the same reason: an avatar at this id never
+  // changes without the performer row itself changing, which this feature
+  // never re-checks on its own.
+  server.get('/api/performers/:id/avatar', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid id' });
+
+    const performer = getPerformer(db, params.data.id);
+    if (performer === null || performer.facePath === null) {
+      return reply.code(404).send({ error: 'No avatar' });
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(join(deps.artworkDir, performer.facePath));
+    } catch {
+      return reply.code(404).send({ error: 'No avatar' });
+    }
+
+    const contentType = POSTER_CONTENT_TYPES[extname(performer.facePath)] ?? 'application/octet-stream';
+    return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
+  });
+
+  // Identical to the avatar route above, except for which cached column it
+  // reads — `image_path` rather than `face_path` — since the two are fetched
+  // and cached independently and either can be present without the other.
+  server.get('/api/performers/:id/image', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid id' });
+
+    const performer = getPerformer(db, params.data.id);
+    if (performer === null || performer.imagePath === null) {
+      return reply.code(404).send({ error: 'No image' });
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(join(deps.artworkDir, performer.imagePath));
+    } catch {
+      return reply.code(404).send({ error: 'No image' });
+    }
+
+    const contentType = POSTER_CONTENT_TYPES[extname(performer.imagePath)] ?? 'application/octet-stream';
+    return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
+  });
+
   server.post('/api/groups/:id/pick', async (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
     const body = pickBodySchema.safeParse(request.body);
@@ -497,7 +569,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       const response: PickResponse = {
         download: toDownloadView(db, download),
         group:
-          stillListed === null ? null : viewOf(stillListed, getGroupMetadata(db, params.data.id)),
+          stillListed === null
+            ? null
+            : viewOf(stillListed, getGroupMetadata(db, params.data.id), performersFor(params.data.id)),
       };
       return response;
     } catch (error) {

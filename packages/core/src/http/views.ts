@@ -10,8 +10,31 @@ import { releasesForGroup } from '../db/releases.ts';
 import type { DownloadRow } from '../db/downloads.ts';
 import type { FeedItemRow } from '../db/feed-items.ts';
 import type { GroupMetadata } from '../db/metadata.ts';
+import type { PerformerRow } from '../db/performers.ts';
 import type { UntrackedEntry } from '../pipeline/reconcile.ts';
 import { str, type SqlRow } from '../db/row.ts';
+
+const TPDB_BASE = 'https://theporndb.net';
+
+/**
+ * The link for one performer, built server-side so the two-namespace rule
+ * lives in one place. Sending `kind` to the browser instead would mean the
+ * client re-deriving a mapping it has no other reason to know, and two
+ * derivations that can disagree.
+ */
+function performerUrl(performer: PerformerRow): string {
+  const namespace = performer.kind === 'performer-site' ? 'performer-sites' : 'performers';
+  return `${TPDB_BASE}/${namespace}/${performer.slug}`;
+}
+
+/** One performer as the browser needs it: a name, a link, and whether an avatar or full image is cached. */
+export interface PerformerView {
+  id: number;
+  name: string;
+  url: string;
+  hasAvatar: boolean;
+  hasImage: boolean;
+}
 
 /**
  * What browse (and `GET /api/metadata`) can say about a group's scene
@@ -25,11 +48,22 @@ export type MetadataView =
   | {
       state: 'confirmed';
       title: string | null;
-      performers: string[];
+      performers: PerformerView[];
+      /**
+       * The legacy cast, as plain names, for a group whose cast has no rows
+       * in `group_performers` yet — migration 7 queued every already-answered
+       * group for a refetch, but they drain at the worker's own rate. Never
+       * populated at the same time as `performers`: a caller that had to
+       * choose between the two lists could choose differently in two places,
+       * and a field that is absent cannot be misused the way one holding a
+       * value that must not be dereferenced can.
+       */
+      performerNames: string[];
       releaseDate: string | null;
       durationSeconds: number | null;
       synopsis: string | null;
       hasPoster: boolean;
+      sceneUrl: string | null;
     }
   | { state: 'none' }
   | { state: 'pending'; nextAttemptAt: number }
@@ -63,6 +97,10 @@ export interface MetadataRequestResponse {
 }
 
 /**
+ * `performers` is this group's cast, read by the caller with
+ * `performersForGroups` for the whole page it is building — never one query
+ * per group, the mistake issue #31 already records for `/api/downloads`.
+ *
  * `queuedNextAt` is this group's `metadata_queue.next_at`, or `undefined` when
  * there is no row — the caller (browse's `toGroupView`) never has one to pass,
  * since browse does not consult the queue at all, so its groups always read
@@ -71,6 +109,7 @@ export interface MetadataRequestResponse {
  */
 export function metadataViewOf(
   metadata: GroupMetadata | undefined,
+  performers: readonly PerformerRow[],
   queuedNextAt?: number,
 ): MetadataView {
   if (metadata === undefined) {
@@ -80,11 +119,22 @@ export function metadataViewOf(
   return {
     state: 'confirmed',
     title: metadata.title,
-    performers: metadata.performers,
+    performers: performers.map((performer) => ({
+      id: performer.id,
+      name: performer.name,
+      url: performerUrl(performer),
+      hasAvatar: performer.facePath !== null,
+      hasImage: performer.imagePath !== null,
+    })),
+    // Only when there is nothing better. The two fields are never both
+    // populated: a caller that had to choose between them could choose
+    // differently in two places.
+    performerNames: performers.length > 0 ? [] : metadata.performers,
     releaseDate: metadata.releaseDate,
     durationSeconds: metadata.durationSeconds,
     synopsis: metadata.synopsis,
     hasPoster: metadata.posterPath !== null,
+    sceneUrl: metadata.sceneSlug === null ? null : `${TPDB_BASE}/scenes/${metadata.sceneSlug}`,
   };
 }
 
@@ -253,6 +303,7 @@ export function toGroupView(
   group: GroupRow,
   plugin: MediaTypePlugin | undefined,
   metadata: GroupMetadata | undefined,
+  performers: readonly PerformerRow[],
 ): GroupView {
   const display = JSON.parse(group.display) as DisplayFields;
 
@@ -309,7 +360,7 @@ export function toGroupView(
     upgradeReleaseId: group.upgradeReleaseId,
     listRankAt: group.listRankAt,
     releases,
-    metadata: metadataViewOf(metadata),
+    metadata: metadataViewOf(metadata, performers),
   };
   if (manualValues !== undefined) view.manualValues = manualValues;
   return view;
