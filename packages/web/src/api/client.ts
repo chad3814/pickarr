@@ -65,6 +65,15 @@ export interface ReleaseView {
   downloadFailed?: boolean;
 }
 
+/** Mirrors `PerformerView` in `packages/core/src/http/views.ts`; see the note on `MetadataView` below. */
+export interface PerformerView {
+  id: number;
+  name: string;
+  url: string;
+  hasAvatar: boolean;
+  hasImage: boolean;
+}
+
 /**
  * What the server can say about a group's scene metadata. Mirrors `MetadataView`
  * in `packages/core/src/http/views.ts` — duplicated rather than imported, the
@@ -80,11 +89,23 @@ export type MetadataView =
   | {
       state: 'confirmed';
       title: string | null;
-      performers: string[];
       releaseDate: string | null;
       durationSeconds: number | null;
       synopsis: string | null;
       hasPoster: boolean;
+      /**
+       * `performers`, `performerNames`, and `sceneUrl` are optional here,
+       * unlike core's `MetadataView`: the current server always sends them,
+       * but this type also describes what a *response* can contain, and a
+       * response can come from a server that predates these fields (a
+       * browser tab left open across a server restart onto an older build,
+       * or a stale SPA bundle talking to a rolled-back API). Task 9 reads
+       * them with `?? []` and `?? null` rather than trusting absence to mean
+       * anything.
+       */
+      performers?: PerformerView[];
+      performerNames?: string[];
+      sceneUrl?: string | null;
     }
   | { state: 'none' }
   /**

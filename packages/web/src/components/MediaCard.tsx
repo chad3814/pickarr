@@ -193,9 +193,18 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           {group.metadata.synopsis !== null && (
             <p className="metadata-synopsis">{group.metadata.synopsis}</p>
           )}
-          {group.metadata.performers.length > 0 && (
+          {/*
+           * `performerNames` rather than the new `performers`: this card
+           * doesn't yet render the rich performer list (avatar, link) that
+           * Task 9 wires in, and `performerNames` is the plain-name fallback
+           * that matches what this list has always shown. Optional, per the
+           * note on `MetadataView` in `client.ts`, so a stale bundle or an
+           * old-server response with neither field renders no list rather
+           * than throwing.
+           */}
+          {(group.metadata.performerNames ?? []).length > 0 && (
             <ul className="metadata-performers">
-              {group.metadata.performers.map((performer) => (
+              {(group.metadata.performerNames ?? []).map((performer) => (
                 <li key={performer}>{performer}</li>
               ))}
             </ul>
