@@ -83,3 +83,30 @@ test('a download client added in this form has nothing on disk to keep, so no ke
   );
   assert.equal(screen.queryByRole('button', { name: /keep existing/i }), null);
 });
+
+test('Replace is named per field, so a page with several secret fields does not read as several identical buttons', () => {
+  render(
+    <>
+      <SecretField label="API key" view={{ kind: 'set' }} value={{ kind: 'keep' }} onChange={() => {}} />
+      <SecretField label="Site lookup key" view={{ kind: 'set' }} value={{ kind: 'keep' }} onChange={() => {}} />
+    </>,
+  );
+  assert.ok(screen.getByRole('button', { name: /replace api key/i }));
+  assert.ok(screen.getByRole('button', { name: /replace site lookup key/i }));
+});
+
+test('Keep existing is named per field too, for the same reason', () => {
+  render(
+    <>
+      <SecretField label="API key" view={{ kind: 'set' }} value={{ kind: 'literal', value: 'x' }} onChange={() => {}} />
+      <SecretField
+        label="Site lookup key"
+        view={{ kind: 'set' }}
+        value={{ kind: 'literal', value: 'y' }}
+        onChange={() => {}}
+      />
+    </>,
+  );
+  assert.ok(screen.getByRole('button', { name: /keep existing api key/i }));
+  assert.ok(screen.getByRole('button', { name: /keep existing site lookup key/i }));
+});
