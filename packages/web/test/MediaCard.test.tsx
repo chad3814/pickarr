@@ -387,11 +387,13 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
 
 test('the poster is a button that opens the modal, and the modal closes', () => {
   render(<MediaCard group={withMetadata({ hasPoster: true })} onPick={() => {}} />);
-  assert.equal(screen.queryByRole('dialog'), null);
+  // #40: never `assert.equal(screen.queryByRole(x), null)` — same deep-inspect
+  // hazard as `queryByText`, on a live element instead of text.
+  assert.ok(!screen.queryByRole('dialog'));
   fireEvent.click(screen.getByRole('button', { name: /poster/i }));
   assert.ok(screen.getByRole('dialog'));
   fireEvent.click(screen.getByRole('button', { name: /close/i }));
-  assert.equal(screen.queryByRole('dialog'), null);
+  assert.ok(!screen.queryByRole('dialog'));
 });
 
 test('a performer shows an avatar, and their name links to their page', () => {
@@ -415,7 +417,8 @@ test('a performer with no cached avatar renders a name and no image', () => {
       hasAvatar: false, hasImage: false },
   ] })} onPick={() => {}} />);
   assert.ok(screen.getByRole('link', { name: 'Alice Maze' }));
-  assert.equal(screen.queryByRole('img', { name: /alice maze/i }), null);
+  // #40: never `assert.equal(screen.queryByRole(x), null)`.
+  assert.ok(!screen.queryByRole('img', { name: /alice maze/i }));
 });
 
 test('a performer avatar opens the full image, not the face', () => {
@@ -440,14 +443,16 @@ test('a performer with an avatar but no full image is not clickable', () => {
   ] })} onPick={() => {}} />);
 
   assert.ok(screen.getByRole('img', { name: /alice maze/i }));
-  assert.equal(screen.queryByRole('button', { name: /alice maze/i }), null);
+  // #40: never `assert.equal(screen.queryByRole(x), null)`.
+  assert.ok(!screen.queryByRole('button', { name: /alice maze/i }));
 });
 
 test('legacy metadata renders plain names with no links or avatars', () => {
   render(<MediaCard group={withMetadata({ performers: [], performerNames: ['Alice Maze'] })}
                     onPick={() => {}} />);
   assert.ok(screen.getByText('Alice Maze'));
-  assert.equal(screen.queryByRole('link', { name: 'Alice Maze' }), null);
+  // #40: never `assert.equal(screen.queryByRole(x), null)`.
+  assert.ok(!screen.queryByRole('link', { name: 'Alice Maze' }));
 });
 
 test('the metadata title links to the scene when a url is known', () => {
@@ -460,5 +465,6 @@ test('the metadata title links to the scene when a url is known', () => {
 test('the metadata title without a url is not a link', () => {
   render(<MediaCard group={withMetadata({ title: 'Scene', sceneUrl: null })} onPick={() => {}} />);
   assert.ok(screen.getByText('Scene'));
-  assert.equal(screen.queryByRole('link', { name: 'Scene' }), null);
+  // #40: never `assert.equal(screen.queryByRole(x), null)`.
+  assert.ok(!screen.queryByRole('link', { name: 'Scene' }));
 });
