@@ -149,16 +149,26 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
       </ul>
 
       {/*
+       * A lookup in flight is the one state worth telling the user about: it
+       * is the only one that resolves into something else on its own, so a
+       * card that says nothing here looks identical to one that will never
+       * get an answer. `none` (asked, nothing came back) and `absent` (never
+       * asked) are both terminal from the SPA's point of view and stay
+       * silent on purpose.
+       */}
+      {group.metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
+
+      {/*
        * A second opinion, never a replacement: `display.title` above stays
        * the card's title even when the provider disagrees with it — adopting
        * a provider value is later work (this phase is deliberately
        * non-destructive). Rendered only once the answer is `confirmed`: a
-       * `pending` or `absent` group has nothing to show, and `none` means the
-       * provider was asked and came back with nothing, which is likewise
-       * nothing to show. The provider populates poster, synopsis,
-       * performers, release date and running time unevenly, so each is
-       * checked and rendered on its own — one being missing says nothing
-       * about the others.
+       * `pending` or `absent` group has nothing to show yet (`pending` gets
+       * its own note above), and `none` means the provider was asked and
+       * came back with nothing, which is likewise nothing to show. The
+       * provider populates poster, synopsis, performers, release date and
+       * running time unevenly, so each is checked and rendered on its own —
+       * one being missing says nothing about the others.
        */}
       {group.metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">

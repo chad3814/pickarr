@@ -247,6 +247,22 @@ test('the metadata panel renders only once the answer is confirmed', () => {
   assert.ok(screen.getByText('A synopsis from the provider.'));
 });
 
+test('a pending lookup says so; none and absent stay silent', () => {
+  const { unmount } = render(
+    <MediaCard group={{ ...GROUP, metadata: { state: 'pending' } }} onPick={() => {}} />,
+  );
+  assert.ok(screen.getByText('pending'));
+  unmount();
+
+  render(<MediaCard group={{ ...GROUP, metadata: { state: 'none' } }} onPick={() => {}} />);
+  // #40: never `assert.equal(screen.queryByText(x), null)`.
+  assert.equal(gone('pending'), true);
+  cleanup();
+
+  render(<MediaCard group={{ ...GROUP, metadata: { state: 'absent' } }} onPick={() => {}} />);
+  assert.equal(gone('pending'), true);
+});
+
 test('the parsed title stays the card title when metadata disagrees', () => {
   // Phase 1 is deliberately non-destructive: the panel is a second opinion,
   // never a replacement. `display.title` is what the parser produced, and
@@ -302,6 +318,32 @@ test('a missing release date or running time is independently absent from the pa
     />,
   );
   assert.ok(screen.getByText('2023-05-01'));
+});
+
+test('no duration renders nothing; a duration of zero still renders 0m', () => {
+  // formatDuration maps both "no duration" and "a duration of zero" to
+  // rendering-adjacent outcomes — the latter literally formats to `0m` — so
+  // asserting `0m` is absent for `null` only pins the guard if a duration of
+  // zero is also proven to render. Without that second case, removing the
+  // `!== null` check and letting `formatDuration(null)` produce `0m` for the
+  // null case too would slip past unnoticed.
+  const { unmount } = render(
+    <MediaCard
+      group={{ ...GROUP, metadata: { ...CONFIRMED, durationSeconds: null } }}
+      onPick={() => {}}
+    />,
+  );
+  // #40: never `assert.equal(screen.queryByText(x), null)`.
+  assert.equal(gone('0m'), true);
+  unmount();
+
+  render(
+    <MediaCard
+      group={{ ...GROUP, metadata: { ...CONFIRMED, durationSeconds: 0 } }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(screen.getByText('0m'));
 });
 
 test('the panel tolerates a missing poster, synopsis and empty performers independently', () => {
