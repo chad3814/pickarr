@@ -287,9 +287,12 @@ async function main(): Promise<void> {
         // Without this, a rejected `close()` would leave `shuttingDown` true
         // forever: `db.close()` and `process.exit` above never run, so every
         // later signal or restart request is silently ignored. Exiting
-        // non-zero here (rather than falling through to the 0 above) is what
-        // lets `restart: unless-stopped` actually restart the container on
-        // this path, since a container that exits 0 is left stopped instead.
+        // non-zero (rather than falling through to the 0 above) does not
+        // change anything about `restart: unless-stopped`, which restarts on
+        // any exit code regardless — it matters for logs and monitoring,
+        // which can tell a failed teardown from a clean one this way, and for
+        // a deployment using `restart: on-failure` instead, where the exit
+        // code is exactly what decides whether this container comes back.
         log(`shutdown failed: ${error.message}`);
         db.close();
         process.exit(1);

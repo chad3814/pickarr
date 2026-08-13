@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { randomUUID } from 'node:crypto';
 import type { ReadStream } from 'node:fs';
-import { open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { open, readFile, rename, rm, writeFile, type FileHandle } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { backup, type DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
@@ -529,36 +529,51 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
    * an immediate `rm` can win the race and the deferred open then fails with
    * ENOENT. Going through the handle makes the open happen first, provably.
    *
+   * `handle` and `stream` are declared above the `try` rather than inside
+   * it, and the catch below closes whichever of them exists: once `open()`
+   * has succeeded, something is holding a descriptor, and a later failure
+   * (`stat`, `createReadStream`) must not leak it just because the failure
+   * happened after the point of no return for the unlink-while-open trick.
+   *
    * A GET, not a POST: it does not change the database, and a plain GET is what
    * lets the browser use the filename chosen below.
    */
   server.get('/api/database/backup', async (_request, reply) => {
     const stamp = new Date(deps.now()).toISOString().slice(0, 10);
+    // `randomUUID()` alongside `process.pid`, for the same reason `PUT
+    // /api/config`'s own temp file carries one: two backup requests landing
+    // in this process within the same millisecond would otherwise both name
+    // the same temp path and corrupt each other's copy.
     const temporary = join(
       dirname(deps.databasePath),
-      `.pickarr-backup-${process.pid}-${deps.now()}.tmp`,
+      `.pickarr-backup-${process.pid}-${randomUUID()}.tmp`,
     );
 
+    let handle: FileHandle | undefined;
+    let stream: ReadStream | undefined;
+    let bytes: number;
     try {
       await backup(deps.db, temporary);
-    } catch (error) {
-      await rm(temporary, { force: true });
-      return reply.code(500).send({ error: `Backup failed: ${(error as Error).message}` });
-    }
-
-    let bytes: number;
-    let stream: ReadStream;
-    try {
-      const handle = await open(temporary, 'r');
+      handle = await open(temporary, 'r');
       bytes = (await handle.stat()).size;
-      // The read stream now holds its own file descriptor, so the copy's
-      // bytes survive losing their name; see the doc comment above. The
-      // stream closes the handle itself once it ends, so nothing here leaks
-      // a descriptor and nothing here needs an explicit close.
+      // Opened above, so the data survives losing its name; see the doc
+      // comment above. The stream closes the handle itself once it ends, so
+      // nothing on this path leaks a descriptor.
       stream = handle.createReadStream();
-      await rm(temporary, { force: true });
+      try {
+        await rm(temporary, { force: true });
+      } catch {
+        // Best-effort past this point on purpose: `stream` already holds its
+        // own descriptor, so the backup is complete and servable either way.
+        // Failing the whole request over a failed `rm` here would discard a
+        // backup that actually succeeded, over a problem no worse than the
+        // temp file occasionally outliving this one request instead of
+        // disappearing the instant its descriptor opened.
+      }
     } catch (error) {
-      await rm(temporary, { force: true });
+      await rm(temporary, { force: true }).catch(() => {});
+      if (stream !== undefined) stream.destroy();
+      else if (handle !== undefined) await handle.close().catch(() => {});
       return reply.code(500).send({ error: `Backup failed: ${(error as Error).message}` });
     }
 
