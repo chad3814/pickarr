@@ -253,6 +253,12 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     // `runMetadataPass` directly (see below) — there is always a worker able
     // to drain a queue row here, so the request endpoint must always queue.
     metadataAvailable: true,
+    // No test here exercises the config routes, and the harness never writes
+    // a config.json to disk at all — config is assembled in memory. A path
+    // under the work directory keeps this placeholder honest about where such
+    // a file would live if one existed.
+    configPath: join(workDir, 'config.json'),
+    bootConfigDocument: null,
   });
 
   // Port 0, then read back what the OS assigned. A fixed port collides between

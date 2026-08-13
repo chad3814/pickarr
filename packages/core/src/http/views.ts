@@ -5,6 +5,7 @@ import type {
   ParsedRelease,
   QualityTokens,
 } from '@pickarr/plugin-api';
+import type { EditableConfig } from '../config/editable.ts';
 import { failedReleaseIds, type GroupRow } from '../db/groups.ts';
 import { releasesForGroup } from '../db/releases.ts';
 import type { DownloadRow } from '../db/downloads.ts';
@@ -449,4 +450,26 @@ export function toDownloadView(db: DatabaseSync, download: DownloadRow): Downloa
     attempts: download.attempts,
     updatedAt: download.updatedAt,
   };
+}
+
+/**
+ * The Settings screen's whole view of configuration.
+ *
+ * `portOverride` is `PICKARR_PORT`, reported so the form can say the port field
+ * is currently being overridden at runtime rather than presenting a value the
+ * running service is not using. `restartRequired` is whether the file on disk
+ * has diverged from the document this process booted with — without it, the
+ * "restart to apply" notice would vanish on a page reload and leave a
+ * saved-but-unapplied config with nothing on screen saying so.
+ */
+export interface ConfigResponse {
+  config: EditableConfig;
+  portOverride: number | null;
+  restartRequired: boolean;
+}
+
+/** `restartRequired` is always true: a save cannot change the running process. */
+export interface ConfigSaveResponse {
+  savedAt: number;
+  restartRequired: true;
 }
