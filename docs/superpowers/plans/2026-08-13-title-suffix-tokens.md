@@ -17,6 +17,7 @@
 - Node 24 is not the shell default: `export PATH="$HOME/.nvm/versions/node/v24.19.0/bin:$PATH"`.
 - **Verify with `npm run check`** (lint + typecheck + tests). `npm run build` runs no typechecker.
 - Baseline: **724 server / 92 web**, all green.
+- **Counts quoted in comments and tests come from a 6,388-title corpus run.** The corpus has since grown to 7,166 parsed titles (`db-2026-08-13.txt`, 925 names from a live instance). Every rule was re-validated and every ratio held, so the quoted numbers are floors rather than exact figures — a probe reading 106 where a comment says 82 is the larger corpus, not a defect. The one figure to distrust is the mid-title count; Task 5 Step 9 extracts the real list.
 - Never use `any`. tsconfig sets `exactOptionalPropertyTypes`, `erasableSyntaxOnly` (which rejects TypeScript parameter properties), `verbatimModuleSyntax`.
 - Comments explain *why*. This file's existing comments carry measured evidence; match that register.
 - **All matching is case-insensitive.** The corpus contains `iTALiAN`. A rule that only matched uppercase would pass every other language test.
