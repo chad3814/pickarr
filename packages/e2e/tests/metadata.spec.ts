@@ -26,7 +26,7 @@ const RELEASE = 'Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR';
  * A scene on-site and within the query's date window, which is all
  * `confirmSceneMetadata` requires to confirm without any title comparison:
  * exactly one candidate inside the window settles it. `posterUrl: null`
- * keeps this test out of `cachePoster`'s file-writing path entirely — the
+ * keeps this test out of `cacheImage`'s file-writing path entirely — the
  * poster route is `MediaCard.test.tsx`'s and `metadata.test.ts`'s job, not
  * this one's.
  */
@@ -38,10 +38,20 @@ function confirmedCandidate(): MetadataCandidate {
     siteId: null,
     siteName: 'Vixen',
     date: '2023-04-15',
-    performers: ['Alex Coal'],
+    performers: [
+      {
+        sourceUuid: 'e2e-performer-1',
+        slug: 'alex-coal',
+        name: 'Alex Coal',
+        kind: 'performer',
+        faceUrl: null,
+        imageUrl: null,
+      },
+    ],
     durationSeconds: null,
     synopsis: 'A confirmed test synopsis.',
     posterUrl: null,
+    slug: null,
   };
 }
 
@@ -93,5 +103,8 @@ test('a card gains its metadata panel without a reload once the worker confirms 
   // `panel` would never appear and this would time out.
   await expect(panel).toBeVisible({ timeout: 10_000 });
   await expect(panel.locator('.metadata-synopsis')).toHaveText('A confirmed test synopsis.');
+  // The whole stack round-trips a performer now: storage, the display view,
+  // and the card all carry `MetadataPerformer`'s structured shape rather than
+  // the bare names it replaced.
   await expect(panel.locator('.metadata-performers li')).toHaveText(['Alex Coal']);
 });

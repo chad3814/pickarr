@@ -116,6 +116,26 @@ export interface MetadataQuery {
   readonly date?: string;
 }
 
+/**
+ * One performer on a scene, as the metadata service describes them.
+ *
+ * `kind` records which of the service's two namespaces this identity lives
+ * in, because that decides the page it links to. It is set by the same branch
+ * that decides where the images came from — a performer read from a `parent`
+ * is canonical, a parentless one is a site alias — so the link and the avatar
+ * cannot disagree about which entity this is.
+ */
+export interface MetadataPerformer {
+  readonly sourceUuid: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly kind: 'performer' | 'performer-site';
+  /** A square crop, suited to a thumbnail. */
+  readonly faceUrl: string | null;
+  /** The full image, for a modal. */
+  readonly imageUrl: string | null;
+}
+
 /** One scene as the metadata service describes it. */
 export interface MetadataCandidate {
   readonly sourceUuid: string | null;
@@ -124,10 +144,12 @@ export interface MetadataCandidate {
   readonly siteId: number | null;
   readonly siteName: string;
   readonly date: string | null;
-  readonly performers: readonly string[];
+  readonly performers: readonly MetadataPerformer[];
   readonly durationSeconds: number | null;
   readonly synopsis: string | null;
   readonly posterUrl: string | null;
+  /** The service's own slug for this scene, from which its page URL is built. */
+  readonly slug: string | null;
 }
 
 /** A candidate that was not believed, and the reason it was not. */

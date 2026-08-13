@@ -4,7 +4,7 @@ body { margin: 0; }
 nav { display: flex; gap: 1rem; padding-bottom: 1rem; }
 nav a { text-decoration: none; }
 nav a.active { font-weight: 600; text-decoration: underline; }
-.media-card { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; opacity: 0.95; }
+.media-card { position: relative; border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; opacity: 0.95; }
 .media-card h2 { margin: 0; font-size: 1.1rem; }
 .subtitle, .date { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
 .badge { display: inline-block; margin-top: 0.4rem; padding: 0.1rem 0.5rem; border-radius: 0.25rem; background: #b45309; color: white; font-size: 0.8rem; }
@@ -16,6 +16,64 @@ nav a.active { font-weight: 600; text-decoration: underline; }
 .release-current { font-weight: 600; }
 .download-row.untracked { opacity: 0.5; font-style: italic; }
 .metadata-pending { opacity: 0.6; font-style: italic; }
+/* Only the interactive thumbnails get the pointer cursor: `button.avatar-thumb`
+   (has a full image behind it) rather than `.avatar-thumb` by class alone,
+   which would also match the plain `<img class="avatar-thumb">` shown for a
+   performer with no full image — that one is deliberately not clickable, and
+   a pointer cursor is exactly the affordance that promises a click it can't
+   answer. */
+.poster-thumb, button.avatar-thumb { padding: 0; border: none; background: none; cursor: pointer; }
+.poster-thumb { position: absolute; top: 1rem; right: 1rem; max-width: 6rem; max-height: 8rem; }
+/* No fixed aspect ratio: the provider's images are frequently landscape (a
+   documented example is 1279x719), not portrait. */
+.poster-thumb img { display: block; max-width: 100%; max-height: 100%; }
+.metadata-performers { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; align-items: center; }
+.metadata-performers li { display: flex; align-items: center; gap: 0.35rem; }
+.avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
+/* The dialog's own box has to be reset, not just the image inside it. The UA
+   stylesheet gives a <dialog> `padding: 1em`, a border, `overflow: auto` and
+   `max-height: calc(100% - 6px - 2em)` — so a tall image reaches the dialog's
+   own scrollbar long before it reaches its `max-height: 100vh`, and the
+   dialog scrolls instead of the image shrinking. `object-fit: contain` cannot
+   help with that: it only decides how content fills a box that something else
+   has already sized, and nothing was sizing this one smaller than the image.
+   Spec bullet 1 asks for the image scaled to fit within the window, which
+   means the box around it must be the window. */
+.image-modal {
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.image-modal::backdrop { background: rgb(0 0 0 / 70%); }
+/* Out of flow, and that is the load-bearing part rather than the styling. As
+   an in-flow sibling above the image, the close button spent its own height
+   out of the 100vh the image is trying to fit inside, so the bottom of a tall
+   image landed just past the viewport — the box was right and the image still
+   did not fit. */
+.image-modal-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  padding: 0 0.5rem;
+  border: none;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 60%);
+  color: white;
+  font-size: 1.5rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.image-modal img { display: block; max-width: 100vw; max-height: 100vh; object-fit: contain; }
 .download-error, .error, .release-failed { color: #b91c1c; }
 .failed { list-style: none; margin: 0; padding: 0; }
 .failed-row { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }

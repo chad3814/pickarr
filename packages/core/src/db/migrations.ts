@@ -522,4 +522,77 @@ export const migrations: Migration[] = [
       db.exec(SCENE_METADATA);
     },
   },
+  {
+    version: 7,
+    up(db) {
+      db.exec(`
+        CREATE TABLE performers (
+          id          INTEGER PRIMARY KEY,
+          source      TEXT    NOT NULL,
+          source_uuid TEXT    NOT NULL,
+          slug        TEXT    NOT NULL,
+          name        TEXT    NOT NULL,
+          kind        TEXT    NOT NULL,
+          face_url    TEXT,
+          face_path   TEXT,
+          image_url   TEXT,
+          image_path  TEXT,
+          fetched_at  INTEGER NOT NULL,
+          UNIQUE (source, source_uuid)
+        );
+
+        CREATE TABLE group_performers (
+          group_id     INTEGER NOT NULL REFERENCES media_groups (id),
+          performer_id INTEGER NOT NULL REFERENCES performers (id),
+          position     INTEGER NOT NULL,
+          PRIMARY KEY (group_id, performer_id)
+        );
+        CREATE INDEX group_performers_performer ON group_performers (performer_id);
+
+        ALTER TABLE group_metadata ADD COLUMN scene_slug TEXT;
+      `);
+
+      // Every group already answered holds names and nothing else — no slug,
+      // no avatar, no link. Queue them so the existing worker refetches at
+      // its own rate. This bypasses `enqueueMetadata`'s "already answered"
+      // guard deliberately: that guard stops a *lazy browse trigger* from
+      // re-asking forever, and a one-time backfill is not that. Routing this
+      // through the guard would mean weakening the guard.
+      //
+      // `state = 'confirmed'` only. A 'none' answer has no performers to
+      // enrich, and re-asking it is exactly the loop the guard prevents.
+      //
+      // `requested_at` is stamped far in the future, and the two columns are
+      // doing different jobs: `dueMetadataQueue` filters on `next_at` and
+      // *orders* by `requested_at`. Stamping `next_at` at 0 keeps every
+      // backfill row immediately due, so the worker starts draining them on
+      // its first tick; stamping `requested_at` at 4102444800000 —
+      // 2100-01-01T00:00:00Z — sorts all of them behind any request a user's
+      // browse makes after the upgrade, whose `requested_at` is a real clock
+      // reading. A round future date rather than a bit pattern: the first
+      // attempt at this used 2^40, which reads like a large number and is in
+      // fact November 2004, and the test below caught it.
+      //
+      // The obvious alternative — `requested_at = fetched_at`, the group's
+      // own answer time — does the exact opposite, and that is the bug this
+      // is written against: every backfill row would be a historical
+      // timestamp, sorting ahead of every post-upgrade request. A freshly
+      // ingested group the user is looking at right now would sit at
+      // `pending` behind the entire backlog.
+      //
+      // Expected drain shape: the whole backfill is due at once and drains at
+      // the worker's own rate — roughly one group per tick, slower per group
+      // once each pulls a poster and up to two images per performer — so a
+      // few thousand groups is hours of background work. Throughout it, any
+      // group browsed after the upgrade jumps the queue and resolves in the
+      // next tick or two, which is the property that makes those hours
+      // invisible rather than infuriating.
+      db.exec(`
+        INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+        SELECT group_id, 4102444800000, 0, 0
+        FROM group_metadata WHERE state = 'confirmed'
+        ON CONFLICT (group_id) DO NOTHING
+      `);
+    },
+  },
 ];

@@ -1,4 +1,4 @@
-import type { MetadataCandidate } from '@pickarr/plugin-api';
+import type { MetadataCandidate, MetadataPerformer } from '@pickarr/plugin-api';
 import { abortRejection } from '../abort.ts';
 import type { SiteLookupConfig } from '../config/schema.ts';
 
@@ -196,17 +196,62 @@ function readPosterUrl(record: Record<string, unknown>): string | null {
   return null;
 }
 
-function readPerformerNames(value: unknown): string[] {
+function str(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Reads the performers off a scene, preferring each one's `parent`.
+ *
+ * A scene's `performers[]` are *site* performers: their slug is
+ * site-prefixed (`6061-alice-maze`), and in the live payload their `image`,
+ * `thumbnail` and `face` are all null. Everything worth showing — the
+ * canonical slug and all three images — is on the nested `parent`. Reading
+ * the outer object, which is what the field names invite, yields a card with
+ * no avatars and links to alias pages.
+ *
+ * `face` is preferred for the thumbnail over `thumbnail`: it is a 500x500
+ * smart crop centred on the face, where `thumbnail` is the poster scaled
+ * down, and a full-body poster two lines high is unrecognisable.
+ *
+ * A performer with no slug is dropped rather than stored with an empty one:
+ * the slug is the whole link, and the uuid it would be keyed on is likewise
+ * absent in that case, so the row would collide with every other such
+ * performer under `UNIQUE (source, source_uuid)`.
+ *
+ * `name`, never `full_name` — the latter carries a disambiguation suffix such
+ * as `Jessica Jaymes (2005)`.
+ */
+function readPerformers(value: unknown): MetadataPerformer[] {
   if (!Array.isArray(value)) return [];
-  const names: string[] = [];
+  const performers: MetadataPerformer[] = [];
+
   for (const entry of value) {
     if (entry === null || typeof entry !== 'object') continue;
-    // `name`, never `full_name` — the latter carries a disambiguation suffix
-    // such as `Jessica Jaymes (2005)`.
-    const name = (entry as { name?: unknown }).name;
-    if (typeof name === 'string' && name.length > 0) names.push(name);
+    const site = entry as Record<string, unknown>;
+    const parentValue = site['parent'];
+    const parent =
+      parentValue !== null && typeof parentValue === 'object'
+        ? (parentValue as Record<string, unknown>)
+        : null;
+    const source = parent ?? site;
+
+    const slug = str(source, 'slug');
+    const sourceUuid = str(source, 'id');
+    const name = str(source, 'name') ?? str(site, 'name');
+    if (slug === null || sourceUuid === null || name === null) continue;
+
+    performers.push({
+      sourceUuid,
+      slug,
+      name,
+      kind: parent === null ? 'performer-site' : 'performer',
+      faceUrl: str(source, 'face'),
+      imageUrl: str(source, 'image'),
+    });
   }
-  return names;
+  return performers;
 }
 
 /**
@@ -248,11 +293,12 @@ function readScenes(body: unknown): MetadataCandidate[] {
       siteId: typeof siteId === 'number' && Number.isInteger(siteId) ? siteId : null,
       siteName: typeof siteName === 'string' ? siteName : '',
       date: typeof date === 'string' && date.length > 0 ? date : null,
-      performers: readPerformerNames(record['performers']),
+      performers: readPerformers(record['performers']),
       durationSeconds:
         typeof duration === 'number' && Number.isFinite(duration) ? duration : null,
       synopsis: typeof synopsis === 'string' && synopsis.length > 0 ? synopsis : null,
       posterUrl: readPosterUrl(record),
+      slug: str(record, 'slug'),
     });
   }
   return scenes;

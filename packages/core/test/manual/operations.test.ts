@@ -650,33 +650,60 @@ test('merging a group that has been browsed does not 500, and leaves the target 
     confirmed: {
       sourceUuid: 'target-uuid', title: 'Target Scene', siteUuid: null, siteId: null,
       siteName: 'Site', date: '2020-01-01', performers: [], durationSeconds: null,
-      synopsis: null, posterUrl: null,
+      synopsis: null, posterUrl: null, slug: null,
     },
     nearMisses: [],
     now: 1000,
   });
 
-  // The source has been browsed too, and picked up all three rows a browse can
-  // leave behind: a confirmed answer, a rejected candidate recorded alongside
-  // it, and — inserted directly, since `recordMetadataAnswer` would not leave
-  // one — a queue row, so the fix is proved against every table `media_groups`
-  // is referenced from, not just whichever one a real sequence happens to hit.
+  // The source has been browsed too, and picked up all four rows a browse can
+  // leave behind: an answer, a rejected candidate recorded alongside it, a
+  // link to its cast, and — inserted directly, since `recordMetadataAnswer`
+  // would not leave one — a queue row, so the fix is proved against every
+  // table `media_groups` is referenced from, not just whichever one a real
+  // sequence happens to hit.
+  //
+  // The cast has to be non-empty, and this test is the reason to say so out
+  // loud: `group_performers` is the newest of those tables, and while this
+  // answer was `confirmed: null` the row it would have written did not exist,
+  // so the one table the performer work added was the one table a test named
+  // for covering "every table" quietly stopped covering. An empty `performers`
+  // array here passes against a `clearGroupMetadata` that has never heard of
+  // `group_performers` — and a real merge, of a real group whose refetch has
+  // landed, does not.
   recordMetadataAnswer(db, {
     groupId: 2,
     source: 'theporndb',
-    confirmed: null,
+    confirmed: {
+      sourceUuid: 'source-uuid', title: 'Source Scene', siteUuid: null, siteId: null,
+      siteName: 'Site', date: '2020-01-01',
+      performers: [
+        {
+          sourceUuid: 'performer-uuid', slug: 'source-performer', name: 'Source Performer',
+          kind: 'performer', faceUrl: null, imageUrl: null,
+        },
+      ],
+      durationSeconds: null, synopsis: null, posterUrl: null, slug: null,
+    },
     nearMisses: [
       {
         candidate: {
           sourceUuid: 'rejected', title: 'Rejected Scene', siteUuid: null, siteId: null,
           siteName: 'Site', date: '2020-01-01', performers: [], durationSeconds: null,
-          synopsis: null, posterUrl: null,
+          synopsis: null, posterUrl: null, slug: null,
         },
         reason: 'date outside window',
       },
     ],
     now: 1000,
   });
+  // Spelled out before the merge rather than assumed: if this link were never
+  // written, the assertion below that it is gone would pass for the wrong
+  // reason and the table would be back to being uncovered.
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM group_performers WHERE group_id = ?').get(2)?.['n']),
+    1,
+  );
   db.prepare(
     `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
      VALUES (2, 2000, 0, 2000)`,
@@ -686,13 +713,21 @@ test('merging a group that has been browsed does not 500, and leaves the target 
   assert.deepEqual(result, { groupId: 1, mergedInto: 1 });
 
   // The source's own rows describe an identity the merge just concluded was
-  // wrong, and must not survive it, in any of the three tables.
+  // wrong, and must not survive it, in any of the four tables.
   assert.equal(getGroupMetadata(db, 2), undefined);
   assert.equal(db.prepare('SELECT 1 FROM metadata_queue WHERE group_id = ?').get(2), undefined);
   assert.equal(
     db.prepare('SELECT 1 FROM metadata_candidates WHERE group_id = ?').get(2),
     undefined,
   );
+  assert.equal(
+    db.prepare('SELECT 1 FROM group_performers WHERE group_id = ?').get(2),
+    undefined,
+  );
+  // The performer itself outlives the merge. It is shared, keyed on the
+  // provider's uuid, and its cached avatar is on disk under its id — deleting
+  // it here would strip it from every other card that credits them.
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM performers').get()?.['n']), 1);
 
   // The target kept its own answer — a merge is not a reason to forget it or
   // to re-ask the question.

@@ -3,6 +3,7 @@ import type { GroupView, ManualField } from '../api/client.ts';
 import { groupAnchor } from '../api/anchors.ts';
 import { formatDuration } from '../api/format.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
+import { ImageModal } from './ImageModal.tsx';
 import { ManualForm, seed } from './ManualForm.tsx';
 import { ReleaseRow } from './ReleaseRow.tsx';
 
@@ -62,6 +63,9 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }: Props) {
   const { display } = group;
   const [editing, setEditing] = useState(false);
+  // One piece of state, so the poster and a performer's full image can never
+  // both be open at once.
+  const [modal, setModal] = useState<{ src: string; alt: string } | null>(null);
 
   // A field's scope says which record it belongs to: the group owns its
   // identity and display (§7.3), each release its own quality (§7.4).
@@ -71,6 +75,10 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   // cannot read a record back into form values, and an empty map is a
   // legitimate prefill for a plugin whose fields are all optional.
   const values = group.manualValues;
+  // Optional on the wire, unlike core's `MetadataView`: a stale bundle or an
+  // old-server response can omit it, so absence is folded into `null` rather
+  // than trusted to mean anything on its own.
+  const sceneUrl = group.metadata.state === 'confirmed' ? group.metadata.sceneUrl ?? null : null;
 
   async function save(submitted: Record<string, string>): Promise<void> {
     // Closed only on success, so a refused merge leaves the values the user
@@ -90,6 +98,17 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
         {display.date !== undefined && <p className="date">{display.date}</p>}
         {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
       </header>
+
+      {group.metadata.state === 'confirmed' && group.metadata.hasPoster && (
+        <button
+          type="button"
+          className="poster-thumb"
+          onClick={() => setModal({ src: `/api/groups/${group.id}/poster`,
+                                    alt: `Poster for ${display.title}` })}
+        >
+          <img src={`/api/groups/${group.id}/poster`} alt={`Poster for ${display.title}`} />
+        </button>
+      )}
 
       {values !== undefined &&
         identityFields !== undefined &&
@@ -168,21 +187,22 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
        * came back with nothing, which is likewise nothing to show. The
        * provider populates poster, synopsis, performers, release date and
        * running time unevenly, so each is checked and rendered on its own —
-       * one being missing says nothing about the others.
+       * one being missing says nothing about the others. The poster itself
+       * is rendered above, out of this section: it is absolutely positioned
+       * and out of flow, so it does not compete with anything here.
        */}
       {group.metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">
-          {group.metadata.hasPoster && (
-            // No fixed aspect ratio: the provider's images are frequently
-            // landscape (a documented example is 1279x719), not portrait.
-            <img
-              className="metadata-poster"
-              src={`/api/groups/${group.id}/poster`}
-              alt={`Poster for ${display.title}`}
-            />
-          )}
           {group.metadata.title !== null && (
-            <p className="metadata-title">{group.metadata.title}</p>
+            <p className="metadata-title">
+              {sceneUrl === null ? (
+                group.metadata.title
+              ) : (
+                <a href={sceneUrl} target="_blank" rel="noopener noreferrer">
+                  {group.metadata.title}
+                </a>
+              )}
+            </p>
           )}
           {group.metadata.releaseDate !== null && (
             <p className="metadata-release-date">{group.metadata.releaseDate}</p>
@@ -193,15 +213,54 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           {group.metadata.synopsis !== null && (
             <p className="metadata-synopsis">{group.metadata.synopsis}</p>
           )}
-          {group.metadata.performers.length > 0 && (
+          {/*
+           * One list or the other, never both. The server already guarantees
+           * that — `metadataViewOf` empties `performerNames` the moment there
+           * is a structured cast — but as two independent `&&` blocks the
+           * card would happily render both if that ever stopped being true,
+           * showing every performer twice. The `else` makes the exclusivity a
+           * property of this component rather than a promise made elsewhere,
+           * and picks the richer list when they disagree.
+           */}
+          {(group.metadata.performers ?? []).length > 0 ? (
             <ul className="metadata-performers">
-              {group.metadata.performers.map((performer) => (
-                <li key={performer}>{performer}</li>
+              {(group.metadata.performers ?? []).map((performer) => (
+                <li key={performer.id}>
+                  {performer.hasAvatar &&
+                    (performer.hasImage ? (
+                      <button
+                        type="button"
+                        className="avatar-thumb"
+                        onClick={() => setModal({ src: `/api/performers/${performer.id}/image`,
+                                                  alt: performer.name })}
+                      >
+                        <img src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
+                      </button>
+                    ) : (
+                      // A face with no full image: shown, not clickable.
+                      // Opening a modal onto a 404 is worse than not offering.
+                      <img className="avatar-thumb"
+                           src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
+                    ))}
+                  <a href={performer.url} target="_blank" rel="noopener noreferrer">
+                    {performer.name}
+                  </a>
+                </li>
               ))}
             </ul>
+          ) : (
+            (group.metadata.performerNames ?? []).length > 0 && (
+              // Answered before migration 7 and not yet refetched: names only,
+              // and no link, because no slug was stored to build one from.
+              <ul className="metadata-performers">
+                {(group.metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
+              </ul>
+            )
           )}
         </section>
       )}
+
+      {modal !== null && <ImageModal {...modal} onClose={() => setModal(null)} />}
     </article>
   );
 }
