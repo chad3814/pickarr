@@ -38,7 +38,16 @@ function confirmedCandidate(): MetadataCandidate {
     siteId: null,
     siteName: 'Vixen',
     date: '2023-04-15',
-    performers: [],
+    performers: [
+      {
+        sourceUuid: 'e2e-performer-1',
+        slug: 'alex-coal',
+        name: 'Alex Coal',
+        kind: 'performer',
+        faceUrl: null,
+        imageUrl: null,
+      },
+    ],
     durationSeconds: null,
     synopsis: 'A confirmed test synopsis.',
     posterUrl: null,
@@ -94,10 +103,8 @@ test('a card gains its metadata panel without a reload once the worker confirms 
   // `panel` would never appear and this would time out.
   await expect(panel).toBeVisible({ timeout: 10_000 });
   await expect(panel.locator('.metadata-synopsis')).toHaveText('A confirmed test synopsis.');
-  // `confirmedCandidate()` carries no performers: `MetadataCandidate.performers`
-  // is now `MetadataPerformer[]`, and neither the storage column nor the
-  // display view has been taught that shape yet (that lands in a later task
-  // in this series), so a populated list here would not survive the
-  // round-trip through `group_metadata` regardless of what this fixture sets.
-  await expect(panel.locator('.metadata-performers li')).toHaveCount(0);
+  // The whole stack round-trips a performer now: storage, the display view,
+  // and the card all carry `MetadataPerformer`'s structured shape rather than
+  // the bare names it replaced.
+  await expect(panel.locator('.metadata-performers li')).toHaveText(['Alex Coal']);
 });
