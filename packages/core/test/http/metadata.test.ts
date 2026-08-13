@@ -204,6 +204,25 @@ test('a group with performer rows reports no fallback names', () => {
   assert.equal(view.performers.length, 1);
 });
 
+test('a performer reports which of its two images are cached', () => {
+  // Both directions, both fields. `hasAvatar` is what decides whether the
+  // card draws an avatar at all, so a derivation stuck at false removes the
+  // feature everywhere while every other assertion in this file still holds:
+  // the fixtures elsewhere leave both paths null, which is the value a broken
+  // derivation returns anyway.
+  const view = metadataViewOf(confirmedMetadata(), [
+    row({ id: 1, facePath: 'performer-face-1.jpg', imagePath: 'performer-image-1.jpg' }),
+    row({ id: 2, facePath: 'performer-face-2.jpg', imagePath: null }),
+    row({ id: 3, facePath: null, imagePath: 'performer-image-3.jpg' }),
+    row({ id: 4, facePath: null, imagePath: null }),
+  ]);
+  assert.ok(view.state === 'confirmed');
+  assert.deepEqual(
+    view.performers.map((performer) => [performer.hasAvatar, performer.hasImage]),
+    [[true, true], [true, false], [false, true], [false, false]],
+  );
+});
+
 test('requesting metadata queues only the unanswered', async () => {
   const db = openTestDatabase();
   const g1 = group(db, 'askable', 'Alpha');
@@ -587,6 +606,52 @@ test('browse carries metadata and reads it in one query', async () => {
   });
   assert.deepEqual(byId.get(g2), { state: 'none' });
   assert.deepEqual(byId.get(g3), { state: 'absent' });
+
+  await server.close();
+  db.close();
+});
+
+test('browse gives each group its own cast, never the other one\'s', async () => {
+  // `performers.get(group.id) ?? []` on the same line as the already-tested
+  // `metadata.get(group.id)` — this is the case that would notice the two
+  // groups' maps getting crossed, which an empty-cast fixture never can.
+  const db = openTestDatabase();
+  const g1 = group(db, 'askable', 'Alpha');
+  const g2 = group(db, 'askable', 'Beta');
+
+  recordMetadataAnswer(db, {
+    groupId: g1,
+    source: 'theporndb',
+    confirmed: candidate({
+      performers: [
+        { sourceUuid: 'p1', slug: 'alice-maze', name: 'Alice Maze', kind: 'performer', faceUrl: null, imageUrl: null },
+      ],
+    }),
+    nearMisses: [],
+    now: NOW,
+  });
+  recordMetadataAnswer(db, {
+    groupId: g2,
+    source: 'theporndb',
+    confirmed: candidate({
+      performers: [
+        { sourceUuid: 'p2', slug: 'bella-rolland', name: 'Bella Rolland', kind: 'performer', faceUrl: null, imageUrl: null },
+      ],
+    }),
+    nearMisses: [],
+    now: NOW,
+  });
+
+  const server = buildServer(deps(db));
+  const response = await server.inject({ method: 'GET', url: '/api/browse?limit=10' });
+  assert.equal(response.statusCode, 200);
+
+  const body = response.json() as {
+    groups: { id: number; metadata: { performers: { name: string }[] } }[];
+  };
+  const namesById = new Map(body.groups.map((g) => [g.id, g.metadata.performers.map((p) => p.name)]));
+  assert.deepEqual(namesById.get(g1), ['Alice Maze']);
+  assert.deepEqual(namesById.get(g2), ['Bella Rolland']);
 
   await server.close();
   db.close();
