@@ -145,6 +145,44 @@ already caused once for site names.
 
 ## 4. `findTitleEnd`, and the composition
 
+> **Amended 2026-08-13, during implementation. The order below is inverted from what this
+> section originally specified, and the amendment is recorded rather than rewritten because
+> the reason is worth keeping.**
+>
+> The original design walked backward from the end of the name over a predicate that
+> included encode tokens, the `XXX` marker, and a release-group tag, and needed a bare-digit
+> exclusion so sequel numbers survived. Wiring it revealed two defects, both caught by this
+> repo's own invariant tests rather than by reasoning:
+>
+> - `Brazzers.23.04.15.Alex.Coal.XXX.2160p60.WEB-DL.H.265.10bit.HDR.DDP5.1.MP4-G` stopped
+>   parsing. `DDP5.1` tokenizes to `DDP5` and `1`; the digit exclusion halted the walk at
+>   that `1`, leaving the title boundary inside the encode run and starving the encode search
+>   into returning `null`.
+> - `PornMegaLoad.26.07.31.DD.White.Hardcore.42617.XXX.1080p.MP4-WRB` yielded the title `DD`
+>   rather than `DD White`. `DD` is a Dolby Digital token, so `isEncodeToken('DD')` is true,
+>   and the group-tag clause then ate `White` as group-shaped-after-an-encode-token.
+>
+> Both share one cause: those clauses used the *previous token* as a proxy for "am I inside
+> the encode run", and the proxy is unreliable in both directions — title words can look like
+> encode tokens, and encode runs contain bare digits.
+>
+> **The order is therefore reversed.** `findEncodeSuffixStart` runs *first* and remains the
+> only authority on where the encode run begins; the new walk starts from *its* answer and
+> considers only vocabulary. That deletes the encode clause, the marker clause, the group-tag
+> clause and the digit exclusion outright — every one of them existed only to fight through a
+> section the existing function already locates correctly.
+>
+> ```ts
+> const encodeStart = findEncodeSuffixStart(tokens, minIndex);   // unchanged
+> if (encodeStart === null) return null;                          // unchanged refusal
+> const titleEnd = findTitleEnd(tokens, minIndex, encodeStart);   // vocabulary only
+> ```
+>
+> `findTitleEnd` now takes the index to walk back *from*, and `isTitleSuffixToken` reduces to
+> content type, language and numeric id. Everything below about the two indices diverging,
+> about `extractQuality` being fed from `encodeStart`, and about tokens never being sliced
+> still holds — only the order and the predicate's contents change.
+
 `findEncodeSuffixStart` already opens with the walk this needs:
 
 ```ts
@@ -202,10 +240,20 @@ call `isEncodeToken`.
 Tested in this order. A token consumed by any rule continues the walk; the first token
 matching none of them ends it.
 
-**1. Encode tokens and the optional group tag.** Existing behaviour via `isEncodeToken`,
-unchanged.
+> **Amended 2026-08-13: rules 1 and 2 are deleted.** Under the inverted order in §4 the walk
+> starts at the encode boundary rather than at the end of the name, so it never encounters an
+> encode token, a release-group tag, or the `XXX` marker — `findEncodeSuffixStart` has already
+> accounted for all three. Only rules 3, 4 and 5 remain, and the bare-digit exclusion that
+> rule 1 required is gone with it. The two rules are kept below, struck through in prose, for
+> the same reason the amendment in §4 is kept: the reasoning about `MARKER_TOKEN` being
+> referenced rather than copied is still the right instinct, and issue #13 is still the
+> precedent — it simply no longer needs applying here.
 
-**2. The `XXX` marker.** By reference to the existing `MARKER_TOKEN` constant, **not** by
+**~~1. Encode tokens and the optional group tag.~~** *Deleted — `findEncodeSuffixStart`
+handles these.* Existing behaviour via `isEncodeToken`, unchanged.
+
+**~~2. The `XXX` marker.~~** *Deleted — it is the boundary `findEncodeSuffixStart` returns,
+so the walk begins after it rather than crossing it.* By reference to the existing `MARKER_TOKEN` constant, **not** by
 adding `'XXX'` to any list. This clause is what makes the whole change work: `XXX` is
 neither an encode token nor a boundary anchor — it has its own branch in
 `findEncodeSuffixStart`, which returns *its* index as the cut. Without this clause the walk

@@ -851,50 +851,40 @@ function findEncodeSuffixStart(tokens: Token[], minIndex: number): number | null
 }
 
 /**
- * Whether a token at the end of a name is something other than a title word.
+ * Whether a token immediately before the encode section is a tag rather than a
+ * title word.
  *
- * `MARKER_TOKEN` is referenced rather than copied into any of the sets above.
- * It has to be crossable or the walk stops at `XXX` and never reaches the id
- * and the content-type tag behind it — which is most of what this exists to
- * remove. Issue #13 is what copying it would cost: `REMASTERED` sat in the
- * encode vocabulary and the non-group list at once and refused 14 corpus
- * titles.
- *
- * Bare digits are excluded from encode tokens because `ANCILLARY_TOKEN` matches
- * single digits (`\d`), but a lone digit like `1` is not a suffix token unless it
- * meets the numeric ID threshold (250+), checked separately below. Without this
- * exclusion, `Rispetto 1 JAP` would incorrectly lose the `1`.
- *
- * Release group tags are recognized when they follow an encode token. This handles
- * the tokenization where `MP4-WRB` splits into `['MP4', 'WRB']` due to the hyphen
- * separator. The gate on previous being an encode token ensures the group is not
- * reached until the encode section is exhausted, and ensures minIndex is respected
- * by virtue of living inside the walk loop.
+ * Vocabulary only, and that is the point. An earlier shape of this walked from
+ * the end of the name and needed clauses for encode tokens, the `XXX` marker
+ * and a release-group tag, plus an exclusion so a bare sequel number survived.
+ * Every one of those was fighting through a section `findEncodeSuffixStart`
+ * already locates, and two of them broke: a bare digit inside `DDP5.1` halted
+ * the walk mid-encode and refused the whole name, and `DD` being a Dolby
+ * Digital token let a group-tag clause eat the title word after it. Both used
+ * the previous token as a proxy for "inside the encode run", which title words
+ * and audio tokens both defeat. Starting from the boundary instead removes the
+ * need to guess.
  */
 export function isTitleSuffixToken(text: string, previous: string | undefined): boolean {
   return (
-    (isEncodeToken(text) && !/^\d+$/.test(text)) ||
-    text.toUpperCase() === MARKER_TOKEN ||
     isContentTypeTerm(text) ||
     isLanguageTerm(text) ||
-    isNumericIdToken(text, previous) ||
-    (looksLikeGroupTag(text, 1) && isEncodeToken(previous ?? ''))
+    isNumericIdToken(text, previous)
   );
 }
 
 /**
- * The index at which the title ends: everything from here to the end of
- * `tokens` is suffix.
+ * The index at which the title ends, walking back from `from` — which is where
+ * the encode section begins.
  *
- * The same backward walk `findEncodeSuffixStart` opens with, over a wider
- * predicate. It stops at the *first* token that could be a title word and does
- * not look past it — see the test named for `Hiyori JAPANESE 2`. `minIndex`
- * carries its existing meaning and is what keeps the walk from emptying the
- * title, so no separate guard is needed; `buildRelease` still refuses an empty
- * scene slug if one ever arrives another way.
+ * Only vocabulary tags are crossed. `minIndex` remains a hard floor, so the
+ * title can never empty, and the walk stops at the first token that could be a
+ * title word without looking past it: `Hiyori JAPANESE 2` keeps its tag because
+ * the `2` blocks it. Skipping a kept token to reach something behind it is how
+ * words go missing from the middle of a title.
  */
-export function findTitleEnd(tokens: Token[], minIndex: number): number {
-  let end = tokens.length;
+export function findTitleEnd(tokens: Token[], minIndex: number, from: number): number {
+  let end = Math.min(from, tokens.length);
   while (end > minIndex) {
     const token = tokens[end - 1];
     if (token === undefined) break;
@@ -916,21 +906,22 @@ export interface TitleBoundary {
 }
 
 /**
- * Pairs the title walk with the existing encode-boundary search.
+ * Pairs the encode-boundary search with the title walk, encode first.
  *
- * `findEncodeSuffixStart` is unchanged and receives `titleEnd` as its
- * `minIndex`, which already means "the first index the cut may fall on". A
- * `null` return means what it has always meant — no recognisable encode
- * section — so every caller's existing refusal path still applies.
+ * `findEncodeSuffixStart` is unchanged and stays the only authority on where
+ * the encode run begins; it now receives the caller's original `minIndex`
+ * rather than a `titleEnd` computed from it, because the dependency runs the
+ * other way. Its `null` means what it has always meant — no recognisable
+ * encode section — so every caller's refusal path is unchanged.
  *
  * Tokens are passed whole rather than sliced. Callers cut the original name
  * string with `token.start`, and slicing the array would shift indices while
  * those offsets stayed absolute.
  */
 export function findTitleBoundary(tokens: Token[], minIndex: number): TitleBoundary | null {
-  const titleEnd = findTitleEnd(tokens, minIndex);
-  const encodeStart = findEncodeSuffixStart(tokens, titleEnd);
+  const encodeStart = findEncodeSuffixStart(tokens, minIndex);
   if (encodeStart === null) return null;
+  const titleEnd = findTitleEnd(tokens, minIndex, encodeStart);
   return { titleEnd, encodeStart };
 }
 
@@ -1377,12 +1368,13 @@ function dateAtEndPrefixTokens(
   if (after.length === 0) {
     const beforeText = name.slice(0, date.startOffset).replace(/[.\s_-]+$/, '');
     const beforeTokens = tokensOf(beforeText);
-    const cut = findEncodeSuffixStart(beforeTokens, 2);
-    const cutToken = cut === null ? undefined : beforeTokens[cut];
-    if (cutToken === undefined) return null;
+    const boundary = findTitleBoundary(beforeTokens, 2);
+    if (boundary === null) return null;
+    const encodeToken = beforeTokens[boundary.encodeStart];
+    if (encodeToken === undefined) return null;
     return {
-      before: beforeTokens.slice(0, cut ?? 0),
-      tail: beforeText.slice(cutToken.start),
+      before: beforeTokens.slice(0, boundary.titleEnd),
+      tail: beforeText.slice(encodeToken.start),
       group: undefined,
     };
   }
@@ -1452,11 +1444,15 @@ function parseDateAtEndForm(
  */
 function datelessPrefixTokens(name: string): { before: Token[]; tail: string } | null {
   const detached = detachReleaseGroup(tokensOf(name), name);
-  const cut = findEncodeSuffixStart(detached.tokens, 2);
-
-  const cutToken = cut === null ? undefined : detached.tokens[cut];
-  if (cutToken !== undefined && cut !== null) {
-    return { before: detached.tokens.slice(0, cut), tail: name.slice(cutToken.start) };
+  const boundary = findTitleBoundary(detached.tokens, 2);
+  if (boundary !== null) {
+    const encodeToken = detached.tokens[boundary.encodeStart];
+    if (encodeToken !== undefined) {
+      return {
+        before: detached.tokens.slice(0, boundary.titleEnd),
+        tail: name.slice(encodeToken.start),
+      };
+    }
   }
 
   // No encode boundary either. That used to end it, but the boundary was only
@@ -1657,19 +1653,18 @@ function parseSceneForm(name: string, options: SceneParseOptions): ParsedRelease
   }
 
   const detached = detachReleaseGroup(tokensOf(rest), rest);
-  const cut = findEncodeSuffixStart(detached.tokens, 1);
-  if (cut === null) return refuse('no trustworthy encode boundary after the date');
+  const boundary = findTitleBoundary(detached.tokens, 1);
+  if (boundary === null) return refuse('no trustworthy encode boundary after the date');
+  const encodeToken = detached.tokens[boundary.encodeStart];
+  if (encodeToken === undefined) return refuse('no trustworthy encode boundary after the date');
 
-  const cutToken = detached.tokens[cut];
-  if (cutToken === undefined) return refuse('no trustworthy encode boundary after the date');
-
-  const sceneText = prettify(rest.slice(0, cutToken.start));
+  const sceneText = prettify(rest.slice(0, suffixOffset(detached.tokens, boundary.titleEnd, rest)));
   if (sceneText.length === 0) return refuse('no title between the date and the encode section');
   // A "title" made only of the marker carries no discriminating content, so
   // two unrelated scenes on one site and day would collide on it.
   if (sceneText.toUpperCase() === MARKER_TOKEN) return refuse('title is only the XXX marker');
 
-  const tail = rest.slice(cutToken.start);
+  const tail = rest.slice(encodeToken.start);
   return buildRelease(site, date, sceneText, slug(sceneText), extractQuality(tail, detached.group));
 }
 
@@ -1788,11 +1783,13 @@ function splitSegment(segment: string): SegmentSplit {
   }
 
   const tokens = tokensOf(text);
-  const cut = findEncodeSuffixStart(tokens, 0);
-  const cutToken = cut === null ? undefined : tokens[cut];
-  if (cutToken !== undefined) {
-    quality.unshift(text.slice(cutToken.start));
-    text = text.slice(0, cutToken.start);
+  const boundary = findTitleBoundary(tokens, 0);
+  if (boundary !== null) {
+    const encodeToken = tokens[boundary.encodeStart];
+    if (encodeToken !== undefined) {
+      quality.unshift(text.slice(encodeToken.start));
+      text = text.slice(0, suffixOffset(tokens, boundary.titleEnd, text));
+    }
   }
 
   return { title: collapsePartSeparator(prettify(text)), quality: quality.join(' '), group };

@@ -151,11 +151,15 @@ const CORPUS: Entry[] = [
     isNew: true,
   },
   // --- Names the encode vocabulary nearly missed ----------------------------
+  //
+  // `26282` is PornMegaLoad's own content id, the same shape as `42466` in
+  // the suffix-parse tests, and the title suffix walk now drops it with the
+  // rest of the trailing run instead of leaving it in the scene title.
   {
     name: 'PornMegaLoad.24.03.17.Cherry.Brady.26282.XXX.REMASTERED.XviD-iPT Team',
-    scene: 'pornmegaload/cherry-brady-26282',
-    key: 'pornmegaload:2024-03-17:cherry-brady-26282',
-    title: 'Cherry Brady 26282',
+    scene: 'pornmegaload/cherry-brady',
+    key: 'pornmegaload:2024-03-17:cherry-brady',
+    title: 'Cherry Brady',
     quality: '-|-|xvid|-|-|-|iPT Team',
     isNew: true,
   },
