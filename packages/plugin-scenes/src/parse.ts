@@ -250,6 +250,72 @@ export const NON_GROUP_EDIT_TERMS = new Set([
  */
 export const NON_GROUP_TERMS = new Set([...LANGUAGE_TERMS, ...NON_GROUP_EDIT_TERMS]);
 
+/**
+ * Scene-type tags some sites append after the title. Not title words: the
+ * service that knows the scene knows it by a name without them, so a title
+ * carrying one cannot be matched.
+ *
+ * Measured: 219 corpus titles carry one, 210 of them in the trailing run.
+ * The remaining 9 are mid-title and are left alone — `findTitleEnd` only ever
+ * walks the end.
+ */
+const CONTENT_TYPE_TERMS = new Set(['HARDCORE', 'SOLO', 'LESBIAN']);
+
+/**
+ * Words after which a number belongs to the title.
+ *
+ * `Violet Voss Episode 466` is why: 466 is past the id threshold, and dropping
+ * it does not merely shorten the title — it collides with episode 467 if a
+ * site posts two on one day.
+ *
+ * A list of observed words, with the maintenance cost that implies: another
+ * site's `chapter` or `ep` would truncate. `stripPosterSignature` carries the
+ * same cost for the same reason — no structural rule was available.
+ *
+ * `PART` and `SCENE` are also in `NON_GROUP_EDIT_TERMS`. That is not the
+ * duplication issue #13 warns about: these two sets answer different questions
+ * — "may a number after this word be dropped" and "does this token have a
+ * group's shape" — and their answers never conflict.
+ */
+const ORDINAL_WORDS = new Set(['EPISODE', 'PART', 'VOL', 'SCENE']);
+
+/**
+ * The smallest all-numeric token treated as a site's own id rather than part
+ * of the title.
+ *
+ * Measured over 6,388 corpus titles: 312 end in a number. All 206 below 250
+ * are sequel or part numbers (`Sarasota 4`, `Menu 2`), and 99 of the 106 at or
+ * above it are ids of the `42xxx` shape. Nothing has 250 sequels.
+ */
+const NUMERIC_ID_MIN = 250;
+
+/** Numbers in this range read as years, and a year can be a title word. */
+const YEAR_MIN = 1900;
+const YEAR_MAX = 2099;
+
+function isContentTypeTerm(text: string): boolean {
+  return CONTENT_TYPE_TERMS.has(text.toUpperCase());
+}
+
+function isLanguageTerm(text: string): boolean {
+  return LANGUAGE_TERMS.has(text.toUpperCase());
+}
+
+/**
+ * `previous` is the token before this one, which is still part of the title at
+ * the moment the walk asks. It is what the `ORDINAL_WORDS` carve-out reads.
+ */
+function isNumericIdToken(text: string, previous: string | undefined): boolean {
+  if (!/^\d+$/.test(text)) return false;
+  const value = Number(text);
+  if (value < NUMERIC_ID_MIN) return false;
+  if (value >= YEAR_MIN && value <= YEAR_MAX) return false;
+  if (previous !== undefined && ORDINAL_WORDS.has(previous.toUpperCase())) return false;
+  return true;
+}
+
+export { isContentTypeTerm, isLanguageTerm, isNumericIdToken };
+
 /** File extensions a downloader or indexer may have appended to a name. */
 const MEDIA_EXTENSIONS = new Set([
   'mp4',
