@@ -243,12 +243,12 @@ adds a poster, synopsis, and performer list to its card. **Nothing about identit
 grouping changes.** The card's title stays whatever the parser decided; the provider's
 answer renders underneath as a second opinion, never a replacement.
 
-**It is lazy.** Nothing is looked up until you browse it. Opening Browse tells the server
-which groups are actually on screen, and only those are queued for a lookup — a library
-with ten thousand groups you never scroll to costs nothing. This is the opposite of site
-lookup above, which runs proactively on every feed tick because it has to: a release needs
-its site settled before it can even be grouped, while a scene's poster and synopsis are
-decoration a card can live without until someone is looking at it.
+**It is lazy.** Nothing is looked up until you look at it. Opening Browse or Picks tells
+the server which groups are actually on screen, and only those are queued for a lookup — a
+library with ten thousand groups you never scroll to costs nothing. This is the opposite of
+site lookup above, which runs proactively on every feed tick because it has to: a release
+needs its site settled before it can even be grouped, while a scene's poster and synopsis
+are decoration a card can live without until someone is looking at it.
 
 Credentials come from the `siteLookup` block already documented above — the metadata
 worker and the site lookup both talk to the same service with the same key, so there is
@@ -292,13 +292,19 @@ principle land on a different verdict than the one already stored. There is no b
 command for this today; a self-healing re-fetch that keeps everything but the poster is the
 obvious phase-2 improvement.
 
-**Picks never triggers a lookup, and never polls.** `GET /api/picks` reads the same
-`group_metadata` table browse does, so a group that was already answered before it was
-picked shows its poster, title, synopsis and performers on Picks exactly as it does on
-Browse — that part is not a limitation. What Picks does not do is ask: it never calls
-`POST /api/metadata/request` and never polls `GET /api/metadata`, so a group that was never
-browsed stays blank on Picks, and a lookup still in flight at the moment you pick a card
-will not show up there until you reload the page or find the same card on Browse.
+**Picks requests and polls too, the same way Browse does.** `GET /api/picks` reads the
+same `group_metadata` table Browse does, so a group already answered before it was picked
+shows its poster, title, synopsis and performers immediately — that part was never a
+limitation. Picks also asks: it calls `POST /api/metadata/request` for every group it
+renders and polls `GET /api/metadata` while any of them is still pending, through the same
+`useGroupMetadata` hook Browse uses, so a group that was never browsed and a lookup still
+in flight both fill in live, without a reload. The one difference from Browse: `/api/picks`
+returns every picked group in a single response rather than paging at 30, so the hook
+chunks that list into batches of the endpoint's 100-id cap rather than assuming a whole
+list of picks ever fits in one request. If metadata is unavailable server-wide — the worker
+disabled, or no `siteLookup` configured — the request endpoint queues nothing and reports
+those ids `unavailable`; the next poll then sees each of them settle at `absent` rather than
+sit `pending`, so Picks does not poll forever for an answer that can never come.
 
 ## Operational notes
 

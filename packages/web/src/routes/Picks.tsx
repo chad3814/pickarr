@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router';
 import { api, type GroupView } from '../api/client.ts';
+import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { MediaCard } from '../components/MediaCard.tsx';
 
 export function Picks() {
@@ -8,6 +9,14 @@ export function Picks() {
   const [error, setError] = useState<string | null>(null);
   const { hash } = useLocation();
   const landed = useRef<string | null>(null);
+
+  // Every group `/api/picks` returned, not a page of them — the route has no
+  // "Load more", it answers everything picked in one response. That can
+  // outgrow the 100-id cap `POST /api/metadata/request` and `GET
+  // /api/metadata` share (see the hook's own comment), which is exactly why
+  // the hook chunks internally rather than assuming its caller's list fits in
+  // one request.
+  const liveMetadata = useGroupMetadata(groups.map((group) => group.id));
 
   async function reload(): Promise<void> {
     try {
@@ -63,7 +72,12 @@ export function Picks() {
       {groups.map((group) => (
         <MediaCard
           key={group.id}
-          group={group}
+          // The live answer once the poll has one, falling back to what
+          // `/api/picks` already carried — the same fallback Browse uses, for
+          // the same reason: it is what lets the first paint show whatever
+          // the last load already knew instead of every card flashing back to
+          // "no metadata" the instant this hook takes over.
+          group={{ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata }}
           onPick={(releaseId) => void pick(group.id, releaseId)}
         />
       ))}
