@@ -115,3 +115,4 @@ input.search { margin-bottom: 1rem; }
 .manual-help { opacity: 0.6; font-size: 0.8rem; }
 .manual-preview { font-family: ui-monospace, monospace; font-size: 0.85rem; }
 .manual-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.secret-set { font-family: ui-monospace, monospace; font-size: 0.85rem; opacity: 0.6; }
