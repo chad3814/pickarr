@@ -522,4 +522,51 @@ export const migrations: Migration[] = [
       db.exec(SCENE_METADATA);
     },
   },
+  {
+    version: 7,
+    up(db) {
+      db.exec(`
+        CREATE TABLE performers (
+          id          INTEGER PRIMARY KEY,
+          source      TEXT    NOT NULL,
+          source_uuid TEXT    NOT NULL,
+          slug        TEXT    NOT NULL,
+          name        TEXT    NOT NULL,
+          kind        TEXT    NOT NULL,
+          face_url    TEXT,
+          face_path   TEXT,
+          image_url   TEXT,
+          image_path  TEXT,
+          fetched_at  INTEGER NOT NULL,
+          UNIQUE (source, source_uuid)
+        );
+
+        CREATE TABLE group_performers (
+          group_id     INTEGER NOT NULL REFERENCES media_groups (id),
+          performer_id INTEGER NOT NULL REFERENCES performers (id),
+          position     INTEGER NOT NULL,
+          PRIMARY KEY (group_id, performer_id)
+        );
+        CREATE INDEX group_performers_performer ON group_performers (performer_id);
+
+        ALTER TABLE group_metadata ADD COLUMN scene_slug TEXT;
+      `);
+
+      // Every group already answered holds names and nothing else — no slug,
+      // no avatar, no link. Queue them so the existing worker refetches at
+      // its own rate. This bypasses `enqueueMetadata`'s "already answered"
+      // guard deliberately: that guard stops a *lazy browse trigger* from
+      // re-asking forever, and a one-time backfill is not that. Routing this
+      // through the guard would mean weakening the guard.
+      //
+      // `state = 'confirmed'` only. A 'none' answer has no performers to
+      // enrich, and re-asking it is exactly the loop the guard prevents.
+      db.exec(`
+        INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+        SELECT group_id, fetched_at, 0, fetched_at
+        FROM group_metadata WHERE state = 'confirmed'
+        ON CONFLICT (group_id) DO NOTHING
+      `);
+    },
+  },
 ];
