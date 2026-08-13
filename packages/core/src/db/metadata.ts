@@ -146,19 +146,28 @@ export function enqueueMetadata(
 }
 
 /**
- * Which of these groups have a `metadata_queue` row, in one query for the
- * whole batch — the same reasoning `metadataForGroups` documents, applied to
- * the other table `GET /api/metadata` has to consult to tell `pending` from
- * `absent`.
+ * Each of these groups' `metadata_queue.next_at`, in one query for the whole
+ * batch — the same reasoning `metadataForGroups` documents, applied to the
+ * other table `GET /api/metadata` has to consult to tell `pending` from
+ * `absent`, and now also to say *when* a pending row will next be tried.
+ *
+ * A group absent from the returned map has no queue row at all — never
+ * enqueued, or already answered and removed from the queue by
+ * `recordMetadataAnswer` — which is exactly the "never asked" case
+ * `metadataViewOf` reports as `'absent'`.
  */
-export function queuedGroupIds(db: DatabaseSync, groupIds: readonly number[]): Set<number> {
-  const found = new Set<number>();
+export function queuedMetadataNextAt(
+  db: DatabaseSync,
+  groupIds: readonly number[],
+): Map<number, number> {
+  const found = new Map<number, number>();
   if (groupIds.length === 0) return found;
   const holes = groupIds.map(() => '?').join(', ');
   for (const row of db
-    .prepare(`SELECT group_id FROM metadata_queue WHERE group_id IN (${holes})`)
+    .prepare(`SELECT group_id, next_at FROM metadata_queue WHERE group_id IN (${holes})`)
     .all(...groupIds)) {
-    found.add(num(row as SqlRow, 'group_id'));
+    const sqlRow = row as SqlRow;
+    found.set(num(sqlRow, 'group_id'), num(sqlRow, 'next_at'));
   }
   return found;
 }

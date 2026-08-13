@@ -32,17 +32,9 @@ export type MetadataView =
       hasPoster: boolean;
     }
   | { state: 'none' }
-  | { state: 'pending' }
+  | { state: 'pending'; nextAttemptAt: number }
   | { state: 'absent' };
 
-/**
- * `metadata` is what `metadataForGroups` found for this one group, already
- * read for the whole page in a single query — never fetched here per group,
- * which is exactly the `/api/downloads` defect (issue #31) this file must not
- * reacquire. `queued` is only meaningful to a caller that has also checked
- * `metadata_queue`; browse never does; the default keeps its groups reading
- * `'absent'` rather than a `'pending'` it has no evidence for.
- */
 /**
  * The answer to `POST /api/metadata/request`. Five counters: an id naming a
  * group that no longer exists is neither queued, answered, nor waiting, and
@@ -70,8 +62,20 @@ export interface MetadataRequestResponse {
   unavailable: number;
 }
 
-export function metadataViewOf(metadata: GroupMetadata | undefined, queued = false): MetadataView {
-  if (metadata === undefined) return queued ? { state: 'pending' } : { state: 'absent' };
+/**
+ * `queuedNextAt` is this group's `metadata_queue.next_at`, or `undefined` when
+ * there is no row — the caller (browse's `toGroupView`) never has one to pass,
+ * since browse does not consult the queue at all, so its groups always read
+ * `'absent'` rather than a `'pending'` they have no evidence for. Only
+ * `GET /api/metadata` looks the queue up and passes a real value through.
+ */
+export function metadataViewOf(
+  metadata: GroupMetadata | undefined,
+  queuedNextAt?: number,
+): MetadataView {
+  if (metadata === undefined) {
+    return queuedNextAt === undefined ? { state: 'absent' } : { state: 'pending', nextAttemptAt: queuedNextAt };
+  }
   if (metadata.state === 'none') return { state: 'none' };
   return {
     state: 'confirmed',

@@ -320,8 +320,53 @@ test('metadata reads report pending, none and confirmed distinctly', async () =>
     hasPoster: false,
   });
   assert.deepEqual(body[String(none)], { state: 'none' });
-  assert.deepEqual(body[String(pending)], { state: 'pending' });
+  // enqueueMetadata (via the `pending` group() call above) inserted the queue
+  // row with next_at = NOW, so the response must carry that value back
+  // rather than merely saying "pending".
+  assert.deepEqual(body[String(pending)], { state: 'pending', nextAttemptAt: NOW });
   assert.deepEqual(body[String(absent)], { state: 'absent' });
+
+  await server.close();
+  db.close();
+});
+
+test('GET /api/metadata reads the queue for a whole page in one query, not one per id', async () => {
+  const db = openTestDatabase();
+  const g1 = group(db, 'askable', 'Alpha');
+  const g2 = group(db, 'askable', 'Beta');
+  const g3 = group(db, 'askable', 'Gamma');
+  enqueueMetadata(db, [g1, g2, g3], NOW);
+
+  const server = buildServer(deps(db));
+
+  // Same instrumentation approach as the browse test below: wrap the
+  // prepared statement's own `.all`, not `db.prepare`, so a regression that
+  // prepares once and then calls `.get()` per id in a loop is still caught.
+  const originalPrepare = db.prepare.bind(db);
+  let metadataQueueExecutions = 0;
+  db.prepare = ((sql: string) => {
+    const statement = originalPrepare(sql);
+    if (!sql.includes('metadata_queue')) return statement;
+    const originalAll = statement.all.bind(statement);
+    statement.all = ((...args: Parameters<typeof statement.all>) => {
+      metadataQueueExecutions += 1;
+      return originalAll(...args);
+    }) as typeof statement.all;
+    return statement;
+  }) as typeof db.prepare;
+
+  const response = await server.inject({ method: 'GET', url: `/api/metadata?ids=${g1},${g2},${g3}` });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(
+    metadataQueueExecutions,
+    1,
+    'GET /api/metadata must read metadata_queue in one query execution for the whole page',
+  );
+  const body = response.json() as Record<string, { state: string; nextAttemptAt?: number }>;
+  for (const id of [g1, g2, g3]) {
+    assert.deepEqual(body[String(id)], { state: 'pending', nextAttemptAt: NOW });
+  }
 
   await server.close();
   db.close();

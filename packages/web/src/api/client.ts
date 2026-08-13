@@ -87,7 +87,22 @@ export type MetadataView =
       hasPoster: boolean;
     }
   | { state: 'none' }
-  | { state: 'pending' }
+  /**
+   * `nextAttemptAt` is `metadata_queue.next_at` — the epoch ms the worker
+   * will next try this group — read straight off the row `GET /api/metadata`
+   * already has to consult to tell `pending` from `absent`. `useGroupMetadata`
+   * sleeps until roughly that time instead of guessing with a fixed ladder;
+   * see its `nextDelayFor` for the guardrails around trusting it literally.
+   *
+   * Optional rather than required, unlike core's `MetadataView`: the current
+   * server always sends it, but this type also describes what a *response*
+   * can contain, and a response can come from a server that predates this
+   * field (a browser tab left open across a server restart onto an older
+   * build, or a stale SPA bundle talking to a rolled-back API). The hook
+   * falls back to its own backoff ladder rather than trusting an absent
+   * field to mean anything.
+   */
+  | { state: 'pending'; nextAttemptAt?: number }
   | { state: 'absent' };
 
 /**
