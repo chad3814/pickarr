@@ -93,20 +93,56 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
     // a time — there is no arrangement in which two cards claim it.
     <article className="media-card" id={groupAnchor(group.id)}>
       {/*
-       * The title block and the poster share a flex row so the row is as tall
-       * as whichever is taller. The poster used to be positioned absolutely
-       * against the card, which reserved no height for it at all: on a card
-       * whose header was shorter than the poster — the common case, since a
-       * title, a subtitle and a date come to about four lines — the image
-       * hung down over the release rows and covered their Pick buttons.
+       * Everything identifying the group goes in the left column, the poster
+       * in the right, and the row is as tall as whichever is taller. The
+       * poster was positioned absolutely once, which reserved no height at
+       * all and left it hanging over the release rows; giving it a column
+       * beside the whole identity block — title, Edit, fields — rather than
+       * beside the title alone is what keeps that column tall enough to sit
+       * next to a poster without leaving a band of empty space under it.
        */}
       <div className="card-head">
-        <header>
-          <h2>{display.title}</h2>
-          {display.subtitle !== undefined && <p className="subtitle">{display.subtitle}</p>}
-          {display.date !== undefined && <p className="date">{display.date}</p>}
-          {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
-        </header>
+        <div className="card-head-main">
+          <header>
+            <h2>{display.title}</h2>
+            {display.subtitle !== undefined && <p className="subtitle">{display.subtitle}</p>}
+            {display.date !== undefined && <p className="date">{display.date}</p>}
+            {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
+          </header>
+
+          {values !== undefined &&
+            identityFields !== undefined &&
+            onEditGroup !== undefined &&
+            (editing ? (
+              <IdentityForm
+                plugin={group.plugin}
+                fields={identityFields}
+                values={values}
+                onSubmit={(submitted) => void save(submitted)}
+                onCancel={() => setEditing(false)}
+              />
+            ) : (
+              <button type="button" onClick={() => setEditing(true)}>
+                Edit
+              </button>
+            ))}
+
+          {/*
+           * A field is rendered as a single text node ("Label: Value") rather
+           * than separate <dt>/<dd> elements. A plugin's field value can equal
+           * the group's subtitle or date verbatim (e.g. a "Site" field
+           * mirroring the subtitle) — keeping label and value in one node
+           * means a query for the bare value never collides with an unrelated
+           * element that happens to hold the exact same string.
+           */}
+          <ul className="fields">
+            {display.fields.map((field) => (
+              <li key={field.label}>
+                {field.label}: {field.value}
+              </li>
+            ))}
+          </ul>
+        </div>
 
         {group.metadata.state === 'confirmed' && group.metadata.hasPoster && (
           <button
@@ -119,39 +155,6 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           </button>
         )}
       </div>
-
-      {values !== undefined &&
-        identityFields !== undefined &&
-        onEditGroup !== undefined &&
-        (editing ? (
-          <IdentityForm
-            plugin={group.plugin}
-            fields={identityFields}
-            values={values}
-            onSubmit={(submitted) => void save(submitted)}
-            onCancel={() => setEditing(false)}
-          />
-        ) : (
-          <button type="button" onClick={() => setEditing(true)}>
-            Edit
-          </button>
-        ))}
-
-      {/*
-       * A field is rendered as a single text node ("Label: Value") rather
-       * than separate <dt>/<dd> elements. A plugin's field value can equal
-       * the group's subtitle or date verbatim (e.g. a "Site" field mirroring
-       * the subtitle) — keeping label and value in one node means a query
-       * for the bare value never collides with an unrelated element that
-       * happens to hold the exact same string.
-       */}
-      <ul className="fields">
-        {display.fields.map((field) => (
-          <li key={field.label}>
-            {field.label}: {field.value}
-          </li>
-        ))}
-      </ul>
 
       <ul className="releases">
         {group.releases.map((release) => (
