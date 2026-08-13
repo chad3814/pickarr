@@ -51,7 +51,7 @@ const GROUP: GroupView = {
 const CONFIRMED: MetadataView = {
   state: 'confirmed',
   title: 'A Different Title',
-  performers: ['Alex Coal', 'Jane Doe'],
+  performerNames: ['Alex Coal', 'Jane Doe'],
   releaseDate: '2023-04-15',
   durationSeconds: 1800,
   synopsis: 'A synopsis from the provider.',
@@ -351,7 +351,7 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
     <MediaCard
       group={{
         ...GROUP,
-        metadata: { ...CONFIRMED, hasPoster: false, synopsis: null, performers: [] },
+        metadata: { ...CONFIRMED, hasPoster: false, synopsis: null, performerNames: [] },
       }}
       onPick={() => {}}
     />,
@@ -372,7 +372,7 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
   unmount();
 
   render(
-    <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, performers: [] } }} onPick={() => {}} />,
+    <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, performerNames: [] } }} onPick={() => {}} />,
   );
   assert.ok(screen.getByRole('img'));
   assert.ok(screen.getByText('A synopsis from the provider.'));
