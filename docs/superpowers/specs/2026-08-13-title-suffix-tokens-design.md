@@ -29,6 +29,12 @@ In scope:
 - `findTitleEnd`, and a composer that returns both boundaries.
 - Five suffix-token rules: encode tokens and group (existing), the `XXX` marker, content
   type, language, and numeric ids.
+- **Splitting `NON_GROUP_TERMS` into a language half and a non-language half**, with
+  `NON_GROUP_TERMS` becoming their union so its membership is unchanged, and the language
+  half serving as the suffix candidates (§5).
+- **Adding `DUTCH` and `JAPANESE`** to the language half, which puts them in
+  `NON_GROUP_TERMS` for the first time. That changes release-group detachment as well as
+  the title, and is measured as such (§10).
 - Corpus measurement of the change, per tier and against the holdout.
 
 Out of scope:
@@ -36,9 +42,6 @@ Out of scope:
 - **Re-keying existing groups.** Moving the boundary changes the identity key, so every
   affected group already in a database keys differently after this change. That migration
   is its own spec, and this one cannot ship without it (§8).
-- **Adding `DUTCH` and `JAPANESE` to `NON_GROUP_TERMS`.** They are absent from it today,
-  which is a separate latent defect — a release ending in one may have it detached as a
-  release group. Noted in §10; not fixed here.
 - Any token class not measured below. The rules are drawn from the corpus, not from
   imagination.
 
@@ -81,12 +84,37 @@ Jordan Maxx Cake S01 E01 Carried Away 2021
 `Episode 466` is the dangerous one. Truncating it to `Violet Voss Episode` does not merely
 lose a word; it collides with episode 467 if a site ever posts two on one date.
 
-**Languages** — 25 titles end in one of the four: `german` 13, `dutch` 11, `japanese` 1,
-**`english` 0**. They are their own class rather than descriptor-adjacent noise:
-`Maria Gail GERMAN` and `Rina D JAPANESE` carry no content-type tag at all. They survive
-into the title because none of the four is in any vocabulary the parser consults in this
-position — `NON_GROUP_TERMS` holds `ENGLISH` and `GERMAN` but answers a different question
-(§5), and has no `DUTCH` or `JAPANESE` at all.
+**Languages** — of the sixteen language terms in or added to `NON_GROUP_TERMS`, seven occur
+title-final: `GERMAN`, `DUTCH`, `SPANISH`, `FRENCH`, `ITALIAN`, `JAPANESE`, `JAP`. Every
+observed occurrence is a genuine tag, not a title word:
+
+```
+Maria Gail GERMAN            Krystal Genner SPANISH
+Mia Wallace FRENCH           Orgia Balorda iTALiAN        ← an Italian-language release
+Rina D JAPANESE              Minori Kamiyama Rispetto 1 JAP
+Alessandra Sweet Hardcore DUTCH
+```
+
+They are their own class rather than descriptor-adjacent noise — `Maria Gail GERMAN` and
+`Rina D JAPANESE` carry no content-type tag at all.
+
+Three points the samples settle. `iTALiAN` is spelled mixed-case, so case-insensitive
+matching is load-bearing rather than tidy. `Rispetto 1 JAP` is the compound case: the walk
+crosses `JAP`, then stops at `1` because it is under the numeric threshold. And `ENGLISH`
+and `RUSSIAN` never appear title-final at all, along with `ENG`, `FRA`, `GER`, `ESP`, `ITA`,
+`JPN` — they are included for consistency with the class, not because a measurement asked
+for them (§10).
+
+**The non-language half must not be suffix candidates**, and the corpus says so outright.
+Three of its entries appear title-final, and in every case as a real title word:
+
+```
+Alaina Dawson Compilation    Best Blowjobs Compilation
+Jessica Jans Bonus Scene     Leona Mia Beauty In Full
+```
+
+`Beauty In Full` truncating to `Beauty In` is the shape of the damage a single undivided
+list would do. This is the measurement behind §5's split.
 
 **Two safety checks**, run over raw names with a cruder splitter than the parser's, so
 approximate — stated as such rather than presented as exact:
@@ -177,21 +205,45 @@ corpus titles.
 **3. Content type** — `hardcore`, `solo`, `lesbian`. Matched case-insensitively. A named
 set, held lowercase, sitting beside the parser's other vocabularies.
 
-**4. Language** — `JAPANESE`, `DUTCH`, `GERMAN`, `ENGLISH`. Its own set.
+**4. Language** — `LANGUAGE_TERMS`, which is one half of a split `NON_GROUP_TERMS`.
 
-**This must not reuse `NON_GROUP_TERMS`,** and the reason is worth stating because reusing
-it is the obvious idea. That set answers a different question — "does this token have a
-group's shape without being a group" — and its own comment says of its entries: *"Each
-names a different cut or different content, which is why detaching one as a group would
-merge two things that are not the same scene."* It holds `UNCUT`, `UNRATED`, `EXTENDED`,
-`UNCENSORED`, `DIRECTORSCUT`, `COMPILATION`, `PART`, `CD`, `DISC`, `SCENE`. Dropping
-`UNCUT` from a title merges the uncut and the standard cut, which is precisely the merge
-that comment exists to prevent.
+`NON_GROUP_TERMS` today mixes two kinds of thing under one question. It becomes the union
+of two named halves, so its membership — and therefore release-group detachment — is
+unchanged except for the two additions below:
 
-`GERMAN` and `ENGLISH` therefore appear in both sets. That is deliberate and safe: the two
-sets answer different questions and their answers do not conflict — a language is both "not
-a release group" and "not a title word". `DUTCH` and `JAPANESE` are in the new set only,
-because they are missing from `NON_GROUP_TERMS` entirely (§10).
+```ts
+const LANGUAGE_TERMS = new Set([
+  'ENGLISH', 'FRENCH', 'GERMAN', 'SPANISH', 'ITALIAN', 'RUSSIAN', 'DUTCH', 'JAPANESE',
+  'ENG', 'FRA', 'GER', 'ESP', 'ITA', 'RUS', 'JAP', 'JPN',
+]);
+
+/** Not languages, and — unlike languages — capable of being title words. */
+const NON_GROUP_EDIT_TERMS = new Set([
+  'SUB', 'SUBS', 'SUBBED', 'DUBBED', 'UNCUT', 'UNRATED', 'EXTENDED', 'DIRECTORS',
+  'UNCENSORED', 'DIRECTORSCUT', 'COMPILATION', 'REMUX', 'PART', 'PT', 'CD', 'DISC',
+  'SCENE', 'FULL', 'HQ', 'LQ',
+]);
+
+const NON_GROUP_TERMS = new Set([...LANGUAGE_TERMS, ...NON_GROUP_EDIT_TERMS]);
+```
+
+Only `LANGUAGE_TERMS` is a suffix candidate. **The other half must never be**, and that is
+measured rather than assumed: `COMPILATION`, `SCENE` and `FULL` all occur title-final as
+genuine title words (§3), so a single undivided list would turn `Beauty In Full` into
+`Beauty In`. The existing comment on the set already says why for a different reason —
+*"Each names a different cut or different content, which is why detaching one as a group
+would merge two things that are not the same scene"* — and dropping `UNCUT` from a title
+merges the uncut and the standard cut, exactly the merge that comment exists to prevent.
+
+`DUTCH` and `JAPANESE` are new to the union and therefore new to `NON_GROUP_TERMS`. That
+is a fix — a release ending in either could previously have it detached as a release group,
+merging two language cuts — but it is also a behaviour change beyond the title, and §10
+records it as one.
+
+`SUB`, `SUBS`, `SUBBED` and `DUBBED` stay on the non-language side deliberately. They are
+about a language rather than being one, they are unobserved title-final, and a dub is
+arguably a different thing from the original audio — so there is no evidence to justify
+dropping them and a plausible reason not to.
 
 **5. All-numeric tokens `>= 250`**, with two carve-outs:
 
@@ -236,10 +288,19 @@ scope the rule by shape, and this paragraph is the note that says so.
 - **`XXX` crossing:** `Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB` parses to title `Suki Sin`,
   and `extractQuality` sees no `Solo` and no `42466`. This is the end-to-end case for §5's
   second rule; if it passes with the `MARKER_TOKEN` clause removed, the clause is unpinned.
+- **The split is behaviour-preserving for groups:** a test asserting `NON_GROUP_TERMS` still
+  contains every term it did before, so the refactor cannot silently drop one. The two
+  additions are asserted separately, as additions.
+- **Case-insensitivity, by the corpus's own spelling:** `Orgia Balorda iTALiAN` must lose
+  its tag. A rule that matched only uppercase would pass every other language test.
+- **The non-language half is not a suffix candidate:** `Leona Mia Beauty In Full`,
+  `Alaina Dawson Compilation` and `Jessica Jans Bonus Scene` keep their final word. These
+  are the cases the split exists for, and without them it is unpinned.
 - **Corpus, before and after:** `npm run corpus` over all tiers. Parse rate must not fall;
-  refusal-reason counts must not grow; the collision count must not grow. Then a run with
-  `--holdout=0` to check the held-back tenth, because tuning against a set that is also
-  measured reports overfitting as progress.
+  refusal-reason counts must not grow; the collision count must not grow. Report the
+  release-group delta too, since `DUTCH` and `JAPANESE` joining `NON_GROUP_TERMS` changes
+  detachment. Then a run with `--holdout=0` to check the held-back tenth, because tuning
+  against a set that is also measured reports overfitting as progress.
 - **Every mutation verified by reverting it** and confirming the specific test fails.
 
 ## 8. The re-key prerequisite
@@ -278,13 +339,18 @@ collation benefit is prospective, not present.
 - **New refusals.** `findEncodeSuffixStart` returns `null` when nothing recognisable
   remains, and callers refuse on that. A longer suffix should make that less likely, not
   more, but the direction is an assumption and the corpus run in §7 is what tests it.
-- **`DUTCH` and `JAPANESE` are absent from `NON_GROUP_TERMS`.** A release ending in either
-  may have it detached as a release group, which would merge two different language cuts.
-  Out of scope here, and worth an issue.
-- **`ENGLISH` is unobserved in final position.** All four languages are specified, but the
-  corpus has 13 `german`, 11 `dutch`, 1 `japanese` and **no** `english`. Including it costs
-  nothing and matches the others, but it is the one entry no measurement supports — so if a
-  title ever legitimately ends in the word, this is the entry that did it.
+- **Adding `DUTCH` and `JAPANESE` changes release-group detachment**, not just titles. A
+  release ending in `-DUTCH` previously had `DUTCH` detached as a release group; now it will
+  not. That is the intended fix — detaching it merges two different language cuts — but it
+  is a second behaviour change riding along with this one, and the corpus run in §7 must
+  report the group-detachment delta separately rather than only the parse rate.
+- **Six language terms are unobserved title-final.** `ENGLISH`, `RUSSIAN`, `ENG`, `FRA`,
+  `GER`, `ESP`, `ITA` and `JPN` never appear there in 6,388 titles. They are included
+  because they are languages and the class is what the rule is about, not because a
+  measurement asked for them. `ENGLISH` and `RUSSIAN` are the two that are also ordinary
+  English adjectives, so if a title is ever wrongly truncated, those are the likely
+  entries — and the fix is to drop them from the suffix half while leaving them in the
+  union, which the split makes a one-line change.
 - **The ordinal carve-out is a list.** `episode`, `part`, `vol`, `scene` are the words
   observed; another site's `chapter` or `ep` would truncate. Same maintenance cost
   `stripPosterSignature` names for its observed-posters list, and the same reason: a
