@@ -213,7 +213,16 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           {group.metadata.synopsis !== null && (
             <p className="metadata-synopsis">{group.metadata.synopsis}</p>
           )}
-          {(group.metadata.performers ?? []).length > 0 && (
+          {/*
+           * One list or the other, never both. The server already guarantees
+           * that — `metadataViewOf` empties `performerNames` the moment there
+           * is a structured cast — but as two independent `&&` blocks the
+           * card would happily render both if that ever stopped being true,
+           * showing every performer twice. The `else` makes the exclusivity a
+           * property of this component rather than a promise made elsewhere,
+           * and picks the richer list when they disagree.
+           */}
+          {(group.metadata.performers ?? []).length > 0 ? (
             <ul className="metadata-performers">
               {(group.metadata.performers ?? []).map((performer) => (
                 <li key={performer.id}>
@@ -239,13 +248,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
                 </li>
               ))}
             </ul>
-          )}
-          {(group.metadata.performerNames ?? []).length > 0 && (
-            // Answered before migration 7 and not yet refetched: names only,
-            // and no link, because no slug was stored to build one from.
-            <ul className="metadata-performers">
-              {(group.metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
-            </ul>
+          ) : (
+            (group.metadata.performerNames ?? []).length > 0 && (
+              // Answered before migration 7 and not yet refetched: names only,
+              // and no link, because no slug was stored to build one from.
+              <ul className="metadata-performers">
+                {(group.metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
+              </ul>
+            )
           )}
         </section>
       )}

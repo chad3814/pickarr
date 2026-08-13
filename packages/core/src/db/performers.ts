@@ -14,7 +14,18 @@ export interface PerformerRow {
   imagePath: string | null;
 }
 
-const COLUMNS = `id, source_uuid, slug, name, kind, face_url, face_path, image_url, image_path`;
+/**
+ * Every name qualified, `id` included. `performersForGroups` interpolates this
+ * list into a join, where a bare `id` is a name SQLite has to resolve against
+ * two tables — it happens to resolve today only because `group_performers`
+ * calls its own key `performer_id`, which is a coincidence of that table's
+ * naming and not something this list should depend on. Qualifying costs the
+ * single-table reads nothing: SQLite reports the short name either way, so
+ * every row still arrives with plain `id`, `slug` and so on.
+ */
+const COLUMNS = `performers.id, performers.source_uuid, performers.slug, performers.name,
+                 performers.kind, performers.face_url, performers.face_path,
+                 performers.image_url, performers.image_path`;
 
 function toPerformer(row: SqlRow): PerformerRow {
   return {
@@ -39,8 +50,12 @@ function toPerformer(row: SqlRow): PerformerRow {
  * update to a row that keeps its cached artwork. Overwriting the paths here
  * would orphan the files and re-download them on the next pass.
  *
- * The urls *are* updated: if the provider moved the image, the next artwork
- * pass should fetch the new one.
+ * The urls *are* updated, but note what that does and does not buy: nothing
+ * re-fetches on the strength of it today. `performersNeedingArtwork` requires
+ * the matching `*_path IS NULL`, and the poster follows the same rule, so a
+ * provider that moves an image leaves the old file cached under the new url.
+ * Keeping the url current is what a future pass that wanted to notice the
+ * move would need; it is not that pass.
  *
  * Several statements, no transaction of its own: this is meant to be called
  * from inside `recordMetadataAnswer`'s existing `BEGIN`/`COMMIT`, and
