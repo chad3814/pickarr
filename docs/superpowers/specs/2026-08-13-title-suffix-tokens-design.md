@@ -50,6 +50,20 @@ Out of scope:
 Measured with the shipped parser over the eight corpus files, 6,388 unique titles that
 currently parse. Every number below is from that run, not from a regex over raw names.
 
+**Re-validated after the corpus grew.** `db-2026-08-13.txt` adds 925 titles taken from a
+live instance's `feed_items`, bringing the corpus to 10,359 distinct names and 7,166 that
+parse. Every rule below survives unchanged and the ratios are stable — a content-type tag
+last rises 82 → 106, behind trailing junk 128 → 150, a title ending in a language 25 → 60,
+numbers kept below the threshold 206 → 298, numbers dropped as ids 103 → 141, the year
+carve-out saving 2 → 3 titles and the ordinal carve-out 1 → 1. The tables in this section
+keep their original denominator so their arithmetic stays internally consistent; treat the
+counts as *at least* these, not as exact against the larger corpus.
+
+The one number that is not stable is the mid-title count, because classifying a tag as
+"mid-title" rather than "behind trailing junk" depends on where the junk threshold is drawn,
+and it reads 9 or 2 for two defensible choices. The implementation extracts the real list
+with a fixed rule rather than trusting either figure (§7).
+
 **Content-type tags** — `hardcore`, `solo`, `lesbian`:
 
 | Position in the parsed title | Count |
