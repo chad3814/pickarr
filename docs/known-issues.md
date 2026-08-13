@@ -497,6 +497,18 @@ the file with it. Either way it presents as a bare SIGKILL naming no test, which
 hour to trace. Compare booleans — `packages/web/test/Browse.test.tsx` has a `gone()` helper
 for exactly this.
 
+**`t.mock.timers` hangs the web test run, so a timing assertion there has to spy rather
+than mock.** Enabling fake timers in a `@testing-library/react` test stalls before the
+first assertion: React's own effect flush schedules through `setTimeout`, so replacing it
+means the effect under test never runs and the test times out with nothing to point at.
+This is not the OOM above — it presents as a plain timeout, which reads like the code being
+wrong rather than the harness. Assert on the *arguments* to the real `setTimeout` instead:
+`packages/web/test/useGroupMetadata.test.tsx` pins an exact backoff ladder and a clamped
+five-minute sleep that way, without waiting a real five minutes or replacing any timer
+behaviour. Server-side tests have no such problem — `t.mock.timers` with
+`{ apis: ['AbortSignal.timeout'] }` is what bounds the fetch-timeout tests in
+`packages/core/test`.
+
 **A test whose expected value is computed by the code under test cannot detect that code
 changing.** `groupAnchor` was mutated to return a constant `group-x` — every card claiming
 one DOM id, so a Downloads link scrolls to whichever card renders first — and **all 70 web
