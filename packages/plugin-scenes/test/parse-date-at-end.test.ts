@@ -331,6 +331,21 @@ test('a dateless name with nothing left for a title is refused', () => {
   assert.equal(parseSceneRelease('Brazzers.1080p.MP4-WRB', { sites: ['Brazzers'] }), null);
 });
 
+test('site matching sees every token up to the encode boundary, not just the ones the title keeps', () => {
+  // Real corpus regression: `datelessPrefixTokens` once sliced `before` at
+  // `titleEnd`, the vocabulary walk's own boundary. But `before` is not the
+  // title here — `parseDatelessForm` rebuilds the title separately from the
+  // tail starting at `encodeStart` — so trimming `before` at `titleEnd` only
+  // ever cost `matchSitePrefix` tokens it needed, never helped the title.
+  // `128825778` and `456239169` are both numeric ids the walk drops as suffix
+  // vocabulary; a site name that happens to span them (as a per-performer
+  // OnlyFans "site" can) must still be reachable.
+  const name = 'OF.E.Part1_Ekaterina.Enokaeva_.128825778_456239169_720p';
+  const result = parsed(name, ['OF E Part1 Ekaterina Enokaeva']);
+  assert.equal(result.display.subtitle, 'OF E Part1 Ekaterina Enokaeva');
+  assert.equal(result.display.title, '128825778 456239169');
+});
+
 // --- Upscaled ----------------------------------------------------------------
 
 test('Upscaled is consumed as encode information, not left in the title', () => {
@@ -457,6 +472,27 @@ test('bracketed text is only stripped when it is a runtime stamp', () => {
   // The delimited form depends on `[Vixen] ...` surviving.
   const result = parsed('[Vixen] Alex Coal - Beautiful Episode - 2023-07-19');
   assert.equal(result.display.subtitle, 'Vixen');
+});
+
+test('the delimited form does not run the vocabulary walk, so a dropped token cannot collide two scenes', () => {
+  // `splitSegment` deliberately keeps the single, unsplit
+  // `findEncodeSuffixStart` cut rather than `findTitleBoundary` — a part's
+  // title here has no fixed order, so a trailing content-type tag or numeric
+  // id is not reliably suffix the way it is in the dotted form. Running the
+  // walk here once let it consume an entire part: `Hardcore` is itself a
+  // content-type term, so the walk crossed it and the numeric id behind it,
+  // and `Hardcore 42466 1080p` / `Hardcore 42467 1080p` both collapsed to
+  // nothing, losing the whole part that distinguished the two scenes. The
+  // date needs a four-digit year (`YMD_PATTERN`/`DMY_PATTERN`) to route this
+  // through the delimited parser at all, rather than the dotted form's
+  // date-at-end shape, which is a different code path with its own tests.
+  const a = parsed('[Site] Alex - Hardcore 42466 1080p - 2026-08-05');
+  const b = parsed('[Site] Alex - Hardcore 42467 1080p - 2026-08-05');
+  assert.notEqual(
+    a.identityKey,
+    b.identityKey,
+    'two distinct scenes must never share an identity key',
+  );
 });
 
 test('VERTICAL and F4V are encode information, not title words', () => {

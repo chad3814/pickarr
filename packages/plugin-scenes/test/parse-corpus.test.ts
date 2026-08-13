@@ -163,6 +163,39 @@ const CORPUS: Entry[] = [
     quality: '-|-|xvid|-|-|-|iPT Team',
     isNew: true,
   },
+  // --- Content-type and language tags, pinned inside the corpus table -------
+  //
+  // Before this pair the corpus carried no entry ending in a content-type or
+  // language token at all, so `corpus: no two distinct scenes ever share an
+  // identity key` never actually exercised a name the vocabulary walk trims —
+  // it could not have caught a merge caused by this feature no matter what
+  // broke. Two encodes of the same `Solo`-tagged scene, so the walk's
+  // trimming is checked against both the collision and the shares-a-key
+  // invariants at once.
+  {
+    name: 'PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB',
+    scene: 'pornmegaload/suki-sin',
+    key: 'pornmegaload:2026-08-05:suki-sin',
+    title: 'Suki Sin',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
+  {
+    name: 'PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.2160p.HEVC.MP4-GRP',
+    scene: 'pornmegaload/suki-sin',
+    key: 'pornmegaload:2026-08-05:suki-sin',
+    title: 'Suki Sin',
+    quality: '2160|-|h265|mp4|-|GRP',
+    isNew: true,
+  },
+  {
+    name: 'HollandschePassie.26.08.06.Alessandra.Sweet.Hardcore.DUTCH.XXX.1080p.MP4-WRB',
+    scene: 'hollandschepassie/alessandra-sweet',
+    key: 'hollandschepassie:2026-08-06:alessandra-sweet',
+    title: 'Alessandra Sweet',
+    quality: '1080|-|-|mp4|-|WRB',
+    isNew: true,
+  },
   {
     name: 'Pantyhosed4U.16.07.20.Heidi.Bush.V.Tight.Tease.And.Tear.XXX.1080i.MP4-KTR',
     scene: 'pantyhosed4u/heidi-bush-v-tight-tease-and-tear',

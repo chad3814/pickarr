@@ -1448,8 +1448,15 @@ function datelessPrefixTokens(name: string): { before: Token[]; tail: string } |
   if (boundary !== null) {
     const encodeToken = detached.tokens[boundary.encodeStart];
     if (encodeToken !== undefined) {
+      // `before` is not the title — it is what `matchSitePrefix` and
+      // `sceneSiteCandidates` read to identify the site, and the title
+      // returned to the caller is rebuilt separately from `prefix.tail`
+      // (which starts at `encodeStart`). `titleEnd` belongs only to that
+      // rebuilt title; slicing `before` at it starves site matching of
+      // tokens the walk dropped as suffix vocabulary, so `before` must keep
+      // everything up to the encode boundary instead.
       return {
-        before: detached.tokens.slice(0, boundary.titleEnd),
+        before: detached.tokens.slice(0, boundary.encodeStart),
         tail: name.slice(encodeToken.start),
       };
     }
@@ -1782,14 +1789,25 @@ function splitSegment(segment: string): SegmentSplit {
     text = text.slice(0, bracket.index).trim();
   }
 
+  // Deliberately `findEncodeSuffixStart` alone, not `findTitleBoundary` — this
+  // shape is excluded from the vocabulary walk. A part's title here has no
+  // fixed order (`sceneSlugFromParts` sorts on exactly that basis), so a
+  // trailing content-type tag or numeric id is not reliably *trailing*
+  // information the way it is in the dotted form, and `findTitleBoundary`
+  // passing `minIndex: 0` here let the walk consume an entire part down to
+  // nothing: `[Site] Alex - Hardcore 42466 1080p - 26.08.05` and the same
+  // with `42467` both lost their whole distinguishing part and collapsed
+  // onto one identity key. Two distinct scenes sharing a key is the one
+  // failure this parser must never produce, so this shape keeps the single,
+  // unsplit cut it had before this change — see design doc §6, which named
+  // this shape as an unmeasured judgement call and said the fix, if it ever
+  // misfired, is to scope the rule out here rather than patch the walk.
   const tokens = tokensOf(text);
-  const boundary = findTitleBoundary(tokens, 0);
-  if (boundary !== null) {
-    const encodeToken = tokens[boundary.encodeStart];
-    if (encodeToken !== undefined) {
-      quality.unshift(text.slice(encodeToken.start));
-      text = text.slice(0, suffixOffset(tokens, boundary.titleEnd, text));
-    }
+  const cut = findEncodeSuffixStart(tokens, 0);
+  const cutToken = cut === null ? undefined : tokens[cut];
+  if (cutToken !== undefined) {
+    quality.unshift(text.slice(cutToken.start));
+    text = text.slice(0, cutToken.start);
   }
 
   return { title: collapsePartSeparator(prettify(text)), quality: quality.join(' '), group };
