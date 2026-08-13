@@ -80,6 +80,25 @@ function viewSecret(value: string): SecretView {
 }
 
 /**
+ * Deep-copies plugin settings, properly handling array values.
+ *
+ * This file is the single authority on `PluginSettingValue`, so a future
+ * variant of that type must not be handled in one copy and missed in the other.
+ */
+function copyPluginSettings(
+  plugins: Record<string, Record<string, PluginSettingValue>>,
+): Record<string, Record<string, PluginSettingValue>> {
+  return Object.fromEntries(
+    Object.entries(plugins).map(([name, settings]) => [
+      name,
+      Object.fromEntries(
+        Object.entries(settings).map(([key, value]) => [key, Array.isArray(value) ? [...value] : value]),
+      ),
+    ]),
+  );
+}
+
+/**
  * Projects a *parsed* config — so the form shows effective values, defaults
  * included — into the shape `GET /api/config` returns.
  *
@@ -93,14 +112,7 @@ export function toEditableConfig(config: PickarrConfig): EditableConfig {
     server: { port: config.server.port },
     database: { path: config.database.path },
     trashDir: config.trashDir,
-    plugins: Object.fromEntries(
-      Object.entries(config.plugins).map(([name, settings]) => [
-        name,
-        Object.fromEntries(
-          Object.entries(settings).map(([key, value]) => [key, Array.isArray(value) ? [...value] : value]),
-        ),
-      ]),
-    ),
+    plugins: copyPluginSettings(config.plugins),
     downloadClients: config.downloadClients.map((client) => ({
       id: client.id,
       type: client.type,
@@ -231,14 +243,7 @@ export function applyEdits(
   next['server'] = { port: submitted.server.port };
   next['database'] = { path: submitted.database.path };
   next['trashDir'] = submitted.trashDir;
-  next['plugins'] = Object.fromEntries(
-    Object.entries(submitted.plugins).map(([name, settings]) => [
-      name,
-      Object.fromEntries(
-        Object.entries(settings).map(([key, value]) => [key, Array.isArray(value) ? [...value] : value]),
-      ),
-    ]),
-  );
+  next['plugins'] = copyPluginSettings(submitted.plugins);
   next['downloadClients'] = clients;
   next['feeds'] = submitted.feeds.map((feed) => ({
     id: feed.id,

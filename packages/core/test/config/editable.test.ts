@@ -90,13 +90,12 @@ test('mutating an array in the projection does not affect the source config', ()
   const editable = editableOf();
   const pluginRecord = editable.plugins['@pickarr/plugin-scenes'];
   const sitesValue = pluginRecord?.['sites'];
-  if (Array.isArray(sitesValue)) {
-    sitesValue.push('NewSite');
-    const sourceSites = (VALID.plugins['@pickarr/plugin-scenes'] as Record<string, unknown>)[
-      'sites'
-    ] as string[];
-    assert.deepEqual(sourceSites, ['Vixen', 'Bangbros']);
-  }
+  assert.ok(Array.isArray(sitesValue));
+  sitesValue.push('NewSite');
+  const sourceSites = (VALID.plugins['@pickarr/plugin-scenes'] as Record<string, unknown>)[
+    'sites'
+  ] as string[];
+  assert.deepEqual(sourceSites, ['Vixen', 'Bangbros']);
 });
 
 function submission(over: (draft: SubmittedConfig) => void = () => {}): SubmittedConfig {
