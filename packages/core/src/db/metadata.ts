@@ -303,11 +303,12 @@ export function deferMetadata(
 
 /**
  * Every row this schema keeps about one group's metadata — its answer, its
- * queue entry, and the candidates rejected on the way to that answer — gone.
+ * queue entry, the candidates rejected on the way to that answer, and the
+ * links to its cast — gone.
  *
  * Called from the merge path in `manual/operations.ts` right before the
  * source's `media_groups` row is deleted, so that delete does not meet a
- * foreign key none of these three tables' `ON DELETE` clauses (there are
+ * foreign key none of these four tables' `ON DELETE` clauses (there are
  * none) would otherwise satisfy. It has to run in the same transaction as
  * that delete: an eviction that committed while the delete rolled back — or
  * the reverse — would leave a group either gone-but-still-answered-for or
@@ -341,6 +342,20 @@ export function clearGroupMetadata(db: DatabaseSync, groupId: number): void {
   db.prepare('DELETE FROM group_metadata WHERE group_id = ?').run(groupId);
   db.prepare('DELETE FROM metadata_queue WHERE group_id = ?').run(groupId);
   db.prepare('DELETE FROM metadata_candidates WHERE group_id = ?').run(groupId);
+  // `group_performers` is the fourth such table and the newest, and it fails
+  // the same way the other three would: `group_id REFERENCES media_groups
+  // (id)` with no ON DELETE, so a merge of a group whose refetch has landed
+  // meets `FOREIGN KEY constraint failed` at `deleteGroup` and returns a 500.
+  // Latent rather than immediate at deploy — no group has a row here until
+  // its own refetch lands — which is precisely why it has to be covered by a
+  // test rather than by the first merge anyone tries.
+  //
+  // The links go; the `performers` rows they point at stay. Those are shared
+  // across groups and keyed on the provider's uuid, not on any one group, so
+  // deleting them here would strip another card's cast and orphan cached
+  // avatar files. An unreferenced performer row is a few hundred bytes of
+  // cache, on exactly the terms the artwork directory is already kept.
+  db.prepare('DELETE FROM group_performers WHERE group_id = ?').run(groupId);
 }
 
 export function setPosterPath(db: DatabaseSync, groupId: number, posterPath: string): void {
