@@ -347,7 +347,10 @@ const SCENE_BODY = {
     poster: 'https://thumb.theporndb.net/office-couch.jpg',
     posters: { full: 'https://cdn/full.jpg', large: 'https://cdn/large.jpg' },
     image: 'https://images1.naughtycdn.com/h.jpg',
-    performers: [{ name: 'Jessica Jaymes', full_name: 'Jessica Jaymes (2005)' }],
+    performers: [{
+      id: 'performer-uuid', slug: 'jessica-jaymes',
+      name: 'Jessica Jaymes', full_name: 'Jessica Jaymes (2005)',
+    }],
     site: { uuid: 'site-uuid', id: 1, name: 'Naughty Office', short_name: 'naughtyoffice' },
   }],
   meta: { total: 1, per_page: 25, current_page: 1, last: 1 },
@@ -363,8 +366,14 @@ test('a scene search maps the documented payload', async () => {
   assert.equal(scene?.siteUuid, 'site-uuid');
   assert.equal(scene?.date, '2021-11-15');
   assert.equal(scene?.durationSeconds, 1000);
-  assert.deepEqual(scene?.performers, ['Jessica Jaymes'],
-    'name, not full_name, which carries a disambiguation suffix');
+  assert.deepEqual(scene?.performers, [{
+    sourceUuid: 'performer-uuid',
+    slug: 'jessica-jaymes',
+    name: 'Jessica Jaymes',
+    kind: 'performer-site',
+    faceUrl: null,
+    imageUrl: null,
+  }], 'name, not full_name, which carries a disambiguation suffix');
   assert.equal(scene?.posterUrl, 'https://cdn/large.jpg', 'posters.large is preferred');
 });
 
@@ -412,7 +421,83 @@ test('further malformed shapes are tolerated: a bare number, and a site given as
     durationSeconds: null,
     synopsis: null,
     posterUrl: null,
+    slug: null,
   }]);
+});
+
+// Shapes taken from a live `GET /scenes?per_page=1`, trimmed to the fields
+// this reads. The nesting is the point: `image`, `thumbnail` and `face` are
+// null on the site performer and populated on its parent, so a reader that
+// trusts the outer object renders no avatars at all.
+const PERFORMER_BODY = {
+  data: [{
+    id: 'scene-uuid', _id: 1, title: 'T', date: '2025-02-07',
+    slug: 'futilestruggles-alice-maze-first-time-day-1-episode-1',
+    url: 'https://www.futilestruggles.com/trial/gallery.php?id=2583',
+    site: { uuid: 'site-uuid', id: 6061, name: 'Futile Struggles' },
+    performers: [{
+      id: 'site-performer-uuid', _id: 2750085, slug: '6061-alice-maze',
+      site_id: 6061, name: 'Alice Maze',
+      image: null, thumbnail: null, face: null,
+      parent: {
+        id: 'parent-uuid', _id: 165140, slug: 'alice-maze', name: 'Alice Maze',
+        image: 'https://cdn.theporndb.net/p/alice-maze.jpg',
+        thumbnail: 'https://cdn.theporndb.net/p/c/alice-maze-thumb.jpg',
+        face: 'https://thumb.theporndb.net/x/500x500/smart/alice-maze.jpg',
+      },
+    }],
+  }],
+  meta: { total: 1, per_page: 25, current_page: 1, last: 1 },
+};
+
+test('a performer is read from its parent, which is where the images are', async () => {
+  const client = createTpdbClient(CONFIG, respondWith(PERFORMER_BODY));
+  const [scene] = await client.searchScenes('x', 1);
+
+  assert.deepEqual(scene?.performers, [{
+    sourceUuid: 'parent-uuid',
+    slug: 'alice-maze',
+    name: 'Alice Maze',
+    kind: 'performer',
+    faceUrl: 'https://thumb.theporndb.net/x/500x500/smart/alice-maze.jpg',
+    imageUrl: 'https://cdn.theporndb.net/p/alice-maze.jpg',
+  }], 'the parent uuid and slug, not the site-prefixed ones');
+});
+
+test('a parentless performer falls back to itself and is a site performer', async () => {
+  const body = structuredClone(PERFORMER_BODY);
+  delete (body.data[0]!.performers[0] as { parent?: unknown }).parent;
+  const client = createTpdbClient(CONFIG, respondWith(body));
+  const [scene] = await client.searchScenes('x', 1);
+
+  // `kind` is what decides the URL namespace later: /performer-sites/, not
+  // /performers/, because the site-prefixed slug is not a performer page.
+  assert.deepEqual(scene?.performers, [{
+    sourceUuid: 'site-performer-uuid',
+    slug: '6061-alice-maze',
+    name: 'Alice Maze',
+    kind: 'performer-site',
+    faceUrl: null,
+    imageUrl: null,
+  }]);
+});
+
+test('a performer with no usable identity is dropped, not half-read', async () => {
+  // No slug means no link and no stable key. A row keyed on '' would collide
+  // with every other such performer under UNIQUE (source, source_uuid).
+  const body = structuredClone(PERFORMER_BODY);
+  const performer = body.data[0]!.performers[0] as Record<string, unknown>;
+  delete performer['parent'];
+  performer['slug'] = '';
+  const client = createTpdbClient(CONFIG, respondWith(body));
+  const [scene] = await client.searchScenes('x', 1);
+  assert.deepEqual(scene?.performers, []);
+});
+
+test('the scene slug is captured and the studio url is not mistaken for it', async () => {
+  const client = createTpdbClient(CONFIG, respondWith(PERFORMER_BODY));
+  const [scene] = await client.searchScenes('x', 1);
+  assert.equal(scene?.slug, 'futilestruggles-alice-maze-first-time-day-1-episode-1');
 });
 
 test('a scene search failure redacts the bearer token', async () => {
