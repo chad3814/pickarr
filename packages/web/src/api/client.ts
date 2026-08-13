@@ -94,14 +94,25 @@ export type MetadataView =
       synopsis: string | null;
       hasPoster: boolean;
       /**
-       * `performers`, `performerNames`, and `sceneUrl` are optional here,
-       * unlike core's `MetadataView`: the current server always sends them,
-       * but this type also describes what a *response* can contain, and a
-       * response can come from a server that predates these fields (a
-       * browser tab left open across a server restart onto an older build,
-       * or a stale SPA bundle talking to a rolled-back API). Task 9 reads
-       * them with `?? []` and `?? null` rather than trusting absence to mean
-       * anything.
+       * Optional here, unlike core's `MetadataView` — but for a narrower
+       * reason than "an older server might omit them", which is only true of
+       * two of the three.
+       *
+       * `performerNames` and `sceneUrl` are new keys. A response from a build
+       * that predates them genuinely lacks them — a tab left open across a
+       * restart onto an older build, or a stale SPA bundle talking to a
+       * rolled-back API — and the `?? []` / `?? null` at each use is what
+       * keeps that from being a crash.
+       *
+       * `performers` is not that case, and saying so matters because the
+       * obvious reading is wrong: the key already existed before this branch,
+       * carrying `string[]` — the same names `performerNames` holds now. An
+       * older server therefore sends `performers`, not nothing, so `?? []`
+       * never fires and what arrives is an array of strings where this code
+       * reads `.id` and `.name`. No type can describe that away; only
+       * reloading onto the matching bundle fixes it. The field stays optional
+       * for consistency with the two beside it, and because a compiler that
+       * forces a check at each use costs nothing.
        */
       performers?: PerformerView[];
       performerNames?: string[];

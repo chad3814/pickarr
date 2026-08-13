@@ -21,10 +21,18 @@ const TPDB_BASE = 'https://theporndb.net';
  * lives in one place. Sending `kind` to the browser instead would mean the
  * client re-deriving a mapping it has no other reason to know, and two
  * derivations that can disagree.
+ *
+ * The slug is escaped because it is the provider's string, not ours. Nothing
+ * here is exploitable — it lands in an `href` the browser resolves, not in
+ * markup — but a slug carrying `?`, `#` or a space silently builds a
+ * different URL than the one intended: everything after a `#` becomes a
+ * fragment, everything after a `?` a query. `encodeURIComponent` is a no-op
+ * on the slugs the provider actually sends, which is the point — it costs
+ * nothing and removes the need to be sure of that.
  */
 function performerUrl(performer: PerformerRow): string {
   const namespace = performer.kind === 'performer-site' ? 'performer-sites' : 'performers';
-  return `${TPDB_BASE}/${namespace}/${performer.slug}`;
+  return `${TPDB_BASE}/${namespace}/${encodeURIComponent(performer.slug)}`;
 }
 
 /** One performer as the browser needs it: a name, a link, and whether an avatar or full image is cached. */
@@ -134,7 +142,12 @@ export function metadataViewOf(
     durationSeconds: metadata.durationSeconds,
     synopsis: metadata.synopsis,
     hasPoster: metadata.posterPath !== null,
-    sceneUrl: metadata.sceneSlug === null ? null : `${TPDB_BASE}/scenes/${metadata.sceneSlug}`,
+    // Escaped for the reason `performerUrl` gives: same provider, same kind
+    // of string, same way of quietly building the wrong link.
+    sceneUrl:
+      metadata.sceneSlug === null
+        ? null
+        : `${TPDB_BASE}/scenes/${encodeURIComponent(metadata.sceneSlug)}`,
   };
 }
 

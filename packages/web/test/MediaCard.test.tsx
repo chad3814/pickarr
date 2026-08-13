@@ -455,6 +455,28 @@ test('legacy metadata renders plain names with no links or avatars', () => {
   assert.ok(!screen.queryByRole('link', { name: 'Alice Maze' }));
 });
 
+test('a cast and legacy names together render only the cast', () => {
+  // The server never sends both — `metadataViewOf` empties `performerNames`
+  // the moment there is a structured cast — so this is a card built from a
+  // response no current server produces. That is the point: as two
+  // independent `&&` blocks the component rendered whichever the server
+  // handed it, and would have rendered every performer twice the day that
+  // guarantee moved or a rolled-back API stopped honouring it. Exclusivity is
+  // now the component's own property.
+  render(<MediaCard group={withMetadata({
+    performers: [
+      { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
+        hasAvatar: false, hasImage: false },
+    ],
+    performerNames: ['Alice Maze'],
+  })} onPick={() => {}} />);
+
+  // One node, not two: the linked one from the structured list.
+  assert.equal(screen.getAllByText('Alice Maze').length, 1);
+  assert.equal(screen.getByRole('link', { name: 'Alice Maze' }).getAttribute('href'),
+    'https://theporndb.net/performers/alice-maze');
+});
+
 test('the metadata title links to the scene when a url is known', () => {
   render(<MediaCard group={withMetadata({ title: 'Scene', sceneUrl: 'https://theporndb.net/scenes/s' })}
                     onPick={() => {}} />);
