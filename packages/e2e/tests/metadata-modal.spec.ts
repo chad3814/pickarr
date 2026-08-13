@@ -33,6 +33,28 @@ function dataUrl(bytes: string): string {
 }
 
 /**
+ * A poster the browser can actually decode, and a deliberately extreme shape:
+ * 8 x 2000, 1-bit greyscale, all black, 84 bytes on the wire.
+ *
+ * Every other image in this suite is `dataUrl('...')` — arbitrary bytes under
+ * a `image/jpeg` label, which is all `cacheImage` inspects. That is enough for
+ * every assertion above, which only asks *which* url an element points at. It
+ * is not enough here: a browser handed undecodable bytes renders a broken
+ * image with no intrinsic size, and an image with no intrinsic size fits
+ * inside any window at all. Measuring the layout means the browser has to have
+ * something real to lay out.
+ *
+ * Regenerate with the four PNG chunks by hand if it ever needs to change — a
+ * signature, IHDR (width, height, bit depth 1, colour type 0), one deflated
+ * IDAT of `height` zero-filled scanlines, IEND. There is no image library in
+ * this repo's dependencies and this is not a reason to add one.
+ */
+const TALL_PNG =
+  'data:image/png;base64,' +
+  'iVBORw0KGgoAAAANSUhEUgAAAAgAAAfQAQAAAADXviPqAAAAG0lEQVR42u3BMQEAAADCoPVPbQwf' +
+  'oAAAAIC3AQ+gAAFUpTheAAAAAElFTkSuQmCC';
+
+/**
  * A confirmed candidate carrying a poster and one performer with both a face
  * (for the avatar) and a full image (for the modal a click on it opens) —
  * the shape this suite needs to reach every button `ImageModal` can be
@@ -41,7 +63,7 @@ function dataUrl(bytes: string): string {
  * and using a different name for each is what proves this suite is reading
  * the performer's own name rather than coincidentally matching the group's.
  */
-function confirmedCandidateWithArtwork(): MetadataCandidate {
+function confirmedCandidateWithArtwork(posterUrl = dataUrl('e2e-poster')): MetadataCandidate {
   return {
     sourceUuid: 'e2e-scene-modal',
     title: 'Alex Coal',
@@ -61,7 +83,7 @@ function confirmedCandidateWithArtwork(): MetadataCandidate {
     ],
     durationSeconds: null,
     synopsis: 'A modal test synopsis.',
-    posterUrl: dataUrl('e2e-poster'),
+    posterUrl,
     slug: null,
   };
 }
@@ -85,9 +107,9 @@ function confirmedCandidateWithArtwork(): MetadataCandidate {
  * ever loads means the SPA's first read is already the finished answer, with
  * no window for it to land in.
  */
-async function seedConfirmedGroup(page: Page, harness: Harness): Promise<void> {
+async function seedConfirmedGroup(page: Page, harness: Harness, posterUrl?: string): Promise<void> {
   harness.ingest([RELEASE]);
-  harness.metadataClient.setCandidates([confirmedCandidateWithArtwork()]);
+  harness.metadataClient.setCandidates([confirmedCandidateWithArtwork(posterUrl)]);
 
   const group = harness.db
     .prepare('SELECT id FROM media_groups ORDER BY id DESC LIMIT 1')
@@ -153,6 +175,63 @@ test('the poster modal closes on Escape, on a click outside, and on the X', asyn
   await expect(dialog).toBeVisible();
   await page.getByRole('button', { name: /close/i }).click();
   await expect(dialog).toBeHidden();
+});
+
+test('a tall poster is scaled to fit inside the window rather than scrolled', async ({
+  page,
+  harness,
+}) => {
+  // Spec bullet 1: "a modal with a full sized image, but scaled to fit within
+  // the window". This is measured in a real browser rather than argued from
+  // the stylesheet, and it has to be: the property depends on the UA
+  // stylesheet for <dialog> (`padding: 1em`, a border, `overflow: auto`,
+  // `max-height: calc(100% - 6px - 2em)`), which is not in this repo and which
+  // happy-dom does not implement. The CSS could be read as correct and be
+  // wrong; only the layout the browser actually computes settles it.
+  //
+  // 8 x 2000 is chosen to make the failure unmissable. At the 1280x720
+  // viewport `devices['Desktop Chrome']` sets, an unconstrained image is 2000
+  // CSS pixels tall in a 720-pixel window — nearly three viewports of
+  // overflow, not a rounding error.
+  await seedConfirmedGroup(page, harness, TALL_PNG);
+
+  const posterButton = page.getByRole('button', { name: /poster/i });
+  await expect(posterButton).toBeVisible({ timeout: 10_000 });
+  await posterButton.click();
+
+  const dialog = page.getByRole('dialog');
+  const image = dialog.getByRole('img');
+  await expect(image).toBeVisible();
+
+  const viewport = page.viewportSize();
+  if (viewport === null) throw new Error('this spec needs a fixed viewport to measure against');
+  const box = await image.boundingBox();
+  if (box === null) throw new Error('the modal image has no layout box');
+
+  // Every edge inside the window. The bottom edge is the one that actually
+  // moved: a tall image overflowed downward while its top stayed put, so
+  // asserting only the height would pass for an image scrolled halfway off
+  // the bottom of the screen.
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+
+  // And "fits" must mean scaled, not collapsed: a 0-pixel image satisfies
+  // every assertion above. A 2000-tall image scaled into a 720-tall window
+  // should be using essentially all of it.
+  expect(box.height).toBeGreaterThan(viewport.height * 0.9);
+
+  // The dialog itself must not have absorbed the overflow by becoming a
+  // scroll container, which is the specific failure here: `overflow: auto`
+  // plus a UA `max-height` means a too-tall image produces a scrollbar
+  // instead of a smaller image, and the image's own `max-height: 100vh` never
+  // binds because the dialog's content box is not the window.
+  const scroll = await dialog.evaluate((element) => ({
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+  expect(scroll.scrollHeight).toBeLessThanOrEqual(scroll.clientHeight);
 });
 
 test('a performer avatar opens the full image', async ({ page, harness }) => {
