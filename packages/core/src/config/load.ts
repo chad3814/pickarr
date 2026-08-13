@@ -24,27 +24,21 @@ async function resolveSecret(value: string, field: string): Promise<string> {
   }
 }
 
-export async function loadConfig(path: string): Promise<PickarrConfig> {
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch {
-    throw new Error(`Could not read config file at ${path}`);
-  }
-
-  let json: JsonValue;
-  try {
-    json = JSON.parse(raw) as JsonValue;
-  } catch (error) {
-    throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
-  }
-
+/**
+ * Schema and cross-field validation, with no filesystem access at all.
+ *
+ * Separate from `loadConfig` because `PUT /api/config` has to apply exactly
+ * these checks to a document it has not written yet. Two copies of this list
+ * would be free to drift, and the one that drifted would be the one guarding
+ * the file a Restart button then boots from.
+ */
+export function parseConfig(json: JsonValue, source: string): PickarrConfig {
   const parsed = configSchema.safeParse(json);
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
       .join('; ');
-    throw new Error(`Config at ${path} is invalid — ${detail}`);
+    throw new Error(`Config at ${source} is invalid — ${detail}`);
   }
 
   const config = parsed.data;
@@ -67,6 +61,18 @@ export async function loadConfig(path: string): Promise<PickarrConfig> {
     }
   }
 
+  return config;
+}
+
+/**
+ * Resolves every `file:` reference in place and re-applies the length rules the
+ * schema could not, because the schema saw a path rather than the key behind it.
+ *
+ * Callable on its own so that a save can *rehearse* it and throw the result
+ * away: a config that parses but whose secret file is missing or empty fails at
+ * boot, and boot is now something a button in the UI triggers.
+ */
+export async function resolveSecrets(config: PickarrConfig): Promise<void> {
   for (const client of config.downloadClients) {
     const field = `downloadClients.${client.id}.apiKey`;
     client.apiKey = await resolveSecret(client.apiKey, field);
@@ -91,6 +97,25 @@ export async function loadConfig(path: string): Promise<PickarrConfig> {
       throw new Error(`${field} resolves to an empty value`);
     }
   }
+}
+
+export async function loadConfig(path: string): Promise<PickarrConfig> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch {
+    throw new Error(`Could not read config file at ${path}`);
+  }
+
+  let json: JsonValue;
+  try {
+    json = JSON.parse(raw) as JsonValue;
+  } catch (error) {
+    throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
+  }
+
+  const config = parseConfig(json, path);
+  await resolveSecrets(config);
 
   const portOverride = process.env['PICKARR_PORT'];
   if (portOverride !== undefined) {

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig } from '../../src/config/load.ts';
+import { loadConfig, parseConfig, resolveSecrets } from '../../src/config/load.ts';
+import type { JsonValue } from '../../src/json.ts';
 
 const VALID = {
   server: { port: 8080 },
@@ -171,5 +172,64 @@ test('a non-positive perTick is refused at startup', async () => {
     broken['metadata'] = { perTick: 0 };
     await writeFile(path, JSON.stringify(broken));
     await assert.rejects(loadConfig(path), /perTick/);
+  });
+});
+
+test('parseConfig accepts a valid document without touching the filesystem', () => {
+  const config = parseConfig(structuredClone(VALID) as unknown as JsonValue, 'test');
+  assert.equal(config.server.port, 8080);
+  // Unresolved: parseConfig does no I/O, so a `file:` reference is still a reference.
+  assert.equal(config.metadata.perTick, 5);
+});
+
+test('parseConfig names its source and the offending field', () => {
+  const broken = structuredClone(VALID);
+  broken.downloadClients[0]!.importMode = 'teleport';
+  assert.throws(
+    () => parseConfig(broken as unknown as JsonValue, '/some/where.json'),
+    (error: Error) => {
+      assert.match(error.message, /\/some\/where\.json/);
+      assert.match(error.message, /importMode/);
+      return true;
+    },
+  );
+});
+
+test('parseConfig applies the cross-field checks', () => {
+  const dupes = structuredClone(VALID);
+  dupes.feeds.push({ ...dupes.feeds[0]! });
+  assert.throws(() => parseConfig(dupes as unknown as JsonValue, 'test'), /duplicate feed id/i);
+
+  const orphan = structuredClone(VALID);
+  orphan.feeds[0]!.plugin = '@pickarr/plugin-absent';
+  assert.throws(() => parseConfig(orphan as unknown as JsonValue, 'test'), /not configured/i);
+});
+
+test('resolveSecrets replaces a file: reference in place', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'sab_key');
+    await writeFile(secretPath, 'resolved-secret-value\n');
+    const document = structuredClone(VALID);
+    document.downloadClients[0]!.apiKey = `file:${secretPath}`;
+    const config = parseConfig(document as unknown as JsonValue, 'test');
+
+    await resolveSecrets(config);
+    assert.equal(config.downloadClients[0]?.apiKey, 'resolved-secret-value');
+  });
+});
+
+test('resolveSecrets rejects a short resolved key without printing it', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'sab_key');
+    await writeFile(secretPath, 'tinykey\n');
+    const document = structuredClone(VALID);
+    document.downloadClients[0]!.apiKey = `file:${secretPath}`;
+    const config = parseConfig(document as unknown as JsonValue, 'test');
+
+    await assert.rejects(resolveSecrets(config), (error: Error) => {
+      assert.match(error.message, /apiKey/);
+      assert.doesNotMatch(error.message, /tinykey/);
+      return true;
+    });
   });
 });
