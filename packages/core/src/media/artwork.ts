@@ -26,6 +26,50 @@ const POSTER_EXTENSIONS = new Map<string, string>([
   ['image/webp', 'webp'],
 ]);
 
+/**
+ * Total-operation deadline for one poster download — the fetch, its headers,
+ * and reading the *entire* streamed body, all against one clock.
+ *
+ * This is deliberately not a per-chunk timeout. A per-chunk timeout only
+ * bounds the gap between two reads; a host that dribbles a single byte every
+ * few seconds never trips one, and would keep this call — and the metadata
+ * worker's `tryRun` mutex it runs under (see `pipeline/scheduler.ts`) — open
+ * indefinitely while looking, to any per-chunk watchdog, perfectly healthy.
+ * A single deadline covering the whole transfer has no such gap to exploit.
+ *
+ * The value is sized off `MAX_POSTER_BYTES`: at a conservative 100 KB/s —
+ * slower than any connection this service is expected to run over — the full
+ * 5 MiB cap takes about 51 seconds to arrive. 60 seconds gives that a little
+ * margin without leaving a stalled connection tying up a worker tick for
+ * minutes.
+ */
+export const POSTER_TIMEOUT_MS = 60_000;
+
+/**
+ * Turns a signal's eventual `abort` into a promise rejection.
+ *
+ * `fetchImpl` is an injected dependency, not necessarily the real `fetch` —
+ * a test double may never look at `init.signal` at all, and even a real
+ * `fetch`'s body reader is a separate object from the request promise.
+ * Racing both the fetch and every subsequent stream read against this one
+ * promise bounds the whole operation by the deadline regardless of whether
+ * the pieces underneath honour the signal themselves.
+ */
+function abortRejection(signal: AbortSignal): Promise<never> {
+  const rejection = new Promise<never>((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true });
+  });
+  // There is real async work (`mkdir`, the fetch itself) between creating
+  // this promise and racing it, so it can reject before anything has raced
+  // it yet — Node reports that as an unhandled rejection even though the
+  // eventual `Promise.race` below handles it a tick later. Attaching a no-op
+  // handler here only marks `rejection` as handled for that bookkeeping; the
+  // same `rejection` object, with the same eventual value, is what every
+  // race below actually runs against.
+  rejection.catch(() => undefined);
+  return rejection;
+}
+
 export interface ArtworkDeps {
   readonly dir: string;
   readonly fetchImpl: FetchImpl;
@@ -48,6 +92,7 @@ async function readBodyWithinCap(
   response: Response,
   groupId: number,
   log: (message: string) => void,
+  timedOut: Promise<never>,
 ): Promise<Uint8Array | null> {
   const body = response.body;
   if (body === null) {
@@ -59,24 +104,36 @@ async function readBodyWithinCap(
   const chunks: Uint8Array[] = [];
   let total = 0;
 
-  for (;;) {
-    // Chunks of a single stream must be read one at a time, in order — there
-    // is nothing here to parallelise.
-    // eslint-disable-next-line no-await-in-loop
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    for (;;) {
+      // Chunks of a single stream must be read one at a time, in order —
+      // there is nothing here to parallelise. Each read is raced against the
+      // same total-operation deadline as the fetch that produced this body,
+      // so a connection that stalls partway through streaming cannot outlive
+      // it just because the headers already arrived.
+      // eslint-disable-next-line no-await-in-loop
+      const { done, value } = await Promise.race([reader.read(), timedOut]);
+      if (done) break;
 
-    chunks.push(value);
-    total += value.byteLength;
+      chunks.push(value);
+      total += value.byteLength;
 
-    // A chunk can straddle the limit, so the total is checked after adding
-    // each one, not before.
-    if (total > MAX_POSTER_BYTES) {
-      // eslint-disable-next-line no-await-in-loop -- one cancellation, ending the loop; nothing to batch it with
-      await reader.cancel();
-      log(`poster for group ${groupId}: exceeded ${MAX_POSTER_BYTES} bytes, aborted`);
-      return null;
+      // A chunk can straddle the limit, so the total is checked after adding
+      // each one, not before.
+      if (total > MAX_POSTER_BYTES) {
+        // eslint-disable-next-line no-await-in-loop -- one cancellation, ending the loop; nothing to batch it with
+        await reader.cancel();
+        log(`poster for group ${groupId}: exceeded ${MAX_POSTER_BYTES} bytes, aborted`);
+        return null;
+      }
     }
+  } catch (error) {
+    // The deadline fired mid-stream (or some other read failure occurred):
+    // release the reader so the underlying socket is not pinned open
+    // indefinitely, then let the caller's catch log this and return null the
+    // same way every other poster failure does.
+    await reader.cancel().catch(() => undefined);
+    throw error;
   }
 
   const bytes = new Uint8Array(total);
@@ -111,10 +168,18 @@ export async function cachePoster(
   // second rename fail ENOENT because the first already moved the file out
   // from under it — silently mixing two posters' content.
   const temp = join(deps.dir, `.${groupId}.${randomUUID()}.part`);
+  // One deadline for the fetch and everything read from its body below — see
+  // the comment on POSTER_TIMEOUT_MS for why that must be a single
+  // total-operation budget rather than a per-chunk one. Started before the
+  // first `await` in this function (rather than immediately before the fetch
+  // call) so nothing this function does — including the `mkdir` below — can
+  // push the deadline later than the moment `cachePoster` was called.
+  const signal = AbortSignal.timeout(POSTER_TIMEOUT_MS);
+  const timedOut = abortRejection(signal);
   try {
     await mkdir(deps.dir, { recursive: true });
 
-    const response = await deps.fetchImpl(url);
+    const response = await Promise.race([deps.fetchImpl(url, { signal }), timedOut]);
     if (!response.ok) {
       await response.body?.cancel();
       deps.log(`poster for group ${groupId}: HTTP ${response.status}`);
@@ -145,7 +210,7 @@ export async function cachePoster(
       return null;
     }
 
-    const bytes = await readBodyWithinCap(response, groupId, deps.log);
+    const bytes = await readBodyWithinCap(response, groupId, deps.log, timedOut);
     if (bytes === null) return null;
 
     // Temp then rename: both are on the same filesystem, and POSIX/NTFS

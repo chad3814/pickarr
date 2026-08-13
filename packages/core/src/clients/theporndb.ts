@@ -67,6 +67,48 @@ const MAX_PAGES = 10;
 const MAX_TOTAL_TO_WALK = 1_000;
 
 /**
+ * Deadline for one HTTP request to the provider — the connect, the response
+ * headers, and reading the JSON body, all counted against the same clock.
+ *
+ * Nothing downstream of `fetchImpl` sets its own timeout, so a host that
+ * accepts the connection and then sends nothing hangs `searchScenes` or
+ * `searchSites` forever. That is worse here than an ordinary slow request:
+ * the metadata worker runs its pass under a `tryRun` mutex
+ * (`pipeline/scheduler.ts`), so one hung lookup does not just delay itself —
+ * every later tick finds the mutex held and silently drops, and metadata
+ * stops for good with nothing logged. Twenty seconds matches this codebase's
+ * other two outbound `fetch` timeouts (`feeds/fetch-feed.ts`,
+ * `clients/sabnzbd.ts`) and is generous next to the provider's documented
+ * slowness — `searchSites`'s one-word fallback queries report totals in the
+ * hundreds per the `MAX_PAGES` comment above — while still being short
+ * enough that one stalled page does not tie up a worker tick for minutes.
+ */
+export const PROVIDER_REQUEST_TIMEOUT_MS = 20_000;
+
+/**
+ * Turns a signal's eventual `abort` into a promise rejection.
+ *
+ * `fetchImpl` is an injected dependency, not necessarily the real `fetch` —
+ * a test double (or some other wrapper) may never look at `init.signal` at
+ * all. Racing every provider call against this promise bounds it by the
+ * deadline regardless of whether the implementation underneath honours the
+ * signal; an implementation that does honour it settles — by rejecting on
+ * its own — before this promise ever would.
+ */
+function abortRejection(signal: AbortSignal): Promise<never> {
+  const rejection = new Promise<never>((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true });
+  });
+  // Attaching a no-op handler immediately marks `rejection` as handled for
+  // Node's unhandled-rejection bookkeeping without changing what it resolves
+  // to; see the longer version of this comment in media/artwork.ts, where the
+  // gap between creating this promise and racing it is wide enough (a real
+  // `mkdir`) to make the difference observable.
+  rejection.catch(() => undefined);
+  return rejection;
+}
+
+/**
  * Pulls the fields we compare out of a response body, tolerating everything
  * else about it.
  *
@@ -255,16 +297,25 @@ export function createTpdbClient(
 
       for (let page = 1; page <= MAX_PAGES; page += 1) {
         const url = `${base}/sites?q=${encodeURIComponent(query)}&page=${page}&per_page=${PER_PAGE}`;
+        // Fresh per page: each page gets its own full budget rather than
+        // sharing one deadline across the whole walk, since a page that
+        // legitimately took a while is not evidence the next one will too.
+        const signal = AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS);
+        const timedOut = abortRejection(signal);
 
         let response: Response;
         try {
           // eslint-disable-next-line no-await-in-loop -- pages are sequential by nature, and each is only fetched when the previous one proved insufficient
-          response = await fetchImpl(url, {
-            headers: {
-              Authorization: `Bearer ${config.apiKey}`,
-              Accept: 'application/json',
-            },
-          });
+          response = await Promise.race([
+            fetchImpl(url, {
+              headers: {
+                Authorization: `Bearer ${config.apiKey}`,
+                Accept: 'application/json',
+              },
+              signal,
+            }),
+            timedOut,
+          ]);
         } catch (error) {
           throw new Error(
             `site search for "${query}" failed: ${redactToken((error as Error).message, config.apiKey)}`,
@@ -279,8 +330,10 @@ export function createTpdbClient(
 
         let body: unknown;
         try {
-          // eslint-disable-next-line no-await-in-loop -- see above
-          body = await response.json();
+          // eslint-disable-next-line no-await-in-loop -- see above; raced against
+          // the same deadline as the fetch, since a connection that stalls after
+          // headers arrive is exactly as silent as one that never connects.
+          body = await Promise.race([response.json(), timedOut]);
         } catch (error) {
           throw new Error(
             `site search for "${query}" returned unreadable JSON: ${redactToken((error as Error).message, config.apiKey)}`,
@@ -314,12 +367,18 @@ export function createTpdbClient(
       if (query.trim().length === 0) return [];
       const site = siteId === null ? '' : `&site_id=${siteId}`;
       const url = `${base}/scenes?q=${encodeURIComponent(query)}${site}&per_page=${PER_PAGE}`;
+      const signal = AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS);
+      const timedOut = abortRejection(signal);
 
       let response: Response;
       try {
-        response = await fetchImpl(url, {
-          headers: { Authorization: `Bearer ${config.apiKey}`, Accept: 'application/json' },
-        });
+        response = await Promise.race([
+          fetchImpl(url, {
+            headers: { Authorization: `Bearer ${config.apiKey}`, Accept: 'application/json' },
+            signal,
+          }),
+          timedOut,
+        ]);
       } catch (error) {
         throw new Error(
           `scene search for "${query}" failed: ${redactToken((error as Error).message, config.apiKey)}`,
@@ -337,7 +396,10 @@ export function createTpdbClient(
 
       let body: unknown;
       try {
-        body = await response.json();
+        // Raced against the same deadline as the fetch above — see the
+        // comment on the site-search loop for why headers arriving is not
+        // enough to consider the request safe from stalling.
+        body = await Promise.race([response.json(), timedOut]);
       } catch (error) {
         throw new Error(
           `scene search for "${query}" returned unreadable JSON: ${redactToken((error as Error).message, config.apiKey)}`,

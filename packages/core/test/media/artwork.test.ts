@@ -1,9 +1,24 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cachePoster, MAX_POSTER_BYTES } from '../../src/media/artwork.ts';
+import { cachePoster, MAX_POSTER_BYTES, POSTER_TIMEOUT_MS } from '../../src/media/artwork.ts';
+
+/**
+ * Node's test runner has supported mocking `AbortSignal.timeout` for a
+ * while, but `@types/node@24`'s `MockTimersOptions['apis']` has not caught
+ * up to it — confirmed against the actual runtime this repo targets, which
+ * does honour it. Only the argument is widened (via `unknown`, since the
+ * literal union types don't otherwise overlap) — `enable` is still called as
+ * a method on `t.mock.timers`, not detached from it, since detaching it
+ * loses the `this` its implementation relies on.
+ */
+type TimerApis = Parameters<TestContext['mock']['timers']['enable']>[0];
+
+function enableAbortTimeoutMock(t: TestContext): void {
+  t.mock.timers.enable({ apis: ['AbortSignal.timeout'] } as unknown as TimerApis);
+}
 
 /**
  * Every test gets its own `mkdtemp` directory and removes it on the way out,
@@ -330,3 +345,41 @@ test('a fetch rejection with a non-Error value is reported, not thrown', async (
     assert.deepEqual(await readdir(dir), []);
   });
 });
+
+// --- Timeout -------------------------------------------------------------
+//
+// A host that accepts the connection and then sends nothing must not hang
+// this call forever — see the comment on POSTER_TIMEOUT_MS. `fetchImpl`
+// below never settles and never looks at its `init.signal`, the worst case:
+// a caller that is not even aware a timeout exists. A passing test here
+// proves the deadline is enforced by `cachePoster` itself. Node's fake
+// timers stand in for real time so this resolves instantly, and the
+// explicit per-test `timeout` bounds the test in case the deadline is not
+// actually enforced and the promise never settles.
+
+test(
+  'a poster fetch that never gets a response is abandoned, not hung forever',
+  { timeout: 2_000 },
+  async (t) => {
+    await withTempDir(async (dir) => {
+      enableAbortTimeoutMock(t);
+      const logged: string[] = [];
+
+      const pending = cachePoster(
+        { dir, fetchImpl: () => new Promise(() => undefined), log: (m) => logged.push(m) },
+        7,
+        'https://example.test/p.jpg',
+      );
+      t.mock.timers.tick(POSTER_TIMEOUT_MS);
+      const name = await pending;
+
+      assert.equal(
+        name,
+        null,
+        'a stalled connection must not hang the metadata pass; it is a poster failure like any other',
+      );
+      assert.equal(logged.length, 1);
+      assert.deepEqual(await readdir(dir), []);
+    });
+  },
+);
