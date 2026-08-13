@@ -325,6 +325,14 @@ export function editGroup(
       return { ok: { groupId: target.id, mergedInto: target.id } };
     }
 
+    // Whether the question a metadata lookup asks has changed, decided before
+    // the update overwrites the answer to it. `sceneMetadataQuery` builds its
+    // query out of the display — the site from `subtitle`, the title, the date
+    // — so a changed display is a changed question even when the key survives
+    // it, which a title correction that reduces to the same slug does.
+    const questionChanged =
+      prepared.identityKey !== group.identityKey || prepared.displayJson !== group.display;
+
     updateGroupIdentity(db, {
       id: group.id,
       identityKey: prepared.identityKey,
@@ -332,6 +340,20 @@ export function editGroup(
       searchText: prepared.searchText,
     });
     markGroupEdited(db, group.id, now);
+
+    // An edit is the one thing that invalidates an answer. `enqueueMetadata`
+    // treats any `group_metadata` row as settled and never asks again, which is
+    // what stops a browse re-querying the provider forever — but that rule
+    // assumes the question is fixed, and this is where it stops being. Left
+    // alone, the row keeps describing whatever scene the reading the human just
+    // overruled had matched, and the card goes on showing its performers and
+    // its poster indefinitely.
+    //
+    // Cleared rather than re-queued: this runs inside the edit's transaction,
+    // and the next browse of the group asks for it anyway. Only when something
+    // actually changed, so a save that rewrites nothing does not blank the
+    // panel and spend a request to rediscover the same answer.
+    if (questionChanged) clearGroupMetadata(db, group.id);
 
     return { ok: { groupId: group.id, mergedInto: null } };
   });
