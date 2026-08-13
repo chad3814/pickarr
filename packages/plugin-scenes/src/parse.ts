@@ -851,6 +851,59 @@ function findEncodeSuffixStart(tokens: Token[], minIndex: number): number | null
 }
 
 /**
+ * Whether a token at the end of a name is something other than a title word.
+ *
+ * `MARKER_TOKEN` is referenced rather than copied into any of the sets above.
+ * It has to be crossable or the walk stops at `XXX` and never reaches the id
+ * and the content-type tag behind it — which is most of what this exists to
+ * remove. Issue #13 is what copying it would cost: `REMASTERED` sat in the
+ * encode vocabulary and the non-group list at once and refused 14 corpus
+ * titles.
+ */
+function isTitleSuffixToken(text: string, previous: string | undefined): boolean {
+  return (
+    (isEncodeToken(text) && !/^\d+$/.test(text)) ||
+    text.toUpperCase() === MARKER_TOKEN ||
+    isContentTypeTerm(text) ||
+    isLanguageTerm(text) ||
+    isNumericIdToken(text, previous)
+  );
+}
+
+/**
+ * The index at which the title ends: everything from here to the end of
+ * `tokens` is suffix.
+ *
+ * The same backward walk `findEncodeSuffixStart` opens with, over a wider
+ * predicate. It stops at the *first* token that could be a title word and does
+ * not look past it — see the test named for `Hiyori JAPANESE 2`. `minIndex`
+ * carries its existing meaning and is what keeps the walk from emptying the
+ * title, so no separate guard is needed; `buildRelease` still refuses an empty
+ * scene slug if one ever arrives another way.
+ */
+export function findTitleEnd(tokens: Token[], minIndex: number): number {
+  let end = tokens.length;
+
+  // Skip a trailing release group if present: a token that looks like a group tag
+  // and immediately follows an encode token.
+  if (
+    end >= 2 &&
+    looksLikeGroupTag(tokens[end - 1]?.text ?? '', 1) &&
+    isEncodeToken(tokens[end - 2]?.text ?? '')
+  ) {
+    end -= 1;
+  }
+
+  while (end > minIndex) {
+    const token = tokens[end - 1];
+    if (token === undefined) break;
+    if (!isTitleSuffixToken(token.text, tokens[end - 2]?.text)) break;
+    end -= 1;
+  }
+  return end;
+}
+
+/**
  * Rewrites underscores as dots before the quality tables read a haystack.
  *
  * Every table below delimits its tokens with `\b`, and `_` is a *word*
