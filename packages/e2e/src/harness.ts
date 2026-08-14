@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -12,6 +12,7 @@ import { openDatabase } from '../../core/src/db/open.ts';
 import type { FeedEntry } from '../../core/src/feeds/parse-rss.ts';
 import { buildServer } from '../../core/src/http/server.ts';
 import { ingestEntries, type IngestResult } from '../../core/src/ingest/ingest.ts';
+import type { JsonValue } from '../../core/src/json.ts';
 import { loadPlugins } from '../../core/src/plugins/registry.ts';
 import { importDownload } from '../../core/src/pipeline/import.ts';
 import { runMetadataPass, type MetadataPassResult } from '../../core/src/pipeline/metadata.ts';
@@ -95,6 +96,12 @@ export interface Harness {
   readonly libraryRoot: string;
   /** The single feed every seeded title arrives on. */
   readonly feed: FeedConfig;
+  /**
+   * The `config.json` this server booted from and the Settings tab's
+   * `GET`/`PUT /api/config` read and write. A spec that drives a save through
+   * the UI reads this file back to assert what actually landed on disk.
+   */
+  readonly configPath: string;
 
   /**
    * Seeds releases by running raw feed titles through the *real* ingest path —
@@ -209,6 +216,19 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     throw new Error('harness config lost its download client or feed');
   }
 
+  // A real file, not an in-memory stand-in: `GET`/`PUT /api/config` both read
+  // `configPath` fresh off disk on every request (see `server.ts`), so a
+  // harness that never wrote one would 500 the instant a spec opened
+  // `/settings`. Written from the same validated `config` the server itself
+  // runs against, so the document a spec reads back is the one the app
+  // actually booted with.
+  const configPath = join(workDir, 'config.json');
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  // Read back rather than reused in memory, mirroring how `main.ts` derives
+  // `bootConfigDocument` from the file it just booted from — the value the
+  // config routes diff every edit against to answer `restartRequired`.
+  const bootConfigDocument = JSON.parse(await readFile(configPath, 'utf8')) as JsonValue;
+
   // `openDatabase` runs every migration, so a fresh file starts at the current
   // schema with no rows.
   const db = openDatabase(config.database.path);
@@ -253,12 +273,8 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     // `runMetadataPass` directly (see below) — there is always a worker able
     // to drain a queue row here, so the request endpoint must always queue.
     metadataAvailable: true,
-    // No test here exercises the config routes, and the harness never writes
-    // a config.json to disk at all — config is assembled in memory. A path
-    // under the work directory keeps this placeholder honest about where such
-    // a file would live if one existed.
-    configPath: join(workDir, 'config.json'),
-    bootConfigDocument: null,
+    configPath,
+    bootConfigDocument,
     databasePath: config.database.path,
     // The harness never restarts the process it's testing against; a real
     // restart route firing `process.exit` mid-suite would take the whole
@@ -282,6 +298,7 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     workDir,
     libraryRoot,
     feed,
+    configPath,
     ingest(titles) {
       tick += 1;
       const now = CLOCK_ORIGIN + tick * 1000;

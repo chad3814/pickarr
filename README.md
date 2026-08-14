@@ -69,6 +69,30 @@ The SABnzbd API key can be supplied two ways: directly as a string in the config
 startup. Docker Compose secrets are mounted exactly there, so the key never has to sit
 in an environment variable, `docker inspect` output, or a crash dump of `process.env`.
 
+### Editing settings from the browser
+
+The `Settings` tab is a form over `config/config.json`: it edits the same file described
+above, in place, rather than a separate store the container has to reconcile with it.
+Saving validates the result the same way boot does — including rehearsing secret
+resolution, so a `file:` reference that is missing or empty fails the save instead of the
+next boot — and only then writes the file atomically.
+
+**A save does not take effect on its own.** Pickarr keeps running with the settings it
+booted with until it restarts, which is why the tab shows a restart button once a saved
+change would actually change behavior. Clicking it asks Pickarr to shut down; whether it
+comes back is entirely up to whatever is running the container. Under the shipped
+`docker-compose.example.yml`, `restart: unless-stopped` means Docker starts it straight
+back up with the new config loaded. Run the container bare, or with `restart: no`, and
+there is no such supervisor: the restart button stops Pickarr and it stays stopped until
+someone starts it again by hand. Check your restart policy before you rely on the button.
+
+API keys and other secrets are never sent to the browser — the form shows only whether one
+is set — and are left untouched by a save unless you explicitly replace them.
+
+The `Settings` tab also offers a database backup: a button that downloads a consistent
+copy of `config/pickarr.db`, taken with SQLite's online backup API rather than a plain
+file copy, so it is safe to use while Pickarr is running and writing to the database.
+
 ### Naming your files
 
 `pathTemplate` decides where an import lands under `libraryRoot`. The default follows
