@@ -73,6 +73,81 @@ test('a language tag leaves the title, whatever its case', () => {
     titleOf('HollandschePassie.26.08.06.Alessandra.Sweet.Hardcore.DUTCH.XXX.1080p.MP4-WRB'),
     'Alessandra Sweet',
   );
+  // `iTALiAN`, the corpus spelling that rules out an all-caps test.
+  assert.equal(
+    titleOf('CentoxCento.26.07.01.Orgia.Balorda.iTALiAN.XXX.720p.MP4-MaMi'),
+    'Orgia Balorda',
+  );
+});
+
+test('a title-case language is a title word, because it is also a surname', () => {
+  // `Britney Dutch` is a performer, on six sites in the corpus. Both of these
+  // are real releases and one is an imported file in the owner's library, so
+  // trimming the surname renamed a real file. `Tyler French` is the same shape
+  // one re-ordering away from being title-final.
+  assert.equal(titleOf('EvilAngel.26.08.09.Britney.Dutch.XXX.2160p.MP4-WRB'), 'Britney Dutch');
+  assert.equal(
+    titleOf('TushyRaw.26.07.19.Britney.Dutch.XXX.2160p.MP4-P0RNL0V3R'),
+    'Britney Dutch',
+  );
+  assert.equal(
+    titleOf('HotGuysFuck.23.09.25.Tyler.French.And.Iris.Rae.XXX.XviD-iPT Team'),
+    'Tyler French And Iris Rae',
+  );
+});
+
+test('a title-case language is a title word as an adjective too', () => {
+  assert.equal(
+    titleOf('BBCPie.26.07.11.Kat.Perfect.French.Maid.XXX.1080p.MP4-WRB'),
+    'Kat Perfect French Maid',
+  );
+  assert.equal(
+    titleOf('WowGirls.24.01.30.Sandralyd.Spanish.Hotness.XXX.1080p.MP4-NBQ'),
+    'Sandralyd Spanish Hotness',
+  );
+  assert.equal(
+    titleOf('JulesJordan.2016.05.23.Nina.Elle.Is.Fluent.In.German.and.Dominating.BBC.With.Lexington.Steele.Sprechen.Sie.Cock.2160p'),
+    'Nina Elle Is Fluent In German and Dominating BBC With Lexington Steele Sprechen Sie Cock',
+  );
+});
+
+test('a shouted language still strips when no tag precedes it', () => {
+  // Clause 1 alone carries this one: `Assigned` is not vocabulary, so an
+  // earlier proposal with only the tag-run clause left the title as
+  // `No Models Assigned DUTCH`.
+  assert.equal(
+    titleOf('HollandschePassie.E34.No.Models.Assigned.DUTCH.XXX.720p.MP4-KTR'),
+    'No Models Assigned',
+  );
+});
+
+test('the walk crosses two vocabulary tokens in sequence', () => {
+  // A release from the owner's live feed, later than the nine corpus files.
+  // Both `DUTCH` and the `Hardcore` behind it have to go; a gate that stopped
+  // the walk after the first drop would leave `Anna Lynx Hardcore` and no
+  // other fixture in this suite would say so.
+  const parsed = plugin.parse(
+    'HollandschePassie.26.08.13.Anna.Lynx.Hardcore.DUTCH.XXX.2160p.MP4-VSEX');
+  assert.ok(parsed !== null);
+  assert.equal(parsed.display.title, 'Anna Lynx');
+  assert.equal(parsed.identityKey, 'hollandschepassie:2026-08-13:anna-lynx');
+});
+
+test('a tag run strips a title-case language behind a real tag', () => {
+  // Clause 2 alone carries the first of these: `Dutch` has no inner capital,
+  // so it goes only because `Hardcore` in front of it is content-type
+  // vocabulary. This spelling is a recasing of the real release above rather
+  // than an observed one — no corpus name puts a title-case language directly
+  // after a content-type tag — but a site that shouts neither is one release
+  // away, and without clause 2 the tag lands in the title.
+  //
+  // The pair below *is* the rule: the same token, in the same casing, with
+  // opposite answers, decided entirely by what precedes it.
+  assert.equal(
+    titleOf('HollandschePassie.26.08.13.Anna.Lynx.Hardcore.Dutch.XXX.2160p.MP4-VSEX'),
+    'Anna Lynx',
+  );
+  assert.equal(titleOf('EvilAngel.26.08.09.Britney.Dutch.XXX.2160p.MP4-WRB'), 'Britney Dutch');
 });
 
 test('POLISH and CZECH leave the title, wherever the anchor is', () => {
