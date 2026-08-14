@@ -17,6 +17,7 @@ import { scoreScene } from './score.ts';
 import { planSceneImport } from './plan-import.ts';
 import { DEFAULT_PATH_TEMPLATE } from './path-template.ts';
 import { confirmSceneMetadata, sceneMetadataQuery } from './metadata.ts';
+import { scenePerformerQuery } from './performer-query.ts';
 
 /**
  * Reads the optional `sites` list out of plugin config.
@@ -53,6 +54,7 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
     planImport: (media, files) => planSceneImport(media, files, { pathTemplate }),
     siteCandidates: (releaseName: string) => sceneSiteCandidates(releaseName, options),
     metadataQuery: (group) => sceneMetadataQuery(group),
+    performerQuery: (group) => scenePerformerQuery(group),
     confirmMetadata: (candidates, query) => confirmSceneMetadata(candidates, query),
     refusalReason: () => lastRefusalReason(),
     manualFields: () => sceneManualFields(),
