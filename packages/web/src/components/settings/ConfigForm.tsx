@@ -1,6 +1,7 @@
 import { useId } from 'react';
 import { DownloadClientFields } from './DownloadClientFields.tsx';
 import { FeedFields } from './FeedFields.tsx';
+import { PluginFields } from './PluginFields.tsx';
 import { SecretField } from './SecretField.tsx';
 import type {
   EditableConfig,
@@ -188,7 +189,7 @@ export interface ConfigFormProps {
 /**
  * The scalar half of the settings form: server, database, trash directory,
  * metadata, and site lookup. `DownloadClientFields`, `FeedFields` and
- * `PluginFields` (Tasks 11-12) render below this, over the same draft.
+ * `PluginFields` render below this, over the same draft.
  */
 export function ConfigForm({ config, draft, portOverride, onChange }: ConfigFormProps) {
   const formId = useId();
@@ -335,8 +336,7 @@ export function ConfigForm({ config, draft, portOverride, onChange }: ConfigForm
         pluginNames={draft.plugins.map((plugin) => plugin.name)}
         onChange={(feeds) => onChange({ ...draft, feeds })}
       />
-
-      {/* Task 12 renders PluginFields here. */}
+      <PluginFields plugins={draft.plugins} onChange={(plugins) => onChange({ ...draft, plugins })} />
     </div>
   );
 }
