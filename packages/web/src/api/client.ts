@@ -491,7 +491,7 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(submitted),
     }),
-  restart: () => request<{ restarting: boolean }>('/api/restart', { method: 'POST' }),
+  restart: () => request<{ restarting: true }>('/api/restart', { method: 'POST' }),
   /**
    * Not routed through `request`, which always reads the body as JSON. A backup
    * is bytes, and the filename lives in a header rather than in a payload.
