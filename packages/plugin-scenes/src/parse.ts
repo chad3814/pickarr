@@ -222,6 +222,13 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
  * the third — `ALSScan.17.12.09.Czech.2017.Casting...` — mid-title, where the
  * walk stops at `Casting` and never reaches it.
  *
+ * Membership no longer decides on its own: a title-final language term is only
+ * dropped when its casing (or the tag before it) says it is a tag — see
+ * `isLanguageSuffixToken`. That is what makes `Britney Dutch` and `Tyler
+ * French` survive while `DUTCH` and `iTALiAN` do not, and it is why the
+ * `ENGLISH`/`RUSSIAN` suspicion above is now largely handled rather than merely
+ * noted.
+ *
  * `THAI` and `ARABIC` are deliberately **not** here, and the reason is the
  * same measurement finding the opposite answer: in this domain both are
  * performer names far more often than languages. `May Thai` is title-final in
@@ -867,6 +874,61 @@ function findEncodeSuffixStart(tokens: Token[], minIndex: number): number | null
 }
 
 /**
+ * A capital anywhere but the first character.
+ *
+ * "A capital after the first character" rather than "all caps" because the
+ * corpus spells one tag `iTALiAN` (`Orgia Balorda iTALiAN`), and an all-caps
+ * test would drop it back into the title.
+ */
+function hasInnerCapital(text: string): boolean {
+  return /[A-Z]/.test(text.slice(1));
+}
+
+/**
+ * Whether a `LANGUAGE_TERMS` member at the end of a title is a tag rather than
+ * a word of the title.
+ *
+ * Membership is not enough, because a language name is also a surname and an
+ * adjective. `Britney Dutch` is a performer on six sites and `Tyler French` is
+ * another; `Perfect French Maid`, `Gorgeous Spanish Cutie` and `Fluent In
+ * German` are real corpus titles. Ungated, this arm truncated
+ * `EvilAngel.26.08.09.Britney.Dutch...` and
+ * `TushyRaw.26.07.19.Britney.Dutch...` to `Britney`, and one of those two is an
+ * imported file in the owner's library — a real rename of a real file, not a
+ * hypothesis.
+ *
+ * Casing is the signal, because a release tag is conventionally shouted and a
+ * title word is not. Measured over the 10,359 unique names in the nine corpus
+ * files: 123 occurrences of a language term, 71 of them with an inner capital
+ * (`SPANISH` 21, `GERMAN` 13, `DUTCH` 13, `FRENCH` 8, `iTALiAN` 6, `JAPANESE`
+ * 4, `POLISH` 3, `CZECH` 2, `JAP` 1) and every one a tag. Of the 52 without
+ * one, the walk reaches exactly the two `Britney.Dutch` releases above; the
+ * other 50 sit mid-title or behind a year the walk stops at, so no title-case
+ * occurrence anywhere in the corpus is a tag this rule now keeps.
+ *
+ * Clause 2 — a tag run is still a tag run — keeps `Hardcore.Dutch` strippable
+ * even though `Hardcore` is title case. It asks whether the previous token is
+ * suffix vocabulary *on its own merits*, passing `undefined` for that token's
+ * own predecessor, so a title-case language cannot lend authority it does not
+ * have to the one behind it. Clause 2 alone is not enough: an earlier proposal
+ * had only it and lost
+ * `HollandschePassie.E34.No.Models.Assigned.DUTCH...` to `Assigned`, which is
+ * not vocabulary.
+ *
+ * Deliberately **not** extended to `CONTENT_TYPE_TERMS`. `Hardcore`, `Solo` and
+ * `Lesbian` are title case in exactly the releases this trimming exists to fix:
+ * every one of the six imported files in the owner's library that this branch
+ * renames is a `ClubSweethearts...Hardcore...` release, and
+ * `ClubSweethearts.26.08.05.Remido.Solo...` is another. A casing rule there
+ * would undo the feature.
+ */
+function isLanguageSuffixToken(text: string, previous: string | undefined): boolean {
+  if (!isLanguageTerm(text)) return false;
+  if (hasInnerCapital(text)) return true;
+  return previous !== undefined && isTitleSuffixToken(previous, undefined);
+}
+
+/**
  * Whether a token immediately before the encode section is a tag rather than a
  * title word.
  *
@@ -880,11 +942,14 @@ function findEncodeSuffixStart(tokens: Token[], minIndex: number): number | null
  * the previous token as a proxy for "inside the encode run", which title words
  * and audio tokens both defeat. Starting from the boundary instead removes the
  * need to guess.
+ *
+ * The language arm is the one clause that reads `previous` for anything other
+ * than the `ORDINAL_WORDS` carve-out — see `isLanguageSuffixToken`.
  */
 export function isTitleSuffixToken(text: string, previous: string | undefined): boolean {
   return (
     isContentTypeTerm(text) ||
-    isLanguageTerm(text) ||
+    isLanguageSuffixToken(text, previous) ||
     isNumericIdToken(text, previous)
   );
 }
