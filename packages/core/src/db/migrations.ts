@@ -261,9 +261,10 @@ const DERIVE_UPGRADE_FLAG = `
  *
  * Three columns deliberately stand, on the survivor and on a lone re-key alike:
  *
- * - `list_rank_at`. Only a release *arriving* lifts a group to the top of the
- *   browse list. These releases were already in the user's database; bumping
- *   would re-sort the whole list on upgrade.
+ * - `list_rank_at`. What lifts a group to the top of a list is something
+ *   *happening* to it — a release arriving, a download failing. These releases
+ *   were already in the user's database; bumping would re-sort the whole list on
+ *   upgrade.
  * - `created_at`. The survivor was created when it was created. Taking a
  *   loser's would date the row from a group that no longer exists.
  * - `edited_at`. It records that the current values were *typed* rather than

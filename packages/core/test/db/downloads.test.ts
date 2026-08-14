@@ -101,6 +101,26 @@ test('failDownload also re-derives the group upgrade flag, so a failed release s
   db.close();
 });
 
+test('failDownload moves the group to the top of the list by stamping list_rank_at', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  db.prepare(
+    "UPDATE media_groups SET state = 'picked', picked_release_id = 1 WHERE id = 1",
+  ).run();
+
+  failDownload(db, id, 'Repair failed, not enough repair blocks (92 short)', 3);
+
+  // The failure's own timestamp, not a sentinel and not left alone. This is how
+  // the group becomes findable on Picks — the list orders on this column and
+  // nothing else, so a failure that did not write it would leave the group
+  // wherever it already was, which for a group picked weeks ago is nowhere the
+  // user will look. And because it is a timestamp rather than a flag, every
+  // later event that stamps another group moves this one down; see
+  // `test/db/picks-order.test.ts` for that half.
+  assert.equal(getGroup(db, 1)?.listRankAt, 3);
+  db.close();
+});
+
 test('failDownload is atomic: a failure re-deriving the flag rolls the status write back', () => {
   // The status write and the re-derivation are two statements, and the comment
   // on `failDownload` claims they are one instant. Without a transaction that

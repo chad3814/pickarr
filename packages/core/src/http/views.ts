@@ -321,9 +321,11 @@ export function toGroupView(
 ): GroupView {
   const display = JSON.parse(group.display) as DisplayFields;
 
-  // Asked once for the group, not once per release, and by the same query
-  // `pickedGroups` sorts on — so a card hoisted to the top of Picks always has
-  // the row on it that explains why.
+  // Asked once for the group, not once per release. It marks rows and nothing
+  // else: `pickedGroups` used to order on this same predicate and no longer
+  // does, because a per-release fact that clears only when that release is
+  // retried made a permanent sort key out of a group the user had already dealt
+  // with.
   const failed = failedReleaseIds(db, group.id);
 
   const releases = releasesForGroup(db, group.id).map((release) => {

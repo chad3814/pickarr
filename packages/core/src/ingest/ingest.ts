@@ -82,9 +82,11 @@ function prepareSafely(
  * Ledger: a feed item is processed only if its INSERT actually inserted, so a
  * feed re-serving its whole history is a no-op.
  *
- * Bump: list_rank_at moves in exactly one situation — a release arriving that
- * beats both the picked release and any already-flagged upgrade on a group the
- * user has picked. Everything else leaves list position alone.
+ * Bump: within ingest, list_rank_at moves in exactly one situation — a release
+ * arriving that beats both the picked release and any already-flagged upgrade on
+ * a group the user has picked. Everything else here leaves list position alone.
+ * (One write outside ingest also moves it: `failDownload`, so a group whose
+ * download just failed surfaces on Picks.)
  */
 export function ingestEntries(
   db: DatabaseSync,

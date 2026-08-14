@@ -234,8 +234,9 @@ function deriveUpgradeReleaseId(
 
 /**
  * Whether a release scoring `score` beats everything the group already knows
- * about — its pick, and anything already flagged as better than that pick.
- * This is the one condition under which `list_rank_at` moves.
+ * about — its pick, and anything already flagged as better than that pick. This
+ * is the one condition under which an *arrival* moves `list_rank_at`; a failing
+ * download moves it too, from `failDownload`, and asks nothing here.
  *
  * Written here once and shared by ingest (`commitRelease`) and the manual
  * merge (`editGroup`) because those are the same event seen twice: a release
@@ -266,12 +267,23 @@ export function earnsListBump(db: DatabaseSync, group: GroupRow, score: number):
 
 /**
  * Re-derives the flag *and* moves list_rank_at — the only write in the system
- * that does the latter. Its callers — ingest, and the merge half of a group
- * edit — reach it only through `earnsListBump` above, which is the sole event
- * the spec says should lift a group back to the top of the browse list: a
- * release arriving that beats both the pick and anything already flagged. The
- * flag itself is recomputed from the same rule every other write uses, so this
- * is that rule plus a bump, not a second mechanism that could disagree with it.
+ * that does the latter. The flag itself is recomputed from the same rule every
+ * other write uses, so this is that rule plus a bump, not a second mechanism
+ * that could disagree with it.
+ *
+ * Two events reach here, and both are "something happened to this group that
+ * the user should see":
+ *
+ * - A release arriving that beats both the pick and anything already flagged —
+ *   ingest and the merge half of a group edit, gated on `earnsListBump` above.
+ *   That lifts the group up the browse list.
+ * - A download failing (`failDownload`). That lifts it up the Picks list, which
+ *   is the only screen a picked group with no flagged upgrade appears on.
+ *
+ * One column serves both because both lists order on it and both mean the same
+ * thing by it: how recently this group did something. A failure earning a
+ * *timestamp* rather than a sort key of its own is the point — see
+ * `pickedGroups` for what pinning failures ahead of everything did instead.
  */
 export function flagUpgrade(db: DatabaseSync, groupId: number, now: number): void {
   const group = getGroup(db, groupId);
@@ -285,10 +297,10 @@ export function flagUpgrade(db: DatabaseSync, groupId: number, now: number): voi
 }
 
 /**
- * Re-derives the flag and nothing else. `flagUpgrade` cannot be reused here:
- * it also moves `list_rank_at`, and only a new release arriving earns a group
- * a place at the top of the list. Correcting a release's quality is not an
- * arrival.
+ * Re-derives the flag and nothing else. `flagUpgrade` cannot be reused here: it
+ * also moves `list_rank_at`, and that is earned only by something *happening* to
+ * the group — a release arriving, a download failing. Correcting a release's
+ * quality is neither.
  *
  * A missing group is silence rather than an error: the callers that reach here
  * — a release edit, a merge that brought in nothing better than the target
@@ -305,9 +317,9 @@ export function refreshUpgradeFlag(db: DatabaseSync, groupId: number): void {
 }
 
 /**
- * Deliberately leaves list_rank_at alone: re-deriving a flag is not a new
- * release arriving, and only a new arrival earns a group a place at the top of
- * the list.
+ * Deliberately leaves list_rank_at alone: choosing among releases the group
+ * already holds is not something happening to the group, so it earns no place at
+ * the top of the list.
  */
 export function markPicked(db: DatabaseSync, groupId: number, releaseId: number): void {
   db.prepare(
@@ -424,18 +436,14 @@ function failedReleasesOf(groupId: string): string {
      WHERE group_id = ${groupId} AND ${latestDownloadFailed('releases.id')} = 1`;
 }
 
-/** 1 when any release in the group has a failed latest download, 0 otherwise. */
-const HAS_FAILED_DOWNLOAD = `EXISTS (${failedReleasesOf('media_groups.id')})`;
-
 /**
  * Which of a group's releases have a failed latest download — empty for a
  * healthy group.
  *
- * A set rather than a boolean because the view needs both facts and this is
- * the one query that carries them: `size > 0` is the group flag, membership is
- * the per-release flag. Asking twice would be two chances to disagree, and the
- * same `failedReleasesOf` that answers here is what `pickedGroups` sorts on, so
- * the ordering and the marking cannot come apart.
+ * A set rather than a boolean because it answers per release: it says which rows
+ * on a card read `Failed` rather than `Current`. It decides nothing about where
+ * the card sits; `pickedGroups` used to sort on the same predicate and that is
+ * exactly what this no longer feeds.
  */
 export function failedReleaseIds(db: DatabaseSync, groupId: number): Set<number> {
   const rows = db.prepare(failedReleasesOf('?')).all(groupId);
@@ -443,23 +451,33 @@ export function failedReleaseIds(db: DatabaseSync, groupId: number): Set<number>
 }
 
 /**
- * Groups with a failed download first, because for the group that prompted this
- * nothing else in the app points at it: a picked group holding no *other*
- * flagged upgrade is off browse (see `BROWSABLE`), so this list is where it has
- * to be findable and the top is where the user lands. Not an invariant, only
- * the case worth designing for — a group can hold a failure and still be
- * browsable, if some third release is flagged (pick the 1080p, the 2160p fails,
- * a 4K REMUX arrives and is flagged), and then it is simply on both screens.
- * The eviction from browse and the arrival here are the same instant —
- * `failDownload` re-derives the upgrade flag in the same transaction — so a
- * group is never briefly absent from both.
+ * Every picked group, most recently eventful first — the same
+ * `(list_rank_at DESC, id ASC)` as `browseGroups` and nothing on top of it.
  *
- * Underneath that, the same tiebreak as `browseGroups`, for the same reason:
- * within one `list_rank_at` tie, ascending `id` is newest-first, because ingest
- * walks an RSS batch newest-first and the newest item gets the lowest id. This
- * has no cursor, so there is no paired comparison to keep in step — but it must
- * still agree with `browseGroups` on order, or the same tied groups render
- * in opposite order on the Picks page versus Browse.
+ * A failed download still needs finding, and for the group that prompted this
+ * work nothing else in the app points at it: a picked group holding no *other*
+ * flagged upgrade is off browse (see `BROWSABLE`), so this list is the only
+ * screen it appears on. It earns its place at the top from `failDownload`
+ * stamping `list_rank_at`, in the same transaction that evicts it from browse —
+ * so a group is never briefly absent from both — and not from a sort key here.
+ *
+ * `ORDER BY EXISTS (a release whose latest download failed) DESC` was that sort
+ * key, and it pinned instead of surfaced. The predicate is per release and
+ * clears only when *that release* is downloaded again, so a group whose 2160p
+ * failed and whose 1080p then imported perfectly well — nothing left to do,
+ * nothing left to retry — outranked every healthy group forever. Several such
+ * groups owned the top of the list permanently, in an order that never changed
+ * and never said which had just happened, which is the whole of what a boolean
+ * cannot express: there is no time in it. A timestamp says "this just failed"
+ * and then, as later events stamp other groups, stops saying it, without
+ * anything having to clear a mark.
+ *
+ * The tiebreak is ascending `id`, matching `browseGroups` for the reason given
+ * there: within one `list_rank_at` tie, ascending id is newest-first, because
+ * ingest walks an RSS batch newest-first and the newest item gets the lowest id.
+ * This has no cursor, so there is no paired comparison to keep in step — but it
+ * must still agree with `browseGroups`, or the same tied groups render in
+ * opposite order on the Picks page versus Browse.
  *
  * Ordered in SQL rather than re-sorted by the caller: this returns rows
  * straight to a view, and a second sort pass would be a second place the order
@@ -467,10 +485,7 @@ export function failedReleaseIds(db: DatabaseSync, groupId: number): Set<number>
  */
 export function pickedGroups(db: DatabaseSync): GroupRow[] {
   return db
-    .prepare(
-      `${SELECT} WHERE state = 'picked'
-       ORDER BY ${HAS_FAILED_DOWNLOAD} DESC, list_rank_at DESC, id ASC`,
-    )
+    .prepare(`${SELECT} WHERE state = 'picked' ORDER BY list_rank_at DESC, id ASC`)
     .all()
     .map((row) => toGroupRow(row as SqlRow));
 }
