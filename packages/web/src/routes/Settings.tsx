@@ -17,6 +17,7 @@ export function Settings() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,7 +47,7 @@ export function Settings() {
     loaded !== null && draft !== null && JSON.stringify(draft) !== JSON.stringify(toDraft(loaded.config));
 
   async function save(): Promise<void> {
-    if (loaded === null || draft === null) return;
+    if (loaded === null || draft === null || saving) return;
     const submitted = toSubmission(draft, loaded.config);
     if ('error' in submitted) {
       setNotice(null);
@@ -54,40 +55,50 @@ export function Settings() {
       return;
     }
 
+    // Guards the whole request, not just the PUT: the confirmation `GET`
+    // below is part of the same save from the user's point of view, and a
+    // second click landing mid-confirmation could still race the re-read
+    // that reseeds the draft.
+    setSaving(true);
     try {
-      await api.saveConfig(submitted);
-    } catch (cause) {
-      setNotice(null);
-      // The draft is deliberately left alone: the edit that was refused is the
-      // one the user needs in front of them to correct.
-      setError((cause as Error).message);
-      return;
-    }
+      try {
+        await api.saveConfig(submitted);
+      } catch (cause) {
+        setNotice(null);
+        // The draft is deliberately left alone: the edit that was refused is
+        // the one the user needs in front of them to correct.
+        setError((cause as Error).message);
+        return;
+      }
 
-    try {
-      // Re-read, so the redacted view of any secret just replaced comes back as
-      // `set` and the form stops offering to submit the literal again. The
-      // draft is reseeded from the response for the same reason. `restartRequired`
-      // comes from this response rather than being assumed true: the server
-      // deep-compares the merged document against what the process booted from,
-      // and a save that writes back exactly that needs no restart.
-      const next = await api.config();
-      setLoaded(next);
-      setDraft(toDraft(next.config));
-      setRestartRequired(next.restartRequired);
-      setNotice('Saved. Pickarr is still running the settings it booted with.');
-      setError(null);
-    } catch (cause) {
-      // The write already landed — only the confirmation read failed. This is
-      // not a failed save: PUT already succeeded, so reporting it as an error
-      // (with `error`, the same styling a refused save uses) would be a false
-      // alarm. A restart is assumed pending because the failed read cannot say
-      // whether the write changed anything.
-      setRestartRequired(true);
-      setNotice(
-        `Saved, but could not confirm the result: ${(cause as Error).message}. Reload this page to see what was written.`,
-      );
-      setError(null);
+      try {
+        // Re-read, so the redacted view of any secret just replaced comes back
+        // as `set` and the form stops offering to submit the literal again.
+        // The draft is reseeded from the response for the same reason.
+        // `restartRequired` comes from this response rather than being
+        // assumed true: the server deep-compares the merged document against
+        // what the process booted from, and a save that writes back exactly
+        // that needs no restart.
+        const next = await api.config();
+        setLoaded(next);
+        setDraft(toDraft(next.config));
+        setRestartRequired(next.restartRequired);
+        setNotice('Saved. Pickarr is still running the settings it booted with.');
+        setError(null);
+      } catch (cause) {
+        // The write already landed — only the confirmation read failed. This
+        // is not a failed save: PUT already succeeded, so reporting it as an
+        // error (with `error`, the same styling a refused save uses) would be
+        // a false alarm. A restart is assumed pending because the failed read
+        // cannot say whether the write changed anything.
+        setRestartRequired(true);
+        setNotice(
+          `Saved, but could not confirm the result: ${(cause as Error).message}. Reload this page to see what was written.`,
+        );
+        setError(null);
+      }
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -109,14 +120,19 @@ export function Settings() {
     try {
       const { blob, filename } = await api.backupDatabase();
       const url = URL.createObjectURL(blob);
-      try {
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = filename;
-        anchor.click();
-      } finally {
-        URL.revokeObjectURL(url);
-      }
+      // An anchor that is never attached to the document, clicked, and then
+      // revoked in the same tick is the classic shape that aborts a download
+      // in Firefox and Safari: both can require the element to be in the DOM
+      // when `click()` fires, and revoking the object URL synchronously right
+      // after can race the navigation `click()` just started. Appending it
+      // and deferring the revoke to a macrotask avoids both.
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
       setNotice(`Downloaded ${filename}`);
       setError(null);
     } catch (cause) {
@@ -141,7 +157,7 @@ export function Settings() {
           />
 
           <div className="settings-actions">
-            <button type="button" disabled={!dirty} onClick={() => void save()}>
+            <button type="button" disabled={!dirty || saving} onClick={() => void save()}>
               Save
             </button>
             {restartRequired && !restarting && (

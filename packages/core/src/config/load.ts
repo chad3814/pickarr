@@ -44,7 +44,15 @@ export async function readConfigDocument(path: string): Promise<JsonValue> {
   try {
     return JSON.parse(raw) as JsonValue;
   } catch (error) {
-    throw new Error(`Config at ${path} is not valid JSON: ${(error as Error).message}`);
+    // V8 echoes ~20 characters of source around the failure — e.g. `Unexpected
+    // token 'S', ..."","apiKey":SUPERSECRE"... is not valid JSON` — which is
+    // enough to leak a fragment of a secret pasted without quotes, and both
+    // config routes return this message verbatim to an unauthenticated
+    // caller. The echoed window always follows a `, ` and starts with a `.`
+    // (from the leading `...`) or a quote; trimming from there keeps whatever
+    // position/line detail V8 does provide and drops only the source excerpt.
+    const message = (error as Error).message.replace(/, [.'"].*$/s, '');
+    throw new Error(`Config at ${path} is not valid JSON: ${message}`);
   }
 }
 

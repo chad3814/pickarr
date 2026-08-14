@@ -119,6 +119,30 @@ understands but this form does not. The file is rewritten as
 `JSON.stringify(document, null, 2) + '\n'`; nothing is lost to reformatting because JSON
 has no comments to lose.
 
+That guarantee holds one level deep as well as at the top: `server`, `database`,
+`metadata`, each download client, each feed, and `siteLookup` are each *merged* — patched
+over a structured clone of whatever already sat at that key — rather than replaced with a
+freshly built object. A key nested inside one of these blocks that this form does not
+model (a setting a newer Pickarr understands, a field added by hand) survives a save the
+same way a top-level one does. The one exception is `plugins`: the form already treats
+every one of a plugin's settings as something it models, add and remove included, so there
+is no "unknown key" left inside that block for a merge to preserve. Two further conditions
+apply to a download client or a feed specifically: the block has to already exist on disk
+(a newly added client has nothing to merge with), and its `id` must not have changed in
+this same submission — an `id` change has no existing entry to match, for the same reason
+`applyEdits` refuses a `keep` for a renamed client's api key (§5).
+
+**A no-op save still writes every schema default.** `applyEdits` always writes `server`,
+`metadata` (and its `enabled`, `intervalSeconds`, `perTick` fields), each feed's
+`intervalSeconds`, each download client's `pathMappings`, and `siteLookup.baseUrl` when a
+site lookup is configured — whether or not the on-disk document already had them. A config
+that omitted `metadata.perTick` to track whatever Pickarr currently defaults it to no
+longer omits it after the first save from this form: the value in the file at the moment of
+that save is pinned there from then on, and no longer follows a future change to the
+built-in default. This is a real, user-visible consequence of saving from the form rather
+than hand-editing the file, not a bug — but it is one the merge above does not fix, because
+these are fields the form *does* model, not unknown ones.
+
 If `config.json` is currently unparseable JSON, `GET /api/config` answers with the parse
 error and the form renders read-only. There is no document to fold edits into, and
 fabricating one would mean a save discarding whatever is actually on disk.

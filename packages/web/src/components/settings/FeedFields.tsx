@@ -69,6 +69,22 @@ export function FeedFields({ feeds, pluginNames, onChange }: FeedFieldsProps) {
               value={feed.plugin}
               onChange={(event) => updateFeed(index, { ...feed, plugin: event.target.value })}
             >
+              {/*
+                A feed's plugin can be a name the `plugins` block used to
+                configure but no longer does — most commonly because a plugin
+                was renamed in this same draft. `value` above is still that
+                old name, but `pluginNames` no longer contains it, so without
+                this option the `<select>` would render with nothing selected
+                while `feed.plugin` still held the stale name — the form would
+                show one thing and submit another, which the server then
+                refuses with a 400 rather than the plugin lookup that
+                `configSchema` requires.
+              */}
+              {!pluginNames.includes(feed.plugin) && (
+                <option value={feed.plugin} disabled>
+                  {feed.plugin || '(none)'}
+                </option>
+              )}
               {pluginNames.map((name) => (
                 <option key={name} value={name}>
                   {name}

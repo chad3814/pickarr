@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, openTestDatabase } from '../../src/db/open.ts';
@@ -646,6 +646,24 @@ test('PUT /api/config writes the change and keeps the secret on disk', async () 
     assert.equal(written['trashDir'], '/data/elsewhere');
     const clients = asJsonArray(written['downloadClients']);
     assert.equal(asJsonObject(clients[0])?.['apiKey'], '0f1e2d3c4b5a69788796a5b4c3d2e1f0');
+    await server.close();
+  });
+});
+
+// `writeFile` creates the temp file at `0666 & ~umask`, and `rename` carries
+// that mode onto `config.json` — silently widening a restrictive file that
+// holds literal api keys on every successful save. This pins that the save
+// preserves whatever mode was already on disk.
+test('PUT /api/config preserves the mode config.json already had', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    await chmod(configPath, 0o600);
+    const server = buildServer(configDeps);
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: configSubmission() });
+    assert.equal(response.statusCode, 200);
+
+    const mode = (await stat(configPath)).mode & 0o777;
+    assert.equal(mode.toString(8), '600');
     await server.close();
   });
 });

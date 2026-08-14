@@ -35,6 +35,23 @@ test('an added feed defaults its interval to the schema default', () => {
   assert.equal(next[1]?.plugin, '@pickarr/plugin-scenes');
 });
 
+// A feed's plugin can name a plugin that used to be configured but, in this
+// same draft, no longer is — most commonly because it was renamed. Without a
+// stand-in option, the <select> renders nothing selected while `feed.plugin`
+// still holds the old name, so the form shows one thing and submits another.
+test('a feed whose plugin was renamed away still shows its (now unlisted) plugin selected', () => {
+  const stale = [
+    { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-old-name', intervalSeconds: '900' },
+  ];
+  render(<FeedFields feeds={stale} pluginNames={['@pickarr/plugin-new-name']} onChange={() => {}} />);
+  const select = screen.getByLabelText(/plugin/i) as HTMLSelectElement;
+  assert.equal(select.value, '@pickarr/plugin-old-name');
+  assert.deepEqual(
+    [...select.querySelectorAll('option')].map((option) => option.getAttribute('value')),
+    ['@pickarr/plugin-old-name', '@pickarr/plugin-new-name'],
+  );
+});
+
 test('removing a feed drops exactly that row, leaving the others in order', () => {
   // Three rows so a bug that always drops the first or last row, regardless
   // of which button was clicked, cannot pass by accident: the middle row is

@@ -194,6 +194,20 @@ function editedSecret(edit: SecretEdit, existing: string | undefined, field: str
 }
 
 /**
+ * Merges a patch of the fields this form knows about over a structured clone
+ * of whatever object (if any) already sat at this key, so a key this form
+ * does not model — a setting a newer Pickarr understands, a block someone
+ * added by hand — survives *inside* that block, not only alongside it.
+ * `existing` may be absent, or not even an object (a stray scalar or array
+ * from hand-editing); either way there is nothing to preserve and the patch
+ * stands alone.
+ */
+function mergeKnownFields(existing: JsonValue | undefined, patch: JsonObject): JsonObject {
+  const base = asJsonObject(existing);
+  return base === null ? patch : { ...structuredClone(base), ...patch };
+}
+
+/**
  * Folds a submission over the document that is currently on disk, returning a
  * new document to write.
  *
@@ -201,6 +215,17 @@ function editedSecret(edit: SecretEdit, existing: string | undefined, field: str
  * object being built, and that is the point: key order is preserved, and any key
  * this form does not model — a setting a newer Pickarr understands, a block
  * someone added by hand — survives the save instead of being silently dropped.
+ * That guarantee is applied at every level `mergeKnownFields` touches
+ * (`server`, `database`, `metadata`, each download client, each feed,
+ * `siteLookup`), not just to keys sitting beside these blocks: an unknown key
+ * *inside* one of them survives too, as long as the block itself is not
+ * newly added (there is nothing on disk yet to merge a new one with) and, for
+ * a download client or feed, its `id` did not change in this same submission
+ * (a changed id has no existing entry to match, for the same reason `keep`
+ * refuses one — see `editedSecret`). `plugins` is not merged this way: the
+ * form already treats every one of a plugin's settings as something it
+ * models, add/remove included, so there is no "unknown key" concept left
+ * inside that block for a merge to preserve.
  */
 export function applyEdits(
   document: JsonValue,
@@ -211,73 +236,92 @@ export function applyEdits(
 
   const next = structuredClone(existing);
 
-  // Matched by id, which is what a `keep` refers to. A client whose id changed
-  // in the same submission has no entry here, and `editedSecret` refuses it.
-  const existingClientKeys = new Map<string, string>();
+  // Matched by id, which is what a `keep` refers to and what a merge merges
+  // with. A client whose id changed in the same submission has no entry
+  // here, and `editedSecret` refuses it.
+  const existingClientsById = new Map<string, JsonObject>();
   for (const entry of asJsonArray(existing['downloadClients'])) {
     const client = asJsonObject(entry);
     const id = client?.['id'];
-    const apiKey = client?.['apiKey'];
-    if (typeof id === 'string' && typeof apiKey === 'string') existingClientKeys.set(id, apiKey);
+    if (client !== null && typeof id === 'string') existingClientsById.set(id, client);
+  }
+
+  const existingFeedsById = new Map<string, JsonObject>();
+  for (const entry of asJsonArray(existing['feeds'])) {
+    const feed = asJsonObject(entry);
+    const id = feed?.['id'];
+    if (feed !== null && typeof id === 'string') existingFeedsById.set(id, feed);
   }
 
   const clients: JsonValue[] = [];
   for (const client of submitted.downloadClients) {
+    const existingClient = existingClientsById.get(client.id);
+    const previousApiKey = existingClient?.['apiKey'];
     const apiKey = editedSecret(
       client.apiKey,
-      existingClientKeys.get(client.id),
+      typeof previousApiKey === 'string' ? previousApiKey : undefined,
       `downloadClients.${client.id}.apiKey`,
     );
     if (typeof apiKey !== 'string') return apiKey;
-    clients.push({
-      id: client.id,
-      type: client.type,
-      url: client.url,
-      apiKey,
-      category: client.category,
-      importMode: client.importMode,
-      pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
-    });
+    clients.push(
+      mergeKnownFields(existingClient, {
+        id: client.id,
+        type: client.type,
+        url: client.url,
+        apiKey,
+        category: client.category,
+        importMode: client.importMode,
+        pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
+      }),
+    );
   }
 
-  next['server'] = { port: submitted.server.port };
-  next['database'] = { path: submitted.database.path };
+  next['server'] = mergeKnownFields(existing['server'], { port: submitted.server.port });
+  next['database'] = mergeKnownFields(existing['database'], { path: submitted.database.path });
   next['trashDir'] = submitted.trashDir;
   next['plugins'] = copyPluginSettings(submitted.plugins);
   next['downloadClients'] = clients;
-  next['feeds'] = submitted.feeds.map((feed) => ({
-    id: feed.id,
-    url: feed.url,
-    plugin: feed.plugin,
-    intervalSeconds: feed.intervalSeconds,
-  }));
+  next['feeds'] = submitted.feeds.map((feed) =>
+    mergeKnownFields(existingFeedsById.get(feed.id), {
+      id: feed.id,
+      url: feed.url,
+      plugin: feed.plugin,
+      intervalSeconds: feed.intervalSeconds,
+    }),
+  );
 
   // Absence is expressed by deleting the key, never by writing `null` or `''`:
   // `metadataSchema.artworkDir` is `.min(1).optional()`, so an empty string is a
-  // validation failure rather than a way of saying "use the default".
-  const metadata: JsonObject = {
+  // validation failure rather than a way of saying "use the default". Deleted
+  // after the merge, not omitted from the patch, because omitting it from the
+  // patch would let the merge resurrect whatever `artworkDir` the on-disk
+  // block already had.
+  const metadataPatch: JsonObject = {
     enabled: submitted.metadata.enabled,
     intervalSeconds: submitted.metadata.intervalSeconds,
     perTick: submitted.metadata.perTick,
   };
-  if (submitted.metadata.artworkDir !== null) metadata['artworkDir'] = submitted.metadata.artworkDir;
+  if (submitted.metadata.artworkDir !== null) metadataPatch['artworkDir'] = submitted.metadata.artworkDir;
+  const metadata = mergeKnownFields(existing['metadata'], metadataPatch);
+  if (submitted.metadata.artworkDir === null) delete metadata['artworkDir'];
   next['metadata'] = metadata;
 
   if (submitted.siteLookup === null) {
     delete next['siteLookup'];
   } else {
-    const previous = asJsonObject(existing['siteLookup'])?.['apiKey'];
+    const existingSiteLookup = asJsonObject(existing['siteLookup']);
+    const previous = existingSiteLookup?.['apiKey'];
     const apiKey = editedSecret(
       submitted.siteLookup.apiKey,
       typeof previous === 'string' ? previous : undefined,
       'siteLookup.apiKey',
     );
     if (typeof apiKey !== 'string') return apiKey;
-    next['siteLookup'] = {
+    next['siteLookup'] = mergeKnownFields(existingSiteLookup, {
       type: submitted.siteLookup.type,
       apiKey,
       baseUrl: submitted.siteLookup.baseUrl,
-    };
+    });
   }
 
   return { document: next };

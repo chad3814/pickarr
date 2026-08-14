@@ -173,6 +173,40 @@ test('a key the form does not model survives, and key order is unchanged', () =>
   assert.deepEqual(Object.keys(document), before);
 });
 
+// The top-level version of this guarantee is not enough: `next['database']`
+// etc. used to be freshly built objects, so a key nested *inside* one of them
+// was dropped even though a sibling top-level key survived.
+test('a key nested inside a known block survives, alongside its client and feed', () => {
+  const onDisk = structuredClone(VALID) as unknown as JsonObject;
+  asJsonObject(onDisk['database'])!['futureOption'] = 'kept';
+  asJsonObject(onDisk['server'])!['futureOption'] = 'kept';
+  asJsonObject(asJsonArray(onDisk['downloadClients'])[0])!['futureOption'] = 'kept';
+  asJsonObject(asJsonArray(onDisk['feeds'])[0])!['futureOption'] = 'kept';
+  onDisk['siteLookup'] = { type: 'theporndb', apiKey: 'tpdb-secret-key-value', futureOption: 'kept' };
+
+  const document = applied(onDisk, (draft) => {
+    draft.siteLookup = { type: 'theporndb', apiKey: { kind: 'keep' }, baseUrl: 'https://x.invalid' };
+  });
+
+  assert.equal(asJsonObject(document['database'])?.['futureOption'], 'kept');
+  assert.equal(asJsonObject(document['server'])?.['futureOption'], 'kept');
+  assert.equal(asJsonObject(asJsonArray(document['downloadClients'])[0])?.['futureOption'], 'kept');
+  assert.equal(asJsonObject(asJsonArray(document['feeds'])[0])?.['futureOption'], 'kept');
+  assert.equal(asJsonObject(document['siteLookup'])?.['futureOption'], 'kept');
+});
+
+// A nested unknown key must survive only alongside the block's *known*
+// fields — it must not let a stale on-disk value leak back in once the
+// submission removes it, the way merging naively could for `artworkDir`.
+test('merging a nested unknown key into metadata does not resurrect a removed artworkDir', () => {
+  const onDisk = structuredClone(VALID) as unknown as JsonObject;
+  onDisk['metadata'] = { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: '/old/art', futureOption: 'kept' };
+  const document = applied(onDisk);
+  const metadata = asJsonObject(document['metadata']);
+  assert.equal(metadata?.['futureOption'], 'kept');
+  assert.equal(metadata?.['artworkDir'], undefined);
+});
+
 test('keeping a secret for a renamed client is refused, not guessed', () => {
   const result = applyEdits(
     structuredClone(VALID) as unknown as JsonValue,

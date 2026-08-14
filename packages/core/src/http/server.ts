@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { randomUUID } from 'node:crypto';
 import type { ReadStream } from 'node:fs';
-import { open, readFile, rename, rm, writeFile, type FileHandle } from 'node:fs/promises';
+import { chmod, open, readFile, rename, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { backup, type DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
@@ -474,7 +474,21 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // many are in flight at once.
     const temporary = `${deps.configPath}.tmp-${process.pid}-${randomUUID()}`;
     try {
+      // `writeFile` creates the temp file at `0666 & ~umask`, and `rename`
+      // would carry that mode onto `config.json` — silently widening a file
+      // that holds literal api keys on every successful save. Matching the
+      // mode already on disk keeps that permission the user's (or the
+      // documented `chmod 600`'s) call, not this route's. A file that cannot
+      // be stat'd (first-ever save, or the file went missing under us) gets
+      // the restrictive default rather than the permissive one.
+      let mode = 0o600;
+      try {
+        mode = (await stat(deps.configPath)).mode & 0o777;
+      } catch {
+        // New or unreadable: fall through to the restrictive default above.
+      }
       await writeFile(temporary, `${JSON.stringify(merged.document, null, 2)}\n`, 'utf8');
+      await chmod(temporary, mode);
       await rename(temporary, deps.configPath);
     } catch (error) {
       // Best-effort: if the rename is what failed, the temp file is still
