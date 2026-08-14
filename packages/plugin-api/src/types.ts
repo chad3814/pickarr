@@ -206,6 +206,22 @@ export interface MediaTypePlugin {
   metadataQuery?(group: GroupIdentity): MetadataQuery | null;
 
   /**
+   * What to search a performer directory for, given a group's identity, or
+   * `null` when this group is not worth asking about.
+   *
+   * The same shape of seam as `siteCandidates` and `metadataQuery`: the plugin
+   * says what to ask, the host decides how and when. Core never learns what a
+   * title's leading words mean, which is what lets a media type with no notion
+   * of performers opt out by simply not implementing this — rather than by core
+   * special-casing it.
+   *
+   * A plugin returning a query is not claiming the query names a performer. It
+   * is a guess, and the host's match rule is what decides whether to believe
+   * any result; see the spec's §7.
+   */
+  performerQuery?(identity: GroupIdentity): string | null;
+
+  /**
    * Which candidate, if any, is this group's scene.
    *
    * Must be strict: a wrong confirmation puts another scene's performers on a
