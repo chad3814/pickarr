@@ -85,8 +85,19 @@ export function FeedFields({ feeds, pluginNames, onChange }: FeedFieldsProps) {
               onChange={(event) => updateFeed(index, { ...feed, intervalSeconds: event.target.value })}
             />
           </div>
+          {/*
+            Named by its own id, the same reason as "Remove download client"
+            in `DownloadClientFields`: one of these renders per feed, and a
+            rotor/forms-mode list of controls would otherwise show identical
+            "Remove feed" entries with no way to tell them apart. A row not
+            yet given an id (freshly added) reads as "(new)".
+          */}
           <div className="settings-row-actions">
-            <button type="button" onClick={() => removeFeed(index)}>
+            <button
+              type="button"
+              aria-label={`Remove feed ${feed.id || '(new)'}`}
+              onClick={() => removeFeed(index)}
+            >
               Remove feed
             </button>
           </div>

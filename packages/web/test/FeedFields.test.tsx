@@ -35,11 +35,16 @@ test('an added feed defaults its interval to the schema default', () => {
   assert.equal(next[1]?.plugin, '@pickarr/plugin-scenes');
 });
 
-test('removing a feed drops exactly that row', () => {
-  let next = [...feeds(), { ...feeds()[0]!, id: 'feed2' }];
+test('removing a feed drops exactly that row, leaving the others in order', () => {
+  // Three rows so a bug that always drops the first or last row, regardless
+  // of which button was clicked, cannot pass by accident: the middle row is
+  // the one under test here.
+  let next = [...feeds(), { ...feeds()[0]!, id: 'feed2' }, { ...feeds()[0]!, id: 'feed3' }];
   render(
     <FeedFields feeds={next} pluginNames={['@pickarr/plugin-scenes']} onChange={(value) => { next = value; }} />,
   );
-  fireEvent.click(screen.getAllByRole('button', { name: /remove/i })[0]!);
-  assert.deepEqual(next.map((feed) => feed.id), ['feed2']);
+  // Named by id: this query would fail to resolve to a single element -
+  // failing the test - if the per-row aria-label were ever removed.
+  fireEvent.click(screen.getByRole('button', { name: /remove feed feed2/i }));
+  assert.deepEqual(next.map((feed) => feed.id), ['feed1', 'feed3']);
 });
