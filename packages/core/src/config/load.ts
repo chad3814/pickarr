@@ -44,16 +44,75 @@ export async function readConfigDocument(path: string): Promise<JsonValue> {
   try {
     return JSON.parse(raw) as JsonValue;
   } catch (error) {
-    // V8 echoes ~20 characters of source around the failure — e.g. `Unexpected
-    // token 'S', ..."","apiKey":SUPERSECRE"... is not valid JSON` — which is
-    // enough to leak a fragment of a secret pasted without quotes, and both
-    // config routes return this message verbatim to an unauthenticated
-    // caller. The echoed window always follows a `, ` and starts with a `.`
-    // (from the leading `...`) or a quote; trimming from there keeps whatever
-    // position/line detail V8 does provide and drops only the source excerpt.
-    const message = (error as Error).message.replace(/, [.'"].*$/s, '');
-    throw new Error(`Config at ${path} is not valid JSON: ${message}`);
+    throw new Error(`Config at ${path} is not valid JSON: ${safeParseFailure(error as Error)}`);
   }
+}
+
+/**
+ * The shapes of V8's `JSON.parse` message that are known to quote no source,
+ * and are therefore safe to hand to an unauthenticated caller verbatim.
+ *
+ * Every one of them ends in the position clause, and every variable part is a
+ * digit. The phrases before it are fixed strings V8 builds from the grammar,
+ * not from the document — which is what makes them repeatable here.
+ *
+ * The list holds only shapes that were produced on the Node in use and read
+ * back, never ones inferred from the grammar. V8 has others (bad escapes,
+ * malformed numbers) that are almost certainly source-free too, and they are
+ * deliberately absent: an unverified entry buys a line number for a rare
+ * failure and risks the thing this function exists to prevent, while leaving
+ * it out costs only that line number. `load.test.ts` covers each entry with a
+ * secret in the file, so a wrongly-admitted shape fails there as a leak.
+ */
+const POSITION = String.raw`at position \d+ \(line \d+ column \d+\)`;
+
+const SOURCE_FREE_PARSE_FAILURE = new RegExp(
+  `^(?:Unexpected end of JSON input` +
+    // This one reads "after JSON at position", with no "in JSON" segment —
+    // which is why it gets its own alternative rather than joining the list
+    // below. Assuming it matched the others is a mistake this list already
+    // made once.
+    `|Unexpected non-whitespace character after JSON ${POSITION}` +
+    `|(?:Expected double-quoted property name` +
+    `|Expected property name or '\\}'` +
+    `|Expected ':' after property name` +
+    `|Expected ',' or '\\}' after property value` +
+    `|Expected ',' or '\\]' after array element` +
+    `|Unterminated string` +
+    `) in JSON ${POSITION})$`,
+);
+
+/** Just the position clause, for a message whose prose half is not on the list. */
+const PARSE_FAILURE_POSITION = /\bat position \d+ \(line \d+ column \d+\)/;
+
+/**
+ * A `JSON.parse` failure reduced to what cannot contain the file's contents.
+ *
+ * This matters because `config.json` holds api keys and both config routes
+ * return this message to an unauthenticated caller who then sees it on the
+ * Settings screen. One of V8's shapes quotes the source directly — `Unexpected
+ * token 'S', ..."","apiKey":SUPERSECRE"... is not valid JSON` — which leaks
+ * both the offending character and a ~20-character window around it. Pasting a
+ * key without quotes produces exactly that.
+ *
+ * An allowlist rather than a denylist, and deliberately so. Trimming the known
+ * bad tail (`replace(/, [.'"].*$/, '')`) worked against today's V8 and failed
+ * silently the moment V8 moved the excerpt — and it also kept `Unexpected
+ * token 'S'`, whose quoted character is itself the first byte of the secret.
+ * Here an unrecognised shape is reduced, so a future V8 costs diagnostic
+ * detail rather than confidentiality.
+ *
+ * The cost is real and worth stating: the source-quoting shape carries no
+ * position clause, so an unquoted value — the very case this exists for — is
+ * reported without a location. The message says why, because a caller who
+ * cannot see the line number should at least know the detail was withheld
+ * rather than never produced.
+ */
+function safeParseFailure(error: Error): string {
+  if (SOURCE_FREE_PARSE_FAILURE.test(error.message)) return error.message;
+  const position = PARSE_FAILURE_POSITION.exec(error.message)?.[0];
+  const where = position === undefined ? '' : ` ${position}`;
+  return `the parser rejected it${where} (its own message is withheld: it can quote the file, which may include a secret)`;
 }
 
 /**
