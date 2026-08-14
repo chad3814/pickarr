@@ -59,6 +59,19 @@ export function PluginFields({ plugins, onChange }: PluginFieldsProps) {
 
   function removePlugin(index: number) {
     onChange(plugins.filter((_, i) => i !== index));
+    // `addAs` is keyed by array position, so removing a plugin must shift
+    // every later key down to match - otherwise the "new setting type"
+    // pending for the plugin that used to sit one slot further down would
+    // silently attach itself to whichever plugin now occupies that slot.
+    setAddAs((current) => {
+      const remapped: Record<number, SettingType> = {};
+      for (const [key, type] of Object.entries(current)) {
+        const at = Number(key);
+        if (at < index) remapped[at] = type;
+        else if (at > index) remapped[at - 1] = type;
+      }
+      return remapped;
+    });
   }
 
   function addPlugin() {

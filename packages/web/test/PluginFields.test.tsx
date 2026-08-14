@@ -47,6 +47,22 @@ test('a number stays a number rather than becoming a string', () => {
   assert.equal(typeof next[0]?.settings[3]?.value, 'number');
 });
 
+test('a boolean stays a boolean rather than becoming a string', () => {
+  let next = plugins();
+  render(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
+  fireEvent.click(screen.getByLabelText('strict'));
+  assert.equal(next[0]?.settings[2]?.value, false);
+  assert.equal(typeof next[0]?.settings[2]?.value, 'boolean');
+});
+
+test('a string stays a string rather than becoming some other type', () => {
+  let next = plugins();
+  render(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
+  fireEvent.change(screen.getByLabelText('libraryRoot'), { target: { value: '/media/movies' } });
+  assert.equal(next[0]?.settings[0]?.value, '/media/movies');
+  assert.equal(typeof next[0]?.settings[0]?.value, 'string');
+});
+
 test('blank lines in a list are dropped rather than becoming empty entries', () => {
   let next = plugins();
   render(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
@@ -100,6 +116,17 @@ test('adding a list setting defaults to an empty list', () => {
   rerender(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
   fireEvent.click(screen.getByRole('button', { name: /add setting/i }));
   assert.deepEqual(next[0]?.settings.at(-1), { key: '', value: [] });
+});
+
+test('a newly-added setting can be found and edited by label before it has a key', () => {
+  // A blank key would otherwise leave its value control's label empty (the
+  // label is `setting.key`), so getByLabelText would have nothing to find.
+  let next = plugins();
+  const { rerender } = render(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
+  fireEvent.click(screen.getByRole('button', { name: /add setting/i }));
+  rerender(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
+  fireEvent.change(screen.getByLabelText('New setting value'), { target: { value: 'hello' } });
+  assert.equal(next[0]?.settings.at(-1)?.value, 'hello');
 });
 
 test('removing a setting drops exactly that row, leaving the others in order', () => {
@@ -167,4 +194,33 @@ test('the remove-plugin button falls back to "(new)" when the plugin has no name
   render(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
   fireEvent.click(screen.getByRole('button', { name: 'Remove plugin (new)' }));
   assert.deepEqual(next, []);
+});
+
+test('removing a plugin remaps pending "new setting type" selections for the plugins after it', () => {
+  // `addAs` is keyed by array position. Without remapping on removal, a
+  // selection made for the plugin that used to sit one slot further down
+  // would silently attach itself to whichever plugin now occupies that slot.
+  let next: PluginDraft[] = [
+    { name: 'p0', settings: [] },
+    { name: 'p1', settings: [] },
+    { name: 'p2', settings: [] },
+  ];
+  const { rerender } = render(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
+
+  // p1 is the second "New setting type" select on the page.
+  fireEvent.change(screen.getAllByLabelText('New setting type')[1]!, { target: { value: 'list' } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remove plugin p0' }));
+  rerender(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
+
+  // p1 has shifted into position 0; its pending selection should have moved
+  // with it, not stayed pinned to whichever plugin now sits at position 1.
+  fireEvent.click(screen.getAllByRole('button', { name: /add setting/i })[0]!);
+  assert.deepEqual(next[0]?.settings.at(-1), { key: '', value: [] });
+  rerender(<PluginFields plugins={next} onChange={(value) => { next = value; }} />);
+
+  // p2 has shifted into position 1 and never had a selection of its own; it
+  // must still default to text, not inherit p1's leftover "list" selection.
+  fireEvent.click(screen.getAllByRole('button', { name: /add setting/i })[1]!);
+  assert.deepEqual(next[1]?.settings.at(-1), { key: '', value: '' });
 });
