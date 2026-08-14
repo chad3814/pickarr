@@ -298,7 +298,17 @@ one distinct title are all case or spelling variants of one scene (`Mckenzie Mae
 `siteComparisonKey` and `slug` doing their job, not this trade-off firing. There is
 nothing to fix here — the alternative is refusing or truncating titles that are
 overwhelmingly real and distinct to keep an id or a type tag that, in practice, never
-turns out to matter. It is pinned by a test (`packages/plugin-scenes/test/suffix-parse.test.ts`,
+turns out to matter.
+
+Two shapes reach the same class by their own route. A **dateless** name has no day in its
+key at all, so two dateless scenes from one site differing only in these tokens collate —
+`TripForFuck.Hiyori.Suzuki.Solo.42466` and `...42467` are one key — which widens an
+over-collation that shape already accepts by having no date to separate anything. And a
+**delimited listing whose date has a two-digit year** is not a listing to the parser at
+all: `26.08.05` matches the dotted-date run, so `[Site] Alex - Hardcore 42466 1080p -
+26.08.05` is read as a dotted trailing-date name, the walk runs, and it shares
+`site:2026-08-05:alex` with the same listing for `42467`. The four-digit spelling of that
+same listing keeps both parts and stays distinct. It is pinned by a test (`packages/plugin-scenes/test/suffix-parse.test.ts`,
 `'two scenes differing only in dropped tokens share a key, deliberately'`) rather than
 guarded against in code, so a future change to what gets trimmed here shows up as a
 failing test instead of a silent, undiscovered merge.

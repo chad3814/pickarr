@@ -21,14 +21,27 @@ test('the split keeps every term the union had before it', () => {
   }
 });
 
-test('DUTCH and JAPANESE are the only additions, and they are languages', () => {
+test('four languages are the only additions, and they are all languages', () => {
   // Additions, asserted separately from the preservation test above so that a
-  // future addition cannot hide inside it.
-  assert.ok(NON_GROUP_TERMS.has('DUTCH'));
-  assert.ok(NON_GROUP_TERMS.has('JAPANESE'));
-  assert.ok(LANGUAGE_TERMS.has('DUTCH'));
-  assert.ok(LANGUAGE_TERMS.has('JAPANESE'));
-  assert.equal(NON_GROUP_TERMS.size, BEFORE_THE_SPLIT.length + 2);
+  // future addition cannot hide inside it. `POLISH` and `CZECH` joined
+  // `DUTCH` and `JAPANESE` once the corpus was measured for them: POLISH is
+  // title-final in all 3 of its occurrences, CZECH in 2 of 3.
+  for (const term of ['DUTCH', 'JAPANESE', 'POLISH', 'CZECH']) {
+    assert.ok(NON_GROUP_TERMS.has(term), term);
+    assert.ok(LANGUAGE_TERMS.has(term), term);
+  }
+  assert.equal(NON_GROUP_TERMS.size, BEFORE_THE_SPLIT.length + 4);
+});
+
+test('THAI and ARABIC are kept out, because in this corpus they are performer names', () => {
+  // `May Thai` and the `Thai` of `Tuk Brilliant Thai` are both title-final, so
+  // admitting `THAI` truncates two real titles; `Sarah Arabic` appears in three
+  // scenes and is a performer wherever it appears. Being a language is not on
+  // its own a reason to be droppable — the measurement is.
+  for (const term of ['THAI', 'ARABIC']) {
+    assert.ok(!LANGUAGE_TERMS.has(term), `${term} must not be droppable from a title`);
+    assert.ok(!NON_GROUP_TERMS.has(term), term);
+  }
 });
 
 test('the two halves are disjoint and cover the union', () => {

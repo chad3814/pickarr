@@ -75,6 +75,43 @@ test('a language tag leaves the title, whatever its case', () => {
   );
 });
 
+test('POLISH and CZECH leave the title, wherever the anchor is', () => {
+  // Real corpus names for both additions, one dated and one episode-numbered.
+  assert.equal(titleOf('XES.26.02.10.Krisa.POLISH.XXX.1080p.MP4-WRB'), 'Krisa');
+  assert.equal(titleOf('SexWithMuslims.19.09.06.Amaris.CZECH.XXX.2160p.MP4-KTR'), 'Amaris');
+  assert.equal(
+    titleOf('AmateriPremium.E71.Ariela.Donovan.CZECH.XXX.XviD-iPT Team'),
+    'Ariela Donovan',
+  );
+});
+
+test('a mid-title Czech is a title word and stays', () => {
+  // The third of the three corpus occurrences. The walk stops at `Casting` and
+  // never reaches it, which is the property that made adding `CZECH` safe.
+  assert.equal(
+    titleOf('ALSScan.17.12.09.Czech.2017.Casting.XXX.SD.MP4-KLEENEX'),
+    'Czech 2017 Casting',
+  );
+});
+
+test('THAI and ARABIC are not suffix vocabulary, because here they are performers', () => {
+  // Both are real languages and neither is in `LANGUAGE_TERMS`, deliberately.
+  // These are the corpus names that would be truncated if they were: `May Thai`
+  // and `Sarah Arabic` are performers, and the second `Thai` is part of a title.
+  assert.equal(
+    titleOf('MorePOV.26.07.23.Alexa.Flexy.Geisha.Kyd.And.May.Thai.XXX.1080p.MP4-WRB'),
+    'Alexa Flexy Geisha Kyd And May Thai',
+  );
+  assert.equal(
+    titleOf('ThaiSwinger.26.07.22.Tuk.Brilliant.Thai.XXX.1080p.MP4-P0RNL0V3R'),
+    'Tuk Brilliant Thai',
+  );
+  assert.equal(
+    titleOf('BrazzersExxtra.26.08.10.Sarah.Arabic.Kinky.Couples.Anal.Quickie.XXX.1080p.MP4-WRB'),
+    'Sarah Arabic Kinky Couples Anal Quickie',
+  );
+});
+
 test('the quality still parses once the suffix is longer', () => {
   const parsed = plugin.parse('PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB');
   assert.ok(parsed !== null);

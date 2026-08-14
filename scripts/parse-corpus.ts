@@ -11,8 +11,16 @@
  *   npm run corpus -- corpus/uhd.txt corpus/hd.txt corpus/sd.txt
  *   npm run corpus -- corpus/*.txt --sites=sites.txt --examples=5
  *   npm run corpus -- corpus/uhd.txt --holdout=0        # include everything
+ *   npm run corpus -- corpus/*.txt --no-learned-sites   # first pass only
  *
  * One file per tier; the tier name is the file's basename.
+ *
+ * The corpus is measured **twice**: once with the configured site list, which is
+ * empty unless `--sites=` is given, and once with the site names the first pass
+ * produced. The second pass is not a nicety — with no site list `matchSitePrefix`
+ * never runs, so a whole half of the parser is unexercised and a change that
+ * corrupts a configured site cannot move any number this harness prints. That
+ * happened; see `learnedSiteNames`.
  */
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -36,6 +44,8 @@ interface Options {
   showCollisions: number;
   /** Send real site lookups. Requires TPDB_API_KEY in the environment. */
   lookups: boolean;
+  /** Measure a second time with the site names the first pass produced. */
+  selfSeed: boolean;
   /** Where confirmed and refused site prefixes persist between runs. */
   cachePath: string;
 }
@@ -48,10 +58,12 @@ function parseArgs(argv: string[]): Options {
     holdoutPercent: 10,
     showCollisions: 15,
     lookups: false,
+    selfSeed: true,
     cachePath: '/tmp/pickarr-corpus-sites.db',
   };
   for (const arg of argv) {
-    if (arg.startsWith('--sites=')) options.sitesFile = arg.slice('--sites='.length);
+    if (arg === '--no-learned-sites') options.selfSeed = false;
+    else if (arg.startsWith('--sites=')) options.sitesFile = arg.slice('--sites='.length);
     else if (arg.startsWith('--examples=')) options.examples = Number(arg.slice('--examples='.length));
     else if (arg.startsWith('--holdout=')) options.holdoutPercent = Number(arg.slice('--holdout='.length));
     else if (arg.startsWith('--collisions='))
@@ -142,6 +154,120 @@ function pct(part: number, whole: number): string {
   return whole === 0 ? '  0.0%' : `${((part / whole) * 100).toFixed(1).padStart(5)}%`;
 }
 
+/** One tier's titles, gathered and filtered once so both passes measure the same set. */
+interface Tier {
+  name: string;
+  lines: number;
+  unique: number;
+  noise: number;
+  /** Signal titles, holdout already applied. */
+  measured: string[];
+  held: number;
+}
+
+/** Everything one pass over the corpus produces. */
+interface Pass {
+  reports: TierReport[];
+  keyToTitles: Map<string, Set<string>>;
+  fingerprints: Map<string, string>;
+  siteQueries: Map<string, number>;
+  /** Per title, for comparing one pass against another. `null` is a refusal. */
+  outcomes: Map<string, { key: string; site: string } | null>;
+}
+
+/**
+ * Parses every measured title with one site list.
+ *
+ * Split out so the corpus can be measured twice in one run — see
+ * `learnedSiteNames`. The judgement is still entirely the plugin's; this only
+ * counts and groups.
+ */
+function runPass(tiers: Tier[], sites: string[]): Pass {
+  const plugin = createScenesPlugin({ libraryRoot: '/corpus', sites });
+  const parseOptions = { sites };
+  const pass: Pass = {
+    reports: [],
+    keyToTitles: new Map(),
+    fingerprints: new Map(),
+    siteQueries: new Map(),
+    outcomes: new Map(),
+  };
+
+  for (const tier of tiers) {
+    const report: TierReport = {
+      tier: tier.name,
+      lines: tier.lines,
+      unique: tier.unique,
+      noise: tier.noise,
+      held: tier.held,
+      measured: tier.measured.length,
+      parsed: 0,
+      refusals: new Map(),
+    };
+
+    for (const title of tier.measured) {
+      const result = plugin.parse(title);
+      if (result === null) {
+        const reason = lastRefusalReason() ?? 'unrecognized';
+        const bucket = report.refusals.get(reason) ?? [];
+        bucket.push(title);
+        report.refusals.set(reason, bucket);
+        pass.outcomes.set(title, null);
+
+        // What a site lookup would be asked, had one been enabled.
+        const candidates = sceneSiteCandidates(title, parseOptions);
+        for (const query of candidates?.queries ?? []) {
+          pass.siteQueries.set(query, (pass.siteQueries.get(query) ?? 0) + 1);
+        }
+        continue;
+      }
+
+      report.parsed += 1;
+      const titles = pass.keyToTitles.get(result.identityKey) ?? new Set<string>();
+      titles.add(title);
+      pass.keyToTitles.set(result.identityKey, titles);
+      pass.fingerprints.set(title, contentFingerprint(title, result.quality.releaseGroup));
+      pass.outcomes.set(title, {
+        key: result.identityKey,
+        site: result.display.subtitle ?? '',
+      });
+    }
+
+    pass.reports.push(report);
+  }
+
+  return pass;
+}
+
+/**
+ * The site names a pass produced, as a configured site list for a second pass.
+ *
+ * This exists because of a measurement that missed a Critical. Until it, every
+ * run of this harness passed `sites: []` unless `--sites=` was given by hand, so
+ * `matchSitePrefix` — and with it every multi-token site name, the whole reason
+ * the site list exists — was never executed by the gate at all. A parser change
+ * that corrupted a configured site was invisible here: with no site list, the
+ * site is a first-token guess before and after, so the numbers cannot move.
+ *
+ * A running instance is never in that state. `learnSites` and `knownSiteNames`
+ * accumulate exactly this list from names the parser has already read, so
+ * seeding a second pass from the first is the deployment the corpus is standing
+ * in for, not a synthetic worst case. It is also the only way to get a site list
+ * with no configuration to hand.
+ *
+ * Self-seeded, so it is mildly circular: a site the parser reads wrongly is
+ * offered back to it. That is a real limit and not a fatal one — the comparison
+ * that matters is base against branch with the *same* list, and a list built
+ * from the base run is what the site-segment diff is read against.
+ */
+function learnedSiteNames(pass: Pass, configured: string[]): string[] {
+  const names = new Set(configured);
+  for (const outcome of pass.outcomes.values()) {
+    if (outcome !== null && outcome.site.length > 0) names.add(outcome.site);
+  }
+  return [...names];
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
@@ -153,26 +279,36 @@ async function main(): Promise<void> {
       .filter((line) => line.length > 0 && !line.startsWith('#'));
   }
   const plugin = createScenesPlugin({ libraryRoot: '/corpus', sites });
-  const parseOptions = { sites };
 
   // Deduplicated across every input, not just within each file. Corpora
   // pulled at different times overlap almost entirely — a second snapshot
   // seventeen hours later shared 2,337 of 2,337 SD titles with the first — and
   // counting a title once per file it appears in would report that overlap as
   // corpus size.
+  //
+  // Gathered once, before anything is parsed, so that both passes measure the
+  // same set. Ordering matters for the same reason it does in main.ts: an
+  // identity key outlives the tick, so a site learned after a name is parsed
+  // cannot be applied to it.
   const seen = new Set<string>();
-  const reports: TierReport[] = [];
-  const keyToTitles = new Map<string, Set<string>>();
-  const fingerprints = new Map<string, string>();
-  const siteQueries = new Map<string, number>();
-
-  // Every title, gathered before anything is parsed. Ordering matters for the
-  // same reason it does in main.ts: an identity key outlives the tick, so a
-  // site learned after a name is parsed cannot be applied to it.
+  const tiers: Tier[] = [];
   const allTitles: string[] = [];
   for (const file of options.files) {
-    const lines = (await readFile(file, 'utf8')).split('\n').map((line) => line.trim());
-    allTitles.push(...lines.filter((line) => line.length > 0 && !USENET_NOISE.test(line)));
+    const raw = (await readFile(file, 'utf8')).split('\n').map((line) => line.trim());
+    const lines = raw.filter((line) => line.length > 0);
+    const unique = [...new Set(lines)].filter((title) => !seen.has(title));
+    for (const title of unique) seen.add(title);
+    const signal = unique.filter((title) => !USENET_NOISE.test(title));
+    const measured = signal.filter((title) => !heldOut(title, options.holdoutPercent));
+    allTitles.push(...signal);
+    tiers.push({
+      name: basename(file).replace(/\.[^.]+$/, ''),
+      lines: lines.length,
+      unique: unique.length,
+      noise: unique.length - signal.length,
+      measured,
+      held: signal.length - measured.length,
+    });
   }
 
   let lookupSummary = '';
@@ -206,55 +342,8 @@ async function main(): Promise<void> {
       `  cache             : ${options.cachePath}`;
   }
 
-  for (const file of options.files) {
-    const raw = (await readFile(file, 'utf8')).split('\n').map((line) => line.trim());
-    const lines = raw.filter((line) => line.length > 0);
-    const unique = [...new Set(lines)].filter((title) => !seen.has(title));
-    for (const title of unique) seen.add(title);
-    const signal = unique.filter((title) => !USENET_NOISE.test(title));
-
-    const report: TierReport = {
-      tier: basename(file).replace(/\.[^.]+$/, ''),
-      lines: lines.length,
-      unique: unique.length,
-      noise: unique.length - signal.length,
-      held: 0,
-      measured: 0,
-      parsed: 0,
-      refusals: new Map(),
-    };
-
-    for (const title of signal) {
-      if (heldOut(title, options.holdoutPercent)) {
-        report.held += 1;
-        continue;
-      }
-      report.measured += 1;
-
-      const result = plugin.parse(title);
-      if (result === null) {
-        const reason = lastRefusalReason() ?? 'unrecognized';
-        const bucket = report.refusals.get(reason) ?? [];
-        bucket.push(title);
-        report.refusals.set(reason, bucket);
-
-        // What a site lookup would be asked, had one been enabled.
-        const candidates = sceneSiteCandidates(title, parseOptions);
-        for (const query of candidates?.queries ?? []) {
-          siteQueries.set(query, (siteQueries.get(query) ?? 0) + 1);
-        }
-        continue;
-      }
-
-      report.parsed += 1;
-      const titles = keyToTitles.get(result.identityKey) ?? new Set<string>();
-      titles.add(title);
-      keyToTitles.set(result.identityKey, titles);
-      fingerprints.set(title, contentFingerprint(title, result.quality.releaseGroup));
-    }
-
-    reports.push(report);
-  }
+  const pass = runPass(tiers, sites);
+  const { reports, keyToTitles, fingerprints, siteQueries } = pass;
 
   if (lookupSummary.length > 0) {
     console.log('\n=== Site lookups');
@@ -324,6 +413,57 @@ async function main(): Promise<void> {
   console.log(`  ${distinctQueries} distinct queries, covering ${[...siteQueries.values()].reduce((a, b) => a + b, 0)} refusals`);
   for (const [query, count] of topQueries) {
     console.log(`  ${String(count).padStart(6)}  ${query}`);
+  }
+
+  // --- second pass, with the sites the first pass learned --------------------
+  //
+  // Everything above ran with whatever site list was configured, which for every
+  // run of this harness before 2026-08-13 was the empty one. That is a gate
+  // blind to `matchSitePrefix` — see `learnedSiteNames` for what it cost. This
+  // pass exists so the default run exercises it.
+  if (!options.selfSeed) {
+    console.log('\n=== Site matching: skipped (--no-learned-sites)');
+  } else {
+    const learned = learnedSiteNames(pass, sites);
+    const second = runPass(tiers, learned);
+    const parsedAgain = second.reports.reduce((sum, r) => sum + r.parsed, 0);
+
+    let keysMoved = 0;
+    let sitesChanged = 0;
+    const examples: string[] = [];
+    for (const [title, before] of pass.outcomes) {
+      const after = second.outcomes.get(title) ?? null;
+      const beforeKey = before?.key ?? 'REFUSED';
+      const afterKey = after?.key ?? 'REFUSED';
+      if (beforeKey !== afterKey) keysMoved += 1;
+      if ((before?.site ?? '') === (after?.site ?? '')) continue;
+      sitesChanged += 1;
+      if (examples.length < options.examples) {
+        examples.push(`  ${before?.site ?? '(refused)'} -> ${after?.site ?? '(refused)'}\n      ${title.slice(0, 90)}`);
+      }
+    }
+
+    const collidedAgain = [...second.keyToTitles.values()].filter((t) => t.size > 1).length;
+    let suspiciousAgain = 0;
+    for (const [, titles] of second.keyToTitles) {
+      if (titles.size < 2) continue;
+      const distinct = new Set([...titles].map((t) => second.fingerprints.get(t) ?? t));
+      if (distinct.size > 1) suspiciousAgain += 1;
+    }
+
+    console.log(`\n=== Site matching, second pass over ${learned.length} learned site names`);
+    console.log(`  ${learned.filter((name) => name.includes(' ')).length} of them are multi-token, which is what \`matchSitePrefix\` is for`);
+    console.log(`  parsed            : ${parsedAgain} (first pass: ${totalParsed})`);
+    console.log(`  identity keys moved: ${keysMoved}`);
+    console.log(`  site segment moved : ${sitesChanged}`);
+    console.log(`  collisions         : ${collidedAgain} keys hold >1 title, ${suspiciousAgain} of them suspicious`);
+    for (const example of examples) console.log(example);
+    if (sitesChanged > options.examples) {
+      console.log(`  ... and ${sitesChanged - options.examples} more site changes`);
+    }
+    console.log('  Compare this block against the same block from the base commit: a site');
+    console.log('  segment that changes here and not there is the regression class the');
+    console.log('  first pass structurally cannot see.');
   }
 
   if (options.holdoutPercent > 0) {
