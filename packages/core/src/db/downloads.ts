@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { refreshUpgradeFlag } from './groups.ts';
+import { flagUpgrade } from './groups.ts';
 import { maybeStr, num, str, type SqlRow } from './row.ts';
 
 export type DownloadStatus =
@@ -236,11 +236,28 @@ export function setStoragePath(
 }
 
 /**
- * Re-derives the group's upgrade flag as well as writing the status, because
- * failing is one of the writes that changes a side of that comparison:
- * `deriveUpgradeReleaseId` will not flag a release whose latest download
- * failed, and `upgrade_release_id` is a stored column that only says so once
- * something recomputes it.
+ * Re-derives the group's upgrade flag and stamps its list rank as well as
+ * writing the status.
+ *
+ * The flag, because failing is one of the writes that changes a side of that
+ * comparison: `deriveUpgradeReleaseId` will not flag a release whose latest
+ * download failed, and `upgrade_release_id` is a stored column that only says so
+ * once something recomputes it.
+ *
+ * The rank, because that is how the group becomes findable. `pickedGroups`
+ * orders on `list_rank_at` alone, so a group picked weeks ago and failed just now
+ * would otherwise sit exactly where it always sat — deep in a long list, on the
+ * one screen it still appears on. Stamping the failure's own timestamp puts it at
+ * the top and lets it drift down again as later events stamp other groups, which
+ * is what the alternative — sorting failures ahead of everything in
+ * `pickedGroups` — could not do: that predicate clears only if the failed release
+ * itself is downloaded again, so a group the user had already dealt with by
+ * taking a different version stayed pinned to the top forever.
+ *
+ * `flagUpgrade` is those two writes, and is reused rather than re-spelled here
+ * for the reason `deriveUpgradeReleaseId` exists at all: one rule, one place. Its
+ * other caller reaches it on a release arriving, which is the same kind of fact —
+ * something happened to this group.
  *
  * Without this the exclusion took effect at an arbitrary later moment — the
  * next unrelated write that happened to call `refreshUpgradeFlag`, perhaps a
@@ -298,7 +315,7 @@ export function failDownload(db: DatabaseSync, id: number, error: string, now: n
     if (download === null) {
       throw new Error(`failDownload: download ${id} vanished after its own update`);
     }
-    refreshUpgradeFlag(db, download.groupId);
+    flagUpgrade(db, download.groupId, now);
     db.exec('COMMIT');
   } catch (error_) {
     db.exec('ROLLBACK');

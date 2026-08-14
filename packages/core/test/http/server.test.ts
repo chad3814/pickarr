@@ -237,7 +237,10 @@ test('picks flags a group whose download failed, marks the release, and says not
 
   const groups = await picksOf(server);
 
-  // Alpha's download failed, so it leads the list even though Beta ranks newer.
+  // Alpha's download failed at 2000, which stamped its list rank and carried it
+  // past Beta's 200. Not because failures sort ahead of everything — the list
+  // orders on `list_rank_at` alone — but because failing is one of the two events
+  // that write it.
   assert.deepEqual(groups.map((group) => group.id), [1, 2]);
   // The order *is* the group-level statement — there is no group-level field,
   // and nothing on the client re-derives one.
