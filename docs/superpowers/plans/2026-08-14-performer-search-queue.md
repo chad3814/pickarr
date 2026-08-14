@@ -1828,6 +1828,7 @@ test('createPerformerRunner makes no request inside a cooldown, and says so once
   assert.equal(passDeps.logged.filter((line) => line.includes('cooldown')).length, 1);
   db.close();
 });
+```
 
 - [ ] **Step 2: Run and watch them fail**
 
