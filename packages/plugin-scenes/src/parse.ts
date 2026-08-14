@@ -215,9 +215,25 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
  * `RUSSIAN` never occur there and are the two that are also ordinary
  * adjectives; if a title is ever wrongly truncated, they are the first
  * entries to suspect.
+ *
+ * `POLISH` and `CZECH` were added after the same measurement was run over the
+ * whole corpus: `POLISH` occurs 3 times and every one is title-final
+ * (`XES.26.02.10.Krisa.POLISH.XXX...`), `CZECH` 3 times with 2 title-final and
+ * the third — `ALSScan.17.12.09.Czech.2017.Casting...` — mid-title, where the
+ * walk stops at `Casting` and never reaches it.
+ *
+ * `THAI` and `ARABIC` are deliberately **not** here, and the reason is the
+ * same measurement finding the opposite answer: in this domain both are
+ * performer names far more often than languages. `May Thai` is title-final in
+ * `MorePOV.26.07.23.Alexa.Flexy.Geisha.Kyd.And.May.Thai.XXX...` and so is the
+ * `Thai` of `ThaiSwinger.26.07.22.Tuk.Brilliant.Thai.XXX...`; both would be
+ * truncated. `Sarah Arabic` appears in three corpus scenes, mid-title in all
+ * of them today, which makes it a title word one re-ordering away from being
+ * title-final. Being a language is not on its own a reason to be here.
  */
 export const LANGUAGE_TERMS = new Set([
   'ENGLISH', 'FRENCH', 'GERMAN', 'SPANISH', 'ITALIAN', 'RUSSIAN', 'DUTCH', 'JAPANESE',
+  'POLISH', 'CZECH',
   'ENG', 'FRA', 'GER', 'ESP', 'ITA', 'RUS', 'JAP', 'JPN',
 ]);
 
@@ -935,6 +951,54 @@ export function suffixOffset(tokens: Token[], index: number, text: string): numb
 }
 
 /**
+ * Where the title text ends, once the site has taken `siteTokens` of the tokens
+ * in front of it — as an offset into `text`.
+ *
+ * The walk's own `minIndex` cannot answer this. It floors a *token index*, while
+ * the title starts after the site, and how wide the site is is not known until
+ * `matchSitePrefix` has run — which needs the token run this function bounds. So
+ * the guard is applied here, on the second pass, with the site's width in hand.
+ * A configured multi-token site otherwise reaches the walk's floor from the
+ * other side and the trimmed title comes out empty.
+ *
+ * Emptying it is not worth taking. What survives in those cases is a bare site
+ * id or a lone tag — `42466`, `solo`, `FRENCH` — and that is not a *wrong*
+ * answer: nothing is invented, it is the site's own catalogue id, accurate and
+ * merely low on information. The rule that a wrong answer beats no answer does
+ * not reach a title like that, while refusing costs the user a release to repair
+ * by hand. `42466` is a poor term to ask ThePornDB and a perfectly stable
+ * identity, and the metadata path records a near-miss rather than confirming a
+ * bad match, so a lookup that fails on it costs nothing beyond the lookup.
+ *
+ * **The whole remaining run is kept, not one token of it**, and that is the
+ * measured half of this decision rather than the tidy one. Flooring the walk at
+ * `siteTokens + 1` — keep one token, drop the rest — reads as the smaller change
+ * and merges two scenes: `OF...Enokaeva_.128825778_456239169_720p` and
+ * `..._456239173_480p` are different posts whose *first* id is shared, so
+ * keeping only the first collapses them onto `ofepart1ekaterinaenokaeva::128825778`.
+ * Two distinct scenes on one identity key is the one failure this parser must
+ * never produce. That pair is the only corpus case with more than one token left
+ * after its site, so the two formulations agree on the other eighteen; it decides
+ * this anyway, because the merge is silent and permanent and the cost of avoiding
+ * it is a longer title.
+ *
+ * When the walk leaves anything at all, its answer stands unchanged — including
+ * for every unmatched site, where the fallback takes one token and `siteTokens`
+ * is 1. `consumeSiteTld` cannot push the site to the end of the run either (it
+ * declines when that would leave nothing), so a token to be the title always
+ * exists.
+ */
+function titleEndOffsetAfterSite(
+  tokens: Token[],
+  text: string,
+  boundary: TitleBoundary,
+  siteTokens: number,
+): number {
+  const emptied = boundary.titleEnd <= siteTokens;
+  return suffixOffset(tokens, emptied ? boundary.encodeStart : boundary.titleEnd, text);
+}
+
+/**
  * Rewrites underscores as dots before the quality tables read a haystack.
  *
  * Every table below delimits its tokens with `\b`, and `_` is a *word*
@@ -1328,11 +1392,14 @@ export function matchSitePrefix(before: Token[], sites: readonly string[]): Site
  *    being re-read as this shape.
  *
  * The site/title split is then a guess, resolved against the configured site
- * list and falling back to the first token. It is only ever a guess about the
- * library *path*: every pre-date token still reaches the identity key, whether
- * in the site half or the scene half, so no split can make two different
- * scenes collide. Moving the split changes where a scene files, never what it
- * collates with.
+ * list and falling back to the first token. Moving the split changes where a
+ * scene files, never what it collates with: every token the *title bound*
+ * keeps reaches the identity key whether it lands in the site half or the
+ * scene half, so no split can make two different scenes collide.
+ *
+ * The suffix tokens past that bound are a separate matter. They reach neither
+ * half, and two names differing only in them collate as one — the accepted
+ * cost recorded in `docs/known-issues.md`, unchanged by where the split falls.
  */
 /**
  * The pre-date tokens of a date-at-end name, or `null` for anything that is
@@ -1344,8 +1411,28 @@ export function matchSitePrefix(before: Token[], sites: readonly string[]): Site
  * for prefixes that can never be used.
  */
 interface DateAtEnd {
-  /** Site and title, with the encode section already removed. */
+  /**
+   * Site and title, with the encode section already removed — and with the
+   * suffix tokens the walk dropped still present, because this is what
+   * `matchSitePrefix` and `sceneSiteCandidates` read. A configured site can
+   * span those tokens (`OF E Part1 Ekaterina Enokaeva` spans two numeric ids),
+   * and cutting them off here does not shorten a title, it only starves site
+   * matching: `matchSitePrefix` never consumes every token it is given, so a
+   * two-token site in a two-token `before` cannot match at all and the site
+   * silently degrades to its first word.
+   */
   readonly before: Token[];
+  /**
+   * Where the *title text* ends, as an offset into the name, given how many of
+   * `before`'s tokens the site turned out to take. A second answer because it is
+   * a different question from where `before` stops, and a function of the site's
+   * width because the two are not independent — see `titleEndOffsetAfterSite`.
+   *
+   * An offset rather than a token index, and named for it: `TitleBoundary`'s
+   * `titleEnd` is an index into an array, and one word for two units is how the
+   * wrong one gets passed.
+   */
+  readonly titleEndOffset: (siteTokens: number) => number;
   /** The encode text, for `extractQuality`. */
   readonly tail: string;
   readonly group: string | undefined;
@@ -1373,7 +1460,9 @@ function dateAtEndPrefixTokens(
     const encodeToken = beforeTokens[boundary.encodeStart];
     if (encodeToken === undefined) return null;
     return {
-      before: beforeTokens.slice(0, boundary.titleEnd),
+      before: beforeTokens.slice(0, boundary.encodeStart),
+      titleEndOffset: (siteTokens) =>
+        titleEndOffsetAfterSite(beforeTokens, beforeText, boundary, siteTokens),
       tail: beforeText.slice(encodeToken.start),
       group: undefined,
     };
@@ -1386,7 +1475,35 @@ function dateAtEndPrefixTokens(
   if (detached.tokens.length === 0) return null;
   if (!detached.tokens.every((token) => isEncodeToken(token.text))) return null;
 
-  return { before, tail, group: detached.group };
+  // Here the date itself ends the title — the encode section is behind it, so
+  // there is no run of suffix tokens between the two for a walk to cross and
+  // `findTitleBoundary` is never called on this path. The bound is the last
+  // pre-date token, not `date.startOffset`, so the separator in front of the
+  // date is not part of the title, and it does not depend on the site's width:
+  // with no walk there is nothing for a site to consume the title through, and
+  // `matchSitePrefix` always leaves a token behind.
+  //
+  // **No walk means no suffix trimming on this path, and that is an asymmetry
+  // rather than a decision.** `Bang.Bros.Solo.42466.18.12.18.1080p.MP4-WRB`
+  // keeps `Solo 42466` in its title, while the same tokens either side of a
+  // leading date — `Bang.Bros.18.12.18.Solo.42466.1080p...` — lose them. Where
+  // the date sits decides it. Extending the walk here is not obviously right:
+  // the suffix would have to be recognised without an encode run adjacent to it,
+  // which is the adjacency-proxy guessing that caused the two defects the
+  // inverted boundary search fixed (design §4). Left as it is, deliberately,
+  // and measured as unchanged from the base commit — but it is the last place in
+  // the dotted family where the two indices are still one number, so a future
+  // reader looking for the next inconsistency should start here.
+  const lastBefore = before.at(-1);
+  if (lastBefore === undefined) return null;
+  const beforeEnd = lastBefore.start + lastBefore.text.length;
+
+  return {
+    before,
+    titleEndOffset: () => beforeEnd,
+    tail,
+    group: detached.group,
+  };
 }
 
 function parseDateAtEndForm(
@@ -1413,14 +1530,14 @@ function parseDateAtEndForm(
   const site =
     match?.name ?? prettify(name.slice(0, lastSiteToken.start + lastSiteToken.text.length));
 
-  // The identity ends at the last token `before` kept, not at the date. When
-  // the date trails the name the encode section sits between the two, and
-  // slicing to the date would leave `2160p` in the scene title.
-  const lastIdentityToken = before.at(-1);
-  if (lastIdentityToken === undefined) return null;
-  const identityEnd = lastIdentityToken.start + lastIdentityToken.text.length;
-
-  const sceneText = prettify(name.slice(firstSceneToken.start, identityEnd));
+  // The identity ends where the shape says the title does, which is neither
+  // the date nor the last token `before` kept — three different places when the
+  // date trails the name. Slicing to the date would leave `2160p` in the title
+  // because the encode section sits between the two; slicing to the end of
+  // `before` would leave the suffix tokens `before` deliberately keeps so that
+  // a multi-token site can still be matched across them. The site's width goes
+  // in because the title cannot end before the site does.
+  const sceneText = prettify(name.slice(firstSceneToken.start, shape.titleEndOffset(siteTokens)));
   if (site.length === 0 || sceneText.length === 0) return null;
   if (sceneText.toUpperCase() === MARKER_TOKEN) return null;
 
@@ -1434,6 +1551,18 @@ function parseDateAtEndForm(
 }
 
 /**
+ * The same two-index split `DateAtEnd` carries, for the dateless shape: what
+ * site matching may read, and where the title stops. They diverge whenever the
+ * suffix walk drops anything, and `parseDatelessForm` needs both.
+ */
+interface DatelessPrefix {
+  readonly before: Token[];
+  /** An offset into the name, as in `DateAtEnd` — not a token index. */
+  readonly titleEndOffset: (siteTokens: number) => number;
+  readonly tail: string;
+}
+
+/**
  * The pre-encode tokens of a name that carries no date, or `null` when the
  * name has no trustworthy encode boundary either.
  *
@@ -1442,21 +1571,22 @@ function parseDateAtEndForm(
  * them. `minIndex` is 2 so at least one token can be the site and one the
  * title.
  */
-function datelessPrefixTokens(name: string): { before: Token[]; tail: string } | null {
+function datelessPrefixTokens(name: string): DatelessPrefix | null {
   const detached = detachReleaseGroup(tokensOf(name), name);
   const boundary = findTitleBoundary(detached.tokens, 2);
   if (boundary !== null) {
     const encodeToken = detached.tokens[boundary.encodeStart];
     if (encodeToken !== undefined) {
-      // `before` is not the title — it is what `matchSitePrefix` and
-      // `sceneSiteCandidates` read to identify the site, and the title
-      // returned to the caller is rebuilt separately from `prefix.tail`
-      // (which starts at `encodeStart`). `titleEnd` belongs only to that
-      // rebuilt title; slicing `before` at it starves site matching of
-      // tokens the walk dropped as suffix vocabulary, so `before` must keep
-      // everything up to the encode boundary instead.
+      // Both indices are carried because the two answers differ. `before`
+      // reaches to the encode boundary so `matchSitePrefix` and
+      // `sceneSiteCandidates` see every token a configured site might span,
+      // including the ones the walk dropped; `titleEndOffset` is where the
+      // title stops, which is short of that whenever the walk dropped
+      // anything.
       return {
         before: detached.tokens.slice(0, boundary.encodeStart),
+        titleEndOffset: (siteTokens) =>
+          titleEndOffsetAfterSite(detached.tokens, name, boundary, siteTokens),
         tail: name.slice(encodeToken.start),
       };
     }
@@ -1471,8 +1601,21 @@ function datelessPrefixTokens(name: string): { before: Token[]; tail: string } |
   // The whole run is offered, and the caller still requires a confirmed site
   // match against it. Nothing is admitted here that was not already gated on
   // that, so a name with no recognisable site is refused exactly as before.
+  //
+  // The title bound is the end of the name, and the vocabulary walk is
+  // deliberately not run here. What licenses the walk elsewhere is the encode
+  // boundary: the tokens it crosses sit between the title and a *recognised*
+  // encode section, and that adjacency is the evidence they are metadata. On
+  // this path there is no such section — that is what brought us here — so a
+  // trailing `Solo` or a trailing number has nothing marking it as a tag, and
+  // `TripForFuck - Hiyori JAPANESE 2` is the shape this path exists for. It is
+  // the same argument `parseSceneForm` makes for a dated name whose remainder
+  // carries no encode vocabulary at all: with no encode section, the whole
+  // remainder is the title.
   const tokens = tokensOf(name);
-  return tokens.length >= 2 ? { before: tokens, tail: '' } : null;
+  return tokens.length >= 2
+    ? { before: tokens, titleEndOffset: () => name.length, tail: '' }
+    : null;
 }
 
 /**
@@ -1567,7 +1710,14 @@ function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRele
     return refuse('no date, and nothing between the site and the encode section');
   }
 
-  const sceneText = prettify(name.slice(firstSceneToken.start, prefix.tail.length > 0 ? name.length - prefix.tail.length : name.length));
+  // `titleEndOffset`, not `name.length - prefix.tail.length`. That subtraction
+  // is the encode boundary, so it left every suffix token the walk dropped in
+  // the title — `TripForFuck.Hiyori.Suzuki.Solo.42466.1080p.MP4-WRB` came back
+  // as `Hiyori Suzuki Solo 42466`, which is this feature's own motivating
+  // example going unfixed in this shape. The site's width goes in for the same
+  // reason it does in the date-at-end shape: a matched site here can be most of
+  // the run, and the title may not end before the site does.
+  const sceneText = prettify(name.slice(firstSceneToken.start, prefix.titleEndOffset(siteTokens)));
   if (sceneText.length === 0 || sceneText.toUpperCase() === MARKER_TOKEN) {
     return refuse('no date, and no title left after the site');
   }
@@ -1789,19 +1939,29 @@ function splitSegment(segment: string): SegmentSplit {
     text = text.slice(0, bracket.index).trim();
   }
 
-  // Deliberately `findEncodeSuffixStart` alone, not `findTitleBoundary` — this
-  // shape is excluded from the vocabulary walk. A part's title here has no
-  // fixed order (`sceneSlugFromParts` sorts on exactly that basis), so a
-  // trailing content-type tag or numeric id is not reliably *trailing*
-  // information the way it is in the dotted form, and `findTitleBoundary`
-  // passing `minIndex: 0` here let the walk consume an entire part down to
-  // nothing: `[Site] Alex - Hardcore 42466 1080p - 26.08.05` and the same
-  // with `42467` both lost their whole distinguishing part and collapsed
-  // onto one identity key. Two distinct scenes sharing a key is the one
-  // failure this parser must never produce, so this shape keeps the single,
-  // unsplit cut it had before this change — see design doc §6, which named
-  // this shape as an unmeasured judgement call and said the fix, if it ever
-  // misfired, is to scope the rule out here rather than patch the walk.
+  // Deliberately `findEncodeSuffixStart` alone, not `findTitleBoundary` — the
+  // walk is scoped out of *this code path*, which is not the same as scoping it
+  // out of the listing shape. A part's title here has no fixed order
+  // (`sceneSlugFromParts` sorts on exactly that basis), so a trailing
+  // content-type tag or numeric id is not reliably *trailing* information the
+  // way it is in the dotted form, and `findTitleBoundary` passing
+  // `minIndex: 0` here let the walk consume an entire part down to nothing:
+  // `[Site] Alex - Hardcore 42466 1080p - 2026-08-05` and the same with
+  // `42467` both lost their whole distinguishing part and collapsed onto one
+  // identity key. Two distinct scenes sharing a key is the one failure this
+  // parser must never produce, so this path keeps the single, unsplit cut it
+  // had before this change — see design doc §6, which named this shape as an
+  // unmeasured judgement call and said the fix, if it ever misfired, is to
+  // scope the rule out here rather than patch the walk.
+  //
+  // Only a four-digit year reaches here. Written `26.08.05`, the same listing
+  // is a dotted name to `DOTTED_DATE_RUN` and goes to the date-at-end shape
+  // instead, where the walk does run and the two parts above *do* collapse
+  // onto `site:2026-08-05:alex`. That collision is inside the class
+  // `docs/known-issues.md` accepts — one site, one date, titles differing only
+  // in dropped tokens — so it is not a defect, but it is not excluded either,
+  // and a comment claiming the shape is safe would be wrong. Both spellings
+  // are pinned by tests in `parse-date-at-end.test.ts`.
   const tokens = tokensOf(text);
   const cut = findEncodeSuffixStart(tokens, 0);
   const cutToken = cut === null ? undefined : tokens[cut];

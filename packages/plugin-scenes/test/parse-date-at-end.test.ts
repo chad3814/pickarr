@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSceneRelease, sceneSiteCandidates } from '../src/parse.ts';
+import { lastRefusalReason, parseSceneRelease, sceneSiteCandidates } from '../src/parse.ts';
 import { scoreScene } from '../src/score.ts';
 
 const ANAL_ONLY = 'Anal.Only.Getting.In.Savannahs.Booty.Savannah.Bond.2022.09.29.Upscaled.2160p';
@@ -334,16 +334,46 @@ test('a dateless name with nothing left for a title is refused', () => {
 test('site matching sees every token up to the encode boundary, not just the ones the title keeps', () => {
   // Real corpus regression: `datelessPrefixTokens` once sliced `before` at
   // `titleEnd`, the vocabulary walk's own boundary. But `before` is not the
-  // title here — `parseDatelessForm` rebuilds the title separately from the
-  // tail starting at `encodeStart` — so trimming `before` at `titleEnd` only
-  // ever cost `matchSitePrefix` tokens it needed, never helped the title.
+  // title here — `matchSitePrefix` and `sceneSiteCandidates` read it — so
+  // trimming it at `titleEnd` only ever cost site matching tokens it needed.
   // `128825778` and `456239169` are both numeric ids the walk drops as suffix
   // vocabulary; a site name that happens to span them (as a per-performer
   // OnlyFans "site" can) must still be reachable.
+  //
+  // The site takes every token but the ids, so the ids are what is left to be
+  // the title — see `titleEndOffsetAfterSite`. Sliced at `titleEnd` the site
+  // could not match at all, and the name refused as
+  // `no date, and the site is not in the known list`.
   const name = 'OF.E.Part1_Ekaterina.Enokaeva_.128825778_456239169_720p';
   const result = parsed(name, ['OF E Part1 Ekaterina Enokaeva']);
   assert.equal(result.display.subtitle, 'OF E Part1 Ekaterina Enokaeva');
   assert.equal(result.display.title, '128825778 456239169');
+  assert.equal(parseSceneRelease(name), null, 'and it still needs the site to be known');
+  assert.equal(lastRefusalReason(), 'no date, and the site is not in the known list');
+});
+
+test('the dateless shape drops its suffix too, which is this feature\'s own example', () => {
+  // `parseDatelessForm` bounded the title at `name.length - prefix.tail.length`
+  // — the *encode* boundary — so `titleEnd` was computed and thrown away, and
+  // this name came back as `Hiyori Suzuki Solo 42466` on this branch and on its
+  // base. Both indices are carried now, and this shape reads the right one.
+  const result = parsed('TripForFuck.Hiyori.Suzuki.Solo.42466.1080p.MP4-WRB', ['TripForFuck']);
+  assert.equal(result.identityKey, 'tripforfuck::hiyori-suzuki');
+  assert.equal(result.display.title, 'Hiyori Suzuki');
+  assert.equal(result.quality.resolution, 1080, 'the encode still comes from the encode boundary');
+  assert.equal(result.quality.releaseGroup, 'WRB');
+});
+
+test('two dateless scenes differing only in dropped tokens collate, as the dated ones do', () => {
+  // What the line above costs, and the same accepted class. A dateless key
+  // already carries an empty date segment and this shape already over-collates
+  // by design; trimming the id widens that. Pinned so the widening is on record
+  // rather than a surprise.
+  const sites = ['TripForFuck'];
+  assert.equal(
+    parsed('TripForFuck.Hiyori.Suzuki.Solo.42466.1080p.MP4-WRB', sites).identityKey,
+    parsed('TripForFuck.Hiyori.Suzuki.Solo.42467.1080p.MP4-WRB', sites).identityKey,
+  );
 });
 
 // --- Upscaled ----------------------------------------------------------------
@@ -482,10 +512,12 @@ test('the delimited form does not run the vocabulary walk, so a dropped token ca
   // walk here once let it consume an entire part: `Hardcore` is itself a
   // content-type term, so the walk crossed it and the numeric id behind it,
   // and `Hardcore 42466 1080p` / `Hardcore 42467 1080p` both collapsed to
-  // nothing, losing the whole part that distinguished the two scenes. The
-  // date needs a four-digit year (`YMD_PATTERN`/`DMY_PATTERN`) to route this
-  // through the delimited parser at all, rather than the dotted form's
-  // date-at-end shape, which is a different code path with its own tests.
+  // nothing, losing the whole part that distinguished the two scenes.
+  //
+  // The four-digit year is load-bearing, not incidental: it is what routes the
+  // name through the delimited parser (`YMD_PATTERN`/`DMY_PATTERN`) rather than
+  // the dotted form's date-at-end shape. What is excluded from the walk is this
+  // code path, not the listing shape — see the two-digit-year test below.
   const a = parsed('[Site] Alex - Hardcore 42466 1080p - 2026-08-05');
   const b = parsed('[Site] Alex - Hardcore 42467 1080p - 2026-08-05');
   assert.notEqual(
@@ -493,6 +525,23 @@ test('the delimited form does not run the vocabulary walk, so a dropped token ca
     b.identityKey,
     'two distinct scenes must never share an identity key',
   );
+});
+
+test('the same listing with a two-digit year is not a listing to the parser, and does run the walk', () => {
+  // `26.08.05` matches `DOTTED_DATE_RUN`, so the delimited reader declines and
+  // the date-at-end shape reads it — where the walk does run and does drop
+  // `Hardcore` and the id, so these two parts collapse onto one key. Same
+  // scenes, same names, one character of date format apart, opposite outcome
+  // from the test above.
+  //
+  // That collision is inside the class `docs/known-issues.md` accepts: one
+  // site, one date, titles differing only in dropped tokens. It is pinned here
+  // because the comment in `splitSegment` used to read as though the listing
+  // shape itself were excluded, and this is the counter-example.
+  const a = parsed('[Site] Alex - Hardcore 42466 1080p - 26.08.05');
+  const b = parsed('[Site] Alex - Hardcore 42467 1080p - 26.08.05');
+  assert.equal(a.identityKey, 'site:2026-08-05:alex');
+  assert.equal(a.identityKey, b.identityKey);
 });
 
 test('VERTICAL and F4V are encode information, not title words', () => {
@@ -546,6 +595,141 @@ test('a trailing date with no encode before it is still refused', () => {
   // Nothing separates site from title *or* title from encode, so there is no
   // boundary to work from and guessing would truncate the title.
   assert.equal(parseSceneRelease('somesite_a-scene-title-18.12.18'), null);
+});
+
+// --- The two indices a trailing date needs -----------------------------------
+
+test('a trailing-date title stops at the suffix, not at the end of the site-matching run', () => {
+  // The plain statement of the rule in this shape: `Solo` is suffix here just
+  // as it is after a leading date, so it leaves the title even though the
+  // encode section — and therefore the run `matchSitePrefix` reads — extends
+  // past it.
+  const result = parsed('ClubSweethearts.Remido.Solo.1080p.18.12.18');
+  assert.equal(result.identityKey, 'clubsweethearts:2018-12-18:remido');
+  assert.equal(result.quality.resolution, 1080, 'the encode is still read from the boundary');
+});
+
+test('a trailing-date site is looked up across the tokens the walk dropped', () => {
+  // Corpus regression, the trailing-date twin of the dateless one below.
+  // `before` is what `matchSitePrefix` and `sceneSiteCandidates` read, and it
+  // once stopped at `titleEnd` — so a site spanning a dropped numeric id was
+  // neither askable nor matchable. `Bang Bros` is two tokens; the queries are
+  // built from `before`, so this is `before` reaching the encode boundary.
+  const candidates = sceneSiteCandidates('Bang.Bros.42466.1080p.18.12.18');
+  assert.deepEqual(candidates?.queries, ['Bang Bros', 'Bang']);
+});
+
+test('a trailing-date site that matches past the suffix takes the site, not the first word', () => {
+  // What the slice above cost: `matchSitePrefix` never consumes every token it
+  // is given, so with `before` cut to `[Bang, Bros]` the two-token site could
+  // not match at all and the site silently degraded to `Bang` with `Bros` — a
+  // word of the site's own name — as the title. Both of these then keyed as
+  // `bang:2018-12-18:bros`: two different scenes on one key, and a configured
+  // site split across two library directories.
+  //
+  // With the site matched, what follows it is nothing but the suffix, so the
+  // suffix *is* the title — see `titleEndOffsetAfterSite`. A bare id is a poor
+  // thing to ask a metadata service and a perfectly good identity, and it keeps
+  // these two scenes apart.
+  const a = parsed('Bang.Bros.42466.1080p.18.12.18', ['Bang Bros']);
+  const b = parsed('Bang.Bros.Hardcore.1080p.18.12.18', ['Bang Bros']);
+  assert.equal(a.display.subtitle, 'Bang Bros');
+  assert.equal(b.display.subtitle, 'Bang Bros');
+  assert.equal(a.identityKey, 'bangbros:2018-12-18:42466');
+  assert.equal(b.identityKey, 'bangbros:2018-12-18:hardcore');
+});
+
+test('with the site unconfigured the two collide, which is the accepted class and not the site defect', () => {
+  // Unconfigured, the site is the first-token guess, so it is `Bang` for both
+  // and the titles differ only in the tokens the walk drops. That is exactly
+  // the over-collation `docs/known-issues.md` accepts — one site, one date,
+  // nothing but dropped tokens between them — and it is a different failure
+  // from the one above, where the site itself was wrong. Pinned rather than
+  // guarded so a change here surfaces as a failing test.
+  const a = parsed('Bang.Bros.42466.1080p.18.12.18');
+  const b = parsed('Bang.Bros.Hardcore.1080p.18.12.18');
+  assert.equal(a.display.subtitle, 'Bang');
+  assert.equal(b.display.subtitle, 'Bang');
+  assert.equal(a.identityKey, b.identityKey);
+});
+
+test('a trailing-date name keeps the title the walk leaves, with the site matched across the rest', () => {
+  // Both indices doing their separate jobs on one name: `Bang Bros` is matched
+  // out of a `before` that runs to the encode boundary, and the title stops at
+  // `Alex Coal` rather than carrying the `Hardcore 42466` that `before` still
+  // holds.
+  const result = parsed('Bang.Bros.Alex.Coal.Hardcore.42466.1080p.18.12.18', ['Bang Bros']);
+  assert.equal(result.identityKey, 'bangbros:2018-12-18:alex-coal');
+  assert.equal(result.display.subtitle, 'Bang Bros');
+  assert.equal(result.display.title, 'Alex Coal');
+});
+
+test('the trailing-date and dateless readings of one name agree', () => {
+  // The real corpus name the dateless test above was written for, with a
+  // trailing date added. Two different code paths reading the same site and the
+  // same title, and they used to disagree: the dated one read the site as `OF`
+  // because its `before` was cut at `titleEnd`, while the dateless one read the
+  // whole configured site. Now both read the site, and both keep the id run as
+  // the title because the site leaves nothing else.
+  const sites = ['OF E Part1 Ekaterina Enokaeva'];
+  const dated = parsed('OF.E.Part1_Ekaterina.Enokaeva_.128825778_456239169_720p-18.12.18', sites);
+  const dateless = parsed('OF.E.Part1_Ekaterina.Enokaeva_.128825778_456239169_720p', sites);
+  assert.equal(dated.display.subtitle, 'OF E Part1 Ekaterina Enokaeva');
+  assert.equal(dated.display.title, dateless.display.title);
+  assert.equal(dated.identityKey, 'ofepart1ekaterinaenokaeva:2018-12-18:128825778-456239169');
+  assert.equal(dateless.identityKey, 'ofepart1ekaterinaenokaeva::128825778-456239169');
+
+  // Unconfigured the site is a guess of one token, so the walk leaves a title
+  // and the ids go.
+  assert.equal(
+    parsed('OF.E.Part1_Ekaterina.Enokaeva_.128825778_456239169_720p-18.12.18').display.title,
+    'E Part1 Ekaterina Enokaeva',
+  );
+});
+
+test('the whole suffix run survives when the site leaves nothing else, not just one token of it', () => {
+  // Two real corpus posts from one OnlyFans "site" whose *first* id is shared
+  // and whose second is not. Keeping one token of the suffix — the tidy reading
+  // of "the title may not end before the site does" — collapses both onto
+  // `ofepart1ekaterinaenokaeva::128825778`, which is two distinct scenes on one
+  // identity key: the failure this parser must never produce. Keeping the whole
+  // run costs a longer title and keeps them apart.
+  const sites = ['OF E Part1 Ekaterina Enokaeva'];
+  const a = parsed('OF.E.Part1_Ekaterina.Enokaeva_.128825778_456239169_720p', sites);
+  const b = parsed('OF.E.Part1_Ekaterina.Enokaeva_.128825778_456239173_480p', sites);
+  assert.equal(a.display.title, '128825778 456239169');
+  assert.equal(b.display.title, '128825778 456239173');
+  assert.notEqual(a.identityKey, b.identityKey);
+});
+
+test('a date with the encode behind it keeps its suffix, which is an asymmetry on purpose', () => {
+  // The other branch of this shape — date near the end, encode *after* it — has
+  // no suffix run between the title and the date, so no walk runs and nothing is
+  // trimmed at all. Behind a *leading* date the same tokens do reach the walk,
+  // and `42466` goes; `Solo` survives there only because `minIndex: 1` floors
+  // the walk one token in, not because the vocabulary spared it. Where the date
+  // sits decides how much is trimmed. The reason the first is left alone is in
+  // `dateAtEndPrefixTokens`: recognising the suffix there would mean recognising
+  // it with no encode run adjacent, which is the guessing the inverted boundary
+  // search removed. Pinned so the inconsistency is visible rather than lurking.
+  const behind = parsed('Bang.Bros.Solo.42466.18.12.18.1080p.MP4-WRB', ['Bang Bros']);
+  assert.equal(behind.identityKey, 'bangbros:2018-12-18:solo-42466');
+  const leading = parsed('Bang.Bros.18.12.18.Solo.42466.1080p.MP4-WRB', ['Bang Bros']);
+  assert.equal(leading.identityKey, 'bangbros:2018-12-18:solo');
+});
+
+test('a title made only of suffix vocabulary is kept rather than refused', () => {
+  // Real corpus name, and the plainest case of the rule: with `Ex Appeal`
+  // configured, everything after the site is a language tag. `FRENCH` is a poor
+  // title and an honest one — nothing is invented — and a refusal here is a
+  // release the user has to repair by hand. `clubseventeen ...` is the same
+  // shape with a trailing date and a content-type tag instead.
+  assert.equal(parsed('Ex.Appeal.FRENCH.XXX.2160p.WEBRip.MP4-COCKiNE', ['Ex Appeal']).display.title, 'FRENCH');
+  const dated = parsed('clubseventeen_tiny-teen,eva-elfie_solo-2160p-19.05.08', [
+    'clubseventeen tiny teen,eva elfie',
+  ]);
+  assert.equal(dated.display.subtitle, 'clubseventeen tiny teen,eva elfie');
+  assert.equal(dated.display.title, 'solo');
 });
 
 // --- Day-first dates with a four-digit year ----------------------------------
@@ -640,6 +824,20 @@ test('a dateless name with no encode section parses once its site is known', () 
   assert.equal(result.identityKey, 'tripforfuck::hiyori-japanese-2');
   assert.equal(result.display.subtitle, 'Trip For Fuck');
   assert.equal(result.display.title, 'Hiyori JAPANESE 2');
+});
+
+test('the no-boundary path keeps its whole remainder, suffix vocabulary and all', () => {
+  // The one path with no encode boundary at all, and therefore no title bound
+  // to compute: the walk is deliberately not run here. What licenses it
+  // elsewhere is adjacency to a *recognised* encode section — that is the
+  // evidence the tokens it crosses are metadata — and there is none here, which
+  // is what brought the name to this path. `Hiyori JAPANESE` keeps its tag for
+  // the same reason a dated name with no encode vocabulary keeps its whole
+  // remainder. If the walk is ever extended here this becomes `Hiyori`, and
+  // that must be a decision with a measurement behind it, not a side effect.
+  const result = parsed('TripForFuck - Hiyori JAPANESE', ['Trip For Fuck']);
+  assert.equal(result.display.title, 'Hiyori JAPANESE');
+  assert.equal(result.identityKey, 'tripforfuck::hiyori-japanese');
 });
 
 test('two episodes of one dateless site stay separate', () => {

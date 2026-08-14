@@ -34,8 +34,12 @@ In scope:
   half serving as the suffix candidates (§5).
 - **Adding `DUTCH` and `JAPANESE`** to the language half, which puts them in
   `NON_GROUP_TERMS` for the first time. That changes release-group detachment as well as
-  the title, and is measured as such (§10).
+  the title, and is measured as such (§10). *Amended 2026-08-13: `POLISH` and `CZECH` too —
+  see §5.*
 - Corpus measurement of the change, per tier and against the holdout.
+- *Amended 2026-08-13, final fix wave:* **the dateless shape**, which the first pass left
+  computing a title bound it then discarded. Owner's decision, so that every key that will
+  ever move moves in one re-key migration (§8, §10).
 
 Out of scope:
 
@@ -226,9 +230,41 @@ return { titleEnd, encodeStart };
 the array would shift indices while those offsets stayed absolute, which corrupts silently.
 
 **`minIndex` guards the title.** It is what keeps the walk from consuming everything, which
-is why the existing callers' values (`2`, `2`, `1`, `0`) carry over unchanged and no
-separate "never empty the title" special case is needed. `buildRelease` already refuses an
+is why the existing callers' values (`2`, `2`, `1`, `0`) carry over unchanged ~~and no
+separate "never empty the title" special case is needed~~. `buildRelease` already refuses an
 empty scene slug; this keeps the walk from producing one.
+
+> **Amended 2026-08-13, during the final fix wave: the second half of that claim is wrong as
+> stated, and a special case is exactly what it needed.** `minIndex` floors a *token index*,
+> and the title does not start at token 0 — it starts after the site. `minIndex: 2`
+> guarantees a non-empty title only while the site is one token. When a configured
+> multi-token site reaches `minIndex` from the other side, the walk's floor and the site's end
+> coincide and the trimmed title is empty. Measured by sweeping every 1–5-token leading prefix
+> of every corpus title as a configured site — 48,941 (title, site-list) pairs — that happens
+> for 19 titles.
+>
+> **The resolution is `titleEndOffsetAfterSite`, applied on a second pass once
+> `matchSitePrefix` has run:** if the walk left nothing after the site, the suffix run *is*
+> the title and the bound falls back to `encodeStart`. Two reasons it keeps the whole run
+> rather than one token of it:
+>
+> - A title of `42466` or `FRENCH` is not a *wrong* answer. Nothing is invented — it is the
+>   site's own catalogue id or its own tag, accurate and merely low on information — so the
+>   "a wrong answer is worse than no answer" rule does not reach it, while refusing costs the
+>   user a release to repair by hand. It is a poor term to ask ThePornDB and a perfectly
+>   stable identity, and the metadata path records a near-miss rather than confirming a bad
+>   match, so a lookup that fails on it costs nothing.
+> - Keeping only the *first* remaining token merges two scenes.
+>   `OF...Enokaeva_.128825778_456239169_720p` and `..._456239173_480p` share their first id
+>   and differ in their second, so a one-token floor collapses them onto
+>   `ofepart1ekaterinaenokaeva::128825778`. That pair is the only corpus case with more than
+>   one token left after its site, and two distinct scenes on one key is the failure this
+>   parser must never produce.
+>
+> Measured after the change: all 19 return to base's identity key exactly — same site slug,
+> same title — and the sweep records 0 newly refused and 0 newly parsed pairs out of 48,941.
+> The walk's answer is untouched wherever it leaves anything at all, which includes every
+> unmatched site, where the fallback takes one token and the floor is the `2` it always was.
 
 **Both functions must share one predicate for encode tokens.** If `findTitleEnd` and
 `findEncodeSuffixStart` ever disagree about what an encode token is, the gap between the
@@ -271,11 +307,20 @@ set, held lowercase, sitting beside the parser's other vocabularies.
 
 `NON_GROUP_TERMS` today mixes two kinds of thing under one question. It becomes the union
 of two named halves, so its membership — and therefore release-group detachment — is
-unchanged except for the two additions below:
+unchanged except for the ~~two~~ four additions below:
+
+> **Amended 2026-08-13, final fix wave: `POLISH` and `CZECH` join the two below**, on the
+> same evidence and after the same measurement. `POLISH` occurs three times in the corpus
+> and is title-final in all three; `CZECH` occurs three times, title-final in two, and its
+> third occurrence (`ALSScan.17.12.09.Czech.2017.Casting...`) is mid-title, where the walk
+> stops at `Casting` and never reaches it. Both therefore behave exactly as `GERMAN` and
+> `DUTCH` do. §10 records which languages were measured and *rejected*, which is the more
+> useful half of this note.
 
 ```ts
 const LANGUAGE_TERMS = new Set([
   'ENGLISH', 'FRENCH', 'GERMAN', 'SPANISH', 'ITALIAN', 'RUSSIAN', 'DUTCH', 'JAPANESE',
+  'POLISH', 'CZECH',
   'ENG', 'FRA', 'GER', 'ESP', 'ITA', 'RUS', 'JAP', 'JPN',
 ]);
 
@@ -322,9 +367,31 @@ on the drop side without a special case.
 
 ## 6. What each shape gets
 
-All four `findEncodeSuffixStart` call sites move to the composer, so every parser shape is
+~~All four `findEncodeSuffixStart` call sites move to the composer, so every parser shape is
 covered by one boundary rule. That includes `splitSegment`, which serves the delimited
-listing form.
+listing form.~~
+
+> **Amended 2026-08-13, during implementation and again in the final fix wave. Three of the
+> four call sites moved; `splitSegment` did not.** Moving it let the walk consume an entire
+> listing part — `Hardcore` is itself a content-type term, so the walk crossed it and the
+> numeric id behind it — and `[Site] Alex - Hardcore 42466 1080p - 2026-08-05` collapsed onto
+> the same identity key as the same listing with `42467`. Two distinct scenes on one key is
+> the one failure this parser must never produce, so `splitSegment` keeps the single
+> `findEncodeSuffixStart` cut, exactly as the paragraph below said to do if the rule ever
+> misfired there.
+>
+> **What that excludes is the code path, not the shape.** `splitSegment` is reached only when
+> the listing's date carries a four-digit year; written `26.08.05` the same name matches
+> `DOTTED_DATE_RUN`, the delimited reader declines, and the date-at-end shape reads it — where
+> the walk does run. The two-digit spelling of the pair above *does* collapse onto
+> `site:2026-08-05:alex`. That collision is inside the class `docs/known-issues.md` accepts
+> (one site, one date, titles differing only in dropped tokens), so it is not a defect, but
+> the earlier wording implied a guarantee the shape does not have. Both spellings are pinned
+> by tests in `parse-date-at-end.test.ts`.
+>
+> The remaining three call sites each carry **two** indices rather than one: `before`, the run
+> `matchSitePrefix` and `sceneSiteCandidates` read, reaches the encode boundary, while the
+> title stops at `titleEnd`. Conflating them cost the date-at-end shape its site — see §10.
 
 The delimited form is worth naming as an asymmetry rather than left implicit. Its title is
 a set of parts with no fixed order — `sceneSlugFromParts` sorts them precisely because
@@ -417,7 +484,64 @@ collation benefit is prospective, not present.
   observed; another site's `chapter` or `ep` would truncate. Same maintenance cost
   `stripPosterSignature` names for its observed-posters list, and the same reason: a
   structural rule was not available.
-- **Reaching the delimited shape is unmeasured**, because the corpus contains no
-  content-type tags in that form. §6 records what to do if it misfires.
+- ~~**Reaching the delimited shape is unmeasured**, because the corpus contains no
+  content-type tags in that form. §6 records what to do if it misfires.~~
+
+  > **Amended 2026-08-13: stale.** It misfired, it was measured, and the rule was scoped out
+  > of `splitSegment` — see §6. What remains is not "unmeasured" but "excluded by code path":
+  > a listing whose date has a two-digit year never reaches `splitSegment` and does get the
+  > walk. That is pinned by a test rather than left as a note.
+
+- **The two indices are easy to confuse, and confusing them corrupts the site.** `encodeStart`
+  bounds what site matching may read; `titleEnd` bounds the title text. `matchSitePrefix`
+  never consumes every token it is given, so a `before` cut down to `titleEnd` cannot match a
+  site that spans the dropped tokens — the site silently degrades to the release's first word
+  and takes the library directory with it. That happened in the date-at-end shape and was
+  caught in review, not by the corpus: **the gate ran with no site list at all** (see the
+  harness bullet below), so the site was a first-token guess before and after and no number
+  could move. The real corpus name that exhibits it is
+  `clubseventeen_tiny-teen,eva-elfie_solo-2160p-19.05.08` with
+  `clubseventeen tiny teen,eva elfie` configured: base and the fix read the four-token site,
+  the intermediate branch ignored it entirely. Both indices are now carried explicitly in
+  `DateAtEnd` and `DatelessPrefix`, and the offset field is named `titleEndOffset` so it
+  cannot be mistaken for `TitleBoundary.titleEnd`, which is an index.
+
+- **An empty title is possible after all, and the suffix becomes the title when it happens.**
+  See the amendment in §4 for the rule and the measurement. Both call sites that run the walk
+  against a *matched* site need it — the date-at-end shape and the dateless shape. The others
+  are safe by construction and were checked rather than assumed: the dotted shape walks only
+  the post-date run, which holds no site tokens at all; the mid-name-date branch of the
+  date-at-end shape and the no-boundary dateless path run no walk; `splitSegment` is scoped
+  out. Every one of them was probed with a configured site covering everything but the suffix,
+  and every one returned a non-empty title.
+
+- **The corpus gate could not see the site half of the parser, and that is why the Critical
+  survived it.** `scripts/parse-corpus.ts` passed `sites: []` unless `--sites=` was given by
+  hand, and no run on this branch gave it — so `matchSitePrefix`, `consumeSiteTld` and every
+  multi-token site name were never executed by the measurement that gated the change. The
+  harness now measures the corpus twice by default: once with the configured list, once with
+  the site names the first pass produced (`--no-learned-sites` to skip), and reports how many
+  identity keys and site segments move between them. A gate that cannot execute the logic
+  under test is a defect in the gate.
+
+- **`THAI` and `ARABIC` were measured and rejected**, and this is the note that says so, so
+  that "they are languages too" does not read as an oversight. `May Thai` is title-final in
+  `MorePOV.26.07.23.Alexa.Flexy.Geisha.Kyd.And.May.Thai.XXX...` and so is the `Thai` of
+  `ThaiSwinger.26.07.22.Tuk.Brilliant.Thai.XXX...`; `Sarah Arabic` appears in three corpus
+  scenes. In this domain both words are performer names far more often than they are
+  languages, so admitting them truncates real titles — the failure this whole vocabulary
+  split exists to avoid. They belong beside `ENGLISH` and `RUSSIAN` as the entries to suspect
+  first, except that these two never get in at all.
+
+- **The dateless shape is in scope, as of the final fix wave.** §2 originally left it out.
+  `parseDatelessForm` bounded its title at the encode boundary, so `titleEnd` was computed and
+  discarded and the feature's own motivating example — `TripForFuck.Hiyori.Suzuki.Solo.42466`
+  — was unfixed there on this branch *and* on its base. The repo owner's decision was to fix
+  it now rather than later, so that every key which will ever move moves in one re-key
+  migration. It widens the over-collation `parseDatelessForm` already documents: a dateless key
+  has an empty date segment, and two dateless scenes differing only in dropped tokens now
+  collate. The no-encode-boundary path inside that shape keeps its whole remainder as the
+  title and deliberately does not run the walk, because what licenses the walk elsewhere is
+  adjacency to a recognised encode section and there is none there.
 - **The 250 threshold is empirical.** A site numbering scenes from 1 to 249 would keep its
   ids; a site with a genuine 250th part would lose it. Neither appears in 6,388 titles.
