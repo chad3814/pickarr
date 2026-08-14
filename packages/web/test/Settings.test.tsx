@@ -123,6 +123,41 @@ test('saving sends keep for an untouched secret and reports the pending restart'
   assert.deepEqual(body.downloadClients[0]?.apiKey, { kind: 'keep' });
 });
 
+test('clicking Save twice before the first request resolves issues only one PUT', async () => {
+  let putRequests = 0;
+  let configCalls = 0;
+  let resolvePut: (() => void) | undefined;
+  stubFetch(async (_url, init) => {
+    if (init?.method === 'PUT') {
+      putRequests += 1;
+      // Held open so the second click lands while the first save is still in
+      // flight — the only window this bug (a double-click sending two PUTs)
+      // can occur in.
+      await new Promise<void>((resolve) => {
+        resolvePut = resolve;
+      });
+      return json({ savedAt: 1, restartRequired: true });
+    }
+    configCalls += 1;
+    // The initial load precedes any save (nothing pending yet); the re-read
+    // that follows a successful save reports the restart it just caused.
+    return json(configResponse({ restartRequired: configCalls > 1 }));
+  });
+
+  render(<Settings />);
+  await waitFor(() => assert.ok(screen.getByLabelText(/trash directory/i)));
+  fireEvent.change(screen.getByLabelText(/trash directory/i), { target: { value: '/data/bin' } });
+
+  const save = screen.getByRole('button', { name: /^save$/i });
+  fireEvent.click(save);
+  assert.equal(save.hasAttribute('disabled'), true);
+  fireEvent.click(save);
+
+  resolvePut?.();
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /restart now/i })));
+  assert.equal(putRequests, 1);
+});
+
 test('a non-numeric port is reported without ever reaching the server', async () => {
   let putRequests = 0;
   stubFetch(async (_url, init) => {
@@ -227,6 +262,56 @@ test('a successful backup names the file it saved', async () => {
   // A backup that stopped revoking its object URL would leak one per download;
   // this is the only thing that would catch a regression there.
   assert.deepEqual(revoked, ['blob:stub']);
+});
+
+test('the download anchor is attached to the document during click, and its object URL is revoked only after the anchor is removed', async () => {
+  stubFetch(async (url) =>
+    url.endsWith('/api/database/backup')
+      ? new Response('SQLite format 3\n', {
+          headers: {
+            'content-type': 'application/octet-stream',
+            'content-disposition': 'attachment; filename="pickarr-2026-08-13.db"',
+          },
+        })
+      : json(configResponse()),
+  );
+
+  // Ordering, not wall-clock timing: the old code never appended or removed
+  // the anchor at all (so `'removed'` would never appear here) and revoked
+  // the object URL synchronously right after `click()` — both classic
+  // Firefox/Safari download-abort shapes. `waitFor` below uses real timers,
+  // so it does not matter whether the fix defers the revoke by one
+  // microtask or one macrotask; what matters is that removal precedes it.
+  const events: string[] = [];
+  URL.createObjectURL = (() => 'blob:stub') as typeof URL.createObjectURL;
+  URL.revokeObjectURL = (() => {
+    events.push('revoked');
+  }) as typeof URL.revokeObjectURL;
+
+  let attachedDuringClick = false;
+  const originalClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+    attachedDuringClick = document.body.contains(this);
+    return originalClick.call(this);
+  };
+  const originalRemove = HTMLAnchorElement.prototype.remove;
+  HTMLAnchorElement.prototype.remove = function (this: HTMLAnchorElement) {
+    events.push('removed');
+    return originalRemove.call(this);
+  };
+
+  try {
+    render(<Settings />);
+    await waitFor(() => assert.ok(screen.getByRole('button', { name: /back up/i })));
+    fireEvent.click(screen.getByRole('button', { name: /back up/i }));
+    await waitFor(() => assert.ok(screen.getByText(/pickarr-2026-08-13\.db/)));
+    await waitFor(() => assert.deepEqual(events, ['removed', 'revoked']));
+
+    assert.equal(attachedDuringClick, true);
+  } finally {
+    HTMLAnchorElement.prototype.click = originalClick;
+    HTMLAnchorElement.prototype.remove = originalRemove;
+  }
 });
 
 test('a failed restart clears the notice a successful save left behind', async () => {

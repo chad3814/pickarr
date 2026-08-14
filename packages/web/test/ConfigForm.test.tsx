@@ -11,7 +11,7 @@ function config(over: Partial<EditableConfig> = {}): EditableConfig {
     server: { port: 8080 },
     database: { path: '/config/pickarr.db' },
     trashDir: '/data/trash',
-    plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes', sites: ['Vixen'] } },
+    plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes', sites: ['Vixen'], retries: 3 } },
     downloadClients: [
       {
         id: 'sab',
@@ -39,7 +39,7 @@ test('a round trip with no edits submits the config unchanged, keeping secrets',
     server: { port: 8080 },
     database: { path: '/config/pickarr.db' },
     trashDir: '/data/trash',
-    plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes', sites: ['Vixen'] } },
+    plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes', sites: ['Vixen'], retries: 3 } },
     downloadClients: [
       {
         id: 'sab',
@@ -58,6 +58,24 @@ test('a round trip with no edits submits the config unchanged, keeping secrets',
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
   };
   assert.deepEqual(submitted, expected);
+});
+
+test('a plugin list setting drops blank lines, and a number setting is parsed, only at submit', () => {
+  // `PluginFields` holds both as raw text in the draft (see its
+  // `PluginSettingDraftValue` doc comment) so that typing into either control
+  // is not clobbered on every keystroke; this is where that raw text is
+  // finally converted back to what `configSchema` expects.
+  const original = config({
+    plugins: { '@pickarr/plugin-scenes': { sites: ['Vixen'], retries: 3 } },
+  });
+  const draft = toDraft(original);
+  draft.plugins[0]!.settings = [
+    { key: 'sites', value: { list: 'Vixen\n\n  \nTushy' } },
+    { key: 'retries', value: { number: '5' } },
+  ];
+  const submitted = toSubmission(draft, original);
+  assert.ok(!('error' in submitted));
+  assert.deepEqual(submitted.plugins['@pickarr/plugin-scenes'], { sites: ['Vixen', 'Tushy'], retries: 5 });
 });
 
 test('an empty artwork directory submits as absent, not as an empty string', () => {

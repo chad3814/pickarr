@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, parseConfig, resolveSecrets } from '../../src/config/load.ts';
+import { loadConfig, parseConfig, readConfigDocument, resolveSecrets } from '../../src/config/load.ts';
 import type { JsonValue } from '../../src/json.ts';
 
 const VALID = {
@@ -129,6 +129,25 @@ test('an invalid config names the offending field', async () => {
   });
 });
 
+// V8's "Unexpected token" message echoes ~20 characters of source around the
+// failure, and both config routes return this message verbatim to an
+// unauthenticated LAN peer. An api key pasted without quotes, or left in
+// front of a trailing comma, is an ordinary mistake — the message must not
+// echo any fragment of it.
+test('a JSON syntax error next to a literal key does not leak the key', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    await writeFile(path, '{"apiKey":SUPERSECRET1234567890,"trashDir":"/data/trash"}');
+
+    await assert.rejects(readConfigDocument(path), (error: Error) => {
+      assert.match(error.message, /not valid JSON/);
+      assert.doesNotMatch(error.message, /SUPERSECRET1234567890/);
+      assert.doesNotMatch(error.message, /SUPERSECRE/);
+      return true;
+    });
+  });
+});
+
 test('PICKARR_PORT overrides the configured port', async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, 'config.json');
@@ -178,8 +197,17 @@ test('a non-positive perTick is refused at startup', async () => {
 test('parseConfig accepts a valid document without touching the filesystem', () => {
   const config = parseConfig(structuredClone(VALID) as unknown as JsonValue, 'test');
   assert.equal(config.server.port, 8080);
-  // Unresolved: parseConfig does no I/O, so a `file:` reference is still a reference.
   assert.equal(config.metadata.perTick, 5);
+});
+
+// `parseConfig` does no I/O — that is `resolveSecrets`'s job — so a `file:`
+// reference must come out exactly as it went in, not resolved and not
+// rejected even if the path it names does not exist.
+test('parseConfig leaves a file: reference unresolved', () => {
+  const withSecret = structuredClone(VALID);
+  withSecret.downloadClients[0]!.apiKey = 'file:/run/secrets/sabnzbd_api_key';
+  const config = parseConfig(withSecret as unknown as JsonValue, 'test');
+  assert.equal(config.downloadClients[0]?.apiKey, 'file:/run/secrets/sabnzbd_api_key');
 });
 
 test('parseConfig names its source and the offending field', () => {

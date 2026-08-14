@@ -87,7 +87,11 @@ there is no such supervisor: the restart button stops Pickarr and it stays stopp
 someone starts it again by hand. Check your restart policy before you rely on the button.
 
 API keys and other secrets are never sent to the browser — the form shows only whether one
-is set — and are left untouched by a save unless you explicitly replace them.
+is set — and are left untouched by a save unless you explicitly replace them. A field you
+left out of the file to track Pickarr's built-in default (`metadata.perTick`, a feed's
+`intervalSeconds`, and so on) is written out explicitly the first time you save from this
+form, with whatever value was in effect at that moment — it no longer tracks a future
+change to the default the way an omitted field does.
 
 The `Settings` tab also offers a database backup: a button that downloads a consistent
 copy of `config/pickarr.db`, taken with SQLite's online backup API rather than a plain

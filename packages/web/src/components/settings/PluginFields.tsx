@@ -1,5 +1,4 @@
 import { useId, useState } from 'react';
-import type { PluginSettingValue } from '../../api/client.ts';
 import type { PluginDraft } from './ConfigForm.tsx';
 
 export interface PluginFieldsProps {
@@ -9,12 +8,29 @@ export interface PluginFieldsProps {
 
 type SettingType = 'text' | 'number' | 'boolean' | 'list';
 
+/**
+ * A plugin setting's value as it lives in the draft, before submission.
+ *
+ * `text` and `boolean` are held as the value itself — a keystroke's meaning
+ * cannot change under a control that just echoes back what was typed or
+ * toggled. `number` and `list` are held as the *raw text* the control shows,
+ * because both are otherwise converted on every keystroke (`Number(...)`,
+ * `fromLines(...)`) and then redisplayed as the converted form: clearing a
+ * number input round-trips `'' -> 0 -> "0"`, and pressing Enter in the list
+ * textarea round-trips `"Vixen\n" -> ['Vixen'] -> "Vixen"` — in both cases
+ * React puts back something other than what was typed, on a control the DOM
+ * itself would otherwise have left alone. Converting only at submit (see
+ * `toSubmission` in `ConfigForm.tsx`) is the same rule that file already
+ * applies to `server.port` and the other numeric fields.
+ */
+export type PluginSettingDraftValue = string | boolean | { list: string } | { number: string };
+
 /** The blank value for a newly-added setting of each type. */
-const BLANK: Record<SettingType, PluginSettingValue> = {
+const BLANK: Record<SettingType, PluginSettingDraftValue> = {
   text: '',
-  number: 0,
+  number: { number: '0' },
   boolean: false,
-  list: [],
+  list: { list: '' },
 };
 
 const blankPlugin: PluginDraft = { name: '', settings: [] };
@@ -22,15 +38,17 @@ const blankPlugin: PluginDraft = { name: '', settings: [] };
 /**
  * A list is edited one value per line.
  *
- * Blank lines are dropped rather than becoming empty strings: `configSchema`
- * types this as `z.array(z.string())` and would accept `['']` happily,
- * leaving a plugin to treat an empty site name as a real one.
+ * Blank lines are dropped rather than becoming empty strings — but only here,
+ * at submit: `configSchema` types this as `z.array(z.string())` and would
+ * accept `['']` happily, leaving a plugin to treat an empty site name as a
+ * real one. Dropping them while typing (on every keystroke) is what broke
+ * pressing Enter to start a new line in the first place.
  */
-function toLines(value: string[]): string {
+export function toLines(value: string[]): string {
   return value.join('\n');
 }
 
-function fromLines(raw: string): string[] {
+export function fromLines(raw: string): string[] {
   return raw
     .split('\n')
     .map((line) => line.trim())
@@ -42,7 +60,7 @@ function fromLines(raw: string): string[] {
  * record of settings whose values may be a string, a number, a boolean or a
  * list of strings.
  *
- * The control is chosen from the value's *current* type and cannot change
+ * The control is chosen from the value's *current* shape and cannot change
  * it. A single text input for everything would be smaller code, but every
  * save would rewrite `sites: ["Vixen"]` as `sites: "Vixen"` and `retries: 3`
  * as `retries: "3"` — and `plugins` is typed loosely enough in
@@ -82,7 +100,7 @@ export function PluginFields({ plugins, onChange }: PluginFieldsProps) {
     <fieldset>
       <legend>Plugins</legend>
       {plugins.map((plugin, index) => {
-        function updateSetting(settingIndex: number, next: { key: string; value: PluginSettingValue }) {
+        function updateSetting(settingIndex: number, next: { key: string; value: PluginSettingDraftValue }) {
           updatePlugin(index, {
             ...plugin,
             settings: plugin.settings.map((setting, i) => (i === settingIndex ? next : setting)),
@@ -134,15 +152,7 @@ export function PluginFields({ plugins, onChange }: PluginFieldsProps) {
                     </div>
                     <div className="manual-field">
                       <label htmlFor={valueId}>{valueLabel}</label>
-                      {Array.isArray(setting.value) ? (
-                        <textarea
-                          id={valueId}
-                          value={toLines(setting.value)}
-                          onChange={(event) =>
-                            updateSetting(settingIndex, { ...setting, value: fromLines(event.target.value) })
-                          }
-                        />
-                      ) : typeof setting.value === 'boolean' ? (
+                      {typeof setting.value === 'boolean' ? (
                         <input
                           id={valueId}
                           type="checkbox"
@@ -151,13 +161,30 @@ export function PluginFields({ plugins, onChange }: PluginFieldsProps) {
                             updateSetting(settingIndex, { ...setting, value: event.target.checked })
                           }
                         />
-                      ) : typeof setting.value === 'number' ? (
+                      ) : typeof setting.value === 'object' && 'list' in setting.value ? (
+                        // Raw text, converted with `fromLines` only at submit
+                        // (`ConfigForm.toSubmission`): converting on every
+                        // keystroke is what made Enter unable to start a new
+                        // line — `"Vixen\n"` becomes `['Vixen']` becomes
+                        // `"Vixen"`, and React puts that back in the textarea.
+                        <textarea
+                          id={valueId}
+                          value={setting.value.list}
+                          onChange={(event) =>
+                            updateSetting(settingIndex, { ...setting, value: { list: event.target.value } })
+                          }
+                        />
+                      ) : typeof setting.value === 'object' && 'number' in setting.value ? (
+                        // Raw text, converted with `Number` only at submit:
+                        // converting on every keystroke is what made clearing
+                        // the field snap back to `0` — `''` becomes `0`
+                        // becomes `"0"`, and React puts that back in the input.
                         <input
                           id={valueId}
                           type="number"
-                          value={String(setting.value)}
+                          value={setting.value.number}
                           onChange={(event) =>
-                            updateSetting(settingIndex, { ...setting, value: Number(event.target.value) })
+                            updateSetting(settingIndex, { ...setting, value: { number: event.target.value } })
                           }
                         />
                       ) : (
@@ -191,10 +218,19 @@ export function PluginFields({ plugins, onChange }: PluginFieldsProps) {
                   </article>
                 );
               })}
+              {/*
+                Named by its own plugin, the same reason "Remove setting"
+                above is: one of these renders per plugin, and a
+                rotor/forms-mode list of controls would otherwise show
+                identical "New setting type" entries with no way to tell them
+                apart. Visible text is unchanged; only the accessible name
+                carries the plugin's identity.
+              */}
               <div className="manual-field">
                 <label htmlFor={`${formId}-add-type-${index}`}>New setting type</label>
                 <select
                   id={`${formId}-add-type-${index}`}
+                  aria-label={`New setting type for ${plugin.name || '(new)'}`}
                   value={addAs[index] ?? 'text'}
                   onChange={(event) => setAddAs({ ...addAs, [index]: event.target.value as SettingType })}
                 >
@@ -204,8 +240,14 @@ export function PluginFields({ plugins, onChange }: PluginFieldsProps) {
                   <option value="list">List of text</option>
                 </select>
               </div>
+              {/*
+                Named by its own plugin, the same reason as above: one of
+                these renders per plugin, and a rotor/forms-mode list of
+                controls would otherwise show identical "Add setting" entries
+                with no way to tell them apart.
+              */}
               <div className="settings-row-actions">
-                <button type="button" onClick={addSetting}>
+                <button type="button" aria-label={`Add setting to ${plugin.name || '(new)'}`} onClick={addSetting}>
                   Add setting
                 </button>
               </div>

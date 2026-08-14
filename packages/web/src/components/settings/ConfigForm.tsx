@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import { DownloadClientFields } from './DownloadClientFields.tsx';
 import { FeedFields } from './FeedFields.tsx';
-import { PluginFields } from './PluginFields.tsx';
+import { fromLines, PluginFields, toLines, type PluginSettingDraftValue } from './PluginFields.tsx';
 import { SecretField } from './SecretField.tsx';
 import type {
   EditableConfig,
@@ -45,7 +45,7 @@ export interface FeedDraft {
 
 export interface PluginDraft {
   name: string;
-  settings: { key: string; value: PluginSettingValue }[];
+  settings: { key: string; value: PluginSettingDraftValue }[];
 }
 
 /** `''` means "leave it out of the file"; see `metadata.artworkDir` in the spec. */
@@ -86,7 +86,15 @@ export function toDraft(config: EditableConfig): ConfigDraft {
       name,
       settings: Object.entries(settings).map(([key, value]) => ({
         key,
-        value: Array.isArray(value) ? [...value] : value,
+        // A list becomes raw text (`toLines`) and a number becomes raw text
+        // of itself; see `PluginSettingDraftValue`'s doc comment in
+        // `PluginFields.tsx` for why the draft cannot hold either as its
+        // real type while the control for it is being typed into.
+        value: Array.isArray(value)
+          ? { list: toLines(value) }
+          : typeof value === 'number'
+            ? { number: String(value) }
+            : value,
       })),
     })),
   };
@@ -106,6 +114,18 @@ function asCount(raw: string, field: string): number | { error: string } {
   if (!/^\d+$/.test(raw.trim())) return { error: `${field} must be a whole number` };
   const value = Number(raw.trim());
   return Number.isSafeInteger(value) && value > 0 ? value : { error: `${field} must be a whole number` };
+}
+
+/**
+ * The conversion `PluginSettingDraftValue`'s doc comment promises: a list's
+ * raw text is split back into an array (dropping blank lines, exactly as
+ * `configSchema` requires), a number's raw text is parsed, and text/boolean
+ * pass through unchanged since nothing converted them away from their real
+ * type in the first place.
+ */
+function fromDraftValue(value: PluginSettingDraftValue): PluginSettingValue {
+  if (typeof value !== 'object') return value;
+  return 'list' in value ? fromLines(value.list) : Number(value.number);
 }
 
 /**
@@ -149,7 +169,7 @@ export function toSubmission(draft: ConfigDraft, config: EditableConfig): Submit
   const plugins: Record<string, Record<string, PluginSettingValue>> = {};
   for (const plugin of draft.plugins) {
     const settings: Record<string, PluginSettingValue> = {};
-    for (const entry of plugin.settings) settings[entry.key] = entry.value;
+    for (const entry of plugin.settings) settings[entry.key] = fromDraftValue(entry.value);
     plugins[plugin.name] = settings;
   }
 

@@ -40,7 +40,12 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
   }
 
   function addClient() {
-    onChange([...clients, blankClient]);
+    // Not `blankClient` itself: pushing the module-level object means every
+    // added row shares the exact same `pathMappings` array reference, so
+    // adding a mapping to one added client would silently add it to every
+    // other added client too. `PluginFields` spreads its blank plugin and
+    // `FeedFields` builds a fresh literal for the same reason.
+    onChange([...clients, { ...blankClient, pathMappings: [] }]);
   }
 
   return (
@@ -158,8 +163,19 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
                   </div>
                 </article>
               ))}
+              {/*
+                Named by its own client, the same reason "Remove path
+                mapping" above is: one of these renders per download client,
+                and a rotor/forms-mode list of controls would otherwise show
+                identical "Add path mapping" entries with no way to tell them
+                apart.
+              */}
               <div className="settings-row-actions">
-                <button type="button" onClick={addPathMapping}>
+                <button
+                  type="button"
+                  aria-label={`Add path mapping to ${client.id || '(new)'}`}
+                  onClick={addPathMapping}
+                >
                   Add path mapping
                 </button>
               </div>

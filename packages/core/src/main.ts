@@ -1,10 +1,8 @@
 import { realpathSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
-import { loadConfig } from './config/load.ts';
-import type { JsonValue } from './json.ts';
+import { loadConfig, readConfigDocument } from './config/load.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins, type PluginRegistry } from './plugins/registry.ts';
 import { createSabnzbdClient } from './clients/sabnzbd.ts';
@@ -63,8 +61,12 @@ async function main(): Promise<void> {
   const config = await loadConfig(CONFIG_PATH);
   // Captured before the server can rewrite the file, and parsed rather than
   // held as text: `restartRequired` asks whether the *settings* changed, and a
-  // reindent is not a settings change.
-  const bootConfigDocument = JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as JsonValue;
+  // reindent is not a settings change. Read through `readConfigDocument`
+  // rather than a second `readFile` + `JSON.parse` here — that function
+  // exists precisely so the "unreadable" and "not valid JSON" messages boot
+  // and the config routes produce cannot drift, and a second copy of the
+  // read-then-parse logic is exactly how they would.
+  const bootConfigDocument = await readConfigDocument(CONFIG_PATH);
   const db = openDatabase(config.database.path);
   const registry = await loadPlugins(config);
 
@@ -226,6 +228,68 @@ async function main(): Promise<void> {
     config.feeds.map((feed) => [feed.id, registry.byPackage(feed.plugin)]),
   );
 
+  // `server` does not exist until `buildServer` below returns, so `shutdown`
+  // (declared here, closing over a `server` binding it does not read until it
+  // actually runs) cannot be built from it directly. `requestRestart` below
+  // instead takes an arrow that calls `shutdown` by name, so the binding only
+  // has to be resolved once `POST /api/restart` actually fires — by which
+  // point `shutdown` is long since assigned.
+  //
+  // Declared and assigned *here* — before `buildServer` and `server.listen()`
+  // — rather than after `server.listen()`, which is where this used to live.
+  // A `const` is in its temporal dead zone from the top of the enclosing
+  // block until its own initializer runs; the invariant this ordering
+  // guarantees is that every path that can reach `requestRestart` (any
+  // request the now-listening server accepts) finds `shutdown` already
+  // assigned. Declaring it after `server.listen()` instead relied on there
+  // being no `await` between that line and here to open a window where a
+  // request could arrive first — true only by accident, and only until the
+  // next `await` lands between them.
+  let shuttingDown = false;
+  const shutdown = (reason: string): void => {
+    // A second trigger during teardown — a SIGTERM arriving while a requested
+    // restart is already tearing down — must not start a second
+    // `server.close()`.
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`${reason}, shutting down`);
+    scheduler.stop();
+    // `close` is only ever called once from either branch below — not once
+    // more if it also throws — because a database that already failed to
+    // close is not fixed by asking it again, and a `catch` that could itself
+    // throw would escape this handler.
+    let dbClosed = false;
+    const closeDb = (): void => {
+      if (dbClosed) return;
+      dbClosed = true;
+      db.close();
+    };
+    void server
+      .close()
+      .then(() => {
+        closeDb();
+        // Zero, not one: this is a clean, intentional stop. Under the documented
+        // `restart: unless-stopped` compose policy that is a restart; under
+        // `restart: on-failure` it would not be, which is why the UI presents
+        // this as an explicit action rather than something a save does silently.
+        process.exit(0);
+      })
+      .catch((error: Error) => {
+        // Without this, a rejected `close()` would leave `shuttingDown` true
+        // forever: `db.close()` and `process.exit` above never run, so every
+        // later signal or restart request is silently ignored. Exiting
+        // non-zero (rather than falling through to the 0 above) does not
+        // change anything about `restart: unless-stopped`, which restarts on
+        // any exit code regardless — it matters for logs and monitoring,
+        // which can tell a failed teardown from a clean one this way, and for
+        // a deployment using `restart: on-failure` instead, where the exit
+        // code is exactly what decides whether this container comes back.
+        log(`shutdown failed: ${error.message}`);
+        closeDb();
+        process.exit(1);
+      });
+  };
+
   const server = buildServer({
     db,
     defaultClient,
@@ -244,10 +308,6 @@ async function main(): Promise<void> {
     configPath: CONFIG_PATH,
     bootConfigDocument,
     databasePath: config.database.path,
-    // `shutdown` closes over `server`, which does not exist until the call
-    // below returns — so this cannot pass `shutdown` itself, only a function
-    // that will call it once `shutdown` is in scope. The arrow is never
-    // invoked until `POST /api/restart` fires, by which point it is.
     requestRestart: () => shutdown('restart requested'),
   });
 
@@ -257,47 +317,6 @@ async function main(): Promise<void> {
   scheduler.start();
   void scheduler.ingestAllNow();
   void scheduler.reconcileNow();
-
-  // One shutdown, three triggers: SIGINT, SIGTERM, and `POST /api/restart`
-  // via the `requestRestart` passed into `buildServer` above. Previously this
-  // body was written inline inside the signal loop, duplicated nowhere else;
-  // now that a second caller needs the exact same sequence, a second copy of
-  // it is how the two would come to differ about, say, whether the database
-  // gets closed.
-  let shuttingDown = false;
-  const shutdown = (reason: string): void => {
-    // A second trigger during teardown — a SIGTERM arriving while a requested
-    // restart is already tearing down — must not start a second
-    // `server.close()`.
-    if (shuttingDown) return;
-    shuttingDown = true;
-    log(`${reason}, shutting down`);
-    scheduler.stop();
-    void server
-      .close()
-      .then(() => {
-        db.close();
-        // Zero, not one: this is a clean, intentional stop. Under the documented
-        // `restart: unless-stopped` compose policy that is a restart; under
-        // `restart: on-failure` it would not be, which is why the UI presents
-        // this as an explicit action rather than something a save does silently.
-        process.exit(0);
-      })
-      .catch((error: Error) => {
-        // Without this, a rejected `close()` would leave `shuttingDown` true
-        // forever: `db.close()` and `process.exit` above never run, so every
-        // later signal or restart request is silently ignored. Exiting
-        // non-zero (rather than falling through to the 0 above) does not
-        // change anything about `restart: unless-stopped`, which restarts on
-        // any exit code regardless — it matters for logs and monitoring,
-        // which can tell a failed teardown from a clean one this way, and for
-        // a deployment using `restart: on-failure` instead, where the exit
-        // code is exactly what decides whether this container comes back.
-        log(`shutdown failed: ${error.message}`);
-        db.close();
-        process.exit(1);
-      });
-  };
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => shutdown(`${signal} received`));

@@ -51,6 +51,25 @@ test('an existing client offers to keep its key; an added one cannot', () => {
   assert.equal(screen.queryAllByRole('button', { name: /keep existing/i }).length, 0);
 });
 
+// `addClient` used to push the module-level `blankClient` object itself, so
+// two added rows started out sharing the exact same `pathMappings` array
+// reference. Editing one field of one of them (`{ ...client, id: 'x' }`)
+// shallow-copies that shared reference into the new object rather than
+// cloning it, so the two rows would still point at one array under the hood.
+test('two added download clients do not share a pathMappings array', () => {
+  let next: ClientDraft[] = [];
+  const { rerender } = render(
+    <DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: /add download client/i }));
+  rerender(<DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />);
+  fireEvent.click(screen.getByRole('button', { name: /add download client/i }));
+  rerender(<DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />);
+
+  assert.equal(next.length, 2);
+  assert.notEqual(next[0]?.pathMappings, next[1]?.pathMappings);
+});
+
 test('removing a client drops exactly that row, leaving the others in order', () => {
   // Three rows so a bug that always drops the first or last row, regardless
   // of which button was clicked, cannot pass by accident: the middle row is
@@ -72,7 +91,11 @@ test('a path mapping can be added and edited', () => {
   const { rerender } = render(
     <DownloadClientFields clients={next} onDisk={ON_DISK} onChange={(value) => { next = value; }} />,
   );
-  fireEvent.click(screen.getByRole('button', { name: /add path mapping/i }));
+  // Named by its own client id rather than /add path mapping/i: several of
+  // these render when there is more than one client, and this query would
+  // fail to resolve to a single element - failing the test - if the per-row
+  // aria-label were ever removed.
+  fireEvent.click(screen.getByRole('button', { name: 'Add path mapping to sab' }));
   rerender(
     <DownloadClientFields clients={next} onDisk={ON_DISK} onChange={(value) => { next = value; }} />,
   );
