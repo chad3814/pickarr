@@ -51,13 +51,20 @@ test('an existing client offers to keep its key; an added one cannot', () => {
   assert.equal(screen.queryAllByRole('button', { name: /keep existing/i }).length, 0);
 });
 
-test('removing a client drops exactly that row', () => {
-  let next = [...draft(), { ...draft()[0]!, id: 'sab2' }];
+test('removing a client drops exactly that row, leaving the others in order', () => {
+  // Three rows so a bug that always drops the first or last row, regardless
+  // of which button was clicked, cannot pass by accident: the middle row is
+  // the one under test here.
+  let next = [...draft(), { ...draft()[0]!, id: 'sab2' }, { ...draft()[0]!, id: 'sab3' }];
   render(
     <DownloadClientFields clients={next} onDisk={ON_DISK} onChange={(value) => { next = value; }} />,
   );
-  fireEvent.click(screen.getAllByRole('button', { name: /remove/i })[1]!);
-  assert.deepEqual(next.map((client) => client.id), ['sab']);
+  // Named by id rather than /remove/i: several buttons on the page contain
+  // "remove" ("Remove download client" per client, "Remove path mapping" per
+  // mapping), and this query would fail to resolve to a single element - and
+  // so fail the test - if the per-row aria-label were ever removed.
+  fireEvent.click(screen.getByRole('button', { name: /remove download client sab2/i }));
+  assert.deepEqual(next.map((client) => client.id), ['sab', 'sab3']);
 });
 
 test('a path mapping can be added and edited', () => {
@@ -71,4 +78,23 @@ test('a path mapping can be added and edited', () => {
   );
   assert.equal(next[0]?.pathMappings.length, 2);
   assert.deepEqual(next[0]?.pathMappings[1], { from: '', to: '' });
+});
+
+test('a path mapping is named by its own from/to, so several on one client are not identical', () => {
+  let next: ClientDraft[] = [
+    {
+      ...draft()[0]!,
+      pathMappings: [
+        { from: '/downloads', to: '/data/downloads' },
+        { from: '/incomplete', to: '/data/incomplete' },
+      ],
+    },
+  ];
+  render(
+    <DownloadClientFields clients={next} onDisk={ON_DISK} onChange={(value) => { next = value; }} />,
+  );
+  // As above: this would fail to resolve to a single button - failing the
+  // test - if the mapping's own from/to were not carried in its aria-label.
+  fireEvent.click(screen.getByRole('button', { name: /remove path mapping \/incomplete/i }));
+  assert.deepEqual(next[0]?.pathMappings, [{ from: '/downloads', to: '/data/downloads' }]);
 });

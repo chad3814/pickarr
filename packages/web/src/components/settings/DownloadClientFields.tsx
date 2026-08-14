@@ -142,15 +142,18 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
                     />
                   </div>
                   {/*
-                    "Delete", not "Remove": a client row (with its own path
-                    mappings) always has at least one mapping by default, so a
-                    "Remove"-matching button here would sit alongside "Remove
-                    download client" and make an accessible-name query for
-                    /remove/i ambiguous about which row it targets.
+                    Named by its own from/to, the same reason as "Remove
+                    download client" below: several of these can render per
+                    client, and reading order is not how every user finds the
+                    right one.
                   */}
                   <div className="settings-row-actions">
-                    <button type="button" onClick={() => removePathMapping(mappingIndex)}>
-                      Delete path mapping
+                    <button
+                      type="button"
+                      aria-label={`Remove path mapping ${mapping.from || '(new)'} to ${mapping.to || '(new)'}`}
+                      onClick={() => removePathMapping(mappingIndex)}
+                    >
+                      Remove path mapping
                     </button>
                   </div>
                 </article>
@@ -162,8 +165,20 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
               </div>
             </fieldset>
 
+            {/*
+              Named by its own id, the same reason `SecretField` names
+              "Replace" and "Keep existing" per field (Task 9): one of these
+              renders per client, and a rotor/forms-mode list of controls
+              would otherwise show identical "Remove download client"
+              entries with no way to tell them apart. A row not yet given an
+              id (freshly added) reads as "(new)" rather than a blank name.
+            */}
             <div className="settings-row-actions">
-              <button type="button" onClick={() => removeClient(index)}>
+              <button
+                type="button"
+                aria-label={`Remove download client ${client.id || '(new)'}`}
+                onClick={() => removeClient(index)}
+              >
                 Remove download client
               </button>
             </div>
