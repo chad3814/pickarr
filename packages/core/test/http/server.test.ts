@@ -668,6 +668,28 @@ test('PUT /api/config preserves the mode config.json already had', async () => {
   });
 });
 
+// The test above passes even if the mode were hardcoded to `0600` and the
+// `stat` ignored, so this one pins that the mode is genuinely read from disk.
+// `0660` is chosen deliberately rather than arbitrarily: under the common
+// umask 022 the group-write bit is masked off when the temp file is created,
+// so reaching `660` here is only possible because of the `chmod` that follows
+// the write. Under a permissive umask the write alone would suffice and this
+// still passes — it never fails a correct implementation, and it does fail one
+// that drops either half.
+test('PUT /api/config preserves a wider mode too, not just a restrictive one', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    await chmod(configPath, 0o660);
+    const server = buildServer(configDeps);
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: configSubmission() });
+    assert.equal(response.statusCode, 200);
+
+    const mode = (await stat(configPath)).mode & 0o777;
+    assert.equal(mode.toString(8), '660');
+    await server.close();
+  });
+});
+
 test('PUT /api/config leaves no temporary file behind', async () => {
   await withConfigDir(async ({ dir, deps: configDeps }) => {
     const server = buildServer(configDeps);
