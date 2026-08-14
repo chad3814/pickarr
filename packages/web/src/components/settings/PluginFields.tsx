@@ -1,0 +1,228 @@
+import { useId, useState } from 'react';
+import type { PluginSettingValue } from '../../api/client.ts';
+import type { PluginDraft } from './ConfigForm.tsx';
+
+export interface PluginFieldsProps {
+  plugins: PluginDraft[];
+  onChange(next: PluginDraft[]): void;
+}
+
+type SettingType = 'text' | 'number' | 'boolean' | 'list';
+
+/** The blank value for a newly-added setting of each type. */
+const BLANK: Record<SettingType, PluginSettingValue> = {
+  text: '',
+  number: 0,
+  boolean: false,
+  list: [],
+};
+
+const blankPlugin: PluginDraft = { name: '', settings: [] };
+
+/**
+ * A list is edited one value per line.
+ *
+ * Blank lines are dropped rather than becoming empty strings: `configSchema`
+ * types this as `z.array(z.string())` and would accept `['']` happily,
+ * leaving a plugin to treat an empty site name as a real one.
+ */
+function toLines(value: string[]): string {
+  return value.join('\n');
+}
+
+function fromLines(raw: string): string[] {
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
+ * The `plugins` block: a record of plugin package names, each holding a
+ * record of settings whose values may be a string, a number, a boolean or a
+ * list of strings.
+ *
+ * The control is chosen from the value's *current* type and cannot change
+ * it. A single text input for everything would be smaller code, but every
+ * save would rewrite `sites: ["Vixen"]` as `sites: "Vixen"` and `retries: 3`
+ * as `retries: "3"` — and `plugins` is typed loosely enough in
+ * `configSchema` (`z.union([...])`) that the file would still validate, so
+ * the damage would only show up as a plugin misbehaving later.
+ */
+export function PluginFields({ plugins, onChange }: PluginFieldsProps) {
+  const formId = useId();
+  const [addAs, setAddAs] = useState<Record<number, SettingType>>({});
+
+  function updatePlugin(index: number, next: PluginDraft) {
+    onChange(plugins.map((plugin, i) => (i === index ? next : plugin)));
+  }
+
+  function removePlugin(index: number) {
+    onChange(plugins.filter((_, i) => i !== index));
+  }
+
+  function addPlugin() {
+    onChange([...plugins, { ...blankPlugin }]);
+  }
+
+  return (
+    <fieldset>
+      <legend>Plugins</legend>
+      {plugins.map((plugin, index) => {
+        function updateSetting(settingIndex: number, next: { key: string; value: PluginSettingValue }) {
+          updatePlugin(index, {
+            ...plugin,
+            settings: plugin.settings.map((setting, i) => (i === settingIndex ? next : setting)),
+          });
+        }
+
+        function removeSetting(settingIndex: number) {
+          updatePlugin(index, { ...plugin, settings: plugin.settings.filter((_, i) => i !== settingIndex) });
+        }
+
+        function addSetting() {
+          const type = addAs[index] ?? 'text';
+          updatePlugin(index, { ...plugin, settings: [...plugin.settings, { key: '', value: BLANK[type] }] });
+        }
+
+        return (
+          <article className="settings-row" key={index}>
+            <div className="manual-field">
+              <label htmlFor={`${formId}-name-${index}`}>Package</label>
+              <input
+                id={`${formId}-name-${index}`}
+                type="text"
+                value={plugin.name}
+                onChange={(event) => updatePlugin(index, { ...plugin, name: event.target.value })}
+              />
+            </div>
+
+            <fieldset>
+              <legend>Settings</legend>
+              {plugin.settings.map((setting, settingIndex) => {
+                const valueId = `${formId}-value-${index}-${settingIndex}`;
+                // A newly-added setting has no key yet, so the label that
+                // would otherwise identify its value control ("sites",
+                // "retries", ...) is empty and getByLabelText finds nothing.
+                // "New setting value" keeps the control reachable by label
+                // until it is named.
+                const valueLabel = setting.key.trim() === '' ? 'New setting value' : setting.key;
+
+                return (
+                  <article className="settings-row" key={settingIndex}>
+                    <div className="manual-field">
+                      <label htmlFor={`${formId}-key-${index}-${settingIndex}`}>Setting name</label>
+                      <input
+                        id={`${formId}-key-${index}-${settingIndex}`}
+                        type="text"
+                        value={setting.key}
+                        onChange={(event) => updateSetting(settingIndex, { ...setting, key: event.target.value })}
+                      />
+                    </div>
+                    <div className="manual-field">
+                      <label htmlFor={valueId}>{valueLabel}</label>
+                      {Array.isArray(setting.value) ? (
+                        <textarea
+                          id={valueId}
+                          value={toLines(setting.value)}
+                          onChange={(event) =>
+                            updateSetting(settingIndex, { ...setting, value: fromLines(event.target.value) })
+                          }
+                        />
+                      ) : typeof setting.value === 'boolean' ? (
+                        <input
+                          id={valueId}
+                          type="checkbox"
+                          checked={setting.value}
+                          onChange={(event) =>
+                            updateSetting(settingIndex, { ...setting, value: event.target.checked })
+                          }
+                        />
+                      ) : typeof setting.value === 'number' ? (
+                        <input
+                          id={valueId}
+                          type="number"
+                          value={String(setting.value)}
+                          onChange={(event) =>
+                            updateSetting(settingIndex, { ...setting, value: Number(event.target.value) })
+                          }
+                        />
+                      ) : (
+                        <input
+                          id={valueId}
+                          type="text"
+                          value={setting.value}
+                          onChange={(event) =>
+                            updateSetting(settingIndex, { ...setting, value: event.target.value })
+                          }
+                        />
+                      )}
+                    </div>
+                    {/*
+                      Named by its own key, the same reason "Remove download
+                      client" and "Remove feed" are: several of these can
+                      render per plugin, and reading order is not how every
+                      user finds the right one. A row not yet given a key
+                      (freshly added) reads as "(new)" rather than a blank
+                      name.
+                    */}
+                    <div className="settings-row-actions">
+                      <button
+                        type="button"
+                        aria-label={`Remove setting ${setting.key || '(new)'}`}
+                        onClick={() => removeSetting(settingIndex)}
+                      >
+                        Remove setting
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+              <div className="manual-field">
+                <label htmlFor={`${formId}-add-type-${index}`}>New setting type</label>
+                <select
+                  id={`${formId}-add-type-${index}`}
+                  value={addAs[index] ?? 'text'}
+                  onChange={(event) => setAddAs({ ...addAs, [index]: event.target.value as SettingType })}
+                >
+                  <option value="text">Text</option>
+                  <option value="number">Number</option>
+                  <option value="boolean">Yes / no</option>
+                  <option value="list">List of text</option>
+                </select>
+              </div>
+              <div className="settings-row-actions">
+                <button type="button" onClick={addSetting}>
+                  Add setting
+                </button>
+              </div>
+            </fieldset>
+
+            {/*
+              Named by its own package name, the same reason "Remove
+              setting" above is: several of these can render at once, and a
+              rotor/forms-mode list of controls would otherwise show
+              identical "Remove plugin" entries with no way to tell them
+              apart. A row not yet given a name (freshly added) reads as
+              "(new)".
+            */}
+            <div className="settings-row-actions">
+              <button
+                type="button"
+                aria-label={`Remove plugin ${plugin.name || '(new)'}`}
+                onClick={() => removePlugin(index)}
+              >
+                Remove plugin
+              </button>
+            </div>
+          </article>
+        );
+      })}
+      <div className="settings-row-actions">
+        <button type="button" onClick={addPlugin}>
+          Add plugin
+        </button>
+      </div>
+    </fieldset>
+  );
+}
