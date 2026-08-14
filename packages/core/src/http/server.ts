@@ -474,10 +474,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // many are in flight at once.
     const temporary = `${deps.configPath}.tmp-${process.pid}-${randomUUID()}`;
     try {
-      // `writeFile` creates the temp file at `0666 & ~umask`, and `rename`
-      // would carry that mode onto `config.json` — silently widening a file
-      // that holds literal api keys on every successful save. Matching the
-      // mode already on disk keeps that permission the user's (or the
+      // Left to itself, `writeFile` creates the temp file at `0666 & ~umask`
+      // and `rename` carries that mode onto `config.json` — silently widening
+      // a file that holds literal api keys on every successful save. Matching
+      // the mode already on disk keeps that permission the user's (or the
       // documented `chmod 600`'s) call, not this route's. A file that cannot
       // be stat'd (first-ever save, or the file went missing under us) gets
       // the restrictive default rather than the permissive one.
@@ -487,7 +487,19 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       } catch {
         // New or unreadable: fall through to the restrictive default above.
       }
-      await writeFile(temporary, `${JSON.stringify(merged.document, null, 2)}\n`, 'utf8');
+      // Both steps are load-bearing, for different reasons. The `mode` option
+      // is applied by `open(O_CREAT)` itself, so the file never exists at the
+      // default `0666 & ~umask` even momentarily — without it there is a
+      // window, however short, where a config full of api keys is world-
+      // readable in the config directory. But that option is *masked* by
+      // umask, so it cannot widen: targeting `0640` under umask 027 creates
+      // `0600`. The `chmod` is what lands the mode exactly, and it can only
+      // ever run against a file this request created (the name carries a
+      // `randomUUID`), so it cannot touch anything else.
+      await writeFile(temporary, `${JSON.stringify(merged.document, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode,
+      });
       await chmod(temporary, mode);
       await rename(temporary, deps.configPath);
     } catch (error) {
