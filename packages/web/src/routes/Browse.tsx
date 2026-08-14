@@ -152,6 +152,7 @@ export function Browse() {
     <section>
       <h1>Browse</h1>
       <input
+        className="search"
         type="search"
         placeholder="Search"
         value={search}

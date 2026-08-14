@@ -4,6 +4,7 @@ body { margin: 0; }
 nav { display: flex; gap: 1rem; padding-bottom: 1rem; }
 nav a { text-decoration: none; }
 nav a.active { font-weight: 600; text-decoration: underline; }
+input.search { margin-bottom: 1rem; }
 .media-card { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; opacity: 0.95; }
 .media-card h2 { margin: 0; font-size: 1.1rem; }
 /* The title block beside the poster, as tall as the taller of the two. The
