@@ -143,6 +143,58 @@ test('a JSON syntax error next to a literal key does not leak the key', async ()
       assert.match(error.message, /not valid JSON/);
       assert.doesNotMatch(error.message, /SUPERSECRET1234567890/);
       assert.doesNotMatch(error.message, /SUPERSECRE/);
+      // Not even the single quoted character V8 leads with — `Unexpected token
+      // 'S'` is the secret's first byte.
+      assert.doesNotMatch(error.message, /'S'/);
+      // And the reader is told the detail was withheld rather than absent.
+      assert.match(error.message, /withheld/);
+      return true;
+    });
+  });
+});
+
+// The reduction is an allowlist: a shape V8 is known to build without quoting
+// the document passes through whole, so an ordinary syntax error keeps its
+// position and its explanation. Every one of these puts a key in the file too,
+// so a shape wrongly admitted to the list would show up here as a leak rather
+// than as a missing line number.
+test('a syntax error that quotes no source keeps its position and explanation', async () => {
+  const sourceFree: Record<string, string> = {
+    'trailing comma': '{"apiKey":"SUPERSECRET1234567890",}',
+    'missing colon': '{"apiKey" "SUPERSECRET1234567890"}',
+    'unquoted property name': '{apiKey:"SUPERSECRET1234567890"}',
+    'missing comma': '{"a":1 "apiKey":"SUPERSECRET1234567890"}',
+    'unterminated string': '{"apiKey":"SUPERSECRET1234',
+    'trailing junk': '{"a":1}SUPERSECRET1234567890',
+  };
+
+  for (const [name, contents] of Object.entries(sourceFree)) {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'config.json');
+      await writeFile(path, contents);
+
+      await assert.rejects(readConfigDocument(path), (error: Error) => {
+        assert.match(error.message, /at position \d+ \(line \d+ column \d+\)/, name);
+        assert.doesNotMatch(error.message, /withheld/, name);
+        assert.doesNotMatch(error.message, /SUPERSECRE/, name);
+        return true;
+      });
+    });
+  }
+});
+
+// Nothing in the message may come from the file, so a document that is nothing
+// but a secret must not put any of it on the wire. `readConfigDocument` is the
+// one place this is enforced for both the boot log and the two config routes.
+test('a file that is only a secret leaks none of it', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'config.json');
+    await writeFile(path, 'SUPERSECRET1234567890');
+
+    await assert.rejects(readConfigDocument(path), (error: Error) => {
+      for (let length = 4; length <= 'SUPERSECRET1234567890'.length; length += 1) {
+        assert.doesNotMatch(error.message, new RegExp('SUPERSECRET1234567890'.slice(0, length)));
+      }
       return true;
     });
   });
