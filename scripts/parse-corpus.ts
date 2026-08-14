@@ -261,11 +261,30 @@ function runPass(tiers: Tier[], sites: string[]): Pass {
  * from the base run is what the site-segment diff is read against.
  */
 function learnedSiteNames(pass: Pass, configured: string[]): string[] {
-  const names = new Set(configured);
+  // Configured names keep their given order and stay in front; only the learned
+  // tail is sorted. Both halves of that matter.
+  //
+  // `matchSitePrefix` keeps the *first* display spelling it is offered for a
+  // given `siteComparisonKey`, so the order of this list decides which spelling
+  // of `hegre` / `Hegre` every release is filed under. Returning a `Set` in
+  // insertion order made that depend on the order the corpus files were named
+  // on the command line: the same nine files as `uhd.txt hd.txt` versus
+  // `hd.txt uhd.txt` reported 435 against 206 for `site segment moved`, while
+  // `parsed` (4133) and `identity keys moved` (153) were identical both ways.
+  // The measured set was the same; only the metric added to catch site
+  // corruption swung by a factor of two, which is the one number a reader of
+  // this gate must be able to trust across runs.
+  //
+  // Configured spellings still win because an explicit `--sites=` file is an
+  // answer, not a guess — sorting the whole list would let a learned `hegre`
+  // outrank a configured `Hegre` on nothing but alphabetical luck.
+  const ordered = [...new Set(configured)];
+  const learned = new Set<string>();
   for (const outcome of pass.outcomes.values()) {
-    if (outcome !== null && outcome.site.length > 0) names.add(outcome.site);
+    if (outcome !== null && outcome.site.length > 0) learned.add(outcome.site);
   }
-  return [...names];
+  for (const name of ordered) learned.delete(name);
+  return [...ordered, ...[...learned].toSorted()];
 }
 
 async function main(): Promise<void> {
