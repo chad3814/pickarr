@@ -39,7 +39,7 @@
 | `packages/core/src/pipeline/metadata.ts` | **Modify.** One enqueue call site after a row settles. |
 | `packages/core/src/main.ts` | **Modify.** Build the runner and hand it to the metadata tick. |
 
-Seven tasks. Tasks 1–4 are independent of each other and can be done in any order; Task 5 needs 1 and 2; Task 6 needs 2, 3, 4; Task 7 needs 6.
+Seven tasks, executed in strict numeric order. The real dependencies: Task 4 needs Task 3 (it imports `PerformerSearchResult` from the client module), Task 5 needs 1 and 2, Task 6 needs 2–5, Task 7 needs 6. Tasks 1–3 are mutually independent, but numeric order satisfies everything and is what this plan assumes.
 
 ---
 
@@ -621,7 +621,7 @@ Accept: application/json
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `packages/core/test/clients/theporndb.test.ts`. Read the file's existing helpers first and reuse its fetch-stub pattern rather than inventing a second one; the sketch below assumes a `jsonResponse(body)`-style helper exists, so adapt names to what is actually there.
+Append to `packages/core/test/clients/theporndb.test.ts`. **Use the file's existing fixtures — do not invent new ones:** `respondWith(body, init?)` at line 39 returns a `FetchImpl & { urls: string[] }`, and `CONFIG` at line 28 is a complete `SiteLookupConfig` (it needs `type: 'theporndb'`, which a bare `{baseUrl, apiKey}` object omits and which would not typecheck). Every test below is written against those two.
 
 ```ts
 test('searchPerformers reads a top-level result as a canonical performer', async () => {
@@ -631,8 +631,8 @@ test('searchPerformers reads a top-level result as a canonical performer', async
   // would stamp every linked performer `performer-site` and point them all at
   // alias pages, which is invisible until a user clicks one.
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => jsonResponse({
+    CONFIG,
+    respondWith({
       data: [{
         id: '32aa4b68-4dbe-49f2-92a5-0e54e5074f4b',
         slug: 'jessica-jaymes',
@@ -670,8 +670,8 @@ test('a provider reporting more pages than were read is reported as truncated', 
   // a confident wrong link, so the caller has to be able to say it judged on a
   // partial set rather than doing so in silence.
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => jsonResponse({
+    CONFIG,
+    respondWith({
       data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }],
       meta: { total: 210, per_page: 100, current_page: 1, last: 3 },
     }),
@@ -685,8 +685,8 @@ test('a body with no meta block is not treated as truncated', () => {
   // evidence of that, and defaulting it to true would log a truncation warning
   // on every search against a provider that stops sending the block.
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => jsonResponse({ data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }] }),
+    CONFIG,
+    respondWith({ data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }] }),
   );
 
   return client.searchPerformers('N').then((page) => assert.equal(page.truncated, false));
@@ -694,8 +694,8 @@ test('a body with no meta block is not treated as truncated', () => {
 
 test('a result without is_parent is a site alias, not a canonical performer', async () => {
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => jsonResponse({
+    CONFIG,
+    respondWith({
       data: [{ id: 'u1', slug: '6061-alice-maze', name: 'Alice Maze', is_parent: false }],
       meta: { total: 1, per_page: 100, current_page: 1, last: 1 },
     }),
@@ -712,8 +712,8 @@ test('a result missing its slug or uuid is dropped rather than stored empty', as
   // such row under UNIQUE (source, source_uuid) — the same reason
   // `readPerformers` drops these.
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => jsonResponse({
+    CONFIG,
+    respondWith({
       data: [
         { id: 'u1', name: 'No Slug', is_parent: true },
         { slug: 'no-uuid', name: 'No Uuid', is_parent: true },
@@ -731,8 +731,8 @@ test('a result missing its slug or uuid is dropped rather than stored empty', as
 
 test('missing aliases read as an empty list, not undefined', async () => {
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => jsonResponse({
+    CONFIG,
+    respondWith({
       data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }],
       meta: { total: 1, per_page: 100, current_page: 1, last: 1 },
     }),
@@ -744,8 +744,8 @@ test('missing aliases read as an empty list, not undefined', async () => {
 test('an empty query never reaches the provider', async () => {
   let called = false;
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => { called = true; return jsonResponse({ data: [] }); },
+    CONFIG,
+    async (url) => { called = true; return respondWith({ data: [] })(url); },
   );
 
   assert.deepEqual(await client.searchPerformers('   '), { results: [], truncated: false });
@@ -754,20 +754,20 @@ test('an empty query never reaches the provider', async () => {
 
 test('the api key never appears in a searchPerformers error', async () => {
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => { throw new Error('connect ECONNREFUSED with Bearer secret-key'); },
+    CONFIG,
+    async () => { throw new Error(`connect ECONNREFUSED with Bearer ${API_KEY}`); },
   );
 
   await assert.rejects(
     () => client.searchPerformers('Jessica Jaymes'),
-    (error: Error) => !error.message.includes('secret-key'),
+    (error: Error) => !error.message.includes(API_KEY),
   );
 });
 
 test('a 429 from searchPerformers is RateLimited with the Retry-After', async () => {
   const client = createTpdbClient(
-    { baseUrl: 'https://api.theporndb.net', apiKey: 'secret-key' },
-    async () => new Response('', { status: 429, headers: { 'Retry-After': '120' } }),
+    CONFIG,
+    respondWith({}, { status: 429, headers: { 'Retry-After': '120' } }),
   );
 
   await assert.rejects(() => client.searchPerformers('x'), (error: Error) => {
@@ -1249,7 +1249,16 @@ function giveCast(db: DatabaseSync, groupId: number): void {
 function pluginWith(
   performerQuery: ((identity: GroupIdentity) => string | null) | undefined,
 ): MediaTypePlugin {
-  const plugin = { id: 'test', mediaType: 'test' } as unknown as MediaTypePlugin;
+  // A real minimal plugin, the shape `metadata.test.ts:577` uses — not a cast
+  // through `unknown`. If `MediaTypePlugin` gains a required member this fails to
+  // typecheck, which is the signal you want; a cast would hide it.
+  const plugin: MediaTypePlugin = {
+    id: 'test',
+    displayName: 'Test',
+    parse: () => null,
+    score: () => 0,
+    planImport: () => null,
+  };
   return performerQuery === undefined ? plugin : { ...plugin, performerQuery };
 }
 
@@ -1949,7 +1958,11 @@ export async function runPerformerPass(deps: PerformerPassDeps): Promise<Perform
         break;
       }
       result.deferred += 1;
-      deferOrGiveUp(deps, row, `${(error as Error).message}`);
+      // `now` and the backoff are both computed from the pass's captured clock
+      // and passed in, matching `metadata.ts`'s own `deferOrGiveUp` signature.
+      // Reading `deps.now()` again inside would stamp `next_at` from a later
+      // instant than the row was judged at.
+      deferOrGiveUp(deps, row, (error as Error).message, now + backoffFor(row.attempts));
     }
   }
 
@@ -1980,7 +1993,12 @@ And the deferral, which must commit even when the transaction that led here roll
  * every pass on the same row and nothing behind it would ever be looked at.
  * `runMetadataPass` documents having had exactly that defect.
  */
-function deferOrGiveUp(deps: PerformerPassDeps, row: PerformerQueueRow, message: string): void {
+function deferOrGiveUp(
+  deps: PerformerPassDeps,
+  row: PerformerQueueRow,
+  message: string,
+  nextAt: number,
+): void {
   const attemptsAfter = row.attempts + 1;
   if (attemptsAfter >= MAX_PERFORMER_ATTEMPTS) {
     deps.log(
@@ -1990,7 +2008,7 @@ function deferOrGiveUp(deps: PerformerPassDeps, row: PerformerQueueRow, message:
     return;
   }
   deps.log(`performer pass: group ${row.groupId} deferred (attempt ${attemptsAfter}): ${message}`);
-  deferPerformerSearch(deps.db, row.groupId, message, deps.now() + backoffFor(row.attempts));
+  deferPerformerSearch(deps.db, row.groupId, message, nextAt);
 }
 ```
 
