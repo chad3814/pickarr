@@ -898,13 +898,25 @@ function hasInnerCapital(text: string): boolean {
  * hypothesis.
  *
  * Casing is the signal, because a release tag is conventionally shouted and a
- * title word is not. Measured over the 10,359 unique names in the nine corpus
- * files: 123 occurrences of a language term, 71 of them with an inner capital
- * (`SPANISH` 21, `GERMAN` 13, `DUTCH` 13, `FRENCH` 8, `iTALiAN` 6, `JAPANESE`
- * 4, `POLISH` 3, `CZECH` 2, `JAP` 1) and every one a tag. Of the 52 without
- * one, the walk reaches exactly the two `Britney.Dutch` releases above; the
- * other 50 sit mid-title or behind a year the walk stops at, so no title-case
- * occurrence anywhere in the corpus is a tag this rule now keeps.
+ * title word is not. Measured over the whole corpus — 18 files, 10,909 unique
+ * names; note `hidden/` and the extensionless `cd1-titles`/`part1-titles`, which
+ * a root `*.txt` glob misses and which cost an earlier measurement 28% of its
+ * input: 141 occurrences of a language term, 89 with an inner capital (`SPANISH`
+ * 22, `JAPANESE` 16, `DUTCH` 14, `GERMAN` 13, `FRENCH` 8, `iTALiAN` 6, `POLISH`
+ * 3, `CZECH` 3, `ENGLISH` 2, `JAP` 1, `ENG` 1) and every one a tag. Of the 52
+ * without one, the walk reaches exactly the two `Britney.Dutch` releases above.
+ *
+ * **Known limitation, and the first place to look if a German rip ever files
+ * wrongly.** Six of those 52 are genuine tags that this rule reads as title
+ * words: `Fickferien.in.der.Toscana.German.2007.XXX.DVDRiP.XviD-WDE`, three
+ * `Orgi.Poernchen.N.German.200X` releases and two `...2009.German_...cd1` rips.
+ * Casing cannot see them — they are shouted nowhere. They are harmless *today*
+ * for two reasons that are both accidents rather than guarantees: the parser
+ * refuses all six outright, and a four-digit year sits between the tag and the
+ * encode boundary, which halts the walk before it reaches them. Either accident
+ * could stop holding — a site list that resolves `Videoram`, or a year rule that
+ * lets the walk cross. The rule is right about every language tag the walk can
+ * currently reach; it is not right about every language tag.
  *
  * Clause 2 — a tag run is still a tag run — keeps `Hardcore.Dutch` strippable
  * even though `Hardcore` is title case. It asks whether the previous token is
@@ -945,6 +957,18 @@ function isLanguageSuffixToken(text: string, previous: string | undefined): bool
  *
  * The language arm is the one clause that reads `previous` for anything other
  * than the `ORDINAL_WORDS` carve-out — see `isLanguageSuffixToken`.
+ *
+ * That arm passes `undefined` as the inner predecessor, which has a consequence
+ * worth stating rather than leaving to be rediscovered: inside clause 2,
+ * `isNumericIdToken` cannot see the `ORDINAL_WORDS` carve-out, so a number that
+ * would be kept as an ordinal still reads as vocabulary when it is asked to
+ * vouch for a language behind it. `Site.26.08.05.Name.Episode.466.Dutch.XXX...`
+ * yields `Name Episode 466` — `Dutch` strips on the strength of `466`, while
+ * `466` itself survives because the carve-out does apply when it is the token
+ * being judged. No corpus name has that shape, and a title-final language after
+ * a three-digit number is likelier a tag than a surname, so this is documented
+ * rather than fixed: closing it means threading a third token through this
+ * predicate, which buys nothing measurable.
  */
 export function isTitleSuffixToken(text: string, previous: string | undefined): boolean {
   return (
