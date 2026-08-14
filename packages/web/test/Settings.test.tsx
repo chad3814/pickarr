@@ -100,12 +100,16 @@ test('Save is offered only once the draft differs from what was loaded', async (
 
 test('saving sends keep for an untouched secret and reports the pending restart', async () => {
   const sent: string[] = [];
+  let configCalls = 0;
   stubFetch(async (url, init) => {
     if (init?.method === 'PUT') {
       sent.push(String(init.body));
       return json({ savedAt: 1, restartRequired: true });
     }
-    return json(configResponse());
+    configCalls += 1;
+    // The initial load precedes any save (nothing pending yet); the re-read
+    // that follows a successful save reports the restart it just caused.
+    return json(configResponse({ restartRequired: configCalls > 1 }));
   });
 
   render(<Settings />);
@@ -206,15 +210,68 @@ test('a successful backup names the file it saved', async () => {
 
   // happy-dom has no download plumbing; these two are what the click uses.
   const created: string[] = [];
+  const revoked: string[] = [];
   URL.createObjectURL = (() => {
     created.push('blob:stub');
     return 'blob:stub';
   }) as typeof URL.createObjectURL;
-  URL.revokeObjectURL = () => {};
+  URL.revokeObjectURL = ((url: string) => {
+    revoked.push(url);
+  }) as typeof URL.revokeObjectURL;
 
   render(<Settings />);
   await waitFor(() => assert.ok(screen.getByRole('button', { name: /back up/i })));
   fireEvent.click(screen.getByRole('button', { name: /back up/i }));
   await waitFor(() => assert.ok(screen.getByText(/pickarr-2026-08-13\.db/)));
   assert.equal(created.length, 1);
+  // A backup that stopped revoking its object URL would leak one per download;
+  // this is the only thing that would catch a regression there.
+  assert.deepEqual(revoked, ['blob:stub']);
+});
+
+test('a failed restart clears the notice a successful save left behind', async () => {
+  let configCalls = 0;
+  stubFetch(async (url, init) => {
+    if (init?.method === 'PUT') return json({ savedAt: 1, restartRequired: true });
+    if (url.endsWith('/api/restart') && init?.method === 'POST') {
+      return json({ error: 'restart refused: another restart is already in progress' }, 409);
+    }
+    configCalls += 1;
+    // The re-read after the save is what reports the restart it caused.
+    return json(configResponse({ restartRequired: configCalls > 1 }));
+  });
+
+  render(<Settings />);
+  await waitFor(() => assert.ok(screen.getByLabelText(/trash directory/i)));
+  fireEvent.change(screen.getByLabelText(/trash directory/i), { target: { value: '/data/bin' } });
+  fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+  await waitFor(() => assert.ok(screen.getByText(/saved/i)));
+
+  fireEvent.click(screen.getByRole('button', { name: /restart now/i }));
+  await waitFor(() => assert.ok(screen.getByText(/restart refused/i)));
+  // The stale green "Saved" notice must not linger next to the new error —
+  // restart()'s catch clears it the same way save()'s and backUp()'s already do.
+  assert.equal(screen.queryByText(/^Saved\./), null);
+});
+
+test('a save that lands but whose confirmation re-read fails still reports the save, not a failure', async () => {
+  let configCalls = 0;
+  stubFetch(async (_url, init) => {
+    if (init?.method === 'PUT') return json({ savedAt: 1, restartRequired: true });
+    configCalls += 1;
+    // First GET is the initial load; the second is save()'s post-write re-read.
+    return configCalls === 1 ? json(configResponse()) : json({ error: 'ECONNRESET' }, 500);
+  });
+
+  render(<Settings />);
+  await waitFor(() => assert.ok(screen.getByLabelText(/trash directory/i)));
+  fireEvent.change(screen.getByLabelText(/trash directory/i), { target: { value: '/data/bin' } });
+  fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+  // The write succeeded — this must not read as a refused save (no "error"
+  // paragraph), and a restart must still be offered since the write landed
+  // even though the confirmation read did not.
+  await waitFor(() => assert.ok(screen.getByText(/^Saved,/)));
+  assert.ok(screen.getByText(/reload/i));
+  assert.ok(screen.getByRole('button', { name: /restart now/i }));
 });

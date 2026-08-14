@@ -56,20 +56,38 @@ export function Settings() {
 
     try {
       await api.saveConfig(submitted);
-      // Re-read, so the redacted view of any secret just replaced comes back as
-      // `set` and the form stops offering to submit the literal again. The
-      // draft is reseeded from the response for the same reason.
-      const next = await api.config();
-      setLoaded(next);
-      setDraft(toDraft(next.config));
-      setRestartRequired(true);
-      setNotice('Saved. Pickarr is still running the settings it booted with.');
-      setError(null);
     } catch (cause) {
       setNotice(null);
       // The draft is deliberately left alone: the edit that was refused is the
       // one the user needs in front of them to correct.
       setError((cause as Error).message);
+      return;
+    }
+
+    try {
+      // Re-read, so the redacted view of any secret just replaced comes back as
+      // `set` and the form stops offering to submit the literal again. The
+      // draft is reseeded from the response for the same reason. `restartRequired`
+      // comes from this response rather than being assumed true: the server
+      // deep-compares the merged document against what the process booted from,
+      // and a save that writes back exactly that needs no restart.
+      const next = await api.config();
+      setLoaded(next);
+      setDraft(toDraft(next.config));
+      setRestartRequired(next.restartRequired);
+      setNotice('Saved. Pickarr is still running the settings it booted with.');
+      setError(null);
+    } catch (cause) {
+      // The write already landed — only the confirmation read failed. This is
+      // not a failed save: PUT already succeeded, so reporting it as an error
+      // (with `error`, the same styling a refused save uses) would be a false
+      // alarm. A restart is assumed pending because the failed read cannot say
+      // whether the write changed anything.
+      setRestartRequired(true);
+      setNotice(
+        `Saved, but could not confirm the result: ${(cause as Error).message}. Reload this page to see what was written.`,
+      );
+      setError(null);
     }
   }
 
@@ -77,9 +95,12 @@ export function Settings() {
     try {
       await api.restart();
       setRestarting(true);
-      setNotice('Restarting. This page will not update until Pickarr is back.');
+      setNotice(
+        "Restarting now: Pickarr is shutting down. It only comes back on its own if something supervises it — for example Docker's restart: unless-stopped — otherwise, start it again yourself.",
+      );
       setError(null);
     } catch (cause) {
+      setNotice(null);
       setError((cause as Error).message);
     }
   }
