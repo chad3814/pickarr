@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { ConfigForm, toDraft, toSubmission } from '../src/components/settings/ConfigForm.tsx';
-import type { EditableConfig } from '../src/api/client.ts';
+import type { EditableConfig, SubmittedConfig } from '../src/api/client.ts';
 
 afterEach(cleanup);
 
@@ -35,14 +35,29 @@ function config(over: Partial<EditableConfig> = {}): EditableConfig {
 test('a round trip with no edits submits the config unchanged, keeping secrets', () => {
   const original = config();
   const submitted = toSubmission(toDraft(original), original);
-  assert.ok(!('error' in submitted));
-  assert.deepEqual(submitted.downloadClients[0]?.apiKey, { kind: 'keep' });
-  assert.equal(submitted.trashDir, '/data/trash');
-  assert.equal(submitted.server.port, 8080);
-  assert.equal(submitted.metadata.artworkDir, null);
-  assert.deepEqual(submitted.plugins, {
-    '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes', sites: ['Vixen'] },
-  });
+  const expected: SubmittedConfig = {
+    server: { port: 8080 },
+    database: { path: '/config/pickarr.db' },
+    trashDir: '/data/trash',
+    plugins: { '@pickarr/plugin-scenes': { libraryRoot: '/media/scenes', sites: ['Vixen'] } },
+    downloadClients: [
+      {
+        id: 'sab',
+        type: 'sabnzbd',
+        url: 'http://sabnzbd:8080',
+        apiKey: { kind: 'keep' },
+        category: 'pickarr',
+        importMode: 'move',
+        pathMappings: [],
+      },
+    ],
+    feeds: [
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900 },
+    ],
+    siteLookup: null,
+    metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
+  };
+  assert.deepEqual(submitted, expected);
 });
 
 test('an empty artwork directory submits as absent, not as an empty string', () => {

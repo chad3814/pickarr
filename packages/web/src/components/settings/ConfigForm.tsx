@@ -217,7 +217,7 @@ export function ConfigForm({ config, draft, portOverride, onChange }: ConfigForm
       </fieldset>
 
       <fieldset>
-        <legend>Database</legend>
+        <legend>Storage</legend>
         <div className="manual-field">
           <label htmlFor={`${formId}-database-path`}>Database path</label>
           <input
