@@ -98,6 +98,55 @@ test('a non-numeric port is caught here rather than sent for a 400', () => {
   assert.match(submitted.error, /port/i);
 });
 
+// `Number('')` is `0`, so clearing this field used to submit a `0` the user
+// never typed — written into their config and indistinguishable from an
+// intentional zero. Holding the raw text is what made the empty state
+// reachable, so this is where it has to be refused.
+test('a cleared plugin number is refused rather than submitted as zero', () => {
+  const original = config();
+  const draft = toDraft(original);
+  const retries = draft.plugins[0]?.settings.find((entry) => entry.key === 'retries');
+  assert.ok(retries !== undefined, 'fixture should carry a numeric plugin setting');
+  retries.value = { number: '' };
+
+  const submitted = toSubmission(draft, original);
+  assert.ok('error' in submitted, 'an empty number must not reach the server');
+  assert.match(submitted.error, /retries/);
+  // The message has to say which plugin and which setting: a plugin block can
+  // hold a dozen of them.
+  assert.match(submitted.error, /@pickarr\/plugin-scenes/);
+});
+
+test('a non-numeric plugin number is refused too', () => {
+  const original = config();
+  const draft = toDraft(original);
+  const retries = draft.plugins[0]?.settings.find((entry) => entry.key === 'retries');
+  assert.ok(retries !== undefined);
+  retries.value = { number: 'three' };
+
+  const submitted = toSubmission(draft, original);
+  assert.ok('error' in submitted);
+  assert.match(submitted.error, /retries/);
+});
+
+// The distinction from `asCount`, which guards ports and intervals and demands
+// a positive integer. `configSchema` types a plugin setting as a bare
+// `z.number()`, so a plugin is entitled to zero and to a negative — refusing
+// them here would reject configs the server accepts.
+test('a plugin number may be zero or negative, unlike a port or an interval', () => {
+  for (const raw of ['0', '-1', '1.5']) {
+    const original = config();
+    const draft = toDraft(original);
+    const retries = draft.plugins[0]?.settings.find((entry) => entry.key === 'retries');
+    assert.ok(retries !== undefined);
+    retries.value = { number: raw };
+
+    const submitted = toSubmission(draft, original);
+    assert.ok(!('error' in submitted), `${raw} should be accepted`);
+    assert.equal(submitted.plugins['@pickarr/plugin-scenes']?.['retries'], Number(raw));
+  }
+});
+
 test('editing the trash directory updates the draft', () => {
   const original = config();
   let draft = toDraft(original);
