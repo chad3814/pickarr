@@ -117,15 +117,39 @@ function asCount(raw: string, field: string): number | { error: string } {
 }
 
 /**
+ * A plugin setting's number, or the setting that failed.
+ *
+ * Deliberately not `asCount`: that one demands a *positive integer* because it
+ * guards ports and intervals, while `configSchema` types a plugin setting as a
+ * bare `z.number()`. A plugin is entitled to `0`, to a negative, and to a
+ * fraction, so the only rule here is that the text names a finite number.
+ *
+ * The empty case is the one that matters. `Number('')` is `0`, so a cleared
+ * field used to submit `0` — a value the user never typed, written into their
+ * config and taken as intentional. Holding the raw text (rather than parsing
+ * per keystroke) is what made clearing the field reachable at all, so this is
+ * the check that has to catch it.
+ */
+function asPluginNumber(raw: string, field: string): number | { error: string } {
+  const trimmed = raw.trim();
+  if (trimmed === '') return { error: `${field} must be a number` };
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : { error: `${field} must be a number` };
+}
+
+/**
  * The conversion `PluginSettingDraftValue`'s doc comment promises: a list's
  * raw text is split back into an array (dropping blank lines, exactly as
- * `configSchema` requires), a number's raw text is parsed, and text/boolean
- * pass through unchanged since nothing converted them away from their real
- * type in the first place.
+ * `configSchema` requires), a number's raw text is parsed and validated, and
+ * text/boolean pass through unchanged since nothing converted them away from
+ * their real type in the first place.
  */
-function fromDraftValue(value: PluginSettingDraftValue): PluginSettingValue {
+function fromDraftValue(
+  value: PluginSettingDraftValue,
+  field: string,
+): PluginSettingValue | { error: string } {
   if (typeof value !== 'object') return value;
-  return 'list' in value ? fromLines(value.list) : Number(value.number);
+  return 'list' in value ? fromLines(value.list) : asPluginNumber(value.number, field);
 }
 
 /**
@@ -169,7 +193,17 @@ export function toSubmission(draft: ConfigDraft, config: EditableConfig): Submit
   const plugins: Record<string, Record<string, PluginSettingValue>> = {};
   for (const plugin of draft.plugins) {
     const settings: Record<string, PluginSettingValue> = {};
-    for (const entry of plugin.settings) settings[entry.key] = fromDraftValue(entry.value);
+    for (const entry of plugin.settings) {
+      // Named by plugin and key rather than by index: a plugin block can hold
+      // a dozen settings, and "must be a number" is only actionable if it says
+      // which one.
+      const value = fromDraftValue(entry.value, `plugins["${plugin.name}"].${entry.key}`);
+      // A list value is an object too, so the check is for the error shape
+      // specifically rather than for objecthood — matching how `applyEdits`
+      // and `manual/operations.ts` discriminate their own result unions.
+      if (typeof value === 'object' && 'error' in value) return value;
+      settings[entry.key] = value;
+    }
     plugins[plugin.name] = settings;
   }
 
