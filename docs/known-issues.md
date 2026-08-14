@@ -278,6 +278,31 @@ five before — a small share of the corpus, but complete coverage of the shape.
 - [A bare-domain prefix becomes the site, so a genuine bare-domain stamp files the scene under the wrong directory](https://github.com/chad3814/pickarr/issues/16) — Wrong path, never a wrong merge.
 - [The same scene in a dotted and a bracketed listing gets two groups](https://github.com/chad3814/pickarr/issues/17) — The dotted form carries no component boundaries. Under-collation, and probably irreducible.
 - [Residual over-collation, believed irreducible](https://github.com/chad3814/pickarr/issues/18) — Two distinct scenes can share an identity key when a release has no marker and its title ends in a word that looks like a resolution or source — a scene literally titled "Party 4K".
+
+**A trailing content-type tag and a bare site id are also dropped from the title, and that
+is a second, accepted way to over-collate.** `Solo`, `Hardcore` and `Lesbian` name a
+scene's type rather than the scene, and a bare number like `42466` is a site's own
+catalogue id rather than a title word; both are read as suffix and trimmed, alongside a
+trailing language tag, from a title that would otherwise carry junk a metadata service
+cannot match against. The cost is structural rather than incidental: if two scenes posted
+by one site on one day differ **only** in the tokens this trims, nothing is left to tell
+them apart, and they collate onto one identity key —
+`PornMegaLoad.26.08.05.Suki.Sin.Solo.42466...` and
+`PornMegaLoad.26.08.05.Suki.Sin.Hardcore.42467...` both key as
+`pornmegaload:2026-08-05:suki-sin`.
+
+This was measured before it was accepted, not assumed. Across 7,166 parsed corpus titles
+there are zero genuine over-collations from it — the fifteen keys that do carry more than
+one distinct title are all case or spelling variants of one scene (`Mckenzie Mae` /
+`McKenzie Mae`, `And` / `and`, `Zarina Noir` / `zarina noir`), which is
+`siteComparisonKey` and `slug` doing their job, not this trade-off firing. There is
+nothing to fix here — the alternative is refusing or truncating titles that are
+overwhelmingly real and distinct to keep an id or a type tag that, in practice, never
+turns out to matter. It is pinned by a test (`packages/plugin-scenes/test/suffix-parse.test.ts`,
+`'two scenes differing only in dropped tokens share a key, deliberately'`) rather than
+guarded against in code, so a future change to what gets trimmed here shows up as a
+failing test instead of a silent, undiscovered merge.
+
 - [In a listing, a hyphen-attached group inside the quality segment leaks into the identity and the quality is lost](https://github.com/chad3814/pickarr/issues/19) — `- 1080p-GRP`. One of the "Smaller, all pre-existing" defects.
 - [When a listing holds two dates the first wins and the second ends up in the title](https://github.com/chad3814/pickarr/issues/20) — One of the "Smaller, all pre-existing" defects.
 - [`4K60` matches no resolution because there is no word boundary before the `60`](https://github.com/chad3814/pickarr/issues/21) — One of the "Smaller, all pre-existing" defects.

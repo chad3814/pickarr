@@ -39,6 +39,20 @@ test('a doubled XXX marker keeps the in-title one, not just the walk-adjacent on
   assert.equal(titleOf('Site.26.08.05.Name.XXX.Solo.XXX.1080p.MP4-WRB'), 'Name XXX');
 });
 
+test('two scenes differing only in dropped tokens share a key, deliberately', () => {
+  // Dropping a content-type tag and a site id is what makes these titles
+  // askable of a metadata service, and it costs this: two scenes posted by one
+  // site on one day whose titles differ ONLY in those tokens collate as one.
+  // Measured before accepting it — zero occurrences across 7,166 parsed corpus
+  // titles, where the only keys carrying two titles are case and spelling
+  // variants of the same scene. Asserted rather than guarded so that a future
+  // change of behaviour here shows up as a failing test instead of a surprise.
+  const a = plugin.parse('PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB');
+  const b = plugin.parse('PornMegaLoad.26.08.05.Suki.Sin.Hardcore.42467.XXX.1080p.MP4-WRB');
+  assert.ok(a !== null && b !== null);
+  assert.equal(a.identityKey, b.identityKey);
+});
+
 test('a content-type tag and an id both leave the title', () => {
   assert.equal(titleOf('PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB'),
     'Suki Sin');
