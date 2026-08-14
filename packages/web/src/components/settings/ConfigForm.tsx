@@ -1,4 +1,6 @@
 import { useId } from 'react';
+import { DownloadClientFields } from './DownloadClientFields.tsx';
+import { FeedFields } from './FeedFields.tsx';
 import { SecretField } from './SecretField.tsx';
 import type {
   EditableConfig,
@@ -323,7 +325,18 @@ export function ConfigForm({ config, draft, portOverride, onChange }: ConfigForm
         )}
       </fieldset>
 
-      {/* Tasks 11-12 render DownloadClientFields, FeedFields and PluginFields here. */}
+      <DownloadClientFields
+        clients={draft.downloadClients}
+        onDisk={config.downloadClients}
+        onChange={(downloadClients) => onChange({ ...draft, downloadClients })}
+      />
+      <FeedFields
+        feeds={draft.feeds}
+        pluginNames={draft.plugins.map((plugin) => plugin.name)}
+        onChange={(feeds) => onChange({ ...draft, feeds })}
+      />
+
+      {/* Task 12 renders PluginFields here. */}
     </div>
   );
 }
