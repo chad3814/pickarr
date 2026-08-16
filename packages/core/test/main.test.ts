@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import type { PluginRegistry } from '../src/plugins/registry.ts';
-import { entryFromArgv, pluginById, resolveArtworkDir } from '../src/main.ts';
+import { composeMetadataTick, entryFromArgv, pluginById, resolveArtworkDir } from '../src/main.ts';
 
 const MAIN_TS_PATH = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
@@ -121,4 +121,42 @@ test('entryFromArgv is false when argv[1] is absent', async () => {
   await withArgv1(undefined, () => {
     assert.equal(entryFromArgv(), false);
   });
+});
+
+// A performer search is the fallback for a scene lookup that settled without
+// a cast, so the pass that produces those rows has to run before the pass
+// that drains them. Asserting the *sequence* — not just that both ran — is
+// what pins that, without needing `main()`'s config/db/fetch/scheduler
+// machinery: `composeMetadataTick` is a pure function of its two arguments.
+test('composeMetadataTick runs the scene pass and then the performer pass, in order', async () => {
+  const calls: string[] = [];
+  const runScenes = async (): Promise<void> => {
+    calls.push('scenes');
+  };
+  const runPerformers = async (): Promise<void> => {
+    calls.push('performers');
+  };
+
+  const tick = composeMetadataTick(runScenes, runPerformers);
+  await tick();
+
+  assert.deepEqual(calls, ['scenes', 'performers']);
+});
+
+test('composeMetadataTick awaits the scene pass before starting the performer pass', async () => {
+  const calls: string[] = [];
+  const runScenes = async (): Promise<void> => {
+    // A microtask delay: if the composed tick did not await this before
+    // calling `runPerformers`, `performers` would be recorded first.
+    await Promise.resolve();
+    calls.push('scenes');
+  };
+  const runPerformers = async (): Promise<void> => {
+    calls.push('performers');
+  };
+
+  const tick = composeMetadataTick(runScenes, runPerformers);
+  await tick();
+
+  assert.deepEqual(calls, ['scenes', 'performers']);
 });
