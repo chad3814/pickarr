@@ -211,6 +211,33 @@ test('a 429 breaks the pass, leaving the rows behind it untouched', async () => 
   db.close();
 });
 
+test('the cooldown is measured from when the 429 landed, not from when the pass began', async () => {
+  // A pass can spend several sequential requests before one is refused, so a
+  // cooldown computed from the clock captured at the top of the pass expires
+  // earlier than the provider asked for — and the next tick spends a request
+  // re-learning the same limit. `lookUpOne` reads the clock again for this
+  // reason; so does this pass.
+  const db = openTestDatabase();
+  seedGroup(db, 1, 'Jessica Jaymes Loves It');
+  insertPerformerSearch(db, 1, 100);
+  let clock = 1000;
+  const passDeps = deps(db, [], {
+    now: () => clock,
+    client: {
+      source: 'theporndb',
+      async searchPerformers() {
+        clock += 4000;
+        throw new RateLimited(120_000);
+      },
+    },
+  });
+
+  const result = await runPerformerPass(passDeps);
+
+  assert.equal(result.cooldownUntil, 5000 + 120_000, 'the full 120s from when the 429 landed');
+  db.close();
+});
+
 test('an ordinary failure defers the row with its message', async () => {
   const db = openTestDatabase();
   seedGroup(db, 1, 'Jessica Jaymes Loves It');
@@ -266,8 +293,16 @@ test('a row whose own write throws still has its attempts bumped', async () => {
 
   assert.equal(result.deferred, 1, 'the failing row deferred rather than throwing');
   assert.equal(duePerformerQueue(db, 9_999_999_999, 10).find((row) => row.groupId === 1)?.attempts, 1);
-  // Group 2 was still reached in this same pass, and settled normally.
+  // Group 2 was still reached in this same pass, and settled normally — asserted
+  // both ways round, because `calls` alone only proves it was asked. Its removal
+  // additionally pins that a COMMIT still lands after the earlier row's
+  // ROLLBACK, which is the half a botched rollback would break.
   assert.deepEqual(passDeps.calls, ['Jessica Jaymes', 'Someone Else']);
+  assert.deepEqual(
+    duePerformerQueue(db, 9_999_999_999, 10).map((row) => row.groupId),
+    [1],
+    'group 1 is still queued for its retry; group 2 is gone, settled',
+  );
   db.close();
 });
 
@@ -299,12 +334,19 @@ test('a truncated page is judged, and the truncation is logged rather than silen
   db.close();
 });
 
-test('no client means no pass and no reads', async () => {
+test('no client means no pass and no queue read', async () => {
   const db = openTestDatabase();
   seedGroup(db, 1, 'Jessica Jaymes Loves It');
   insertPerformerSearch(db, 1, 100);
 
+  // The queue table is parked under another name across the call, so "it did not
+  // read the queue" is something this test establishes rather than something a
+  // reader has to confirm by inspecting the order of two lines: a pass that
+  // reached `duePerformerQueue` would throw `no such table` instead of answering
+  // zeros. Renamed back afterwards so the row assertion below can still see it.
+  db.exec('ALTER TABLE performer_queue RENAME TO performer_queue_parked');
   const result = await runPerformerPass(deps(db, [], { client: undefined }));
+  db.exec('ALTER TABLE performer_queue_parked RENAME TO performer_queue');
 
   assert.deepEqual(result, { looked: 0, linked: 0, unmatched: 0, deferred: 0, cooldownUntil: null });
   assert.deepEqual(duePerformerQueue(db, 9999, 10).map((row) => row.groupId), [1]);
@@ -336,6 +378,49 @@ test('createPerformerRunner makes no request inside a cooldown, and says so once
     passDeps.logged.filter((line) => line.includes('cooling down')).length,
     1,
     'the skip is announced once per cooldown, not once per tick',
+  );
+  db.close();
+});
+
+test('the runner asks again once a cooldown lapses, and announces the next one afresh', async () => {
+  // The other half of `loggedSkip`: it is cleared on the tick that resumes, so a
+  // second cooldown is announced rather than silently swallowed because an
+  // earlier one had already been reported. A frozen clock cannot see either
+  // behaviour — no tick ever reaches the far side of a cooldown — so this one
+  // advances.
+  const db = openTestDatabase();
+  seedGroup(db, 1, 'Jessica Jaymes Loves It');
+  insertPerformerSearch(db, 1, 100);
+  let clock = 1000;
+  // A 429 leaves the row's next_at alone, so the same row is due again on the
+  // tick that resumes; both answers are refusals, which is what gives a second
+  // cooldown to announce.
+  const passDeps = deps(db, [new RateLimited(120_000), new RateLimited(120_000)], {
+    now: () => clock,
+  });
+  const run = createPerformerRunner(passDeps);
+
+  await run();
+  clock = 60_000;
+  await run();
+  assert.deepEqual(passDeps.calls, ['Jessica Jaymes'], 'still inside the first cooldown');
+  assert.equal(passDeps.logged.filter((line) => line.includes('cooling down')).length, 1);
+
+  clock = 200_000;
+  await run();
+  assert.deepEqual(
+    passDeps.calls,
+    ['Jessica Jaymes', 'Jessica Jaymes'],
+    'the cooldown lapsed, so the row was asked again',
+  );
+
+  clock = 250_000;
+  await run();
+  assert.deepEqual(passDeps.calls, ['Jessica Jaymes', 'Jessica Jaymes'], 'and a new cooldown holds');
+  assert.equal(
+    passDeps.logged.filter((line) => line.includes('cooling down')).length,
+    2,
+    'the second cooldown is announced too, not swallowed by the first',
   );
   db.close();
 });

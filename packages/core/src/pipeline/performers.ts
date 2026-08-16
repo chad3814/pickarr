@@ -251,14 +251,22 @@ export async function runPerformerPass(deps: PerformerPassDeps): Promise<Perform
         // keeps its next_at and is picked up normally once the cooldown clears.
         // Asking the rest anyway would spend one request per row rediscovering a
         // limit already known.
-        result.cooldownUntil = now + error.retryAfterMs;
+        //
+        // The clock is read again here rather than reusing the pass's `now`, for
+        // the reason `lookUpOne` states where it does the same: this pass may
+        // have spent several sequential requests reaching this row, and a
+        // cooldown measured from a stale timestamp expires earlier than the
+        // provider intended — costing a request to re-learn the same limit.
+        result.cooldownUntil = deps.now() + error.retryAfterMs;
         break;
       }
       result.deferred += 1;
-      // `now` and the backoff are both computed from the pass's captured clock
-      // and passed in, matching `metadata.ts`'s own `deferOrGiveUp` signature.
-      // Reading `deps.now()` again inside would stamp `next_at` from a later
-      // instant than the row was judged at.
+      // `nextAt` is computed here from the clock this pass captured, rather than
+      // left to `deferOrGiveUp` to read fresh: the row is being stamped for the
+      // instant it was judged at, and a helper reading the clock again would
+      // stamp it from a later one. The 429 above is the opposite case on purpose
+      // — a cooldown measures forward from when the limit landed, so it wants
+      // the current clock, while a backoff measures from the judgement.
       deferOrGiveUp(deps, row, (error as Error).message, now + backoffFor(row.attempts));
     }
   }
