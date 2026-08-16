@@ -462,6 +462,19 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
  * one that fails on demand — see `applyMove`'s tests for exactly which
  * failures that has to cover.
  *
+ * `commit` exists for the same reason as `rename`, and only for that reason:
+ * `applyMove` runs its own hand-rolled `BEGIN`/`COMMIT`/`ROLLBACK` (it cannot
+ * use the shared `inTransaction` from `db/transaction.ts`, since that helper
+ * is synchronous and the renames it would need to wrap are not) — see the
+ * comment on `applyMove`. Wrapping only the `COMMIT` call, and only here,
+ * lets a test make a commit fail on demand — deterministically, unlike
+ * poisoning it with a deferred foreign key, which trips wherever `COMMIT`
+ * happens to be called and so cannot distinguish *where* it was called from
+ * — without adding any seam to `db/transaction.ts` itself, which is shared
+ * with the manual edit path and must not grow one just for this test. The
+ * real implementation is exactly `(db) => db.exec('COMMIT')`; there is
+ * nothing else it could legitimately do.
+ *
  * `now` arrived with the merge and nothing else needs it: a re-key writes no
  * timestamp of its own (spec §6 — not `edited_at`, not `list_rank_at`), but a
  * merge re-derives the survivor's upgrade flag, and the arrival half of that
@@ -470,6 +483,7 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
 export interface RekeyDeps {
   now(): number;
   rename(from: string, to: string): Promise<void>;
+  commit(db: DatabaseSync): void;
 }
 
 /**
@@ -750,7 +764,7 @@ async function applyMove(
   }
 
   try {
-    db.exec('COMMIT');
+    deps.commit(db);
   } catch (error) {
     db.exec('ROLLBACK');
     for (const move of outcome.renames.toReversed()) await deps.rename(move.to, move.from);
