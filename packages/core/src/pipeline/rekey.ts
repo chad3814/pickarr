@@ -112,8 +112,23 @@ function stationary(row: GroupRawRow, outcome: RekeyOutcome): StationaryAttempt 
 }
 
 /**
- * Builds the destination a live imported file would move to if the group
- * were re-keyed to `identity`, by asking the plugin exactly as
+ * Either every live file got a destination, or none of this group's renames
+ * are trustworthy enough to act on. There is no partial-success shape: a
+ * `move` whose `renames` silently omitted a file it couldn't figure out would
+ * report success while quietly leaving that one file stranded at its old
+ * path under the group's new key — the exact failure this whole pass exists
+ * to catch, now with nothing anywhere saying it happened. "Skip the group"
+ * costs a human one look at a reason string; "half-rename it" costs a file
+ * that nothing will ever revisit, because the group's own key will read
+ * `unchanged` on every future run once the identity columns are updated.
+ */
+type RenameResult =
+  | { ok: true; renames: { fileId: number; from: string; to: string }[] }
+  | { ok: false; reason: string };
+
+/**
+ * Builds the destination every live imported file would move to if the
+ * group were re-keyed to `identity`, by asking the plugin exactly as
  * `pipeline/import.ts:324` does at real import time — never by editing the
  * old path's text. A title correction and a path are not the same
  * transformation (the path template can reorder, drop or rename segments
@@ -121,11 +136,9 @@ function stationary(row: GroupRawRow, outcome: RekeyOutcome): StationaryAttempt 
  * inside the old path would silently miss every one of those and place a file
  * where the template says nothing should live.
  *
- * A file this can't re-plan (an unreachable download/release row, or a
- * plugin that refuses the synthetic input) is skipped rather than aborting
- * the group's whole proposal: a rename this pass cannot compute confidently
- * is exactly the situation "skip it" exists for, and it costs one file, not
- * the group's otherwise-sound identity move.
+ * Fails the whole group, naming the file, the moment any one file's
+ * destination can't be computed — see `RenameResult` above for why a partial
+ * list is not an acceptable answer.
  */
 function computeRenames(
   db: DatabaseSync,
@@ -133,25 +146,32 @@ function computeRenames(
   libraryRoot: string,
   groupId: number,
   identity: PreparedIdentity,
-): { fileId: number; from: string; to: string }[] {
+): RenameResult {
   const files = db
     .prepare(
       `SELECT id, download_id, dest_path, size_bytes
          FROM imported_files WHERE group_id = ? AND trashed_at IS NULL ORDER BY id`,
     )
     .all(groupId) as SqlRow[];
-  if (files.length === 0) return [];
+  if (files.length === 0) return { ok: true, renames: [] };
 
   const display = JSON.parse(identity.displayJson) as ParsedRelease['display'];
   const renames: { fileId: number; from: string; to: string }[] = [];
 
   for (const file of files) {
-    const download = getDownload(db, num(file, 'download_id'));
-    const release = download === null ? null : getRelease(db, download.releaseId);
-    // Both lookups are guaranteed by the schema's foreign keys in a
-    // healthy database; guarded rather than asserted so a row that
-    // somehow fails to resolve costs this one rename, not the group.
-    if (release === null) continue;
+    const fileId = num(file, 'id');
+    const downloadId = num(file, 'download_id');
+    const download = getDownload(db, downloadId);
+    if (download === null) {
+      return { ok: false, reason: `imported file ${fileId}: its download row (id ${downloadId}) no longer exists` };
+    }
+    const release = getRelease(db, download.releaseId);
+    if (release === null) {
+      return {
+        ok: false,
+        reason: `imported file ${fileId}: its release row (id ${download.releaseId}) no longer exists`,
+      };
+    }
 
     const destPath = str(file, 'dest_path');
     const media: ParsedRelease = {
@@ -166,24 +186,33 @@ function computeRenames(
     let plan: ImportPlan | null;
     try {
       plan = plugin.planImport(media, sourceFiles);
-    } catch {
-      continue;
+    } catch (error) {
+      return { ok: false, reason: `imported file ${fileId}: planImport threw: ${(error as Error).message}` };
     }
     const planned = plan?.files[0];
-    if (planned === undefined) continue;
+    if (planned === undefined) {
+      return {
+        ok: false,
+        reason: `imported file ${fileId}: planImport returned ${plan === null ? 'null' : 'no files'}`,
+      };
+    }
 
-    renames.push({ fileId: num(file, 'id'), from: destPath, to: resolve(libraryRoot, planned.destination) });
+    renames.push({ fileId, from: destPath, to: resolve(libraryRoot, planned.destination) });
   }
 
-  return renames;
+  return { ok: true, renames };
 }
 
 /**
- * The `move` outcome for a group whose new identity has already cleared any
+ * The outcome for a group whose new identity has already cleared any
  * collision check — either because it never needed one (case 7's key never
- * moves, so nothing can be standing in its way) or because it won one.
+ * moves, so nothing can be standing in its way) or because it won one. Not
+ * unconditionally a `move`: if any live file's destination can't be computed,
+ * this reports `skipped-unparsable` instead, per `RenameResult`'s reasoning —
+ * a wrong answer is worse than no answer, and skipping a group beats
+ * half-renaming it.
  */
-function moveOutcome(
+function finalizeMove(
   db: DatabaseSync,
   registry: PluginRegistry,
   row: GroupRawRow,
@@ -191,13 +220,24 @@ function moveOutcome(
   displayChanged: boolean,
 ): RekeyOutcome {
   const plugin = registry.byId(row.plugin);
-  // Unreachable in practice: attemptFor() already refused an unknown plugin
-  // id before any group of this plugin can reach a move. Handled rather than
-  // asserted because "no renames" is still a safe, honest answer for it.
-  const renames =
-    plugin === undefined
-      ? []
-      : computeRenames(db, plugin, registry.libraryRootById(row.plugin), row.id, identity);
+  if (plugin === undefined) {
+    // Unreachable in practice: attemptFor() already refused an unknown
+    // plugin id before any group of this plugin can reach here. Answered
+    // rather than asserted, for the same reason every other branch in this
+    // module prefers a stated refusal to a thrown assertion.
+    return {
+      kind: 'skipped-unparsable',
+      reason: `group ${row.id}: plugin id "${row.plugin}" resolved during parse but not while planning its renames`,
+    };
+  }
+
+  const result = computeRenames(db, plugin, registry.libraryRootById(row.plugin), row.id, identity);
+  if (!result.ok) {
+    return {
+      kind: 'skipped-unparsable',
+      reason: `group ${row.id} would move to identity key "${identity.identityKey}", but its renames could not be computed: ${result.reason}`,
+    };
+  }
 
   return {
     kind: 'move',
@@ -205,7 +245,7 @@ function moveOutcome(
     displayJson: identity.displayJson,
     searchText: identity.searchText,
     displayChanged,
-    renames,
+    renames: result.renames,
   };
 }
 
@@ -280,7 +320,7 @@ function attemptFor(
     // since this group was created corrects its spelling without touching
     // the slug the site collapses to. The key never moving means nothing can
     // ever contest this slot, so the outcome is final immediately.
-    return stationary(row, moveOutcome(db, registry, row, identity, true));
+    return stationary(row, finalizeMove(db, registry, row, identity, true));
   }
 
   return { kind: 'mover', slot: slot(row.plugin, identity.identityKey), identity };
@@ -354,7 +394,7 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
       const displayChanged = attempt.identity.displayJson !== row.display;
       proposals.push({
         groupId: row.id,
-        outcome: moveOutcome(db, registry, row, attempt.identity, displayChanged),
+        outcome: finalizeMove(db, registry, row, attempt.identity, displayChanged),
       });
       continue;
     }
