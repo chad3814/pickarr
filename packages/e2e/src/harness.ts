@@ -131,14 +131,19 @@ export interface Harness {
   runMetadataPass(): Promise<MetadataPassResult>;
 }
 
-function createFakeClient(id: string, importMode: 'move' | 'copy'): FakeDownloadClient {
+function createFakeClient(
+  id: string,
+  importMode: 'move' | 'copy',
+  category: string,
+): FakeDownloadClient {
   const added: AddedUrl[] = [];
   const removed: string[] = [];
-  let snapshot: ClientSnapshot = { queue: [], history: [] };
+  let snapshot: ClientSnapshot = { queue: [], history: [], complete: true };
 
   return {
     id,
     importMode,
+    category,
     added,
     removed,
     setSnapshot(next) {
@@ -239,7 +244,11 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
   // what actually matters — a misconfigured `sites` list still throws here.
   const registry = await loadPlugins(config, async () => ({ default: createScenesPlugin }));
 
-  const client = createFakeClient(clientConfig.id, clientConfig.importMode);
+  const client = createFakeClient(
+    clientConfig.id,
+    clientConfig.importMode,
+    clientConfig.category,
+  );
   const metadataClient = createFakeMetadataClient();
 
   // Shared with `runMetadataPass` below, so a poster a test caches through the

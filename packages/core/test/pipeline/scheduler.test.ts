@@ -14,6 +14,7 @@ const NO_RECONCILE_WORK: ReconcileResult = {
   failed: 0,
   removed: 0,
   imported: 0,
+  absent: 0,
 };
 
 /** Yields to the macrotask queue so already-scheduled promise work can run. */
@@ -36,7 +37,7 @@ test('reconcileNow caches the untracked snapshot for later reads', async () => {
       parseFailures: [],
       parseFailuresSuppressed: 0,
     }),
-    reconcile: async () => ({ untracked: UNTRACKED, advanced: 0, failed: 0, imported: 0, removed: 0 }),
+    reconcile: async () => ({ untracked: UNTRACKED, advanced: 0, failed: 0, imported: 0, removed: 0, absent: 0 }),
     clientIds: ['sab'],
     log: () => {},
   });
@@ -148,7 +149,7 @@ test('an ingest failure on one feed does not stop the others', async () => {
         parseFailuresSuppressed: 0,
       };
     },
-    reconcile: async () => ({ untracked: [], advanced: 0, failed: 0, imported: 0, removed: 0 }),
+    reconcile: async () => ({ untracked: [], advanced: 0, failed: 0, imported: 0, removed: 0, absent: 0 }),
     clientIds: [],
     log: () => {},
   });
@@ -340,5 +341,111 @@ test('ingestAllNow logs each parse failure individually, plus a suppressed count
   assert.ok(logged.some((line) => line.includes('Weird.Release.One')));
   assert.ok(logged.some((line) => line.includes('Weird.Release.Two')));
   assert.ok(logged.some((line) => /1.*suppress/i.test(line)));
+  db.close();
+});
+
+// --- Reconcile tick reporting -----------------------------------------------
+//
+// The counters existed and nothing printed them. That is the shape of the
+// 2026-08-15 incident: 35 downloads were failed over seventeen minutes and the
+// log said nothing at all about it. A tick that did something now says so.
+
+test('a reconcile tick that did something logs its counters, absence included', async () => {
+  const db = openTestDatabase();
+  const logged: string[] = [];
+  const scheduler = createScheduler({
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => ({
+      untracked: UNTRACKED,
+      advanced: 2,
+      failed: 0,
+      imported: 1,
+      removed: 1,
+      absent: 5,
+    }),
+    clientIds: ['sab'],
+    log: (message) => logged.push(message),
+  });
+
+  await scheduler.reconcileNow();
+
+  const line = logged.find((message) => message.startsWith('reconcile sab:'));
+  assert.ok(line !== undefined, 'a tick with news must report it');
+  assert.match(line ?? '', /2 advanced/);
+  assert.match(line ?? '', /1 imported/);
+  assert.match(line ?? '', /5 missing from client/);
+  assert.match(line ?? '', /1 untracked/);
+  db.close();
+});
+
+test('a quiet reconcile tick logs nothing, because a line every ten seconds is a line nobody reads', async () => {
+  const db = openTestDatabase();
+  const logged: string[] = [];
+  const scheduler = createScheduler({
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => NO_RECONCILE_WORK,
+    clientIds: ['sab'],
+    log: (message) => logged.push(message),
+  });
+
+  await scheduler.reconcileNow();
+  await scheduler.reconcileNow();
+
+  assert.deepEqual(logged, []);
+  db.close();
+});
+
+// Absence is sticky: a download missing from the client stays missing until it
+// comes back, so `absent` is non-zero on every tick until something changes.
+// Without deduplication, saying so would mean a line every tick forever.
+test('an unchanged reconcile situation is stated once, and again only when it changes', async () => {
+  const db = openTestDatabase();
+  const logged: string[] = [];
+  let absent = 3;
+  const scheduler = createScheduler({
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => ({
+      untracked: [],
+      advanced: 0,
+      failed: 0,
+      imported: 0,
+      removed: 0,
+      absent,
+    }),
+    clientIds: ['sab'],
+    log: (message) => logged.push(message),
+  });
+
+  await scheduler.reconcileNow();
+  await scheduler.reconcileNow();
+  await scheduler.reconcileNow();
+  assert.equal(logged.length, 1, 'the same three rows are still missing; that is not news twice');
+
+  absent = 4;
+  await scheduler.reconcileNow();
+  assert.equal(logged.length, 2);
+  assert.match(logged[1] ?? '', /4 missing from client/);
+
+  // A genuinely quiet tick clears the memory, so the same situation recurring
+  // afterwards is reported rather than mistaken for a repeat of a fact that has
+  // since stopped being true.
+  absent = 0;
+  await scheduler.reconcileNow();
+  assert.equal(logged.length, 2, 'nothing to say');
+  absent = 4;
+  await scheduler.reconcileNow();
+  assert.equal(logged.length, 3, 'it happened again, so it is said again');
   db.close();
 });

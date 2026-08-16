@@ -87,11 +87,61 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     }
   }
 
+  /**
+   * The last reconcile summary logged per client, so an unchanging situation is
+   * stated once instead of every tick.
+   *
+   * This is what makes it safe to log `absent` at all. Absence is sticky by
+   * design — a download missing from the client stays missing until it comes
+   * back — so `result.absent` is non-zero on every tick until the situation
+   * changes, and at one tick per `RECONCILE_INTERVAL_MS` that would be a line
+   * every ten seconds forever: the shape of log nobody reads, which is how the
+   * 2026-08-15 incident stayed invisible for seventeen minutes despite the
+   * evidence being on screen. Deduplicating on the summary text means "5
+   * missing from client" is said when it becomes true and again when the number
+   * moves, and nothing in between.
+   */
+  const lastReconcileSummary = new Map<string, string>();
+
+  /**
+   * A reconcile tick's counters, when there are any. A tick where nothing at
+   * all happened prints nothing — the common case by far, and the one that
+   * would bury everything else — and it also clears the remembered summary, so
+   * a situation that recurs after a genuinely quiet tick is reported afresh
+   * rather than suppressed as a repeat of something that is no longer true.
+   *
+   * `absent` is spelled out rather than abbreviated because it is the counter
+   * this whole change exists to make visible, and it is deliberately not a
+   * failure count: those rows are still active and still being looked for.
+   */
+  function logReconcileResult(clientId: string, result: ReconcileResult): void {
+    const news =
+      result.advanced +
+      result.failed +
+      result.imported +
+      result.removed +
+      result.absent +
+      result.untracked.length;
+    if (news === 0) {
+      lastReconcileSummary.delete(clientId);
+      return;
+    }
+
+    const summary =
+      `${result.advanced} advanced, ${result.imported} imported, ${result.failed} failed, ` +
+      `${result.removed} cleaned up, ${result.absent} missing from client, ` +
+      `${result.untracked.length} untracked`;
+    if (lastReconcileSummary.get(clientId) === summary) return;
+    lastReconcileSummary.set(clientId, summary);
+    deps.log(`reconcile ${clientId}: ${summary}`);
+  }
+
   async function reconcilePass(): Promise<void> {
     for (const clientId of deps.clientIds) {
       try {
         const result = await deps.reconcile(clientId);
         untracked.set(clientId, result.untracked);
+        logReconcileResult(clientId, result);
       } catch (error) {
         deps.log(`reconcile ${clientId} failed: ${(error as Error).message}`);
       }

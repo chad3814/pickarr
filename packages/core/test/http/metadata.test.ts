@@ -27,8 +27,9 @@ function fakeClient(): DownloadClient {
   return {
     id: 'sab',
     importMode: 'move',
+    category: 'pickarr',
     addUrl: async () => 'nzo_1',
-    snapshot: async () => ({ queue: [], history: [] }),
+    snapshot: async () => ({ queue: [], history: [], complete: true }),
     remove: async () => {},
     mapPath: (path) => path,
   };

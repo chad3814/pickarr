@@ -252,6 +252,8 @@ export interface DownloadView {
   error: string | null;
   attempts: number;
   updatedAt: number;
+  /** When the client first stopped reporting this download, or null while it is seen. */
+  absentSince: number | null;
 }
 
 export interface DownloadsResponse {
@@ -451,6 +453,7 @@ export function toDownloadView(db: DatabaseSync, download: DownloadRow): Downloa
     error: download.error,
     attempts: download.attempts,
     updatedAt: download.updatedAt,
+    absentSince: download.absentSince,
   };
 }
 

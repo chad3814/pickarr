@@ -16,14 +16,32 @@ import type {
 const TIMEOUT_MS = 20_000;
 
 /**
+ * The `limit` passed on each history page request. Far above any realistic
+ * installation's history size, so the common case is a single request and
+ * paging only actually happens against a client either abnormally large or
+ * (see the incident regression test) one that silently caps its response
+ * regardless of what was asked for.
+ */
+const HISTORY_PAGE_SIZE = 500;
+
+/**
+ * The most history pages `snapshot()` will request before giving up and
+ * reporting the snapshot incomplete. 20 pages of `HISTORY_PAGE_SIZE` is
+ * 10,000 entries — far past any real installation — so this bounds a
+ * pathological or misbehaving client rather than a real one; a genuine
+ * install never gets close.
+ */
+const MAX_HISTORY_PAGES = 20;
+
+/**
  * Statuses SABnzbd's history reports that mean a job is genuinely never
  * coming back. `Failed` is the obvious one. `Deleted` belongs here too: it
  * means a person removed the job at the client, and unlike every status in
  * `IN_PROGRESS_STATUSES` nothing is going to move it out of that state later
  * — the entry just sits in history as `Deleted` forever. Reading it as
- * in-progress would make reconcile wait on it indefinitely, because
- * missing_polls only counts *absence* from queue/history, and a deleted job
- * is never absent.
+ * in-progress would make reconcile wait on it indefinitely, because reconcile
+ * only ever observes *absence* from queue/history, and a deleted job that
+ * still sits in history is never absent.
  */
 const TERMINAL_FAILURE_STATUSES = new Set(['failed', 'deleted']);
 
@@ -51,10 +69,10 @@ const IN_PROGRESS_STATUSES = new Set([
  * A status this client has never seen is read as a failure, not as
  * in-progress, deliberately the less forgiving of the two wrong guesses.
  * In-progress means "wait and poll again," and there is no mechanism that
- * ever revisits that guess: the job is present in history, so missing_polls
- * stays at zero, and it stays present indefinitely if the unrecognized label
- * is itself a terminal state SABnzbd introduced that this client does not
- * enumerate yet. A wrong failure is visible immediately and fixable by
+ * ever revisits that guess: the job is present in history, so reconcile never
+ * records it as absent, and it stays present indefinitely if the unrecognized
+ * label is itself a terminal state SABnzbd introduced that this client does
+ * not enumerate yet. A wrong failure is visible immediately and fixable by
  * extending this list; a wrong "still working" can hang forever with no
  * signal that anything is wrong.
  */
@@ -85,13 +103,34 @@ let warnedUnrecognizedHistoryStatus = false;
 
 /**
  * Test-only escape hatch, mirroring
- * `resetLabelMismatchWarningForTests` in `pipeline/reconcile.ts`: node:test
+ * `resetReconcileWarningsForTests` in `pipeline/reconcile.ts`: node:test
  * runs every test in one file inside a single process/module instance, so
  * the "once per process" flag above persists across tests unless a test
  * resets it first.
  */
 export function resetUnrecognizedHistoryStatusWarningForTests(): void {
   warnedUnrecognizedHistoryStatus = false;
+}
+
+/**
+ * Whether the process has already emitted the "dropped slot" warning below.
+ * Same once-per-process rationale as `warnedUnrecognizedHistoryStatus`.
+ */
+let warnedDroppedSlot = false;
+
+/** Test-only escape hatch, mirroring `resetUnrecognizedHistoryStatusWarningForTests`. */
+export function resetDroppedSlotWarningForTests(): void {
+  warnedDroppedSlot = false;
+}
+
+function warnDroppedSlotOnce(kind: 'queue' | 'history', dropped: number): void {
+  if (warnedDroppedSlot) return;
+  warnedDroppedSlot = true;
+  console.warn(
+    `pickarr: SABnzbd ${kind} reported ${dropped} slot(s) this client could not read an ` +
+      'nzo_id from; the snapshot is being treated as incomplete rather than risking an ' +
+      'absence mark for a job the client actually holds.',
+  );
 }
 
 function warnUnrecognizedStatusOnce(ref: string, rawStatus: string): void {
@@ -253,6 +292,21 @@ export function createSabnzbdClient(
   }
 
   /**
+   * Reads a slot's category through `safeText` (a category is server text
+   * like any other) and maps "no category" to `null`. SABnzbd spells that
+   * two different ways depending on which endpoint answered: a queue slot
+   * with no category is the literal string `"None"`, never an absent field;
+   * a history slot with no category is the empty string. Both must collapse
+   * to `null`, or a local filter comparing against a real category name
+   * (see the reconcile design) would treat "None" as a category nobody
+   * configured.
+   */
+  function readCategory(value: JsonValue | undefined): string | null {
+    const raw = safeText(value);
+    return raw === '' || raw === 'None' ? null : raw;
+  }
+
+  /**
    * Wraps an error from an injectable dependency (fetchImpl itself, or a
    * Response's .json()) so nothing it says can leak the api key. The
    * property must hold regardless of how a caller ends up logging or
@@ -300,6 +354,7 @@ export function createSabnzbdClient(
   return {
     id: config.id,
     importMode: config.importMode,
+    category: config.category,
 
     async addUrl(url, name) {
       const body = asRecord(
@@ -323,18 +378,98 @@ export function createSabnzbdClient(
     },
 
     async snapshot(): Promise<ClientSnapshot> {
-      const [queueBody, historyBody] = await Promise.all([
-        call('queue', { category: config.category }),
-        call('history', { category: config.category }),
-      ]);
+      // No `category` on either call. We match entries to downloads on
+      // `nzo_id` with the `[pickarr-N]` label as a fallback (reconcile.ts),
+      // not on the client's category, and asking SABnzbd to filter for us
+      // would break the completeness check below: queue_info's `noofslots`
+      // is the size of the *whole* queue regardless of what was requested,
+      // so comparing a filtered result's length against it would report
+      // every snapshot incomplete forever. Filtering, if any is wanted, is
+      // the caller's job on data that is provably everything.
+      //
+      // `limit=0` is passed explicitly rather than omitted, even though
+      // queue_info already treats a missing limit as unlimited: the two
+      // endpoints read a missing `limit` differently, and relying on that
+      // difference silently is what caused this incident.
+      //
+      // Not awaited here: the history loop below awaits real network calls
+      // (real event-loop turns) before this promise is examined again, and
+      // an unawaited promise with no handler attached by the end of a turn
+      // is what Node considers unhandled — by default, terminating the
+      // process (a `Promise.all` of both calls, as this used to be, didn't
+      // have this problem, because `Promise.all` attaches its own handler to
+      // both promises synchronously). `queueFailed` below is that handler:
+      // attaching it here, not at the `await queuePromise` further down, is
+      // what keeps a queue-side rejection from ever being unhandled, and
+      // lets the loop notice and stop paging rather than running to the cap
+      // against a client that has already told us it is unreachable.
+      const queuePromise = call('queue', { limit: '0' });
+      let queueFailed = false;
+      queuePromise.catch(() => {
+        queueFailed = true;
+      });
+
+      // History has no "unlimited" equivalent, so it must be paged: request
+      // HISTORY_PAGE_SIZE at a time, starting after whatever has already
+      // been collected, until the response's own `noofslots` says there is
+      // nothing left, a page comes back with no slots, or MAX_HISTORY_PAGES
+      // is hit. Sequential, not parallel — each page's `start` depends on
+      // how much the previous page actually returned.
+      const historySlots: JsonValue[] = [];
+      let historyComplete = false;
+      for (let page = 0; page < MAX_HISTORY_PAGES && !queueFailed; page += 1) {
+        const historyBody = await call('history', {
+          start: String(historySlots.length),
+          limit: String(HISTORY_PAGE_SIZE),
+        });
+        const historyRecord = asRecord(asRecord(historyBody)?.['history']);
+        const pageSlots = asArray(historyRecord?.['slots']);
+        historySlots.push(...pageSlots);
+
+        // Read defensively: `noofslots` is a number in every real response,
+        // but a value that is missing or not a number must not throw — it
+        // means "cannot verify", which is exactly the false-`complete` case,
+        // not a crash.
+        //
+        // Ruling: when it is unreadable, stop after this one page rather
+        // than paging on to MAX_HISTORY_PAGES as the brief's literal text
+        // says. `complete` is false either way once `noofslots` cannot be
+        // read — nothing past this page can turn it true — so the other 19
+        // requests a genuinely unresponsive `noofslots` client would
+        // otherwise cost, every single tick, buy nothing. This deliberately
+        // supersedes the brief for this one case; do not restore the loop
+        // to "fix" it back.
+        const noofslots = historyRecord?.['noofslots'];
+        if (typeof noofslots !== 'number') break;
+        if (historySlots.length >= noofslots) {
+          historyComplete = true;
+          break;
+        }
+        // An empty page before reaching the reported total means the total
+        // was wrong — more paging will not help, so stop rather than loop to
+        // the cap for nothing.
+        if (pageSlots.length === 0) break;
+      }
 
       // Everything below reads through safeText, never asText. These strings
       // are *returned* rather than thrown, so none of the error-path defences
       // apply to them, and a caller logging a snapshot would print them
       // straight off the wire. SABnzbd's fail_message in particular quotes
       // the failing request.
+      //
+      // Still awaited unconditionally, whether or not the loop above exited
+      // early on `queueFailed`: this is what actually surfaces the rejection
+      // to `snapshot()`'s caller. The `.catch` above only ever silences the
+      // *unhandled*-rejection bookkeeping; it never resolves or swallows the
+      // failure itself, so this line rejects with the original error exactly
+      // as it did before `Promise.all` was replaced.
+      const queueBody = await queuePromise;
+      const queueRecord = asRecord(asRecord(queueBody)?.['queue']);
+      const queueSlots = asArray(queueRecord?.['slots']);
+      const queueNoofslots = queueRecord?.['noofslots'];
+
       const queue: ClientQueueEntry[] = [];
-      for (const raw of asArray(asRecord(asRecord(queueBody)?.['queue'])?.['slots'])) {
+      for (const raw of queueSlots) {
         const slot = asRecord(raw);
         if (slot === null) continue;
         const ref = safeText(slot['nzo_id']);
@@ -343,11 +478,30 @@ export function createSabnzbdClient(
           ref,
           name: safeText(slot['filename']),
           percentage: Number.parseInt(safeText(slot['percentage']), 10) || 0,
+          category: readCategory(slot['cat']),
         });
       }
 
+      // The naive reading is that comparing `queueSlots.length` (every slot the
+      // client sent, before we could key any of it) against `noofslots` (the
+      // client's own count) is enough to know the snapshot is whole. It is not:
+      // a slot with an unreadable `nzo_id` is dropped above rather than kept
+      // under a key we cannot trust, so it never reaches `queue`, but it was
+      // still counted in `queueSlots.length` — the length test would pass while
+      // a job we actually hold at the client silently fails to appear in
+      // `queue`. Property (b) (an incomplete snapshot must never imply
+      // absence) then breaks for exactly that job. Comparing the accepted count
+      // against the raw count closes that: dropping anything makes the
+      // snapshot incomplete.
+      const droppedQueueSlots = queueSlots.length - queue.length;
+      if (droppedQueueSlots > 0) warnDroppedSlotOnce('queue', droppedQueueSlots);
+      const queueComplete =
+        typeof queueNoofslots === 'number' &&
+        queueSlots.length >= queueNoofslots &&
+        droppedQueueSlots === 0;
+
       const history: ClientHistoryEntry[] = [];
-      for (const raw of asArray(asRecord(asRecord(historyBody)?.['history'])?.['slots'])) {
+      for (const raw of historySlots) {
         const slot = asRecord(raw);
         if (slot === null) continue;
         const ref = safeText(slot['nzo_id']);
@@ -378,10 +532,30 @@ export function createSabnzbdClient(
           outcome,
           storagePath: outcome === 'completed' && storage !== '' ? storage : null,
           failMessage: effectiveFailMessage,
+          category: readCategory(slot['category']),
         });
       }
 
-      return { queue, history };
+      // Same reasoning as `droppedQueueSlots` above, applied to history: a slot
+      // with an unreadable `nzo_id` is dropped rather than kept, but it was
+      // still counted toward `historySlots.length`, which is what the paging
+      // loop above compared against `noofslots`. The naive reading is that the
+      // page-total check is enough on its own; it is not, because it only ever
+      // sees the raw count, never the count we could actually key entries by.
+      // Requiring the accepted count to match the raw count here catches a
+      // drop even though the page-total check already passed.
+      //
+      // This distinction matters more here than for the queue because each
+      // history page's `start` is derived from `historySlots.length` — the raw
+      // count, not the accepted one — so the two were always going to diverge
+      // whenever a drop happens mid-page, not just at the end. Tracking them
+      // separately, rather than folding "accepted" into the paging arithmetic,
+      // is what keeps the paging math correct and still lets a drop surface.
+      const droppedHistorySlots = historySlots.length - history.length;
+      if (droppedHistorySlots > 0) warnDroppedSlotOnce('history', droppedHistorySlots);
+      const historyIsComplete = historyComplete && droppedHistorySlots === 0;
+
+      return { queue, history, complete: queueComplete && historyIsComplete };
     },
 
     async remove(ref: string, deleteFiles: boolean): Promise<void> {
