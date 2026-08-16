@@ -204,10 +204,17 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // An uncaught rejection here would be an unhandled rejection on the
         // process, which crashes it by default; a transient database fault
         // must cost one skipped tick, not the whole container.
+        //
+        // "metadata tick", not "metadata pass": `runMetadata` is main.ts's
+        // composed closure, which runs the scene pass and then the performer
+        // pass. Naming one pass here would send an operator reading the scene
+        // pass's code over a failure the performer pass threw. The passes' own
+        // log lines name themselves, so the one thing this line has to be
+        // honest about is that it cannot say which.
         const metadataTimer = setInterval(() => {
           void metadataMutex
             .tryRun(runMetadata)
-            .catch((error: Error) => deps.log(`metadata pass failed: ${error.message}`));
+            .catch((error: Error) => deps.log(`metadata tick failed: ${error.message}`));
         }, deps.metadataIntervalMs ?? DEFAULT_METADATA_INTERVAL_MS);
         metadataTimer.unref();
         timers.push(metadataTimer);
