@@ -334,13 +334,25 @@ Notes that will otherwise cost you a debugging round:
 - Modify: `packages/core/src/manual/operations.ts`, `packages/core/src/pipeline/rekey.ts`
 - Modify: `packages/core/test/pipeline/rekey.test.ts`
 
-**This task reverses a spec decision, on the owner's ruling and on evidence.** Read this before
-writing anything, because the spec still says the opposite and you will otherwise "fix" it back.
+**This task narrows a spec decision, on the owner's ruling and on evidence. It does not overturn
+it.** Read this before writing anything, and read spec §5 with it — the distinction below is the
+whole task, and an implementer who misses it will either merge too much or merge nothing.
 
-The spec argues collisions are reported and never merged, on the grounds that migration 4's
-collisions were one scene split in two — so merging repaired them — whereas *"ours fuse two
-genuinely different scenes."* That reasoning was sound and its premise turned out to be false.
-The one collision in the owner's 2026-08-16 database is migration 4's shape exactly:
+Spec §5 argues collisions are reported and never merged. Its reasoning is *specific to the class
+it analysed*: the accepted collision of two genuinely **different** scenes that differ only in
+tokens this branch drops — `Suki.Sin.Solo.42466` and `Suki.Sin.Hardcore.42467` colliding on
+`pornmegaload:2026-08-05:suki-sin` (`known-issues.md:281-314`). For that class the spec is still
+right and this task changes nothing: fusing two scenes a user may hold separate files for is
+exactly the wrong answer, and it stays reported.
+
+What the spec did not contemplate is a **second class**, which is what the owner's database
+actually contains: the same scene in two groups at two encodes. That is migration 4's shape, where
+merging is pure repair rather than fusion.
+
+```
+group  106  ClubSweethearts.26.08.07.Foxy.Dreams.Solo.XXX.1080p.MP4-WRB   moves, loses "Solo"
+group 1137  ClubSweethearts.2026.08.07.Foxy.Dreams.720p.x265              already holds the key
+```
 
 ```
 group  106  ClubSweethearts.26.08.07.Foxy.Dreams.Solo.XXX.1080p.MP4-WRB   moves, loses "Solo"
@@ -359,9 +371,23 @@ One scene, two encodes, two groups. Measured history:
 
 So the merge direction is not a judgement call — 106 has *no history whatsoever*, and merging it
 into 1137 hands the user a 1080p WRB release next to the 720p x265 they already downloaded, which
-today they cannot see because the two groups are separate. Update the spec's §5 rationale in the
-same commit; leaving a spec that argues against the shipped behaviour is how the next reader
-"corrects" it.
+today they cannot see because the two groups are separate.
+
+**How to tell the classes apart, mechanically.** Do not try to decide "is this the same scene?"
+semantically — that is a guess, and a wrong guess here deletes a group. Use history as the proxy,
+because it is what the user would lose: a mover with no downloads, no imported files (live *or*
+trashed) and no metadata has nothing that merging can destroy, so merging it is recoverable by
+re-ingest. Anything else is reported. This deliberately declines to merge some genuine duplicates;
+that is the right direction to err, and spec §5's "a wrong answer is worse than no answer" is the
+reason.
+
+Note that this rule is not new to the project: migration 4 already chose a survivor by
+"live imported file, then any download, then lowest id" (spec §5, `migrations.ts:254-260`). Task
+4a's rule is that precedent restricted to the case where the *loser* has none of those.
+
+**Rewrite spec §5 in this task's commit** — not to say "we merge now", but to name the two classes
+and give each its answer. Leaving a spec that reads as a blanket prohibition is how the next
+reader "corrects" this code back out.
 
 **Reuse the existing merge. Do not write a second one.** `manual/operations.ts:296-323` already
 performs this exact operation with the ordering the foreign keys demand — releases move,
