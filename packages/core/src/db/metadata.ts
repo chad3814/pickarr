@@ -410,3 +410,61 @@ export function setPosterPath(db: DatabaseSync, groupId: number, posterPath: str
     groupId,
   );
 }
+
+/** A stored poster, as the repair script needs to see it. */
+export interface StoredPoster {
+  groupId: number;
+  posterUrl: string;
+  /** Null for a row whose image was never successfully fetched to disk. */
+  posterPath: string | null;
+}
+
+/**
+ * Every row whose `poster_url` contains `fragment`.
+ *
+ * The fragment is a caller-supplied literal — `BACKGROUND_CROP_MARKER`, the
+ * only caller — and is matched with LIKE, so it must not contain `%` or `_`,
+ * which that marker does not. Parameterised rather than interpolated all the
+ * same: the string reaches SQLite as a bound value, so the shape of the
+ * statement cannot depend on it.
+ *
+ * Deliberately takes the fragment rather than hard-coding it. What counts as
+ * a synthesised poster is the client's knowledge, stated once beside the
+ * reader that acts on it; a second copy of the substring down here is how the
+ * two would eventually stop agreeing.
+ */
+export function postersMatching(db: DatabaseSync, fragment: string): StoredPoster[] {
+  const rows = db
+    .prepare(
+      `SELECT group_id, poster_url, poster_path FROM group_metadata
+       WHERE poster_url LIKE '%' || ? || '%'
+       ORDER BY group_id`,
+    )
+    .all(fragment);
+  return rows.map((row) => ({
+    groupId: num(row as SqlRow, 'group_id'),
+    posterUrl: str(row as SqlRow, 'poster_url'),
+    posterPath: maybeStr(row as SqlRow, 'poster_path'),
+  }));
+}
+
+/**
+ * Repoints a row at a different image, url and file together.
+ *
+ * Distinct from `setPosterPath`, which fills in a path for a url the provider
+ * just supplied. This one *replaces* the url as well, and the pair has to move
+ * as one: a row naming the old url beside the new file (or the reverse) would
+ * be re-selected by `postersMatching` on the next run and refetched forever.
+ */
+export function setPosterImage(
+  db: DatabaseSync,
+  groupId: number,
+  posterUrl: string,
+  posterPath: string,
+): void {
+  db.prepare('UPDATE group_metadata SET poster_url = ?, poster_path = ? WHERE group_id = ?').run(
+    posterUrl,
+    posterPath,
+    groupId,
+  );
+}
