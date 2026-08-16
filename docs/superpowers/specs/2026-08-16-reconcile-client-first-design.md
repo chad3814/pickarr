@@ -214,7 +214,11 @@ entry's `nzo_id`.
 
 Eligibility for matching is deliberately wider than `activeDownloads`:
 
-- `imported` rows are matched, so the cleanup pass can still remove their jobs (§8).
+- `imported` rows are deliberately *not* matched here — the cleanup pass (§8) runs its own
+  query and owns them. They must still be recognised as ours, though: an entry whose ref
+  is absent from the match set but present in `knownRefs` belongs to an imported row and
+  is skipped, **not** reported as untracked. Conflating "no matching active row" with
+  "not ours" would report every imported job as an orphan.
 - `failed` rows are matched **only** when the failure was `disappeared-from-client`.
   That is the self-retiring recovery path for the 35 (§10). A row that failed for any
   other reason — a repair failure, an import failure, an exhausted `addurl` — stays
@@ -237,7 +241,10 @@ SABnzbd is holding gets reconciled with whatever Pickarr believes about it, incl
        if the snapshot already holds its [pickarr-N] label -> adopt that ref
        else -> addUrl, record the ref
 
-3. for each entry in the snapshot:
+3. for each entry in the snapshot, queue and history collapsed to one entry per
+   ref with the queue winning (a job mid-transition is listed in both; taking
+   history's completed reading and then the queue's would import it and set it
+   back to downloading in the same tick):
      resolve the entry to a download (§5)
      no match                     -> untracked (§9)
      match is 'imported'          -> leave to the cleanup pass (§8)
