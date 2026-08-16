@@ -4,10 +4,25 @@ import type { PerformerSearchResult } from '../clients/theporndb.ts';
 /**
  * The form two spellings of one name have to agree on.
  *
- * Case, and the punctuation that separates words — a release title writes
- * `Anne Marie` where the provider writes `Anne-Marie`, and `ONeil` where it
- * writes `O'Neil`. Both are the same claim about the same person and a
- * comparison that called them different would reject the majority of real hits.
+ * Case, and punctuation that *separates* words — a release title writes
+ * `Anne Marie` where the provider writes `Anne-Marie`. Both are the same claim
+ * about the same person, and folding the hyphen to a space is what lets them
+ * compare equal; a comparison that called them different would reject a large
+ * share of real hits.
+ *
+ * An apostrophe is not that kind of punctuation, so it gets its own rule,
+ * applied first: it is *elided*, not folded to a space. A hyphen sits between
+ * two words (`Anne-Marie` is a title's rendering of `Anne Marie`), but an
+ * apostrophe sits inside one (`O'Neil` is one word, and a release title
+ * routinely drops the mark to write it `ONeil`). Folding it to a space instead
+ * would split the word — `O'Neil` would become `o neil`, two tokens where the
+ * other spelling has one — and the two would never match. This is also why the
+ * elision has to run before the general punctuation fold below: run the other
+ * way round, the hyphen rule would have already turned the apostrophe into a
+ * space and the damage would be done. If this line is ever removed as
+ * apparently-redundant with the fold that follows it, `Katie O'Neil` stops
+ * matching `Katie ONeil` again — that regression is exactly what it exists to
+ * prevent.
  *
  * Deliberately *not* aggressive beyond that: it does not strip vowels, collapse
  * doubled letters or fold `Anna Bell` into `Annabelle`. Over-normalising here
