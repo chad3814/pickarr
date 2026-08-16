@@ -9,6 +9,32 @@ with a push. Everything load-bearing from that workspace is reproduced here, and
 is committed. When you resume, the workspace can be rebuilt from this file plus the
 committed plan — see "How to resume" below.
 
+> **Update, 2026-08-16: the run resumed, completed, and landed on `main`. Read the rest of
+> this file as a historical record, not as instructions.**
+>
+> The "How to resume" section below is spent — Task 2 was picked up from it and tasks 2-7
+> then ran to completion, so following it now would re-do finished work.
+>
+> **Every commit id in this file has been rewritten.** The branch was rebased twice before
+> landing: once onto `14bef62`, and again onto `85639d2` after `main` moved 14 commits
+> during the run. Both rewrites changed every SHA, and the originals are now unreachable.
+> The ids throughout this file — including inside the reproduced ledger and report blocks —
+> have been updated to the commits that actually exist on `main`, so they resolve. Nothing
+> else in those blocks was touched; only the ids differ from what was written on 2026-08-14.
+> `f8242f8` is left as-is: it was `main`'s tip at the time and is still reachable through
+> `main`'s own history.
+>
+> One of those rebases collided on a migration number — `main` took `version: 8` for
+> `downloads.absent_since` while this branch had it for `performer_queue`, so the queue
+> table ships as `version: 9`. Any statement below about migration 8 refers to the original
+> plan, not to what shipped.
+>
+> **The full record is committed and is better than this reproduction.** See
+> `claudedocs/2026-08-14-performer-search-queue/` for the complete ledger — every ruling
+> taken during the run with what it costs if wrong, the whole-branch review's triage of 20
+> deferred findings, and all seven task briefs and implementer reports. This file reproduces
+> only the fraction that existed when the run was suspended.
+
 ---
 
 ## Where things stand
@@ -18,11 +44,11 @@ Branch `feature/performer-search-queue`, worktree
 
 | Commit | What |
 |---|---|
-| `1f2bcce` | Design spec |
-| `1f75efb` | Implementation plan (7 tasks) |
-| `e3cd1da` | Plan corrections — pre-flight findings A–D |
-| `685a7e5` | Plan fix — unterminated code fence (finding E) |
-| `15a3070` | **Task 1 complete** — plugin `performerQuery` seam |
+| `339a206` | Design spec |
+| `d9d76dc` | Implementation plan (7 tasks) |
+| `46cad3a` | Plan corrections — pre-flight findings A–D |
+| `bf6c17a` | Plan fix — unterminated code fence (finding E) |
+| `ddc97a1` | **Task 1 complete** — plugin `performerQuery` seam |
 
 **Task 1 of 7 is done and its review is clean. Tasks 2–7 have not been started.**
 
@@ -31,7 +57,7 @@ Task 2 implementer was **never dispatched** (see the correction note in the ledg
 an earlier ledger line wrongly said it had been, written in the same message that was
 interrupted before the dispatch happened).
 
-Test state at `15a3070`: **819 core / 165 web, all green** (813 core baseline + 6 new).
+Test state at `ddc97a1`: **819 core / 165 web, all green** (813 core baseline + 6 new).
 `npm run build` also succeeded on the branch's earlier commits.
 
 - Spec: `docs/superpowers/specs/2026-08-14-performer-search-queue-design.md`
@@ -68,7 +94,7 @@ Test state at `15a3070`: **819 core / 165 web, all green** (813 core baseline + 
    **Sanity-check the extraction:** `grep -c "Wire it into the running process" <workspace>/task-6-brief.md`
    must print `0`. If it prints `1`, a code fence in the plan has come unbalanced again and
    Task 6's brief is swallowing Task 7 — see finding E.
-5. **Resume at Task 2.** BASE for its review package is `15a3070`. Do not re-dispatch Task 1;
+5. **Resume at Task 2.** BASE for its review package is `ddc97a1`. Do not re-dispatch Task 1;
    its commit is in git and its review was clean.
 
 ---
@@ -188,8 +214,8 @@ Spec: docs/superpowers/specs/2026-08-14-performer-search-queue-design.md (read, 
 Worktree: <rebuild on the new machine>
 Branch: feature/performer-search-queue
 Branch start (merge-base with main): f8242f8
-Plan committed: 1f75efb · Spec committed: 1f2bcce
-Plan corrections committed: e3cd1da (pre-flight rulings A–D), 685a7e5 (ruling E)
+Plan committed: d9d76dc · Spec committed: 339a206
+Plan corrections committed: 46cad3a (pre-flight rulings A–D), bf6c17a (ruling E)
 
 ## Pre-flight conflict scan
 
@@ -261,10 +287,10 @@ commit.
 
 ## Progress
 
-Task 1: dispatched (implementer, sonnet) — BASE e3cd1da
-Task 1: implementer DONE — commit 15a3070 — 819 core (+6) / 165 web green; mutation
+Task 1: dispatched (implementer, sonnet) — BASE 46cad3a
+Task 1: implementer DONE — commit ddc97a1 — 819 core (+6) / 165 web green; mutation
   WORDS 2→1 broke the named test (6 tests, 1 pass, 5 fail), restored to green
-Task 1: task reviewer dispatched (sonnet) — package review-685a7e5..15a3070.diff
+Task 1: task reviewer dispatched (sonnet) — package review-bf6c17a..ddc97a1.diff
 Task 1: review clean — Spec ✅, quality Approved
 Task 1: minor (deferred): .trim() in scenePerformerQuery is redundant given
   split(/\s+/)+filter, and no test pins it — deleting it would still pass all 6 tests.
@@ -273,12 +299,12 @@ Task 1: minor (deferred): the WORDS comment cites Free.Use.Fantasy as appearing 
   resolve-sites.ts; that file actually discusses "Free Use" → "Freeuse Fantasy" and the
   one-word retry confirming "Free". Argument sound, literal citation is not. Mirrored in
   the test file comment.
-Task 1: complete (commits 685a7e5..15a3070, review clean)
+Task 1: complete (commits bf6c17a..ddc97a1, review clean)
 
 Task 2: NOT dispatched. An earlier ledger line claiming it was dispatched was written in
 the same message that was interrupted, before the Agent call was ever made. No Task 2
 implementer exists, no Task 2 work is in flight, no Task 2 commit exists. Resume here.
-BASE for Task 2 when dispatched: 15a3070.
+BASE for Task 2 when dispatched: ddc97a1.
 
 Session suspended at the user's request to continue on another machine.
 ```
@@ -328,7 +354,7 @@ failed as expected side effects. Only "an empty or whitespace title yields nothi
 survived, since a title with zero words is unaffected by WORDS. Restored WORDS = 2 →
 6/6 green, and full npm run check back to 819/165, confirming no residue.
 
-Commit: 15a3070, 4 files, 100 insertions. Not pushed.
+Commit: ddc97a1, 4 files, 100 insertions. Not pushed.
 
 Concerns about the brief: none. GroupIdentity already exported as described; the
 types.ts doc register matched; the index.ts object literal matched the described
