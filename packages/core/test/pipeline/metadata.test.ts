@@ -9,6 +9,7 @@ import createScenesPlugin from '@pickarr/plugin-scenes';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { insertGroup } from '../../src/db/groups.ts';
 import { dueMetadataQueue, enqueueMetadata, getGroupMetadata } from '../../src/db/metadata.ts';
+import { duePerformerQueue } from '../../src/db/performer-queue.ts';
 import { performersForGroups } from '../../src/db/performers.ts';
 import { getDiscoveredSite, recordDiscoveredSite } from '../../src/db/sites.ts';
 import { RateLimited, type FetchImpl, type SceneLookupClient } from '../../src/clients/theporndb.ts';
@@ -772,4 +773,74 @@ test('an attempts ceiling stops a permanently poisoned row from deferring foreve
     undefined,
     'the exhausted row must leave the queue rather than defer again',
   );
+});
+
+test('a confirmed scene that supplied a cast queues no performer search', async () => {
+  // The confirmation already answered the question this queue exists to ask.
+  // Nothing here checks that explicitly — `insertPerformerSearch` refuses a
+  // group with a cast — which is exactly why including `confirmed` at the call
+  // site is safe rather than a second rule to keep in step.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  enqueueMetadata(db, [groupId], 1_000);
+
+  const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] });
+  const client = fakeSceneClient(() => [scene]);
+
+  await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(getGroupMetadata(db, groupId)?.state, 'confirmed');
+  assert.ok((performersForGroups(db, [groupId]).get(groupId) ?? []).length > 0);
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10), []);
+});
+
+test('a confirmed scene that named nobody queues a performer search', async () => {
+  // Same confirmation, `performers: []`. The group ends up picked, answered and
+  // castless — which is precisely the gap this feature fills, and the case a
+  // rule keyed only on `state = 'none'` would miss.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  enqueueMetadata(db, [groupId], 1_000);
+
+  const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [] });
+  const client = fakeSceneClient(() => [scene]);
+
+  await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(getGroupMetadata(db, groupId)?.state, 'confirmed');
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
+});
+
+test('a settled-as-none lookup queues a performer search', async () => {
+  // A search that ran and confirmed nothing. `answerUnaskable` / a 'none' answer
+  // settles the row, and the group has no cast.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  enqueueMetadata(db, [groupId], 1_000);
+
+  const client = fakeSceneClient(() => []);
+
+  await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(getGroupMetadata(db, groupId)?.state, 'none');
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
+});
+
+test('a deferred row queues nothing, because it has not settled', async () => {
+  // A client that throws an ordinary error, so `deferOrGiveUp` defers rather
+  // than answering. The row will be asked again: a group whose scene lookup is
+  // still in flight has not yet *failed* to produce a cast, and queueing here
+  // would spend a performer request on a question that is still open.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  enqueueMetadata(db, [groupId], 1_000);
+
+  const client = fakeSceneClient(() => {
+    throw new Error('ECONNREFUSED');
+  });
+
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(result.deferred, 1);
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10), []);
 });
