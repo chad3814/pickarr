@@ -128,34 +128,85 @@ Consequence, stated plainly: a hand-edited group keeps a key the current parser 
 That is the correct trade — the alternative discards user intent — but it means `edited_at` stops
 being merely advisory and starts carrying real weight, and the first thing to read it is this pass.
 
-## 5. Collisions are reported, not merged
+## 5. Collisions: reported by default, merged in one narrow class
 
-**Decided: report, do not merge.** The reasoning below stood after review.
+**Decided: report, except where merging provably destroys nothing.** This section originally read
+"report, never merge", and the argument for that is unchanged and still below — but it turned out to
+be an argument about *one class* of collision, and the owner's database contains a second class it
+never considered. Both are named here, because a section that reads as a blanket prohibition is how
+the next reader deletes the merge as a mistake, and a section that reads as blanket permission is
+how someone fuses two scenes.
 
 When two existing groups' new slugs collide, migration 4's answer was to merge: choose a survivor
 (live imported file, then any download, then lowest id), repoint every referencing row, delete the
 losers, then take the new key — in that order, because `UNIQUE (plugin, identity_key)` would
 otherwise reject the update (`migrations.ts:254-260`).
 
-**We should not copy that.** Migration 4's collisions were always the *same scene* split in two, so
-merging was pure repair. Ours are different: the accepted collision class is two genuinely
-*different* scenes (`docs/known-issues.md:281-314`) —
+### Class 1 — two different scenes. Reported, never merged.
+
+Migration 4's collisions were always the *same scene* split in two, so merging was pure repair. The
+collision class this branch *introduces* is not: it is two genuinely *different* scenes
+(`docs/known-issues.md:281-314`) —
 
 > `PornMegaLoad.26.08.05.Suki.Sin.Solo.42466…` and `PornMegaLoad.26.08.05.Suki.Sin.Hardcore.42467…`
 > both key as `pornmegaload:2026-08-05:suki-sin`
 
-Accepting that for *new* ingest is defensible: nothing is lost that was ever separate. Doing it in a
-migration means fusing two groups a user may already have two sets of files for, and deleting one of
-them. Nothing in the codebase currently takes a position on that, and "a wrong answer is worse than
-no answer" points one way.
+Accepting that for *new* ingest is defensible: nothing is lost that was ever separate. Doing it to
+rows that already exist means fusing two groups a user may already have two sets of files for, and
+deleting one of them. Nothing else in the codebase takes a position on that, and "a wrong answer is
+worse than no answer" points one way.
 
-**Proposal:** on collision, re-key neither row. Leave both at their old keys, and report them —
+So on a class-1 collision, re-key neither row. Leave both at their old keys, and report them —
 count at startup, full list behind a flag. Both groups keep their files and their history; the cost
 is that both keep keys the parser would no longer produce, and a future release of either scene
 creates a third group. That is visible and repairable. A silent fusion is neither.
 
 Measured: **zero** collisions of this kind across 7,166 parsed corpus titles, so the expected
 population is zero and this is a safety net rather than a workflow.
+
+### Class 2 — one scene, two encodes, two groups. Merged.
+
+The collision the owner's 2026-08-16 database actually contains is not class 1 at all. It is one
+scene held twice, which is migration 4's shape exactly, and there merging repairs rather than fuses:
+
+```
+group  106  ClubSweethearts.26.08.07.Foxy.Dreams.Solo.XXX.1080p.MP4-WRB   moves, loses "Solo"
+group 1137  ClubSweethearts.2026.08.07.Foxy.Dreams.720p.x265              already holds the key
+```
+
+Measured on that pair: group 106 has 3 releases and **no downloads, no imported files, no metadata
+and no pick**; group 1137 has one of each. Reporting instead of merging costs the user a 1080p
+release sitting beside the 720p they already downloaded, which they cannot otherwise see — the two
+groups being separate is the whole reason it is invisible.
+
+**Which class a pair falls in is decided mechanically, from history — never from the titles.**
+Reading two titles and judging "same scene?" is a guess, and a wrong guess deletes a group. So the
+pass asks `groupHistory` (`db/groups.ts:584`) about the *mover* — the group whose key is changing —
+and merges only when it answers `null`: no downloads, and no `imported_files` rows live **or**
+trashed. Such a group has nothing that merging can destroy; its releases move to the survivor and
+everything else about it is reconstructible by re-ingesting the same feed items. Anything else is
+class 1 and is reported.
+
+This deliberately declines to merge some genuine duplicates — a duplicate that has been downloaded
+stays reported. That is the direction to err, and class 1's own "a wrong answer is worse than no
+answer" is why.
+
+**Direction is not a choice the pass makes.** The survivor is the group already holding the key; the
+mover folds into it. Migration 4's "lowest id" last resort has no role here, and the ids in the pair
+above run the other way — 106 is deleted, 1137 survives. Merging the other way round would mean
+deleting the holder *and* re-keying the survivor into the freed slot, which is a larger operation
+than the shared merge performs; a mover that has history is therefore reported, never resolved by
+reversing the direction. A slot contested by two or more movers is reported too: a merge needs a
+single uncontested survivor to name, and a pile-up has none.
+
+Two further restrictions, both load-bearing:
+
+- The merge is the one lifted from `manual/operations.ts` (now `db/merge-groups.ts`), unchanged, so
+  the ordering the foreign keys demand is written once. `clearGroupMetadata` before `deleteGroup` is
+  part of that ordering — see §7.
+- The pass does **not** stamp `edited_at` on the survivor, though the manual merge does. That stamp
+  is justified by a human having named the scene; a pass is not a human, and stamping would immunise
+  the survivor against every future run (§4, §6).
 
 ## 6. What the pass writes, per row
 
@@ -165,7 +216,8 @@ For each `scenes` group with `edited_at IS NULL`, in one transaction per batch:
    untouched and count it.
 2. New key equals old key **and** display is unchanged → write nothing at all, so the row cannot
    drift. Migration 4's rule (`migrations.ts:331-336`).
-3. New key collides with another existing row → skip both, per §5.
+3. New key collides with another existing row → merged into the holder if §5's class-2 test passes,
+   otherwise skip both and report them.
 4. Otherwise write `identity_key`, `display` and `search_text` together via the existing
    `updateGroupIdentity` (`packages/core/src/db/groups.ts:486-493`), and **call
    `clearGroupMetadata`** (`packages/core/src/db/metadata.ts:311-315`) in the same transaction,
@@ -207,13 +259,14 @@ committing first would leave the database pointing at a path that does not exist
 
 **Refuse rather than overwrite.** If a computed destination already exists on disk, skip the group and
 report it. Two groups' files wanting one name is the same shape as the key collision in §5 and gets
-the same answer.
+class 1's answer, not class 2's: a file already at the destination is precisely the history that
+makes a pair unmergeable, so nothing here can be repaired by folding one group into the other.
 
 Only rows with `trashed_at IS NULL` are touched. `trash_path` is left alone — it records where a
 trashed file went, and nothing renders a new one.
 
 This overrides, for this pass only, the policy the interactive merge states — that files in the
-library "keep the paths they were given" (`packages/core/src/manual/operations.ts:281-283`). That rule
+library "keep the paths they were given" (`packages/core/src/manual/operations.ts:256`). That rule
 exists because a merge fuses two scenes that were always separate; here the file's name is simply
 wrong under the new parser, and the group it belongs to is not changing.
 
@@ -231,10 +284,17 @@ pass catches per-row failures, counts them, and continues; only a failure to ope
 aborts. A row that fails is left at its old key, which is the same outcome as a refusal.
 
 Note the FK trap: there is **no `ON DELETE` clause anywhere in the schema**, and deleting a group
-that has ever been browsed fails the foreign key from the three metadata tables — the 500 documented
-at `docs/known-issues.md:478-482`. §5 means this pass deletes no rows at all, which sidesteps it
-entirely. If review overturns §5 in favour of merging, `clearGroupMetadata` becomes mandatory before
-every delete, in the same transaction, or the pass will refuse to start the process.
+that has ever been browsed fails the foreign key from the metadata tables — the 500 documented at
+`docs/known-issues.md:478-482`. §5's class-2 merge is the one thing in this pass that deletes a row,
+so `clearGroupMetadata` before `deleteGroup` in the same transaction is mandatory, not defensive;
+there are now **four** such tables, `group_performers` being the newest (`db/metadata.ts:387`). The
+shared merge body already orders it that way, which is most of why it is shared rather than copied.
+
+A merge that throws is counted and skipped exactly as a failed re-key is, and one transaction per
+merge means the rollback returns both groups to what they were: the releases still on the mover, the
+mover still present. The foreign keys are also the backstop for the history rule itself — if a merge
+were ever proposed for a group with a download or an imported file, the delete would refuse rather
+than discard the record.
 
 ## 8. Testing
 
@@ -243,7 +303,10 @@ every delete, in the same transaction, or the pass will refuse to start the proc
 - A group whose key does not move is not written at all (assert via a trigger or by checking no
   `UPDATE` ran, not merely that values are equal).
 - A hand-edited group (`edited_at` set) is untouched even though its title would move.
-- Two groups colliding under the new key are both left alone and both reported.
+- Two groups colliding under the new key are both left alone and both reported, unless the mover has
+  no history at all (§5, class 2) — in which case it is folded into the holder, the holder keeps its
+  own key, pick and files, and its `edited_at` stays null. A mover whose only history is a *trashed*
+  imported file is reported, not merged.
 - A group that had been browsed has its `group_metadata` row cleared; one that had not is unaffected.
 - A group whose display changes but whose slug does not is still cleared — the case that broke the
   invariant the second time.

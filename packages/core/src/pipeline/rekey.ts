@@ -8,7 +8,8 @@ import type {
   QualityTokens,
 } from '@pickarr/plugin-api';
 import { getDownload } from '../db/downloads.ts';
-import { groupHistory, updateGroupIdentity } from '../db/groups.ts';
+import { getGroup, groupHistory, updateGroupIdentity } from '../db/groups.ts';
+import { mergeGroupInto } from '../db/merge-groups.ts';
 import { clearGroupMetadata } from '../db/metadata.ts';
 import { getRelease } from '../db/releases.ts';
 import { knownSiteNames } from '../db/sites.ts';
@@ -452,24 +453,28 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
 /**
  * Everything `applyRekey` needs beyond `db` and `registry`, injected instead
  * of imported directly so a test can substitute a fake without touching a
- * real filesystem — the same reasoning `ManualDeps` already applies one layer
- * up. Empty in this task: writing `identity_key`, `display` and
- * `search_text`, and clearing stale metadata, are both plain synchronous
- * `DatabaseSync` calls with nothing worth faking. Task 5 populates this with
- * `rename` from `node:fs/promises`, which is also why `applyRekey` is already
- * declared `async` below — so the signature does not change shape a second
- * time once Task 6 has a real caller.
+ * real filesystem or a real clock — the same reasoning `ManualDeps` already
+ * applies one layer up, and `now` is the same member `ManualDeps` carries for
+ * the same reason. Task 5 populates this with `rename` from
+ * `node:fs/promises`, which is also why `applyRekey` is already declared
+ * `async` below — so the signature does not change shape a second time once
+ * Task 6 has a real caller.
+ *
+ * `now` arrived with the merge and nothing else needs it: a re-key writes no
+ * timestamp of its own (spec §6 — not `edited_at`, not `list_rank_at`), but a
+ * merge re-derives the survivor's upgrade flag, and the arrival half of that
+ * rule stamps `list_rank_at`. See `mergeGroupInto`.
  */
-export type RekeyDeps = Record<string, never>;
+export interface RekeyDeps {
+  now(): number;
+}
 
 /**
  * Tally of what one run of the write pass actually did, over every proposal
- * `planRekey` returned. Declared with `merged` and `renamed` already present,
- * even though this task fills in neither, so the shape does not change under
- * a test *this* task writes and then again under Task 4a's and Task 5's —
- * see `interfaces.md`. `merged` stays 0 here: a `merge` proposal is a
- * counted no-op below, never a write, until Task 4a implements it. `renamed`
- * stays 0 for the same reason: this task moves no file, Task 5 does.
+ * `planRekey` returned. `renamed` is still always 0: this pass moves no file
+ * yet, Task 5 does. A merge that throws is counted in `failed` rather than in
+ * `merged`, exactly as a move that throws is — the two are the same claim,
+ * that the pass reports what it actually wrote.
  */
 export interface RekeyReport {
   moved: number;
@@ -487,23 +492,19 @@ export interface RekeyReport {
  * — so the plan it acts on is always read from the database's current state,
  * never a stale snapshot a caller happened to be holding.
  *
- * Every `move` is applied in its own transaction, never one for the whole
- * pass: a single poison row (a broken constraint, a full disk, anything that
- * makes one group's write throw) must not roll back the other groups that
- * were already correct. A group whose write throws is counted in `failed`
- * and left at its old key; the loop moves on to the next proposal. This is
- * the one property Step 5 breaks on purpose to prove — see the task report.
+ * Every `move` and every `merge` is applied in its own transaction, never one
+ * for the whole pass: a single poison row (a broken constraint, a full disk,
+ * anything that makes one group's write throw) must not roll back the other
+ * groups that were already correct. A group whose write throws is counted in
+ * `failed` and left exactly as it was; the loop moves on to the next
+ * proposal. This is the one property Step 5 breaks on purpose to prove — see
+ * the task report.
  */
 export async function applyRekey(
   db: DatabaseSync,
   registry: PluginRegistry,
   deps: RekeyDeps,
 ): Promise<RekeyReport> {
-  // Unused until Task 5 gives this something to call (`rename`). Referenced
-  // here, rather than left to go silently unused, so the parameter's purpose
-  // is visible at the one call site that has nothing yet to do with it.
-  void deps;
-
   const proposals = planRekey(db, registry);
 
   const report: RekeyReport = {
@@ -537,16 +538,52 @@ export async function applyRekey(
         report.skippedCollision++;
         break;
 
-      case 'merge':
-        // Task 4a's job, not this one's. Handled explicitly, as a counted
-        // no-op, rather than folded into a `default:` arm: with no default,
-        // an exhaustive switch makes the compiler itself point at this line
-        // the moment Task 4a adds a real `MergeOutcome` case, instead of a
-        // regression silently vanishing into a default that already existed.
-        // `merged` is deliberately not incremented here — it stays 0 until
-        // 4a actually performs the merge; counting it now would report a
-        // write that never happened.
+      case 'merge': {
+        // The one outcome in this pass that deletes a row, so what makes it
+        // safe is worth stating where it happens rather than only where it is
+        // decided. `planRekey` proposes this only for a single mover against a
+        // single, uncontested holder whose `groupHistory` answered null — no
+        // downloads, no imported files live or trashed — which is the whole of
+        // the argument: the mover's releases are the only thing merging can
+        // move, and a group with nothing on disk and nothing on record can be
+        // reconstructed by re-ingesting the same feed items. Deliberately not
+        // re-asked here. Duplicating the rule at the write site is a second
+        // copy that can disagree with the first, and the foreign keys on
+        // `downloads` and `imported_files` already refuse the delete outright
+        // if it ever did — a counted `failed`, not a lost file.
+        //
+        // The mover folds into the holder, never the reverse. Nothing else is
+        // available: the holder is the group that already occupies the slot,
+        // so merging the other way would additionally have to re-key the
+        // survivor into the freed slot, which is a different and larger
+        // operation than the one `mergeGroupInto` performs.
+        try {
+          inTransaction(db, () => {
+            const target = getGroup(db, outcome.intoGroupId);
+            if (target === null) {
+              // Unreachable: a holder is stationary by construction, and
+              // nothing in this loop deletes a stationary group. Thrown into
+              // the same `failed` count as any other broken merge rather than
+              // asserted, because the alternative to counting it is a pass
+              // that stops.
+              throw new Error(`group ${outcome.intoGroupId} vanished before group ${groupId} could merge into it`);
+            }
+            mergeGroupInto(db, { id: groupId }, target, deps.now(), {
+              // A pass is not a human. `mergeGroupInto`'s own comment carries
+              // the full reasoning; the short of it is that `edited_at` is
+              // what tells the *next* run of this pass to leave a row alone.
+              stampEdited: false,
+            });
+          });
+          report.merged++;
+        } catch {
+          // As in `move` below: `inTransaction` has already rolled the whole
+          // merge back, so both groups are left exactly as they were — the
+          // releases still on the mover, the mover still present.
+          report.failed++;
+        }
         break;
+      }
 
       case 'move': {
         try {
