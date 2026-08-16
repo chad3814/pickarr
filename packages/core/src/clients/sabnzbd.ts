@@ -16,6 +16,24 @@ import type {
 const TIMEOUT_MS = 20_000;
 
 /**
+ * The `limit` passed on each history page request. Far above any realistic
+ * installation's history size, so the common case is a single request and
+ * paging only actually happens against a client either abnormally large or
+ * (see the incident regression test) one that silently caps its response
+ * regardless of what was asked for.
+ */
+const HISTORY_PAGE_SIZE = 500;
+
+/**
+ * The most history pages `snapshot()` will request before giving up and
+ * reporting the snapshot incomplete. 20 pages of `HISTORY_PAGE_SIZE` is
+ * 10,000 entries — far past any real installation — so this bounds a
+ * pathological or misbehaving client rather than a real one; a genuine
+ * install never gets close.
+ */
+const MAX_HISTORY_PAGES = 20;
+
+/**
  * Statuses SABnzbd's history reports that mean a job is genuinely never
  * coming back. `Failed` is the obvious one. `Deleted` belongs here too: it
  * means a person removed the job at the client, and unlike every status in
@@ -253,6 +271,21 @@ export function createSabnzbdClient(
   }
 
   /**
+   * Reads a slot's category through `safeText` (a category is server text
+   * like any other) and maps "no category" to `null`. SABnzbd spells that
+   * two different ways depending on which endpoint answered: a queue slot
+   * with no category is the literal string `"None"`, never an absent field;
+   * a history slot with no category is the empty string. Both must collapse
+   * to `null`, or a local filter comparing against a real category name
+   * (see the reconcile design) would treat "None" as a category nobody
+   * configured.
+   */
+  function readCategory(value: JsonValue | undefined): string | null {
+    const raw = safeText(value);
+    return raw === '' || raw === 'None' ? null : raw;
+  }
+
+  /**
    * Wraps an error from an injectable dependency (fetchImpl itself, or a
    * Response's .json()) so nothing it says can leak the api key. The
    * property must hold regardless of how a caller ends up logging or
@@ -323,18 +356,67 @@ export function createSabnzbdClient(
     },
 
     async snapshot(): Promise<ClientSnapshot> {
-      const [queueBody, historyBody] = await Promise.all([
-        call('queue', { category: config.category }),
-        call('history', { category: config.category }),
-      ]);
+      // No `category` on either call. We match entries to downloads on
+      // `nzo_id` with the `[pickarr-N]` label as a fallback (reconcile.ts),
+      // not on the client's category, and asking SABnzbd to filter for us
+      // would break the completeness check below: queue_info's `noofslots`
+      // is the size of the *whole* queue regardless of what was requested,
+      // so comparing a filtered result's length against it would report
+      // every snapshot incomplete forever. Filtering, if any is wanted, is
+      // the caller's job on data that is provably everything.
+      //
+      // `limit=0` is passed explicitly rather than omitted, even though
+      // queue_info already treats a missing limit as unlimited: the two
+      // endpoints read a missing `limit` differently, and relying on that
+      // difference silently is what caused this incident.
+      const queuePromise = call('queue', { limit: '0' });
+
+      // History has no "unlimited" equivalent, so it must be paged: request
+      // HISTORY_PAGE_SIZE at a time, starting after whatever has already
+      // been collected, until the response's own `noofslots` says there is
+      // nothing left, a page comes back with no slots, or MAX_HISTORY_PAGES
+      // is hit. Sequential, not parallel — each page's `start` depends on
+      // how much the previous page actually returned.
+      const historySlots: JsonValue[] = [];
+      let historyComplete = false;
+      for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+        const historyBody = await call('history', {
+          start: String(historySlots.length),
+          limit: String(HISTORY_PAGE_SIZE),
+        });
+        const historyRecord = asRecord(asRecord(historyBody)?.['history']);
+        const pageSlots = asArray(historyRecord?.['slots']);
+        historySlots.push(...pageSlots);
+
+        // Read defensively: `noofslots` is a number in every real response,
+        // but a value that is missing or not a number must not throw — it
+        // means "cannot verify", which is exactly the false-`complete` case,
+        // not a crash.
+        const noofslots = historyRecord?.['noofslots'];
+        if (typeof noofslots === 'number' && historySlots.length >= noofslots) {
+          historyComplete = true;
+          break;
+        }
+        // An empty page before reaching the reported total is either the
+        // total being wrong or unreadable — either way, more paging will not
+        // help, so stop rather than loop to the cap for nothing.
+        if (pageSlots.length === 0) break;
+      }
 
       // Everything below reads through safeText, never asText. These strings
       // are *returned* rather than thrown, so none of the error-path defences
       // apply to them, and a caller logging a snapshot would print them
       // straight off the wire. SABnzbd's fail_message in particular quotes
       // the failing request.
+      const queueBody = await queuePromise;
+      const queueRecord = asRecord(asRecord(queueBody)?.['queue']);
+      const queueSlots = asArray(queueRecord?.['slots']);
+      const queueNoofslots = queueRecord?.['noofslots'];
+      const queueComplete =
+        typeof queueNoofslots === 'number' && queueSlots.length >= queueNoofslots;
+
       const queue: ClientQueueEntry[] = [];
-      for (const raw of asArray(asRecord(asRecord(queueBody)?.['queue'])?.['slots'])) {
+      for (const raw of queueSlots) {
         const slot = asRecord(raw);
         if (slot === null) continue;
         const ref = safeText(slot['nzo_id']);
@@ -343,11 +425,12 @@ export function createSabnzbdClient(
           ref,
           name: safeText(slot['filename']),
           percentage: Number.parseInt(safeText(slot['percentage']), 10) || 0,
+          category: readCategory(slot['cat']),
         });
       }
 
       const history: ClientHistoryEntry[] = [];
-      for (const raw of asArray(asRecord(asRecord(historyBody)?.['history'])?.['slots'])) {
+      for (const raw of historySlots) {
         const slot = asRecord(raw);
         if (slot === null) continue;
         const ref = safeText(slot['nzo_id']);
@@ -378,10 +461,11 @@ export function createSabnzbdClient(
           outcome,
           storagePath: outcome === 'completed' && storage !== '' ? storage : null,
           failMessage: effectiveFailMessage,
+          category: readCategory(slot['category']),
         });
       }
 
-      return { queue, history };
+      return { queue, history, complete: queueComplete && historyComplete };
     },
 
     async remove(ref: string, deleteFiles: boolean): Promise<void> {
