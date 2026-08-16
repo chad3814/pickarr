@@ -674,3 +674,158 @@ test(
     await pending;
   },
 );
+
+// --- Performer search ---------------------------------------------------------
+
+test('searchPerformers reads a top-level result as a canonical performer', async () => {
+  // `is_parent` is the whole point of this test. `readPerformers` derives kind
+  // from a nested `parent`, which a scene's site-performers have and a top-level
+  // /performers result does not — it *is* the parent. Reusing that reader here
+  // would stamp every linked performer `performer-site` and point them all at
+  // alias pages, which is invisible until a user clicks one.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({
+      data: [{
+        id: '32aa4b68-4dbe-49f2-92a5-0e54e5074f4b',
+        slug: 'jessica-jaymes',
+        name: 'Jessica Jaymes',
+        full_name: 'Jessica Jaymes (2005)',
+        is_parent: true,
+        aliases: ['Jessi Jaymes'],
+        image: 'https://cdn.invalid/image.jpg',
+        face: 'https://cdn.invalid/face.jpg',
+      }],
+      meta: { total: 1, per_page: 100, current_page: 1, last: 1 },
+    }),
+  );
+
+  const page = await client.searchPerformers('Jessica Jaymes');
+
+  assert.equal(page.truncated, false);
+  assert.equal(page.results.length, 1);
+  assert.deepEqual(page.results[0]?.performer, {
+    sourceUuid: '32aa4b68-4dbe-49f2-92a5-0e54e5074f4b',
+    slug: 'jessica-jaymes',
+    // `name`, never `full_name`: the latter carries a disambiguation suffix that
+    // could never equal a two-word query.
+    name: 'Jessica Jaymes',
+    kind: 'performer',
+    faceUrl: 'https://cdn.invalid/face.jpg',
+    imageUrl: 'https://cdn.invalid/image.jpg',
+  });
+  assert.deepEqual(page.results[0]?.aliases, ['Jessi Jaymes']);
+});
+
+test('a provider reporting more pages than were read is reported as truncated', () => {
+  // The match rule turns on *how many* candidates match exactly. A second exact
+  // match sitting on page two would turn "link nothing, this is ambiguous" into
+  // a confident wrong link, so the caller has to be able to say it judged on a
+  // partial set rather than doing so in silence.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({
+      data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }],
+      meta: { total: 210, per_page: 100, current_page: 1, last: 3 },
+    }),
+  );
+
+  return client.searchPerformers('N').then((page) => assert.equal(page.truncated, true));
+});
+
+test('a body with no meta block is not treated as truncated', () => {
+  // `truncated` is a claim that more pages exist. An absent `meta` is not
+  // evidence of that, and defaulting it to true would log a truncation warning
+  // on every search against a provider that stops sending the block.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({ data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }] }),
+  );
+
+  return client.searchPerformers('N').then((page) => assert.equal(page.truncated, false));
+});
+
+test('a result without is_parent is a site alias, not a canonical performer', async () => {
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({
+      data: [{ id: 'u1', slug: '6061-alice-maze', name: 'Alice Maze', is_parent: false }],
+      meta: { total: 1, per_page: 100, current_page: 1, last: 1 },
+    }),
+  );
+
+  assert.equal(
+    (await client.searchPerformers('Alice Maze')).results[0]?.performer.kind,
+    'performer-site',
+  );
+});
+
+test('a result missing its slug or uuid is dropped rather than stored empty', async () => {
+  // The slug is the whole link, and an absent uuid collides with every other
+  // such row under UNIQUE (source, source_uuid) — the same reason
+  // `readPerformers` drops these.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({
+      data: [
+        { id: 'u1', name: 'No Slug', is_parent: true },
+        { slug: 'no-uuid', name: 'No Uuid', is_parent: true },
+        { id: 'u2', slug: 'fine', name: 'Fine Person', is_parent: true },
+      ],
+      meta: { total: 3, per_page: 100, current_page: 1, last: 1 },
+    }),
+  );
+
+  assert.deepEqual(
+    (await client.searchPerformers('x')).results.map((r) => r.performer.name),
+    ['Fine Person'],
+  );
+});
+
+test('missing aliases read as an empty list, not undefined', async () => {
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({
+      data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }],
+      meta: { total: 1, per_page: 100, current_page: 1, last: 1 },
+    }),
+  );
+
+  assert.deepEqual((await client.searchPerformers('x')).results.map((r) => r.aliases), [[]]);
+});
+
+test('an empty query never reaches the provider', async () => {
+  let called = false;
+  const client = createTpdbClient(
+    CONFIG,
+    async (url) => { called = true; return respondWith({ data: [] })(url); },
+  );
+
+  assert.deepEqual(await client.searchPerformers('   '), { results: [], truncated: false });
+  assert.equal(called, false);
+});
+
+test('the api key never appears in a searchPerformers error', async () => {
+  const client = createTpdbClient(
+    CONFIG,
+    async () => { throw new Error(`connect ECONNREFUSED with Bearer ${API_KEY}`); },
+  );
+
+  await assert.rejects(
+    () => client.searchPerformers('Jessica Jaymes'),
+    (error: Error) => !error.message.includes(API_KEY),
+  );
+});
+
+test('a 429 from searchPerformers is RateLimited with the Retry-After', async () => {
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({}, { status: 429, headers: { 'Retry-After': '120' } }),
+  );
+
+  await assert.rejects(() => client.searchPerformers('x'), (error: Error) => {
+    assert.ok(error instanceof RateLimited);
+    assert.equal(error.retryAfterMs, 120_000);
+    return true;
+  });
+});

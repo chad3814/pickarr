@@ -149,6 +149,28 @@ export interface SceneLookupClient {
   searchScenes(query: string, siteId: number | null): Promise<readonly MetadataCandidate[]>;
 }
 
+export interface PerformerSearchResult {
+  readonly performer: MetadataPerformer;
+  readonly aliases: readonly string[];
+}
+
+export interface PerformerSearchPage {
+  readonly results: readonly PerformerSearchResult[];
+  /**
+   * True when the provider reported pages beyond the one read. The caller's rule
+   * is "exactly one exact match", which a truncated set can get wrong, so this
+   * is the signal that makes the truncation loggable instead of silent. It lives
+   * on the return value rather than being logged here because the client has no
+   * `log` dependency — and giving it one to say this would be the wrong seam.
+   */
+  readonly truncated: boolean;
+}
+
+export interface PerformerLookupClient {
+  readonly source: string;
+  searchPerformers(query: string): Promise<PerformerSearchPage>;
+}
+
 /**
  * A rate limit, distinguished from every other failure by its own type.
  *
@@ -324,6 +346,34 @@ function str(record: Record<string, unknown>, key: string): string | null {
 }
 
 /**
+ * The five fields both performer shapes spell identically, or `null` when the
+ * record cannot be stored at all.
+ *
+ * `kind` is the parameter because it is the one thing the two endpoints disagree
+ * about, and they disagree for a real reason: a scene's `performers[]` are site
+ * aliases carrying a nested canonical `parent`, while a `/performers` search
+ * returns the canonical entity itself, which says so with `is_parent`. One
+ * reader deciding `kind` by looking for a `parent` would answer
+ * `'performer-site'` for every search result — every linked performer pointed at
+ * an alias page, and nothing to notice it by.
+ *
+ * A record missing slug, uuid or name yields `null` rather than a row with an
+ * empty one: the slug is the whole link, and an absent uuid collides with every
+ * other such record under `UNIQUE (source, source_uuid)`.
+ */
+function readPerformerFields(
+  record: Record<string, unknown>,
+  kind: MetadataPerformer['kind'],
+  nameFallback: Record<string, unknown> | null = null,
+): MetadataPerformer | null {
+  const slug = str(record, 'slug');
+  const sourceUuid = str(record, 'id');
+  const name = str(record, 'name') ?? (nameFallback === null ? null : str(nameFallback, 'name'));
+  if (slug === null || sourceUuid === null || name === null) return null;
+  return { sourceUuid, slug, name, kind, faceUrl: str(record, 'face'), imageUrl: str(record, 'image') };
+}
+
+/**
  * Reads the performers off a scene, preferring each one's `parent`.
  *
  * A scene's `performers[]` are *site* performers: their slug is
@@ -359,19 +409,12 @@ function readPerformers(value: unknown): MetadataPerformer[] {
         : null;
     const source = parent ?? site;
 
-    const slug = str(source, 'slug');
-    const sourceUuid = str(source, 'id');
-    const name = str(source, 'name') ?? str(site, 'name');
-    if (slug === null || sourceUuid === null || name === null) continue;
-
-    performers.push({
-      sourceUuid,
-      slug,
-      name,
-      kind: parent === null ? 'performer-site' : 'performer',
-      faceUrl: str(source, 'face'),
-      imageUrl: str(source, 'image'),
-    });
+    const performer = readPerformerFields(
+      source,
+      parent === null ? 'performer-site' : 'performer',
+      site,
+    );
+    if (performer !== null) performers.push(performer);
   }
   return performers;
 }
@@ -426,11 +469,56 @@ function readScenes(body: unknown): MetadataCandidate[] {
   return scenes;
 }
 
+/**
+ * Reads a performer search page, tolerating everything we do not use.
+ *
+ * `is_parent` decides `kind`, and it is compared against `true` rather than
+ * coerced: a provider that starts sending `"true"`, `1` or `null` must read as
+ * "not stated" and fall to the alias namespace, not be silently truthy. Getting
+ * this wrong is invisible until a user clicks a performer and lands on the wrong
+ * page.
+ *
+ * `truncated` is `meta.last > 1`, and an absent or unreadable `meta` reads as
+ * `false`. It is a positive claim that more pages exist; defaulting it to true
+ * would warn about truncation on every search the moment the provider stopped
+ * sending the block.
+ */
+function readPerformerPage(body: unknown): PerformerSearchPage {
+  if (body === null || typeof body !== 'object') return { results: [], truncated: false };
+  const record = body as Record<string, unknown>;
+
+  const results: PerformerSearchResult[] = [];
+  const data = record['data'];
+  if (Array.isArray(data)) {
+    for (const entry of data) {
+      if (entry === null || typeof entry !== 'object') continue;
+      const row = entry as Record<string, unknown>;
+      const performer = readPerformerFields(
+        row,
+        row['is_parent'] === true ? 'performer' : 'performer-site',
+      );
+      if (performer === null) continue;
+      const aliases = row['aliases'];
+      results.push({
+        performer,
+        aliases: Array.isArray(aliases)
+          ? aliases.filter((alias): alias is string => typeof alias === 'string' && alias.length > 0)
+          : [],
+      });
+    }
+  }
+
+  const meta = record['meta'];
+  const last =
+    meta !== null && typeof meta === 'object' ? (meta as Record<string, unknown>)['last'] : null;
+  return { results, truncated: typeof last === 'number' && last > 1 };
+}
+
 /** Searches sites and scenes in ThePornDB. */
 export function createTpdbClient(
   config: SiteLookupConfig,
   fetchImpl: FetchImpl,
-): SiteLookupClient & SceneLookupClient {
+): SiteLookupClient & SceneLookupClient & PerformerLookupClient {
   const base = config.baseUrl.replace(/\/+$/, '');
 
   return {
@@ -553,6 +641,62 @@ export function createTpdbClient(
       }
 
       return readScenes(body);
+    },
+
+    /**
+     * One page, like `searchScenes` and unlike `searchSites`' `MAX_PAGES` walk.
+     *
+     * `PER_PAGE` (100) rather than a smaller page, and that is a correctness
+     * argument rather than a throughput one: the caller's rule is "exactly one
+     * exact match", which is only honestly decidable over the results actually
+     * seen. A narrow page hides a second exact match on page two and converts an
+     * ambiguity — link nothing — into a confident wrong link. When `meta.last`
+     * says there were more pages the caller is told, so a truncated judgement is
+     * logged rather than silent.
+     */
+    async searchPerformers(query: string): Promise<PerformerSearchPage> {
+      if (query.trim().length === 0) return { results: [], truncated: false };
+      const url = `${base}/performers?q=${encodeURIComponent(query)}&page=1&per_page=${PER_PAGE}`;
+      const signal = AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS);
+      const timedOut = abortRejection(signal);
+
+      let response: Response;
+      try {
+        response = await Promise.race([
+          fetchImpl(url, {
+            headers: { Authorization: `Bearer ${config.apiKey}`, Accept: 'application/json' },
+            signal,
+          }),
+          timedOut,
+        ]);
+      } catch (error) {
+        throw new Error(
+          `performer search for "${query}" failed: ${redactToken((error as Error).message, config.apiKey)}`,
+        );
+      }
+
+      if (response.status === 429) {
+        throw new RateLimited(retryAfterMs(response.headers.get('retry-after')));
+      }
+      if (!response.ok) {
+        throw new Error(
+          `performer search for "${query}" returned HTTP ${response.status} ${response.statusText}`,
+        );
+      }
+
+      let body: unknown;
+      try {
+        // Raced against the same deadline as the fetch above — see the comment
+        // on the site-search loop for why headers arriving is not enough to
+        // consider the request safe from stalling.
+        body = await Promise.race([response.json(), timedOut]);
+      } catch (error) {
+        throw new Error(
+          `performer search for "${query}" returned unreadable JSON: ${redactToken((error as Error).message, config.apiKey)}`,
+        );
+      }
+
+      return readPerformerPage(body);
     },
   };
 }
