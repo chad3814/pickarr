@@ -656,12 +656,12 @@ test('merging a group that has been browsed does not 500, and leaves the target 
     now: 1000,
   });
 
-  // The source has been browsed too, and picked up all four rows a browse can
+  // The source has been browsed too, and picked up all five rows a browse can
   // leave behind: an answer, a rejected candidate recorded alongside it, a
   // link to its cast, and — inserted directly, since `recordMetadataAnswer`
-  // would not leave one — a queue row, so the fix is proved against every
-  // table `media_groups` is referenced from, not just whichever one a real
-  // sequence happens to hit.
+  // would not leave either — a metadata queue row and a performer-search queue
+  // row, so the fix is proved against every table `media_groups` is referenced
+  // from, not just whichever one a real sequence happens to hit.
   //
   // The cast has to be non-empty, and this test is the reason to say so out
   // loud: `group_performers` is the newest of those tables, and while this
@@ -708,14 +708,24 @@ test('merging a group that has been browsed does not 500, and leaves the target 
     `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
      VALUES (2, 2000, 0, 2000)`,
   ).run();
+  // `performer_queue` is the fifth table, and it is the one whose row nothing
+  // in the UI can show: a group whose scene lookup settled castless is queued
+  // for a performer search with no visible trace. That is the shape of the
+  // defect this test exists for — a normal merge meeting `FOREIGN KEY
+  // constraint failed` over a row nobody knew the group held.
+  db.prepare(
+    `INSERT INTO performer_queue (group_id, requested_at, attempts, next_at)
+     VALUES (2, 2000, 0, 2000)`,
+  ).run();
 
   const result = ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
   assert.deepEqual(result, { groupId: 1, mergedInto: 1 });
 
   // The source's own rows describe an identity the merge just concluded was
-  // wrong, and must not survive it, in any of the four tables.
+  // wrong, and must not survive it, in any of the five tables.
   assert.equal(getGroupMetadata(db, 2), undefined);
   assert.equal(db.prepare('SELECT 1 FROM metadata_queue WHERE group_id = ?').get(2), undefined);
+  assert.equal(db.prepare('SELECT 1 FROM performer_queue WHERE group_id = ?').get(2), undefined);
   assert.equal(
     db.prepare('SELECT 1 FROM metadata_candidates WHERE group_id = ?').get(2),
     undefined,
@@ -789,6 +799,16 @@ test('an identity edit forgets metadata confirmed against the identity it replac
     now: 1000,
   });
 
+  // Queued for a performer search as well, which is what a castless settle
+  // leaves behind. On this path the row is not a foreign-key hazard — nothing
+  // is deleted — it is a *stale question*: the search it asks for is built from
+  // the title the human is about to replace, so an answer arriving after the
+  // edit would write a cast derived from the reading that was just overruled.
+  db.prepare(
+    `INSERT INTO performer_queue (group_id, requested_at, attempts, next_at)
+     VALUES (2, 2000, 0, 2000)`,
+  ).run();
+
   // `k9` collides with nothing, so this takes the plain-edit path rather than
   // the merge one. The merge path already clears metadata — but only as a
   // foreign-key precondition for deleting the source row, which is why this
@@ -807,6 +827,14 @@ test('an identity edit forgets metadata confirmed against the identity it replac
     db.prepare('SELECT 1 FROM metadata_candidates WHERE group_id = ?').get(2),
     undefined,
   );
+
+  // The cast linked against the old identity goes with it, and so does the
+  // pending search that would have written another one.
+  assert.equal(
+    db.prepare('SELECT 1 FROM group_performers WHERE group_id = ?').get(2),
+    undefined,
+  );
+  assert.equal(db.prepare('SELECT 1 FROM performer_queue WHERE group_id = ?').get(2), undefined);
 
   db.close();
 });

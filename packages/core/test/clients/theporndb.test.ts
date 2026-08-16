@@ -717,6 +717,33 @@ test('searchPerformers reads a top-level result as a canonical performer', async
   assert.deepEqual(page.results[0]?.aliases, ['Jessi Jaymes']);
 });
 
+test('the performer search asks the documented endpoint for a full page, query encoded', async () => {
+  // The url is pinned rather than left to the payload assertions above, because
+  // every one of those passes against a typo in it. `per_page=100` in particular
+  // is a correctness requirement and not a throughput one: the match rule turns
+  // on *how many* candidates match exactly, so a narrower page hides a second
+  // exact match and converts an ambiguity — link nothing — into a confident
+  // wrong link. A dropped `encodeURIComponent` is the other invisible one; a
+  // bare space in a query string is a malformed request, and the two-word query
+  // this whole feature is built on always has one.
+  const fetchImpl = respondWith({
+    data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true }],
+    meta: { total: 1, per_page: 100, current_page: 1, last: 1 },
+  });
+  const client = createTpdbClient(CONFIG, fetchImpl);
+
+  await client.searchPerformers('Jessica Jaymes');
+
+  const url = fetchImpl.urls[0] ?? '';
+  assert.ok(url.startsWith('https://api.theporndb.net/performers?'), `wrong endpoint: ${url}`);
+  assert.ok(url.includes('per_page=100'), `page not asked in full: ${url}`);
+  assert.ok(url.includes('page=1'), `first page not named: ${url}`);
+  // Spelled literally rather than rebuilt with `encodeURIComponent`, which is
+  // the helper under test here: an expectation computed by the code under test
+  // cannot detect that code being dropped.
+  assert.ok(url.includes('q=Jessica%20Jaymes'), `query not encoded: ${url}`);
+});
+
 test('a provider reporting more pages than were read is reported as truncated', () => {
   // The match rule turns on *how many* candidates match exactly. A second exact
   // match sitting on page two would turn "link nothing, this is ambiguous" into
@@ -758,6 +785,46 @@ test('a result without is_parent is a site alias, not a canonical performer', as
     (await client.searchPerformers('Alice Maze')).results[0]?.performer.kind,
     'performer-site',
   );
+});
+
+test('a non-boolean is_parent is "not stated", not silently truthy', async () => {
+  // `1` and `'true'` are both truthy, and a coercing reader would call each of
+  // these canonical. `is_parent` is compared against `true` precisely so a
+  // provider that changes the field's type reads as "not stated" and falls to
+  // the alias namespace — where `pickPerformer` declines to link it — rather
+  // than quietly stamping an alias page as the canonical identity.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({
+      data: [
+        { id: 'u1', slug: 'one', name: 'One', is_parent: 1 },
+        { id: 'u2', slug: 'two', name: 'Two', is_parent: 'true' },
+        { id: 'u3', slug: 'three', name: 'Three', is_parent: null },
+      ],
+      meta: { total: 3, per_page: 100, current_page: 1, last: 1 },
+    }),
+  );
+
+  assert.deepEqual(
+    (await client.searchPerformers('x')).results.map((r) => r.performer.kind),
+    ['performer-site', 'performer-site', 'performer-site'],
+  );
+});
+
+test('an empty alias is dropped rather than carried as a matchable empty string', async () => {
+  // An empty alias would normalise to the empty string, and so would a query
+  // that normalised away entirely — `pickPerformer` refuses an empty query for
+  // that reason, but the alias side has to hold up its own end rather than rely
+  // on it.
+  const client = createTpdbClient(
+    CONFIG,
+    respondWith({
+      data: [{ id: 'u1', slug: 's', name: 'N', is_parent: true, aliases: ['', 'x', 7, null] }],
+      meta: { total: 1, per_page: 100, current_page: 1, last: 1 },
+    }),
+  );
+
+  assert.deepEqual((await client.searchPerformers('x')).results[0]?.aliases, ['x']);
 });
 
 test('a result missing its slug or uuid is dropped rather than stored empty', async () => {
