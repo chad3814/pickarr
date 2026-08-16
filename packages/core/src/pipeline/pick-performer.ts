@@ -62,6 +62,25 @@ function normalise(name: string): string {
  * performer at all — so the failure this must not have is a plausible wrong
  * name written onto a group's cast. Silence is the correct answer to doubt, and
  * it is by far the most common one.
+ *
+ * Both tiers see only `kind: 'performer'` candidates, filtered once before
+ * either runs. The design spec's §7 gives the reason for the exclusion in the
+ * neighbouring case of `site_performers`: it is "deliberately not a match
+ * source ... names belonging to `performer-site` entities, which are a
+ * different identity than the one being linked". A `/performers` page can carry
+ * both identities at once — a canonical parent, plus the site-scoped entries
+ * that share its name — so a rule that counted both would find *two* exact
+ * matches for the commonest correct query, call it ambiguous, and link nothing.
+ * With no parent in the page it is worse than silence: a lone `is_parent: false`
+ * match would be linked, which is the outcome `readPerformerFields`' own comment
+ * names — "every linked performer pointed at an alias page, and nothing to
+ * notice it by" — as the reason `kind` is a parameter there at all.
+ *
+ * The filter belongs here and not in `readPerformerPage`, which reports
+ * faithfully whatever the provider said about each entity. Which identity is
+ * *linkable* is a matching policy, and this is where the matching policy lives.
+ * Filtering before the tiering, rather than inside each tier, is what stops a
+ * `performer-site` entity winning tier 2 on an alias after tier 1 excluded it.
  */
 export function pickPerformer(
   query: string,
@@ -70,11 +89,13 @@ export function pickPerformer(
   const wanted = normalise(query);
   if (wanted.length === 0) return null;
 
-  const byName = results.filter((result) => normalise(result.performer.name) === wanted);
+  const linkable = results.filter((result) => result.performer.kind === 'performer');
+
+  const byName = linkable.filter((result) => normalise(result.performer.name) === wanted);
   if (byName.length === 1) return byName[0]?.performer ?? null;
   if (byName.length > 1) return null;
 
-  const byAlias = results.filter((result) =>
+  const byAlias = linkable.filter((result) =>
     result.aliases.some((alias) => normalise(alias) === wanted),
   );
   return byAlias.length === 1 ? (byAlias[0]?.performer ?? null) : null;
