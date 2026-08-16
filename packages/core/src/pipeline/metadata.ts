@@ -24,7 +24,13 @@ import { enqueuePerformerSearch } from './performers.ts';
 /** Doubling backoff from one minute, capped so a long outage never stops retrying. */
 export const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
 
-function backoffFor(attempts: number): number {
+/**
+ * Exported because the performer pass in `pipeline/performers.ts` retries against
+ * the same rate-limited provider and shares this curve rather than keeping a
+ * second copy of it: two curves aimed at one service is two things to tune, and
+ * one of them will be forgotten.
+ */
+export function backoffFor(attempts: number): number {
   return Math.min(60_000 * 2 ** attempts, MAX_BACKOFF_MS);
 }
 
