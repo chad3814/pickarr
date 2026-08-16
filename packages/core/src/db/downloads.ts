@@ -253,6 +253,31 @@ export function setClientRef(
   requireAffected('setClientRef', id, result.changes);
 }
 
+/**
+ * The other half of `setClientRef`, for a row whose next status is not
+ * `downloading`.
+ *
+ * Both corrections a re-attachment needs — point the row at the client job it
+ * actually belongs to, and retract the error that stranded it — with no status
+ * write at all. `setClientRef` forces `'downloading'`, which is right for a row
+ * being handed to the client or recovered as still-running, and wrong for one
+ * whose job the client has already finished or failed: that row's next status
+ * is `'completed'` or `'failed'`, and passing it through `'downloading'` first
+ * writes a status no reader ever observes and makes one logical recovery look
+ * like two events to whoever is counting them.
+ */
+export function reattachClientRef(
+  db: DatabaseSync,
+  id: number,
+  clientRef: string,
+  now: number,
+): void {
+  const result = db
+    .prepare('UPDATE downloads SET client_ref = ?, error = NULL, updated_at = ? WHERE id = ?')
+    .run(clientRef, now, id);
+  requireAffected('reattachClientRef', id, result.changes);
+}
+
 export function setStatus(
   db: DatabaseSync,
   id: number,

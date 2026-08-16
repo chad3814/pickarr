@@ -19,6 +19,7 @@ import {
   getDownload,
   indexDownloadsForClient,
   markAbsent,
+  reattachClientRef,
   recordError,
   setClientRef,
   setStatus,
@@ -188,6 +189,13 @@ function jobDirectory(id: number, storagePath: string | null): string | null {
  * visible instead. It is deliberately global-once rather than once per tick:
  * a short poll interval would otherwise flood the log with the same fact
  * restated every few seconds.
+ *
+ * It is also deliberately checked for *every* matched entry now, not only for
+ * the rows that reach the null-ref double-submit guard. The label is a general
+ * matching key under this design (a lost or changed ref is recoverable from it),
+ * so a client that mangles names breaks more than resubmission — and the sooner
+ * that is said, the better. Still once per process, so the wider scope costs
+ * nothing in log volume.
  */
 let warnedLabelMismatch = false;
 
@@ -360,7 +368,15 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       // discovering in step 3 that the recovered job already failed or
       // completed) — that is two separate true events, not one event
       // double-counted, so the counters are not meant to be mutually
-      // exclusive within a tick.
+      // exclusive within a tick. The `advanced` this increments is the real
+      // transition `queued` → `downloading`: this row had no ref at all and
+      // now has one, which is exactly what `advanced` is for.
+      //
+      // This is emphatically *not* a licence for step 3's own re-attachment to
+      // count itself as well. That case starts from a row that already has a
+      // ref and a status, and the status it ends in is the one the entry
+      // dictates; counting the correction and then the transition would report
+      // one recovery twice. See the re-attachment comment in step 3.
       setClientRef(db, download.id, recovered, now);
       result.advanced += 1;
       continue;
@@ -482,18 +498,29 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
     seen.add(download.id);
     warnIfLabelMismatch(download, entry.name);
 
-    let status = download.status;
-    if (download.clientRef !== entry.ref || status === 'failed') {
-      // Re-attachment, and the one write that does both halves of it:
-      // `setClientRef` corrects the ref (a no-op when it was already right),
-      // clears the error that stranded the row, and puts it back in a live
-      // status. Reached two ways — a ref that was wrong or missing, and a row
-      // failed as `disappeared-from-client` whose job the client turns out to
-      // have had all along, which is how the 35 downloads of the incident
-      // recover with no repair script.
-      setClientRef(db, download.id, entry.ref, now);
-      result.advanced += 1;
-      status = 'downloading';
+    // Re-attachment, reached two ways: a ref that is wrong (the label matched
+    // and the ref did not), and a row failed as `disappeared-from-client` whose
+    // job the client turns out to have had all along — which is how the 35
+    // downloads of the incident recover with no repair script.
+    //
+    // It writes the ref and clears the stranding error, and deliberately does
+    // *not* write the status: the status this row should end up in is whatever
+    // the entry says below, and routing it through `downloading` first would
+    // write a status no reader ever observes and count one recovery as two
+    // advances. So no `advanced` here either — the branches below own both the
+    // status write and the counter, and `advanced` keeps meaning "transitions",
+    // not "rows touched".
+    //
+    // Which entry gets to correct a ref is Map-insertion-order dependent when
+    // the client holds two jobs carrying the same `[pickarr-N]` label: the
+    // first one `collapse` yields wins (see the `seen` guard above), and that
+    // order comes from the snapshot's own history-then-queue ordering. That is
+    // known and accepted rather than overlooked. Input that ambiguous has no
+    // right answer — both entries claim to be the same download — and neither
+    // choice loses anything: the row ends up attached to one real job, and the
+    // other is reconciled on a later tick if it is still there.
+    if (download.clientRef !== entry.ref || download.status === 'failed') {
+      reattachClientRef(db, download.id, entry.ref, now);
     }
 
     if (entry.outcome === 'failed') {
@@ -523,7 +550,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       // lingers in history.
       const mapped = client.mapPath(entry.storagePath);
       if (download.storagePath !== mapped) setStoragePath(db, download.id, mapped, now);
-      if (status !== 'completed') {
+      if (download.status !== 'completed') {
         setStatus(db, download.id, 'completed', now);
         result.advanced += 1;
       }
@@ -548,7 +575,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
     // real transitions rather than every tick a healthy download continues to
     // exist.
     clearAbsent(db, download.id);
-    if (status !== 'downloading') {
+    if (download.status !== 'downloading') {
       setStatus(db, download.id, 'downloading', now);
       result.advanced += 1;
     }

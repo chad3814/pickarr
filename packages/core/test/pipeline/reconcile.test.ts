@@ -483,6 +483,47 @@ test('the incident: a row failed as disappeared-from-client is re-attached to it
   db.close();
 });
 
+test('recovering a stranded download is one status write and one advance, not two', async () => {
+  // The re-attachment corrects the ref and the error; the status it lands in is
+  // whatever the client says, written once. Routing it through `downloading`
+  // first would write a status no reader ever observes and would report the
+  // first tick after deploy as 70 advances for 35 recovered downloads.
+  //
+  // Observed with a trigger rather than by inspection, because the intermediate
+  // write is invisible from the outside: it is overwritten within the same tick,
+  // so only something watching the column can tell one write from two.
+  const db = openTestDatabase();
+  seedDownload(db, {
+    id: 1,
+    status: 'failed',
+    clientRef: 'nzo_1',
+    error: 'disappeared-from-client',
+  });
+  db.exec('CREATE TABLE status_writes (status TEXT)');
+  db.exec(`CREATE TRIGGER record_status AFTER UPDATE OF status ON downloads
+           BEGIN INSERT INTO status_writes (status) VALUES (NEW.status); END`);
+  const client = fakeClient({
+    queue: [],
+    history: [finished('nzo_1', '/sab/complete/R')],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client));
+
+  assert.deepEqual(
+    db
+      .prepare('SELECT status FROM status_writes')
+      .all()
+      .map((row) => String(row['status'])),
+    ['completed'],
+    'straight to what the client says it is, with no intermediate downloading write',
+  );
+  assert.equal(result.advanced, 1, 'one recovery is one advance');
+  assert.equal(getDownload(db, 1)?.error, null, 'and the stranding error is still retracted');
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_1');
+  db.close();
+});
+
 test('a row that failed for any other reason is left failed, however finished its job looks', async () => {
   const db = openTestDatabase();
   const reason = 'Repair failed, not enough repair blocks (92 short)';
