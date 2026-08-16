@@ -137,8 +137,28 @@ One call site, in `runMetadataPass`, immediately after `outcome` is known, gated
 
 A single site is deliberate. This codebase's repeated lesson — `deriveUpgradeReleaseId`,
 `failDownload`'s flag re-derivation — is that an invariant re-derived by whichever caller
-remembers is an invariant that holds on some paths. `runMetadataPass` is the only place a
-metadata row settles, so every settle path inherits the enqueue by construction.
+remembers is an invariant that holds on some paths. `runMetadataPass` is the only place
+*the pass* settles a row, so every settle path within it inherits the enqueue by
+construction.
+
+It is not the only place in the codebase a metadata row settles. `http/server.ts:713-719`
+calls `answerUnaskable` for a group its plugin could never look up, settling the row as
+`state = 'none'` without enqueueing a performer search. That asymmetry is unresolved rather
+than argued for, and it is recorded here so nobody reads "one call site" as a claim that no
+second settle path exists.
+
+It is currently **latent**, and for the scenes plugin the two conditions cannot co-occur.
+Reaching that line requires `metadataAnswerability` to answer `'unaskable'`, which for a
+plugin that has both metadata hooks means `sceneMetadataQuery` yielded no query — and it
+does that only when `display.subtitle` is absent or empty, or when `display.title` is
+empty. `buildRelease` refuses a release whose site slug is empty and writes the site into
+`display.subtitle`, so no scenes group has an empty subtitle. And an empty title is not the
+other half of a co-occurrence either: `scenePerformerQuery` splits `display.title` into
+words and returns `null` below two, so a group with an empty title has nothing to enqueue.
+
+The case that *would* reach it is a future plugin implementing `performerQuery` without
+both metadata hooks: `metadataAnswerability` answers `'unaskable'` on the missing hooks
+alone, `answerUnaskable` settles the row, and a performer query that exists is never asked.
 
 `confirmed` and `none` both settle. `deferred` has not settled: the row will be asked
 again, and a group whose scene lookup is still in flight has not yet failed to produce a
@@ -278,9 +298,15 @@ per tick.
 **Driven by the existing metadata tick, after the metadata pass.** No new config knob: a
 second interval to tune is a second thing to get wrong, and the two passes talk to the
 same rate-limited service, so sharing one cadence is what keeps the combined request rate
-predictable. Running after means a row enqueued this tick is searched on the next one,
-which is correct — the enqueue and the search are separate decisions and nothing needs
-them in the same tick.
+predictable. Running after is what orders the producer before the consumer: the pass that
+settles rows castless has to run before the pass that drains them.
+
+A row enqueued this tick is searched in the **same** tick, not the next one.
+`insertPerformerSearch` writes `next_at = now`, `duePerformerQueue` selects
+`next_at <= ?`, and each pass reads its clock fresh when it runs — so a row the scene pass
+just wrote is already due moments later when the performer pass reads the queue. This is
+worth stating because it sets the tick's worst-case request count: the sum of both passes'
+`perTick`, not `perTick` itself.
 
 ## 10. Failure handling
 

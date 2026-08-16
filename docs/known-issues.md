@@ -610,3 +610,15 @@ mock's timer running for real, ~70 seconds. And the `queryByText` OOM above is t
 Use `afterEach(cleanup)`, which runs whether the test passed or threw —
 `Failed.test.tsx`, `Browse.test.tsx` and `Downloads.test.tsx` all do. Per-test `cleanup()`
 calls only run on the happy path, which is the path that did not need them.
+
+**Three tests need a Node newer than `package.json` asks for, and fail confusingly on one
+that satisfies it.** `t.mock.timers` with `{ apis: ['AbortSignal.timeout'] }` is what bounds
+the fetch-timeout tests, and Node v24.15.0 does not support that api name: two tests in
+`packages/core/test/clients/theporndb.test.ts` and one in `packages/core/test/media/artwork.test.ts`
+fail there with `ERR_INVALID_ARG_VALUE: The property 'options.apis' option
+AbortSignal.timeout is not supported`. They pass on v24.19.0. `engines.node` says only
+`">=24"`, so v24.15.0 is a version the repo currently claims to support, and the failure
+reads like the code being wrong rather than the runtime being old — the message names an
+argument, not a version. Check `node -v` before believing these three. Raising the floor to
+the version that actually works would settle it; that is a change to the published contract
+and has not been made.
