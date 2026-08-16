@@ -39,8 +39,9 @@ function fakeClient(): DownloadClient {
   return {
     id: 'sab',
     importMode: 'move',
+    category: 'pickarr',
     addUrl: async () => 'nzo_1',
-    snapshot: async () => ({ queue: [], history: [] }),
+    snapshot: async () => ({ queue: [], history: [], complete: true }),
   remove: async () => {},
     mapPath: (path) => path,
   };
@@ -429,6 +430,22 @@ test('downloads merges tracked rows with the untracked snapshot', async () => {
   db.close();
 });
 
+test('downloads reports absentSince, null and populated', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+
+  const untouched = (await server.inject({ method: 'GET', url: '/api/downloads' })).json();
+  assert.equal(untouched['tracked'][0]['absentSince'], null);
+
+  db.prepare('UPDATE downloads SET absent_since = 500 WHERE id = 1').run();
+  const marked = (await server.inject({ method: 'GET', url: '/api/downloads' })).json();
+  assert.equal(marked['tracked'][0]['absentSince'], 500);
+  await server.close();
+  db.close();
+});
+
 test('retrying a failed import resumes at completed', async () => {
   const db = openTestDatabase();
   seedGroups(db);
@@ -488,6 +505,43 @@ test('retrying a download that has not failed is refused', async () => {
   // Untouched: re-running an already-imported upgrade is the one API call that
   // could make an import destroy its own output, so the row must not be reset.
   assert.equal(getDownload(db, 1)?.status, 'imported');
+  await server.close();
+  db.close();
+});
+
+test('retrying a healthy downloading download is refused', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+  // Fresh from `pick`, row 1 is `downloading` with no absent_since — the client
+  // still reports it, so retry must refuse it exactly as it always has.
+
+  const response = await server.inject({ method: 'POST', url: '/api/downloads/1/retry' });
+
+  assert.equal(response.statusCode, 409);
+  assert.equal(getDownload(db, 1)?.status, 'downloading');
+  await server.close();
+  db.close();
+});
+
+test('retrying a downloading download the client has lost is accepted', async () => {
+  // The escape hatch Task 4 adds: absence never fails a download (Task 3), so
+  // a genuinely-lost download stays `downloading` forever unless retry will
+  // take it. Without this, `inFlightForRelease` (which excludes only `failed`)
+  // would also keep its release from ever being picked again.
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+  db.prepare('UPDATE downloads SET absent_since = 500 WHERE id = 1').run();
+
+  const response = await server.inject({ method: 'POST', url: '/api/downloads/1/retry' });
+
+  assert.equal(response.statusCode, 200);
+  const after = getDownload(db, 1);
+  assert.equal(after?.status, 'queued');
+  assert.equal(after?.absentSince, null);
   await server.close();
   db.close();
 });

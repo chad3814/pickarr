@@ -7,8 +7,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
   reconcileClient,
-  MAX_MISSING_POLLS,
-  resetLabelMismatchWarningForTests,
+  resetReconcileWarningsForTests,
 } from '../../src/pipeline/reconcile.ts';
 import {
   clientJobName,
@@ -20,12 +19,16 @@ import {
 } from '../../src/db/downloads.ts';
 import type { ClientSnapshot, DownloadClient } from '../../src/clients/types.ts';
 
-const EMPTY: ClientSnapshot = { queue: [], history: [] };
+const EMPTY: ClientSnapshot = { queue: [], history: [], complete: true };
+
+/** What every fake client here submits under, so `OURS` is what it polls. */
+const OURS = 'pickarr';
 
 function fakeClient(snapshot: ClientSnapshot, overrides: Partial<DownloadClient> = {}) {
   return {
     id: 'sab',
     importMode: 'move' as const,
+    category: OURS,
     addUrl: async () => 'nzo_new',
     snapshot: async () => snapshot,
     remove: async () => {},
@@ -36,7 +39,14 @@ function fakeClient(snapshot: ClientSnapshot, overrides: Partial<DownloadClient>
 
 function seedDownload(
   db: DatabaseSync,
-  fields: { id: number; status: string; clientRef: string | null; missingPolls?: number },
+  fields: {
+    id: number;
+    status: string;
+    clientRef: string | null;
+    error?: string;
+    storagePath?: string;
+    absentSince?: number;
+  },
 ): void {
   db.prepare(
     `INSERT OR IGNORE INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
@@ -52,35 +62,61 @@ function seedDownload(
   ).run();
   db.prepare(
     `INSERT INTO downloads (id, release_id, group_id, client_id, client_ref, kind, status,
-                            missing_polls, created_at, updated_at)
-     VALUES (?, 1, 1, 'sab', ?, 'initial', ?, ?, 1, 1)`,
-  ).run(fields.id, fields.clientRef, fields.status, fields.missingPolls ?? 0);
+                            error, storage_path, absent_since, created_at, updated_at)
+     VALUES (?, 1, 1, 'sab', ?, 'initial', ?, ?, ?, ?, 1, 1)`,
+  ).run(
+    fields.id,
+    fields.clientRef,
+    fields.status,
+    fields.error ?? null,
+    fields.storagePath ?? null,
+    fields.absentSince ?? null,
+  );
 }
 
-function deps(db: DatabaseSync, client: DownloadClient, imported: DownloadRow[] = []) {
+function deps(
+  db: DatabaseSync,
+  client: DownloadClient,
+  imported: DownloadRow[] = [],
+  now = 1000,
+) {
   return {
     db,
     client,
-    now: () => 1000,
+    now: () => now,
     importDownload: async (download: DownloadRow) => {
       imported.push(download);
     },
   };
 }
 
-test('a download in the queue stays downloading and resets missing_polls', async () => {
-  const db = openTestDatabase();
-  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1', missingPolls: 2 });
-  const client = fakeClient({
-    queue: [{ ref: 'nzo_1', name: 'R', percentage: 50 }],
-    history: [],
-  });
+/** A queue slot in our own category, which is the ordinary case. */
+function queued(ref: string, name = 'R', percentage = 50) {
+  return { ref, name, percentage, category: OURS };
+}
 
-  await reconcileClient(deps(db, client));
+function finished(ref: string, storagePath: string | null, name = 'R') {
+  return {
+    ref,
+    name,
+    outcome: 'completed' as const,
+    storagePath,
+    failMessage: null,
+    category: OURS,
+  };
+}
+
+test('a download in the queue stays downloading and any absence mark is retracted', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1', absentSince: 500 });
+  const client = fakeClient({ queue: [queued('nzo_1')], history: [], complete: true });
+
+  const result = await reconcileClient(deps(db, client));
 
   const download = getDownload(db, 1)!;
   assert.equal(download.status, 'downloading');
-  assert.equal(download.missingPolls, 0);
+  assert.equal(download.absentSince, null);
+  assert.equal(result.absent, 0);
   db.close();
 });
 
@@ -90,15 +126,8 @@ test('a completed download gets its mapped storage path and is imported', async 
   const imported: DownloadRow[] = [];
   const client = fakeClient({
     queue: [],
-    history: [
-      {
-        ref: 'nzo_1',
-        name: 'R',
-        outcome: 'completed',
-        storagePath: '/sab/complete/R',
-        failMessage: null,
-      },
-    ],
+    history: [finished('nzo_1', '/sab/complete/R')],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client, imported));
@@ -118,29 +147,38 @@ test('a completed download gets its mapped storage path and is imported', async 
 // driven from the row's own state.
 test('a completed row with a storage path is imported even when the client has pruned its history', async () => {
   const db = openTestDatabase();
-  seedDownload(db, { id: 1, status: 'completed', clientRef: 'nzo_1' });
-  db.prepare("UPDATE downloads SET storage_path = '/pickarr/complete/R' WHERE id = 1").run();
+  seedDownload(db, {
+    id: 1,
+    status: 'completed',
+    clientRef: 'nzo_1',
+    storagePath: '/pickarr/complete/R',
+  });
   const imported: DownloadRow[] = [];
   const client = fakeClient(EMPTY);
 
-  // More ticks than it takes to be declared missing: a completed row is
-  // waiting on us, not on the client, so it is exempt from that accounting.
-  for (let tick = 0; tick <= MAX_MISSING_POLLS; tick += 1) {
+  // Several ticks of total absence: a completed row is waiting on us, not on
+  // the client, so its absence from the snapshot is the expected steady state
+  // and is not recorded as absence at all.
+  for (let tick = 0; tick < 4; tick += 1) {
     await reconcileClient(deps(db, client, imported));
   }
 
-  assert.equal(imported.length, MAX_MISSING_POLLS + 1);
+  assert.equal(imported.length, 4);
   assert.equal(imported[0]?.storagePath, '/pickarr/complete/R');
   const download = getDownload(db, 1)!;
   assert.equal(download.status, 'completed');
-  assert.equal(download.missingPolls, 0);
+  assert.equal(download.absentSince, null);
   db.close();
 });
 
 test('an import failure on a completed row fails the download rather than retrying forever', async () => {
   const db = openTestDatabase();
-  seedDownload(db, { id: 1, status: 'completed', clientRef: 'nzo_1' });
-  db.prepare("UPDATE downloads SET storage_path = '/pickarr/complete/R' WHERE id = 1").run();
+  seedDownload(db, {
+    id: 1,
+    status: 'completed',
+    clientRef: 'nzo_1',
+    storagePath: '/pickarr/complete/R',
+  });
 
   await reconcileClient({
     db,
@@ -162,8 +200,12 @@ test('an import failure says so in the log, not only in the row', async () => {
   // deployment reads. The first single-file storage path failed every pick
   // silently — the reason was visible on one screen and nowhere else.
   const db = openTestDatabase();
-  seedDownload(db, { id: 1, status: 'completed', clientRef: 'nzo_1' });
-  db.prepare("UPDATE downloads SET storage_path = '/pickarr/complete/R' WHERE id = 1").run();
+  seedDownload(db, {
+    id: 1,
+    status: 'completed',
+    clientRef: 'nzo_1',
+    storagePath: '/pickarr/complete/R',
+  });
 
   const lines: string[] = [];
   await reconcileClient({
@@ -193,8 +235,10 @@ test('a failed download records the fail message', async () => {
         outcome: 'failed',
         storagePath: null,
         failMessage: 'Out of retention',
+        category: OURS,
       },
     ],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client));
@@ -210,14 +254,22 @@ test('a failed download records the fail message', async () => {
 // working on it. The bug this guards: the old two-way outcome read every
 // such state as a terminal failure, so an ordinary multi-part download got
 // marked failed while SABnzbd was still unpacking it.
-test('a download in a transient client state is left alone, but its missing-poll count is still reset', async () => {
+test('a download in a transient client state keeps its status, and its absence mark is retracted', async () => {
   const db = openTestDatabase();
-  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1', missingPolls: 2 });
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1', absentSince: 500 });
   const client = fakeClient({
     queue: [],
     history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'in-progress', storagePath: null, failMessage: null },
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'in-progress',
+        storagePath: null,
+        failMessage: null,
+        category: OURS,
+      },
     ],
+    complete: true,
   });
 
   const result = await reconcileClient(deps(db, client));
@@ -225,9 +277,10 @@ test('a download in a transient client state is left alone, but its missing-poll
   const download = getDownload(db, 1)!;
   assert.equal(download.status, 'downloading');
   assert.equal(download.error, null);
-  assert.equal(download.missingPolls, 0);
+  assert.equal(download.absentSince, null);
   assert.equal(result.failed, 0);
   assert.equal(result.imported, 0);
+  assert.equal(result.absent, 0);
   db.close();
 });
 
@@ -237,8 +290,16 @@ test('a download with a genuine terminal failure status still fails, distinct fr
   const client = fakeClient({
     queue: [],
     history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'failed', storagePath: null, failMessage: 'Failed' },
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'failed',
+        storagePath: null,
+        failMessage: 'Failed',
+        category: OURS,
+      },
     ],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client));
@@ -254,9 +315,8 @@ test('a completed download with no storage path fails rather than importing noth
   const imported: DownloadRow[] = [];
   const client = fakeClient({
     queue: [],
-    history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'completed', storagePath: null, failMessage: null },
-    ],
+    history: [finished('nzo_1', null)],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client, imported));
@@ -266,35 +326,301 @@ test('a completed download with no storage path fails rather than importing noth
   db.close();
 });
 
-test('a download missing from both lists fails only after three consecutive polls', async () => {
+// A job mid-transition is listed in history as `Completed` while the queue
+// still holds it. Iterating history and then the queue would import it on the
+// history reading and set the very same row back to `downloading` on the queue
+// reading, in one tick. The queue wins instead: acting a tick late on a
+// completion is harmless, acting early on one is not.
+test('a job listed in both the queue and history is read as still queued, not imported', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  const imported: DownloadRow[] = [];
+  const client = fakeClient({
+    queue: [queued('nzo_1')],
+    history: [finished('nzo_1', '/sab/complete/R')],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client, imported));
+
+  assert.equal(imported.length, 0);
+  const download = getDownload(db, 1)!;
+  assert.equal(download.status, 'downloading');
+  assert.equal(download.storagePath, null);
+  assert.equal(result.imported, 0);
+  db.close();
+});
+
+// --- Absence is an observation, never a verdict -----------------------------
+//
+// The tests these replace asserted that a download missing from the client for
+// three consecutive polls was failed as `disappeared-from-client`. That is the
+// behaviour of the 2026-08-15 incident, not a property worth keeping: SABnzbd
+// was holding all 35 of those jobs, and the list they were "missing" from had
+// been silently truncated to ten entries.
+
+test('a row absent from a complete snapshot records when the absence began, once', async () => {
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient(EMPTY);
 
-  for (let poll = 1; poll < MAX_MISSING_POLLS; poll += 1) {
-    await reconcileClient(deps(db, client));
-    assert.equal(getDownload(db, 1)?.status, 'downloading', `poll ${poll}`);
-  }
+  const first = await reconcileClient(deps(db, client, [], 1000));
+  assert.equal(getDownload(db, 1)?.absentSince, 1000);
+  assert.equal(first.absent, 1);
 
-  await reconcileClient(deps(db, client));
-  const download = getDownload(db, 1)!;
-  assert.equal(download.status, 'failed');
-  assert.match(download.error ?? '', /disappeared-from-client/);
+  // Still missing a tick later. The mark answers "when did this begin", so the
+  // original timestamp stands — a plain assignment would make a download that
+  // has been gone for hours read as gone for ten seconds, forever.
+  const second = await reconcileClient(deps(db, client, [], 9000));
+  assert.equal(getDownload(db, 1)?.absentSince, 1000);
+  assert.equal(second.absent, 1, 'still counted as missing, even though the mark is unchanged');
+  assert.equal(getDownload(db, 1)?.status, 'downloading');
   db.close();
 });
 
-test('reappearing resets the missing counter', async () => {
+// The single most important test in this change. An incomplete snapshot is
+// exactly what the incident was: a view Pickarr could not prove was the whole
+// picture, read as evidence that 35 downloads had disappeared. A snapshot that
+// does not know itself to be complete may advance the rows it *does* contain
+// and may never be read as saying anything is missing.
+test('a row absent from an INCOMPLETE snapshot is left completely alone', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  const lines: string[] = [];
+
+  const result = await reconcileClient({
+    db,
+    client: fakeClient({ queue: [], history: [], complete: false }),
+    now: () => 1000,
+    log: (message) => lines.push(message),
+    importDownload: async () => {},
+  });
+
+  const download = getDownload(db, 1)!;
+  assert.equal(download.absentSince, null, 'an unprovable view cannot establish absence');
+  assert.equal(download.status, 'downloading');
+  assert.equal(download.error, null);
+  assert.equal(result.absent, 0);
+  assert.equal(result.failed, 0);
+  // Silently skipping the sweep would make an incomplete snapshot look exactly
+  // like a complete one in which nothing was missing.
+  assert.match(lines.join('\n'), /snapshot incomplete, skipping the absence sweep/);
+  db.close();
+});
+
+test('an absence mark already standing survives an incomplete snapshot rather than being cleared', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1', absentSince: 500 });
+
+  await reconcileClient(deps(db, fakeClient({ queue: [], history: [], complete: false }), [], 1000));
+
+  assert.equal(getDownload(db, 1)?.absentSince, 500);
+  db.close();
+});
+
+test('a previously absent row seen again has its absence mark cleared', async () => {
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
 
-  await reconcileClient(deps(db, fakeClient(EMPTY)));
-  await reconcileClient(
-    deps(db, fakeClient({ queue: [{ ref: 'nzo_1', name: 'R', percentage: 1 }], history: [] })),
-  );
-  await reconcileClient(deps(db, fakeClient(EMPTY)));
-  await reconcileClient(deps(db, fakeClient(EMPTY)));
+  await reconcileClient(deps(db, fakeClient(EMPTY), [], 1000));
+  assert.equal(getDownload(db, 1)?.absentSince, 1000);
 
+  await reconcileClient(
+    deps(db, fakeClient({ queue: [queued('nzo_1')], history: [], complete: true }), [], 2000),
+  );
+
+  assert.equal(getDownload(db, 1)?.absentSince, null, 'reappearing retracts the observation');
   assert.equal(getDownload(db, 1)?.status, 'downloading');
+  db.close();
+});
+
+test('no number of absent ticks ever fails a download', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  const client = fakeClient(EMPTY);
+
+  for (let tick = 0; tick < 25; tick += 1) {
+    const result = await reconcileClient(deps(db, client, [], 1000 + tick));
+    const download = getDownload(db, 1)!;
+    assert.equal(download.status, 'downloading', `tick ${tick}`);
+    assert.equal(download.error, null, `tick ${tick}`);
+    assert.equal(result.failed, 0, `tick ${tick}`);
+  }
+
+  // And the row is still active, so it is still looked for: absence leaves the
+  // download recoverable forever rather than terminating it.
+  assert.equal(getDownload(db, 1)?.absentSince, 1000);
+  db.close();
+});
+
+// --- Recovering a download the client turns out to have all along -----------
+
+test('the incident: a row failed as disappeared-from-client is re-attached to its finished job and imported', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, {
+    id: 1,
+    status: 'failed',
+    clientRef: 'nzo_1',
+    error: 'disappeared-from-client',
+    absentSince: 500,
+  });
+  const imported: DownloadRow[] = [];
+  const client = fakeClient({
+    queue: [],
+    history: [finished('nzo_1', '/sab/complete/R')],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client, imported));
+
+  const download = getDownload(db, 1)!;
+  assert.equal(download.status, 'completed');
+  assert.equal(download.storagePath, '/pickarr/complete/R');
+  assert.equal(download.error, null, 'the failure that stranded it is retracted, not left standing');
+  assert.equal(download.absentSince, null);
+  assert.equal(imported.length, 1);
+  assert.equal(result.imported, 1);
+  db.close();
+});
+
+test('recovering a stranded download is one status write and one advance, not two', async () => {
+  // The re-attachment corrects the ref and the error; the status it lands in is
+  // whatever the client says, written once. Routing it through `downloading`
+  // first would write a status no reader ever observes and would report the
+  // first tick after deploy as 70 advances for 35 recovered downloads.
+  //
+  // Observed with a trigger rather than by inspection, because the intermediate
+  // write is invisible from the outside: it is overwritten within the same tick,
+  // so only something watching the column can tell one write from two.
+  const db = openTestDatabase();
+  seedDownload(db, {
+    id: 1,
+    status: 'failed',
+    clientRef: 'nzo_1',
+    error: 'disappeared-from-client',
+  });
+  db.exec('CREATE TABLE status_writes (status TEXT)');
+  db.exec(`CREATE TRIGGER record_status AFTER UPDATE OF status ON downloads
+           BEGIN INSERT INTO status_writes (status) VALUES (NEW.status); END`);
+  const client = fakeClient({
+    queue: [],
+    history: [finished('nzo_1', '/sab/complete/R')],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client));
+
+  assert.deepEqual(
+    db
+      .prepare('SELECT status FROM status_writes')
+      .all()
+      .map((row) => String(row['status'])),
+    ['completed'],
+    'straight to what the client says it is, with no intermediate downloading write',
+  );
+  assert.equal(result.advanced, 1, 'one recovery is one advance');
+  assert.equal(getDownload(db, 1)?.error, null, 'and the stranding error is still retracted');
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_1');
+  db.close();
+});
+
+test('a row that failed for any other reason is left failed, however finished its job looks', async () => {
+  const db = openTestDatabase();
+  const reason = 'Repair failed, not enough repair blocks (92 short)';
+  seedDownload(db, { id: 1, status: 'failed', clientRef: 'nzo_1', error: reason });
+  const imported: DownloadRow[] = [];
+  const client = fakeClient({
+    queue: [],
+    history: [finished('nzo_1', '/sab/complete/R')],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client, imported));
+
+  const download = getDownload(db, 1)!;
+  assert.equal(download.status, 'failed');
+  assert.equal(download.error, reason, 'untouched: resurrecting this is a different decision');
+  assert.equal(download.storagePath, null);
+  assert.equal(imported.length, 0);
+  // Ours, so not an orphan either — recognised and deliberately left alone.
+  assert.equal(result.untracked.length, 0);
+  db.close();
+});
+
+test('a client ref that no longer matches is corrected from the label rather than being fatal', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_stale' });
+  const client = fakeClient({
+    queue: [queued('nzo_current', clientJobName('Some.Release.Title', 1))],
+    history: [],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client));
+
+  const download = getDownload(db, 1)!;
+  assert.equal(download.clientRef, 'nzo_current');
+  assert.equal(download.status, 'downloading');
+  assert.equal(result.untracked.length, 0, 'a job of ours is never an orphan');
+  db.close();
+});
+
+test('two entries carrying one label import that download once, not twice', async () => {
+  // Only reachable for jobs submitted before the double-submit guard existed,
+  // but the cost of getting it wrong is high: the second import would run
+  // against files the first had already moved and would fail a download that
+  // had in fact just succeeded.
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_a' });
+  const imported: DownloadRow[] = [];
+  const client = fakeClient({
+    queue: [],
+    history: [
+      finished('nzo_a', '/sab/complete/R'),
+      finished('nzo_b', '/sab/complete/R', clientJobName('Some.Release.Title', 1)),
+    ],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client, imported));
+
+  assert.equal(imported.length, 1);
+  assert.equal(result.imported, 1);
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_a', 'the ref match wins');
+  assert.equal(result.untracked.length, 0, 'the duplicate is ours, not an orphan');
+  db.close();
+});
+
+test('a ref and a label naming different downloads takes the ref, and says so once', async () => {
+  resetReconcileWarningsForTests();
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  seedDownload(db, { id: 2, status: 'downloading', clientRef: 'nzo_2' });
+  const client = fakeClient({
+    // The ref belongs to download 1; the label claims download 2.
+    queue: [queued('nzo_1', clientJobName('Some.Release.Title', 2))],
+    history: [],
+    complete: true,
+  });
+  const warnMock = mock.method(console, 'warn', () => {});
+
+  try {
+    await reconcileClient(deps(db, client, [], 1000));
+    await reconcileClient(deps(db, client, [], 2000));
+
+    const disagreements = warnMock.mock.calls
+      .map((call) => String(call.arguments[0] ?? ''))
+      .filter((message) => message.includes('by ref but download'));
+    assert.equal(disagreements.length, 1, 'once per process, not once per tick');
+    assert.match(disagreements[0] ?? '', /job nzo_1 matches download 1 by ref but download 2/);
+  } finally {
+    warnMock.mock.restore();
+  }
+
+  // Download 1 keeps the ref that is genuinely its own, and download 2 is not
+  // silently re-pointed at someone else's job.
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_1');
+  assert.equal(getDownload(db, 2)?.clientRef, 'nzo_2');
   db.close();
 });
 
@@ -303,11 +629,15 @@ test('a queued download with no client ref is retried', async () => {
   seedDownload(db, { id: 1, status: 'queued', clientRef: null });
   const client = fakeClient(EMPTY, { addUrl: async () => 'nzo_retry' });
 
-  await reconcileClient(deps(db, client));
+  const result = await reconcileClient(deps(db, client));
 
   const download = getDownload(db, 1)!;
   assert.equal(download.status, 'downloading');
   assert.equal(download.clientRef, 'nzo_retry');
+  // The ref was minted after the snapshot was taken, so the snapshot's silence
+  // about it says nothing and must not be recorded as absence.
+  assert.equal(download.absentSince, null);
+  assert.equal(result.absent, 0);
   db.close();
 });
 
@@ -331,20 +661,18 @@ test('addurl retries stop after the attempt cap', async () => {
   db.close();
 });
 
+// --- Untracked entries ------------------------------------------------------
+
 test('entries with no matching row are reported as untracked and never imported', async () => {
   const db = openTestDatabase();
   const imported: DownloadRow[] = [];
   const client = fakeClient({
-    queue: [{ ref: 'foreign_1', name: 'Someone Elses', percentage: 12 }],
-    history: [
-      {
-        ref: 'foreign_2',
-        name: 'Also Not Ours',
-        outcome: 'completed',
-        storagePath: '/sab/complete/X',
-        failMessage: null,
-      },
-    ],
+    queue: [{ ref: 'foreign_1', name: 'Someone Elses', percentage: 12, category: OURS }],
+    // A completed entry with no matching row must be decided unknown *before*
+    // anything looks at what the client says happened to it: taking the
+    // completed branch would try to import a download that does not exist.
+    history: [finished('foreign_2', '/sab/complete/X', 'Also Not Ours')],
+    complete: true,
   });
 
   const result = await reconcileClient(deps(db, client, imported));
@@ -359,14 +687,67 @@ test('entries with no matching row are reported as untracked and never imported'
   db.close();
 });
 
+test('untracked reporting is filtered to our own category', async () => {
+  // The snapshot is unfiltered — that is what makes its completeness checkable
+  // — so it holds every job on the server. Reporting all of it as orphaned
+  // Pickarr work would make the untracked panel useless on a shared client.
+  const db = openTestDatabase();
+  const client = fakeClient({
+    queue: [
+      { ref: 'ours', name: 'Ours', percentage: 5, category: OURS },
+      { ref: 'theirs', name: 'Radarr Job', percentage: 5, category: 'movies' },
+      { ref: 'nobodys', name: 'Hand Dropped Nzb', percentage: 5, category: null },
+    ],
+    history: [],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client));
+
+  assert.deepEqual(
+    result.untracked.map((entry) => entry.ref),
+    ['ours'],
+  );
+  db.close();
+});
+
+test('a job of ours re-categorised at the client is still matched and reconciled', async () => {
+  // Matching is category-blind on purpose: a job moved to another category is
+  // still the job this download submitted, and the incident's own root cause
+  // was trusting a category-filtered view.
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
+  const imported: DownloadRow[] = [];
+  const client = fakeClient({
+    queue: [],
+    history: [
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'completed',
+        storagePath: '/sab/complete/R',
+        failMessage: null,
+        category: 'somebody-elses-category',
+      },
+    ],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client, imported));
+
+  assert.equal(getDownload(db, 1)?.storagePath, '/pickarr/complete/R');
+  assert.equal(imported.length, 1);
+  assert.equal(result.untracked.length, 0);
+  db.close();
+});
+
 test('an already-imported download still in history is not reported as untracked', async () => {
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'imported', clientRef: 'nzo_1' });
   const client = fakeClient({
     queue: [],
-    history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'completed', storagePath: '/sab/x', failMessage: null },
-    ],
+    history: [finished('nzo_1', '/sab/x')],
+    complete: true,
   });
 
   const result = await reconcileClient(deps(db, client));
@@ -380,9 +761,8 @@ test('an import failure fails the download rather than throwing out of the tick'
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient({
     queue: [],
-    history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'completed', storagePath: '/sab/x', failMessage: null },
-    ],
+    history: [finished('nzo_1', '/sab/x')],
+    complete: true,
   });
 
   await reconcileClient({
@@ -419,7 +799,11 @@ test('a queued download whose addUrl already succeeded is recovered from the que
   const client = fakeClient(
     // Recovery has to extract the marker out of a name that also carries the
     // release title (see clientJobName), not match on the bare label alone.
-    { queue: [{ ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 5 }], history: [] },
+    {
+      queue: [queued('nzo_orphan', clientJobName('Some.Release.Title', 1), 5)],
+      history: [],
+      complete: true,
+    },
     {
       addUrl: async () => {
         addUrlCalls += 1;
@@ -447,14 +831,9 @@ test('a queued download whose addUrl already succeeded and finished is recovered
     {
       queue: [],
       history: [
-        {
-          ref: 'nzo_finished',
-          name: clientJobName('Some.Release.Title', 1),
-          outcome: 'completed',
-          storagePath: '/sab/complete/R',
-          failMessage: null,
-        },
+        finished('nzo_finished', '/sab/complete/R', clientJobName('Some.Release.Title', 1)),
       ],
+      complete: true,
     },
     {
       addUrl: async () => {
@@ -481,7 +860,11 @@ test('recovering a ref by label does not consume an addurl attempt, unlike a rea
   db.prepare('UPDATE downloads SET attempts = 4 WHERE id = 1').run();
   let addUrlCalls = 0;
   const client = fakeClient(
-    { queue: [{ ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 1 }], history: [] },
+    {
+      queue: [queued('nzo_orphan', clientJobName('Some.Release.Title', 1), 1)],
+      history: [],
+      complete: true,
+    },
     {
       addUrl: async () => {
         addUrlCalls += 1;
@@ -527,19 +910,20 @@ test('a fresh addUrl call sends a name carrying the release title, with the labe
 //
 // Recovery depends entirely on the client surfacing the label a download was
 // submitted under verbatim as that entry's name. If a real server doesn't
-// (renames jobs once it has parsed the actual nzb, say), refByLabel simply
-// never matches and every retry regresses to the pre-fix double-submit risk
-// — with no test failure, since the fakes here stub the name directly rather
-// than round-tripping it through a real client. The warning below is what
-// turns that silent regression into a visible one.
+// (renames jobs once it has parsed the actual nzb, say), the label match
+// simply never fires and every retry regresses to the pre-fix double-submit
+// risk — with no test failure, since the fakes here stub the name directly
+// rather than round-tripping it through a real client. The warning below is
+// what turns that silent regression into a visible one.
 
 test('a tracked download whose client-side name does not match its label warns exactly once, not once per tick', async () => {
-  resetLabelMismatchWarningForTests();
+  resetReconcileWarningsForTests();
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient({
-    queue: [{ ref: 'nzo_1', name: 'Some.Release.Name', percentage: 10 }],
+    queue: [queued('nzo_1', 'Some.Release.Name', 10)],
     history: [],
+    complete: true,
   });
   const warnMock = mock.method(console, 'warn', () => {});
 
@@ -560,13 +944,14 @@ test('a tracked download whose client-side name does not match its label warns e
 });
 
 test('a tracked download whose client-side name matches its label never warns', async () => {
-  resetLabelMismatchWarningForTests();
+  resetReconcileWarningsForTests();
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient({
     // A real client reports the title-plus-marker name, not the bare label.
-    queue: [{ ref: 'nzo_1', name: clientJobName('T', 1), percentage: 10 }],
+    queue: [queued('nzo_1', clientJobName('T', 1), 10)],
     history: [],
+    complete: true,
   });
   const warnMock = mock.method(console, 'warn', () => {});
 
@@ -601,7 +986,8 @@ test('an imported download is removed from the client, with its files', async ()
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-done', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+      history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-1]')],
+      complete: true,
     },
     { remove },
   );
@@ -615,7 +1001,11 @@ test('a download still running is left alone', async () => {
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo-live' });
   const { removed, remove } = removalTracking();
   const client = fakeClient(
-    { queue: [{ ref: 'nzo-live', name: 'Scene [pickarr-1]', percentage: 40 }], history: [] },
+    {
+      queue: [queued('nzo-live', 'Scene [pickarr-1]', 40)],
+      history: [],
+      complete: true,
+    },
     { remove },
   );
 
@@ -625,10 +1015,23 @@ test('a download still running is left alone', async () => {
 
 test('a failed download is left in the client for inspection', async () => {
   const db = openTestDatabase();
-  seedDownload(db, { id: 1, status: 'failed', clientRef: 'nzo-bad' });
+  seedDownload(db, { id: 1, status: 'failed', clientRef: 'nzo-bad', error: 'Out of retention' });
   const { removed, remove } = removalTracking();
   const client = fakeClient(
-    { queue: [], history: [{ ref: 'nzo-bad', name: 'Scene [pickarr-1]', outcome: 'failed', storagePath: null, failMessage: null }] },
+    {
+      queue: [],
+      history: [
+        {
+          ref: 'nzo-bad',
+          name: 'Scene [pickarr-1]',
+          outcome: 'failed',
+          storagePath: null,
+          failMessage: null,
+          category: OURS,
+        },
+      ],
+      complete: true,
+    },
     { remove },
   );
 
@@ -642,7 +1045,8 @@ test('an untracked entry is never removed, however finished it looks', async () 
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-stranger', name: 'Someone Elses Job', outcome: 'completed', storagePath: '/sab/y', failMessage: null }],
+      history: [finished('nzo-stranger', '/sab/y', 'Someone Elses Job')],
+      complete: true,
     },
     { remove },
   );
@@ -658,7 +1062,8 @@ test('a download imported during this same tick is cleaned up in it', async () =
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-now', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+      history: [finished('nzo-now', '/sab/x', 'Scene [pickarr-1]')],
+      complete: true,
     },
     { remove },
   );
@@ -690,21 +1095,13 @@ function directoryTracking(): {
 }
 
 function importedWithStorage(db: DatabaseSync, storagePath: string): void {
-  seedDownload(db, { id: 1, status: 'imported', clientRef: 'nzo-done' });
-  db.prepare('UPDATE downloads SET storage_path = ? WHERE id = 1').run(storagePath);
+  seedDownload(db, { id: 1, status: 'imported', clientRef: 'nzo-done', storagePath });
 }
 
 const DONE = {
   queue: [],
-  history: [
-    {
-      ref: 'nzo-done',
-      name: 'Scene [pickarr-1]',
-      outcome: 'completed' as const,
-      storagePath: '/sab/x',
-      failMessage: null,
-    },
-  ],
+  history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-1]')],
+  complete: true,
 };
 
 test('the job directory goes too — the client empties it but leaves it standing', async () => {
@@ -862,7 +1259,8 @@ test('a removal that fails does not undo the import, and is retried next tick', 
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-done', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+      history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-1]')],
+      complete: true,
     },
     {
       remove: () => {

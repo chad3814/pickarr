@@ -4,12 +4,15 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
   bumpAttempts,
-  bumpMissingPolls,
+  clearAbsent,
+  downloadLabel,
   failDownload,
   getDownload,
+  indexDownloadsForClient,
   insertDownload,
+  markAbsent,
   recordError,
-  resetMissingPolls,
+  resetForRetry,
   setClientRef,
   setStatus,
   setStoragePath,
@@ -162,33 +165,131 @@ test('bumpAttempts throws on a bad id instead of returning 0', () => {
   db.close();
 });
 
-test('bumpMissingPolls throws on a bad id instead of returning 0', () => {
-  const db = openTestDatabase();
-  seed(db);
-  assert.throws(() => bumpMissingPolls(db, BAD_ID, 2), /bumpMissingPolls.*9999/);
-  db.close();
-});
-
-test('resetMissingPolls throws on a bad id', () => {
-  const db = openTestDatabase();
-  seed(db);
-  assert.throws(() => resetMissingPolls(db, BAD_ID), /resetMissingPolls.*9999/);
-  db.close();
-});
-
-test('resetMissingPolls on a real row whose missing_polls is already 0 is a legitimate no-op, not an error', () => {
-  const db = openTestDatabase();
-  const id = seed(db);
-  assert.doesNotThrow(() => resetMissingPolls(db, id));
-  assert.equal(getDownload(db, id)?.missingPolls, 0);
-  db.close();
-});
-
-test('bumpAttempts and bumpMissingPolls increment and return the new count for a real row', () => {
+test('bumpAttempts increments and returns the new count for a real row', () => {
   const db = openTestDatabase();
   const id = seed(db);
   assert.equal(bumpAttempts(db, id, 2), 1);
   assert.equal(bumpAttempts(db, id, 3), 2);
-  assert.equal(bumpMissingPolls(db, id, 4), 1);
+  db.close();
+});
+
+// --- absent_since: absence as an observation, not a verdict ----------------
+
+/**
+ * A second download on the same group, for tests that need more than one
+ * row. A separate feed item and release because `releases.feed_item_id` is
+ * NOT NULL UNIQUE, same as `seed`'s.
+ */
+function seedSecond(db: DatabaseSync, id: number): number {
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (?, 'f', ?, 'Title', ?, 1)`,
+  ).run(id, `g${id}`, `https://indexer.invalid/${id}.nzb`);
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (?, 1, ?, '{}', 100, 1)`,
+  ).run(id, id);
+  return insertDownload(db, {
+    releaseId: id,
+    groupId: 1,
+    clientId: 'sab',
+    kind: 'initial',
+    createdAt: 1,
+  });
+}
+
+test('markAbsent sets absent_since, and a second call with a later now leaves the original value', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  markAbsent(db, id, 5);
+  assert.equal(getDownload(db, id)?.absentSince, 5);
+
+  // The `WHERE absent_since IS NULL` guard is the entire point of this
+  // function: without it, every tick a job stays missing would push the
+  // timestamp forward, and "how long has this been gone" would always read
+  // "just now".
+  markAbsent(db, id, 9);
+  assert.equal(getDownload(db, id)?.absentSince, 5, 'the original absence time is preserved');
+  db.close();
+});
+
+test('clearAbsent clears absent_since and is a no-op when already null', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+
+  assert.doesNotThrow(() => clearAbsent(db, id));
+  assert.equal(getDownload(db, id)?.absentSince, null);
+
+  markAbsent(db, id, 5);
+  clearAbsent(db, id);
+  assert.equal(getDownload(db, id)?.absentSince, null);
+  db.close();
+});
+
+test('absentSince round-trips through getDownload as null and as a number', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  assert.equal(getDownload(db, id)?.absentSince, null);
+  markAbsent(db, id, 42);
+  assert.equal(getDownload(db, id)?.absentSince, 42);
+  db.close();
+});
+
+test('resetForRetry clears absent_since so a retry does not inherit a stale absence mark', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  markAbsent(db, id, 5);
+  resetForRetry(db, id, 10);
+  assert.equal(getDownload(db, id)?.absentSince, null);
+  db.close();
+});
+
+test('indexDownloadsForClient.byRef includes failed rows and excludes imported rows, keyed on client_ref', () => {
+  const db = openTestDatabase();
+  const kept = seed(db); // will be 'downloading'
+  const failed = seedSecond(db, 2);
+  const imported = seedSecond(db, 3);
+
+  setClientRef(db, kept, 'nzo_kept', 1);
+  setClientRef(db, failed, 'nzo_failed', 1);
+  failDownload(db, failed, 'disappeared-from-client', 2);
+  setClientRef(db, imported, 'nzo_imported', 1);
+  setStatus(db, imported, 'imported', 2);
+
+  const { byRef } = indexDownloadsForClient(db, 'sab');
+  assert.deepEqual([...byRef.keys()].toSorted(), ['nzo_failed', 'nzo_kept']);
+  assert.equal(byRef.get('nzo_kept')?.id, kept);
+  assert.equal(byRef.get('nzo_failed')?.id, failed);
+  assert.equal(byRef.has('nzo_imported'), false);
+  db.close();
+});
+
+test('indexDownloadsForClient.byLabel keys on pickarr-<id> for the same row set as byRef', () => {
+  const db = openTestDatabase();
+  const kept = seed(db);
+  const imported = seedSecond(db, 2);
+
+  setClientRef(db, kept, 'nzo_kept', 1);
+  setClientRef(db, imported, 'nzo_imported', 1);
+  setStatus(db, imported, 'imported', 2);
+
+  const { byLabel } = indexDownloadsForClient(db, 'sab');
+  assert.deepEqual([...byLabel.keys()], [downloadLabel(kept)]);
+  assert.equal(byLabel.get(downloadLabel(kept))?.id, kept);
+  db.close();
+});
+
+test('indexDownloadsForClient builds both maps from one query: a kept row is the same object in byRef and byLabel', () => {
+  const db = openTestDatabase();
+  const kept = seed(db);
+  setClientRef(db, kept, 'nzo_kept', 1);
+
+  const { byRef, byLabel } = indexDownloadsForClient(db, 'sab');
+  // Strict identity, not just equal values: this is what a single query
+  // building both maps from one row array actually guarantees, and what a
+  // second, separately-run query could not — two queries would give two
+  // distinct row objects with the same field values, and this assertion
+  // would still pass on that broken version if it only checked deepEqual.
+  assert.equal(byRef.get('nzo_kept'), byLabel.get(downloadLabel(kept)));
   db.close();
 });

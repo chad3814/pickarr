@@ -35,3 +35,19 @@ export function formatDuration(seconds: number): string {
   const minutes = totalMinutes % 60;
   return hours === 0 ? `${minutes}m` : `${hours}h ${minutes}m`;
 }
+
+/**
+ * How long ago something started, as a single coarse unit — `3h`, `2d`,
+ * `45m` — never a live-updating clock: the row re-renders on the next poll
+ * like everything else on this screen, and the number is only ever as fresh
+ * as that poll. Floored rather than rounded, so "missing for 1h" cannot read
+ * as an hour that has not actually elapsed yet.
+ */
+export function formatElapsed(ms: number): string {
+  const totalMinutes = Math.floor(ms / 60_000);
+  if (totalMinutes < 1) return 'under a minute';
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours}h`;
+  return `${Math.floor(totalHours / 24)}d`;
+}

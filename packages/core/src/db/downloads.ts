@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { flagUpgrade } from './groups.ts';
-import { maybeStr, num, str, type SqlRow } from './row.ts';
+import { maybeNum, maybeStr, num, str, type SqlRow } from './row.ts';
 
 export type DownloadStatus =
   | 'queued'
@@ -25,14 +25,21 @@ export interface DownloadRow {
   storagePath: string | null;
   error: string | null;
   attempts: number;
-  missingPolls: number;
+  absentSince: number | null;
   createdAt: number;
   updatedAt: number;
 }
 
+/**
+ * `missing_polls` is deliberately not selected. The column still exists —
+ * dropping a live column buys nothing (see migration 8) — but nothing reads
+ * or writes it any more: counting polls was the wrong clock, and
+ * `absent_since` replaced it.
+ */
 const SELECT = `
   SELECT id, release_id, group_id, client_id, client_ref, kind, status,
-         storage_path, error, attempts, missing_polls, created_at, updated_at
+         storage_path, error, attempts, absent_since,
+         created_at, updated_at
   FROM downloads
 `;
 
@@ -59,7 +66,7 @@ function toDownloadRow(row: SqlRow): DownloadRow {
     storagePath: maybeStr(row, 'storage_path'),
     error: maybeStr(row, 'error'),
     attempts: num(row, 'attempts'),
-    missingPolls: num(row, 'missing_polls'),
+    absentSince: maybeNum(row, 'absent_since'),
     createdAt: num(row, 'created_at'),
     updatedAt: num(row, 'updated_at'),
   };
@@ -170,6 +177,41 @@ export function activeDownloads(db: DatabaseSync, clientId: string): DownloadRow
     .map((row) => toDownloadRow(row as SqlRow));
 }
 
+export interface DownloadIndex {
+  byRef: Map<string, DownloadRow>;
+  byLabel: Map<string, DownloadRow>;
+}
+
+/**
+ * The two lookup indexes the client-first reconcile loop matches SABnzbd
+ * entries against: a client ref once a job is known to the client, and the
+ * label a job was submitted under (`downloadLabel`) while it is still being
+ * recognized by name (a fresh submission, or one recovering from
+ * `disappeared-from-client`). Reconcile needs both every tick, so this runs
+ * one query and keys the same rows two ways rather than making the caller
+ * (or this module) scan the row set twice for two maps that would otherwise
+ * be byte-identical queries apart from the key.
+ *
+ * The row set is every download of this client that has a client ref,
+ * excluding `imported`. `imported` is excluded on purpose, not by oversight
+ * — the cleanup pass at the end of the tick owns imported rows and runs its
+ * own query against them, and a second map here that also found them would
+ * invite a double import of the same job. `failed` rows are included on
+ * purpose too: reconcile decides which of those are eligible for
+ * re-attachment (only ones whose error is exactly `disappeared-from-client`),
+ * and that decision belongs to the caller, not to this query.
+ */
+export function indexDownloadsForClient(db: DatabaseSync, clientId: string): DownloadIndex {
+  const rows = db
+    .prepare(`${SELECT} WHERE client_id = ? AND client_ref IS NOT NULL AND status != 'imported'`)
+    .all(clientId)
+    .map((row) => toDownloadRow(row as SqlRow));
+  return {
+    byRef: new Map(rows.map((row) => [row.clientRef as string, row])),
+    byLabel: new Map(rows.map((row) => [downloadLabel(row.id), row])),
+  };
+}
+
 /**
  * Whether releaseId already has a download that a fresh pick would collide
  * with. Excludes only 'failed' — not just the actively-running statuses —
@@ -209,6 +251,31 @@ export function setClientRef(
     )
     .run(clientRef, now, id);
   requireAffected('setClientRef', id, result.changes);
+}
+
+/**
+ * The other half of `setClientRef`, for a row whose next status is not
+ * `downloading`.
+ *
+ * Both corrections a re-attachment needs — point the row at the client job it
+ * actually belongs to, and retract the error that stranded it — with no status
+ * write at all. `setClientRef` forces `'downloading'`, which is right for a row
+ * being handed to the client or recovered as still-running, and wrong for one
+ * whose job the client has already finished or failed: that row's next status
+ * is `'completed'` or `'failed'`, and passing it through `'downloading'` first
+ * writes a status no reader ever observes and makes one logical recovery look
+ * like two events to whoever is counting them.
+ */
+export function reattachClientRef(
+  db: DatabaseSync,
+  id: number,
+  clientRef: string,
+  now: number,
+): void {
+  const result = db
+    .prepare('UPDATE downloads SET client_ref = ?, error = NULL, updated_at = ? WHERE id = ?')
+    .run(clientRef, now, id);
+  requireAffected('reattachClientRef', id, result.changes);
 }
 
 export function setStatus(
@@ -285,7 +352,7 @@ export function setStoragePath(
  * `already has download`. `committedScore` makes the two agree by
  * construction.
  *
- * It lives in this function rather than at the seven `failDownload` call sites
+ * It lives in this function rather than at the five `failDownload` call sites
  * in reconcile.ts for the reason `deriveUpgradeReleaseId` exists at all: an
  * invariant re-derived by whichever caller remembers is an invariant that holds
  * on some paths. This is the only writer of `status = 'failed'` in the package,
@@ -340,35 +407,63 @@ export function bumpAttempts(db: DatabaseSync, id: number, now: number): number 
   return row.attempts;
 }
 
-export function bumpMissingPolls(db: DatabaseSync, id: number, now: number): number {
-  const result = db
-    .prepare('UPDATE downloads SET missing_polls = missing_polls + 1, updated_at = ? WHERE id = ?')
-    .run(now, id);
-  requireAffected('bumpMissingPolls', id, result.changes);
-  const row = getDownload(db, id);
-  if (row === null) {
-    throw new Error(`bumpMissingPolls: download ${id} vanished after its own update`);
-  }
-  return row.missingPolls;
+/**
+ * Records when a download was first not seen in a client snapshot — not when
+ * it was *last* not seen, which a plain assignment would produce. The
+ * `absent_since IS NULL` guard is the whole point: without it, every tick a
+ * job stays missing would push the timestamp forward, and "how long has this
+ * been gone" (surfaced through `/api/downloads`, and the signal the retry
+ * escape hatch relies on) would always read as "just now". A stale id is not
+ * treated as an error the way the setters above do — reconcile calls this for
+ * every row absent from a snapshot in a loop, and a row already gone by the
+ * time this runs is not a coding mistake worth throwing over.
+ *
+ * Deliberately does not touch `updated_at`: that column means "when this
+ * download's own state last changed," and absence is an observation about
+ * the client, not a state change in the download. Do not add it here.
+ */
+export function markAbsent(db: DatabaseSync, id: number, now: number): void {
+  db.prepare('UPDATE downloads SET absent_since = ? WHERE id = ? AND absent_since IS NULL').run(
+    now,
+    id,
+  );
 }
 
 /**
- * A no-op when missing_polls is already 0 is legitimate (idempotent reset,
- * not an error) and must not be confused with "no such id" — so a bad id is
- * detected with a separate existence check, not by the affected-row count.
+ * The inverse of `markAbsent`: a no-op when already clear is legitimate (the
+ * row was never absent, or reconcile already cleared it this tick) rather than
+ * an error, so there is no existence check to distinguish "already clear" from
+ * "no such id" — nothing here needs to tell them apart.
+ *
+ * Every other setter in this file turns a bad id into a thrown error, and the
+ * deleted `resetMissingPolls` did it with a `getDownload` probe on its
+ * `changes === 0` path, which was cheap there because that path was rare.
+ * Here the no-op path is the *common* one — most downloads are not absent on
+ * most ticks — so the same probe would mean a query per row per tick to guard
+ * against a condition that cannot arise on this call path: every id reaching
+ * `clearAbsent` was just read out of this table by the caller (reconcile,
+ * matching a snapshot entry against a row it already has), not typed in by a
+ * human. Paying for the bad-id assertion here would be buying safety against
+ * a mistake the call site cannot make.
+ *
+ * Also does not touch `updated_at`, for the same reason `markAbsent` does
+ * not: clearing an observation about the client is not a state change in the
+ * download.
  */
-export function resetMissingPolls(db: DatabaseSync, id: number): void {
-  const result = db
-    .prepare('UPDATE downloads SET missing_polls = 0 WHERE id = ? AND missing_polls != 0')
-    .run(id);
-  if (result.changes === 0 && getDownload(db, id) === null) {
-    throw new Error(`resetMissingPolls: no download with id ${id}`);
-  }
+export function clearAbsent(db: DatabaseSync, id: number): void {
+  db.prepare('UPDATE downloads SET absent_since = NULL WHERE id = ? AND absent_since IS NOT NULL').run(
+    id,
+  );
 }
 
 /**
  * Resumes from the furthest point already reached: a row that has a storage
  * path only needs its import redone, everything else restarts from queued.
+ *
+ * `absent_since` is cleared so a retried download does not inherit a stale
+ * mark from a previous attempt. `missing_polls` is not touched: nothing reads
+ * it any more, and writing a column no reader consults would be the only
+ * remaining pretence that it still means something.
  */
 export function resetForRetry(db: DatabaseSync, id: number, now: number): DownloadRow | null {
   const download = getDownload(db, id);
@@ -377,7 +472,7 @@ export function resetForRetry(db: DatabaseSync, id: number, now: number): Downlo
   const status: DownloadStatus = download.storagePath === null ? 'queued' : 'completed';
   db.prepare(
     `UPDATE downloads
-     SET status = ?, error = NULL, attempts = 0, missing_polls = 0,
+     SET status = ?, error = NULL, attempts = 0, absent_since = NULL,
          client_ref = CASE WHEN ? = 'queued' THEN NULL ELSE client_ref END,
          updated_at = ?
      WHERE id = ?`,
