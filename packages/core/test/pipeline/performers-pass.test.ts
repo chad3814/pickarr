@@ -320,11 +320,22 @@ test('createPerformerRunner makes no request inside a cooldown, and says so once
   const passDeps = deps(db, [new RateLimited(120_000)]);
   const run = createPerformerRunner(passDeps);
 
+  // Three ticks, not two, and that is what makes the count below mean anything:
+  // the first runs the pass and takes the 429, the second is the tick that says
+  // it is skipping, and the third is the one that must say nothing. Counting the
+  // skip line — "cooling down", the only line the skip writes — is the only way
+  // to tell once-per-cooldown from once-per-tick. The pass's own summary line
+  // says "cooldown until", so matching that substring instead would count the
+  // summary and hold at one however often the skip fired.
   await run();
   await run();
   await run();
 
   assert.deepEqual(passDeps.calls, ['Jessica Jaymes'], 'only the first tick asked');
-  assert.equal(passDeps.logged.filter((line) => line.includes('cooldown')).length, 1);
+  assert.equal(
+    passDeps.logged.filter((line) => line.includes('cooling down')).length,
+    1,
+    'the skip is announced once per cooldown, not once per tick',
+  );
   db.close();
 });
