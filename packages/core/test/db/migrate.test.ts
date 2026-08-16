@@ -938,7 +938,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   db.close();
 });
 
@@ -1033,4 +1033,16 @@ test('migration 8 adds absent_since, NULL for rows that already existed', () => 
 
   const row = db.prepare('SELECT absent_since FROM downloads WHERE id = 1').get();
   assert.equal(row?.['absent_since'], null, 'a row that predates the column has nothing to backfill it with');
+});
+
+// --- Migration 10: app_state, not 7, not 8, not 9 --------------------------
+
+test('app_state arrives at version 10 and takes no other version', () => {
+  const db = new DatabaseSync(':memory:');
+  migrate(db);
+  const applied = db
+    .prepare('SELECT version FROM schema_migrations ORDER BY version')
+    .all()
+    .map((row) => Number(row['version']));
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 });
