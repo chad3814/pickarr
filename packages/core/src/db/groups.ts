@@ -544,6 +544,7 @@ export function moveReleasesToGroup(
 }
 
 /**
+<<<<<<< HEAD
  * The rest of a merge, and the reason the merge is now allowed at all.
  *
  * `moveReleasesToGroup` alone leaves `downloads` and `imported_files` pointing at
@@ -591,6 +592,15 @@ export function moveImportedFilesToGroup(
  * It used to be guarded by `groupHistory` instead — a merge was refused outright
  * if the source had ever been downloaded from — and that refusal, not the move of
  * the other two tables, was what kept this statement safe. See `groupHistory`.
+ *
+ * That refusal is still how the *second* caller reaches here. The re-key pass
+ * (`pipeline/rekey.ts`, via `db/merge-groups.ts`) folds a colliding group away
+ * only when `groupHistory` returns null, so it arrives with no `downloads` and no
+ * `imported_files` to move — the two moves above are no-ops on its path, and the
+ * gate is doing the work instead. The two callers therefore reach the same
+ * statement having made opposite bargains: the identity edit moves history and
+ * trashes what it supersedes, the pass declines to touch a group that has any.
+ * Neither is the other's fallback, and a change here has to hold for both.
  */
 export function deleteGroup(db: DatabaseSync, id: number): void {
   db.prepare('DELETE FROM media_groups WHERE id = ?').run(id);

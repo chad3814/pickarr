@@ -301,9 +301,30 @@ It is referenced rather than copied because issue #13 is the scar for the altern
 corpus titles.
 
 **3. Content type** — `hardcore`, `solo`, `lesbian`. Matched case-insensitively. A named
-set, held lowercase, sitting beside the parser's other vocabularies.
+set, held uppercase (`CONTENT_TYPE_TERMS`), sitting beside the parser's other vocabularies.
 
-**4. Language** — `LANGUAGE_TERMS`, which is one half of a split `NON_GROUP_TERMS`.
+**4. Language** — `LANGUAGE_TERMS`, which is one half of a split `NON_GROUP_TERMS`, gated by
+a casing rule (`isLanguageSuffixToken`, added after this section was first written — see its
+own doc comment in `parse.ts` for the full measurement, summarized here since it is otherwise
+undocumented outside a predicate's docstring).
+
+`LANGUAGE_TERMS` membership alone is not the test: a language name is also a surname and an
+adjective (`Britney Dutch`, `Perfect French Maid`), so the walk additionally requires **either**
+of:
+
+- **An inner capital** (`hasInnerCapital`: a capital anywhere but the first character, e.g.
+  `GERMAN`, `iTALiAN`) — a release tag is conventionally shouted, a title word is not; or
+- **The previous token is itself suffix vocabulary on its own merits** (checked with that
+  token's own predecessor passed as `undefined`, so a title-case language cannot lend
+  authority it does not have to the token behind it) — this is what keeps `Hardcore.Dutch`
+  strippable even though `Hardcore` is title case.
+
+Measured over the corpus: 141 occurrences of a language term, 89 with an inner capital and
+every one a tag; of the 52 without one, the walk reaches exactly two genuine title words
+(`Britney Dutch`, both real releases). Deliberately **not** extended to
+`CONTENT_TYPE_TERMS` — the six `ClubSweethearts...Hardcore...` and
+`...Remido.Solo...` releases this trimming exists to fix are title case, so a casing rule
+there would undo the feature.
 
 `NON_GROUP_TERMS` today mixes two kinds of thing under one question. It becomes the union
 of two named halves, so its membership — and therefore release-group detachment — is

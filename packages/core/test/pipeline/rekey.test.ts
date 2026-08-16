@@ -577,6 +577,38 @@ test('case 9b: renames is empty for a moving group with no live imported files',
   assert.deepEqual(outcome.renames, []);
 });
 
+test('a destination that lexically escapes the library root is skipped, not renamed', () => {
+  // Not reachable with the shipped plugin — nothing in it can turn an
+  // identity key into a `..`-escaping or absolute destination — so this
+  // drives `computeRenames` through a plugin double whose `planImport`
+  // returns exactly the shape `pipeline/import.ts`'s `resolveDestination`
+  // refuses at real import time. The point is that this pass refuses it too,
+  // rather than handing it straight to `rename()`.
+  const { db, plugin: realPlugin } = setup();
+  const rawTitle = 'Site.26.05.03.Oscar.Papa.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-05-03:oscar-papa-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+  const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+  db.prepare(
+    `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+     VALUES (?, ?, '/src/live.mp4', '/library/Site/old-name.mp4', 12345, 1)`,
+  ).run(downloadId, groupId);
+
+  const escapingPlugin: MediaTypePlugin = {
+    ...realPlugin,
+    planImport: () => ({ files: [{ source: '/src/live.mp4', destination: '../../etc/evil.mp4' }] }),
+  };
+  const escapingRegistry = registryFor(escapingPlugin);
+
+  const outcome = outcomeFor(planRekey(db, escapingRegistry), groupId);
+  assert.equal(outcome.kind, 'skipped-unparsable');
+  if (outcome.kind !== 'skipped-unparsable') return;
+  assert.ok(outcome.reason.includes('escapes the library root'), outcome.reason);
+});
+
 test('a group with two live files where one destination cannot be computed is skipped, not moved', () => {
   const { db, registry } = setup();
   // Otherwise a clean move: GERMAN is the language suffix the current parser
@@ -993,6 +1025,76 @@ test('applyRekey test 7: a group whose write throws is counted in failed and doe
   assert.notEqual(fineAfter?.identityKey, 'site:2026-06-09:charlie-delta-german');
 });
 
+test(
+  'applyRekey test 7b: a mover into another mover\'s vacated slot can fail permanently — ' +
+    'known gap, pinned as current behaviour',
+  async () => {
+    // This is the vacated-slot gap named at the bucketing code in `rekey.ts`
+    // and in the re-key spec's failure section: `planRekey` buckets a mover
+    // only by the slot it moves *into*, never by the slot it *vacates*, so it
+    // sees no collision between a group moving away from slot K and a second
+    // group moving into that same, still-occupied K. Not a fix — pinning what
+    // the code does today so a future change to the bucketing has to notice
+    // it changed this.
+    const { db, plugin, registry } = setup();
+
+    // Fixture setup only (not an assertion): call the plugin once, the same
+    // way `agreeingIdentity` does, to get the exact key format the parser
+    // uses today rather than guessing it.
+    const sharedRawTitle = 'Site.26.06.10.Alpha.Bravo.XXX.1080p.MP4-GRP1';
+    const vacatedSlotKey = agreeingIdentity(plugin, sharedRawTitle).identityKey;
+
+    // Group B, inserted first (lower id): its raw title is `sharedRawTitle`,
+    // so a fresh parse sends it to `vacatedSlotKey` — the slot group A
+    // currently, uncontestedly, holds below. B's own stored key is unrelated
+    // and stale, so B is a genuine mover targeting that slot.
+    const groupB = groupWithRelease(db, {
+      rawTitle: sharedRawTitle,
+      identityKey: 'site:2026-06-11:mike-november-stale',
+      display: '{"title":"stale b","fields":[]}',
+    });
+
+    // Group A, inserted second (higher id): its *current* stored key is
+    // exactly `vacatedSlotKey` — B's destination — but its own raw title
+    // parses fresh to a third, different key (GERMAN strips, as elsewhere in
+    // this file), so A is also a genuine mover, moving away from the very
+    // slot B is moving into.
+    const rawA = 'Site.26.06.10.Zulu.Yankee.GERMAN.XXX.1080p.MP4-GRP2';
+    const groupA = groupWithRelease(db, {
+      rawTitle: rawA,
+      identityKey: vacatedSlotKey,
+      display: '{"title":"stale a","fields":[]}',
+    });
+    assert.ok(groupB < groupA, 'sanity: B must be applied before A for the gap to bite');
+
+    // `planRekey` reports no collision at all: A's bucket is keyed on A's
+    // fresh destination, not on `vacatedSlotKey`, so nothing is filed under
+    // `vacatedSlotKey` except B. Both are proposed as plain, uncontested
+    // `move`s.
+    const proposals = planRekey(db, registry);
+    assert.equal(outcomeFor(proposals, groupB).kind, 'move');
+    assert.equal(outcomeFor(proposals, groupA).kind, 'move');
+
+    // `applyRekey` applies in ascending group-id order, so B's `move` runs
+    // first — while A's row still holds `vacatedSlotKey` — and collides with
+    // it under `UNIQUE (plugin, identity_key)`. B is counted in `failed` and
+    // left exactly as it was; A's own move then runs unopposed once B's
+    // attempt has rolled back, and succeeds. Nothing revisits a `failed`
+    // group (see `REKEY_MARKER_KEY`'s doc comment for the manual recovery
+    // path), so B stays failed even though A's move, moments later, frees
+    // the very slot B wanted.
+    const report = await applyRekey(db, registry, DEPS);
+    assert.equal(report.failed, 1, 'B collides with A, which has not moved yet');
+    assert.equal(report.moved, 1, 'A moves once, unopposed, after B has already failed');
+
+    const rowB = getGroup(db, groupB);
+    assert.equal(rowB?.identityKey, 'site:2026-06-11:mike-november-stale', 'B is left exactly as it was');
+
+    const rowA = getGroup(db, groupA);
+    assert.notEqual(rowA?.identityKey, vacatedSlotKey, 'A did move away from the slot B wanted');
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Task 4a: the merge. The only outcome in this pass that deletes a row, and
 // the only one narrowing a spec decision rather than implementing it — see
@@ -1058,6 +1160,16 @@ test('applyRekey test 8: a mover with no history folds into the holder, which ke
   assertMetadataTablesSurvive(db, holderId);
 });
 
+// Tests 9 and 10 below assert only the final `skippedCollision`/`merged`
+// counts, which two independent mechanisms can both produce: `planRekey`'s
+// own history check (it never proposes `merge` for a mover with history in
+// the first place) and `applyRekey`'s write-time re-check inside the merge
+// transaction (see `rekey.ts`'s comment on why the history rule is asked
+// twice). Since the fixtures here give both mechanisms the same answer,
+// "these still pass" is not evidence either guard individually still fires —
+// deleting one of the two would not fail either test. `applyRekey test 15`
+// is what pins the re-check specifically, by making history appear only
+// between plan and apply so the two mechanisms disagree.
 test('applyRekey test 9: a mover with a download is not merged, and the holder is not merged away instead', async () => {
   const { db, plugin, registry } = setup();
   const { holderId, moverId } = collidingPair(db, plugin, { date: '26.07.02', name: 'Golf.Hotel' });
@@ -1831,8 +1943,13 @@ test('runRekeyOnBoot test 5: a hand-edited group contributes zero drift, in the 
   assert.equal(countDrift(db, registry), 1, 'the edited group must not count, only the moving one');
 
   // Applied path: a fresh database, so the marker is unset and applyRekey
-  // actually runs. The derived drift must agree with countDrift's answer —
-  // one, from the mover — not two.
+  // actually runs. The mover gets fixed by this very pass, so it must not
+  // still be reported as "not agreeing" once the pass is done — drift here
+  // is zero, not one. (An earlier draft of this test asserted one, on the
+  // reasoning that a fresh countDrift would also say one; that reasoning was
+  // backwards, because `moved` is exactly the set of groups this boot just
+  // repaired, and a fresh parse of a moved group now agrees with it. See the
+  // parity check below and `runRekeyOnBoot`'s comment on the drift sum.)
   const fresh = setup();
   groupWithRelease(fresh.db, {
     rawTitle: editedRaw,
@@ -1850,5 +1967,50 @@ test('runRekeyOnBoot test 5: a hand-edited group contributes zero drift, in the 
   const outcome = await runRekeyOnBoot(fresh.db, fresh.registry, DEPS);
   assert.equal(outcome.applied, true);
   assert.equal(outcome.report?.skippedEdited, 1, 'the edited group must still be counted in the report');
-  assert.equal(outcome.drift, 1, 'but excluded from drift — only the mover counts');
+  assert.equal(outcome.report?.moved, 1, 'sanity: the mover must have actually moved');
+  assert.equal(outcome.drift, 0, 'the mover was just repaired, so nothing still disagrees');
+
+  // Parity check: this is the property the drift sum is supposed to have —
+  // a fresh, post-apply `countDrift` call must agree with the derived
+  // number, because both are answering the same question ("what still
+  // disagrees, right now") from the same, now-converged, database state.
+  assert.equal(countDrift(fresh.db, fresh.registry), outcome.drift, "drift must match a fresh countDrift's answer");
+});
+
+test('runRekeyOnBoot test 6: a group that fails to apply still counts as drift, unlike one that moved', async () => {
+  // This is the case the ruling in the fix-wave review called out by name:
+  // `failed` names a group whose stored identity genuinely still disagrees
+  // with a fresh parse (the write never landed), so it belongs in the same
+  // sum as `skippedUnparsable`/`skippedCollision`/`skippedDestinationExists`
+  // — unlike `moved`/`merged`, which this boot just repaired.
+  const { db, plugin, registry, libraryRoot } = await setupWithRealLibrary();
+  try {
+    const rawTitle = 'Site.26.09.09.India.Boot.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKey = 'site:2026-09-09:india-boot-german';
+    const staleDisplay = '{"title":"stale india","fields":[]}';
+    const groupId = groupWithRelease(db, { rawTitle, identityKey: staleKey, display: staleDisplay });
+    const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+    const fromPath = realPlannedPath(plugin, libraryRoot, staleKey, staleDisplay);
+    await mkdir(dirname(fromPath), { recursive: true });
+    await writeFile(fromPath, 'fake video bytes');
+    addImportedFile(db, { downloadId, groupId, destPath: fromPath });
+
+    // `REJECTING_RENAME` forces `applyMove` to throw, which `applyRekey`
+    // counts in `failed` rather than `moved` — see `applyRekey test 17`,
+    // which pins the same rejection leaving the group untouched.
+    const outcome = await runRekeyOnBoot(db, registry, { now: () => MERGE_NOW, rename: REJECTING_RENAME, commit: REAL_COMMIT });
+    assert.equal(outcome.applied, true);
+    assert.equal(outcome.report?.failed, 1, 'sanity: the rename must actually have failed');
+    assert.equal(outcome.report?.moved, 0);
+    assert.equal(outcome.drift, 1, 'a failed group still disagrees with a fresh parse, so it counts');
+
+    assert.equal(
+      countDrift(db, registry),
+      outcome.drift,
+      'a fresh countDrift must agree: the failed group still proposes a move',
+    );
+  } finally {
+    await rm(libraryRoot, { recursive: true, force: true });
+  }
 });
