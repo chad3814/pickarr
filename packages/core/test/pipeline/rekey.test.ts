@@ -383,3 +383,78 @@ test('case 9b: renames is empty for a moving group with no live imported files',
   if (outcome.kind !== 'move') return;
   assert.deepEqual(outcome.renames, []);
 });
+
+test('a group with two live files where one destination cannot be computed is skipped, not moved', () => {
+  const { db, registry } = setup();
+  // Otherwise a clean move: GERMAN is the language suffix the current parser
+  // strips (as in case 2/9), so the stored key is stale and this would move.
+  const rawTitle = 'Site.26.05.01.Mike.November.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-05-01:mike-november-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+  const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+  // One file whose destination the plugin can compute...
+  db.prepare(
+    `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+     VALUES (?, ?, '/src/live-a.mp4', '/library/Site/old-a.mp4', 12345, 1)`,
+  ).run(downloadId, groupId);
+  // ...and one it cannot: an extension `planSceneImport` does not recognize
+  // as video, so it finds no importable file and returns null for this one.
+  const unresolvable = db.prepare(
+    `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+     VALUES (?, ?, '/src/live-b.nfo', '/library/Site/old-b.nfo', 999, 1)`,
+  ).run(downloadId, groupId);
+  const unresolvableFileId = Number(unresolvable.lastInsertRowid);
+
+  const outcome = outcomeFor(planRekey(db, registry), groupId);
+  assert.equal(outcome.kind, 'skipped-unparsable');
+  if (outcome.kind !== 'skipped-unparsable') return;
+  // The whole group is refused, not half-renamed — the reason names the
+  // specific file that could not be planned, not just "something failed".
+  assert.ok(outcome.reason.includes(`imported file ${unresolvableFileId}`));
+  assert.ok(outcome.reason.includes('planImport returned null'));
+});
+
+test('3-way collision: two movers and a holder targeting one slot are each skipped-collision, never merged', () => {
+  const { db, plugin, registry } = setup();
+  const holderRaw = 'Site.26.02.04.Hotel.India.XXX.1080p.MP4-GRP';
+  const holderIdentity = agreeingIdentity(plugin, holderRaw);
+  const holderId = groupWithRelease(db, { rawTitle: holderRaw, ...holderIdentity });
+
+  // Both movers parse fresh to the identical key the holder already owns;
+  // only the encode information differs, which the identity key never sees.
+  const mover1Raw = 'Site.26.02.04.Hotel_India.XXX.2160p.MP4-GRP2';
+  const mover1Id = groupWithRelease(db, {
+    rawTitle: mover1Raw,
+    identityKey: 'site:2026-02-04:hotel-india-old-mover-1',
+    display: '{"title":"stale mover 1","fields":[]}',
+  });
+  // Deliberately no history on this mover: a bare mover-vs-holder pair with
+  // no history would merge (case 6a), so this is the case that most needs a
+  // dedicated assertion — a *second* mover contending for the same slot must
+  // still block the merge, because "the same scene" is not what a 3-way
+  // pile-up means, and a wrong merge deletes a group.
+
+  const mover2Raw = 'Site.26.02.04.Hotel-India.XXX.720p.MP4-GRP3';
+  const mover2Id = groupWithRelease(db, {
+    rawTitle: mover2Raw,
+    identityKey: 'site:2026-02-04:hotel-india-old-mover-2',
+    display: '{"title":"stale mover 2","fields":[]}',
+  });
+
+  const proposals = planRekey(db, registry);
+  const holderOutcome = outcomeFor(proposals, holderId);
+  const mover1Outcome = outcomeFor(proposals, mover1Id);
+  const mover2Outcome = outcomeFor(proposals, mover2Id);
+
+  assert.deepEqual(holderOutcome, { kind: 'unchanged' });
+  assert.equal(mover1Outcome.kind, 'skipped-collision');
+  assert.equal(mover2Outcome.kind, 'skipped-collision');
+  // The assertion that matters most: neither history-free mover is merged
+  // away just because it happens to have no history of its own.
+  assert.notEqual(mover1Outcome.kind, 'merge');
+  assert.notEqual(mover2Outcome.kind, 'merge');
+});
