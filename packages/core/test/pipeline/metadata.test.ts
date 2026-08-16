@@ -21,6 +21,7 @@ import {
   runMetadataPass,
   type MetadataPassDeps,
 } from '../../src/pipeline/metadata.ts';
+import { performerQueryFor } from '../../src/pipeline/performers.ts';
 
 const scenesPlugin: MediaTypePlugin = createScenesPlugin({ libraryRoot: '/m', sites: [] });
 
@@ -786,6 +787,12 @@ test('a confirmed scene that supplied a cast queues no performer search', async 
 
   const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] });
   const client = fakeSceneClient(() => [scene]);
+
+  // Proves the group was eligible for a performer search before the pass
+  // ever runs, so the empty `duePerformerQueue` below means the cast refused
+  // it — not that this arrangement was never going to queue anything, which
+  // is what the next test (identical arrangement, no cast) demonstrates.
+  assert.equal(performerQueryFor({ db, pluginFor: defaultPluginFor, log: () => undefined }, groupId), 'A Scene');
 
   await runMetadataPass(deps({ db, client, now: () => 1_000 }));
 

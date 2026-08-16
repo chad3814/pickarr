@@ -38,10 +38,15 @@ export function performerQueryFor(deps: PerformerEnqueueDeps, groupId: number): 
   try {
     const display = JSON.parse(group.display) as DisplayFields;
     const query = plugin.performerQuery({ identityKey: group.identityKey, display });
-    return query === null || query.trim().length === 0 ? null : query;
+    return query === null || query.trim().length === 0 ? null : query.trim();
   } catch (error) {
+    // `JSON.parse` and `plugin.performerQuery` share this one try/catch, so
+    // this cannot say which of the two threw — a group with corrupt `display`
+    // looks identical here to a genuine plugin bug. Naming both rather than
+    // blaming the plugin is what keeps an operator from chasing innocent
+    // plugin code when the real fault is a malformed stored row.
     deps.log(
-      `performer enqueue: group ${groupId} skipped, plugin threw building the query: ${(error as Error).message}`,
+      `performer enqueue: group ${groupId} skipped, building the query threw (plugin or malformed display): ${(error as Error).message}`,
     );
     return null;
   }
