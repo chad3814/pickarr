@@ -8,6 +8,7 @@ import type {
   ParsedRelease,
   QualityTokens,
 } from '@pickarr/plugin-api';
+import { getAppState, setAppState } from '../db/app-state.ts';
 import { getDownload } from '../db/downloads.ts';
 import { getGroup, groupHistory, updateGroupIdentity } from '../db/groups.ts';
 import { updateDestPath } from '../db/imported-files.ts';
@@ -790,4 +791,108 @@ async function destinationOccupied(path: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw error;
   }
+}
+
+/**
+ * The `app_state` key this pass's completion marker lives under — see
+ * `app-state.ts`'s own doc comment for why a generic key-value table is the
+ * right home for it (a pass marker, not user data) and
+ * `docs/superpowers/specs/2026-08-14-rekey-scene-slugs-design.md` for why the
+ * pass needs one at all: it runs the live parser rather than a fixed schema
+ * change, so it has no place in `schema_migrations`.
+ */
+export const REKEY_MARKER_KEY = 'pass:rekey-scene-slugs';
+
+/**
+ * How many groups a fresh `planRekey` would still act on — every proposal
+ * whose outcome is not `unchanged`. Pure and read-only, like `planRekey`
+ * itself: no write, no filesystem access, nothing gated on whether the
+ * marker is set. Measured at ~120ms cold over 1222 groups on the owner's
+ * real database (Task 7) and growing linearly with the library — already
+ * over the plan's own "~100ms, say so" line, so this is deliberately left as
+ * a single `planRekey` call rather than optimised here.
+ *
+ * Never call this a second time in a boot that already ran `applyRekey`:
+ * that would re-parse every raw title for an answer `applyRekey`'s own
+ * report already carries. `runRekeyOnBoot` below derives its drift count
+ * from the report in that case instead of calling this function.
+ */
+export function countDrift(db: DatabaseSync, registry: PluginRegistry): number {
+  return planRekey(db, registry).filter((proposal) => proposal.outcome.kind !== 'unchanged').length;
+}
+
+/** What one boot's worth of `runRekeyOnBoot` did — see that function. */
+export interface RekeyBootOutcome {
+  /** True on the one boot that actually writes: the marker was unset. */
+  applied: boolean;
+  /** `applyRekey`'s own tally, present only when `applied` is true. */
+  report: RekeyReport | null;
+  /**
+   * Groups not agreeing with a fresh parse, as of this check. When `applied`
+   * is true this is read off `report` — the sum of every non-`unchanged`
+   * bucket, which `planRekey` would have counted identically had it been
+   * asked again — rather than a second call to `countDrift`, so that running
+   * the pass and then drift-checking it does not parse every title twice
+   * (see `countDrift`'s own comment). When `applied` is false, this is
+   * `countDrift`'s answer directly.
+   */
+  drift: number;
+}
+
+/**
+ * The Task 6 entry point: run the write pass exactly once, ever, then settle
+ * into an every-boot read-only drift check. Gated on `REKEY_MARKER_KEY`
+ * rather than on whether anything is actually left to do, so the *decision*
+ * to stop writing survives independently of the data — the alternative
+ * (write until `planRekey` returns nothing but `unchanged`) would run the
+ * write pass again on every boot for as long as even one group is
+ * permanently stationary by design (`skipped-edited`, `skipped-collision`),
+ * which is forever.
+ *
+ * Takes `deps` and returns its outcome rather than logging anything itself;
+ * `main.ts`'s `runRekeyAtBoot` owns the log line and the try/catch that keeps
+ * a throw here from blocking startup.
+ */
+export async function runRekeyOnBoot(
+  db: DatabaseSync,
+  registry: PluginRegistry,
+  deps: RekeyDeps,
+): Promise<RekeyBootOutcome> {
+  if (getAppState(db, REKEY_MARKER_KEY) !== null) {
+    return { applied: false, report: null, drift: countDrift(db, registry) };
+  }
+
+  const report = await applyRekey(db, registry, deps);
+
+  // Written last, in its own transaction, deliberately — not "in the same
+  // transaction as the final batch" (an earlier draft of this task's brief
+  // said that, but there is no batch: `applyRekey`'s own module comment
+  // explains why Task 4 commits one group at a time, on purpose, so a single
+  // poison row cannot roll back the groups that already landed). Folding
+  // this write into any one group's transaction would mean that group's
+  // identity, and only that group's, decides whether the whole pass is ever
+  // considered "done" — an arbitrary coupling with no basis in the design.
+  //
+  // Safe to write separately because the pass converges: if this line is
+  // never reached (a throw from `applyRekey` itself, or the process dying
+  // between the last group's commit and here), the marker stays unset and
+  // the next boot simply re-runs `runRekeyOnBoot` from the top. `planRekey`
+  // then reads every already-moved group as `unchanged` — the identity
+  // columns are already right — so that boot's `applyRekey` call only
+  // touches whatever is genuinely still outstanding, and this line runs
+  // again. Task 7 is the evidence for "converges": it asserts the pass
+  // proposes nothing against an already-converged copy of the owner's real
+  // database.
+  setAppState(db, REKEY_MARKER_KEY, 'done', deps.now());
+
+  const drift =
+    report.moved +
+    report.merged +
+    report.skippedEdited +
+    report.skippedUnparsable +
+    report.skippedCollision +
+    report.skippedDestinationExists +
+    report.failed;
+
+  return { applied: true, report, drift };
 }
