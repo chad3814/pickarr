@@ -1,13 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, rename as realRename, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import createScenesPlugin from '@pickarr/plugin-scenes';
 import { getGroup, markPicked } from '../../src/db/groups.ts';
+import { filesForGroup } from '../../src/db/imported-files.ts';
 import { recordMetadataAnswer } from '../../src/db/metadata.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { recordDiscoveredSite } from '../../src/db/sites.ts';
 import { validateIdentity } from '../../src/ingest/commit.ts';
+import { lstatOrNull } from '../../src/pipeline/import.ts';
 import { applyRekey, planRekey, type RekeyDeps, type RekeyOutcome } from '../../src/pipeline/rekey.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 
@@ -22,16 +27,20 @@ const PACKAGE_NAME = '@pickarr/plugin-scenes-package';
  * stub elsewhere in this codebase does) would let `rekey.ts` resolve the
  * plugin by the wrong key without any test noticing — which is exactly the
  * defect Step 5 of the task brief exists to catch.
+ *
+ * `libraryRoot` defaults to the fixed placeholder every non-filesystem test
+ * uses; Task 5's rename tests pass a real `mkdtemp` directory instead, since
+ * they exercise `node:fs/promises` against actual files.
  */
-function registryFor(plugin: MediaTypePlugin): PluginRegistry {
+function registryFor(plugin: MediaTypePlugin, libraryRoot: string = LIBRARY_ROOT): PluginRegistry {
   return {
     byPackage: (name) => {
       if (name !== PACKAGE_NAME) throw new Error(`No plugin registered for package ${name}`);
       return plugin;
     },
     byId: (id) => (id === plugin.id ? plugin : undefined),
-    libraryRoot: () => LIBRARY_ROOT,
-    libraryRootById: () => LIBRARY_ROOT,
+    libraryRoot: () => libraryRoot,
+    libraryRootById: () => libraryRoot,
     all: () => [plugin],
   };
 }
@@ -41,6 +50,71 @@ function setup(): { db: DatabaseSync; plugin: MediaTypePlugin; registry: PluginR
   const db = openTestDatabase();
   const plugin = createScenesPlugin({}) as MediaTypePlugin;
   return { db, plugin, registry: registryFor(plugin) };
+}
+
+/**
+ * The same fixture as `setup`, except `registry.libraryRootById` points at a
+ * real, empty directory (`node:fs/promises` `mkdtemp`, per the task brief)
+ * rather than the fixed `/library` placeholder — for the tests below that
+ * exercise real renames rather than only the paths `planRekey` computes.
+ * Callers are responsible for `rm(libraryRoot, { recursive: true })` when
+ * done; there is no registration-based cleanup here because `node:test` has
+ * no per-test teardown hook to hang it on.
+ */
+async function setupWithRealLibrary(): Promise<{
+  db: DatabaseSync;
+  plugin: MediaTypePlugin;
+  registry: PluginRegistry;
+  libraryRoot: string;
+}> {
+  const db = openTestDatabase();
+  const plugin = createScenesPlugin({}) as MediaTypePlugin;
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-rekey-'));
+  return { db, plugin, registry: registryFor(plugin, libraryRoot), libraryRoot };
+}
+
+/**
+ * Asks the plugin itself where a file would land for a given identity —
+ * exactly what `computeRenames` does internally, called here only to build a
+ * real, correctly-located fixture file, never to predict a value the tests
+ * below assert against. `extension` is fixed at `.mp4` throughout this
+ * section so two calls for the same identity always agree on it.
+ */
+function realPlannedPath(
+  plugin: MediaTypePlugin,
+  libraryRoot: string,
+  identityKey: string,
+  displayJson: string,
+): string {
+  const media: ParsedRelease = {
+    identityKey,
+    display: JSON.parse(displayJson) as ParsedRelease['display'],
+    quality: {},
+  };
+  const plan = plugin.planImport(media, [
+    { absolutePath: '/source/placeholder.mp4', relativePath: 'placeholder.mp4', sizeBytes: 1 },
+  ]);
+  assert.ok(plan !== null, 'fixture identity must produce a plan');
+  const file = plan?.files[0];
+  assert.ok(file !== undefined, 'fixture plan must have a file');
+  if (file === undefined) throw new Error('unreachable');
+  return resolve(libraryRoot, file.destination);
+}
+
+/** A `RekeyDeps.rename` that fails every call, for the "rename throws" case. */
+const REJECTING_RENAME: RekeyDeps['rename'] = () => Promise.reject(new Error('rename refused'));
+
+/**
+ * A `RekeyDeps.rename` that behaves exactly like the real thing except for
+ * one specific `from` path, which it refuses — so a test can make the second
+ * of two renames fail while the first genuinely succeeds on disk, and then
+ * check that `applyMove` puts the first one back.
+ */
+function renameThatRefuses(refuseFrom: string): RekeyDeps['rename'] {
+  return async (from, to) => {
+    if (from === refuseFrom) throw new Error(`rename refused for ${from}`);
+    await realRename(from, to);
+  };
 }
 
 let nextFeedItemId = 1;
@@ -560,7 +634,11 @@ test('3-way collision: two movers and a holder targeting one slot are each skipp
  * then be racing.
  */
 const MERGE_NOW = 9_000_000;
-const DEPS: RekeyDeps = { now: () => MERGE_NOW };
+// `rename` is the real `node:fs/promises` function: every test above this
+// point produces `renames: []` (no live imported files), so it is never
+// actually called by them — it is only wired up here so `DEPS` satisfies
+// `RekeyDeps` without a stub that would silently paper over that fact.
+const DEPS: RekeyDeps = { now: () => MERGE_NOW, rename: realRename };
 
 /** Every table `clearGroupMetadata` clears, enumerated rather than counted,
  * so a future fifth table added there fails these tests by omission instead
@@ -1138,4 +1216,304 @@ test('applyRekey test 15: history appearing between plan and apply skips the mer
   assert.notEqual(getGroup(db, moverId), null, 'the mover is not deleted');
   assert.notEqual(getGroup(db, holderId), null);
   assert.deepEqual(releaseIdsFor(db, moverId), moverReleaseIds, 'and keeps its releases');
+});
+
+// ---------------------------------------------------------------------------
+// Task 5: file renames, inside the same transaction. Every test below uses a
+// real `mkdtemp` directory and real files — the property under test is what
+// happens on disk, which a fake filesystem cannot answer for.
+// ---------------------------------------------------------------------------
+
+test('applyRekey test 16: a move renames its live file on disk and updates dest_path', async () => {
+  const { db, plugin, registry, libraryRoot } = await setupWithRealLibrary();
+  try {
+    const rawTitle = 'Site.26.08.01.Tango.Uniform.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKey = 'site:2026-08-01:tango-uniform-german';
+    const staleDisplay = '{"title":"stale","fields":[]}';
+    const groupId = groupWithRelease(db, { rawTitle, identityKey: staleKey, display: staleDisplay });
+    const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+    const fromPath = realPlannedPath(plugin, libraryRoot, staleKey, staleDisplay);
+    await mkdir(dirname(fromPath), { recursive: true });
+    await writeFile(fromPath, 'fake video bytes');
+    const fileId = addImportedFile(db, { downloadId, groupId, destPath: fromPath });
+
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    assert.equal(report.moved, 1);
+    assert.equal(report.renamed, 1);
+    assert.equal(report.failed, 0);
+
+    const row = filesForGroup(db, groupId).find((f) => f.id === fileId);
+    assert.ok(row !== undefined);
+    const toPath = row?.destPath;
+    assert.ok(toPath !== undefined);
+    if (toPath === undefined) return;
+    assert.notEqual(toPath, fromPath, 'dest_path must hold the new path, not the old one');
+
+    assert.equal(await lstatOrNull(fromPath), null, 'the old path must be gone');
+    assert.notEqual(await lstatOrNull(toPath), null, 'the file must exist at its new path');
+  } finally {
+    await rm(libraryRoot, { recursive: true, force: true });
+  }
+});
+
+test('applyRekey test 17: a rename that throws leaves the file, dest_path and identity_key untouched', async () => {
+  const { db, plugin, registry, libraryRoot } = await setupWithRealLibrary();
+  try {
+    const rawTitle = 'Site.26.08.02.Uniform.Victor.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKey = 'site:2026-08-02:uniform-victor-german';
+    const staleDisplay = '{"title":"stale","fields":[]}';
+    const groupId = groupWithRelease(db, { rawTitle, identityKey: staleKey, display: staleDisplay });
+    const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+    const fromPath = realPlannedPath(plugin, libraryRoot, staleKey, staleDisplay);
+    await mkdir(dirname(fromPath), { recursive: true });
+    await writeFile(fromPath, 'fake video bytes');
+    addImportedFile(db, { downloadId, groupId, destPath: fromPath });
+
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: REJECTING_RENAME });
+    assert.equal(report.failed, 1);
+    assert.equal(report.moved, 0);
+    assert.equal(report.renamed, 0);
+
+    const group = getGroup(db, groupId);
+    assert.equal(group?.identityKey, staleKey, 'the key must be left alone');
+
+    const row = filesForGroup(db, groupId)[0];
+    assert.ok(row !== undefined);
+    assert.equal(row?.destPath, fromPath, 'dest_path must be left alone');
+
+    assert.notEqual(await lstatOrNull(fromPath), null, 'the file must still be at its original path');
+  } finally {
+    await rm(libraryRoot, { recursive: true, force: true });
+  }
+});
+
+test('applyRekey test 18: a commit that fails after a successful rename renames the file back', async () => {
+  const { db, plugin, registry, libraryRoot } = await setupWithRealLibrary();
+  try {
+    const rawTitle = 'Site.26.08.03.Victor.Whiskey.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKey = 'site:2026-08-03:victor-whiskey-german';
+    const staleDisplay = '{"title":"stale","fields":[]}';
+    const groupId = groupWithRelease(db, { rawTitle, identityKey: staleKey, display: staleDisplay });
+    const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+    const fromPath = realPlannedPath(plugin, libraryRoot, staleKey, staleDisplay);
+    await mkdir(dirname(fromPath), { recursive: true });
+    await writeFile(fromPath, 'fake video bytes');
+    const fileId = addImportedFile(db, { downloadId, groupId, destPath: fromPath });
+
+    // Sanctioned exception, as elsewhere in this file: the property under
+    // test is what happens to the file once the commit fails, not what the
+    // new identity is, so the expected `to` path is obtained by calling the
+    // plugin, not by hardcoding one.
+    const parsed = plugin.parse(rawTitle);
+    assert.notEqual(parsed, null);
+    const validated = validateIdentity(parsed as ParsedRelease);
+    assert.ok('identity' in validated);
+    const newIdentity = (validated as { identity: { identityKey: string; displayJson: string } }).identity;
+    const toPath = realPlannedPath(plugin, libraryRoot, newIdentity.identityKey, newIdentity.displayJson);
+
+    // A deferred foreign key, violated only once this group's identity row is
+    // written, so the violation surfaces at `COMMIT` rather than mid-write —
+    // a real commit failure, not a stand-in for one. Unlike the
+    // `BEFORE UPDATE ... RAISE(ROLLBACK)` triggers used elsewhere in this
+    // file (which fire *before* the write and so never reach a rename at
+    // all), a deferred constraint lets the write, and the rename that follows
+    // it, both succeed before anything fails.
+    db.exec(
+      `CREATE TABLE deferred_poison (
+         id INTEGER PRIMARY KEY,
+         group_id INTEGER REFERENCES media_groups (id) DEFERRABLE INITIALLY DEFERRED
+       )`,
+    );
+    db.exec(
+      `CREATE TRIGGER poison_commit AFTER UPDATE ON media_groups
+       FOR EACH ROW WHEN NEW.id = ${groupId}
+       BEGIN INSERT INTO deferred_poison (group_id) VALUES (-1); END;`,
+    );
+
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    assert.equal(report.failed, 1);
+    assert.equal(report.moved, 0);
+    assert.equal(report.renamed, 0);
+
+    const group = getGroup(db, groupId);
+    assert.equal(group?.identityKey, staleKey, 'the identity must be rolled back');
+
+    const row = filesForGroup(db, groupId).find((f) => f.id === fileId);
+    assert.equal(row?.destPath, fromPath, 'dest_path must be rolled back');
+
+    assert.notEqual(await lstatOrNull(fromPath), null, 'the file must be back at its original path');
+    assert.equal(await lstatOrNull(toPath), null, 'nothing must remain at the path the failed commit claimed');
+  } finally {
+    await rm(libraryRoot, { recursive: true, force: true });
+  }
+});
+
+test('applyRekey test 19: a destination that already exists on disk is skipped without overwriting it', async () => {
+  const { db, plugin, registry, libraryRoot } = await setupWithRealLibrary();
+  try {
+    const rawTitle = 'Site.26.08.04.Whiskey.Xray.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKey = 'site:2026-08-04:whiskey-xray-german';
+    const staleDisplay = '{"title":"stale","fields":[]}';
+    const groupId = groupWithRelease(db, { rawTitle, identityKey: staleKey, display: staleDisplay });
+    const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+    const fromPath = realPlannedPath(plugin, libraryRoot, staleKey, staleDisplay);
+    await mkdir(dirname(fromPath), { recursive: true });
+    await writeFile(fromPath, 'original file bytes');
+    const fileId = addImportedFile(db, { downloadId, groupId, destPath: fromPath });
+
+    const parsed = plugin.parse(rawTitle);
+    assert.notEqual(parsed, null);
+    const validated = validateIdentity(parsed as ParsedRelease);
+    assert.ok('identity' in validated);
+    const newIdentity = (validated as { identity: { identityKey: string; displayJson: string } }).identity;
+    const toPath = realPlannedPath(plugin, libraryRoot, newIdentity.identityKey, newIdentity.displayJson);
+    await mkdir(dirname(toPath), { recursive: true });
+    await writeFile(toPath, 'PRE-EXISTING');
+
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    assert.equal(
+      report.skippedDestinationExists,
+      1,
+      'a pre-occupied destination must be counted, not silently ignored',
+    );
+    assert.equal(report.failed, 0, 'a correct refusal is not a failure — nothing here threw');
+    assert.equal(report.moved, 0);
+    assert.equal(report.renamed, 0);
+
+    const group = getGroup(db, groupId);
+    assert.equal(group?.identityKey, staleKey, 'the key must be left alone');
+
+    const row = filesForGroup(db, groupId).find((f) => f.id === fileId);
+    assert.equal(row?.destPath, fromPath, 'dest_path must be left alone');
+
+    assert.equal(await readFile(fromPath, 'utf8'), 'original file bytes', 'the source file must be untouched');
+    assert.equal(
+      await readFile(toPath, 'utf8'),
+      'PRE-EXISTING',
+      'rename(2) silently replaces an existing destination — the pre-existing file must survive',
+    );
+  } finally {
+    await rm(libraryRoot, { recursive: true, force: true });
+  }
+});
+
+test('applyRekey test 20: a move never rewrites trash_path, only a live row\'s own dest_path', async () => {
+  const { db, plugin, registry, libraryRoot } = await setupWithRealLibrary();
+  try {
+    const rawTitle = 'Site.26.08.05.Xray.Yankee.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKey = 'site:2026-08-05:xray-yankee-german';
+    const staleDisplay = '{"title":"stale","fields":[]}';
+    const groupId = groupWithRelease(db, { rawTitle, identityKey: staleKey, display: staleDisplay });
+    const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+    const fromPath = realPlannedPath(plugin, libraryRoot, staleKey, staleDisplay);
+    await mkdir(dirname(fromPath), { recursive: true });
+    await writeFile(fromPath, 'live bytes');
+    const liveFileId = addImportedFile(db, { downloadId, groupId, destPath: fromPath });
+
+    const trashedFileId = addImportedFile(db, {
+      downloadId,
+      groupId,
+      destPath: '/library/Site/trashed-name.mp4',
+      trashedAt: 123,
+    });
+
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    assert.equal(report.moved, 1);
+    assert.equal(report.renamed, 1, 'only the live file counts, never the trashed one');
+
+    const rows = filesForGroup(db, groupId);
+    const liveRow = rows.find((f) => f.id === liveFileId);
+    const trashedRow = rows.find((f) => f.id === trashedFileId);
+    assert.ok(liveRow !== undefined && trashedRow !== undefined);
+
+    assert.notEqual(liveRow?.destPath, fromPath, 'the live file must have moved');
+    assert.equal(
+      trashedRow?.destPath,
+      '/library/Site/trashed-name.mp4',
+      "a trashed row's dest_path is history, not a live path to keep in sync",
+    );
+    assert.equal(trashedRow?.trashPath, '/trash/old.mp4', 'trash_path must never be rewritten by a move');
+  } finally {
+    await rm(libraryRoot, { recursive: true, force: true });
+  }
+});
+
+test('applyRekey test 21: a group with two live files renames both, or neither if one fails', async () => {
+  const { db, plugin, registry, libraryRoot } = await setupWithRealLibrary();
+  try {
+    // Group A: both files must succeed.
+    const rawTitleA = 'Site.26.08.06.Yankee.Zulu.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKeyA = 'site:2026-08-06:yankee-zulu-german';
+    const staleDisplayA = '{"title":"stale a","fields":[]}';
+    const groupIdA = groupWithRelease(db, { rawTitle: rawTitleA, identityKey: staleKeyA, display: staleDisplayA });
+    const downloadA = addDownload(db, groupIdA, releaseIdFor(db, groupIdA));
+
+    const fromMp4A = realPlannedPath(plugin, libraryRoot, staleKeyA, staleDisplayA);
+    await mkdir(dirname(fromMp4A), { recursive: true });
+    await writeFile(fromMp4A, 'mp4 bytes');
+    const fileMp4AId = addImportedFile(db, { downloadId: downloadA, groupId: groupIdA, destPath: fromMp4A });
+
+    const fromMkvA = fromMp4A.replace(/\.mp4$/, '.mkv');
+    assert.notEqual(fromMkvA, fromMp4A);
+    await writeFile(fromMkvA, 'mkv bytes');
+    const fileMkvAId = addImportedFile(db, { downloadId: downloadA, groupId: groupIdA, destPath: fromMkvA });
+
+    const successReport = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    assert.equal(successReport.moved, 1);
+    assert.equal(successReport.renamed, 2, 'both live files must be counted');
+
+    const rowsA = filesForGroup(db, groupIdA);
+    const rowMp4A = rowsA.find((f) => f.id === fileMp4AId);
+    const rowMkvA = rowsA.find((f) => f.id === fileMkvAId);
+    assert.notEqual(rowMp4A?.destPath, fromMp4A);
+    assert.notEqual(rowMkvA?.destPath, fromMkvA);
+    assert.equal(await lstatOrNull(fromMp4A), null);
+    assert.equal(await lstatOrNull(fromMkvA), null);
+
+    // Group B: the second rename (the .mkv file, per `computeRenames`'
+    // ascending-id order) is made to fail, and neither file must move.
+    const rawTitleB = 'Site.26.08.07.Zulu.Alpha.GERMAN.XXX.1080p.MP4-GRP';
+    const staleKeyB = 'site:2026-08-07:zulu-alpha-german';
+    const staleDisplayB = '{"title":"stale b","fields":[]}';
+    const groupIdB = groupWithRelease(db, { rawTitle: rawTitleB, identityKey: staleKeyB, display: staleDisplayB });
+    const downloadB = addDownload(db, groupIdB, releaseIdFor(db, groupIdB));
+
+    const fromMp4B = realPlannedPath(plugin, libraryRoot, staleKeyB, staleDisplayB);
+    await mkdir(dirname(fromMp4B), { recursive: true });
+    await writeFile(fromMp4B, 'mp4 bytes b');
+    addImportedFile(db, { downloadId: downloadB, groupId: groupIdB, destPath: fromMp4B });
+
+    const fromMkvB = fromMp4B.replace(/\.mp4$/, '.mkv');
+    assert.notEqual(fromMkvB, fromMp4B);
+    await writeFile(fromMkvB, 'mkv bytes b');
+    addImportedFile(db, { downloadId: downloadB, groupId: groupIdB, destPath: fromMkvB });
+
+    const failureReport = await applyRekey(db, registry, {
+      now: () => MERGE_NOW,
+      rename: renameThatRefuses(fromMkvB),
+    });
+    assert.equal(failureReport.failed, 1);
+    assert.equal(failureReport.moved, 0);
+    assert.equal(failureReport.renamed, 0);
+
+    const groupB = getGroup(db, groupIdB);
+    assert.equal(groupB?.identityKey, staleKeyB, 'group B must be left at its old key');
+
+    const rowsB = filesForGroup(db, groupIdB);
+    for (const row of rowsB) {
+      assert.ok(
+        row.destPath === fromMp4B || row.destPath === fromMkvB,
+        'neither file\'s dest_path may have moved',
+      );
+    }
+    assert.notEqual(await lstatOrNull(fromMp4B), null, 'the first file must be back at its original path');
+    assert.notEqual(await lstatOrNull(fromMkvB), null, 'the second file was never moved in the first place');
+  } finally {
+    await rm(libraryRoot, { recursive: true, force: true });
+  }
 });
