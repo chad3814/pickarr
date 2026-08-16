@@ -938,7 +938,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   db.close();
 });
 

@@ -349,12 +349,12 @@ export function deferMetadata(
 
 /**
  * Every row this schema keeps about one group's metadata — its answer, its
- * queue entry, the candidates rejected on the way to that answer, and the
- * links to its cast — gone.
+ * queue entry, the candidates rejected on the way to that answer, the links
+ * to its cast, and its queued performer search — gone.
  *
  * Called from the merge path in `manual/operations.ts` right before the
  * source's `media_groups` row is deleted, so that delete does not meet a
- * foreign key none of these four tables' `ON DELETE` clauses (there are
+ * foreign key none of these five tables' `ON DELETE` clauses (there are
  * none) would otherwise satisfy. It has to run in the same transaction as
  * that delete: an eviction that committed while the delete rolled back — or
  * the reverse — would leave a group either gone-but-still-answered-for or
@@ -402,6 +402,16 @@ export function clearGroupMetadata(db: DatabaseSync, groupId: number): void {
   // avatar files. An unreferenced performer row is a few hundred bytes of
   // cache, on exactly the terms the artwork directory is already kept.
   db.prepare('DELETE FROM group_performers WHERE group_id = ?').run(groupId);
+  // `performer_queue` is the fifth such table, for the same no-cascade reason:
+  // `group_id REFERENCES media_groups (id)` with no ON DELETE means a group
+  // whose scene lookup settled castless and got queued for a performer search
+  // fails `deleteGroup` with the identical FOREIGN KEY 500 the four tables
+  // above were added here to prevent. docs/known-issues.md records that defect
+  // shipping twice already; the fix each time was "remember every table that
+  // points at media_groups", which is exactly the class of fix that keeps
+  // recurring until it lives in one function every caller already goes
+  // through.
+  db.prepare('DELETE FROM performer_queue WHERE group_id = ?').run(groupId);
 }
 
 export function setPosterPath(db: DatabaseSync, groupId: number, posterPath: string): void {

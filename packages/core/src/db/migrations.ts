@@ -617,4 +617,30 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE downloads ADD COLUMN absent_since INTEGER;');
     },
   },
+  // 9, not 8, and the third instance of the story the comments above tell. This
+  // table was written as `version: 8` while `main` was independently taking that
+  // number for the `absent_since` column directly above, and that one landed
+  // first. The guard those earlier collisions bought did its job: a merged list
+  // carrying two 8s is refused by `assertUniqueVersions` before a statement
+  // runs, naming the version — rather than a fresh database reporting a UNIQUE
+  // violation on `schema_migrations`, or a database already holding the other 8
+  // skipping this table in silence and leaving the queue absent with no error
+  // anywhere. Renumbered per that function's own instruction: versions are a
+  // total order, not labels, so the later arrival moves.
+  {
+    version: 9,
+    up(db) {
+      db.exec(`
+        CREATE TABLE performer_queue (
+          group_id     INTEGER PRIMARY KEY REFERENCES media_groups (id),
+          requested_at INTEGER NOT NULL,
+          attempts     INTEGER NOT NULL DEFAULT 0,
+          next_at      INTEGER NOT NULL,
+          last_error   TEXT
+        );
+
+        CREATE INDEX performer_queue_due ON performer_queue (next_at);
+      `);
+    },
+  },
 ];
