@@ -19,6 +19,7 @@ import {
 } from '../db/metadata.ts';
 import { performersForGroups, performersNeedingArtwork, setPerformerArtwork } from '../db/performers.ts';
 import { rememberSiteId, siteIdForName } from '../db/sites.ts';
+import { enqueuePerformerSearch } from './performers.ts';
 
 /** Doubling backoff from one minute, capped so a long outage never stops retrying. */
 export const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
@@ -250,6 +251,16 @@ export async function runMetadataPass(deps: MetadataPassDeps): Promise<MetadataP
       // outside whatever transaction just failed and rolled itself back.
       const message = (error as Error).message;
       outcome = deferOrGiveUp(deps, row, now, `unexpected failure: ${message}`, now + backoffFor(row.attempts));
+    }
+
+    // One call site, gated on having settled. `deferred` has not settled: the
+    // row will be asked again, and a group whose scene lookup is still in
+    // flight has not yet failed to produce a cast. A single site rather than
+    // one per settle path for the reason `deriveUpgradeReleaseId` exists — an
+    // invariant re-derived by whichever caller remembers is one that holds on
+    // some paths. This is the only place a metadata row settles.
+    if (outcome.kind !== 'deferred') {
+      enqueuePerformerSearch({ db: deps.db, pluginFor: deps.pluginFor, log: deps.log }, row.groupId, now);
     }
 
     if (outcome.kind === 'confirmed') result.confirmed += 1;
