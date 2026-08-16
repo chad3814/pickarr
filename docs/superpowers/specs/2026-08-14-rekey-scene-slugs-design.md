@@ -210,7 +210,10 @@ Two further restrictions, both load-bearing:
 
 ## 6. What the pass writes, per row
 
-For each `scenes` group with `edited_at IS NULL`, in one transaction per batch:
+For each `scenes` group with `edited_at IS NULL`, in one transaction **per group** — deliberately,
+not one for the whole batch, so a single poison row cannot roll back the groups that already landed;
+see §7 and `packages/core/src/pipeline/rekey.ts`'s own module comment, both of which already state
+this:
 
 1. Re-parse the group's `raw_title` with the live plugin. No parse, or a refusal → leave the row
    untouched and count it.
@@ -219,8 +222,8 @@ For each `scenes` group with `edited_at IS NULL`, in one transaction per batch:
 3. New key collides with another existing row → merged into the holder if §5's class-2 test passes,
    otherwise skip both and report them.
 4. Otherwise write `identity_key`, `display` and `search_text` together via the existing
-   `updateGroupIdentity` (`packages/core/src/db/groups.ts:486-493`), and **call
-   `clearGroupMetadata`** (`packages/core/src/db/metadata.ts:311-315`) in the same transaction,
+   `updateGroupIdentity` (`packages/core/src/db/groups.ts:501`), and **call
+   `clearGroupMetadata`** (`packages/core/src/db/metadata.ts:387`) in the same transaction,
    conditional on the display having changed rather than on the key having changed — a title
    correction can reduce to the same slug, so the key survives while the question does not
    (`packages/core/src/manual/operations.ts:333-334`).
@@ -301,6 +304,35 @@ it against a live server turns the plan into a snapshot an in-flight import can 
 keys do protect the record either way — the delete is refused outright — but they refuse it as a
 throw counted in `failed`, where re-asking produces the answer this shape should have had, a
 `skipped-collision` that names the reason.
+
+**A known, unhandled gap in the bucketing.** `planRekey` buckets a mover only by the slot it moves
+*into*, never by the slot it *vacates*. If group B's fresh identity key equals group A's *current*
+key, while A is itself moving away to a third slot, `planRekey` sees no collision at all — A's own
+bucket (its current slot) holds only A, since B's bucket key is B's fresh slot, not A's current one —
+and proposes plain `move`s for both. `applyRekey` applies proposals in group-id order, so if
+`B.id < A.id`, B's `updateGroupIdentity` runs first and hits `UNIQUE (plugin, identity_key)` against
+A's still-current row, landing B in `failed`. No half-state results: the throw precedes any rename, so
+B is left exactly as it was before the pass ran. This is not fixed in this version — the owner's real
+database has zero `failed` groups today, and seeing a vacated slot requires the bucketing to consider
+every group's *current* slot as well as its destination slot, which is a larger change than a
+narrow fix wave should carry. Left as a comment at the bucketing code in `rekey.ts` rather than as a
+silent gap.
+
+**Recovery for a `failed` (or `skippedDestinationExists`) group.** The write pass is marker-gated
+(`REKEY_MARKER_KEY`) to run exactly once, ever — every boot after the first only drift-checks. That
+means nothing in this codebase automatically retries a group left in `failed` or
+`skippedDestinationExists`; whatever made it fail (a broken constraint, a full disk, a file already
+occupying the computed destination, or the vacated-slot gap above) has to be fixed by hand, and then
+the pass has to be told to run again. To do that, delete the marker row and let the next boot re-run
+`runRekeyOnBoot` from the top:
+
+```sql
+DELETE FROM app_state WHERE key = 'pass:rekey-scene-slugs';
+```
+
+The pass converges on re-run: every group already correctly re-keyed reads as `unchanged` on the next
+`planRekey` (its identity columns already agree), so only whatever is genuinely still outstanding is
+retried.
 
 ## 8. Testing
 

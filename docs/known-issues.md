@@ -278,6 +278,9 @@ five before — a small share of the corpus, but complete coverage of the shape.
 - [A bare-domain prefix becomes the site, so a genuine bare-domain stamp files the scene under the wrong directory](https://github.com/chad3814/pickarr/issues/16) — Wrong path, never a wrong merge.
 - [The same scene in a dotted and a bracketed listing gets two groups](https://github.com/chad3814/pickarr/issues/17) — The dotted form carries no component boundaries. Under-collation, and probably irreducible.
 - [Residual over-collation, believed irreducible](https://github.com/chad3814/pickarr/issues/18) — Two distinct scenes can share an identity key when a release has no marker and its title ends in a word that looks like a resolution or source — a scene literally titled "Party 4K".
+- [In a listing, a hyphen-attached group inside the quality segment leaks into the identity and the quality is lost](https://github.com/chad3814/pickarr/issues/19) — `- 1080p-GRP`. One of the "Smaller, all pre-existing" defects.
+- [When a listing holds two dates the first wins and the second ends up in the title](https://github.com/chad3814/pickarr/issues/20) — One of the "Smaller, all pre-existing" defects.
+- [`4K60` matches no resolution because there is no word boundary before the `60`](https://github.com/chad3814/pickarr/issues/21) — One of the "Smaller, all pre-existing" defects.
 
 **A trailing content-type tag and a bare site id are also dropped from the title, and that
 is a second, accepted way to over-collate.** `Solo`, `Hardcore` and `Lesbian` name a
@@ -312,10 +315,6 @@ same listing keeps both parts and stays distinct. It is pinned by a test (`packa
 `'two scenes differing only in dropped tokens share a key, deliberately'`) rather than
 guarded against in code, so a future change to what gets trimmed here shows up as a
 failing test instead of a silent, undiscovered merge.
-
-- [In a listing, a hyphen-attached group inside the quality segment leaks into the identity and the quality is lost](https://github.com/chad3814/pickarr/issues/19) — `- 1080p-GRP`. One of the "Smaller, all pre-existing" defects.
-- [When a listing holds two dates the first wins and the second ends up in the title](https://github.com/chad3814/pickarr/issues/20) — One of the "Smaller, all pre-existing" defects.
-- [`4K60` matches no resolution because there is no word boundary before the `60`](https://github.com/chad3814/pickarr/issues/21) — One of the "Smaller, all pre-existing" defects.
 
 **Under-collation by design.** A name whose boundary is genuinely ambiguous returns
 `null` rather than guessing. That is the intended direction: a `parse_error` row is

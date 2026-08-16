@@ -20,6 +20,7 @@ import { inTransaction } from '../db/transaction.ts';
 import { maybeNum, maybeStr, num, str, type SqlRow } from '../db/row.ts';
 import { validateIdentity, type PreparedIdentity } from '../ingest/commit.ts';
 import type { PluginRegistry } from '../plugins/registry.ts';
+import { isContained } from './import.ts';
 
 /**
  * See the design doc and `task-3-brief.md` for the full account of why this
@@ -161,6 +162,18 @@ type RenameResult =
  * Keeping such an entry out of `renames` is what lets `applyMove` skip the
  * destination-exists check for it entirely: the "destination" is the file's
  * own current path, not a collision.
+ *
+ * `to` is also checked with the same `isContained` a plugin's destination is
+ * checked with at real import time (`pipeline/import.ts`'s
+ * `resolveDestination`), on the same principle stated there: a plugin is not
+ * trusted to keep its own paths inside the library. Not reachable with the
+ * shipped plugin today — nothing in it can turn an identity key into a
+ * `..`-escaping or absolute destination — but this pass hands `to` straight
+ * to `rename()`, same as import does, so it must refuse exactly what import
+ * refuses rather than only resembling that check. A prior draft of this
+ * comment claimed the two were already doing "the same normalisation" while
+ * only one of them enforced containment; fixed here by making it true,
+ * rather than by narrowing the claim.
  */
 function computeRenames(
   db: DatabaseSync,
@@ -220,6 +233,16 @@ function computeRenames(
     }
 
     const to = resolve(libraryRoot, planned.destination);
+    // Refused exactly as `pipeline/import.ts`'s `resolveDestination` refuses
+    // it, and for the same reason — see the doc comment above. `false`: `to`
+    // names a file, never the library root directory itself, matching
+    // `resolveDestination`'s own `allowRootItself` argument.
+    if (!isContained(resolve(libraryRoot), to, false)) {
+      return {
+        ok: false,
+        reason: `imported file ${fileId}: planned destination "${to}" escapes the library root "${resolve(libraryRoot)}"`,
+      };
+    }
     // Already there: a display-only correction (the key, and so the path,
     // did not move) is not a rename. See the doc comment above.
     if (to !== destPath) renames.push({ fileId, from: destPath, to });
@@ -392,6 +415,22 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
   // no two groups hold that today. A moved key colliding with a group that
   // is not moving is therefore indistinguishable, in this map, from two
   // movers colliding with each other; both are read off the same bucket.
+  //
+  // Known, unhandled gap (fix-wave review, 2026-08-16): a mover is bucketed
+  // only by the slot it moves *into*, never by the slot it vacates. If group
+  // B's fresh key is group A's *current* key while A is itself moving away
+  // to a third slot, both A and B are proposed as plain `move`s here — A's
+  // bucket (A's current slot) sees only A, since B's bucket key is B's own
+  // fresh slot, not A's — and `applyRekey` applies proposals in group-id
+  // order. If `B.id < A.id`, B's `updateGroupIdentity` runs first and hits
+  // `UNIQUE (plugin, identity_key)` against A's still-current row, landing B
+  // in `failed` permanently (nothing ever retries a `failed` group — see
+  // `REKEY_MARKER_KEY`'s doc comment and the re-key spec's failure section
+  // for the recovery path). No half-state results: the throw precedes any
+  // rename, so B is left exactly as it was. Deliberately not fixed here —
+  // the owner's real database has 0 failed groups, and redesigning the
+  // bucketing to see vacated slots is a larger change than this fix wave
+  // should carry.
   const buckets = new Map<string, Bucket>();
   for (const row of rows) {
     const attempt = attempts.get(row.id);
@@ -834,6 +873,21 @@ async function destinationOccupied(path: string): Promise<boolean> {
  * `docs/superpowers/specs/2026-08-14-rekey-scene-slugs-design.md` for why the
  * pass needs one at all: it runs the live parser rather than a fixed schema
  * change, so it has no place in `schema_migrations`.
+ *
+ * The write pass this key gates is deliberately never re-run automatically
+ * (see `runRekeyOnBoot`'s own comment): once set, every later boot only
+ * drift-checks. That means a group left in `failed` or
+ * `skippedDestinationExists` by the one boot that ran the write pass is never
+ * retried by anything in this codebase — recovery is manual. To force the
+ * write pass to run again (for example after fixing whatever made a group
+ * fail), delete this key's row from `app_state`:
+ *
+ *   DELETE FROM app_state WHERE key = 'pass:rekey-scene-slugs';
+ *
+ * The next boot then re-runs `runRekeyOnBoot` from the top exactly as it
+ * would after an interrupted first run (see that function's comment on why
+ * this converges): every already-correct group reads as `unchanged`, and
+ * only whatever is genuinely still outstanding is retried.
  */
 export const REKEY_MARKER_KEY = 'pass:rekey-scene-slugs';
 
@@ -882,8 +936,13 @@ export interface RekeyBootOutcome {
    * reason (see that function's comment). When `applied` is true this is
    * read off `report` instead of a second `countDrift` call, so that running
    * the pass and then drift-checking it does not parse every title twice
-   * (see `countDrift`'s own comment). When `applied` is false, this is
-   * `countDrift`'s answer directly.
+   * (see `countDrift`'s own comment) — `moved` and `merged` are excluded from
+   * that sum because they are exactly the groups this boot just brought into
+   * agreement, and `failed` is included because a group counted there still
+   * disagrees, which together make the sum equal what a post-apply
+   * `countDrift` call would return (see `runRekeyOnBoot`'s comment on the
+   * sum itself). When `applied` is false, this is `countDrift`'s answer
+   * directly.
    */
   drift: number;
 }
@@ -934,22 +993,24 @@ export async function runRekeyOnBoot(
   // database.
   setAppState(db, REKEY_MARKER_KEY, 'done', deps.now());
 
-  // `skippedEdited` deliberately excluded — see `countDrift`'s comment for
-  // why counting a recorded human decision as "drift" would give this number
-  // a permanent, ignorable floor. `failed` is also excluded here: it names a
-  // problem with *this boot's attempt* (a broken constraint, a full disk, a
-  // poisoned commit) rather than a stored, at-rest disagreement with the
-  // parser, and it is already visible in the same log line as its own named
-  // field — folding it into "drift" too would double-count the same fact
-  // under two labels. A group counted in `failed` this boot is exactly a
-  // `move` or `merge` candidate again on the very next `planRekey`, so
-  // nothing about it is hidden by leaving it out of this sum.
+  // `RekeyBootOutcome.drift` documents "groups not agreeing with a fresh
+  // parse, as of this check" — a state, not an activity log. `moved` and
+  // `merged` are exactly the groups this boot just brought into agreement,
+  // so they do not belong in that state: including them would make the one
+  // boot that repairs everything report the largest "still not agreeing"
+  // number it will ever produce. `skippedEdited` stays excluded, per
+  // `countDrift`'s comment, as a recorded human decision rather than a
+  // disagreement. `failed` is included, unlike in an earlier draft of this
+  // sum: a group counted there did not get repaired — its stored identity
+  // still disagrees with a fresh parse — and on this path `failed` is this
+  // boot's own apply-time counter, not a plan-time bucket, so adding it here
+  // double-counts nothing. This makes the sum equal what a post-apply
+  // `countDrift` call would return; see `rekey.test.ts` for the pin.
   const drift =
-    report.moved +
-    report.merged +
     report.skippedUnparsable +
     report.skippedCollision +
-    report.skippedDestinationExists;
+    report.skippedDestinationExists +
+    report.failed;
 
   return { applied: true, report, drift };
 }
