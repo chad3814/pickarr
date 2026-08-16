@@ -258,7 +258,11 @@ export async function runMetadataPass(deps: MetadataPassDeps): Promise<MetadataP
     // flight has not yet failed to produce a cast. A single site rather than
     // one per settle path for the reason `deriveUpgradeReleaseId` exists — an
     // invariant re-derived by whichever caller remembers is one that holds on
-    // some paths. This is the only place a metadata row settles.
+    // some paths. This is the only place *this pass* settles a row, so every
+    // settle path within it inherits the enqueue. It is not the only place in
+    // the codebase a row settles: `http/server.ts`'s `answerUnaskable` call
+    // also settles a row (as `state = 'none'`) without enqueueing, and that
+    // asymmetry is currently unresolved rather than deliberate.
     if (outcome.kind !== 'deferred') {
       enqueuePerformerSearch({ db: deps.db, pluginFor: deps.pluginFor, log: deps.log }, row.groupId, now);
     }

@@ -88,6 +88,21 @@ test('a group whose plugin offers no query is not queued', () => {
   db.close();
 });
 
+test('a plugin returning only whitespace is treated the same as no query', () => {
+  // `performerQueryFor` guards on `query.trim().length === 0` before ever
+  // returning; a plugin misbehaving by returning blank padding rather than
+  // `null` must not queue a search for an empty string. A refactor to
+  // `if (query === null) return null` would not go red without this test.
+  const db = openTestDatabase();
+  seedGroup(db, 1, 'Jessica Jaymes Loves It');
+  const deps = depsWith(db, pluginWith(() => '   '));
+
+  assert.equal(performerQueryFor(deps, 1), null);
+  assert.equal(enqueuePerformerSearch(deps, 1, 500), false);
+  assert.deepEqual(duePerformerQueue(db, 500, 10), []);
+  db.close();
+});
+
 test('a plugin that does not implement performerQuery queues nothing', () => {
   const db = openTestDatabase();
   seedGroup(db, 1, 'Jessica Jaymes Loves It');
