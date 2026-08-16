@@ -1019,13 +1019,17 @@ test('applyRekey test 11: two groups that both carry history are a counted skipp
 
 test('applyRekey test 12: with neither group carrying history the holder survives, whatever the ids are', async () => {
   const { db, plugin, registry } = setup();
-  // Inserted mover-first, so the surviving group is the *higher* id. The
-  // survivor is not a tiebreak between two equal candidates: it is whichever
-  // group already occupies the slot, which is the only choice `mergeGroupInto`
-  // can make — merging the other way would have to re-key the survivor into
-  // the freed slot as well. Pinned with the ids ordered against it so that a
-  // future "lowest id wins" reading (migration 4's last resort,
-  // `migrations.ts:254-260`) cannot be adopted here by accident.
+  // The holder survives **by construction, not by luck of row order**: it is
+  // the group that already occupies the slot, and folding the other way would
+  // additionally have to re-key the survivor into the freed slot, which is not
+  // an operation `mergeGroupInto` performs. So there is no tiebreak to apply
+  // when neither group has history — there are not two candidates.
+  //
+  // Inserted mover-first anyway, so the survivor is the *higher* id. That is
+  // what makes this test able to fail: under a "lowest id wins" reading
+  // (migration 4's last resort, `migrations.ts:254-260`, which was carried
+  // into this task's brief in error) the mover would be the survivor here, and
+  // the assertions below would catch it.
   const { holderId, moverId } = collidingPair(db, plugin, {
     date: '26.07.05',
     name: 'Mike.November',
@@ -1086,4 +1090,52 @@ test('applyRekey test 14: a merge that throws is counted in failed and does not 
 
   assert.equal(getGroup(db, clean.moverId), null);
   assert.notEqual(getGroup(db, clean.holderId), null);
+});
+
+test('applyRekey test 15: history appearing between plan and apply skips the merge instead of failing it', async () => {
+  const { db, plugin, registry } = setup();
+
+  // Applied first — `planRekey` orders by group id and this one is inserted
+  // before the pair — and used only as a place to hang the trigger below, so
+  // that the download appears *after* the plan was computed and *before* the
+  // merge it invalidates is reached. That window is the whole subject of this
+  // test: `applyRekey` plans once and then writes, and the plan-time history
+  // check is a snapshot of a moment that has passed by the time the delete
+  // runs.
+  const triggerRaw = 'Site.26.07.09.Uniform.Victor.GERMAN.XXX.1080p.MP4-GRP';
+  const triggerId = groupWithRelease(db, {
+    rawTitle: triggerRaw,
+    identityKey: 'site:2026-07-09:uniform-victor-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+
+  const { holderId, moverId } = collidingPair(db, plugin, { date: '26.07.10', name: 'Whiskey.Xray' });
+  const moverReleaseIds = releaseIdsFor(db, moverId);
+  const moverReleaseId = releaseIdFor(db, moverId);
+  assert.ok(triggerId < moverId, 'the trigger group must be applied before the merge it invalidates');
+
+  db.exec(
+    `CREATE TRIGGER late_history AFTER UPDATE ON media_groups
+     FOR EACH ROW WHEN NEW.id = ${triggerId}
+     BEGIN
+       INSERT INTO downloads (release_id, group_id, client_id, kind, status, created_at, updated_at)
+       VALUES (${moverReleaseId}, ${moverId}, 'late-client', 'initial', 'downloading', 1, 1);
+     END;`,
+  );
+
+  const report = await applyRekey(db, registry, DEPS);
+  assert.equal(report.moved, 1, 'the group carrying the trigger must actually be written, or nothing fires');
+  const late = db.prepare('SELECT 1 FROM downloads WHERE group_id = ?').get(moverId);
+  assert.notEqual(late, undefined, 'the download must exist by the end of the pass, or this proves nothing');
+
+  // A clean refusal, not a foreign key blowing up inside the delete. The FKs
+  // would have protected the download either way, but they would have done it
+  // as a throw counted in `failed`, which says only that something broke.
+  assert.equal(report.merged, 0);
+  assert.equal(report.failed, 0, 'the re-check must catch this before the delete does');
+  assert.equal(report.skippedCollision, 1);
+
+  assert.notEqual(getGroup(db, moverId), null, 'the mover is not deleted');
+  assert.notEqual(getGroup(db, holderId), null);
+  assert.deepEqual(releaseIdsFor(db, moverId), moverReleaseIds, 'and keeps its releases');
 });

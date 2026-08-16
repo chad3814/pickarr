@@ -546,11 +546,7 @@ export async function applyRekey(
         // downloads, no imported files live or trashed — which is the whole of
         // the argument: the mover's releases are the only thing merging can
         // move, and a group with nothing on disk and nothing on record can be
-        // reconstructed by re-ingesting the same feed items. Deliberately not
-        // re-asked here. Duplicating the rule at the write site is a second
-        // copy that can disagree with the first, and the foreign keys on
-        // `downloads` and `imported_files` already refuse the delete outright
-        // if it ever did — a counted `failed`, not a lost file.
+        // reconstructed by re-ingesting the same feed items.
         //
         // The mover folds into the holder, never the reverse. Nothing else is
         // available: the holder is the group that already occupies the slot,
@@ -558,7 +554,30 @@ export async function applyRekey(
         // survivor into the freed slot, which is a different and larger
         // operation than the one `mergeGroupInto` performs.
         try {
-          inTransaction(db, () => {
+          const merged = inTransaction(db, () => {
+            // Asked a second time, inside the transaction that does the
+            // delete, and deliberately: this is not the redundant check it
+            // looks like and should not be removed as one.
+            //
+            // `planRekey` read this at plan time, and today nothing can
+            // falsify it in between — the pass runs at startup before the
+            // server listens, and nothing in this loop creates a download or
+            // an imported file. But `applyRekey` is exported, and this is the
+            // only path in the system that deletes a group without a human
+            // asking. The first caller that runs it against a live server —
+            // a "run the pass now" control, say — makes the plan a snapshot
+            // that an in-flight import can outrun, and the plan-time answer
+            // stops being a fact about now.
+            //
+            // The foreign keys do protect the file: a delete under a
+            // `downloads` or `imported_files` row is refused outright. But
+            // they refuse it as a throw counted in `failed`, which reads as
+            // "something broke" and says nothing about what. Re-asking turns
+            // the same protection into the answer it should have had —
+            // `skipped-collision`, the outcome for exactly this shape.
+            const history = groupHistory(db, groupId);
+            if (history !== null) return false;
+
             const target = getGroup(db, outcome.intoGroupId);
             if (target === null) {
               // Unreachable: a holder is stationary by construction, and
@@ -574,8 +593,10 @@ export async function applyRekey(
               // what tells the *next* run of this pass to leave a row alone.
               stampEdited: false,
             });
+            return true;
           });
-          report.merged++;
+          if (merged) report.merged++;
+          else report.skippedCollision++;
         } catch {
           // As in `move` below: `inTransaction` has already rolled the whole
           // merge back, so both groups are left exactly as they were — the

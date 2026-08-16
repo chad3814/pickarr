@@ -292,9 +292,15 @@ shared merge body already orders it that way, which is most of why it is shared 
 
 A merge that throws is counted and skipped exactly as a failed re-key is, and one transaction per
 merge means the rollback returns both groups to what they were: the releases still on the mover, the
-mover still present. The foreign keys are also the backstop for the history rule itself — if a merge
-were ever proposed for a group with a download or an imported file, the delete would refuse rather
-than discard the record.
+mover still present.
+
+The history rule is asked **twice**: once by `planRekey`, and again inside the merge transaction
+immediately before the delete. The second ask is not redundant. `applyRekey` is exported, and this
+is the only path in the system that deletes a group without a human asking; the first caller to run
+it against a live server turns the plan into a snapshot an in-flight import can outrun. The foreign
+keys do protect the record either way — the delete is refused outright — but they refuse it as a
+throw counted in `failed`, where re-asking produces the answer this shape should have had, a
+`skipped-collision` that names the reason.
 
 ## 8. Testing
 
