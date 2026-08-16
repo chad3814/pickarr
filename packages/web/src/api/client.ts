@@ -259,6 +259,8 @@ export interface DownloadView {
   error: string | null;
   attempts: number;
   updatedAt: number;
+  /** When the client first stopped reporting this download, or null while it is seen. */
+  absentSince: number | null;
 }
 
 export interface UntrackedEntry {

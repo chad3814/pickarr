@@ -231,6 +231,7 @@ test('a failed download on Downloads reaches its group on Picks', async () => {
         error: 'Repair failed, not enough repair blocks (92 short)',
         attempts: 1,
         updatedAt: 1,
+        absentSince: null,
       },
     ],
     untracked: [],

@@ -26,6 +26,16 @@ function routed(node: ReactNode) {
   return <MemoryRouter>{node}</MemoryRouter>;
 }
 
+/**
+ * Never `assert.equal(screen.queryByText(x), null)` — a failed match there
+ * formats the whole live DOM to explain itself, which burns real time and
+ * reports no test name. Compare the boolean instead, as `Browse.test.tsx`
+ * does.
+ */
+function gone(text: string | RegExp): boolean {
+  return screen.queryByText(text) === null;
+}
+
 function download(over: Partial<DownloadView> = {}): DownloadView {
   return {
     id: 1,
@@ -37,6 +47,7 @@ function download(over: Partial<DownloadView> = {}): DownloadView {
     error: null,
     attempts: 0,
     updatedAt: 1,
+    absentSince: null,
     ...over,
   };
 }
@@ -63,6 +74,57 @@ test('a tracked row shows status and offers retry only when failed', () => {
   );
   assert.ok(screen.getByRole('button', { name: /retry/i }));
   assert.ok(screen.getByText(/disk full/));
+});
+
+test('an absent row warns and offers retry, a healthy row offers neither', () => {
+  const threeHoursAgo = Date.now() - 3 * 60 * 60 * 1000;
+  const { rerender } = render(
+    routed(<DownloadRow download={download({ absentSince: threeHoursAgo })} onRetry={() => {}} />),
+  );
+  assert.ok(screen.getByText(/missing from client for 3h/i));
+  assert.ok(screen.getByRole('button', { name: /retry/i }));
+
+  rerender(routed(<DownloadRow download={download()} onRetry={() => {}} />));
+  assert.ok(gone(/missing from client/i));
+  assert.equal(screen.queryByRole('button', { name: /retry/i }), null);
+});
+
+test('a failed row keeps its error and retry button, and no absence warning', () => {
+  render(
+    routed(
+      <DownloadRow
+        download={download({ status: 'failed', error: 'disk full', attempts: 1 })}
+        onRetry={() => {}}
+      />,
+    ),
+  );
+  assert.ok(screen.getByText(/disk full/));
+  assert.ok(screen.getByRole('button', { name: /retry/i }));
+  assert.ok(gone(/missing from client/i));
+});
+
+test('retry is offered for exactly the statuses the API guard accepts', () => {
+  // `POST /api/downloads/:id/retry` 409s unless `status === 'failed' ||
+  // absentSince !== null` (packages/core/src/http/server.ts). The button must
+  // offer retry on precisely that set — wider and it 409s on click, narrower
+  // and an absent row keeps no escape hatch at all. This enumerates every
+  // status the SPA can see a download in, crossed with absent/not, as the one
+  // place both halves of that agreement are pinned together.
+  const statuses = ['queued', 'downloading', 'completed', 'importing', 'imported', 'failed'] as const;
+  for (const status of statuses) {
+    for (const absentSince of [null, Date.now() - 60_000]) {
+      const { unmount } = render(
+        routed(<DownloadRow download={download({ status, absentSince })} onRetry={() => {}} />),
+      );
+      const expectRetry = status === 'failed' || absentSince !== null;
+      assert.equal(
+        screen.queryByRole('button', { name: /retry/i }) !== null,
+        expectRetry,
+        `status=${status} absentSince=${String(absentSince)}`,
+      );
+      unmount();
+    }
+  }
 });
 
 test('a failed download links to its group on the Picks tab', () => {
