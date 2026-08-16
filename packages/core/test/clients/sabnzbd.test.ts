@@ -553,24 +553,42 @@ test('complete is false when MAX_HISTORY_PAGES is exhausted before noofslots is 
   assert.equal(recorder.urls.filter((url) => url.includes('mode=history')).length, 20);
 });
 
-test('complete is false when noofslots is absent or not a number, on either endpoint', async () => {
-  const missingNoofslots = createSabnzbdClient(CONFIG, async (url) =>
-    jsonResponse(
-      url.includes('mode=queue')
-        ? { queue: { slots: [{ nzo_id: 'q1', filename: 'R', percentage: '1' }] } }
-        : { history: { slots: [] } },
-    ),
+// Deliberately gives each history page real slots (not an empty page), which
+// is what distinguishes this from a fixture that would stop on the first
+// page for an unrelated reason. Before the fix (fix round 1, controller
+// ruling), an unreadable `noofslots` on a *non-empty* page kept the loop
+// going — the empty-page exit never fired, and neither did the
+// reaches-noofslots exit, so it ran all the way to MAX_HISTORY_PAGES against
+// a client that could never satisfy either — 20 requests every tick, forever.
+test('complete is false when noofslots is absent or not a number, on either endpoint, and history does not page to the cap chasing it', async () => {
+  const missingRecorder = recordingFetch((url) =>
+    url.includes('mode=queue')
+      ? { queue: { slots: [{ nzo_id: 'q1', filename: 'R', percentage: '1' }] } }
+      : {
+          history: {
+            slots: [{ nzo_id: 'h1', name: 'R', status: 'Completed', storage: '', fail_message: '' }],
+          },
+        },
   );
-  assert.equal((await missingNoofslots.snapshot()).complete, false);
+  const missingNoofslots = createSabnzbdClient(CONFIG, missingRecorder.fetch);
+  const missingSnapshot = await missingNoofslots.snapshot();
+  assert.equal(missingSnapshot.complete, false);
+  assert.equal(missingRecorder.urls.filter((url) => url.includes('mode=history')).length, 1);
 
-  const nonNumericNoofslots = createSabnzbdClient(CONFIG, async (url) =>
-    jsonResponse(
-      url.includes('mode=queue')
-        ? { queue: { noofslots: 'lots', slots: [{ nzo_id: 'q1', filename: 'R', percentage: '1' }] } }
-        : { history: { noofslots: 'lots', slots: [] } },
-    ),
+  const nonNumericRecorder = recordingFetch((url) =>
+    url.includes('mode=queue')
+      ? { queue: { noofslots: 'lots', slots: [{ nzo_id: 'q1', filename: 'R', percentage: '1' }] } }
+      : {
+          history: {
+            noofslots: 'lots',
+            slots: [{ nzo_id: 'h1', name: 'R', status: 'Completed', storage: '', fail_message: '' }],
+          },
+        },
   );
-  assert.equal((await nonNumericNoofslots.snapshot()).complete, false);
+  const nonNumericNoofslots = createSabnzbdClient(CONFIG, nonNumericRecorder.fetch);
+  const nonNumericSnapshot = await nonNumericNoofslots.snapshot();
+  assert.equal(nonNumericSnapshot.complete, false);
+  assert.equal(nonNumericRecorder.urls.filter((url) => url.includes('mode=history')).length, 1);
 });
 
 test('complete is true on an ordinary single-page response', async () => {
@@ -634,6 +652,86 @@ test('incident regression: a client that caps history at 10 unless a larger limi
 
   assert.equal(snapshot.history.length, total);
   assert.equal(snapshot.complete, true);
+});
+
+// Fix round 1 regression: the queue request is started before the history
+// loop and only awaited afterward, so a queue-side failure lives unawaited
+// across every `await` the history loop makes in between. Node treats a
+// promise as "unhandled" if nothing has attached a handler to it by the end
+// of a turn, and by default that terminates the process — so this used to
+// be able to crash the whole process instead of `snapshot()` cleanly
+// rejecting, exactly when a queue failure landed while history was still
+// paging. This pins both halves of the fix: the rejection still reaches the
+// caller, and nothing is ever flagged unhandled along the way.
+test('a queue rejection while history paging is still in progress surfaces as a clean snapshot() rejection, never an unhandled one', async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandledRejection);
+  try {
+    // A deferred promise pins the ordering without relying on real timers:
+    // the queue side is only allowed to reject once the first history page
+    // has actually been requested, so the queue rejection lands while pages
+    // 2 and 3 (of 3; `total` is set above HISTORY_PAGE_SIZE * 2) are still
+    // to come — history paging is provably still in progress.
+    let releaseQueueRejection: (() => void) | undefined;
+    const queueUnblocked = new Promise<void>((resolve) => {
+      releaseQueueRejection = resolve;
+    });
+    let historyPageCount = 0;
+    const total = 1_100;
+
+    const client = createSabnzbdClient(CONFIG, async (url) => {
+      if (url.includes('mode=queue')) {
+        await queueUnblocked;
+        throw new Error('queue endpoint unreachable');
+      }
+      historyPageCount += 1;
+      releaseQueueRejection?.();
+      // A real event-loop turn per page, standing in for actual network I/O.
+      // Without this, every promise in this test settles inside one batch of
+      // microtasks with no macrotask boundary in between, and Node's
+      // unhandled-rejection check — which runs between macrotasks, not
+      // within a single microtask flush — never gets a chance to run before
+      // `snapshot()` reaches its own `await queuePromise` and attaches a
+      // handler "in time" regardless of whether the fix is in place. This
+      // was verified: without this line, the test could not tell fixed code
+      // from the reverted bug.
+      await new Promise((resolve) => setImmediate(resolve));
+      const params = new URL(url).searchParams;
+      const start = Number(params.get('start'));
+      const remaining = total - start;
+      const count = Math.max(0, Math.min(500, remaining));
+      return jsonResponse({
+        history: {
+          noofslots: total,
+          slots: Array.from({ length: count }, (_unused, index) => ({
+            nzo_id: `h${start + index}`,
+            name: 'R',
+            status: 'Completed',
+            storage: '',
+            fail_message: '',
+          })),
+        },
+      });
+    });
+
+    await assert.rejects(client.snapshot(), (error: Error) => {
+      assert.match(error.message, /SABnzbd queue request failed/);
+      assert.ok(error.cause instanceof Error);
+      assert.match(error.cause.message, /queue endpoint unreachable/);
+      return true;
+    });
+    assert.ok(historyPageCount >= 1, 'history must have started paging before the queue rejected');
+
+    // Give a straggling unhandled rejection (what this test exists to catch)
+    // a full turn to surface before asserting none did.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandledRejection);
+  }
 });
 
 // --- History status -> outcome -----------------------------------------

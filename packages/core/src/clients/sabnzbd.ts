@@ -369,7 +369,23 @@ export function createSabnzbdClient(
       // queue_info already treats a missing limit as unlimited: the two
       // endpoints read a missing `limit` differently, and relying on that
       // difference silently is what caused this incident.
+      //
+      // Not awaited here: the history loop below awaits real network calls
+      // (real event-loop turns) before this promise is examined again, and
+      // an unawaited promise with no handler attached by the end of a turn
+      // is what Node considers unhandled — by default, terminating the
+      // process (a `Promise.all` of both calls, as this used to be, didn't
+      // have this problem, because `Promise.all` attaches its own handler to
+      // both promises synchronously). `queueFailed` below is that handler:
+      // attaching it here, not at the `await queuePromise` further down, is
+      // what keeps a queue-side rejection from ever being unhandled, and
+      // lets the loop notice and stop paging rather than running to the cap
+      // against a client that has already told us it is unreachable.
       const queuePromise = call('queue', { limit: '0' });
+      let queueFailed = false;
+      queuePromise.catch(() => {
+        queueFailed = true;
+      });
 
       // History has no "unlimited" equivalent, so it must be paged: request
       // HISTORY_PAGE_SIZE at a time, starting after whatever has already
@@ -379,7 +395,7 @@ export function createSabnzbdClient(
       // how much the previous page actually returned.
       const historySlots: JsonValue[] = [];
       let historyComplete = false;
-      for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+      for (let page = 0; page < MAX_HISTORY_PAGES && !queueFailed; page += 1) {
         const historyBody = await call('history', {
           start: String(historySlots.length),
           limit: String(HISTORY_PAGE_SIZE),
@@ -392,14 +408,24 @@ export function createSabnzbdClient(
         // but a value that is missing or not a number must not throw — it
         // means "cannot verify", which is exactly the false-`complete` case,
         // not a crash.
+        //
+        // Ruling: when it is unreadable, stop after this one page rather
+        // than paging on to MAX_HISTORY_PAGES as the brief's literal text
+        // says. `complete` is false either way once `noofslots` cannot be
+        // read — nothing past this page can turn it true — so the other 19
+        // requests a genuinely unresponsive `noofslots` client would
+        // otherwise cost, every single tick, buy nothing. This deliberately
+        // supersedes the brief for this one case; do not restore the loop
+        // to "fix" it back.
         const noofslots = historyRecord?.['noofslots'];
-        if (typeof noofslots === 'number' && historySlots.length >= noofslots) {
+        if (typeof noofslots !== 'number') break;
+        if (historySlots.length >= noofslots) {
           historyComplete = true;
           break;
         }
-        // An empty page before reaching the reported total is either the
-        // total being wrong or unreadable — either way, more paging will not
-        // help, so stop rather than loop to the cap for nothing.
+        // An empty page before reaching the reported total means the total
+        // was wrong — more paging will not help, so stop rather than loop to
+        // the cap for nothing.
         if (pageSlots.length === 0) break;
       }
 
@@ -408,6 +434,13 @@ export function createSabnzbdClient(
       // apply to them, and a caller logging a snapshot would print them
       // straight off the wire. SABnzbd's fail_message in particular quotes
       // the failing request.
+      //
+      // Still awaited unconditionally, whether or not the loop above exited
+      // early on `queueFailed`: this is what actually surfaces the rejection
+      // to `snapshot()`'s caller. The `.catch` above only ever silences the
+      // *unhandled*-rejection bookkeeping; it never resolves or swallows the
+      // failure itself, so this line rejects with the original error exactly
+      // as it did before `Promise.all` was replaced.
       const queueBody = await queuePromise;
       const queueRecord = asRecord(asRecord(queueBody)?.['queue']);
       const queueSlots = asArray(queueRecord?.['slots']);
