@@ -112,6 +112,27 @@ export function resetUnrecognizedHistoryStatusWarningForTests(): void {
   warnedUnrecognizedHistoryStatus = false;
 }
 
+/**
+ * Whether the process has already emitted the "dropped slot" warning below.
+ * Same once-per-process rationale as `warnedUnrecognizedHistoryStatus`.
+ */
+let warnedDroppedSlot = false;
+
+/** Test-only escape hatch, mirroring `resetUnrecognizedHistoryStatusWarningForTests`. */
+export function resetDroppedSlotWarningForTests(): void {
+  warnedDroppedSlot = false;
+}
+
+function warnDroppedSlotOnce(kind: 'queue' | 'history', dropped: number): void {
+  if (warnedDroppedSlot) return;
+  warnedDroppedSlot = true;
+  console.warn(
+    `pickarr: SABnzbd ${kind} reported ${dropped} slot(s) this client could not read an ` +
+      'nzo_id from; the snapshot is being treated as incomplete rather than risking an ' +
+      'absence mark for a job the client actually holds.',
+  );
+}
+
 function warnUnrecognizedStatusOnce(ref: string, rawStatus: string): void {
   if (warnedUnrecognizedHistoryStatus) return;
   warnedUnrecognizedHistoryStatus = true;
@@ -446,8 +467,6 @@ export function createSabnzbdClient(
       const queueRecord = asRecord(asRecord(queueBody)?.['queue']);
       const queueSlots = asArray(queueRecord?.['slots']);
       const queueNoofslots = queueRecord?.['noofslots'];
-      const queueComplete =
-        typeof queueNoofslots === 'number' && queueSlots.length >= queueNoofslots;
 
       const queue: ClientQueueEntry[] = [];
       for (const raw of queueSlots) {
@@ -462,6 +481,24 @@ export function createSabnzbdClient(
           category: readCategory(slot['cat']),
         });
       }
+
+      // The naive reading is that comparing `queueSlots.length` (every slot the
+      // client sent, before we could key any of it) against `noofslots` (the
+      // client's own count) is enough to know the snapshot is whole. It is not:
+      // a slot with an unreadable `nzo_id` is dropped above rather than kept
+      // under a key we cannot trust, so it never reaches `queue`, but it was
+      // still counted in `queueSlots.length` — the length test would pass while
+      // a job we actually hold at the client silently fails to appear in
+      // `queue`. Property (b) (an incomplete snapshot must never imply
+      // absence) then breaks for exactly that job. Comparing the accepted count
+      // against the raw count closes that: dropping anything makes the
+      // snapshot incomplete.
+      const droppedQueueSlots = queueSlots.length - queue.length;
+      if (droppedQueueSlots > 0) warnDroppedSlotOnce('queue', droppedQueueSlots);
+      const queueComplete =
+        typeof queueNoofslots === 'number' &&
+        queueSlots.length >= queueNoofslots &&
+        droppedQueueSlots === 0;
 
       const history: ClientHistoryEntry[] = [];
       for (const raw of historySlots) {
@@ -499,7 +536,26 @@ export function createSabnzbdClient(
         });
       }
 
-      return { queue, history, complete: queueComplete && historyComplete };
+      // Same reasoning as `droppedQueueSlots` above, applied to history: a slot
+      // with an unreadable `nzo_id` is dropped rather than kept, but it was
+      // still counted toward `historySlots.length`, which is what the paging
+      // loop above compared against `noofslots`. The naive reading is that the
+      // page-total check is enough on its own; it is not, because it only ever
+      // sees the raw count, never the count we could actually key entries by.
+      // Requiring the accepted count to match the raw count here catches a
+      // drop even though the page-total check already passed.
+      //
+      // This distinction matters more here than for the queue because each
+      // history page's `start` is derived from `historySlots.length` — the raw
+      // count, not the accepted one — so the two were always going to diverge
+      // whenever a drop happens mid-page, not just at the end. Tracking them
+      // separately, rather than folding "accepted" into the paging arithmetic,
+      // is what keeps the paging math correct and still lets a drop surface.
+      const droppedHistorySlots = historySlots.length - history.length;
+      if (droppedHistorySlots > 0) warnDroppedSlotOnce('history', droppedHistorySlots);
+      const historyIsComplete = historyComplete && droppedHistorySlots === 0;
+
+      return { queue, history, complete: queueComplete && historyIsComplete };
     },
 
     async remove(ref: string, deleteFiles: boolean): Promise<void> {

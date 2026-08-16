@@ -352,7 +352,7 @@ export function setStoragePath(
  * `already has download`. `committedScore` makes the two agree by
  * construction.
  *
- * It lives in this function rather than at the seven `failDownload` call sites
+ * It lives in this function rather than at the five `failDownload` call sites
  * in reconcile.ts for the reason `deriveUpgradeReleaseId` exists at all: an
  * invariant re-derived by whichever caller remembers is an invariant that holds
  * on some paths. This is the only writer of `status = 'failed'` in the package,
@@ -417,6 +417,10 @@ export function bumpAttempts(db: DatabaseSync, id: number, now: number): number 
  * treated as an error the way the setters above do — reconcile calls this for
  * every row absent from a snapshot in a loop, and a row already gone by the
  * time this runs is not a coding mistake worth throwing over.
+ *
+ * Deliberately does not touch `updated_at`: that column means "when this
+ * download's own state last changed," and absence is an observation about
+ * the client, not a state change in the download. Do not add it here.
  */
 export function markAbsent(db: DatabaseSync, id: number, now: number): void {
   db.prepare('UPDATE downloads SET absent_since = ? WHERE id = ? AND absent_since IS NULL').run(
@@ -441,6 +445,10 @@ export function markAbsent(db: DatabaseSync, id: number, now: number): void {
  * matching a snapshot entry against a row it already has), not typed in by a
  * human. Paying for the bad-id assertion here would be buying safety against
  * a mistake the call site cannot make.
+ *
+ * Also does not touch `updated_at`, for the same reason `markAbsent` does
+ * not: clearing an observation about the client is not a state change in the
+ * download.
  */
 export function clearAbsent(db: DatabaseSync, id: number): void {
   db.prepare('UPDATE downloads SET absent_since = NULL WHERE id = ? AND absent_since IS NOT NULL').run(

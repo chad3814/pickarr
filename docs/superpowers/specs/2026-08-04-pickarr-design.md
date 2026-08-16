@@ -336,6 +336,11 @@ regardless of how many downloads are in flight. From the resulting snapshot:
   than one, because a download moving from queue to history can briefly appear in
   neither.
 
+> **Superseded.** The category-filtered snapshot, `missing_polls`, and the
+> three-consecutive-misses rule above are historical; see
+> `docs/superpowers/specs/2026-08-16-reconcile-client-first-design.md` for current
+> reconcile behaviour.
+
 **Import** — triggered when reconcile observes a download reach `completed`. The row
 moves to `importing` for the duration and to `imported` on success, which is what makes
 the boot-time recovery in §8 work. Steps: map the SABnzbd-reported path through the

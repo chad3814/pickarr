@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { inspect } from 'node:util';
 import {
   createSabnzbdClient,
+  resetDroppedSlotWarningForTests,
   resetUnrecognizedHistoryStatusWarningForTests,
 } from '../../src/clients/sabnzbd.ts';
 import type { DownloadClientConfig } from '../../src/config/schema.ts';
@@ -610,6 +611,67 @@ test('complete is true on an ordinary single-page response', async () => {
   const snapshot = await client.snapshot();
 
   assert.equal(snapshot.complete, true);
+});
+
+// A slot this client cannot key on (see the nzo_id checks in snapshot()) is
+// dropped from `queue` rather than kept under a ref we cannot trust, but it
+// was still counted toward `noofslots`. Without tracking the raw count
+// separately from what got accepted, that drop is invisible: the length test
+// against `noofslots` still passes, `complete` still reports true, and
+// property (b) — an incomplete snapshot must never imply absence — breaks
+// for exactly the job whose slot got dropped.
+test('a queue slot with an unreadable nzo_id makes the snapshot incomplete, without losing the slots that were readable', async () => {
+  resetDroppedSlotWarningForTests();
+  const client = createSabnzbdClient(CONFIG, async (url) =>
+    jsonResponse(
+      url.includes('mode=queue')
+        ? {
+            queue: {
+              noofslots: 2,
+              slots: [
+                { nzo_id: 'q1', filename: 'R1', percentage: '1' },
+                { nzo_id: '', filename: 'R2', percentage: '2' },
+              ],
+            },
+          }
+        : { history: { noofslots: 0, slots: [] } },
+    ),
+  );
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.queue.length, 1);
+  assert.equal(snapshot.queue[0]?.ref, 'q1');
+  assert.equal(snapshot.complete, false);
+});
+
+// Same hole, on the history side: history paging derives each page's `start`
+// from the raw slot count, not the accepted one, so the two must be tracked
+// separately regardless — this is the same drop, just on the endpoint that
+// also pages.
+test('a history slot with an unreadable nzo_id makes the snapshot incomplete, without losing the slots that were readable', async () => {
+  resetDroppedSlotWarningForTests();
+  const client = createSabnzbdClient(CONFIG, async (url) =>
+    jsonResponse(
+      url.includes('mode=queue')
+        ? { queue: { noofslots: 0, slots: [] } }
+        : {
+            history: {
+              noofslots: 2,
+              slots: [
+                { nzo_id: 'h1', name: 'R1', status: 'Completed', storage: '', fail_message: '' },
+                { nzo_id: '', name: 'R2', status: 'Completed', storage: '', fail_message: '' },
+              ],
+            },
+          },
+    ),
+  );
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.history.length, 1);
+  assert.equal(snapshot.history[0]?.ref, 'h1');
+  assert.equal(snapshot.complete, false);
 });
 
 // The incident this whole design exists to fix: a real SABnzbd (or a proxy
