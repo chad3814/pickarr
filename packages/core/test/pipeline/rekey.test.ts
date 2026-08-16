@@ -117,6 +117,27 @@ function renameThatRefuses(refuseFrom: string): RekeyDeps['rename'] {
   };
 }
 
+/**
+ * `RekeyDeps.commit`'s only legitimate implementation — see the interface's
+ * own doc comment for why there can only be one.
+ */
+const REAL_COMMIT: RekeyDeps['commit'] = (db) => db.exec('COMMIT');
+
+/**
+ * A `RekeyDeps.commit` that always throws, so `applyRekey test 18` can force
+ * a commit failure deterministically. This is deliberately not a deferred
+ * foreign key: a deferred FK trips wherever `COMMIT` ends up being called,
+ * so it cannot tell "commit after the rename" from "commit before it" —
+ * exactly the distinction `applyMove`'s ordering exists to get right, and
+ * the reason an earlier version of this test's break-on-purpose evidence
+ * did not hold. This fake throws regardless of where the call sits, and the
+ * test asserts on the *disk and db state that results*, which does depend on
+ * the ordering.
+ */
+const REJECTING_COMMIT: RekeyDeps['commit'] = () => {
+  throw new Error('commit refused');
+};
+
 let nextFeedItemId = 1;
 
 /**
@@ -638,7 +659,7 @@ const MERGE_NOW = 9_000_000;
 // point produces `renames: []` (no live imported files), so it is never
 // actually called by them — it is only wired up here so `DEPS` satisfies
 // `RekeyDeps` without a stub that would silently paper over that fact.
-const DEPS: RekeyDeps = { now: () => MERGE_NOW, rename: realRename };
+const DEPS: RekeyDeps = { now: () => MERGE_NOW, rename: realRename, commit: REAL_COMMIT };
 
 /** Every table `clearGroupMetadata` clears, enumerated rather than counted,
  * so a future fifth table added there fails these tests by omission instead
@@ -1238,7 +1259,7 @@ test('applyRekey test 16: a move renames its live file on disk and updates dest_
     await writeFile(fromPath, 'fake video bytes');
     const fileId = addImportedFile(db, { downloadId, groupId, destPath: fromPath });
 
-    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename, commit: REAL_COMMIT });
     assert.equal(report.moved, 1);
     assert.equal(report.renamed, 1);
     assert.equal(report.failed, 0);
@@ -1271,7 +1292,7 @@ test('applyRekey test 17: a rename that throws leaves the file, dest_path and id
     await writeFile(fromPath, 'fake video bytes');
     addImportedFile(db, { downloadId, groupId, destPath: fromPath });
 
-    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: REJECTING_RENAME });
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: REJECTING_RENAME, commit: REAL_COMMIT });
     assert.equal(report.failed, 1);
     assert.equal(report.moved, 0);
     assert.equal(report.renamed, 0);
@@ -1314,26 +1335,14 @@ test('applyRekey test 18: a commit that fails after a successful rename renames 
     const newIdentity = (validated as { identity: { identityKey: string; displayJson: string } }).identity;
     const toPath = realPlannedPath(plugin, libraryRoot, newIdentity.identityKey, newIdentity.displayJson);
 
-    // A deferred foreign key, violated only once this group's identity row is
-    // written, so the violation surfaces at `COMMIT` rather than mid-write —
-    // a real commit failure, not a stand-in for one. Unlike the
-    // `BEFORE UPDATE ... RAISE(ROLLBACK)` triggers used elsewhere in this
-    // file (which fire *before* the write and so never reach a rename at
-    // all), a deferred constraint lets the write, and the rename that follows
-    // it, both succeed before anything fails.
-    db.exec(
-      `CREATE TABLE deferred_poison (
-         id INTEGER PRIMARY KEY,
-         group_id INTEGER REFERENCES media_groups (id) DEFERRABLE INITIALLY DEFERRED
-       )`,
-    );
-    db.exec(
-      `CREATE TRIGGER poison_commit AFTER UPDATE ON media_groups
-       FOR EACH ROW WHEN NEW.id = ${groupId}
-       BEGIN INSERT INTO deferred_poison (group_id) VALUES (-1); END;`,
-    );
-
-    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    // `REJECTING_COMMIT`, not a deferred-FK trigger: a deferred foreign key
+    // violation surfaces wherever `COMMIT` is next called, which cannot tell
+    // "committed after the rename" from "committed before it" — the ordering
+    // this test exists to guard. `REJECTING_COMMIT` throws unconditionally,
+    // so the assertions below are what actually pin the ordering: they read
+    // the disk and db state a commit failure must leave behind, not merely
+    // whether one was thrown.
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename, commit: REJECTING_COMMIT });
     assert.equal(report.failed, 1);
     assert.equal(report.moved, 0);
     assert.equal(report.renamed, 0);
@@ -1374,7 +1383,7 @@ test('applyRekey test 19: a destination that already exists on disk is skipped w
     await mkdir(dirname(toPath), { recursive: true });
     await writeFile(toPath, 'PRE-EXISTING');
 
-    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename, commit: REAL_COMMIT });
     assert.equal(
       report.skippedDestinationExists,
       1,
@@ -1422,7 +1431,7 @@ test('applyRekey test 20: a move never rewrites trash_path, only a live row\'s o
       trashedAt: 123,
     });
 
-    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    const report = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename, commit: REAL_COMMIT });
     assert.equal(report.moved, 1);
     assert.equal(report.renamed, 1, 'only the live file counts, never the trashed one');
 
@@ -1463,7 +1472,7 @@ test('applyRekey test 21: a group with two live files renames both, or neither i
     await writeFile(fromMkvA, 'mkv bytes');
     const fileMkvAId = addImportedFile(db, { downloadId: downloadA, groupId: groupIdA, destPath: fromMkvA });
 
-    const successReport = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename });
+    const successReport = await applyRekey(db, registry, { now: () => MERGE_NOW, rename: realRename, commit: REAL_COMMIT });
     assert.equal(successReport.moved, 1);
     assert.equal(successReport.renamed, 2, 'both live files must be counted');
 
@@ -1496,6 +1505,7 @@ test('applyRekey test 21: a group with two live files renames both, or neither i
     const failureReport = await applyRekey(db, registry, {
       now: () => MERGE_NOW,
       rename: renameThatRefuses(fromMkvB),
+      commit: REAL_COMMIT,
     });
     assert.equal(failureReport.failed, 1);
     assert.equal(failureReport.moved, 0);
