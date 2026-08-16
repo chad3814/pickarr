@@ -938,7 +938,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8]);
   db.close();
 });
 
@@ -1013,4 +1013,24 @@ test('two performers cannot share one source uuid', () => {
   );
   insert.run('a');
   assert.throws(() => insert.run('b'), /UNIQUE/);
+});
+
+// --- Migration 8: absence becomes a timestamp, not a poll count ------------
+
+test('migration 8 adds absent_since, NULL for rows that already existed', () => {
+  const db = databaseAtVersion(7);
+  addGroup(db, { id: 1, key: 'a' });
+  addRelease(db, { id: 1, groupId: 1, score: 100 });
+  addDownload(db, { id: 1, releaseId: 1, groupId: 1 });
+
+  migrations.find((m) => m.version === 8)!.up(db);
+
+  const columns = db
+    .prepare('PRAGMA table_info(downloads)')
+    .all()
+    .map((row) => String(row['name']));
+  assert.ok(columns.includes('absent_since'));
+
+  const row = db.prepare('SELECT absent_since FROM downloads WHERE id = 1').get();
+  assert.equal(row?.['absent_since'], null, 'a row that predates the column has nothing to backfill it with');
 });

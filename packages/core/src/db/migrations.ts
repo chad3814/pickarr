@@ -596,4 +596,27 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  // 8: replaces the poll counter with a timestamp for the same reason a poll
+  // count was never a safe clock — reconcile runs under `tryRun`, so ticks are
+  // dropped for the entire duration of a long import, and "three missed polls"
+  // is not thirty seconds when the tick that would have counted them never
+  // ran. `absent_since` records when a download was first not seen at the
+  // client instead of how many times it was not seen, which is a fact
+  // reconcile can act on regardless of how the ticks in between were spaced.
+  //
+  // `missing_polls` is left in place rather than dropped: `DROP COLUMN` is
+  // available in this SQLite version, but rewriting a live table buys nothing
+  // for one small integer column, and leaving it makes this migration
+  // trivially reversible. Its callers (`bumpMissingPolls`, `resetMissingPolls`
+  // in `downloads.ts`) still exist for one more commit only because deleting
+  // them here would strand their call sites in `pipeline/reconcile.ts`
+  // mid-refactor; once those callers move to `markAbsent`/`clearAbsent`, the
+  // column itself stops being read or written and this comment is its only
+  // remaining mention.
+  {
+    version: 8,
+    up(db) {
+      db.exec('ALTER TABLE downloads ADD COLUMN absent_since INTEGER;');
+    },
+  },
 ];
