@@ -8,9 +8,11 @@ import type {
   QualityTokens,
 } from '@pickarr/plugin-api';
 import { getDownload } from '../db/downloads.ts';
-import { groupHistory } from '../db/groups.ts';
+import { groupHistory, updateGroupIdentity } from '../db/groups.ts';
+import { clearGroupMetadata } from '../db/metadata.ts';
 import { getRelease } from '../db/releases.ts';
 import { knownSiteNames } from '../db/sites.ts';
+import { inTransaction } from '../db/transaction.ts';
 import { maybeNum, maybeStr, num, str, type SqlRow } from '../db/row.ts';
 import { validateIdentity, type PreparedIdentity } from '../ingest/commit.ts';
 import type { PluginRegistry } from '../plugins/registry.ts';
@@ -445,4 +447,145 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
   }
 
   return proposals;
+}
+
+/**
+ * Everything `applyRekey` needs beyond `db` and `registry`, injected instead
+ * of imported directly so a test can substitute a fake without touching a
+ * real filesystem — the same reasoning `ManualDeps` already applies one layer
+ * up. Empty in this task: writing `identity_key`, `display` and
+ * `search_text`, and clearing stale metadata, are both plain synchronous
+ * `DatabaseSync` calls with nothing worth faking. Task 5 populates this with
+ * `rename` from `node:fs/promises`, which is also why `applyRekey` is already
+ * declared `async` below — so the signature does not change shape a second
+ * time once Task 6 has a real caller.
+ */
+export type RekeyDeps = Record<string, never>;
+
+/**
+ * Tally of what one run of the write pass actually did, over every proposal
+ * `planRekey` returned. Declared with `merged` and `renamed` already present,
+ * even though this task fills in neither, so the shape does not change under
+ * a test *this* task writes and then again under Task 4a's and Task 5's —
+ * see `interfaces.md`. `merged` stays 0 here: a `merge` proposal is a
+ * counted no-op below, never a write, until Task 4a implements it. `renamed`
+ * stays 0 for the same reason: this task moves no file, Task 5 does.
+ */
+export interface RekeyReport {
+  moved: number;
+  renamed: number;
+  merged: number;
+  skippedEdited: number;
+  skippedUnparsable: number;
+  skippedCollision: number;
+  failed: number;
+}
+
+/**
+ * The write half of the re-key pass. Calls `planRekey` itself, on the same
+ * `db` it is about to write to, rather than taking proposals as an argument
+ * — so the plan it acts on is always read from the database's current state,
+ * never a stale snapshot a caller happened to be holding.
+ *
+ * Every `move` is applied in its own transaction, never one for the whole
+ * pass: a single poison row (a broken constraint, a full disk, anything that
+ * makes one group's write throw) must not roll back the other groups that
+ * were already correct. A group whose write throws is counted in `failed`
+ * and left at its old key; the loop moves on to the next proposal. This is
+ * the one property Step 5 breaks on purpose to prove — see the task report.
+ */
+export async function applyRekey(
+  db: DatabaseSync,
+  registry: PluginRegistry,
+  deps: RekeyDeps,
+): Promise<RekeyReport> {
+  // Unused until Task 5 gives this something to call (`rename`). Referenced
+  // here, rather than left to go silently unused, so the parameter's purpose
+  // is visible at the one call site that has nothing yet to do with it.
+  void deps;
+
+  const proposals = planRekey(db, registry);
+
+  const report: RekeyReport = {
+    moved: 0,
+    renamed: 0,
+    merged: 0,
+    skippedEdited: 0,
+    skippedUnparsable: 0,
+    skippedCollision: 0,
+    failed: 0,
+  };
+
+  for (const { groupId, outcome } of proposals) {
+    switch (outcome.kind) {
+      case 'unchanged':
+        // Nothing to write — the row already agrees with the parser. Proved
+        // by a sentinel in the test, not by re-reading the (already equal)
+        // identity columns: a write here would be invisible to an equality
+        // check but not to a value the writer would have clobbered.
+        break;
+
+      case 'skipped-edited':
+        report.skippedEdited++;
+        break;
+
+      case 'skipped-unparsable':
+        report.skippedUnparsable++;
+        break;
+
+      case 'skipped-collision':
+        report.skippedCollision++;
+        break;
+
+      case 'merge':
+        // Task 4a's job, not this one's. Handled explicitly, as a counted
+        // no-op, rather than folded into a `default:` arm: with no default,
+        // an exhaustive switch makes the compiler itself point at this line
+        // the moment Task 4a adds a real `MergeOutcome` case, instead of a
+        // regression silently vanishing into a default that already existed.
+        // `merged` is deliberately not incremented here — it stays 0 until
+        // 4a actually performs the merge; counting it now would report a
+        // write that never happened.
+        break;
+
+      case 'move': {
+        try {
+          inTransaction(db, () => {
+            updateGroupIdentity(db, {
+              id: groupId,
+              identityKey: outcome.identityKey,
+              // `PreparedIdentity.displayJson` is what this column is filled
+              // from; `display` is only what the column itself is called —
+              // see `interfaces.md`, which exists because this exact name
+              // mismatch cost a prior implementer a debugging round.
+              display: outcome.displayJson,
+              searchText: outcome.searchText,
+            });
+            // Only when the question a metadata lookup would ask has
+            // actually changed — `manual/operations.ts`'s `questionChanged`
+            // reasoning, reapplied here: `sceneMetadataQuery` builds its
+            // query from the display, so a slug-only move (the mirror of
+            // case 7: key changed but display did not) asks the provider the
+            // same question it already answered, and the cached answer is
+            // still good. Deliberately never touches `edited_at`: that
+            // column marks a row a human corrected by hand, so a future pass
+            // knows not to overwrite it (`migrations.ts:268-272`). This pass
+            // is not a human, and stamping it would immunise every group it
+            // re-keys against the next run.
+            if (outcome.displayChanged) clearGroupMetadata(db, groupId);
+          });
+          report.moved++;
+        } catch {
+          // `inTransaction` has already rolled back everything this group's
+          // body attempted, so it is left exactly as it was. The catch here,
+          // rather than one around the whole loop, is what lets the next
+          // proposal still be applied.
+          report.failed++;
+        }
+        break;
+      }
+    }
+  }
+
+  return report;
 }
