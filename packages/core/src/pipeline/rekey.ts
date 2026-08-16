@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type {
@@ -9,6 +10,7 @@ import type {
 } from '@pickarr/plugin-api';
 import { getDownload } from '../db/downloads.ts';
 import { getGroup, groupHistory, updateGroupIdentity } from '../db/groups.ts';
+import { updateDestPath } from '../db/imported-files.ts';
 import { mergeGroupInto } from '../db/merge-groups.ts';
 import { clearGroupMetadata } from '../db/metadata.ts';
 import { getRelease } from '../db/releases.ts';
@@ -455,10 +457,10 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
  * of imported directly so a test can substitute a fake without touching a
  * real filesystem or a real clock — the same reasoning `ManualDeps` already
  * applies one layer up, and `now` is the same member `ManualDeps` carries for
- * the same reason. Task 5 populates this with `rename` from
- * `node:fs/promises`, which is also why `applyRekey` is already declared
- * `async` below — so the signature does not change shape a second time once
- * Task 6 has a real caller.
+ * the same reason. `rename` is `node:fs/promises`' own function, unadapted:
+ * the real caller (Task 6) wires up the import directly, and a test wires up
+ * one that fails on demand — see `applyMove`'s tests for exactly which
+ * failures that has to cover.
  *
  * `now` arrived with the merge and nothing else needs it: a re-key writes no
  * timestamp of its own (spec §6 — not `edited_at`, not `list_rank_at`), but a
@@ -467,14 +469,27 @@ export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProp
  */
 export interface RekeyDeps {
   now(): number;
+  rename(from: string, to: string): Promise<void>;
 }
 
 /**
  * Tally of what one run of the write pass actually did, over every proposal
- * `planRekey` returned. `renamed` is still always 0: this pass moves no file
- * yet, Task 5 does. A merge that throws is counted in `failed` rather than in
- * `merged`, exactly as a move that throws is — the two are the same claim,
- * that the pass reports what it actually wrote.
+ * `planRekey` returned. `renamed` counts individual files moved on disk,
+ * summed across every `move` — a display-only correction (case 7) contributes
+ * zero even though it counts toward `moved`, and a group with several live
+ * files can contribute more than one. A merge that throws is counted in
+ * `failed` rather than in `merged`, exactly as a move that throws is — the
+ * two are the same claim, that the pass reports what it actually wrote.
+ *
+ * `skippedDestinationExists` is deliberately its own field, not folded into
+ * `failed`. `failed` is this report's word for "the pass tried to write
+ * something and threw" — a broken constraint, a full disk, a poisoned
+ * commit. A destination already occupied on disk is not that: it is
+ * `applyMove` correctly declining to overwrite a file that is already there,
+ * which is exactly the safe outcome `destinationOccupied` exists to produce.
+ * This report is what an operator reads in the boot log to learn what the
+ * pass did; counting a correct refusal as a failure sends them hunting a bug
+ * that does not exist. Do not fold this back into `failed`.
  */
 export interface RekeyReport {
   moved: number;
@@ -483,6 +498,7 @@ export interface RekeyReport {
   skippedEdited: number;
   skippedUnparsable: number;
   skippedCollision: number;
+  skippedDestinationExists: number;
   failed: number;
 }
 
@@ -514,6 +530,7 @@ export async function applyRekey(
     skippedEdited: 0,
     skippedUnparsable: 0,
     skippedCollision: 0,
+    skippedDestinationExists: 0,
     failed: 0,
   };
 
@@ -598,9 +615,10 @@ export async function applyRekey(
           if (merged) report.merged++;
           else report.skippedCollision++;
         } catch {
-          // As in `move` below: `inTransaction` has already rolled the whole
-          // merge back, so both groups are left exactly as they were — the
-          // releases still on the mover, the mover still present.
+          // As in `move` below (via `applyMove`): the transaction has already
+          // rolled the whole merge back, so both groups are left exactly as
+          // they were — the releases still on the mover, the mover still
+          // present.
           report.failed++;
         }
         break;
@@ -608,36 +626,28 @@ export async function applyRekey(
 
       case 'move': {
         try {
-          inTransaction(db, () => {
-            updateGroupIdentity(db, {
-              id: groupId,
-              identityKey: outcome.identityKey,
-              // `PreparedIdentity.displayJson` is what this column is filled
-              // from; `display` is only what the column itself is called —
-              // see `interfaces.md`, which exists because this exact name
-              // mismatch cost a prior implementer a debugging round.
-              display: outcome.displayJson,
-              searchText: outcome.searchText,
-            });
-            // Only when the question a metadata lookup would ask has
-            // actually changed — `manual/operations.ts`'s `questionChanged`
-            // reasoning, reapplied here: `sceneMetadataQuery` builds its
-            // query from the display, so a slug-only move (the mirror of
-            // case 7: key changed but display did not) asks the provider the
-            // same question it already answered, and the cached answer is
-            // still good. Deliberately never touches `edited_at`: that
-            // column marks a row a human corrected by hand, so a future pass
-            // knows not to overwrite it (`migrations.ts:268-272`). This pass
-            // is not a human, and stamping it would immunise every group it
-            // re-keys against the next run.
-            if (outcome.displayChanged) clearGroupMetadata(db, groupId);
-          });
-          report.moved++;
+          const renamedCount = await applyMove(db, groupId, outcome, deps);
+          if (renamedCount === null) {
+            // A destination `computeRenames` planned is already occupied on
+            // disk. Refused before a single row was written or a single file
+            // touched, so the group is left exactly where `planRekey` found
+            // it. Counted separately from `failed`, deliberately: nothing
+            // threw here, and nothing went wrong — `destinationOccupied`
+            // caught exactly the collision it exists to catch, and did the
+            // safe thing. Folding this into `failed` would read, in the boot
+            // log this report feeds, as a bug to go hunting for; it is not
+            // one. See `RekeyReport.skippedDestinationExists`.
+            report.skippedDestinationExists++;
+          } else {
+            report.moved++;
+            report.renamed += renamedCount;
+          }
         } catch {
-          // `inTransaction` has already rolled back everything this group's
-          // body attempted, so it is left exactly as it was. The catch here,
-          // rather than one around the whole loop, is what lets the next
-          // proposal still be applied.
+          // `applyMove` has already rolled back its transaction and, if any
+          // renames had already landed, reversed them on disk — so the group
+          // is left exactly as it was. The catch here, rather than one
+          // around the whole loop, is what lets the next proposal still be
+          // applied.
           report.failed++;
         }
         break;
@@ -646,4 +656,124 @@ export async function applyRekey(
   }
 
   return report;
+}
+
+/**
+ * The write half of a `move` outcome: the identity row, the metadata clear it
+ * conditionally implies, and every live file's `dest_path`, together with the
+ * renames on disk those new paths promise. Order is the whole of the safety
+ * argument the module comment on `applyRekey` refers to — the transaction
+ * opens, the row and every `dest_path` are written, the renames run *inside*
+ * that still-open transaction, and only then does it commit:
+ *
+ *   1. `BEGIN`
+ *   2. write `identity_key`/`display`/`search_text` and every new `dest_path`
+ *   3. `await rename(...)` each live file
+ *   4. `COMMIT`
+ *
+ * Committing before the renames would leave the database pointing at a path
+ * nothing has been moved to yet — and both `findLiveByDest`
+ * (`pipeline/import.ts`) and `trashLiveFiles` (`pipeline/upgrade.ts`) trust
+ * `dest_path` to name a real file. Doing the disk work inside the still-open
+ * transaction instead means a failure in either direction has something to
+ * undo: a rename that throws still has an open transaction to roll back, and
+ * a commit that throws still has real files sitting at their new paths that
+ * can be renamed back.
+ *
+ * That "renamed back" is only safe because of what `renames` is restricted to
+ * in practice: `{titledots}` is the only placeholder this pass ever changes
+ * (a key move never touches the `{sitename}` segment, which is the only path
+ * *segment* the default template has — see `path-template.ts`), so every
+ * entry in `renames` moves a file within one directory. A same-directory
+ * rename is a single filesystem operation with no window in which the file
+ * exists at neither name, which is what makes "call `rename` again with the
+ * arguments swapped" a complete undo rather than a best-effort guess at one.
+ *
+ * Returns the number of files renamed on success, or `null` if the group was
+ * refused because a computed destination was already occupied — refused
+ * ahead of the transaction, so nothing about the group is written at all.
+ */
+async function applyMove(
+  db: DatabaseSync,
+  groupId: number,
+  outcome: Extract<RekeyOutcome, { kind: 'move' }>,
+  deps: RekeyDeps,
+): Promise<number | null> {
+  // `rename(2)` silently replaces an existing destination on POSIX; this
+  // check, done before anything is written, is the only thing standing
+  // between the pass and destroying a file that already lives at a path
+  // `computeRenames` planned to. A collision costs the group nothing more
+  // than staying where it was.
+  for (const move of outcome.renames) {
+    if (await destinationOccupied(move.to)) return null;
+  }
+
+  db.exec('BEGIN');
+  try {
+    updateGroupIdentity(db, {
+      id: groupId,
+      identityKey: outcome.identityKey,
+      // `PreparedIdentity.displayJson` is what this column is filled
+      // from; `display` is only what the column itself is called —
+      // see `interfaces.md`, which exists because this exact name
+      // mismatch cost a prior implementer a debugging round.
+      display: outcome.displayJson,
+      searchText: outcome.searchText,
+    });
+    // Only when the question a metadata lookup would ask has actually
+    // changed — `manual/operations.ts`'s `questionChanged` reasoning,
+    // reapplied here: `sceneMetadataQuery` builds its query from the
+    // display, so a slug-only move (the mirror of case 7: key changed but
+    // display did not) asks the provider the same question it already
+    // answered, and the cached answer is still good. Deliberately never
+    // touches `edited_at`: that column marks a row a human corrected by
+    // hand, so a future pass knows not to overwrite it
+    // (`migrations.ts:268-272`). This pass is not a human, and stamping it
+    // would immunise every group it re-keys against the next run.
+    if (outcome.displayChanged) clearGroupMetadata(db, groupId);
+    for (const move of outcome.renames) updateDestPath(db, move.fileId, move.to);
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  const renamedSoFar: { from: string; to: string }[] = [];
+  try {
+    for (const move of outcome.renames) {
+      await deps.rename(move.from, move.to);
+      renamedSoFar.push(move);
+    }
+  } catch (error) {
+    db.exec('ROLLBACK');
+    for (const move of renamedSoFar.toReversed()) await deps.rename(move.to, move.from);
+    throw error;
+  }
+
+  try {
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    for (const move of outcome.renames.toReversed()) await deps.rename(move.to, move.from);
+    throw error;
+  }
+
+  return outcome.renames.length;
+}
+
+/**
+ * Whether something already sits at `path`, tolerating exactly the one error
+ * that answers the question ("nothing is there") and rethrowing everything
+ * else. A permissions error or similar is not evidence the pass may proceed —
+ * it is evidence the pass cannot tell, and guessing "empty" in that case risks
+ * the one outcome `applyMove` calls this to prevent: `rename(2)` overwriting a
+ * file that was there all along.
+ */
+async function destinationOccupied(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
