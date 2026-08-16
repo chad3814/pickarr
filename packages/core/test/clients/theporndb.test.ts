@@ -1,4 +1,4 @@
-import { test, type TestContext } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   backgroundFromCrop,
@@ -10,21 +10,7 @@ import {
   type FetchImpl,
 } from '../../src/clients/theporndb.ts';
 import type { SiteLookupConfig } from '../../src/config/schema.ts';
-
-/**
- * Node's test runner has supported mocking `AbortSignal.timeout` for a
- * while, but `@types/node@24`'s `MockTimersOptions['apis']` has not caught
- * up to it — confirmed against the actual runtime this repo targets, which
- * does honour it. Only the argument is widened (via `unknown`, since the
- * literal union types don't otherwise overlap) — `enable` is still called as
- * a method on `t.mock.timers`, not detached from it, since detaching it
- * loses the `this` its implementation relies on.
- */
-type TimerApis = Parameters<TestContext['mock']['timers']['enable']>[0];
-
-function enableAbortTimeoutMock(t: TestContext): void {
-  t.mock.timers.enable({ apis: ['AbortSignal.timeout'] } as unknown as TimerApis);
-}
+import { stubAbortTimeout } from '../abort-timeout.ts';
 
 const API_KEY = 'tpdb-secret-key-0123456789abcdef';
 
@@ -655,11 +641,16 @@ test(
   'a site search that never gets a response is abandoned rather than hung forever',
   { timeout: 2_000 },
   async (t) => {
-    enableAbortTimeoutMock(t);
+    const timeout = stubAbortTimeout(t);
     const client = createTpdbClient(CONFIG, () => new Promise(() => undefined));
 
     const pending = assert.rejects(client.searchSites('bangbros'));
-    t.mock.timers.tick(PROVIDER_REQUEST_TIMEOUT_MS);
+    assert.deepEqual(
+      timeout.requested,
+      [PROVIDER_REQUEST_TIMEOUT_MS],
+      'the deadline is asked for before the request, and is the documented one',
+    );
+    timeout.fire();
     await pending;
   },
 );
@@ -669,7 +660,7 @@ test(
     'and is not mistaken for a rate limit',
   { timeout: 2_000 },
   async (t) => {
-    enableAbortTimeoutMock(t);
+    const timeout = stubAbortTimeout(t);
     const client = createTpdbClient(CONFIG, () => new Promise(() => undefined));
 
     const pending = assert.rejects(client.searchScenes('bangbros', null), (error: unknown) => {
@@ -678,7 +669,8 @@ test(
       assert.ok(!(error instanceof RateLimited), 'a timeout must not be treated as a rate limit');
       return true;
     });
-    t.mock.timers.tick(PROVIDER_REQUEST_TIMEOUT_MS);
+    assert.deepEqual(timeout.requested, [PROVIDER_REQUEST_TIMEOUT_MS]);
+    timeout.fire();
     await pending;
   },
 );

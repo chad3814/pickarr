@@ -1,24 +1,10 @@
-import { test, type TestContext } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cacheImage, MAX_IMAGE_BYTES, IMAGE_TIMEOUT_MS, performerArtworkKey } from '../../src/media/artwork.ts';
-
-/**
- * Node's test runner has supported mocking `AbortSignal.timeout` for a
- * while, but `@types/node@24`'s `MockTimersOptions['apis']` has not caught
- * up to it — confirmed against the actual runtime this repo targets, which
- * does honour it. Only the argument is widened (via `unknown`, since the
- * literal union types don't otherwise overlap) — `enable` is still called as
- * a method on `t.mock.timers`, not detached from it, since detaching it
- * loses the `this` its implementation relies on.
- */
-type TimerApis = Parameters<TestContext['mock']['timers']['enable']>[0];
-
-function enableAbortTimeoutMock(t: TestContext): void {
-  t.mock.timers.enable({ apis: ['AbortSignal.timeout'] } as unknown as TimerApis);
-}
+import { stubAbortTimeout } from '../abort-timeout.ts';
 
 /**
  * Every test gets its own `mkdtemp` directory and removes it on the way out,
@@ -383,7 +369,7 @@ test(
   { timeout: 2_000 },
   async (t) => {
     await withTempDir(async (dir) => {
-      enableAbortTimeoutMock(t);
+      const timeout = stubAbortTimeout(t);
       const logged: string[] = [];
 
       const pending = cacheImage(
@@ -391,7 +377,12 @@ test(
         '7',
         'https://example.test/p.jpg',
       );
-      t.mock.timers.tick(IMAGE_TIMEOUT_MS);
+      assert.deepEqual(
+        timeout.requested,
+        [IMAGE_TIMEOUT_MS],
+        'the deadline covers the whole operation, so it is taken before the mkdir',
+      );
+      timeout.fire();
       const name = await pending;
 
       assert.equal(
