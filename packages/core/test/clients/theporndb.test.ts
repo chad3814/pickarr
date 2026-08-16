@@ -1,7 +1,10 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  backgroundFromCrop,
+  BACKGROUND_CROP_MARKER,
   createTpdbClient,
+  isBackgroundCrop,
   PROVIDER_REQUEST_TIMEOUT_MS,
   RateLimited,
   type FetchImpl,
@@ -423,6 +426,102 @@ test('further malformed shapes are tolerated: a bare number, and a site given as
     posterUrl: null,
     slug: null,
   }]);
+});
+
+// --- Synthesised portrait posters --------------------------------------------
+
+/**
+ * A real row from this library's database, kept verbatim rather than trimmed.
+ * The awkward parts are the point: the `filters:` segment carries a
+ * `watermark(...)` argument holding its own percent-encoded path, so anything
+ * that counts path segments from the left recovers the site's logo instead of
+ * the scene's background.
+ */
+const CROP =
+  'https://thumb.theporndb.net/6lTbCMl9aBGSuDkuuUA3ucoAKyU=/800x1200/smart/' +
+  'filters:sharpen():upscale():watermark(sites%2F4b%2F4b%2F8a%2F3d0384f4e2ca36ac5ff275029d5c746' +
+  '%2Flogo%2Fcreampieangels-logo.png,-10,-10,25,50)/' +
+  'scene%2Ff9%2F84%2F16%2F55aa1763635d4e5bb83d6f63f8f5639%2Fbackground' +
+  '%2Fbg-creampieangels-dude-fixes-blonde-pussy-on-a-chair.jpg';
+
+const BACKGROUND =
+  'https://cdn.theporndb.net/scene/f9/84/16/55aa1763635d4e5bb83d6f63f8f5639/background/' +
+  'bg-creampieangels-dude-fixes-blonde-pussy-on-a-chair.jpg';
+
+function sceneWith(over: Record<string, unknown>): Record<string, unknown> {
+  return { data: [{ id: 'scene-uuid', title: 'A Scene', ...over }] };
+}
+
+async function posterFrom(body: Record<string, unknown>): Promise<string | null | undefined> {
+  const [scene] = await createTpdbClient(CONFIG, respondWith(body)).searchScenes('x', null);
+  return scene?.posterUrl;
+}
+
+test('a crop url yields the background it was cut from, not the watermark logo', () => {
+  assert.ok(isBackgroundCrop(CROP));
+  assert.ok(CROP.includes(BACKGROUND_CROP_MARKER));
+  assert.equal(backgroundFromCrop(CROP), BACKGROUND);
+});
+
+test('a poster that is not a crop is left alone', () => {
+  const real = 'https://cdn.theporndb.net/scene/e2/b4/poster/c/poster-daytime-delight-large.jpg';
+  assert.equal(isBackgroundCrop(real), false);
+  assert.equal(backgroundFromCrop(real), null, 'nothing to recover from a genuine poster');
+});
+
+test('a foreign origin smuggled into the encoded segment is refused', () => {
+  // The decoded text steers a fetch and names a file on disk, so resolving it
+  // against the CDN must not be allowed to adopt a different host.
+  const hostile = `https://thumb.theporndb.net/hash=${BACKGROUND_CROP_MARKER}https%3A%2F%2Fevil.example%2Fx.jpg`;
+  assert.equal(backgroundFromCrop(hostile), null);
+
+  const protocolRelative = `https://thumb.theporndb.net/hash=${BACKGROUND_CROP_MARKER}%2F%2Fevil.example%2Fx.jpg`;
+  assert.equal(backgroundFromCrop(protocolRelative), null);
+});
+
+test('an undecodable or empty segment yields nothing rather than a guess', () => {
+  assert.equal(backgroundFromCrop(`https://thumb.theporndb.net/h=${BACKGROUND_CROP_MARKER}%zz.jpg`), null);
+  assert.equal(backgroundFromCrop(`https://thumb.theporndb.net/h=${BACKGROUND_CROP_MARKER}`), null);
+  assert.equal(backgroundFromCrop('not a url at all'), null);
+});
+
+test("the payload's own background is preferred over a crop of it", async () => {
+  assert.equal(
+    await posterFrom(sceneWith({
+      posters: { large: CROP, full: CROP },
+      background: {
+        full: BACKGROUND,
+        large: 'https://cdn.theporndb.net/scene/f9/84/16/large.jpg',
+      },
+    })),
+    BACKGROUND,
+    'full, not large: this branch exists because a downscaled rendition was the problem',
+  );
+});
+
+test('a crop with no background object falls back to decoding the crop url', async () => {
+  assert.equal(await posterFrom(sceneWith({ posters: { large: CROP } })), BACKGROUND);
+});
+
+test('a background that is itself a crop is not trusted', async () => {
+  assert.equal(
+    await posterFrom(sceneWith({ posters: { large: CROP }, background: { full: CROP } })),
+    BACKGROUND,
+  );
+});
+
+test('an unrecoverable crop is kept, so the card has an image and the repair can find it', async () => {
+  const undecodable = `https://thumb.theporndb.net/h=${BACKGROUND_CROP_MARKER}%zz.jpg`;
+  assert.equal(await posterFrom(sceneWith({ posters: { large: undecodable } })), undecodable);
+});
+
+test('a genuine poster is never rewritten, background object or not', async () => {
+  const real = 'https://cdn.theporndb.net/scene/e2/b4/poster/c/poster-large.jpg';
+  assert.equal(
+    await posterFrom(sceneWith({ posters: { large: real }, background: { full: BACKGROUND } })),
+    real,
+    'the background only wins when what was offered was a crop of one',
+  );
 });
 
 // Shapes taken from a live `GET /scenes?per_page=1`, trimmed to the fields

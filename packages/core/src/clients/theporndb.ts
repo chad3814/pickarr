@@ -174,6 +174,101 @@ function retryAfterMs(header: string | null): number {
 }
 
 /**
+ * The give-away that a "poster" is not one.
+ *
+ * A scene with no portrait artwork of its own still answers `posters` with a
+ * URL, because TPDB synthesises one on demand: its thumbnailer takes the
+ * landscape *background* and returns a 800x1200 centre crop of it, sharpened,
+ * upscaled, and stamped with the site's logo. Nothing in the payload says so
+ * — the field is populated and the image loads — but the result is a blown-up
+ * slice of a wider photo, which is worse artwork than the photo it came from.
+ *
+ * This substring is what distinguishes the two. `800x1200` is the crop
+ * geometry and `smart` is the thumbnailer's content-aware focal mode; a real
+ * poster is served straight off the CDN and passes through no thumbnailer at
+ * all. Measured against this library's own 215 cached posters, the split is
+ * exactly that clean: 213 carry the marker and every one of them decodes to a
+ * `/background/` path, while the 2 that do not are plain
+ * `cdn.theporndb.net/.../poster/...` URLs.
+ *
+ * Exported because the offline repair script matches stored `poster_url`s
+ * against it — the rule for recognising one of these has to be stated once.
+ */
+export const BACKGROUND_CROP_MARKER = '/800x1200/smart/';
+
+/** Origin the thumbnailer's source images are actually served from. */
+const TPDB_CDN_ORIGIN = 'https://cdn.theporndb.net';
+
+/** Whether this URL is a synthesised portrait crop rather than real artwork. */
+export function isBackgroundCrop(url: string): boolean {
+  return url.includes(BACKGROUND_CROP_MARKER);
+}
+
+/**
+ * Recovers the original background image a portrait crop was cut from.
+ *
+ * The thumbnailer embeds its source as the last path segment, percent-encoded
+ * whole — `scene%2Ff9%2F84%2F...%2Fbackground%2Fbg-....jpg` — so the original
+ * needs no request to discover, only decoding and re-hosting on the CDN.
+ * Taking the *last* segment matters: the `filters:...` segment before it
+ * carries a `watermark(sites%2F...%2Flogo.png,...)` argument containing its
+ * own encoded path, so counting segments from the left finds the site's logo
+ * instead of the scene's background.
+ *
+ * Used two ways, and deliberately the same code for both: as the fallback
+ * when a scene payload carries no `background` object, and as the *only*
+ * source for the repair script, which has a stored URL and no payload left to
+ * consult. Both must land on the same image.
+ *
+ * Returns null rather than a guess for anything that does not decode to a URL
+ * on TPDB's own CDN. The decoded text steers a `fetch` and the filename bytes
+ * get written to disk, so an absolute `https://elsewhere/x.jpg` smuggled into
+ * that segment must not be followed — resolving against the CDN origin and
+ * then re-checking the origin is what refuses it, since resolution alone
+ * would happily adopt the foreign host.
+ */
+export function backgroundFromCrop(cropUrl: string): string | null {
+  if (!isBackgroundCrop(cropUrl)) return null;
+
+  let pathname: string;
+  try {
+    // Parsed rather than string-sliced so a query string or fragment cannot
+    // end up inside the segment being decoded.
+    pathname = new URL(cropUrl).pathname;
+  } catch {
+    return null;
+  }
+
+  const encoded = pathname.slice(pathname.lastIndexOf('/') + 1);
+  if (encoded.length === 0) return null;
+
+  let resolved: URL;
+  try {
+    resolved = new URL(decodeURIComponent(encoded), `${TPDB_CDN_ORIGIN}/`);
+  } catch {
+    // Either a malformed percent-escape or a decoded value that is not a
+    // usable URL reference. Both mean the same thing here: nothing to recover.
+    return null;
+  }
+  return resolved.origin === TPDB_CDN_ORIGIN ? resolved.href : null;
+}
+
+/**
+ * Reads one URL out of a `{ full, large, medium, small }` image object,
+ * trying the given sizes in order. `posters`, `background` and
+ * `background_back` all share this shape.
+ */
+function readSizedImage(value: unknown, sizes: readonly string[]): string | null {
+  if (value === null || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  for (const size of sizes) {
+    const url = record[size];
+    if (typeof url === 'string' && url.length > 0) return url;
+  }
+  return null;
+}
+
+/**
  * Poster sources in preference order.
  *
  * TPDB's own CDN first: the studio CDN fields (`image`, `poster_image`) point
@@ -181,19 +276,46 @@ function retryAfterMs(header: string | null): number {
  * foreign referrer. The documented `image` is 1279x719, so nothing downstream
  * may assume a portrait aspect ratio.
  */
-function readPosterUrl(record: Record<string, unknown>): string | null {
-  const posters = record['posters'];
-  if (posters !== null && typeof posters === 'object') {
-    for (const size of ['large', 'full'] as const) {
-      const url = (posters as Record<string, unknown>)[size];
-      if (typeof url === 'string' && url.length > 0) return url;
-    }
-  }
+function readOfferedPoster(record: Record<string, unknown>): string | null {
+  const fromSet = readSizedImage(record['posters'], ['large', 'full']);
+  if (fromSet !== null) return fromSet;
   for (const key of ['poster', 'image'] as const) {
     const url = record[key];
     if (typeof url === 'string' && url.length > 0) return url;
   }
   return null;
+}
+
+/**
+ * The poster to store, preferring a real background over a crop of one.
+ *
+ * When the offered poster is synthesised (see `BACKGROUND_CROP_MARKER`), the
+ * payload's own `background` is the better image by every measure available:
+ * it is the full frame rather than a centre slice of it, at its native size
+ * rather than upscaled, and without the logo the thumbnailer stamps on.
+ * Nothing downstream assumes portrait — `readOfferedPoster` above already
+ * documents that the plain `image` field is 1279x719 — so a landscape
+ * background is a legitimate answer here, not a shape violation.
+ *
+ * `full` before `large`, the opposite of the poster preference above and for
+ * the opposite reason: this branch is reached precisely because a downscaled,
+ * re-cropped rendition was what went wrong, so it asks for the original.
+ *
+ * The two fallbacks matter for different failures. `backgroundFromCrop`
+ * covers a payload with no `background` object at all, recovering the source
+ * from the crop URL itself. Keeping the crop covers the case where even that
+ * fails: a synthesised poster is poor artwork, but it is better than a card
+ * with no image, and it stays recognisable to the repair script for a later
+ * attempt.
+ */
+function readPosterUrl(record: Record<string, unknown>): string | null {
+  const offered = readOfferedPoster(record);
+  if (offered === null || !isBackgroundCrop(offered)) return offered;
+
+  const background = readSizedImage(record['background'], ['full', 'large']);
+  if (background !== null && !isBackgroundCrop(background)) return background;
+
+  return backgroundFromCrop(offered) ?? offered;
 }
 
 function str(record: Record<string, unknown>, key: string): string | null {
