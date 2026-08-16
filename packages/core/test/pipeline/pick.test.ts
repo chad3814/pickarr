@@ -25,6 +25,7 @@ function fakeClient(overrides: Partial<DownloadClient> = {}): DownloadClient {
   return {
     id: 'sab',
     importMode: 'move',
+    category: 'pickarr',
     addUrl: async () => 'nzo_1',
     snapshot: async (): Promise<ClientSnapshot> => ({ queue: [], history: [], complete: true }),
     remove: async (): Promise<void> => {},

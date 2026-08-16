@@ -25,15 +25,20 @@ export interface DownloadRow {
   storagePath: string | null;
   error: string | null;
   attempts: number;
-  missingPolls: number;
   absentSince: number | null;
   createdAt: number;
   updatedAt: number;
 }
 
+/**
+ * `missing_polls` is deliberately not selected. The column still exists —
+ * dropping a live column buys nothing (see migration 8) — but nothing reads
+ * or writes it any more: counting polls was the wrong clock, and
+ * `absent_since` replaced it.
+ */
 const SELECT = `
   SELECT id, release_id, group_id, client_id, client_ref, kind, status,
-         storage_path, error, attempts, missing_polls, absent_since,
+         storage_path, error, attempts, absent_since,
          created_at, updated_at
   FROM downloads
 `;
@@ -61,7 +66,6 @@ function toDownloadRow(row: SqlRow): DownloadRow {
     storagePath: maybeStr(row, 'storage_path'),
     error: maybeStr(row, 'error'),
     attempts: num(row, 'attempts'),
-    missingPolls: num(row, 'missing_polls'),
     absentSince: maybeNum(row, 'absent_since'),
     createdAt: num(row, 'created_at'),
     updatedAt: num(row, 'updated_at'),
@@ -378,32 +382,6 @@ export function bumpAttempts(db: DatabaseSync, id: number, now: number): number 
   return row.attempts;
 }
 
-export function bumpMissingPolls(db: DatabaseSync, id: number, now: number): number {
-  const result = db
-    .prepare('UPDATE downloads SET missing_polls = missing_polls + 1, updated_at = ? WHERE id = ?')
-    .run(now, id);
-  requireAffected('bumpMissingPolls', id, result.changes);
-  const row = getDownload(db, id);
-  if (row === null) {
-    throw new Error(`bumpMissingPolls: download ${id} vanished after its own update`);
-  }
-  return row.missingPolls;
-}
-
-/**
- * A no-op when missing_polls is already 0 is legitimate (idempotent reset,
- * not an error) and must not be confused with "no such id" — so a bad id is
- * detected with a separate existence check, not by the affected-row count.
- */
-export function resetMissingPolls(db: DatabaseSync, id: number): void {
-  const result = db
-    .prepare('UPDATE downloads SET missing_polls = 0 WHERE id = ? AND missing_polls != 0')
-    .run(id);
-  if (result.changes === 0 && getDownload(db, id) === null) {
-    throw new Error(`resetMissingPolls: no download with id ${id}`);
-  }
-}
-
 /**
  * Records when a download was first not seen in a client snapshot — not when
  * it was *last* not seen, which a plain assignment would produce. The
@@ -423,22 +401,21 @@ export function markAbsent(db: DatabaseSync, id: number, now: number): void {
 }
 
 /**
- * The inverse of `markAbsent`, mirroring `resetMissingPolls`'s shape: a no-op
- * when already clear is legitimate (the row was never absent, or reconcile
- * already cleared it this tick) rather than an error, so there is no
- * existence check to distinguish "already clear" from "no such id" — nothing
- * here needs to tell them apart.
+ * The inverse of `markAbsent`: a no-op when already clear is legitimate (the
+ * row was never absent, or reconcile already cleared it this tick) rather than
+ * an error, so there is no existence check to distinguish "already clear" from
+ * "no such id" — nothing here needs to tell them apart.
  *
- * `resetMissingPolls` pairs its no-op with a `getDownload` probe on the
- * `changes === 0` path to turn a bad id into a thrown error, and that probe
- * is cheap there because that path is rare. Here the no-op path is the
- * *common* one — most downloads are not absent on most ticks — so the same
- * probe would mean a query per row per tick to guard against a condition
- * that cannot arise on this call path: every id reaching `clearAbsent` was
- * just read out of this table by the caller (reconcile, matching a snapshot
- * entry against a row it already has), not typed in by a human. Paying for
- * the bad-id assertion here would be buying safety against a mistake the
- * call site cannot make.
+ * Every other setter in this file turns a bad id into a thrown error, and the
+ * deleted `resetMissingPolls` did it with a `getDownload` probe on its
+ * `changes === 0` path, which was cheap there because that path was rare.
+ * Here the no-op path is the *common* one — most downloads are not absent on
+ * most ticks — so the same probe would mean a query per row per tick to guard
+ * against a condition that cannot arise on this call path: every id reaching
+ * `clearAbsent` was just read out of this table by the caller (reconcile,
+ * matching a snapshot entry against a row it already has), not typed in by a
+ * human. Paying for the bad-id assertion here would be buying safety against
+ * a mistake the call site cannot make.
  */
 export function clearAbsent(db: DatabaseSync, id: number): void {
   db.prepare('UPDATE downloads SET absent_since = NULL WHERE id = ? AND absent_since IS NOT NULL').run(
@@ -449,6 +426,11 @@ export function clearAbsent(db: DatabaseSync, id: number): void {
 /**
  * Resumes from the furthest point already reached: a row that has a storage
  * path only needs its import redone, everything else restarts from queued.
+ *
+ * `absent_since` is cleared so a retried download does not inherit a stale
+ * mark from a previous attempt. `missing_polls` is not touched: nothing reads
+ * it any more, and writing a column no reader consults would be the only
+ * remaining pretence that it still means something.
  */
 export function resetForRetry(db: DatabaseSync, id: number, now: number): DownloadRow | null {
   const download = getDownload(db, id);
@@ -457,7 +439,7 @@ export function resetForRetry(db: DatabaseSync, id: number, now: number): Downlo
   const status: DownloadStatus = download.storagePath === null ? 'queued' : 'completed';
   db.prepare(
     `UPDATE downloads
-     SET status = ?, error = NULL, attempts = 0, missing_polls = 0, absent_since = NULL,
+     SET status = ?, error = NULL, attempts = 0, absent_since = NULL,
          client_ref = CASE WHEN ? = 'queued' THEN NULL ELSE client_ref END,
          updated_at = ?
      WHERE id = ?`,
