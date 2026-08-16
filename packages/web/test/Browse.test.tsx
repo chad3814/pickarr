@@ -125,6 +125,7 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       error: null,
       attempts: 0,
       updatedAt: 1,
+      absentSince: null,
     },
     group: pick,
   };
