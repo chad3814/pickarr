@@ -714,7 +714,30 @@ test('applyRekey test 6: edited_at, list_rank_at, created_at and picked_release_
 });
 
 test('applyRekey test 7: a group whose write throws is counted in failed and does not stop the pass', async () => {
-  const { db, registry } = setup();
+  const { db, plugin, registry } = setup();
+
+  // Ordered deliberately: planRekey walks `media_groups` by ascending id, so
+  // this group is applied and committed *before* the poisoned one is even
+  // reached. It is the half of the brief's invariant a poison placed first
+  // cannot exercise on its own — "a single poison row must not roll back 59
+  // good ones" is about groups that already landed, not just ones still to
+  // come. `fineAfter` below keeps that direction covered too.
+  const fineBeforeRaw = 'Site.26.06.07.Yankee.Alpha.GERMAN.XXX.1080p.MP4-GRP0';
+  const fineBeforeId = groupWithRelease(db, {
+    rawTitle: fineBeforeRaw,
+    identityKey: 'site:2026-06-07:yankee-alpha-german',
+    display: '{"title":"stale fine before","fields":[]}',
+  });
+  // Sanctioned exception, as in test 1 above: the property under test is
+  // that this group actually moved (to whatever the parser says today, not
+  // to a hardcoded guess), so the expected key comes from calling the
+  // plugin directly.
+  const fineBeforeParsed = plugin.parse(fineBeforeRaw);
+  assert.notEqual(fineBeforeParsed, null);
+  const fineBeforeValidated = validateIdentity(fineBeforeParsed as ParsedRelease);
+  assert.ok('identity' in fineBeforeValidated);
+  const fineBeforeExpectedKey = (fineBeforeValidated as { identity: { identityKey: string } }).identity.identityKey;
+
   const poisonRaw = 'Site.26.06.08.Alpha.Bravo.GERMAN.XXX.1080p.MP4-GRP';
   const poisonedId = groupWithRelease(db, {
     rawTitle: poisonRaw,
@@ -730,21 +753,34 @@ test('applyRekey test 7: a group whose write throws is counted in failed and doe
 
   // Poisoned deliberately, from outside the code under test — the same
   // technique `pipeline/metadata.test.ts` uses for the equivalent claim: a
-  // trigger that aborts only this one group's UPDATE, standing in for a
-  // broken constraint or a full disk. `applyRekey`'s own per-group
-  // transaction already unwinds this cleanly; this test exists to prove the
-  // *loop* survives it and still reaches the group behind it.
+  // trigger that aborts this one group's UPDATE, standing in for a broken
+  // constraint or a full disk. `RAISE(ROLLBACK, ...)`, not `RAISE(ABORT,
+  // ...)`: ABORT unwinds only the statement that raised it and leaves the
+  // surrounding transaction open, so a regression that widens the
+  // transaction to wrap the whole loop while still catching per group would
+  // behave identically to correct code under an ABORT poison and this test
+  // would stay green for the wrong reason. ROLLBACK aborts the whole active
+  // transaction, which is what actually distinguishes "one transaction per
+  // group" from "one transaction for the pass": under the latter, this
+  // poison would take `fineBefore`'s already-committed write down with it.
   db.exec(
     `CREATE TRIGGER poison_rekey BEFORE UPDATE ON media_groups
      FOR EACH ROW WHEN NEW.id = ${poisonedId}
-     BEGIN SELECT RAISE(ABORT, 'poisoned row'); END;`,
+     BEGIN SELECT RAISE(ROLLBACK, 'poisoned row'); END;`,
   );
 
   const before = getGroup(db, poisonedId);
 
   const report = await applyRekey(db, registry, {});
   assert.equal(report.failed, 1);
-  assert.equal(report.moved, 1, 'the group behind the poisoned one must still move');
+  assert.equal(report.moved, 2, 'both the group before and the group behind the poisoned one must still move');
+
+  const fineBeforeAfter = getGroup(db, fineBeforeId);
+  assert.equal(
+    fineBeforeAfter?.identityKey,
+    fineBeforeExpectedKey,
+    'a group already committed before the poisoned one must survive its rollback',
+  );
 
   const poisonedAfter = getGroup(db, poisonedId);
   assert.equal(poisonedAfter?.identityKey, before?.identityKey, 'the poisoned group must be left at its old key');
