@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import createScenesPlugin from '@pickarr/plugin-scenes';
-import { getGroup } from '../../src/db/groups.ts';
+import { getGroup, markPicked } from '../../src/db/groups.ts';
 import { recordMetadataAnswer } from '../../src/db/metadata.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { recordDiscoveredSite } from '../../src/db/sites.ts';
 import { validateIdentity } from '../../src/ingest/commit.ts';
-import { applyRekey, planRekey, type RekeyOutcome } from '../../src/pipeline/rekey.ts';
+import { applyRekey, planRekey, type RekeyDeps, type RekeyOutcome } from '../../src/pipeline/rekey.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 
 const LIBRARY_ROOT = '/library';
@@ -129,6 +129,92 @@ function releaseIdFor(db: DatabaseSync, groupId: number): number {
   const row = db.prepare('SELECT id FROM releases WHERE group_id = ? ORDER BY id LIMIT 1').get(groupId);
   assert.ok(row !== undefined, `no release for group ${groupId}`);
   return Number((row as { id: number }).id);
+}
+
+/**
+ * A second release on an existing group, with a score of its own. Needs a feed
+ * item of its own too: `releases.feed_item_id` is UNIQUE, so two releases can
+ * never share one. Never the group's *earliest* release, so the raw title
+ * `planRekey` re-parses is still the one `groupWithRelease` inserted.
+ */
+function addRelease(db: DatabaseSync, groupId: number, opts: { rawTitle: string; score: number }): number {
+  const feedItemId = nextFeedItemId++;
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (?, 'f', ?, ?, ?, 1)`,
+  ).run(feedItemId, `guid-${feedItemId}`, opts.rawTitle, `https://indexer.invalid/${feedItemId}`);
+  const result = db
+    .prepare(
+      `INSERT INTO releases (group_id, feed_item_id, quality, score, created_at)
+       VALUES (?, ?, '{}', ?, 1)`,
+    )
+    .run(groupId, feedItemId, opts.score);
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * `download_id` is a parameter rather than derived from `groupId` because the
+ * two are independent columns, and the trashed-file test below depends on
+ * their being able to disagree: it needs a group whose *only* history is a
+ * trashed `imported_files` row, which is unreachable if the row's download
+ * must also belong to that group.
+ */
+function addImportedFile(
+  db: DatabaseSync,
+  opts: { downloadId: number; groupId: number; destPath: string; trashedAt?: number },
+): number {
+  const trashedAt = opts.trashedAt ?? null;
+  const result = db
+    .prepare(
+      `INSERT INTO imported_files
+         (download_id, group_id, source_path, dest_path, size_bytes, trashed_at, trash_path, created_at)
+       VALUES (?, ?, '/src/imported.mp4', ?, 12345, ?, ?, 1)`,
+    )
+    .run(opts.downloadId, opts.groupId, opts.destPath, trashedAt, trashedAt === null ? null : '/trash/old.mp4');
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * The collision the pass merges, as a fixture: a holder whose stored identity
+ * already agrees with the parser, and a mover whose stored key does not but
+ * whose title parses to the holder's. `Echo_Foxtrot` and `Echo.Foxtrot` reduce
+ * to one slug, which is the mechanism behind the real pair this task exists
+ * for — `ClubSweethearts.26.08.07.Foxy.Dreams.Solo.XXX.1080p` losing "Solo"
+ * onto `ClubSweethearts.2026.08.07.Foxy.Dreams.720p` — without depending on
+ * which suffix tokens the parser drops today.
+ *
+ * `moverFirst` exists for one test: ids come from insertion order, so it is
+ * the only way to build a pair whose survivor is *not* the lower id.
+ */
+function collidingPair(
+  db: DatabaseSync,
+  plugin: MediaTypePlugin,
+  opts: { date: string; name: string; moverFirst?: boolean },
+): { holderId: number; moverId: number } {
+  const holderRaw = `Site.${opts.date}.${opts.name}.XXX.1080p.MP4-GRP`;
+  const moverRaw = `Site.${opts.date}.${opts.name.replaceAll('.', '_')}.XXX.2160p.MP4-GRP2`;
+  const insertHolder = (): number =>
+    groupWithRelease(db, { rawTitle: holderRaw, ...agreeingIdentity(plugin, holderRaw) });
+  const insertMover = (): number =>
+    groupWithRelease(db, {
+      rawTitle: moverRaw,
+      identityKey: `site:stale-mover:${opts.date}:${opts.name}`,
+      display: '{"title":"stale mover","fields":[]}',
+    });
+
+  if (opts.moverFirst === true) {
+    const moverId = insertMover();
+    return { moverId, holderId: insertHolder() };
+  }
+  const holderId = insertHolder();
+  return { holderId, moverId: insertMover() };
+}
+
+function releaseIdsFor(db: DatabaseSync, groupId: number): number[] {
+  return db
+    .prepare('SELECT id FROM releases WHERE group_id = ? ORDER BY id')
+    .all(groupId)
+    .map((row) => Number((row as { id: number }).id));
 }
 
 test('case 1: a stored key that already agrees with a fresh parse is unchanged', () => {
@@ -467,6 +553,15 @@ test('3-way collision: two movers and a holder targeting one slot are each skipp
 // and no more.
 // ---------------------------------------------------------------------------
 
+/**
+ * A stopped clock, so the one timestamp a pass can move — `list_rank_at`, when
+ * a merge brings the survivor something better than its pick — is a value the
+ * tests can name outright instead of bounding against a wall clock they would
+ * then be racing.
+ */
+const MERGE_NOW = 9_000_000;
+const DEPS: RekeyDeps = { now: () => MERGE_NOW };
+
 /** Every table `clearGroupMetadata` clears, enumerated rather than counted,
  * so a future fifth table added there fails these tests by omission instead
  * of silently passing. `group_performers` is the newest of the four
@@ -569,7 +664,7 @@ test('applyRekey test 1: a move proposal writes identity_key, display and search
   const expected = (validated as { identity: { identityKey: string; displayJson: string; searchText: string } })
     .identity;
 
-  const report = await applyRekey(db, registry, {});
+  const report = await applyRekey(db, registry, DEPS);
   assert.equal(report.moved, 1);
 
   const row = getGroup(db, groupId);
@@ -589,7 +684,7 @@ test('applyRekey test 2: a displayChanged move clears all four metadata tables',
   });
   seedAllMetadataTables(db, groupId);
 
-  const report = await applyRekey(db, registry, {});
+  const report = await applyRekey(db, registry, DEPS);
   assert.equal(report.moved, 1, 'fixture must actually move, or the clear below proves nothing');
 
   assertMetadataTablesEmpty(db, groupId);
@@ -612,7 +707,7 @@ test('applyRekey test 3: a move whose display already matches the parse does not
   });
   seedAllMetadataTables(db, groupId);
 
-  const report = await applyRekey(db, registry, {});
+  const report = await applyRekey(db, registry, DEPS);
   assert.equal(report.moved, 1);
   const row = getGroup(db, groupId);
   assert.equal(row?.identityKey, correct.identityKey, 'the key must still move');
@@ -633,7 +728,7 @@ test('applyRekey test 4: an unchanged group is not written at all', async () => 
   const sentinel = 'SENTINEL-applyRekey-unchanged-search-text';
   db.prepare('UPDATE media_groups SET search_text = ? WHERE id = ?').run(sentinel, groupId);
 
-  const report = await applyRekey(db, registry, {});
+  const report = await applyRekey(db, registry, DEPS);
   assert.equal(report.moved, 0);
   const row = getGroup(db, groupId);
   assert.equal(row?.searchText, sentinel);
@@ -674,7 +769,7 @@ test('applyRekey test 5: skipped groups are untouched and each is counted', asyn
   const ids = [editedId, unparsableId, collisionA, collisionB];
   const before = ids.map((id) => getGroup(db, id));
 
-  const report = await applyRekey(db, registry, {});
+  const report = await applyRekey(db, registry, DEPS);
   assert.equal(report.skippedEdited, 1);
   assert.equal(report.skippedUnparsable, 1);
   assert.equal(report.skippedCollision, 2);
@@ -700,7 +795,7 @@ test('applyRekey test 6: edited_at, list_rank_at, created_at and picked_release_
   const before = getGroup(db, groupId);
   assert.ok(before !== null);
 
-  const report = await applyRekey(db, registry, {});
+  const report = await applyRekey(db, registry, DEPS);
   assert.equal(report.moved, 1);
 
   const after = getGroup(db, groupId);
@@ -771,7 +866,7 @@ test('applyRekey test 7: a group whose write throws is counted in failed and doe
 
   const before = getGroup(db, poisonedId);
 
-  const report = await applyRekey(db, registry, {});
+  const report = await applyRekey(db, registry, DEPS);
   assert.equal(report.failed, 1);
   assert.equal(report.moved, 2, 'both the group before and the group behind the poisoned one must still move');
 
@@ -787,4 +882,208 @@ test('applyRekey test 7: a group whose write throws is counted in failed and doe
 
   const fineAfter = getGroup(db, fineId);
   assert.notEqual(fineAfter?.identityKey, 'site:2026-06-09:charlie-delta-german');
+});
+
+// ---------------------------------------------------------------------------
+// Task 4a: the merge. The only outcome in this pass that deletes a row, and
+// the only one narrowing a spec decision rather than implementing it — see
+// spec §5 for the two classes of collision and why exactly one of them is
+// merged. Everything below is about which class a given pair falls in, and
+// the answer is always read off `groupHistory`, never off the titles.
+// ---------------------------------------------------------------------------
+
+test('applyRekey test 8: a mover with no history folds into the holder, which keeps its key, pick and files', async () => {
+  const { db, plugin, registry } = setup();
+  const { holderId, moverId } = collidingPair(db, plugin, { date: '26.07.01', name: 'Foxy.Dreams' });
+
+  // The holder is the group the owner's real 1137 is: picked, downloaded,
+  // with a file in the library under its own name.
+  const holderReleaseId = releaseIdFor(db, holderId);
+  const holderDownloadId = addDownload(db, holderId, holderReleaseId);
+  const holderFileId = addImportedFile(db, {
+    downloadId: holderDownloadId,
+    groupId: holderId,
+    destPath: '/library/Site/holder.mp4',
+  });
+  markPicked(db, holderId, holderReleaseId);
+  const holderBefore = getGroup(db, holderId);
+  assert.ok(holderBefore !== null);
+
+  // And the mover is 106: several releases, one of them better than anything
+  // the holder has, and nothing else at all. Metadata on both, because the
+  // source's must go before the delete can succeed (`group_id REFERENCES
+  // media_groups` with no ON DELETE) and the survivor's must not.
+  const moverExtraId = addRelease(db, moverId, { rawTitle: 'Site.26.07.01.Foxy_Dreams.XXX.1080p.MP4-WRB', score: 100 });
+  const moverReleaseIds = releaseIdsFor(db, moverId);
+  assert.equal(moverReleaseIds.length, 2, 'the mover must bring more than one release, or "every release moves" is untested');
+  seedAllMetadataTables(db, moverId);
+  seedAllMetadataTables(db, holderId);
+
+  const report = await applyRekey(db, registry, DEPS);
+  assert.equal(report.merged, 1);
+  assert.equal(report.failed, 0);
+  assert.equal(report.skippedCollision, 0);
+
+  assert.equal(getGroup(db, moverId), null, 'the mover is gone');
+  assert.deepEqual(
+    releaseIdsFor(db, holderId),
+    [holderReleaseId, ...moverReleaseIds].toSorted((a, b) => a - b),
+    'every one of the mover\'s releases is now the holder\'s',
+  );
+
+  const holderAfter = getGroup(db, holderId);
+  assert.ok(holderAfter !== null);
+  assert.equal(holderAfter?.identityKey, holderBefore?.identityKey, 'the holder keeps the key it already held');
+  assert.equal(holderAfter?.display, holderBefore?.display);
+  assert.equal(holderAfter?.pickedReleaseId, holderReleaseId, 'the merge never re-picks');
+  // The point of the whole exercise, stated as an assertion: the better
+  // encode the user could not previously see is now flagged on the group they
+  // actually have, and the group has moved up the list because of it.
+  assert.equal(holderAfter?.upgradeReleaseId, moverExtraId);
+  assert.equal(holderAfter?.listRankAt, MERGE_NOW);
+
+  const holderFile = db.prepare('SELECT group_id FROM imported_files WHERE id = ?').get(holderFileId);
+  assert.equal(Number((holderFile as { group_id: number }).group_id), holderId, 'the holder keeps its imported file');
+
+  assertMetadataTablesEmpty(db, moverId);
+  assertMetadataTablesSurvive(db, holderId);
+});
+
+test('applyRekey test 9: a mover with a download is not merged, and the holder is not merged away instead', async () => {
+  const { db, plugin, registry } = setup();
+  const { holderId, moverId } = collidingPair(db, plugin, { date: '26.07.02', name: 'Golf.Hotel' });
+  const moverReleaseIds = releaseIdsFor(db, moverId);
+  const holderReleaseIds = releaseIdsFor(db, holderId);
+  addDownload(db, moverId, releaseIdFor(db, moverId));
+  // The holder deliberately has none. This is the direction assertion: with
+  // history on the mover and none on the holder, the one merge that would
+  // still be possible is the reverse one, and the pass must refuse it rather
+  // than delete the group that actually holds the key. Nothing in the rule
+  // reads which group is moving; it reads what each would lose.
+
+  const report = await applyRekey(db, registry, DEPS);
+  assert.equal(report.merged, 0);
+  assert.equal(report.skippedCollision, 1);
+  assert.equal(report.failed, 0);
+
+  assert.notEqual(getGroup(db, moverId), null, 'the mover survives');
+  assert.notEqual(getGroup(db, holderId), null, 'and so does the holder');
+  assert.deepEqual(releaseIdsFor(db, moverId), moverReleaseIds, 'no releases moved either way');
+  assert.deepEqual(releaseIdsFor(db, holderId), holderReleaseIds);
+});
+
+test('applyRekey test 10: a mover whose only history is a trashed imported file is not merged', async () => {
+  const { db, plugin, registry } = setup();
+  const { holderId, moverId } = collidingPair(db, plugin, { date: '26.07.03', name: 'India.Juliet' });
+
+  // The download hangs off the holder on purpose. `groupHistory` answers
+  // `imported-files` before it looks at downloads, so a mover carrying a
+  // download of its own would be refused on that branch and this test would
+  // pass without the trashed row ever mattering.
+  const holderDownloadId = addDownload(db, holderId, releaseIdFor(db, holderId));
+  addImportedFile(db, {
+    downloadId: holderDownloadId,
+    groupId: moverId,
+    destPath: '/library/Site/mover-trashed.mp4',
+    trashedAt: 5,
+  });
+
+  const report = await applyRekey(db, registry, DEPS);
+  // A trashed file is still a file that was placed on disk under this group's
+  // name, and the trash row records where it went. Merging would delete the
+  // group that record points at.
+  assert.equal(report.merged, 0);
+  assert.equal(report.skippedCollision, 1);
+  assert.notEqual(getGroup(db, moverId), null);
+  assert.notEqual(getGroup(db, holderId), null);
+});
+
+test('applyRekey test 11: two groups that both carry history are a counted skipped-collision', async () => {
+  const { db, plugin, registry } = setup();
+  const { holderId, moverId } = collidingPair(db, plugin, { date: '26.07.04', name: 'Kilo.Lima' });
+  const moverDownloadId = addDownload(db, moverId, releaseIdFor(db, moverId));
+  addImportedFile(db, { downloadId: moverDownloadId, groupId: moverId, destPath: '/library/Site/mover.mp4' });
+  const holderDownloadId = addDownload(db, holderId, releaseIdFor(db, holderId));
+  addImportedFile(db, { downloadId: holderDownloadId, groupId: holderId, destPath: '/library/Site/holder.mp4' });
+
+  // Spec §5's original class reaches here too: two genuinely different scenes
+  // that collide only because the parser stopped distinguishing them will
+  // ordinarily have files on both sides, and this is the outcome that keeps
+  // them both.
+  const report = await applyRekey(db, registry, DEPS);
+  assert.equal(report.merged, 0);
+  assert.equal(report.skippedCollision, 1);
+  assert.notEqual(getGroup(db, moverId), null);
+  assert.notEqual(getGroup(db, holderId), null);
+});
+
+test('applyRekey test 12: with neither group carrying history the holder survives, whatever the ids are', async () => {
+  const { db, plugin, registry } = setup();
+  // Inserted mover-first, so the surviving group is the *higher* id. The
+  // survivor is not a tiebreak between two equal candidates: it is whichever
+  // group already occupies the slot, which is the only choice `mergeGroupInto`
+  // can make — merging the other way would have to re-key the survivor into
+  // the freed slot as well. Pinned with the ids ordered against it so that a
+  // future "lowest id wins" reading (migration 4's last resort,
+  // `migrations.ts:254-260`) cannot be adopted here by accident.
+  const { holderId, moverId } = collidingPair(db, plugin, {
+    date: '26.07.05',
+    name: 'Mike.November',
+    moverFirst: true,
+  });
+  assert.ok(moverId < holderId, 'the fixture only proves anything if the survivor is the higher id');
+  const holderBefore = getGroup(db, holderId);
+
+  const report = await applyRekey(db, registry, DEPS);
+  assert.equal(report.merged, 1);
+  assert.equal(getGroup(db, moverId), null);
+  assert.equal(getGroup(db, holderId)?.identityKey, holderBefore?.identityKey);
+  // Nothing arrived that beats a pick the holder does not have, so the merge
+  // is not an arrival and the list order stands.
+  assert.equal(getGroup(db, holderId)?.listRankAt, holderBefore?.listRankAt);
+});
+
+test('applyRekey test 13: the surviving group is not stamped edited_at', async () => {
+  const { db, plugin, registry } = setup();
+  const { holderId, moverId } = collidingPair(db, plugin, { date: '26.07.06', name: 'Oscar.Papa' });
+
+  const report = await applyRekey(db, registry, DEPS);
+  assert.equal(report.merged, 1);
+  assert.equal(getGroup(db, moverId), null);
+  // The manual merge this body was lifted from stamps the survivor, and its
+  // comment justifies that by a human having named the scene. A pass is not a
+  // human, and `edited_at` is what tells the *next* run of this pass to leave
+  // a row alone (test 3, `migrations.ts:268-272`) — so stamping here would
+  // exempt every merged-into group from every future parser fix.
+  assert.equal(getGroup(db, holderId)?.editedAt, null);
+});
+
+test('applyRekey test 14: a merge that throws is counted in failed and does not stop the pass', async () => {
+  const { db, plugin, registry } = setup();
+  const poisoned = collidingPair(db, plugin, { date: '26.07.07', name: 'Quebec.Romeo' });
+  const clean = collidingPair(db, plugin, { date: '26.07.08', name: 'Sierra.Tango' });
+  seedAllMetadataTables(db, poisoned.moverId);
+  const poisonedReleaseIds = releaseIdsFor(db, poisoned.moverId);
+
+  // Poisoned from outside the code under test, as applyRekey test 7 does, and
+  // aimed at the delete: that is the last statement of the merge, so a
+  // rollback here has the largest amount of already-applied work to undo, and
+  // the assertions below are how we know it undid all of it rather than
+  // leaving the releases parked on a group the pass then failed to delete.
+  db.exec(
+    `CREATE TRIGGER poison_merge BEFORE DELETE ON media_groups
+     FOR EACH ROW WHEN OLD.id = ${poisoned.moverId}
+     BEGIN SELECT RAISE(ROLLBACK, 'poisoned merge'); END;`,
+  );
+
+  const report = await applyRekey(db, registry, DEPS);
+  assert.equal(report.failed, 1);
+  assert.equal(report.merged, 1, 'the merge behind the poisoned one must still happen');
+
+  assert.notEqual(getGroup(db, poisoned.moverId), null, 'the failed merge leaves its mover in place');
+  assert.deepEqual(releaseIdsFor(db, poisoned.moverId), poisonedReleaseIds, 'and its releases with it');
+  assertMetadataTablesSurvive(db, poisoned.moverId);
+
+  assert.equal(getGroup(db, clean.moverId), null);
+  assert.notEqual(getGroup(db, clean.holderId), null);
 });
