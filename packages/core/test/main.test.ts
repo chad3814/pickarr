@@ -1,12 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, rename as realRename, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
+import { openTestDatabase } from '../src/db/open.ts';
 import type { PluginRegistry } from '../src/plugins/registry.ts';
-import { composeMetadataTick, entryFromArgv, pluginById, resolveArtworkDir } from '../src/main.ts';
+import type { RekeyDeps } from '../src/pipeline/rekey.ts';
+import {
+  composeMetadataTick,
+  entryFromArgv,
+  pluginById,
+  resolveArtworkDir,
+  runRekeyAtBoot,
+} from '../src/main.ts';
 
 const MAIN_TS_PATH = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
@@ -159,4 +167,56 @@ test('composeMetadataTick awaits the scene pass before starting the performer pa
   await tick();
 
   assert.deepEqual(calls, ['scenes', 'performers']);
+});
+
+// ---------------------------------------------------------------------------
+// Task 6: runRekeyAtBoot — the startup wiring around runRekeyOnBoot. This is
+// the "startup test" the task report's Step 5 break-on-purpose refers to:
+// remove the try/catch inside runRekeyAtBoot and the second test below is
+// the one that fails, because nothing left upstream would catch the throw
+// this fake registry produces.
+// ---------------------------------------------------------------------------
+
+const REAL_DEPS: RekeyDeps = {
+  now: () => Date.now(),
+  rename: realRename,
+  commit: (handle) => handle.exec('COMMIT'),
+};
+
+test('runRekeyAtBoot: an empty database logs a report line and resolves without throwing', async () => {
+  const db = openTestDatabase();
+  const messages: string[] = [];
+  await runRekeyAtBoot(db, fakeRegistry(), REAL_DEPS, (message) => messages.push(message));
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0]?.includes('rekey:'));
+});
+
+test('runRekeyAtBoot: a pass that throws outright is logged and does not stop startup', async () => {
+  const db = openTestDatabase();
+  // `planRekey` calls `registry.all()` before anything else, outside any
+  // try/catch of its own — the cleanest way to force a genuine, uncaught
+  // throw out of the whole `runRekeyOnBoot` call, standing in for whatever a
+  // real parser regression could do that `applyRekey`'s own per-group
+  // try/catch does not already convert into a counted `failed`.
+  const explodingRegistry: PluginRegistry = {
+    byPackage: () => {
+      throw new Error('unused in this test');
+    },
+    byId: () => undefined,
+    libraryRoot: () => '/media',
+    libraryRootById: () => '/media',
+    all: () => {
+      throw new Error('registry exploded');
+    },
+  };
+
+  const messages: string[] = [];
+  // If runRekeyAtBoot's try/catch is removed, this `await` rejects and the
+  // test fails — which is exactly the break-on-purpose evidence Step 5 asks
+  // for. With the try/catch in place, it resolves, and the thrown message is
+  // what ends up logged instead of taking the process down.
+  await runRekeyAtBoot(db, explodingRegistry, REAL_DEPS, (message) => messages.push(message));
+
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0]?.includes('registry exploded'), 'the caught error must be visible in the boot log');
 });

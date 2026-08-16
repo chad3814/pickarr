@@ -13,7 +13,16 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import { recordDiscoveredSite } from '../../src/db/sites.ts';
 import { validateIdentity } from '../../src/ingest/commit.ts';
 import { lstatOrNull } from '../../src/pipeline/import.ts';
-import { applyRekey, planRekey, type RekeyDeps, type RekeyOutcome } from '../../src/pipeline/rekey.ts';
+import { getAppState, setAppState } from '../../src/db/app-state.ts';
+import {
+  applyRekey,
+  countDrift,
+  planRekey,
+  REKEY_MARKER_KEY,
+  runRekeyOnBoot,
+  type RekeyDeps,
+  type RekeyOutcome,
+} from '../../src/pipeline/rekey.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 
 const LIBRARY_ROOT = '/library';
@@ -1526,4 +1535,154 @@ test('applyRekey test 21: a group with two live files renames both, or neither i
   } finally {
     await rm(libraryRoot, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task 6: runRekeyOnBoot / countDrift — the boot wiring. Everything above
+// tests planRekey and applyRekey directly, without an app_state marker in the
+// picture at all; everything below tests the marker that decides whether a
+// given boot writes anything.
+// ---------------------------------------------------------------------------
+
+/**
+ * A `RekeyDeps.now` that always throws, for test 3 below. Safe to use across
+ * a whole `applyRekey` call only when the fixture has no colliding groups:
+ * `deps.now()` is called nowhere inside `applyRekey` except inside the merge
+ * branch's own try/catch (see `applyRekey`'s module comment), so with no
+ * merge to trigger, this throws for the first time exactly where test 3
+ * means it to — `runRekeyOnBoot`'s own, uncaught, call to `deps.now()` for
+ * the marker's `updated_at`.
+ */
+const THROWING_NOW: RekeyDeps['now'] = () => {
+  throw new Error('clock unavailable');
+};
+
+test('runRekeyOnBoot test 1: with no marker, the pass applies and then writes the marker', async () => {
+  const { db, plugin, registry } = setup();
+  assert.equal(getAppState(db, REKEY_MARKER_KEY), null);
+
+  const rawTitle = 'Site.26.09.01.Alpha.Boot.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-09-01:alpha-boot-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+  // Sanctioned exception, as elsewhere in this file: the property under test
+  // is that the pass actually ran, not what today's parser says, so this only
+  // asserts the plugin still parses the title, never a hardcoded slug.
+  assert.notEqual(plugin.parse(rawTitle), null);
+
+  const outcome = await runRekeyOnBoot(db, registry, DEPS);
+  assert.equal(outcome.applied, true);
+  assert.ok(outcome.report !== null);
+  assert.equal(outcome.report?.moved, 1);
+
+  const row = getGroup(db, groupId);
+  assert.notEqual(row?.identityKey, 'site:2026-09-01:alpha-boot-german', 'the group must actually have moved');
+
+  assert.notEqual(getAppState(db, REKEY_MARKER_KEY), null, 'the marker must be written after applying');
+});
+
+test('runRekeyOnBoot test 2: with the marker present, the pass does not apply — proven by a sentinel', async () => {
+  const { db, registry } = setup();
+  const rawTitle = 'Site.26.09.02.Bravo.Boot.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-09-02:bravo-boot-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+  setAppState(db, REKEY_MARKER_KEY, 'done', 1);
+
+  // Same sentinel technique as applyRekey test 4: a value the writer would
+  // clobber if it ran at all, not an equality check against the (already
+  // stale) stored value, which would pass even on a bug that ran the pass
+  // and happened to leave this particular column alone.
+  const sentinel = 'SENTINEL-runRekeyOnBoot-marker-set-search-text';
+  db.prepare('UPDATE media_groups SET search_text = ? WHERE id = ?').run(sentinel, groupId);
+
+  const outcome = await runRekeyOnBoot(db, registry, DEPS);
+  assert.equal(outcome.applied, false);
+  assert.equal(outcome.report, null);
+  assert.equal(outcome.drift, 1, 'this group would move if the pass ran, so it is counted as drift');
+
+  const row = getGroup(db, groupId);
+  assert.equal(row?.identityKey, 'site:2026-09-02:bravo-boot-german', 'the key must be untouched');
+  assert.equal(row?.searchText, sentinel, 'the sentinel surviving proves nothing was written');
+});
+
+test('runRekeyOnBoot test 3: a throw before the marker write leaves it unset, and a second run finishes cleanly', async () => {
+  // Ruling (overrides the brief): the brief's original test 3 asked for the
+  // marker to be written "in the same transaction as the final batch". There
+  // is no batch — Task 4 commits one group's transaction at a time,
+  // deliberately, so a single poison row cannot roll back the groups that
+  // already landed — and inventing one here would undo that. What this
+  // proves instead: the marker write is its own transaction, *after* every
+  // group's own transaction has already committed, so an interruption
+  // between "every group committed" and "marker written" just leaves the
+  // marker unset. The next boot reruns `runRekeyOnBoot` from the top, reads
+  // every already-moved group as `unchanged`, and only redoes whatever is
+  // genuinely still outstanding — nothing, in this fixture, since the
+  // interrupted run already finished writing both groups. Safe because the
+  // pass converges (see `runRekeyOnBoot`'s own comment, and Task 7).
+  const { db, registry } = setup();
+  const rawTitleA = 'Site.26.09.03.Charlie.Boot.GERMAN.XXX.1080p.MP4-GRP';
+  const groupA = groupWithRelease(db, {
+    rawTitle: rawTitleA,
+    identityKey: 'site:2026-09-03:charlie-boot-german',
+    display: '{"title":"stale a","fields":[]}',
+  });
+  const rawTitleB = 'Site.26.09.04.Delta.Boot.GERMAN.XXX.1080p.MP4-GRP2';
+  const groupB = groupWithRelease(db, {
+    rawTitle: rawTitleB,
+    identityKey: 'site:2026-09-04:delta-boot-german',
+    display: '{"title":"stale b","fields":[]}',
+  });
+
+  await assert.rejects(
+    () => runRekeyOnBoot(db, registry, { now: THROWING_NOW, rename: realRename, commit: REAL_COMMIT }),
+    /clock unavailable/,
+  );
+
+  assert.equal(getAppState(db, REKEY_MARKER_KEY), null, 'the marker must not be written');
+  // The groups themselves were already committed, each in its own
+  // transaction, before the throw — proof this interrupted the marker write,
+  // not the pass itself.
+  const rowA = getGroup(db, groupA);
+  const rowB = getGroup(db, groupB);
+  assert.notEqual(rowA?.identityKey, 'site:2026-09-03:charlie-boot-german');
+  assert.notEqual(rowB?.identityKey, 'site:2026-09-04:delta-boot-german');
+
+  // Second run: the marker is still unset, so it takes the apply path again —
+  // and finds nothing left to do, because both groups already read
+  // `unchanged`. "Finishes cleanly" here means exactly that: the marker gets
+  // written this time, with zero further groups to move.
+  const outcome = await runRekeyOnBoot(db, registry, DEPS);
+  assert.equal(outcome.applied, true);
+  assert.equal(outcome.report?.moved, 0, 'both groups were already fixed by the interrupted run');
+  assert.notEqual(getAppState(db, REKEY_MARKER_KEY), null, 'the second run must write the marker');
+});
+
+test('runRekeyOnBoot test 4: countDrift runs planRekey only, writes nothing, and ignores the marker', () => {
+  const { db, plugin, registry } = setup();
+  const movingRaw = 'Site.26.09.05.Echo.Boot.GERMAN.XXX.1080p.MP4-GRP';
+  groupWithRelease(db, {
+    rawTitle: movingRaw,
+    identityKey: 'site:2026-09-05:echo-boot-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+  const stationaryRaw = 'Site.26.09.06.Foxtrot.Boot.XXX.1080p.MP4-GRP2';
+  groupWithRelease(db, { rawTitle: stationaryRaw, ...agreeingIdentity(plugin, stationaryRaw) });
+
+  const before = db.prepare('SELECT id, identity_key, display, search_text FROM media_groups ORDER BY id').all();
+
+  assert.equal(countDrift(db, registry), 1, 'only the moving group counts as drift');
+
+  const after = db.prepare('SELECT id, identity_key, display, search_text FROM media_groups ORDER BY id').all();
+  assert.deepEqual(after, before, 'countDrift must write nothing, ever');
+
+  // The marker's presence must not change the answer at all: countDrift is a
+  // pure read over planRekey's own output, never gated on app_state — the
+  // gating on the marker belongs entirely to runRekeyOnBoot, one level up.
+  setAppState(db, REKEY_MARKER_KEY, 'done', 1);
+  assert.equal(countDrift(db, registry), 1);
 });
