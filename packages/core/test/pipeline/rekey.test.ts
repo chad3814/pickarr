@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import createScenesPlugin from '@pickarr/plugin-scenes';
+import { getGroup } from '../../src/db/groups.ts';
+import { recordMetadataAnswer } from '../../src/db/metadata.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { recordDiscoveredSite } from '../../src/db/sites.ts';
 import { validateIdentity } from '../../src/ingest/commit.ts';
-import { planRekey, type RekeyOutcome } from '../../src/pipeline/rekey.ts';
+import { applyRekey, planRekey, type RekeyOutcome } from '../../src/pipeline/rekey.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 
 const LIBRARY_ROOT = '/library';
@@ -457,4 +459,296 @@ test('3-way collision: two movers and a holder targeting one slot are each skipp
   // away just because it happens to have no history of its own.
   assert.notEqual(mover1Outcome.kind, 'merge');
   assert.notEqual(mover2Outcome.kind, 'merge');
+});
+
+// ---------------------------------------------------------------------------
+// Task 4: applyRekey — the writer. planRekey above never touches the
+// database; everything below proves the write half does exactly as much,
+// and no more.
+// ---------------------------------------------------------------------------
+
+/** Every table `clearGroupMetadata` clears, enumerated rather than counted,
+ * so a future fifth table added there fails these tests by omission instead
+ * of silently passing. `group_performers` is the newest of the four
+ * (`db/metadata.ts:387`, `e229966`) and the one a test copied from an older
+ * plan would miss. */
+const METADATA_TABLES = ['group_metadata', 'metadata_queue', 'metadata_candidates', 'group_performers'] as const;
+
+/**
+ * Leaves a row for `groupId` in all four `METADATA_TABLES`: an answer, a
+ * rejected candidate recorded alongside it, a cast link, and a queue row
+ * inserted directly afterward, mirroring the equivalent fixture in
+ * `manual/operations.test.ts` — `recordMetadataAnswer` itself deletes the
+ * queue row it answers, so the still-queued row has to be added back after.
+ * The cast is deliberately non-empty: an empty `performers` array would
+ * leave no row in `group_performers` at all, and a test built that way would
+ * pass against a `clearGroupMetadata` that had never heard of that table.
+ */
+function seedAllMetadataTables(db: DatabaseSync, groupId: number): void {
+  recordMetadataAnswer(db, {
+    groupId,
+    source: 'theporndb',
+    confirmed: {
+      sourceUuid: `source-uuid-${groupId}`,
+      title: 'Some Scene',
+      siteUuid: null,
+      siteId: null,
+      siteName: 'Site',
+      date: '2020-01-01',
+      performers: [
+        {
+          sourceUuid: `performer-uuid-${groupId}`,
+          slug: `performer-${groupId}`,
+          name: 'Some Performer',
+          kind: 'performer',
+          faceUrl: null,
+          imageUrl: null,
+        },
+      ],
+      durationSeconds: null,
+      synopsis: null,
+      posterUrl: null,
+      slug: null,
+    },
+    nearMisses: [
+      {
+        candidate: {
+          sourceUuid: `rejected-uuid-${groupId}`,
+          title: 'Rejected Scene',
+          siteUuid: null,
+          siteId: null,
+          siteName: 'Site',
+          date: '2020-01-01',
+          performers: [],
+          durationSeconds: null,
+          synopsis: null,
+          posterUrl: null,
+          slug: null,
+        },
+        reason: 'date outside window',
+      },
+    ],
+    now: 1000,
+  });
+  db.prepare(
+    `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+     VALUES (?, 2000, 0, 2000)`,
+  ).run(groupId);
+}
+
+function assertMetadataTablesEmpty(db: DatabaseSync, groupId: number): void {
+  for (const table of METADATA_TABLES) {
+    const row = db.prepare(`SELECT 1 FROM ${table} WHERE group_id = ?`).get(groupId);
+    assert.equal(row, undefined, `${table} must be cleared for group ${groupId}`);
+  }
+}
+
+function assertMetadataTablesSurvive(db: DatabaseSync, groupId: number): void {
+  for (const table of METADATA_TABLES) {
+    const row = db.prepare(`SELECT 1 FROM ${table} WHERE group_id = ?`).get(groupId);
+    assert.notEqual(row, undefined, `${table} must survive for group ${groupId}`);
+  }
+}
+
+test('applyRekey test 1: a move proposal writes identity_key, display and search_text together', async () => {
+  const { db, plugin, registry } = setup();
+  const rawTitle = 'Site.26.06.01.November.Oscar.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-06-01:november-oscar-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+
+  // Sanctioned exception, as in planRekey's case 2 above: the property under
+  // test is agreement with the parser, so the expected values come from
+  // calling the plugin, not from a hardcoded slug.
+  const parsed = plugin.parse(rawTitle);
+  assert.notEqual(parsed, null);
+  const validated = validateIdentity(parsed as ParsedRelease);
+  assert.ok('identity' in validated);
+  const expected = (validated as { identity: { identityKey: string; displayJson: string; searchText: string } })
+    .identity;
+
+  const report = await applyRekey(db, registry, {});
+  assert.equal(report.moved, 1);
+
+  const row = getGroup(db, groupId);
+  assert.ok(row !== null);
+  assert.equal(row?.identityKey, expected.identityKey);
+  assert.equal(row?.display, expected.displayJson);
+  assert.equal(row?.searchText, expected.searchText);
+});
+
+test('applyRekey test 2: a displayChanged move clears all four metadata tables', async () => {
+  const { db, registry } = setup();
+  const rawTitle = 'Site.26.06.02.Papa.Quebec.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-06-02:papa-quebec-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+  seedAllMetadataTables(db, groupId);
+
+  const report = await applyRekey(db, registry, {});
+  assert.equal(report.moved, 1, 'fixture must actually move, or the clear below proves nothing');
+
+  assertMetadataTablesEmpty(db, groupId);
+});
+
+test('applyRekey test 3: a move whose display already matches the parse does not clear metadata', async () => {
+  const { db, plugin, registry } = setup();
+  const rawTitle = 'Site.26.06.03.Romeo.Sierra.XXX.1080p.MP4-GRP';
+  const correct = agreeingIdentity(plugin, rawTitle);
+  // Reachable: the stored key and the stored display are independent
+  // columns, not derived from one another, so a group can carry a wrong key
+  // next to an already-correct display. That is exactly the condition
+  // `displayChanged` gates on — the mirror of planRekey's case 7 above,
+  // which reaches "key survives, display doesn't"; this reaches "key moves,
+  // display doesn't".
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-06-03:wrong-stored-key',
+    display: correct.display,
+  });
+  seedAllMetadataTables(db, groupId);
+
+  const report = await applyRekey(db, registry, {});
+  assert.equal(report.moved, 1);
+  const row = getGroup(db, groupId);
+  assert.equal(row?.identityKey, correct.identityKey, 'the key must still move');
+
+  assertMetadataTablesSurvive(db, groupId);
+});
+
+test('applyRekey test 4: an unchanged group is not written at all', async () => {
+  const { db, plugin, registry } = setup();
+  const rawTitle = 'Site.26.06.04.Sierra.Tango.XXX.1080p.MP4-GRP';
+  const identity = agreeingIdentity(plugin, rawTitle);
+  const groupId = groupWithRelease(db, { rawTitle, ...identity });
+
+  // A value the writer would overwrite if it wrote at all. Comparing stored
+  // vs. computed search_text would pass even on a bug that writes the
+  // (already-correct) value back — this sentinel differs from what a write
+  // would produce, so its survival is proof no write happened.
+  const sentinel = 'SENTINEL-applyRekey-unchanged-search-text';
+  db.prepare('UPDATE media_groups SET search_text = ? WHERE id = ?').run(sentinel, groupId);
+
+  const report = await applyRekey(db, registry, {});
+  assert.equal(report.moved, 0);
+  const row = getGroup(db, groupId);
+  assert.equal(row?.searchText, sentinel);
+});
+
+test('applyRekey test 5: skipped groups are untouched and each is counted', async () => {
+  const { db, registry } = setup();
+
+  const editedRaw = 'Site.26.06.05.Uniform.Victor.GERMAN.XXX.1080p.MP4-GRP';
+  const editedId = groupWithRelease(db, {
+    rawTitle: editedRaw,
+    identityKey: 'site:2026-06-05:uniform-victor-german',
+    display: '{"title":"stale edited","fields":[]}',
+    editedAt: 500,
+  });
+
+  const unparsableId = groupWithRelease(db, {
+    rawTitle: 'hello',
+    identityKey: 'whatever:something',
+    display: '{"title":"whatever","fields":[]}',
+  });
+
+  const collisionRawA = 'Site.26.06.06.Whiskey.Xray.XXX.1080p.MP4-GRP';
+  const collisionRawB = 'Site.26.06.06.Whiskey.Xray.XXX.2160p.MP4-GRP2';
+  const collisionA = groupWithRelease(db, {
+    rawTitle: collisionRawA,
+    identityKey: 'site:2026-06-06:whiskey-xray-old-a',
+    display: '{"title":"stale a","fields":[]}',
+  });
+  const collisionB = groupWithRelease(db, {
+    rawTitle: collisionRawB,
+    identityKey: 'site:2026-06-06:whiskey-xray-old-b',
+    display: '{"title":"stale b","fields":[]}',
+  });
+  addDownload(db, collisionA, releaseIdFor(db, collisionA));
+  addDownload(db, collisionB, releaseIdFor(db, collisionB));
+
+  const ids = [editedId, unparsableId, collisionA, collisionB];
+  const before = ids.map((id) => getGroup(db, id));
+
+  const report = await applyRekey(db, registry, {});
+  assert.equal(report.skippedEdited, 1);
+  assert.equal(report.skippedUnparsable, 1);
+  assert.equal(report.skippedCollision, 2);
+  assert.equal(report.moved, 0);
+
+  const after = ids.map((id) => getGroup(db, id));
+  assert.deepEqual(after, before);
+});
+
+test('applyRekey test 6: edited_at, list_rank_at, created_at and picked_release_id are untouched by a move', async () => {
+  const { db, registry } = setup();
+  const rawTitle = 'Site.26.06.07.Yankee.Zulu.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-06-07:yankee-zulu-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+  const releaseId = releaseIdFor(db, groupId);
+  // Set to a real, non-null value rather than left at its default null, so
+  // survival is a meaningful assertion and not a null-equals-null accident.
+  db.prepare('UPDATE media_groups SET picked_release_id = ? WHERE id = ?').run(releaseId, groupId);
+
+  const before = getGroup(db, groupId);
+  assert.ok(before !== null);
+
+  const report = await applyRekey(db, registry, {});
+  assert.equal(report.moved, 1);
+
+  const after = getGroup(db, groupId);
+  assert.ok(after !== null);
+  // A pass is not a human: stamping edited_at here would immunise this group
+  // against the next re-key pass (migrations.ts:268-272).
+  assert.equal(after?.editedAt, null);
+  assert.equal(after?.listRankAt, before?.listRankAt);
+  assert.equal(after?.createdAt, before?.createdAt);
+  assert.equal(after?.pickedReleaseId, releaseId);
+});
+
+test('applyRekey test 7: a group whose write throws is counted in failed and does not stop the pass', async () => {
+  const { db, registry } = setup();
+  const poisonRaw = 'Site.26.06.08.Alpha.Bravo.GERMAN.XXX.1080p.MP4-GRP';
+  const poisonedId = groupWithRelease(db, {
+    rawTitle: poisonRaw,
+    identityKey: 'site:2026-06-08:alpha-bravo-german',
+    display: '{"title":"stale poison","fields":[]}',
+  });
+  const fineRaw = 'Site.26.06.09.Charlie.Delta.GERMAN.XXX.1080p.MP4-GRP2';
+  const fineId = groupWithRelease(db, {
+    rawTitle: fineRaw,
+    identityKey: 'site:2026-06-09:charlie-delta-german',
+    display: '{"title":"stale fine","fields":[]}',
+  });
+
+  // Poisoned deliberately, from outside the code under test — the same
+  // technique `pipeline/metadata.test.ts` uses for the equivalent claim: a
+  // trigger that aborts only this one group's UPDATE, standing in for a
+  // broken constraint or a full disk. `applyRekey`'s own per-group
+  // transaction already unwinds this cleanly; this test exists to prove the
+  // *loop* survives it and still reaches the group behind it.
+  db.exec(
+    `CREATE TRIGGER poison_rekey BEFORE UPDATE ON media_groups
+     FOR EACH ROW WHEN NEW.id = ${poisonedId}
+     BEGIN SELECT RAISE(ABORT, 'poisoned row'); END;`,
+  );
+
+  const before = getGroup(db, poisonedId);
+
+  const report = await applyRekey(db, registry, {});
+  assert.equal(report.failed, 1);
+  assert.equal(report.moved, 1, 'the group behind the poisoned one must still move');
+
+  const poisonedAfter = getGroup(db, poisonedId);
+  assert.equal(poisonedAfter?.identityKey, before?.identityKey, 'the poisoned group must be left at its old key');
+
+  const fineAfter = getGroup(db, fineId);
+  assert.notEqual(fineAfter?.identityKey, 'site:2026-06-09:charlie-delta-german');
 });
