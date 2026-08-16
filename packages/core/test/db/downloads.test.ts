@@ -7,10 +7,9 @@ import {
   bumpMissingPolls,
   clearAbsent,
   downloadLabel,
-  downloadsByLabel,
-  downloadsByRef,
   failDownload,
   getDownload,
+  indexDownloadsForClient,
   insertDownload,
   markAbsent,
   recordError,
@@ -270,7 +269,7 @@ test('resetForRetry clears absent_since so a retry does not inherit a stale abse
   db.close();
 });
 
-test('downloadsByRef includes failed rows and excludes imported rows, keyed on client_ref', () => {
+test('indexDownloadsForClient.byRef includes failed rows and excludes imported rows, keyed on client_ref', () => {
   const db = openTestDatabase();
   const kept = seed(db); // will be 'downloading'
   const failed = seedSecond(db, 2);
@@ -282,7 +281,7 @@ test('downloadsByRef includes failed rows and excludes imported rows, keyed on c
   setClientRef(db, imported, 'nzo_imported', 1);
   setStatus(db, imported, 'imported', 2);
 
-  const byRef = downloadsByRef(db, 'sab');
+  const { byRef } = indexDownloadsForClient(db, 'sab');
   assert.deepEqual([...byRef.keys()].toSorted(), ['nzo_failed', 'nzo_kept']);
   assert.equal(byRef.get('nzo_kept')?.id, kept);
   assert.equal(byRef.get('nzo_failed')?.id, failed);
@@ -290,7 +289,7 @@ test('downloadsByRef includes failed rows and excludes imported rows, keyed on c
   db.close();
 });
 
-test('downloadsByLabel keys on pickarr-<id> for the same row set as downloadsByRef', () => {
+test('indexDownloadsForClient.byLabel keys on pickarr-<id> for the same row set as byRef', () => {
   const db = openTestDatabase();
   const kept = seed(db);
   const imported = seedSecond(db, 2);
@@ -299,8 +298,23 @@ test('downloadsByLabel keys on pickarr-<id> for the same row set as downloadsByR
   setClientRef(db, imported, 'nzo_imported', 1);
   setStatus(db, imported, 'imported', 2);
 
-  const byLabel = downloadsByLabel(db, 'sab');
+  const { byLabel } = indexDownloadsForClient(db, 'sab');
   assert.deepEqual([...byLabel.keys()], [downloadLabel(kept)]);
   assert.equal(byLabel.get(downloadLabel(kept))?.id, kept);
+  db.close();
+});
+
+test('indexDownloadsForClient builds both maps from one query: a kept row is the same object in byRef and byLabel', () => {
+  const db = openTestDatabase();
+  const kept = seed(db);
+  setClientRef(db, kept, 'nzo_kept', 1);
+
+  const { byRef, byLabel } = indexDownloadsForClient(db, 'sab');
+  // Strict identity, not just equal values: this is what a single query
+  // building both maps from one row array actually guarantees, and what a
+  // second, separately-run query could not — two queries would give two
+  // distinct row objects with the same field values, and this assertion
+  // would still pass on that broken version if it only checked deepEqual.
+  assert.equal(byRef.get('nzo_kept'), byLabel.get(downloadLabel(kept)));
   db.close();
 });
