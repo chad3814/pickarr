@@ -1686,3 +1686,60 @@ test('runRekeyOnBoot test 4: countDrift runs planRekey only, writes nothing, and
   setAppState(db, REKEY_MARKER_KEY, 'done', 1);
   assert.equal(countDrift(db, registry), 1);
 });
+
+test('runRekeyOnBoot test 5: a hand-edited group contributes zero drift, in the read-only check and the applied count alike', async () => {
+  // Fix round 1: `skippedEdited` was originally folded into drift, which
+  // gives the number a permanent floor — a hand-edited group is skipped
+  // forever, by design (migrations.ts:268-272), so counting it as
+  // "diverging" would report it as such at every single boot for the life
+  // of the database. On the owner's real data that floor is 33 groups: a
+  // count that can never reach zero stops working as a signal.
+  const { db, plugin, registry } = setup();
+
+  // Would move if it weren't edited: the same "GERMAN" language-suffix
+  // staleness used throughout this file (see case 2), but with editedAt set
+  // so the pass must leave it alone forever regardless.
+  const editedRaw = 'Site.26.09.07.Golf.Boot.GERMAN.XXX.1080p.MP4-GRP';
+  groupWithRelease(db, {
+    rawTitle: editedRaw,
+    identityKey: 'site:2026-09-07:golf-boot-german',
+    display: '{"title":"stale edited","fields":[]}',
+    editedAt: 500,
+  });
+
+  // A second, genuinely moving group in the same fixture — so this test
+  // proves the exclusion is targeted at skipped-edited specifically, not a
+  // bug that zeroes out drift altogether.
+  const movingRaw = 'Site.26.09.08.Hotel.Boot.GERMAN.XXX.1080p.MP4-GRP2';
+  groupWithRelease(db, {
+    rawTitle: movingRaw,
+    identityKey: 'site:2026-09-08:hotel-boot-german',
+    display: '{"title":"stale moving","fields":[]}',
+  });
+
+  // Read-only path (marker set): countDrift must see the edited group as
+  // skipped-edited and exclude it, counting only the real mover.
+  assert.equal(countDrift(db, registry), 1, 'the edited group must not count, only the moving one');
+
+  // Applied path: a fresh database, so the marker is unset and applyRekey
+  // actually runs. The derived drift must agree with countDrift's answer —
+  // one, from the mover — not two.
+  const fresh = setup();
+  groupWithRelease(fresh.db, {
+    rawTitle: editedRaw,
+    identityKey: 'site:2026-09-07:golf-boot-german',
+    display: '{"title":"stale edited","fields":[]}',
+    editedAt: 500,
+  });
+  groupWithRelease(fresh.db, {
+    rawTitle: movingRaw,
+    identityKey: 'site:2026-09-08:hotel-boot-german',
+    display: '{"title":"stale moving","fields":[]}',
+  });
+  assert.notEqual(plugin.parse(editedRaw), null, 'sanity: the edited title must still be parsable');
+
+  const outcome = await runRekeyOnBoot(fresh.db, fresh.registry, DEPS);
+  assert.equal(outcome.applied, true);
+  assert.equal(outcome.report?.skippedEdited, 1, 'the edited group must still be counted in the report');
+  assert.equal(outcome.drift, 1, 'but excluded from drift — only the mover counts');
+});
