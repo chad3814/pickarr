@@ -6,7 +6,12 @@ import { loadConfig, readConfigDocument } from './config/load.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins, type PluginRegistry } from './plugins/registry.ts';
 import { createSabnzbdClient } from './clients/sabnzbd.ts';
-import { createTpdbClient, type SceneLookupClient, type SiteLookupClient } from './clients/theporndb.ts';
+import {
+  createTpdbClient,
+  type PerformerLookupClient,
+  type SceneLookupClient,
+  type SiteLookupClient,
+} from './clients/theporndb.ts';
 import type { DownloadClient } from './clients/types.ts';
 import { knownSiteNames } from './db/sites.ts';
 import { resolveSitesForBatch } from './pipeline/resolve-sites.ts';
@@ -17,6 +22,7 @@ import { importDownload } from './pipeline/import.ts';
 import { recoverInterruptedWork } from './pipeline/recover.ts';
 import { createScheduler } from './pipeline/scheduler.ts';
 import { createMetadataRunner } from './pipeline/metadata.ts';
+import { createPerformerRunner } from './pipeline/performers.ts';
 import type { ArtworkDeps } from './media/artwork.ts';
 import { buildServer } from './http/server.ts';
 
@@ -57,6 +63,26 @@ export function pluginById(registry: PluginRegistry): (id: string) => MediaTypeP
   return (id) => registry.byId(id) ?? null;
 }
 
+/**
+ * Composes the scene pass and the performer pass into the single closure the
+ * scheduler's `runMetadata` slot expects, awaiting each in turn rather than
+ * concurrently: both talk to the same rate-limited service, and running them
+ * with `Promise.all` would double the instantaneous request rate `perTick`
+ * exists to bound. Pulled out as its own pure function — rather than inlined
+ * at the call site — so the one property that actually needs pinning (scenes
+ * before performers) can be tested without `main()`'s config, database,
+ * fetch and scheduler machinery.
+ */
+export function composeMetadataTick(
+  runScenes: () => Promise<void>,
+  runPerformers: () => Promise<void>,
+): () => Promise<void> {
+  return async () => {
+    await runScenes();
+    await runPerformers();
+  };
+}
+
 async function main(): Promise<void> {
   const config = await loadConfig(CONFIG_PATH);
   // Captured before the server can rewrite the file, and parsed rather than
@@ -84,12 +110,12 @@ async function main(): Promise<void> {
     throw new Error(`downloadClients: no client registered for id ${firstClientConfig.id}`);
   }
 
-  // One client, used for both site lookup and scene metadata: `createTpdbClient`
-  // already returns an object satisfying both `SiteLookupClient` and
-  // `SceneLookupClient`, and both features read the same `siteLookup`
-  // credentials, so a second instance would just be a second, redundant
-  // holder of the same api key.
-  let tpdbClient: (SiteLookupClient & SceneLookupClient) | undefined;
+  // One client, used for site lookup, scene metadata and performer search:
+  // `createTpdbClient` already returns an object satisfying `SiteLookupClient`,
+  // `SceneLookupClient` and `PerformerLookupClient`, and all three features read
+  // the same `siteLookup` credentials, so a second instance would just be a
+  // second, redundant holder of the same api key.
+  let tpdbClient: (SiteLookupClient & SceneLookupClient & PerformerLookupClient) | undefined;
   if (config.siteLookup === undefined) {
     log('site lookup: not configured; date-at-end names use their first word as the site');
   } else {
@@ -144,7 +170,7 @@ async function main(): Promise<void> {
     // its own closure — see its doc comment in pipeline/metadata.ts for why
     // that has to happen here rather than being recomputed inside
     // `runMetadataPass` itself, which has no memory of the previous tick.
-    runMetadata = createMetadataRunner({
+    const runScenes = createMetadataRunner({
       db,
       client,
       pluginFor,
@@ -153,7 +179,33 @@ async function main(): Promise<void> {
       now: () => Date.now(),
       log,
     });
-    log(`metadata: enabled, every ${config.metadata.intervalSeconds}s, ${config.metadata.perTick} per tick`);
+    // One tick drives both passes, in order. No second interval: a second
+    // knob is a second thing to tune wrong, and both passes talk to the same
+    // rate-limited service, so sharing one cadence is what keeps the
+    // combined request rate predictable. "Predictable" is a bound, not a
+    // constant, though: the scene pass can enqueue up to `perTick` rows and
+    // the performer pass can then search them, so worst-case provider
+    // requests in one tick is the *sum* of both passes' `perTick`, not
+    // `perTick` itself. Scenes first — a performer search is the fallback for
+    // a scene lookup that settled without a cast, so the pass that produces
+    // those rows has to run before the pass that drains them. Each pass reads
+    // `now()` fresh when it runs, so a row the scene pass just enqueued
+    // (`next_at = now`) is already due by the time the performer pass reads
+    // the queue moments later — it is searched in this same tick, not the
+    // next one.
+    const runPerformers = createPerformerRunner({
+      db,
+      client,
+      pluginFor,
+      perTick: config.metadata.perTick,
+      now: () => Date.now(),
+      log,
+    });
+    runMetadata = composeMetadataTick(runScenes, runPerformers);
+    log(
+      `metadata: enabled, every ${config.metadata.intervalSeconds}s, ${config.metadata.perTick} per tick ` +
+        '(performer search shares the same tick)',
+    );
   }
 
   const scheduler = createScheduler({
