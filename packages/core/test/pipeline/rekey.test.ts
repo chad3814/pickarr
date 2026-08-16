@@ -703,22 +703,50 @@ const MERGE_NOW = 9_000_000;
 // `RekeyDeps` without a stub that would silently paper over that fact.
 const DEPS: RekeyDeps = { now: () => MERGE_NOW, rename: realRename, commit: REAL_COMMIT };
 
-/** Every table `clearGroupMetadata` clears, enumerated rather than counted,
- * so a future fifth table added there fails these tests by omission instead
- * of silently passing. `group_performers` is the newest of the four
- * (`db/metadata.ts:387`, `e229966`) and the one a test copied from an older
- * plan would miss. */
-const METADATA_TABLES = ['group_metadata', 'metadata_queue', 'metadata_candidates', 'group_performers'] as const;
+/**
+ * Every table `clearGroupMetadata` clears, enumerated rather than counted, so
+ * a future sixth table added there fails these tests by omission instead of
+ * silently passing.
+ *
+ * This list has now gone stale three times — three, then four, then five —
+ * each time a table was added to `clearGroupMetadata` without this literal
+ * growing alongside it. A derived version (reading `sqlite_master` for every
+ * table with a `group_id` column, say, or introspecting the statements
+ * `clearGroupMetadata` runs) was considered and rejected: either it recovers
+ * the same list `clearGroupMetadata` already encodes, which makes the
+ * assertion tautological against the very function under test, or it widens
+ * to "every table with a `group_id` foreign key" and starts failing on tables
+ * (`downloads`, `imported_files`) that `clearGroupMetadata` deliberately does
+ * *not* touch, per the no-cascade rationale on that function. A maintained
+ * literal, wrong in an obvious and loud way (a `FOREIGN KEY constraint
+ * failed` from `deleteGroup`, not a silently-passing test), beats either.
+ * `performer_queue` is the fifth and newest (`db/metadata.ts:387`).
+ *
+ * The obligation this comment exists to state: the next table added to
+ * `clearGroupMetadata` must be added here in the same change, and
+ * `seedAllMetadataTables` below must be taught to seed a row in it.
+ */
+const METADATA_TABLES = [
+  'group_metadata',
+  'metadata_queue',
+  'metadata_candidates',
+  'group_performers',
+  'performer_queue',
+] as const;
 
 /**
- * Leaves a row for `groupId` in all four `METADATA_TABLES`: an answer, a
- * rejected candidate recorded alongside it, a cast link, and a queue row
- * inserted directly afterward, mirroring the equivalent fixture in
- * `manual/operations.test.ts` — `recordMetadataAnswer` itself deletes the
- * queue row it answers, so the still-queued row has to be added back after.
- * The cast is deliberately non-empty: an empty `performers` array would
- * leave no row in `group_performers` at all, and a test built that way would
- * pass against a `clearGroupMetadata` that had never heard of that table.
+ * Leaves a row for `groupId` in all five `METADATA_TABLES`: an answer, a
+ * rejected candidate recorded alongside it, a cast link, a metadata-queue row
+ * inserted directly afterward, and a performer-queue row inserted directly
+ * afterward too — mirroring the equivalent fixture in
+ * `manual/operations.test.ts`. Both queue rows are added by hand rather than
+ * through their own insert helpers: `recordMetadataAnswer` itself deletes the
+ * metadata-queue row it answers, so it has to be re-added; and
+ * `insertPerformerSearch` refuses to queue a group that already has a cast
+ * (`groupHasCast`), which this group does, so it would silently no-op here.
+ * The cast is deliberately non-empty: an empty `performers` array would leave
+ * no row in `group_performers` at all, and a test built that way would pass
+ * against a `clearGroupMetadata` that had never heard of that table.
  */
 function seedAllMetadataTables(db: DatabaseSync, groupId: number): void {
   recordMetadataAnswer(db, {
@@ -768,6 +796,10 @@ function seedAllMetadataTables(db: DatabaseSync, groupId: number): void {
   });
   db.prepare(
     `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+     VALUES (?, 2000, 0, 2000)`,
+  ).run(groupId);
+  db.prepare(
+    `INSERT INTO performer_queue (group_id, requested_at, attempts, next_at)
      VALUES (?, 2000, 0, 2000)`,
   ).run(groupId);
 }
