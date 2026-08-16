@@ -145,6 +145,22 @@ type RenameResult =
  * Fails the whole group, naming the file, the moment any one file's
  * destination can't be computed — see `RenameResult` above for why a partial
  * list is not an acceptable answer.
+ *
+ * A file whose computed destination equals its current `dest_path` is
+ * dropped rather than included as a no-op rename. This is exactly case 7's
+ * shape carried down to the file level: `{sitename}`, `{date}` and every
+ * other path-template placeholder key off `identityKey`
+ * (`path-template.ts`'s `templateValues`), so a proposal whose key does not
+ * move (only its `display` does — a site spelling learned after the group
+ * was created, say) recomputes the identical path for every live file. Both
+ * `destPath` and `to` are produced by the same `resolve(libraryRoot, ...)`
+ * normalisation (here and in `pipeline/import.ts`'s `resolveDestination`),
+ * so a plain string comparison is exact — there is no symlink or
+ * relative-segment ambiguity `realpath` would be needed to resolve, and
+ * `realpath` costs a syscall per file this pass would otherwise not spend.
+ * Keeping such an entry out of `renames` is what lets `applyMove` skip the
+ * destination-exists check for it entirely: the "destination" is the file's
+ * own current path, not a collision.
  */
 function computeRenames(
   db: DatabaseSync,
@@ -203,7 +219,10 @@ function computeRenames(
       };
     }
 
-    renames.push({ fileId, from: destPath, to: resolve(libraryRoot, planned.destination) });
+    const to = resolve(libraryRoot, planned.destination);
+    // Already there: a display-only correction (the key, and so the path,
+    // did not move) is not a rename. See the doc comment above.
+    if (to !== destPath) renames.push({ fileId, from: destPath, to });
   }
 
   return { ok: true, renames };
@@ -707,19 +726,34 @@ export async function applyRekey(
  * Returns the number of files renamed on success, or `null` if the group was
  * refused because a computed destination was already occupied — refused
  * ahead of the transaction, so nothing about the group is written at all.
+ *
+ * Exported so a test can drive the same-path defensive guard directly with a
+ * hand-built `outcome`, independent of whether `computeRenames` currently
+ * produces one — see the guard's own comment for why that independence
+ * matters. `applyRekey` is still the only real caller.
  */
-async function applyMove(
+export async function applyMove(
   db: DatabaseSync,
   groupId: number,
   outcome: Extract<RekeyOutcome, { kind: 'move' }>,
   deps: RekeyDeps,
 ): Promise<number | null> {
+  // Defensive, not load-bearing: `computeRenames` no longer emits an entry
+  // whose `to` equals its own `from` (see its doc comment), so this should
+  // always be a no-op filter. It stays here anyway, because the alternative
+  // is trusting every future caller of `applyMove` to route through a
+  // planner that gets this right — and the cost of being wrong is the bug
+  // this guards: a file compared against its own current path reads as
+  // "occupied" and aborts a group that isn't actually colliding with
+  // anything.
+  const renames = outcome.renames.filter((move) => move.from !== move.to);
+
   // `rename(2)` silently replaces an existing destination on POSIX; this
   // check, done before anything is written, is the only thing standing
   // between the pass and destroying a file that already lives at a path
   // `computeRenames` planned to. A collision costs the group nothing more
   // than staying where it was.
-  for (const move of outcome.renames) {
+  for (const move of renames) {
     if (await destinationOccupied(move.to)) return null;
   }
 
@@ -746,7 +780,7 @@ async function applyMove(
     // (`migrations.ts:268-272`). This pass is not a human, and stamping it
     // would immunise every group it re-keys against the next run.
     if (outcome.displayChanged) clearGroupMetadata(db, groupId);
-    for (const move of outcome.renames) updateDestPath(db, move.fileId, move.to);
+    for (const move of renames) updateDestPath(db, move.fileId, move.to);
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
@@ -754,7 +788,7 @@ async function applyMove(
 
   const renamedSoFar: { from: string; to: string }[] = [];
   try {
-    for (const move of outcome.renames) {
+    for (const move of renames) {
       await deps.rename(move.from, move.to);
       renamedSoFar.push(move);
     }
@@ -768,11 +802,11 @@ async function applyMove(
     deps.commit(db);
   } catch (error) {
     db.exec('ROLLBACK');
-    for (const move of outcome.renames.toReversed()) await deps.rename(move.to, move.from);
+    for (const move of renames.toReversed()) await deps.rename(move.to, move.from);
     throw error;
   }
 
-  return outcome.renames.length;
+  return renames.length;
 }
 
 /**

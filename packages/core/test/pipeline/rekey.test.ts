@@ -15,6 +15,7 @@ import { validateIdentity } from '../../src/ingest/commit.ts';
 import { lstatOrNull } from '../../src/pipeline/import.ts';
 import { getAppState, setAppState } from '../../src/db/app-state.ts';
 import {
+  applyMove,
   applyRekey,
   countDrift,
   planRekey,
@@ -1535,6 +1536,114 @@ test('applyRekey test 21: a group with two live files renames both, or neither i
   } finally {
     await rm(libraryRoot, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task 5 fix round 3: a display-only move (case 7's shape) whose group has a
+// live file recomputes the identical destination for it — the file's own
+// current path, not a collision. `computeRenames` must drop that entry
+// rather than pass it to `applyMove` as a "rename" to nowhere, and
+// `applyMove` must not abort the group even if one reaches it anyway. On the
+// owner's real database this was 9 of 93 movers, permanently stuck: the pass
+// runs once (marker-gated), so a group that hits this never gets a second
+// chance to converge.
+// ---------------------------------------------------------------------------
+
+test('applyRekey test 22: a display-only move on a group with a live file writes identity/display/metadata and renames nothing', async () => {
+  const { db, plugin, registry } = setup();
+  const rawTitle = 'JulesJordan.26.08.08.Kilo.Lima.XXX.1080p.MP4-GRP';
+
+  // Stored before the site was confirmed, exactly as in planRekey's case 7:
+  // the unresolved spelling reaches the key's site segment too, but that
+  // segment collapses either spelling to the same slug, so the key survives
+  // and only the display corrects.
+  const unresolved = agreeingIdentity(plugin, rawTitle);
+  const groupId = groupWithRelease(db, { rawTitle, ...unresolved });
+  const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+
+  // The file already sits exactly where `computeRenames` will recompute it:
+  // every path-template placeholder keys off `identityKey`
+  // (`path-template.ts`), and the site confirmation below does not move the
+  // key, so a real import under the unresolved spelling would have written
+  // this same path. No real filesystem needed — this is a pure path-string
+  // fixture, like `case 7` above.
+  const plan = plugin.planImport(
+    { identityKey: unresolved.identityKey, display: JSON.parse(unresolved.display) as ParsedRelease['display'], quality: {} },
+    [{ absolutePath: '/src/scene.mp4', relativePath: 'scene.mp4', sizeBytes: 12345 }],
+  );
+  assert.ok(plan !== null);
+  const currentFile = plan?.files[0];
+  assert.ok(currentFile !== undefined);
+  if (currentFile === undefined) return;
+  const currentPath = resolve(LIBRARY_ROOT, currentFile.destination);
+  const fileId = addImportedFile(db, { downloadId, groupId, destPath: currentPath });
+
+  seedAllMetadataTables(db, groupId);
+  recordDiscoveredSite(db, 'JulesJordan', { site: 'Jules Jordan' }, 'test', 1);
+
+  // Proof that no rename was attempted, not merely that none was needed: an
+  // unconditionally-rejecting `rename` would fail the whole group if
+  // `applyMove` tried to use it for this file.
+  const report = await applyRekey(db, registry, {
+    now: () => MERGE_NOW,
+    rename: REJECTING_RENAME,
+    commit: REAL_COMMIT,
+  });
+  assert.equal(report.moved, 1);
+  assert.equal(report.renamed, 0);
+  assert.equal(report.failed, 0);
+  assert.equal(report.skippedDestinationExists, 0);
+
+  const group = getGroup(db, groupId);
+  assert.equal(group?.identityKey, unresolved.identityKey, 'the key does not move');
+  assert.ok(group?.display.includes('Jules Jordan'), 'the display is corrected');
+  assertMetadataTablesEmpty(db, groupId);
+
+  const row = filesForGroup(db, groupId).find((f) => f.id === fileId);
+  assert.equal(row?.destPath, currentPath, 'dest_path is untouched because nothing moved');
+});
+
+test('applyMove: a same-path rename entry reaching it directly is a no-op, not an abort', async () => {
+  const { db } = setup();
+  const identityKey = 'site:2026-08-09:november-oscar';
+  const displayJson = '{"title":"already correct","fields":[]}';
+  const groupId = groupWithRelease(db, {
+    rawTitle: 'Site.26.08.09.November.Oscar.XXX.1080p.MP4-GRP',
+    identityKey,
+    display: displayJson,
+  });
+  const downloadId = addDownload(db, groupId, releaseIdFor(db, groupId));
+  const samePath = '/library/Site/november-oscar.mp4';
+  const fileId = addImportedFile(db, { downloadId, groupId, destPath: samePath });
+
+  // Hand-built rather than planned: the point of this test is that
+  // `applyMove` itself refuses to treat a same-path entry as a collision,
+  // independent of whether `computeRenames` would ever hand it one after
+  // the fix above — see the guard's own comment in `rekey.ts`.
+  const outcome: Extract<RekeyOutcome, { kind: 'move' }> = {
+    kind: 'move',
+    identityKey,
+    displayJson,
+    searchText: 'already correct',
+    displayChanged: false,
+    renames: [{ fileId, from: samePath, to: samePath }],
+  };
+
+  // A rejecting `rename` proves the entry is skipped rather than merely
+  // surviving as a same-path POSIX no-op rename that happened to succeed.
+  const renamedCount = await applyMove(db, groupId, outcome, {
+    now: () => MERGE_NOW,
+    rename: REJECTING_RENAME,
+    commit: REAL_COMMIT,
+  });
+
+  assert.equal(renamedCount, 0, 'the same-path entry is not counted as a rename, and nothing aborted the group');
+
+  const group = getGroup(db, groupId);
+  assert.equal(group?.identityKey, identityKey);
+
+  const row = filesForGroup(db, groupId).find((f) => f.id === fileId);
+  assert.equal(row?.destPath, samePath);
 });
 
 // ---------------------------------------------------------------------------
