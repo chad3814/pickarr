@@ -51,6 +51,16 @@ export interface DownloadClient {
   readonly id: string;
   readonly importMode: 'move' | 'copy';
   /**
+   * The category this client submits Pickarr's jobs under, exposed because
+   * `snapshot()` no longer filters by it: the snapshot is everything the
+   * server holds, so a caller that wants to say which of those entries are
+   * *ours* needs the same category `addUrl` uses. Read off the client rather
+   * than passed alongside it so the two can never disagree — a filter
+   * comparing against a category nothing was submitted under would report
+   * every job on the server as a stranger's.
+   */
+  readonly category: string;
+  /**
    * Adds a URL and returns the client's reference for it.
    *
    * `name` is what pickarr sends the client as the job's display name: the

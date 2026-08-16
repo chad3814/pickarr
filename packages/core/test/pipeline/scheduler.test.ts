@@ -14,6 +14,7 @@ const NO_RECONCILE_WORK: ReconcileResult = {
   failed: 0,
   removed: 0,
   imported: 0,
+  absent: 0,
 };
 
 /** Yields to the macrotask queue so already-scheduled promise work can run. */
@@ -36,7 +37,7 @@ test('reconcileNow caches the untracked snapshot for later reads', async () => {
       parseFailures: [],
       parseFailuresSuppressed: 0,
     }),
-    reconcile: async () => ({ untracked: UNTRACKED, advanced: 0, failed: 0, imported: 0, removed: 0 }),
+    reconcile: async () => ({ untracked: UNTRACKED, advanced: 0, failed: 0, imported: 0, removed: 0, absent: 0 }),
     clientIds: ['sab'],
     log: () => {},
   });
@@ -148,7 +149,7 @@ test('an ingest failure on one feed does not stop the others', async () => {
         parseFailuresSuppressed: 0,
       };
     },
-    reconcile: async () => ({ untracked: [], advanced: 0, failed: 0, imported: 0, removed: 0 }),
+    reconcile: async () => ({ untracked: [], advanced: 0, failed: 0, imported: 0, removed: 0, absent: 0 }),
     clientIds: [],
     log: () => {},
   });

@@ -4,7 +4,6 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
   bumpAttempts,
-  bumpMissingPolls,
   clearAbsent,
   downloadLabel,
   failDownload,
@@ -14,7 +13,6 @@ import {
   markAbsent,
   recordError,
   resetForRetry,
-  resetMissingPolls,
   setClientRef,
   setStatus,
   setStoragePath,
@@ -167,34 +165,11 @@ test('bumpAttempts throws on a bad id instead of returning 0', () => {
   db.close();
 });
 
-test('bumpMissingPolls throws on a bad id instead of returning 0', () => {
-  const db = openTestDatabase();
-  seed(db);
-  assert.throws(() => bumpMissingPolls(db, BAD_ID, 2), /bumpMissingPolls.*9999/);
-  db.close();
-});
-
-test('resetMissingPolls throws on a bad id', () => {
-  const db = openTestDatabase();
-  seed(db);
-  assert.throws(() => resetMissingPolls(db, BAD_ID), /resetMissingPolls.*9999/);
-  db.close();
-});
-
-test('resetMissingPolls on a real row whose missing_polls is already 0 is a legitimate no-op, not an error', () => {
-  const db = openTestDatabase();
-  const id = seed(db);
-  assert.doesNotThrow(() => resetMissingPolls(db, id));
-  assert.equal(getDownload(db, id)?.missingPolls, 0);
-  db.close();
-});
-
-test('bumpAttempts and bumpMissingPolls increment and return the new count for a real row', () => {
+test('bumpAttempts increments and returns the new count for a real row', () => {
   const db = openTestDatabase();
   const id = seed(db);
   assert.equal(bumpAttempts(db, id, 2), 1);
   assert.equal(bumpAttempts(db, id, 3), 2);
-  assert.equal(bumpMissingPolls(db, id, 4), 1);
   db.close();
 });
 

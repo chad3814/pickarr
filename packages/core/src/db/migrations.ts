@@ -607,12 +607,10 @@ export const migrations: Migration[] = [
   // `missing_polls` is left in place rather than dropped: `DROP COLUMN` is
   // available in this SQLite version, but rewriting a live table buys nothing
   // for one small integer column, and leaving it makes this migration
-  // trivially reversible. Its callers (`bumpMissingPolls`, `resetMissingPolls`
-  // in `downloads.ts`) still exist for one more commit only because deleting
-  // them here would strand their call sites in `pipeline/reconcile.ts`
-  // mid-refactor; once those callers move to `markAbsent`/`clearAbsent`, the
-  // column itself stops being read or written and this comment is its only
-  // remaining mention.
+  // trivially reversible. Nothing reads or writes it any more — its helpers
+  // and their last call sites in `pipeline/reconcile.ts` are gone, and
+  // `downloads.ts` no longer even selects it — so this comment is the column's
+  // only remaining mention.
   {
     version: 8,
     up(db) {

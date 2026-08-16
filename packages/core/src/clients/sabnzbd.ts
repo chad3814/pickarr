@@ -39,9 +39,9 @@ const MAX_HISTORY_PAGES = 20;
  * means a person removed the job at the client, and unlike every status in
  * `IN_PROGRESS_STATUSES` nothing is going to move it out of that state later
  * — the entry just sits in history as `Deleted` forever. Reading it as
- * in-progress would make reconcile wait on it indefinitely, because
- * missing_polls only counts *absence* from queue/history, and a deleted job
- * is never absent.
+ * in-progress would make reconcile wait on it indefinitely, because reconcile
+ * only ever observes *absence* from queue/history, and a deleted job that
+ * still sits in history is never absent.
  */
 const TERMINAL_FAILURE_STATUSES = new Set(['failed', 'deleted']);
 
@@ -69,10 +69,10 @@ const IN_PROGRESS_STATUSES = new Set([
  * A status this client has never seen is read as a failure, not as
  * in-progress, deliberately the less forgiving of the two wrong guesses.
  * In-progress means "wait and poll again," and there is no mechanism that
- * ever revisits that guess: the job is present in history, so missing_polls
- * stays at zero, and it stays present indefinitely if the unrecognized label
- * is itself a terminal state SABnzbd introduced that this client does not
- * enumerate yet. A wrong failure is visible immediately and fixable by
+ * ever revisits that guess: the job is present in history, so reconcile never
+ * records it as absent, and it stays present indefinitely if the unrecognized
+ * label is itself a terminal state SABnzbd introduced that this client does
+ * not enumerate yet. A wrong failure is visible immediately and fixable by
  * extending this list; a wrong "still working" can hang forever with no
  * signal that anything is wrong.
  */
@@ -103,7 +103,7 @@ let warnedUnrecognizedHistoryStatus = false;
 
 /**
  * Test-only escape hatch, mirroring
- * `resetLabelMismatchWarningForTests` in `pipeline/reconcile.ts`: node:test
+ * `resetReconcileWarningsForTests` in `pipeline/reconcile.ts`: node:test
  * runs every test in one file inside a single process/module instance, so
  * the "once per process" flag above persists across tests unless a test
  * resets it first.
@@ -333,6 +333,7 @@ export function createSabnzbdClient(
   return {
     id: config.id,
     importMode: config.importMode,
+    category: config.category,
 
     async addUrl(url, name) {
       const body = asRecord(
