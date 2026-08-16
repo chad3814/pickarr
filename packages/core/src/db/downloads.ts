@@ -173,41 +173,39 @@ export function activeDownloads(db: DatabaseSync, clientId: string): DownloadRow
     .map((row) => toDownloadRow(row as SqlRow));
 }
 
+export interface DownloadIndex {
+  byRef: Map<string, DownloadRow>;
+  byLabel: Map<string, DownloadRow>;
+}
+
 /**
- * The row set the client-first reconcile loop matches SABnzbd entries
- * against: every download of this client that has a client ref, excluding
- * `imported`. `imported` is excluded on purpose, not by oversight — the
- * cleanup pass at the end of the tick owns imported rows and runs its own
- * query against them, and a second map here that also found them would
+ * The two lookup indexes the client-first reconcile loop matches SABnzbd
+ * entries against: a client ref once a job is known to the client, and the
+ * label a job was submitted under (`downloadLabel`) while it is still being
+ * recognized by name (a fresh submission, or one recovering from
+ * `disappeared-from-client`). Reconcile needs both every tick, so this runs
+ * one query and keys the same rows two ways rather than making the caller
+ * (or this module) scan the row set twice for two maps that would otherwise
+ * be byte-identical queries apart from the key.
+ *
+ * The row set is every download of this client that has a client ref,
+ * excluding `imported`. `imported` is excluded on purpose, not by oversight
+ * — the cleanup pass at the end of the tick owns imported rows and runs its
+ * own query against them, and a second map here that also found them would
  * invite a double import of the same job. `failed` rows are included on
  * purpose too: reconcile decides which of those are eligible for
  * re-attachment (only ones whose error is exactly `disappeared-from-client`),
  * and that decision belongs to the caller, not to this query.
  */
-export function downloadsByRef(db: DatabaseSync, clientId: string): Map<string, DownloadRow> {
+export function indexDownloadsForClient(db: DatabaseSync, clientId: string): DownloadIndex {
   const rows = db
     .prepare(`${SELECT} WHERE client_id = ? AND client_ref IS NOT NULL AND status != 'imported'`)
     .all(clientId)
     .map((row) => toDownloadRow(row as SqlRow));
-  return new Map(rows.map((row) => [row.clientRef as string, row]));
-}
-
-/**
- * The same row set as `downloadsByRef`, keyed instead on the label a job was
- * submitted under (`downloadLabel`). Reconcile needs both: a client ref once
- * a job is known to the client, and the label while it is still being
- * recognized by name (a fresh submission, or one recovering from
- * `disappeared-from-client`). Built here, alongside `downloadsByRef`, rather
- * than derived in the pipeline from one query — running one query per lookup
- * key keeps the reconcile loop from doing a second index pass over the same
- * rows just to key them differently.
- */
-export function downloadsByLabel(db: DatabaseSync, clientId: string): Map<string, DownloadRow> {
-  const rows = db
-    .prepare(`${SELECT} WHERE client_id = ? AND client_ref IS NOT NULL AND status != 'imported'`)
-    .all(clientId)
-    .map((row) => toDownloadRow(row as SqlRow));
-  return new Map(rows.map((row) => [downloadLabel(row.id), row]));
+  return {
+    byRef: new Map(rows.map((row) => [row.clientRef as string, row])),
+    byLabel: new Map(rows.map((row) => [downloadLabel(row.id), row])),
+  };
 }
 
 /**
@@ -430,6 +428,17 @@ export function markAbsent(db: DatabaseSync, id: number, now: number): void {
  * already cleared it this tick) rather than an error, so there is no
  * existence check to distinguish "already clear" from "no such id" — nothing
  * here needs to tell them apart.
+ *
+ * `resetMissingPolls` pairs its no-op with a `getDownload` probe on the
+ * `changes === 0` path to turn a bad id into a thrown error, and that probe
+ * is cheap there because that path is rare. Here the no-op path is the
+ * *common* one — most downloads are not absent on most ticks — so the same
+ * probe would mean a query per row per tick to guard against a condition
+ * that cannot arise on this call path: every id reaching `clearAbsent` was
+ * just read out of this table by the caller (reconcile, matching a snapshot
+ * entry against a row it already has), not typed in by a human. Paying for
+ * the bad-id assertion here would be buying safety against a mistake the
+ * call site cannot make.
  */
 export function clearAbsent(db: DatabaseSync, id: number): void {
   db.prepare('UPDATE downloads SET absent_since = NULL WHERE id = ? AND absent_since IS NOT NULL').run(
