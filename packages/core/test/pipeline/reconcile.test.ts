@@ -20,7 +20,7 @@ import {
 } from '../../src/db/downloads.ts';
 import type { ClientSnapshot, DownloadClient } from '../../src/clients/types.ts';
 
-const EMPTY: ClientSnapshot = { queue: [], history: [] };
+const EMPTY: ClientSnapshot = { queue: [], history: [], complete: true };
 
 function fakeClient(snapshot: ClientSnapshot, overrides: Partial<DownloadClient> = {}) {
   return {
@@ -72,8 +72,9 @@ test('a download in the queue stays downloading and resets missing_polls', async
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1', missingPolls: 2 });
   const client = fakeClient({
-    queue: [{ ref: 'nzo_1', name: 'R', percentage: 50 }],
+    queue: [{ ref: 'nzo_1', name: 'R', percentage: 50, category: null }],
     history: [],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client));
@@ -97,8 +98,10 @@ test('a completed download gets its mapped storage path and is imported', async 
         outcome: 'completed',
         storagePath: '/sab/complete/R',
         failMessage: null,
+        category: null,
       },
     ],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client, imported));
@@ -193,8 +196,10 @@ test('a failed download records the fail message', async () => {
         outcome: 'failed',
         storagePath: null,
         failMessage: 'Out of retention',
+        category: null,
       },
     ],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client));
@@ -216,8 +221,16 @@ test('a download in a transient client state is left alone, but its missing-poll
   const client = fakeClient({
     queue: [],
     history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'in-progress', storagePath: null, failMessage: null },
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'in-progress',
+        storagePath: null,
+        failMessage: null,
+        category: null,
+      },
     ],
+    complete: true,
   });
 
   const result = await reconcileClient(deps(db, client));
@@ -237,8 +250,16 @@ test('a download with a genuine terminal failure status still fails, distinct fr
   const client = fakeClient({
     queue: [],
     history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'failed', storagePath: null, failMessage: 'Failed' },
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'failed',
+        storagePath: null,
+        failMessage: 'Failed',
+        category: null,
+      },
     ],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client));
@@ -255,8 +276,16 @@ test('a completed download with no storage path fails rather than importing noth
   const client = fakeClient({
     queue: [],
     history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'completed', storagePath: null, failMessage: null },
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'completed',
+        storagePath: null,
+        failMessage: null,
+        category: null,
+      },
     ],
+    complete: true,
   });
 
   await reconcileClient(deps(db, client, imported));
@@ -289,7 +318,14 @@ test('reappearing resets the missing counter', async () => {
 
   await reconcileClient(deps(db, fakeClient(EMPTY)));
   await reconcileClient(
-    deps(db, fakeClient({ queue: [{ ref: 'nzo_1', name: 'R', percentage: 1 }], history: [] })),
+    deps(
+      db,
+      fakeClient({
+        queue: [{ ref: 'nzo_1', name: 'R', percentage: 1, category: null }],
+        history: [],
+        complete: true,
+      }),
+    ),
   );
   await reconcileClient(deps(db, fakeClient(EMPTY)));
   await reconcileClient(deps(db, fakeClient(EMPTY)));
@@ -335,7 +371,7 @@ test('entries with no matching row are reported as untracked and never imported'
   const db = openTestDatabase();
   const imported: DownloadRow[] = [];
   const client = fakeClient({
-    queue: [{ ref: 'foreign_1', name: 'Someone Elses', percentage: 12 }],
+    queue: [{ ref: 'foreign_1', name: 'Someone Elses', percentage: 12, category: null }],
     history: [
       {
         ref: 'foreign_2',
@@ -343,8 +379,10 @@ test('entries with no matching row are reported as untracked and never imported'
         outcome: 'completed',
         storagePath: '/sab/complete/X',
         failMessage: null,
+        category: null,
       },
     ],
+    complete: true,
   });
 
   const result = await reconcileClient(deps(db, client, imported));
@@ -365,8 +403,16 @@ test('an already-imported download still in history is not reported as untracked
   const client = fakeClient({
     queue: [],
     history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'completed', storagePath: '/sab/x', failMessage: null },
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'completed',
+        storagePath: '/sab/x',
+        failMessage: null,
+        category: null,
+      },
     ],
+    complete: true,
   });
 
   const result = await reconcileClient(deps(db, client));
@@ -381,8 +427,16 @@ test('an import failure fails the download rather than throwing out of the tick'
   const client = fakeClient({
     queue: [],
     history: [
-      { ref: 'nzo_1', name: 'R', outcome: 'completed', storagePath: '/sab/x', failMessage: null },
+      {
+        ref: 'nzo_1',
+        name: 'R',
+        outcome: 'completed',
+        storagePath: '/sab/x',
+        failMessage: null,
+        category: null,
+      },
     ],
+    complete: true,
   });
 
   await reconcileClient({
@@ -419,7 +473,13 @@ test('a queued download whose addUrl already succeeded is recovered from the que
   const client = fakeClient(
     // Recovery has to extract the marker out of a name that also carries the
     // release title (see clientJobName), not match on the bare label alone.
-    { queue: [{ ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 5 }], history: [] },
+    {
+      queue: [
+        { ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 5, category: null },
+      ],
+      history: [],
+      complete: true,
+    },
     {
       addUrl: async () => {
         addUrlCalls += 1;
@@ -453,8 +513,10 @@ test('a queued download whose addUrl already succeeded and finished is recovered
           outcome: 'completed',
           storagePath: '/sab/complete/R',
           failMessage: null,
+          category: null,
         },
       ],
+      complete: true,
     },
     {
       addUrl: async () => {
@@ -481,7 +543,13 @@ test('recovering a ref by label does not consume an addurl attempt, unlike a rea
   db.prepare('UPDATE downloads SET attempts = 4 WHERE id = 1').run();
   let addUrlCalls = 0;
   const client = fakeClient(
-    { queue: [{ ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 1 }], history: [] },
+    {
+      queue: [
+        { ref: 'nzo_orphan', name: clientJobName('Some.Release.Title', 1), percentage: 1, category: null },
+      ],
+      history: [],
+      complete: true,
+    },
     {
       addUrl: async () => {
         addUrlCalls += 1;
@@ -538,8 +606,9 @@ test('a tracked download whose client-side name does not match its label warns e
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient({
-    queue: [{ ref: 'nzo_1', name: 'Some.Release.Name', percentage: 10 }],
+    queue: [{ ref: 'nzo_1', name: 'Some.Release.Name', percentage: 10, category: null }],
     history: [],
+    complete: true,
   });
   const warnMock = mock.method(console, 'warn', () => {});
 
@@ -565,8 +634,9 @@ test('a tracked download whose client-side name matches its label never warns', 
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient({
     // A real client reports the title-plus-marker name, not the bare label.
-    queue: [{ ref: 'nzo_1', name: clientJobName('T', 1), percentage: 10 }],
+    queue: [{ ref: 'nzo_1', name: clientJobName('T', 1), percentage: 10, category: null }],
     history: [],
+    complete: true,
   });
   const warnMock = mock.method(console, 'warn', () => {});
 
@@ -601,7 +671,17 @@ test('an imported download is removed from the client, with its files', async ()
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-done', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+      history: [
+        {
+          ref: 'nzo-done',
+          name: 'Scene [pickarr-1]',
+          outcome: 'completed',
+          storagePath: '/sab/x',
+          failMessage: null,
+          category: null,
+        },
+      ],
+      complete: true,
     },
     { remove },
   );
@@ -615,7 +695,11 @@ test('a download still running is left alone', async () => {
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo-live' });
   const { removed, remove } = removalTracking();
   const client = fakeClient(
-    { queue: [{ ref: 'nzo-live', name: 'Scene [pickarr-1]', percentage: 40 }], history: [] },
+    {
+      queue: [{ ref: 'nzo-live', name: 'Scene [pickarr-1]', percentage: 40, category: null }],
+      history: [],
+      complete: true,
+    },
     { remove },
   );
 
@@ -628,7 +712,20 @@ test('a failed download is left in the client for inspection', async () => {
   seedDownload(db, { id: 1, status: 'failed', clientRef: 'nzo-bad' });
   const { removed, remove } = removalTracking();
   const client = fakeClient(
-    { queue: [], history: [{ ref: 'nzo-bad', name: 'Scene [pickarr-1]', outcome: 'failed', storagePath: null, failMessage: null }] },
+    {
+      queue: [],
+      history: [
+        {
+          ref: 'nzo-bad',
+          name: 'Scene [pickarr-1]',
+          outcome: 'failed',
+          storagePath: null,
+          failMessage: null,
+          category: null,
+        },
+      ],
+      complete: true,
+    },
     { remove },
   );
 
@@ -642,7 +739,17 @@ test('an untracked entry is never removed, however finished it looks', async () 
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-stranger', name: 'Someone Elses Job', outcome: 'completed', storagePath: '/sab/y', failMessage: null }],
+      history: [
+        {
+          ref: 'nzo-stranger',
+          name: 'Someone Elses Job',
+          outcome: 'completed',
+          storagePath: '/sab/y',
+          failMessage: null,
+          category: null,
+        },
+      ],
+      complete: true,
     },
     { remove },
   );
@@ -658,7 +765,17 @@ test('a download imported during this same tick is cleaned up in it', async () =
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-now', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+      history: [
+        {
+          ref: 'nzo-now',
+          name: 'Scene [pickarr-1]',
+          outcome: 'completed',
+          storagePath: '/sab/x',
+          failMessage: null,
+          category: null,
+        },
+      ],
+      complete: true,
     },
     { remove },
   );
@@ -703,8 +820,10 @@ const DONE = {
       outcome: 'completed' as const,
       storagePath: '/sab/x',
       failMessage: null,
+      category: null,
     },
   ],
+  complete: true,
 };
 
 test('the job directory goes too — the client empties it but leaves it standing', async () => {
@@ -862,7 +981,17 @@ test('a removal that fails does not undo the import, and is retried next tick', 
   const client = fakeClient(
     {
       queue: [],
-      history: [{ ref: 'nzo-done', name: 'Scene [pickarr-1]', outcome: 'completed', storagePath: '/sab/x', failMessage: null }],
+      history: [
+        {
+          ref: 'nzo-done',
+          name: 'Scene [pickarr-1]',
+          outcome: 'completed',
+          storagePath: '/sab/x',
+          failMessage: null,
+          category: null,
+        },
+      ],
+      complete: true,
     },
     {
       remove: () => {

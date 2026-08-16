@@ -134,7 +134,7 @@ export interface Harness {
 function createFakeClient(id: string, importMode: 'move' | 'copy'): FakeDownloadClient {
   const added: AddedUrl[] = [];
   const removed: string[] = [];
-  let snapshot: ClientSnapshot = { queue: [], history: [] };
+  let snapshot: ClientSnapshot = { queue: [], history: [], complete: true };
 
   return {
     id,

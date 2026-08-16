@@ -65,8 +65,10 @@ test('Retry takes a failed download out of failed', async ({ page, harness }) =>
         outcome: 'failed',
         storagePath: null,
         failMessage: 'unpack failed at the client',
+        category: null,
       },
     ],
+    complete: true,
   });
   const reconciled = await harness.reconcile();
   expect(reconciled.failed).toBe(1);
@@ -97,7 +99,7 @@ test('Retry takes a failed download out of failed', async ({ page, harness }) =>
   // guard reads that as "already there" and recovers the ref rather than
   // calling `addUrl` again — so leaving it in place would hide a retry that
   // never re-sent anything.
-  harness.client.setSnapshot({ queue: [], history: [] });
+  harness.client.setSnapshot({ queue: [], history: [], complete: true });
   await harness.reconcile();
 
   await expect.poll(() => harness.client.added.length).toBe(2);

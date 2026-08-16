@@ -2,11 +2,22 @@ export interface ClientQueueEntry {
   ref: string;
   name: string;
   percentage: number;
+  /**
+   * The client's own category for this slot, or `null` when the slot carries
+   * none. A queue slot with no category is the literal string `"None"`, not
+   * an absent field — the client is responsible for mapping that (and the
+   * empty string) to `null` before this entry is built, so every consumer
+   * can compare against a real category name without knowing the client's
+   * spelling of "no category".
+   */
+  category: string | null;
 }
 
 export interface ClientHistoryEntry {
   ref: string;
   name: string;
+  /** See `ClientQueueEntry.category`. */
+  category: string | null;
   /**
    * `completed` is the only success reading — that has not changed. What is
    * new is `in-progress`: SABnzbd's real history carries several transient
@@ -27,6 +38,13 @@ export interface ClientHistoryEntry {
 export interface ClientSnapshot {
   queue: ClientQueueEntry[];
   history: ClientHistoryEntry[];
+  /**
+   * Whether this snapshot is the client's whole picture. False when a page
+   * could not be retrieved or the client reported more entries than it
+   * returned. A false snapshot may still be used to advance rows it *does*
+   * contain; it may never be used to conclude something is absent.
+   */
+  complete: boolean;
 }
 
 export interface DownloadClient {
@@ -45,7 +63,11 @@ export interface DownloadClient {
    * on free-text matching against the release title.
    */
   addUrl(url: string, name: string): Promise<string>;
-  /** One poll of everything in this client's configured category. */
+  /**
+   * One poll of everything the client knows about — queue and history,
+   * unfiltered by category. See `ClientSnapshot.complete` for why: asking
+   * the client to filter costs the ability to verify the result is whole.
+   */
   snapshot(): Promise<ClientSnapshot>;
   /**
    * Drops a finished job from the client, and its leftover files with it.
