@@ -573,9 +573,11 @@ This is not the OOM above — it presents as a plain timeout, which reads like t
 wrong rather than the harness. Assert on the *arguments* to the real `setTimeout` instead:
 `packages/web/test/useGroupMetadata.test.tsx` pins an exact backoff ladder and a clamped
 five-minute sleep that way, without waiting a real five minutes or replacing any timer
-behaviour. Server-side tests have no such problem — `t.mock.timers` with
-`{ apis: ['AbortSignal.timeout'] }` is what bounds the fetch-timeout tests in
-`packages/core/test`.
+behaviour. Server-side tests reach the same place by a different route, and not through
+`t.mock.timers`: the fetch-timeout tests replace `AbortSignal.timeout` itself with a signal
+the test aborts on demand (`packages/core/test/abort-timeout.ts`), which needs no timer
+mocking at all and asserts the production path more directly — the code still calls
+`AbortSignal.timeout(ms)`, still gets a signal, and still aborts for exactly one reason.
 
 **A test whose expected value is computed by the code under test cannot detect that code
 changing.** `groupAnchor` was mutated to return a constant `group-x` — every card claiming
@@ -610,15 +612,3 @@ mock's timer running for real, ~70 seconds. And the `queryByText` OOM above is t
 Use `afterEach(cleanup)`, which runs whether the test passed or threw —
 `Failed.test.tsx`, `Browse.test.tsx` and `Downloads.test.tsx` all do. Per-test `cleanup()`
 calls only run on the happy path, which is the path that did not need them.
-
-**Three tests need a Node newer than `package.json` asks for, and fail confusingly on one
-that satisfies it.** `t.mock.timers` with `{ apis: ['AbortSignal.timeout'] }` is what bounds
-the fetch-timeout tests, and Node v24.15.0 does not support that api name: two tests in
-`packages/core/test/clients/theporndb.test.ts` and one in `packages/core/test/media/artwork.test.ts`
-fail there with `ERR_INVALID_ARG_VALUE: The property 'options.apis' option
-AbortSignal.timeout is not supported`. They pass on v24.19.0. `engines.node` says only
-`">=24"`, so v24.15.0 is a version the repo currently claims to support, and the failure
-reads like the code being wrong rather than the runtime being old — the message names an
-argument, not a version. Check `node -v` before believing these three. Raising the floor to
-the version that actually works would settle it; that is a change to the published contract
-and has not been made.
