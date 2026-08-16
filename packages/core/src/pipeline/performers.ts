@@ -11,7 +11,7 @@ import {
   type PerformerQueueRow,
 } from '../db/performer-queue.ts';
 import { setGroupPerformers, upsertPerformers } from '../db/performers.ts';
-import { backoffFor } from './metadata.ts';
+import { backoffFor } from './backoff.ts';
 import { pickPerformer } from './pick-performer.ts';
 
 export interface PerformerEnqueueDeps {
@@ -136,18 +136,26 @@ export interface PerformerPassResult {
  * nothing **is** an answer, the rule `resolve-sites.ts` and `runMetadataPass`
  * both state; leaving it queued would spend one request per pass forever
  * rediscovering the same silence.
+ *
+ * `source` is passed in from the client that answered rather than named here.
+ * It is half of `performers`' `UNIQUE (source, source_uuid)`, so it says which
+ * provider issued the uuid beside it — `db/metadata.ts` writes the client's own
+ * `source` into the same column for the same reason. A second writer spelling
+ * one provider's name as a literal is how a row ends up claiming a uuid that
+ * its stated source never issued, the moment a second client exists.
  */
 function recordPerformerOutcome(
   deps: PerformerPassDeps,
   groupId: number,
   performer: MetadataPerformer | null,
+  source: string,
   now: number,
 ): 'linked' | 'unmatched' {
   deps.db.exec('BEGIN');
   try {
     let linked = false;
     if (performer !== null && !groupHasCast(deps.db, groupId)) {
-      const ids = upsertPerformers(deps.db, 'theporndb', [performer], now);
+      const ids = upsertPerformers(deps.db, source, [performer], now);
       setGroupPerformers(deps.db, groupId, ids);
       linked = true;
     }
@@ -241,7 +249,7 @@ export async function runPerformerPass(deps: PerformerPassDeps): Promise<Perform
         );
       }
       const outcome = recordPerformerOutcome(
-        deps, row.groupId, pickPerformer(query, page.results), now,
+        deps, row.groupId, pickPerformer(query, page.results), client.source, now,
       );
       if (outcome === 'linked') result.linked += 1;
       else result.unmatched += 1;

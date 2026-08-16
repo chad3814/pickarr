@@ -14,9 +14,9 @@ import { performersForGroups } from '../../src/db/performers.ts';
 import { getDiscoveredSite, recordDiscoveredSite } from '../../src/db/sites.ts';
 import { RateLimited, type FetchImpl, type SceneLookupClient } from '../../src/clients/theporndb.ts';
 import type { ArtworkDeps } from '../../src/media/artwork.ts';
+import { MAX_BACKOFF_MS } from '../../src/pipeline/backoff.ts';
 import {
   createMetadataRunner,
-  MAX_BACKOFF_MS,
   MAX_METADATA_ATTEMPTS,
   runMetadataPass,
   type MetadataPassDeps,
