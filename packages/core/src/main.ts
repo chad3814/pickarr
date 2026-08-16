@@ -170,6 +170,22 @@ async function main(): Promise<void> {
   // already run inside `openDatabase` above; this pass is deliberately not
   // part of that, since it runs the live parser rather than a fixed schema
   // change (see `runRekeyOnBoot`'s doc comment).
+  //
+  // This call MUST stay before `await server.listen(...)` below. `planRekey`
+  // reads every group once and `applyRekey` acts on that single snapshot —
+  // safe only because nothing else can be creating a download, an imported
+  // file, or a group between the read and the write. Once `server.listen`
+  // has run, incoming HTTP traffic can do exactly that, and the snapshot a
+  // merge decided against stops being a fact about "now" by the time the
+  // merge's delete actually runs (see the comment on the merge branch inside
+  // `applyRekey`, which names this exact scenario). Moving this pass after
+  // `listen` — to boot faster, or to start serving while it runs — would
+  // reopen that window. The `groupHistory` re-check inside the merge's own
+  // transaction (`rekey.ts`, Task 4a) is the backstop if that ordering is
+  // ever violated: it turns a merge that raced a real write into a clean
+  // `skipped-collision` rather than a deleted group with live history. It is
+  // a backstop, not a substitute for keeping this above `listen` — it only
+  // catches the merge case, not a `move` racing a concurrent import.
   await runRekeyAtBoot(
     db,
     registry,

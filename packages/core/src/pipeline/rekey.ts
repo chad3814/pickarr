@@ -805,12 +805,25 @@ export const REKEY_MARKER_KEY = 'pass:rekey-scene-slugs';
 
 /**
  * How many groups a fresh `planRekey` would still act on — every proposal
- * whose outcome is not `unchanged`. Pure and read-only, like `planRekey`
- * itself: no write, no filesystem access, nothing gated on whether the
- * marker is set. Measured at ~120ms cold over 1222 groups on the owner's
- * real database (Task 7) and growing linearly with the library — already
- * over the plan's own "~100ms, say so" line, so this is deliberately left as
- * a single `planRekey` call rather than optimised here.
+ * whose outcome is `move`, `merge`, `skipped-collision`,
+ * `skipped-unparsable`, or (once `applyRekey` runs) `skipped-destination-
+ * exists`: stored state genuinely disagreeing with what the parser says
+ * today, whether the pass itself can resolve that disagreement or a human
+ * has to. Pure and read-only, like `planRekey` itself: no write, no
+ * filesystem access, nothing gated on whether the marker is set. Measured at
+ * ~120ms cold over 1222 groups on the owner's real database (Task 7) and
+ * growing linearly with the library — already over the plan's own "~100ms,
+ * say so" line, so this is deliberately left as a single `planRekey` call
+ * rather than optimised here.
+ *
+ * `skipped-edited` is the one non-`unchanged` outcome deliberately excluded.
+ * It is not a disagreement to flag — it is a recorded human decision
+ * (`migrations.ts:268-272`) that the pass skips forever, on purpose. Counting
+ * it would give this number a permanent floor: on the owner's database, 33
+ * groups would report "diverging" at every single boot, for eternity, with
+ * nothing that could ever act on them. A count that can never reach zero is
+ * one a reader learns to ignore, which defeats the reason this function
+ * exists. Do not add it back to the sum.
  *
  * Never call this a second time in a boot that already ran `applyRekey`:
  * that would re-parse every raw title for an answer `applyRekey`'s own
@@ -818,7 +831,9 @@ export const REKEY_MARKER_KEY = 'pass:rekey-scene-slugs';
  * from the report in that case instead of calling this function.
  */
 export function countDrift(db: DatabaseSync, registry: PluginRegistry): number {
-  return planRekey(db, registry).filter((proposal) => proposal.outcome.kind !== 'unchanged').length;
+  return planRekey(db, registry).filter(
+    (proposal) => proposal.outcome.kind !== 'unchanged' && proposal.outcome.kind !== 'skipped-edited',
+  ).length;
 }
 
 /** What one boot's worth of `runRekeyOnBoot` did — see that function. */
@@ -828,10 +843,10 @@ export interface RekeyBootOutcome {
   /** `applyRekey`'s own tally, present only when `applied` is true. */
   report: RekeyReport | null;
   /**
-   * Groups not agreeing with a fresh parse, as of this check. When `applied`
-   * is true this is read off `report` — the sum of every non-`unchanged`
-   * bucket, which `planRekey` would have counted identically had it been
-   * asked again — rather than a second call to `countDrift`, so that running
+   * Groups not agreeing with a fresh parse, as of this check — same
+   * definition as `countDrift`'s, `skipped-edited` excluded for the same
+   * reason (see that function's comment). When `applied` is true this is
+   * read off `report` instead of a second `countDrift` call, so that running
    * the pass and then drift-checking it does not parse every title twice
    * (see `countDrift`'s own comment). When `applied` is false, this is
    * `countDrift`'s answer directly.
@@ -885,14 +900,22 @@ export async function runRekeyOnBoot(
   // database.
   setAppState(db, REKEY_MARKER_KEY, 'done', deps.now());
 
+  // `skippedEdited` deliberately excluded — see `countDrift`'s comment for
+  // why counting a recorded human decision as "drift" would give this number
+  // a permanent, ignorable floor. `failed` is also excluded here: it names a
+  // problem with *this boot's attempt* (a broken constraint, a full disk, a
+  // poisoned commit) rather than a stored, at-rest disagreement with the
+  // parser, and it is already visible in the same log line as its own named
+  // field — folding it into "drift" too would double-count the same fact
+  // under two labels. A group counted in `failed` this boot is exactly a
+  // `move` or `merge` candidate again on the very next `planRekey`, so
+  // nothing about it is hidden by leaving it out of this sum.
   const drift =
     report.moved +
     report.merged +
-    report.skippedEdited +
     report.skippedUnparsable +
     report.skippedCollision +
-    report.skippedDestinationExists +
-    report.failed;
+    report.skippedDestinationExists;
 
   return { applied: true, report, drift };
 }
