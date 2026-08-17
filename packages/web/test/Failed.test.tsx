@@ -4,6 +4,7 @@ import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-li
 import { MemoryRouter } from 'react-router';
 import { App } from '../src/App.tsx';
 import { Failed } from '../src/routes/Failed.tsx';
+import { stubIntersectionObserver, type Intersection } from './intersection.ts';
 import type {
   DismissResponse,
   FailedItemView,
@@ -145,6 +146,17 @@ async function loadBothPages(): Promise<void> {
   await waitFor(() => assert.ok(screen.getByText('Delta.RAW')));
 }
 
+/**
+ * The same two pages, reached the way a reader now normally reaches them. Kept
+ * beside `loadBothPages` rather than replacing it: the button is the fallback for
+ * an observer that never fires, so both paths need a test that uses them.
+ */
+async function loadBothPagesByScrolling(view: Intersection): Promise<void> {
+  await loadFirstPage();
+  view.enter();
+  await waitFor(() => assert.ok(screen.getByText('Delta.RAW')));
+}
+
 function failedRequests(calls: string[]): string[] {
   return calls.filter((call) => call.includes('/api/failed'));
 }
@@ -283,6 +295,62 @@ test('dismissing after "load more" keeps the pages already loaded', async () => 
   await waitFor(() => assert.ok(gone('Alpha.RAW.1080p')));
   assert.ok(screen.getByText('Delta.RAW'));
   assert.equal(failedRequests(calls()).length, before);
+});
+
+test('the next page arrives when the end of the list comes into view, with no click', async () => {
+  const view = stubIntersectionObserver();
+  try {
+    serve();
+    await loadFirstPage();
+
+    view.enter();
+
+    await waitFor(() => assert.ok(screen.getByText('Delta.RAW')));
+    // Appended, not swapped in: the rule "load more" already had.
+    assert.ok(screen.getByText('Alpha.RAW.1080p'));
+  } finally {
+    view.restore();
+  }
+});
+
+test('fixing after a page arrived by scrolling keeps the pages already loaded', async () => {
+  // The invariant the issue insists must survive, on the path that now loads
+  // most pages. Under a button a reader who lost a page noticed; under scrolling
+  // the list silently shortens and they scroll again.
+  const view = stubIntersectionObserver();
+  try {
+    const calls = serve(true);
+    await loadBothPagesByScrolling(view);
+    const before = failedRequests(calls()).length;
+
+    fireEvent.click(within(row('Alpha.RAW.1080p')).getByRole('button', { name: /fix/i }));
+    // Alpha's suggestions cover only the site, and Title is required.
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A Thing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => assert.ok(gone('Alpha.RAW.1080p')));
+    assert.ok(screen.getByText('Delta.RAW'));
+    assert.equal(failedRequests(calls()).length, before);
+  } finally {
+    view.restore();
+  }
+});
+
+test('dismissing after a page arrived by scrolling keeps the pages already loaded', async () => {
+  const view = stubIntersectionObserver();
+  try {
+    const calls = serve();
+    await loadBothPagesByScrolling(view);
+    const before = failedRequests(calls()).length;
+
+    fireEvent.click(within(row('Alpha.RAW.1080p')).getByRole('button', { name: 'Dismiss' }));
+
+    await waitFor(() => assert.ok(gone('Alpha.RAW.1080p')));
+    assert.ok(screen.getByText('Delta.RAW'));
+    assert.equal(failedRequests(calls()).length, before);
+  } finally {
+    view.restore();
+  }
 });
 
 test('"load more" appends the next page rather than replacing the list', async () => {

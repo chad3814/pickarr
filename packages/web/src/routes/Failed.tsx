@@ -7,6 +7,7 @@ import {
 } from '../api/client.ts';
 import { ManualForm, seed } from '../components/ManualForm.tsx';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
+import { usePagedList } from '../api/usePagedList.ts';
 
 interface FixProps {
   item: FailedItemView;
@@ -50,33 +51,26 @@ function FixForm({ item, fields, onSubmit, onCancel }: FixProps) {
  * by hand or to say it is never wanted.
  */
 export function Failed() {
-  const [items, setItems] = useState<FailedItemView[]>([]);
   const [fields, setFields] = useState<ManualFieldsResponse>({});
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
   const [includeDismissed, setIncludeDismissed] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const loadPage = useCallback(
-    async (from: string | null, dismissed: boolean, replace: boolean): Promise<void> => {
-      try {
-        const page = await api.failed(from, dismissed);
-        setItems((previous) => (replace ? page.items : [...previous, ...page.items]));
-        setCursor(page.nextCursor);
-        setDone(page.nextCursor === null);
-        setError(null);
-      } catch (cause) {
-        setError((cause as Error).message);
-      }
+  // Rebuilt whenever the toggle changes, which is `usePagedList`'s signal to
+  // start the list over from the first page.
+  const fetchPage = useCallback(
+    async (cursor: string | null) => {
+      const page = await api.failed(cursor, includeDismissed);
+      return { items: page.items, nextCursor: page.nextCursor };
     },
-    [],
+    [includeDismissed],
   );
 
-  useEffect(() => {
-    void loadPage(null, includeDismissed, true);
-  }, [loadPage, includeDismissed]);
+  const { items, setItems, loading, done, loadMore, sentinelRef } = usePagedList(
+    fetchPage,
+    setError,
+  );
 
   // The schemas are configuration, one map for every row on every page, so they
   // are fetched once for the screen rather than per item.
@@ -100,8 +94,10 @@ export function Failed() {
 
   /**
    * Drop the one row that was resolved. Refetching the first page instead would
-   * discard every page loaded past it — the bug Browse had, where acting on a
-   * row after "Load more" snapped the list back to its original length.
+   * discard every page loaded past it — the bug Browse had, where acting on a row
+   * further down the list snapped it back to its original length. Pages now
+   * arrive by scrolling, which only hides that failure: a list that silently
+   * shortens gets scrolled again rather than noticed.
    */
   async function fix(itemId: number, values: Record<string, string>): Promise<void> {
     try {
@@ -208,9 +204,20 @@ export function Failed() {
       {done && items.length === 0 && <p>Nothing failed to parse.</p>}
 
       {!done && (
-        <button type="button" onClick={() => void loadPage(cursor, includeDismissed, false)}>
-          Load more
-        </button>
+        <>
+          {/* Coming into view is what asks for the next page. */}
+          <div ref={sentinelRef} aria-hidden="true" />
+          {loading && <p className="loading">Loading…</p>}
+          {/*
+            Kept, rather than replaced by the scrolling. An observer that never
+            fires — a viewport too short to scroll, an odd zoom, a browser that
+            reports nothing — would otherwise strand the reader with no way to
+            ask for the rest, and it is the retry after a page that failed.
+          */}
+          <button type="button" onClick={loadMore} disabled={loading}>
+            Load more
+          </button>
+        </>
       )}
     </section>
   );
