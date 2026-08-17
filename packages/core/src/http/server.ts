@@ -31,6 +31,7 @@ import {
 } from '../db/metadata.ts';
 import { getPerformer, performersForGroups, type PerformerRow } from '../db/performers.ts';
 import { validateIdentity } from '../ingest/commit.ts';
+import { planIdentityChange } from '../manual/identity-plan.ts';
 import {
   dismissFeedItem,
   editGroup,
@@ -53,6 +54,7 @@ import {
   type FailedResponse,
   type GroupEditResponse,
   type GroupView,
+  type IdentityPlanResponse,
   type MetadataRequestResponse,
   type MetadataView,
   type PickResponse,
@@ -125,6 +127,12 @@ export interface ServerDeps {
    * testing here is that a restart is asked for exactly once.
    */
   requestRestart(): void;
+  /**
+   * `config.trashDir`, passed in rather than re-read here for the same reason
+   * `artworkDir` is: this module has no other business knowing the config
+   * document's shape, and a second read is how the two copies drift.
+   */
+  trashDir: string;
 }
 
 /**
@@ -217,6 +225,14 @@ const idParamsSchema = z.object({
   }),
 });
 const valuesBodySchema = z.object({ values: z.record(z.string(), z.string()) });
+// `planDigest` is optional at the schema level because a display-only edit
+// needs none — `editGroup` is what actually enforces which edits require one,
+// and it is enforced there rather than here for the same reason the four
+// routes above read their own status rather than a second copy of the rule.
+const editBodySchema = z.object({
+  values: z.record(z.string(), z.string()),
+  planDigest: z.string().optional(),
+});
 const previewBodySchema = z.object({
   plugin: z.string().min(1),
   values: z.record(z.string(), z.string()),
@@ -322,6 +338,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     registry: deps.registry,
     pluginForFeed: (feedId) => deps.pluginForFeed(feedId),
     now: () => deps.now(),
+    trashDir: deps.trashDir,
   };
 
   /**
@@ -964,7 +981,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return response;
   });
 
-  // Each of the four routes below carries the status the operation chose rather
+  // Each of the five routes below carries the status the operation chose rather
   // than deriving one: which refusal means 400, 404 or 409 is a rule about the
   // operation, and a second copy of it here would be free to drift from it.
   server.post('/api/feed-items/:id/resolve', async (request, reply) => {
@@ -992,19 +1009,48 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return { id: params.data.id, dismissedAt: result.ok.dismissedAt };
   });
 
-  server.patch('/api/groups/:id', async (request, reply) => {
+  /**
+   * Everything an identity change would do, and nothing done. Writes nothing —
+   * a POST only because the values are a form's worth of fields and belong in
+   * a body, not because anything changes. `/api/manual-preview` further down
+   * makes the same GET-vs-POST call for the same method-honesty reason.
+   */
+  server.post('/api/groups/:id/identity-plan', async (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
     const body = valuesBodySchema.safeParse(request.body);
     if (!params.success || !body.success) {
       return reply.code(400).send({ error: 'Invalid request' });
     }
 
-    const result = editGroup(manual, params.data.id, body.data.values);
+    const result = await planIdentityChange(manual, params.data.id, body.data.values);
+    if (!('ok' in result)) return reply.code(result.status).send({ error: result.error });
+    const response: IdentityPlanResponse = result.ok;
+    return response;
+  });
+
+  server.patch('/api/groups/:id', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    const body = editBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.code(400).send({ error: 'Invalid request' });
+    }
+
+    // `planDigest` is forwarded as-is, undefined and all: `editGroup` is what
+    // decides whether this edit needed one, and a missing digest and a stale
+    // one are the same refusal there for the same reason — both mean the user
+    // did not confirm *this* plan.
+    const result = await editGroup(manual, params.data.id, body.data.values, body.data.planDigest);
     if (!('ok' in result)) return reply.code(result.status).send({ error: result.error });
 
     const group = groupAfter(result.ok.groupId);
     if (group === null) return reply.code(404).send({ error: 'No such group' });
-    const response: GroupEditResponse = { group, mergedInto: result.ok.mergedInto };
+    const response: GroupEditResponse = {
+      group,
+      mergedInto: result.ok.mergedInto,
+      renamed: result.ok.renamed,
+      trashed: result.ok.trashed,
+      failed: result.ok.failed,
+    };
     return response;
   });
 

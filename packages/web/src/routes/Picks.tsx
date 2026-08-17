@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router';
-import { api, type GroupView } from '../api/client.ts';
+import { api, RequestError, type GroupView, type ManualField } from '../api/client.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
+import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
+import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
 import { MediaCard } from '../components/MediaCard.tsx';
 
 export function Picks() {
   const [groups, setGroups] = useState<GroupView[]>([]);
+  const [fields, setFields] = useState<Record<string, ManualField[]>>({});
   const [error, setError] = useState<string | null>(null);
   const { hash } = useLocation();
   const landed = useRef<string | null>(null);
@@ -29,6 +32,22 @@ export function Picks() {
 
   useEffect(() => {
     void reload();
+  }, []);
+
+  // The schemas are configuration, one map for the whole screen, fetched once
+  // rather than per card — the same reason Browse fetches it once for its
+  // list. Picks had never needed this before: it offered no editing at all
+  // until this change, which is exactly why a picked group whose identity
+  // belonged to another group was unreachable — Browse only lists groups
+  // still `state = 'new'` or flagged for upgrade.
+  useEffect(() => {
+    void (async () => {
+      try {
+        setFields(await api.manualFields());
+      } catch (cause) {
+        setError((cause as Error).message);
+      }
+    })();
   }, []);
 
   /**
@@ -65,10 +84,75 @@ export function Picks() {
     }
   }
 
+  /**
+   * Reloads rather than patching the list, unlike Browse. A merge can take a
+   * group off Picks entirely — when the survivor holds no pick — or bring one
+   * onto it, and which list a group belongs to is the server's answer to
+   * give, not one to reconstruct on the client.
+   *
+   * The `RequestError`/409 check is `useIdentityChange`'s own contract for
+   * `apply` (see that hook's `ApplyOutcome` doc): only a stale `planDigest`
+   * should send the dialog back for a fresh plan, and that is a 409
+   * specifically — every other failure, a 400 from a plugin or a 500, is
+   * reported here and closes the dialog instead of looping it.
+   */
+  async function applyEdit(
+    groupId: number,
+    values: Record<string, string>,
+    planDigest?: string,
+  ): Promise<ApplyOutcome> {
+    try {
+      const { failed } = await api.editGroup(groupId, values, planDigest);
+      await reload();
+      // A save that landed but left files unmoved is not fully done — the
+      // library sits in two layouts until a retry finishes the job, so this
+      // has to be told apart from silence, not folded into a plain success.
+      setError(
+        failed.length === 0
+          ? null
+          : `Saved, but ${failed.length} file(s) could not be moved: ${failed
+              .map((entry) => `${entry.path} (${entry.error})`)
+              .join('; ')}`,
+      );
+      return { saved: true };
+    } catch (cause) {
+      if (cause instanceof RequestError && cause.status === 409) return { saved: false, stale: true };
+      setError((cause as Error).message);
+      return { saved: false, stale: false };
+    }
+  }
+
+  const identityChange = useIdentityChange(applyEdit, setError);
+
+  /**
+   * Reloads rather than patching, for the same reason `applyEdit` does:
+   * rescoring a release can take the group's upgrade flag away, and whether
+   * that leaves the group on Picks at all is the server's answer to give.
+   */
+  async function editRelease(releaseId: number, values: Record<string, string>): Promise<boolean> {
+    try {
+      await api.editRelease(releaseId, values);
+      await reload();
+      return true;
+    } catch (cause) {
+      setError((cause as Error).message);
+      return false;
+    }
+  }
+
   return (
     <section>
       <h1>Picks</h1>
       {error !== null && <p className="error">{error}</p>}
+      {identityChange.plan !== null && (
+        <IdentityChangeConfirm
+          plan={identityChange.plan}
+          onConfirm={() => void identityChange.confirm()}
+          onCancel={identityChange.cancel}
+          busy={identityChange.busy}
+          stale={identityChange.stale}
+        />
+      )}
       {groups.map((group) => (
         <MediaCard
           key={group.id}
@@ -79,6 +163,12 @@ export function Picks() {
           // "no metadata" the instant this hook takes over.
           group={{ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata }}
           onPick={(releaseId) => void pick(group.id, releaseId)}
+          // A plugin with no manual hooks is *missing* from this map, and a
+          // group can outlive the package that made it; either way the card
+          // finds no schema and offers no editing.
+          fields={fields[group.plugin]}
+          onEditGroup={(values) => identityChange.begin(group.id, values)}
+          onEditRelease={(releaseId, values) => editRelease(releaseId, values)}
         />
       ))}
     </section>

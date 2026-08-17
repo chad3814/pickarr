@@ -377,12 +377,16 @@ export function deferMetadata(
  *
  * This does not weaken the no-cascade choice for `downloads` and
  * `imported_files`. Those tables record something that happened — a file was
- * fetched, imported, is sitting on disk under the source's name — and
- * `groupHistory` uses the foreign key that would otherwise fire as the
- * deliberate backstop that refuses the merge outright rather than silently
- * discard that record. Metadata records no event at all, only a cached,
- * disposable answer to "what does a remote service call this", so there is
- * nothing here worth refusing a merge to protect.
+ * fetched, imported, is sitting on disk under the source's name — and until
+ * the 2026-08-16 identity-edit design, `groupHistory` used the foreign key
+ * that would otherwise fire as the deliberate backstop that refused the merge
+ * outright rather than silently discard that record. That branch replaced the
+ * refusal with the shown decision in that design's §5: the rows now move to
+ * the survivor instead. Metadata is different regardless — it records no
+ * event at all, only a cached, disposable answer to "what does a remote
+ * service call this" — which is why clearing it here, rather than moving it
+ * the way `downloads` and `imported_files` now are, is still the right call:
+ * there was never anything here worth carrying forward, refusal or no.
  */
 export function clearGroupMetadata(db: DatabaseSync, groupId: number): void {
   db.prepare('DELETE FROM group_metadata WHERE group_id = ?').run(groupId);

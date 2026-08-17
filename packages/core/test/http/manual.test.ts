@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { FastifyInstance } from 'fastify';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ManualField, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import createScenesPlugin from '@pickarr/plugin-scenes';
@@ -139,6 +140,7 @@ function deps(db: DatabaseSync, plugin: MediaTypePlugin = PLUGIN): ServerDeps {
     bootConfigDocument: null,
     databasePath: '/tmp/pickarr-manual-test-unused.db',
     requestRestart: () => {},
+    trashDir: '/trash',
   };
 }
 
@@ -216,6 +218,24 @@ function insertDownload(db: DatabaseSync, groupId: number, releaseId: number): v
 
 function groupCount(db: DatabaseSync): number {
   return Number(db.prepare('SELECT COUNT(*) AS n FROM media_groups').get()?.['n']);
+}
+
+/**
+ * Plans a change over HTTP and hands back the digest it named, so a test can
+ * confirm the very plan it was shown — the same round trip the SPA makes,
+ * rather than a shortcut that assumes what the plan route would have said.
+ */
+async function planDigestFor(
+  server: FastifyInstance,
+  groupId: number,
+  values: Record<string, string>,
+): Promise<string> {
+  const response = await server.inject({
+    method: 'POST',
+    url: `/api/groups/${groupId}/identity-plan`,
+    payload: { values },
+  });
+  return String(response.json()['digest']);
 }
 
 interface FailedItemBody {
@@ -620,38 +640,15 @@ test('patching a group returns it rewritten, with no merge', async () => {
   db.close();
 });
 
-test('a merge answers with the target group and names it in mergedInto', async () => {
+/**
+ * A merge moves releases, so `PATCH` refuses it without a digest — proven
+ * first here, then confirmed with the digest the plan route names, which is
+ * the same two-request round trip the SPA makes.
+ */
+test('PATCH /api/groups/:id refuses a merge with no digest', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
   seedTwoGroups(db);
-  const server = buildServer(deps(db));
-
-  const body = (
-    await server.inject({
-      method: 'PATCH',
-      url: '/api/groups/2',
-      payload: { values: { key: 'k1' } },
-    })
-  ).json();
-
-  // The client knows the source id — it sent it — so `mergedInto` naming the
-  // target is what lets it drop one card and replace the other.
-  assert.equal(body['mergedInto'], 1);
-  assert.equal(body['group']['id'], 1);
-  assert.deepEqual(
-    body['group']['releases'].map((release: { id: number }) => release.id),
-    [2, 1],
-  );
-  assert.equal(getGroup(db, 2), null);
-  await server.close();
-  db.close();
-});
-
-test('a merge refused for a group with a download is a 409 that says why', async () => {
-  const db = openTestDatabase();
-  seedFeedItems(db);
-  seedTwoGroups(db);
-  insertDownload(db, 2, 2);
   const server = buildServer(deps(db));
 
   const response = await server.inject({
@@ -661,8 +658,68 @@ test('a merge refused for a group with a download is a 409 that says why', async
   });
 
   assert.equal(response.statusCode, 409);
-  assert.match(String(response.json()['error']), /has a download recorded against it/);
+  assert.match(String(response.json()['error']), /must be confirmed first/);
   assert.equal(getGroup(db, 2)?.identityKey, 'k2');
+  assert.equal(getGroup(db, 1)?.identityKey, 'k1');
+  await server.close();
+  db.close();
+});
+
+test('a merge answers with the target group and names it in mergedInto', async () => {
+  const db = openTestDatabase();
+  seedFeedItems(db);
+  seedTwoGroups(db);
+  const server = buildServer(deps(db));
+
+  const digest = await planDigestFor(server, 2, { key: 'k1' });
+  const response = await server.inject({
+    method: 'PATCH',
+    url: '/api/groups/2',
+    payload: { values: { key: 'k1' }, planDigest: digest },
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  // The client knows the source id — it sent it — so `mergedInto` naming the
+  // target is what lets it drop one card and replace the other.
+  assert.equal(body['mergedInto'], 1);
+  assert.equal(body['group']['id'], 1);
+  assert.deepEqual(
+    body['group']['releases'].map((release: { id: number }) => release.id),
+    [2, 1],
+  );
+  assert.equal(body['renamed'], 0);
+  assert.equal(body['trashed'], 0);
+  assert.deepEqual(body['failed'], []);
+  assert.equal(getGroup(db, 2), null);
+  await server.close();
+  db.close();
+});
+
+/**
+ * Used to be a 409 saying the source "has a download recorded against it" and
+ * that the refusal would not clear by waiting — permanent, because nothing
+ * deletes a `downloads` row. The download is no longer an obstruction at all:
+ * a confirmed merge carries the download across with everything else, exactly
+ * as it does for a source with no download on record.
+ */
+test('a download against the source no longer blocks a confirmed merge', async () => {
+  const db = openTestDatabase();
+  seedFeedItems(db);
+  seedTwoGroups(db);
+  insertDownload(db, 2, 2);
+  const server = buildServer(deps(db));
+
+  const digest = await planDigestFor(server, 2, { key: 'k1' });
+  const response = await server.inject({
+    method: 'PATCH',
+    url: '/api/groups/2',
+    payload: { values: { key: 'k1' }, planDigest: digest },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json()['mergedInto'], 1);
+  assert.equal(getGroup(db, 2), null);
   await server.close();
   db.close();
 });
@@ -686,6 +743,48 @@ test('patching an unknown group is a 404 and a malformed body a 400', async () =
   assert.equal(missing.statusCode, 404);
   assert.equal(malformed.statusCode, 400);
   assert.equal(getGroup(db, 2)?.identityKey, 'k2');
+  await server.close();
+  db.close();
+});
+
+// --- Plan a group's identity change -------------------------------------
+
+test('POST /api/groups/:id/identity-plan describes a merge without performing it', async () => {
+  const db = openTestDatabase();
+  seedFeedItems(db);
+  seedTwoGroups(db);
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/groups/2/identity-plan',
+    payload: { values: { key: 'k1' } },
+  });
+
+  assert.equal(response.statusCode, 200);
+  const plan = response.json();
+  assert.equal(plan['kind'], 'merge');
+  assert.equal(plan['mergeInto']['id'], 1);
+  assert.ok(typeof plan['digest'] === 'string' && plan['digest'].length > 0);
+  // Nothing done — a plan is read-only, and both groups still stand exactly
+  // as seeded.
+  assert.notEqual(getGroup(db, 1), null);
+  assert.notEqual(getGroup(db, 2), null);
+  await server.close();
+  db.close();
+});
+
+test('POST /api/groups/:id/identity-plan is 404 for a group that does not exist', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/groups/99/identity-plan',
+    payload: { values: { key: 'k1' } },
+  });
+
+  assert.equal(response.statusCode, 404);
   await server.close();
   db.close();
 });

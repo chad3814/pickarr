@@ -1,19 +1,26 @@
+import { mkdir, realpath } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
+import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { clearParseError, getFeedItem, setDismissedAt } from '../db/feed-items.ts';
 import {
   deleteGroup,
   earnsListBump,
-  findGroup,
   flagUpgrade,
   getGroup,
-  groupHistory,
   markGroupEdited,
+  markPicked,
+  moveDownloadsToGroup,
+  moveImportedFilesToGroup,
   moveReleasesToGroup,
   refreshUpgradeFlag,
   updateGroupIdentity,
-  type GroupRow,
 } from '../db/groups.ts';
+import {
+  getImportedFile,
+  setImportedFileDest,
+  type ImportedFileRow,
+} from '../db/imported-files.ts';
 import { clearGroupMetadata } from '../db/metadata.ts';
 import {
   getRelease,
@@ -21,19 +28,27 @@ import {
   releasesForGroup,
   updateReleaseQuality,
 } from '../db/releases.ts';
-import {
-  commitRelease,
-  validateIdentity,
-  validateParsed,
-  type PreparedIdentity,
-} from '../ingest/commit.ts';
+import { commitRelease, validateParsed } from '../ingest/commit.ts';
 import type { PluginRegistry } from '../plugins/registry.ts';
+import { lstatOrNull, moveWithinLibrary, type RenameLike } from '../pipeline/import.ts';
+import { trashFiles } from '../pipeline/upgrade.ts';
+import { planIdentityChange } from './identity-plan.ts';
+import { buildRelease, editHooks, mediaFor, mergedValues, resolveIdentityFor } from './values.ts';
 
 export interface ManualDeps {
   db: DatabaseSync;
   registry: PluginRegistry;
   pluginForFeed(feedId: string): MediaTypePlugin | null;
   now(): number;
+  /**
+   * Where a superseded pick's files go when an identity change merges two
+   * groups. The same directory an upgrade import trashes into, and for the same
+   * reason: one scene ends up with one owned file, and the other is recoverable
+   * by hand rather than deleted.
+   */
+  trashDir: string;
+  /** Injectable so a test can fail one rename mid-loop. Defaults to `fs.rename`. */
+  rename?: RenameLike;
 }
 
 /**
@@ -67,74 +82,6 @@ function inTransaction<T>(db: DatabaseSync, body: () => T): T {
     db.exec('ROLLBACK');
     throw error;
   }
-}
-
-/**
- * Asks the plugin to turn field values into a release.
- *
- * Guarded for the same reason `validateParsed` is: this runs inside a request
- * handler that has no guard of its own, and a plugin hook that throws would
- * otherwise be a 500 over a rolled-back transaction rather than a message
- * shown under the fields that caused it.
- */
-function buildRelease(
-  plugin: MediaTypePlugin,
-  from: NonNullable<MediaTypePlugin['fromManualValues']>,
-  values: Record<string, string>,
-): { media: ParsedRelease } | { error: string } {
-  try {
-    return from.call(plugin, values);
-  } catch (error) {
-    return { error: `plugin threw: ${(error as Error).message}` };
-  }
-}
-
-/**
- * The submitted values over the current record's own, so an edit form may send
- * only what changed — and so a form scoped to one half of the record (identity
- * for a group, quality for a release) still hands the plugin a complete set.
- */
-function mergedValues(
-  plugin: MediaTypePlugin,
-  to: NonNullable<MediaTypePlugin['toManualValues']>,
-  current: ParsedRelease,
-  submitted: Record<string, string>,
-): { values: Record<string, string> } | { error: string } {
-  try {
-    return { values: { ...to.call(plugin, current), ...submitted } };
-  } catch (error) {
-    return { error: `plugin threw: ${(error as Error).message}` };
-  }
-}
-
-/**
- * Both halves of the edit contract, or nothing.
- *
- * A plugin implementing none of the manual hooks gets no edit UI at all, so
- * reaching an edit for one is a request for something that does not exist —
- * 409 rather than a thrown "not a function". Correcting an existing record
- * needs the inverse hook too: without `toManualValues` there is no way to send
- * only what changed.
- */
-function editHooks(
-  plugin: MediaTypePlugin,
-): {
-  from: NonNullable<MediaTypePlugin['fromManualValues']>;
-  to: NonNullable<MediaTypePlugin['toManualValues']>;
-} | null {
-  const from = plugin.fromManualValues;
-  const to = plugin.toManualValues;
-  if (from === undefined || to === undefined) return null;
-  return { from, to };
-}
-
-/** The stored halves of a record, back in the shape a plugin understands. */
-function mediaFor(group: GroupRow, quality: string): ParsedRelease {
-  return {
-    identityKey: group.identityKey,
-    display: JSON.parse(group.display) as ParsedRelease['display'],
-    quality: JSON.parse(quality) as ParsedRelease['quality'],
-  };
 }
 
 /**
@@ -213,76 +160,100 @@ export function dismissFeedItem(
   });
 }
 
+/** What an applied identity change did, including the parts of it that failed. */
+export interface GroupEditOutcome {
+  groupId: number;
+  mergedInto: number | null;
+  renamed: number;
+  trashed: number;
+  /**
+   * Files that did not end up where the plan said they would. Collected rather
+   * than thrown: by the time any of this runs the database half is committed
+   * and correct, and a throw would report the whole edit as a failure it was
+   * not.
+   */
+  failed: readonly { path: string; error: string }[];
+}
+
 /**
- * Corrects a group's identity and display, which is to say every release in it
- * and every future import that lands in it.
+ * Corrects a group's identity and display, which is to say every release in it,
+ * every future import that lands in it, and — now — the files it has already
+ * placed in the library.
  *
- * `validateIdentity` supplies `identityKey`, `displayJson` and `searchText`;
- * `searchText` is never recomputed here, because the one place it is derived
- * from `display` must stay the one place `display` is serialized. It is the
- * scoreless validator because a group has no quality to score — see its own
- * comment for what asking anyway would cost.
+ * Four phases, and the order is the safety argument rather than an incidental
+ * sequence (design doc of 2026-08-16 §5). Read the invariant before rearranging
+ * anything: **after phase 1 the database is fully correct about grouping, and
+ * every `dest_path` still truthfully names where its file actually is, because
+ * nothing on disk has moved yet.** The database therefore never lies, at any
+ * instant, including part-way through a failure — which is what makes an
+ * interrupted edit something a re-save finishes rather than a puzzle an operator
+ * has to reconstruct by hand.
+ *
+ * The identity itself comes from `resolveIdentityFor`, so the planner and this
+ * cannot disagree about what a set of values means. It is the scoreless
+ * validator because a group has no quality to score — see `validateIdentity`
+ * for what asking anyway would cost — and `searchText` is taken from it rather
+ * than recomputed, because the one place it is derived from `display` must stay
+ * the one place `display` is serialized.
  */
-export function editGroup(
+export async function editGroup(
   deps: ManualDeps,
   groupId: number,
   values: Record<string, string>,
-): ManualResult<{ groupId: number; mergedInto: number | null }> {
+  planDigest?: string,
+): Promise<ManualResult<GroupEditOutcome>> {
   const { db } = deps;
-  return inTransaction(db, () => {
-    const group = getGroup(db, groupId);
-    if (group === null) return refuse(404, `no such group: ${groupId}`);
 
-    const plugin = deps.registry.byId(group.plugin);
-    if (plugin === undefined) return refuse(409, `no plugin loaded for id ${group.plugin}`);
+  // Phase 0. The plan is recomputed rather than trusted: between the preview
+  // and this call a release may have ingested or a queued download may have
+  // imported, and the user must not confirm a plan that no longer holds.
+  const planned = await planIdentityChange(deps, groupId, values);
+  if (!('ok' in planned)) return planned;
+  const plan = planned.ok;
 
-    const hooks = editHooks(plugin);
-    if (hooks === null) return refuse(409, `plugin ${plugin.id} does not support manual editing`);
+  if (plan.blockers.length > 0) {
+    return refuse(409, `cannot apply this identity change: ${plan.blockers.join('; ')}`);
+  }
 
-    // A group holds no quality of its own — quality is release-level — and the
-    // plugin contract requires a correct key and display from the
-    // identity-scoped values alone, so an empty one is the honest input.
-    const merged = mergedValues(plugin, hooks.to, mediaFor(group, '{}'), values);
-    if ('error' in merged) return refuse(400, merged.error);
+  // A plan that moves nothing needs no confirmation, which is what keeps a typo
+  // fix on a display field a one-click save exactly as it always was.
+  //
+  // `renames` and `trashing` are asked about regardless of `kind`, and that is
+  // load-bearing rather than belt-and-braces: re-submitting the same values
+  // after a partial rename failure classifies as `kind: 'none'` — the merge
+  // already happened — while the planner still sees files at stale paths and
+  // still returns renames. Gating the file work on `kind` would make finishing
+  // an interrupted edit impossible through the same door that started it.
+  const needsConfirmation =
+    plan.kind === 'merge' || plan.renames.length > 0 || plan.trashing.length > 0;
+  if (needsConfirmation && planDigest !== plan.digest) {
+    return refuse(
+      409,
+      planDigest === undefined
+        ? 'this change moves releases or files and must be confirmed first'
+        : 'what this change would do has altered since it was shown; review it again',
+    );
+  }
 
-    const built = buildRelease(plugin, hooks.from, merged.values);
-    if ('error' in built) return refuse(400, built.error);
+  const now = deps.now();
+  const group = getGroup(db, groupId);
+  if (group === null) return refuse(404, `no such group: ${groupId}`);
+  const plugin = deps.registry.byId(group.plugin);
+  if (plugin === undefined) return refuse(409, `no plugin loaded for id ${group.plugin}`);
+  const resolved = resolveIdentityFor(plugin, group, values);
+  if ('error' in resolved) return refuse(resolved.status, resolved.error);
+  const identity = resolved.identity;
 
-    const validated = validateIdentity(built.media);
-    if ('error' in validated) return refuse(400, validated.error);
+  const target = plan.mergeInto === null ? null : getGroup(db, plan.mergeInto.id);
+  if (plan.mergeInto !== null && target === null) {
+    return refuse(409, `group ${plan.mergeInto.id} no longer exists`);
+  }
 
-    const now = deps.now();
-    const prepared: PreparedIdentity = validated.identity;
-    const target =
-      prepared.identityKey === group.identityKey
-        ? null
-        : findGroup(db, group.plugin, prepared.identityKey);
-
-    if (target !== null && target.id !== group.id) {
-      // Named specifically, because the two situations differ in what the user
-      // would go and look at: a download record against this group, or files
-      // already on disk under its name.
-      //
-      // Both messages say the refusal is permanent, because it is. Nothing in
-      // the system deletes a `downloads` row, and a trashed `imported_files`
-      // row still counts as history — so a user told only "has a download"
-      // would reasonably wait for it to finish, and waiting makes it worse:
-      // the import writes an `imported_files` row too. Lifting the restriction
-      // is a code change (spec §7.3), not something to wait out.
-      const obstruction = groupHistory(db, group.id);
-      if (obstruction === 'downloads') {
-        return refuse(
-          409,
-          `cannot merge group ${group.id} into group ${target.id}: group ${group.id} has a download recorded against it. Download records are never removed, so this will not clear by waiting.`,
-        );
-      }
-      if (obstruction === 'imported-files') {
-        return refuse(
-          409,
-          `cannot merge group ${group.id} into group ${target.id}: group ${group.id} already has files in the library under its own name, which keep the paths they were given. Trashing them does not clear this either.`,
-        );
-      }
-
+  // Phase 1. One transaction, database only, and every write in it is one the
+  // rows alone can express — nothing here touches the filesystem, which is the
+  // whole reason the invariant above holds.
+  const survivorId = inTransaction(db, () => {
+    if (target !== null) {
       // Asked *before* the move, and it has to be: `earnsListBump` compares
       // against the target's own pick and flag, and once these releases sit
       // under the target they are part of what it already knows about — the
@@ -293,10 +264,37 @@ export function editGroup(
       const best = releasesForGroup(db, group.id)[0];
       const bumps = best !== undefined && earnsListBump(db, target, best.score);
 
-      // Order matters and the foreign key enforces it: the releases move
-      // first, then the target's flag is re-derived over them, and the emptied
-      // source is deleted last — the one statement here that can throw.
+      // All three tables move before the delete, and the foreign keys enforce
+      // it: `releases`, `downloads` and `imported_files` all reference
+      // `group_id`, and any row left behind makes `deleteGroup` the statement
+      // that discovers it. Moving `downloads` and `imported_files` at all is
+      // what lifts the old refusal — see `moveDownloadsToGroup`.
       moveReleasesToGroup(db, group.id, target.id);
+      moveDownloadsToGroup(db, group.id, target.id);
+      moveImportedFilesToGroup(db, group.id, target.id);
+
+      // A pick names a release the user owns a file for. That release changed
+      // groups, it did not disappear, so the survivor takes the pick the plan
+      // chose — dropping it would tell the user they no longer have a file they
+      // do. `state` travels with it (`markPicked` writes both): a row holding a
+      // pick while still reading 'new' is off Picks and back in Browse, the
+      // same loss in a different hat.
+      //
+      // Written *before* the two flag calls below so that the flag is derived
+      // against the pick the group actually ends up with. That is a choice, not
+      // a correctness requirement, and the comment says so deliberately: both
+      // `flagUpgrade` and `refreshUpgradeFlag` derive from the group's *current*
+      // `picked_release_id`, but `markPicked` writes `upgrade_release_id` itself
+      // from the same rule, so the final row is identical either way — reversing
+      // the two would merely have the flag call derive against a stale pick and
+      // `markPicked` overwrite it. The flag is right *because `markPicked`
+      // re-derives it*. Anything that changes that — splitting `markPicked` into
+      // a pick-only setter, say — makes this ordering load-bearing for real, so
+      // keep it as written rather than relying on the overwrite.
+      if (plan.pick.surviving !== null) {
+        markPicked(db, target.id, plan.pick.surviving.releaseId);
+      }
+
       // A release moving into a group and beating its pick *is* an arrival at
       // that group. It merely took a slower route, in through a human, exactly
       // as a resolve does — and a resolve bumps (§7.1). Reaching the same
@@ -308,6 +306,13 @@ export function editGroup(
       // release's quality — because neither introduces a release the group did
       // not already have. A merge that brings in nothing better does not bump
       // either: moving a pair of also-ran encodes across is not an arrival.
+      //
+      // `flagUpgrade` here is a re-derivation plus the bump — the bump is the
+      // only thing it adds that `markPicked` did not already do. The
+      // `refreshUpgradeFlag` branch is only meaningfully reached when no pick
+      // survives (a merge of two unpicked groups, or a pick that named a release
+      // the merged group will not hold); with a surviving pick it re-derives
+      // exactly what `markPicked` just wrote.
       if (bumps) flagUpgrade(db, target.id, now);
       else refreshUpgradeFlag(db, target.id);
       // The stamp goes on the surviving group. The target's own display and
@@ -321,8 +326,7 @@ export function editGroup(
       // the statement that would otherwise discover that the hard way.
       clearGroupMetadata(db, group.id);
       deleteGroup(db, group.id);
-
-      return { ok: { groupId: target.id, mergedInto: target.id } };
+      return target.id;
     }
 
     // Whether the question a metadata lookup asks has changed, decided before
@@ -331,13 +335,13 @@ export function editGroup(
     // — so a changed display is a changed question even when the key survives
     // it, which a title correction that reduces to the same slug does.
     const questionChanged =
-      prepared.identityKey !== group.identityKey || prepared.displayJson !== group.display;
+      identity.identityKey !== group.identityKey || identity.displayJson !== group.display;
 
     updateGroupIdentity(db, {
       id: group.id,
-      identityKey: prepared.identityKey,
-      display: prepared.displayJson,
-      searchText: prepared.searchText,
+      identityKey: identity.identityKey,
+      display: identity.displayJson,
+      searchText: identity.searchText,
     });
     markGroupEdited(db, group.id, now);
 
@@ -354,9 +358,135 @@ export function editGroup(
     // actually changed, so a save that rewrites nothing does not blank the
     // panel and spend a request to rediscover the same answer.
     if (questionChanged) clearGroupMetadata(db, group.id);
-
-    return { ok: { groupId: group.id, mergedInto: null } };
+    return group.id;
   });
+
+  const failed: { path: string; error: string }[] = [];
+  let trashed = 0;
+  let renamed = 0;
+
+  // Everything below is filesystem work, and it is skipped entirely when the
+  // plan moves no files. A display-only edit must not create the library root
+  // as a side effect of saving a title, and must not be refusable because it
+  // could not.
+  if (plan.trashing.length > 0 || plan.renames.length > 0) {
+    let libraryRootReal: string | null = null;
+    try {
+      // Resolved and created before `realpath`, exactly as `importDownload`
+      // does it: `realpath` needs the directory to exist. Resolved once, not
+      // per file.
+      const libraryRoot = resolve(deps.registry.libraryRootById(group.plugin));
+      await mkdir(libraryRoot, { recursive: true });
+      libraryRootReal = await realpath(libraryRoot);
+    } catch (error) {
+      // Reported rather than thrown, for the same reason a per-file failure is:
+      // phase 1 is committed and was correct, and a throw here would report the
+      // whole edit as failed. With no library root there is nowhere for any
+      // planned move to go, so every one of them is named.
+      const reason = (error as Error).message;
+      for (const entry of plan.trashing) failed.push({ path: entry.path, error: reason });
+      for (const move of plan.renames) failed.push({ path: move.from, error: reason });
+    }
+
+    if (libraryRootReal !== null) {
+      // Phase 2, before phase 3, and for the reason `import.ts` gives for
+      // trashing ahead of its own transfer loop: a superseded file frequently
+      // occupies the exact path a renamed file wants, so it has to move out of
+      // the way before anything can be written there. Ordering it ahead of the
+      // renames — rather than interleaving — also means a failure part-way
+      // through leaves a recoverable trail (the superseded files sitting in
+      // `trashDir`) instead of a half-trashed, half-renamed group.
+      if (plan.trashing.length > 0) {
+        const rows: ImportedFileRow[] = [];
+        for (const entry of plan.trashing) {
+          const row = getImportedFile(db, entry.importedFileId);
+          if (row === null) {
+            // The row went between the plan and here, but its *file* need not
+            // have, and the planner has already exempted its path from the
+            // occupant blocker on the strength of this phase clearing it.
+            // Skipping it silently would drop an occupied path out of the outcome
+            // while leaving it in the way, so it is reported like any other file
+            // this phase failed to move.
+            failed.push({
+              path: entry.path,
+              error: `imported file ${entry.importedFileId} is no longer on record, so it was not trashed`,
+            });
+            continue;
+          }
+          rows.push(row);
+        }
+        try {
+          await trashFiles(db, rows, libraryRootReal, deps.trashDir, survivorId, now);
+          trashed = rows.length;
+        } catch (error) {
+          // `trashFiles` marks each row trashed immediately after moving that
+          // file, so the rows themselves say how far it got. Read back rather
+          // than guessed: blaming the first row for a later one's failure would
+          // send an operator to look at a file that moved perfectly well.
+          const reason = (error as Error).message;
+          for (const row of rows) {
+            const after = getImportedFile(db, row.id);
+            if (after !== null && after.trashedAt !== null) trashed += 1;
+            else failed.push({ path: row.destPath, error: reason });
+          }
+        }
+      }
+
+      // Phase 3. One file at a time, each row's `dest_path` updated in its own
+      // small transaction straight after its own file moves, so a crash leaves
+      // every moved file recorded at its new path and every unmoved one at its
+      // old. A single transaction around the whole loop would hold a
+      // transaction open across filesystem I/O and would, on a rollback, leave
+      // every already-moved file recorded where it no longer is.
+      for (const move of plan.renames) {
+        // The last guard against overwriting a file, and now the only one.
+        // `transfer` (`pipeline/import.ts`) does not check its destination —
+        // `importDownload` does that in its own loop before calling it — and the
+        // planner *deliberately* lifts its occupied-destination blocker for
+        // exactly the paths phase 2 promises to clear. So if phase 2 did not
+        // clear one (an unwritable `trashDir` throws at its first `mkdir`, before
+        // touching anything, leaving every doomed file where it was), a rename
+        // here would overwrite a file the design promises is recoverable from
+        // `trashDir`, leave two live `imported_files` rows naming one path, and
+        // leave the clobbered row describing another release's bytes.
+        //
+        // Whose file it is deliberately does not matter: if it is still there,
+        // phase 3 has no business writing over it. Re-saving after fixing the
+        // trash directory plans the same moves again, so nothing is lost by
+        // refusing.
+        const occupant = await lstatOrNull(move.to);
+        if (occupant !== null) {
+          failed.push({
+            path: move.from,
+            error: `${move.to} is still occupied, so it was left where it is`,
+          });
+          continue;
+        }
+
+        try {
+          await moveWithinLibrary(move.from, move.to, libraryRootReal, deps.rename);
+          inTransaction(db, () => setImportedFileDest(db, move.importedFileId, move.to));
+          renamed += 1;
+        } catch (error) {
+          // Collected, never rethrown. The merge is already committed and was
+          // correct; abandoning the remaining files would only strand more of
+          // them, and the row still names where this one actually is, so
+          // re-saving the same values plans the remaining moves again.
+          failed.push({ path: move.from, error: (error as Error).message });
+        }
+      }
+    }
+  }
+
+  return {
+    ok: {
+      groupId: survivorId,
+      mergedInto: target === null ? null : target.id,
+      renamed,
+      trashed,
+      failed,
+    },
+  };
 }
 
 /**

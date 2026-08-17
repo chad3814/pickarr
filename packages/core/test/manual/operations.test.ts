@@ -1,64 +1,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
+import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { getFeedItem } from '../../src/db/feed-items.ts';
 import { getGroup } from '../../src/db/groups.ts';
+import { filesForGroup } from '../../src/db/imported-files.ts';
 import { getGroupMetadata, recordMetadataAnswer } from '../../src/db/metadata.ts';
 import { getRelease, releasesForGroup } from '../../src/db/releases.ts';
-import { maybeNum, type SqlRow } from '../../src/db/row.ts';
-import type { PluginRegistry } from '../../src/plugins/registry.ts';
+import { maybeNum, num, type SqlRow } from '../../src/db/row.ts';
+import { planIdentityChange } from '../../src/manual/identity-plan.ts';
 import {
   dismissFeedItem,
   editGroup,
   editRelease,
   resolveFeedItem,
   type ManualDeps,
-  type ManualResult,
 } from '../../src/manual/operations.ts';
-
-const NOW = 5000;
-
-/**
- * A plugin whose identity is whatever `key` says and whose quality is a
- * resolution — no parsing, no site list, no field validation beyond the one
- * rule the 400 cases need. These tests are about core's rules for a manual
- * edit, not about any real plugin's idea of a release name.
- *
- * `key: '!'` is the one back door: it returns a `ParsedRelease` that
- * `validateParsed` must reject, which is the only way to reach that branch
- * from outside without a plugin that lies about its own contract.
- */
-const PLUGIN: MediaTypePlugin = {
-  id: 'test',
-  displayName: 'Test',
-  parse: () => null,
-  score: (quality) => quality.resolution ?? 0,
-  planImport: () => null,
-  manualFields: () => [
-    { name: 'key', label: 'Key', type: 'text', scope: 'identity', required: true },
-    { name: 'title', label: 'Title', type: 'text', scope: 'identity' },
-    { name: 'res', label: 'Resolution', type: 'text', scope: 'quality' },
-  ],
-  fromManualValues(values): { media: ParsedRelease } | { error: string } {
-    const key = values['key'] ?? '';
-    if (key === '') return { error: 'key is required' };
-    if (key === 'THROW') throw new Error('boom');
-    return {
-      media: {
-        identityKey: key === '!' ? '' : key,
-        display: { title: values['title'] ?? key, fields: [] },
-        quality: { resolution: Number(values['res'] ?? '0') },
-      },
-    };
-  },
-  toManualValues: (media) => ({
-    key: media.identityKey,
-    title: media.display.title,
-    res: String(media.quality.resolution ?? ''),
-  }),
-};
+import { lstatOrNull } from '../../src/pipeline/import.ts';
+import { FILING, NOW, PLUGIN, makeDeps, ok, failure, seedWithFile } from './fixtures.ts';
 
 /**
  * A plugin that cannot score. Nothing about a group needs a score — quality is
@@ -87,36 +50,6 @@ const BARE: MediaTypePlugin = {
   score: (quality) => quality.resolution ?? 0,
   planImport: () => null,
 };
-
-function registryFor(plugin: MediaTypePlugin): PluginRegistry {
-  return {
-    byPackage: () => plugin,
-    byId: (id) => (id === plugin.id ? plugin : undefined),
-    libraryRoot: () => '/library',
-    libraryRootById: () => '/library',
-    all: () => [plugin],
-  };
-}
-
-/** Feed `f` is configured; every other feed id has been removed from config. */
-function makeDeps(db: DatabaseSync, plugin: MediaTypePlugin = PLUGIN): ManualDeps {
-  return {
-    db,
-    registry: registryFor(plugin),
-    pluginForFeed: (feedId) => (feedId === 'f' ? plugin : null),
-    now: () => NOW,
-  };
-}
-
-function ok<T>(result: ManualResult<T>): T {
-  assert.ok('ok' in result, `expected success, got ${JSON.stringify(result)}`);
-  return result.ok;
-}
-
-function failure<T>(result: ManualResult<T>): { error: string; status: number } {
-  assert.ok(!('ok' in result), `expected failure, got ${JSON.stringify(result)}`);
-  return result;
-}
 
 /** `edited_at` is on neither `ReleaseRow` nor the group row's public shape. */
 function releaseEditedAt(db: DatabaseSync, id: number): number | null {
@@ -250,6 +183,19 @@ function seedEditableReleases(db: DatabaseSync): void {
      VALUES (1, 1, 1, '{"resolution":720}', 720, 100),
             (2, 1, 2, '{"resolution":480}', 480, 100)`,
   ).run();
+}
+
+/**
+ * Plans the change, then applies it against the digest that plan returned —
+ * which is the only way to apply anything that moves releases or files.
+ *
+ * There is deliberately no test-only bypass of the digest. It is the whole
+ * confirmation gate, and a flag that skipped it would be a hole in the gate
+ * that the tests would then be proving nothing about.
+ */
+async function applyPlanned(deps: ManualDeps, groupId: number, values: Record<string, string>) {
+  const plan = ok(await planIdentityChange(deps, groupId, values));
+  return editGroup(deps, groupId, values, plan.digest);
 }
 
 function insertDownload(db: DatabaseSync, groupId: number, releaseId: number): void {
@@ -478,13 +424,15 @@ test('dismiss 404s on an unknown feed item', () => {
 
 // --- Edit a group ------------------------------------------------------
 
-test('editing only the display keeps the key and rewrites the search text with it', () => {
+test('editing only the display keeps the key and rewrites the search text with it', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  const result = ok(editGroup(makeDeps(db), 2, { title: 'Renamed' }));
+  const result = ok(await editGroup(makeDeps(db), 2, { title: 'Renamed' }));
 
-  assert.deepEqual(result, { groupId: 2, mergedInto: null });
+  // No digest, and none required: this moves nothing. A typo fix stays a
+  // one-click save.
+  assert.deepEqual(result, { groupId: 2, mergedInto: null, renamed: 0, trashed: 0, failed: [] });
   const group = getGroup(db, 2)!;
   assert.equal(group.identityKey, 'k2');
   assert.equal(group.display, '{"title":"Renamed","fields":[]}');
@@ -494,13 +442,15 @@ test('editing only the display keeps the key and rewrites the search text with i
   db.close();
 });
 
-test('editing the key to an unused one rewrites the group in place', () => {
+test('editing the key to an unused one rewrites the group in place', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  const result = ok(editGroup(makeDeps(db), 2, { key: 'k9' }));
+  const result = ok(await editGroup(makeDeps(db), 2, { key: 'k9' }));
 
-  assert.deepEqual(result, { groupId: 2, mergedInto: null });
+  // A rekey with no files under the old key moves nothing on disk either, so it
+  // needs no digest.
+  assert.deepEqual(result, { groupId: 2, mergedInto: null, renamed: 0, trashed: 0, failed: [] });
   const group = getGroup(db, 2)!;
   assert.equal(group.identityKey, 'k9');
   // The title came from `toManualValues` of the current record: an edit
@@ -512,13 +462,13 @@ test('editing the key to an unused one rewrites the group in place', () => {
   db.close();
 });
 
-test('editing the key to another group merges into it and deletes the source', () => {
+test('editing the key to another group merges into it and deletes the source', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  const result = ok(editGroup(makeDeps(db), 2, { key: 'k1', title: 'Renamed' }));
+  const result = ok(await applyPlanned(makeDeps(db), 2, { key: 'k1', title: 'Renamed' }));
 
-  assert.deepEqual(result, { groupId: 1, mergedInto: 1 });
+  assert.deepEqual(result, { groupId: 1, mergedInto: 1, renamed: 0, trashed: 0, failed: [] });
   assert.equal(getGroup(db, 2), null);
   assert.deepEqual(
     releasesForGroup(db, 1).map((release) => release.id),
@@ -535,11 +485,11 @@ test('editing the key to another group merges into it and deletes the source', (
   db.close();
 });
 
-test('a merge bumps list_rank_at when an incoming release beats the target pick', () => {
+test('a merge bumps list_rank_at when an incoming release beats the target pick', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
+  ok(await applyPlanned(makeDeps(db), 2, { key: 'k1' }));
 
   const target = getGroup(db, 1)!;
   // The 2160 moving in beats the picked 720, so it is an *arrival* at group 1:
@@ -551,11 +501,11 @@ test('a merge bumps list_rank_at when an incoming release beats the target pick'
   db.close();
 });
 
-test('a merge that brings in nothing better than the pick does not bump', () => {
+test('a merge that brings in nothing better than the pick does not bump', async () => {
   const db = openTestDatabase();
   seedWorseSource(db);
 
-  ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
+  ok(await applyPlanned(makeDeps(db), 2, { key: 'k1' }));
 
   const target = getGroup(db, 1)!;
   // Moving two also-ran encodes into a group is not an arrival: there is
@@ -566,11 +516,11 @@ test('a merge that brings in nothing better than the pick does not bump', () => 
   db.close();
 });
 
-test('a merge that ties an already-flagged upgrade does not bump', () => {
+test('a merge that ties an already-flagged upgrade does not bump', async () => {
   const db = openTestDatabase();
   seedFlaggedTarget(db);
 
-  ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
+  ok(await applyPlanned(makeDeps(db), 2, { key: 'k1' }));
 
   const target = getGroup(db, 1)!;
   // The incoming 2160 beats the picked 720 but only equals the 2160 already
@@ -585,11 +535,11 @@ test('a merge that ties an already-flagged upgrade does not bump', () => {
   db.close();
 });
 
-test('a merge leaves the target group its own display and search text', () => {
+test('a merge leaves the target group its own display and search text', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  ok(editGroup(makeDeps(db), 2, { key: 'k1', title: 'Renamed' }));
+  ok(await applyPlanned(makeDeps(db), 2, { key: 'k1', title: 'Renamed' }));
 
   // The submitted values were the user's way of naming which existing scene
   // this is; the target already describes it. Taking the display too would let
@@ -600,9 +550,10 @@ test('a merge leaves the target group its own display and search text', () => {
   db.close();
 });
 
-test('a merge that fails at the delete leaves nothing behind', () => {
+test('a merge that fails at the delete leaves nothing behind', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
+  const deps = makeDeps(db);
   // The delete is the one statement in a merge that can fail — a foreign key
   // this code did not anticipate, a disk error. RAISE(ABORT) fails that
   // statement and leaves the surrounding transaction to the caller, which is
@@ -611,8 +562,15 @@ test('a merge that fails at the delete leaves nothing behind', () => {
     CREATE TRIGGER refuse_group_delete BEFORE DELETE ON media_groups
     BEGIN SELECT RAISE(ABORT, 'simulated delete failure'); END
   `);
+  // Planning only reads, so the trigger does not change what it returns — and
+  // the digest still has to be right, because the phase-1 transaction is only
+  // reached through the same gate a real caller comes through.
+  const plan = ok(await planIdentityChange(deps, 2, { key: 'k1' }));
 
-  assert.throws(() => editGroup(makeDeps(db), 2, { key: 'k1' }), /simulated delete failure/);
+  await assert.rejects(
+    editGroup(deps, 2, { key: 'k1' }, plan.digest),
+    /simulated delete failure/,
+  );
 
   // Without the enclosing transaction all three earlier writes commit and
   // survive: the releases end up under the target while the source row lives
@@ -637,7 +595,7 @@ test('a merge that fails at the delete leaves nothing behind', () => {
   db.close();
 });
 
-test('merging a group that has been browsed does not 500, and leaves the target metadata untouched', () => {
+test('merging a group that has been browsed does not 500, and leaves the target metadata untouched', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
@@ -718,8 +676,8 @@ test('merging a group that has been browsed does not 500, and leaves the target 
      VALUES (2, 2000, 0, 2000)`,
   ).run();
 
-  const result = ok(editGroup(makeDeps(db), 2, { key: 'k1' }));
-  assert.deepEqual(result, { groupId: 1, mergedInto: 1 });
+  const result = ok(await applyPlanned(makeDeps(db), 2, { key: 'k1' }));
+  assert.deepEqual(result, { groupId: 1, mergedInto: 1, renamed: 0, trashed: 0, failed: [] });
 
   // The source's own rows describe an identity the merge just concluded was
   // wrong, and must not survive it, in any of the five tables.
@@ -748,7 +706,7 @@ test('merging a group that has been browsed does not 500, and leaves the target 
   db.close();
 });
 
-test('an identity edit forgets metadata confirmed against the identity it replaced', () => {
+test('an identity edit forgets metadata confirmed against the identity it replaced', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
@@ -813,7 +771,7 @@ test('an identity edit forgets metadata confirmed against the identity it replac
   // the merge one. The merge path already clears metadata — but only as a
   // foreign-key precondition for deleting the source row, which is why this
   // path was never given the same treatment.
-  ok(editGroup(makeDeps(db), 2, { key: 'k9' }));
+  ok(await editGroup(makeDeps(db), 2, { key: 'k9' }));
 
   // The row has to be gone rather than merely stale. `enqueueMetadata` counts
   // *any* `group_metadata` row as answered, so one that survives is never
@@ -839,7 +797,7 @@ test('an identity edit forgets metadata confirmed against the identity it replac
   db.close();
 });
 
-test('a save that changes nothing keeps the metadata it already had', () => {
+test('a save that changes nothing keeps the metadata it already had', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
@@ -865,7 +823,7 @@ test('a save that changes nothing keeps the metadata it already had', () => {
 
   // The key and the title the group already holds, so both the identity and
   // the rendered display come back byte-identical.
-  ok(editGroup(makeDeps(db), 2, { key: 'k2', title: 'G2' }));
+  ok(await editGroup(makeDeps(db), 2, { key: 'k2', title: 'G2' }));
 
   // Nothing the lookup asks about changed, so forgetting the answer would cost
   // a request and blank the card's panel until the worker replied — as the
@@ -878,65 +836,89 @@ test('a save that changes nothing keeps the metadata it already had', () => {
   db.close();
 });
 
-test('a merge is refused when the source group has a download', () => {
+/**
+ * Was a 409 until the identity-change design of 2026-08-16, and asserted the
+ * message that said so ("has a download recorded against it", "will not clear
+ * by waiting"). That refusal was permanent, because nothing in the system
+ * deletes a `downloads` row — so a group ever picked from could never have its
+ * identity corrected at all. It now merges, and the download moves with it.
+ */
+test('a source group with a download recorded against it now merges', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
   insertDownload(db, 2, 2);
 
-  const result = failure(editGroup(makeDeps(db), 2, { key: 'k1' }));
+  const outcome = ok(await applyPlanned(makeDeps(db), 2, { key: 'k1' }));
 
-  assert.equal(result.status, 409);
-  // The message names which of the two obstructions it is, and says the
-  // refusal is permanent: nothing deletes a download row, so a user told only
-  // "has a download" would wait for something that never comes.
-  assert.match(result.error, /has a download recorded against it/);
-  assert.match(result.error, /will not clear by waiting/);
-  assert.notEqual(getGroup(db, 2), null);
-  assert.equal(getGroup(db, 2)?.identityKey, 'k2');
+  assert.equal(outcome.mergedInto, 1);
+  assert.equal(getGroup(db, 2), null, 'the emptied source is deleted');
   assert.deepEqual(
-    releasesForGroup(db, 2).map((release) => release.id),
-    [2],
+    releasesForGroup(db, 1).map((release) => release.id),
+    [2, 1],
+  );
+  // The row that used to make this permanent, now pointing at the survivor —
+  // which is what `deleteGroup`'s foreign key demands and what makes the merge
+  // possible at all.
+  assert.equal(
+    num(db.prepare('SELECT group_id FROM downloads WHERE id = 1').get() as SqlRow, 'group_id'),
+    1,
   );
   db.close();
 });
 
-test('a merge is refused when the source group has an imported file', () => {
+/**
+ * The other half of the same reversal: a 409 that said the source "already has
+ * files in the library under its own name, which keep the paths they were
+ * given", and that trashing them would not clear it either. Both halves of that
+ * message are now false — the row moves with the merge, and phase 3 is what
+ * reconciles the path.
+ *
+ * `FILING` rather than the default `PLUGIN`: a plugin that files nothing
+ * (`planImport: () => null`) cannot say where a live file belongs under the new
+ * identity, and the planner refuses that as a blocker rather than stranding the
+ * file. The file itself is deliberately absent from disk, which the planner
+ * reports as a warning and skips — this test is about the *row* travelling, and
+ * the file half has its own tests below.
+ */
+test('a source group with an imported file recorded against it now merges', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
   // The download hangs off the target, so only the imported file holds the
-  // source — the second half of the history check on its own.
+  // source — the second half of the old history check on its own.
   insertDownload(db, 1, 1);
   db.prepare(
     `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path, size_bytes, created_at)
      VALUES (1, 1, 2, '/a', '/b', 10, 1)`,
   ).run();
+  const deps = makeDeps(db, FILING);
 
-  const result = failure(editGroup(makeDeps(db), 2, { key: 'k1' }));
+  const plan = ok(await planIdentityChange(deps, 2, { key: 'k1' }));
+  assert.match(String(plan.warnings[0]), /already gone from disk/);
+  const outcome = ok(await editGroup(deps, 2, { key: 'k1' }, plan.digest));
 
-  assert.equal(result.status, 409);
-  assert.match(result.error, /already has files in the library/);
-  assert.match(result.error, /Trashing them does not clear this either/);
-  assert.notEqual(getGroup(db, 2), null);
+  assert.equal(outcome.mergedInto, 1);
+  assert.equal(getGroup(db, 2), null);
   assert.deepEqual(
-    releasesForGroup(db, 1).map((release) => release.id),
+    filesForGroup(db, 1).map((file) => file.id),
     [1],
+    'the imported file row followed the source into the survivor',
   );
   db.close();
 });
 
-test('editGroup 404s on an unknown group', () => {
+test('editGroup 404s on an unknown group', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  assert.equal(failure(editGroup(makeDeps(db), 99, { key: 'k9' })).status, 404);
+  assert.equal(failure(await editGroup(makeDeps(db), 99, { key: 'k9' })).status, 404);
   db.close();
 });
 
-test("editGroup reports the plugin's own message when it rejects the values", () => {
+test("editGroup reports the plugin's own message when it rejects the values", async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  const result = failure(editGroup(makeDeps(db), 2, { key: '' }));
+  const result = failure(await editGroup(makeDeps(db), 2, { key: '' }));
 
   assert.equal(result.status, 400);
   assert.equal(result.error, 'key is required');
@@ -944,11 +926,11 @@ test("editGroup reports the plugin's own message when it rejects the values", ()
   db.close();
 });
 
-test('editGroup 400s when the identity the plugin built fails validation', () => {
+test('editGroup 400s when the identity the plugin built fails validation', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  const result = failure(editGroup(makeDeps(db), 2, { key: '!' }));
+  const result = failure(await editGroup(makeDeps(db), 2, { key: '!' }));
 
   // The scoreless validator still applies the identity checks: dropping the
   // score must not drop the rest with it.
@@ -958,15 +940,15 @@ test('editGroup 400s when the identity the plugin built fails validation', () =>
   db.close();
 });
 
-test('a group can be edited under a plugin whose score throws', () => {
+test('a group can be edited under a plugin whose score throws', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  const result = ok(editGroup(makeDeps(db, THROWS_ON_SCORE), 2, { key: 'k9' }));
+  const result = ok(await editGroup(makeDeps(db, THROWS_ON_SCORE), 2, { key: 'k9' }));
 
   // A group has no quality to score, so asking for one would refuse this edit
   // with a 400 the user has no way to satisfy — hence the scoreless validator.
-  assert.deepEqual(result, { groupId: 2, mergedInto: null });
+  assert.deepEqual(result, { groupId: 2, mergedInto: null, renamed: 0, trashed: 0, failed: [] });
   assert.equal(getGroup(db, 2)?.identityKey, 'k9');
   db.close();
 });
@@ -985,15 +967,363 @@ test('a release cannot be edited under a plugin whose score throws', () => {
   db.close();
 });
 
-test('a plugin that throws while prefilling the form is a 400, not a 500', () => {
+test('a plugin that throws while prefilling the form is a 400, not a 500', async () => {
   const db = openTestDatabase();
   seedTwoGroups(db);
 
-  const result = failure(editGroup(makeDeps(db, THROWS_ON_PREFILL), 2, { key: 'k9' }));
+  const result = failure(await editGroup(makeDeps(db, THROWS_ON_PREFILL), 2, { key: 'k9' }));
 
   assert.equal(result.status, 400);
   assert.match(result.error, /plugin threw: boom/);
   assert.equal(getGroup(db, 2)?.identityKey, 'k2');
+  db.close();
+});
+
+// --- Apply an identity change to the library ---------------------------
+
+test('the reported scenario: correcting a picked group merges it into the other one', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+  const deps = makeDeps(db, FILING, libraryRoot);
+
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+  const outcome = ok(await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest));
+
+  assert.equal(outcome.mergedInto, 2);
+  assert.equal(outcome.renamed, 1);
+  assert.deepEqual(outcome.failed, []);
+
+  const survivor = getGroup(db, 2);
+  assert.equal(survivor?.state, 'picked');
+  assert.equal(survivor?.pickedReleaseId, 1, 'the target adopts the source pick');
+  // Derived *after* the adopted pick was written. Deriving first would ask the
+  // question of a group whose `picked_release_id` was still NULL, which derives
+  // to no upgrade at all — the user would lose the 2160 the merge just put
+  // within reach.
+  assert.equal(survivor?.upgradeReleaseId, 2, 'the 2160 release is now a flagged upgrade');
+  assert.deepEqual(
+    releasesForGroup(db, 2)
+      .map((release) => release.id)
+      .toSorted(),
+    [1, 2],
+  );
+
+  assert.equal(await readFile(join(libraryRoot, 'k2', '1080.mp4'), 'utf8'), 'data');
+  assert.equal(await lstatOrNull(join(libraryRoot, 'k1', '1080.mp4')), null);
+  const files = filesForGroup(db, 2);
+  assert.equal(files[0]?.destPath, join(libraryRoot, 'k2', '1080.mp4'), 'dest_path caught up');
+  db.close();
+});
+
+test('a stale digest is refused and changes nothing', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+  const deps = makeDeps(db, FILING, libraryRoot);
+
+  const result = await editGroup(deps, 1, { key: 'k2', title: 'A' }, 'not-the-digest');
+
+  assert.equal(failure(result).status, 409);
+  assert.notEqual(getGroup(db, 1), null, 'the source group is untouched');
+  assert.notEqual(await lstatOrNull(join(libraryRoot, 'k1', '1080.mp4')), null);
+  db.close();
+});
+
+test('a missing digest is refused when the plan moves anything', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+
+  const result = await editGroup(makeDeps(db, FILING, libraryRoot), 1, { key: 'k2', title: 'A' });
+
+  assert.equal(failure(result).status, 409);
+  assert.match(failure(result).error, /must be confirmed first/);
+  db.close();
+});
+
+test('a display-only edit still applies with no digest', async () => {
+  const db = openTestDatabase();
+  seedTwoGroups(db);
+
+  const outcome = ok(await editGroup(makeDeps(db), 1, { key: 'k1', title: 'Renamed' }));
+
+  assert.equal(outcome.mergedInto, null);
+  assert.equal(
+    (JSON.parse(getGroup(db, 1)!.display) as { title: string }).title,
+    'Renamed',
+    'a typo fix must still save in one click',
+  );
+  db.close();
+});
+
+test('a blocked plan is refused', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+  // Something the group did not put there sits at the path the rename wants.
+  await mkdir(join(libraryRoot, 'k2'), { recursive: true });
+  await writeFile(join(libraryRoot, 'k2', '1080.mp4'), 'someone else');
+  const deps = makeDeps(db, FILING, libraryRoot);
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+
+  const result = await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest);
+
+  // A confirmed digest is not permission to overwrite: the blockers are checked
+  // on the freshly recomputed plan, ahead of the digest comparison.
+  assert.equal(failure(result).status, 409);
+  assert.notEqual(getGroup(db, 1), null);
+  assert.equal(await readFile(join(libraryRoot, 'k2', '1080.mp4'), 'utf8'), 'someone else');
+  db.close();
+});
+
+test('a failing rename leaves the merge standing and reports the file', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+  const deps: ManualDeps = {
+    ...makeDeps(db, FILING, libraryRoot),
+    // EPERM, not EXDEV: EXDEV has a copy fallback that would succeed.
+    rename: () => Promise.reject(Object.assign(new Error('nope'), { code: 'EPERM' })),
+  };
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+
+  const outcome = ok(await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest));
+
+  assert.equal(outcome.mergedInto, 2, 'the merge committed before any file moved');
+  assert.equal(outcome.renamed, 0);
+  assert.equal(outcome.failed.length, 1);
+  assert.equal(
+    filesForGroup(db, 2)[0]?.destPath,
+    join(libraryRoot, 'k1', '1080.mp4'),
+    'dest_path still names where the file actually is',
+  );
+  db.close();
+});
+
+test('re-saving after a failed rename finishes the remaining work', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+  const failing: ManualDeps = {
+    ...makeDeps(db, FILING, libraryRoot),
+    rename: () => Promise.reject(Object.assign(new Error('nope'), { code: 'EPERM' })),
+  };
+  const firstPlan = ok(await planIdentityChange(failing, 1, { key: 'k2', title: 'A' }));
+  await editGroup(failing, 1, { key: 'k2', title: 'A' }, firstPlan.digest);
+
+  // Same values, working filesystem, and the group is now group 2.
+  const deps = makeDeps(db, FILING, libraryRoot);
+  const plan = ok(await planIdentityChange(deps, 2, { key: 'k2', title: 'B' }));
+  assert.equal(plan.kind, 'none', 'the merge already happened');
+  assert.equal(plan.renames.length, 1, 'but the file is still at its old path');
+
+  const outcome = ok(await editGroup(deps, 2, { key: 'k2', title: 'B' }, plan.digest));
+
+  // The file work is gated on the plan's renames rather than on `kind`, which is
+  // what makes finishing an interrupted edit the same operation as the edit.
+  assert.equal(outcome.renamed, 1);
+  assert.equal(await readFile(join(libraryRoot, 'k2', '1080.mp4'), 'utf8'), 'data');
+  assert.equal(filesForGroup(db, 2)[0]?.destPath, join(libraryRoot, 'k2', '1080.mp4'));
+  db.close();
+});
+
+test('a superseded pick is trashed before the survivors are renamed', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const trashDir = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  await seedWithFile(db, libraryRoot);
+  // The target is picked too, on a release scoring *below* the source's — so it
+  // is the target's own file that is superseded, and the source's pick and file
+  // are the ones that survive and move. Both a trash and a rename in one apply
+  // is the only shape that can observe the order of the two phases.
+  db.prepare('UPDATE releases SET score = 500 WHERE id = 2').run();
+  db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 2 WHERE id = 2").run();
+  await mkdir(join(libraryRoot, 'k2'), { recursive: true });
+  await writeFile(join(libraryRoot, 'k2', '2160.mp4'), 'superseded');
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (2, 2, 2, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (2, 2, 2, '/dl/b.mp4', ?, 5, 100)`,
+  ).run(join(libraryRoot, 'k2', '2160.mp4'));
+
+  // Asked from inside the rename, which is the only place the question "had the
+  // trashing already happened?" can be answered honestly. In production the
+  // superseded file frequently occupies the exact path the renamed one wants —
+  // the collision `import.ts` trashes ahead of its own transfer loop to avoid —
+  // and this is that ordering, observed rather than assumed.
+  let supersededWasGoneFirst: boolean | null = null;
+  const deps: ManualDeps = {
+    ...makeDeps(db, FILING, libraryRoot),
+    trashDir,
+    rename: async (from, to) => {
+      supersededWasGoneFirst =
+        (await lstatOrNull(join(libraryRoot, 'k2', '2160.mp4'))) === null;
+      await rename(from, to);
+    },
+  };
+
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+  const outcome = ok(await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest));
+
+  assert.equal(outcome.trashed, 1);
+  assert.equal(outcome.renamed, 1);
+  assert.deepEqual(outcome.failed, []);
+  assert.equal(supersededWasGoneFirst, true);
+  assert.equal(getGroup(db, 2)?.pickedReleaseId, 1, 'the higher-scoring pick stands');
+  const trashedRow = filesForGroup(db, 2).find((file) => file.id === 2);
+  assert.notEqual(trashedRow?.trashedAt, null);
+  assert.equal(await readFile(join(libraryRoot, 'k2', '1080.mp4'), 'utf8'), 'data');
+  db.close();
+});
+
+/**
+ * The production case, and the one the whole phase-2-before-phase-3 ordering is
+ * for: the superseded file occupies the *exact* path the surviving file is being
+ * renamed to. Nothing here would work in any other order — the rename has
+ * nowhere to land until the trash has happened.
+ *
+ * The ordering test above proves phase 2 runs first by observation; this one
+ * proves it matters.
+ */
+test('a rename into the path a superseded file occupies succeeds', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const trashDir = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  await seedWithFile(db, libraryRoot);
+  // Same resolution on both picks, so both files are filed under `1080.mp4`, and
+  // a lower score on the target's, so the source's pick and file survive.
+  db.prepare(`UPDATE releases SET quality = '{"resolution":1080}', score = 500 WHERE id = 2`).run();
+  db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 2 WHERE id = 2").run();
+  await mkdir(join(libraryRoot, 'k2'), { recursive: true });
+  await writeFile(join(libraryRoot, 'k2', '1080.mp4'), 'superseded');
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (2, 2, 2, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (2, 2, 2, '/dl/b.mp4', ?, 10, 100)`,
+  ).run(join(libraryRoot, 'k2', '1080.mp4'));
+  const deps: ManualDeps = { ...makeDeps(db, FILING, libraryRoot), trashDir };
+
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+  assert.deepEqual(plan.blockers, [], 'a file this plan trashes is not a foreign occupant');
+  const outcome = ok(await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest));
+
+  assert.equal(outcome.trashed, 1);
+  assert.equal(outcome.renamed, 1);
+  assert.deepEqual(outcome.failed, []);
+  // The contested path now holds the winner, and the loser is recoverable.
+  assert.equal(await readFile(join(libraryRoot, 'k2', '1080.mp4'), 'utf8'), 'data');
+  assert.equal(await lstatOrNull(join(libraryRoot, 'k1', '1080.mp4')), null);
+  const survivingFile = filesForGroup(db, 2).find((file) => file.id === 1);
+  assert.equal(survivingFile?.destPath, join(libraryRoot, 'k2', '1080.mp4'));
+  const trashedFile = filesForGroup(db, 2).find((file) => file.id === 2);
+  assert.notEqual(trashedFile?.trashedAt, null);
+  assert.equal(await readFile(String(trashedFile?.trashPath), 'utf8'), 'superseded');
+  assert.equal(getGroup(db, 2)?.pickedReleaseId, 1);
+  db.close();
+});
+
+/**
+ * The invariant the whole four-phase order exists to buy, pinned: **nothing on
+ * disk moves until phase 1 has committed.** Hoisting phases 2-3 above phase 1 —
+ * or interleaving them — would leave a group whose files had moved while the
+ * database still described the arrangement they moved out of, which is exactly
+ * the state no re-save could reason about.
+ *
+ * The delete trigger is the same technique the phase-1 rollback test above uses;
+ * what is new here is that the group *has a file*, so a phase-1 failure has
+ * something to prove about the filesystem.
+ */
+test('a phase 1 failure leaves every file exactly where it was', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+  const deps = makeDeps(db, FILING, libraryRoot);
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+  assert.equal(plan.renames.length, 1, 'there has to be file work for this to prove anything');
+  db.exec(`
+    CREATE TRIGGER refuse_group_delete BEFORE DELETE ON media_groups
+    BEGIN SELECT RAISE(ABORT, 'simulated delete failure'); END
+  `);
+
+  await assert.rejects(
+    editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest),
+    /simulated delete failure/,
+  );
+
+  // The file is still where the database says it is, and the database still says
+  // what it said before — the two never disagreed for an instant.
+  assert.equal(await readFile(join(libraryRoot, 'k1', '1080.mp4'), 'utf8'), 'data');
+  assert.equal(await lstatOrNull(join(libraryRoot, 'k2', '1080.mp4')), null);
+  assert.equal(filesForGroup(db, 1)[0]?.destPath, join(libraryRoot, 'k1', '1080.mp4'));
+  assert.notEqual(getGroup(db, 1), null);
+  assert.equal(db.isTransaction, false);
+  db.close();
+});
+
+/**
+ * The failure mode the occupant check in phase 3 exists for. An unwritable
+ * `trashDir` makes `trashFiles` throw at its first `mkdir`, before it has touched
+ * anything, so every superseded file is still on disk — and the planner has
+ * already lifted its occupied-destination blocker for exactly those paths on the
+ * strength of phase 2 clearing them. Without the check, phase 3 would rename
+ * straight over a file the design promises is recoverable from `trashDir`,
+ * destroying it and leaving two live rows naming one path.
+ */
+test('a rename is refused when phase 2 failed to clear its destination', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  await seedWithFile(db, libraryRoot);
+  // The same collision as the test above: both picks are 1080p, so both files
+  // are filed under `1080.mp4`, and the target's scores lower and loses.
+  db.prepare(`UPDATE releases SET quality = '{"resolution":1080}', score = 500 WHERE id = 2`).run();
+  db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 2 WHERE id = 2").run();
+  await mkdir(join(libraryRoot, 'k2'), { recursive: true });
+  await writeFile(join(libraryRoot, 'k2', '1080.mp4'), 'superseded');
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (2, 2, 2, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (2, 2, 2, '/dl/b.mp4', ?, 10, 100)`,
+  ).run(join(libraryRoot, 'k2', '1080.mp4'));
+  // A regular file where the trash directory should be, so `trashFiles`' own
+  // `mkdir` fails with ENOTDIR — a misconfigured or unwritable `trashDir` in
+  // miniature, and one that fails before it has moved anything.
+  const trashDir = join(await mkdtemp(join(tmpdir(), 'pickarr-trash-')), 'not-a-directory');
+  await writeFile(trashDir, 'in the way');
+  const deps: ManualDeps = { ...makeDeps(db, FILING, libraryRoot), trashDir };
+
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+  const outcome = ok(await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest));
+
+  assert.equal(outcome.trashed, 0);
+  assert.equal(outcome.renamed, 0, 'the rename must not proceed over an uncleared destination');
+  assert.equal(outcome.failed.length, 2, 'both the trashing and the rename are reported');
+  assert.match(String(outcome.failed[1]?.error), /still occupied/);
+  // Neither file was touched, and both rows still name where their file is.
+  assert.equal(await readFile(join(libraryRoot, 'k2', '1080.mp4'), 'utf8'), 'superseded');
+  assert.equal(await readFile(join(libraryRoot, 'k1', '1080.mp4'), 'utf8'), 'data');
+  const files = filesForGroup(db, 2);
+  assert.equal(files.find((file) => file.id === 1)?.destPath, join(libraryRoot, 'k1', '1080.mp4'));
+  assert.equal(files.find((file) => file.id === 2)?.destPath, join(libraryRoot, 'k2', '1080.mp4'));
+  assert.equal(files.find((file) => file.id === 2)?.trashedAt, null);
+  // And the merge itself stands, so re-saving after fixing the trash directory
+  // finishes the file work.
+  assert.equal(outcome.mergedInto, 2);
   db.close();
 });
 
@@ -1052,14 +1382,14 @@ test('editRelease 404s on an unknown release', () => {
 
 // --- Degradation -------------------------------------------------------
 
-test('a plugin with no manual hooks refuses all three edits and still dismisses', () => {
+test('a plugin with no manual hooks refuses all three edits and still dismisses', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
   seedPickedGroup(db);
   const deps = makeDeps(db, BARE);
 
   const resolved = failure(resolveFeedItem(deps, 1, { key: 'k9' }));
-  const grouped = failure(editGroup(deps, 1, { key: 'k9' }));
+  const grouped = failure(await editGroup(deps, 1, { key: 'k9' }));
   const released = failure(editRelease(deps, 1, { res: '2160' }));
 
   assert.equal(resolved.status, 409);

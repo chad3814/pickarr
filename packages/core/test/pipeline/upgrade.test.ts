@@ -6,11 +6,15 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { importDownload, type ImportDeps } from '../../src/pipeline/import.ts';
-import { trashLiveFiles } from '../../src/pipeline/upgrade.ts';
+import { importDownload, lstatOrNull, type ImportDeps } from '../../src/pipeline/import.ts';
+import { trashFiles } from '../../src/pipeline/upgrade.ts';
 import { getGroup } from '../../src/db/groups.ts';
 import { getDownload } from '../../src/db/downloads.ts';
-import { filesForGroup, liveFilesForGroup } from '../../src/db/imported-files.ts';
+import {
+  filesForGroup,
+  liveFilesForGroup,
+  liveFilesForOtherReleases,
+} from '../../src/db/imported-files.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 
 function registryFor(planImport: MediaTypePlugin['planImport'], root: string): PluginRegistry {
@@ -293,14 +297,15 @@ test('an initial import trashes nothing and leaves the pointer alone', async () 
   }
 });
 
-// --- Direct unit tests against trashLiveFiles ---
+// --- Direct unit tests against trashFiles ---
 //
-// The tests above exercise trashLiveFiles only through importDownload, and
+// The tests above exercise trashFiles only through importDownload, and
 // only ever with one live file per group. These call it directly, so each
-// can set up the exact row shape it needs without a full import plan. The
-// third argument is the id of the download doing the importing (1, the
-// in-flight upgrade); the rows below belong to download 9, so none of them is
-// excluded and every one is a genuine trash candidate.
+// can set up the exact row shape it needs without a full import plan. Each
+// passes `liveFilesForGroup(db, 1, 1)` — 1 being the id of the download doing
+// the importing (the in-flight upgrade) — as the row list; the rows below
+// belong to download 9, so none of them is excluded and every one is a
+// genuine trash candidate.
 
 test('two live files sharing a basename in different library directories both survive in trash', async () => {
   const root = await tempRoot();
@@ -320,7 +325,14 @@ test('two live files sharing a basename in different library directories both su
     ).run(join(library, 'A', 'scene.mp4'), join(library, 'B', 'scene.mp4'));
 
     const libraryRootReal = await realpath(library);
-    const trashedTo = await trashLiveFiles(db, 1, 1, libraryRootReal, trash, 5000);
+    const trashedTo = await trashFiles(
+      db,
+      liveFilesForGroup(db, 1, 1),
+      libraryRootReal,
+      trash,
+      1,
+      5000,
+    );
     if (trashedTo === null) throw new Error('expected files to be trashed');
 
     // Both files survive, each under its own path, not overwriting the other.
@@ -360,11 +372,14 @@ test('a refusal partway through trashing still names where earlier files in the 
 
     const libraryRootReal = await realpath(library);
 
-    await assert.rejects(trashLiveFiles(db, 1, 1, libraryRootReal, trash, 6000), (error: Error) => {
-      assert.match(error.message, /not a regular file/);
-      assert.match(error.message, /1[/\\]6000/);
-      return true;
-    });
+    await assert.rejects(
+      trashFiles(db, liveFilesForGroup(db, 1, 1), libraryRootReal, trash, 1, 6000),
+      (error: Error) => {
+        assert.match(error.message, /not a regular file/);
+        assert.match(error.message, /1[/\\]6000/);
+        return true;
+      },
+    );
 
     // The first row's file was already moved before the second was refused.
     assert.equal(
@@ -393,7 +408,14 @@ test('a live row whose file is already gone is trashed with no invented path', a
     ).run(join(library, 'scene.mp4'));
 
     const libraryRootReal = await realpath(library);
-    const trashedTo = await trashLiveFiles(db, 1, 1, libraryRootReal, trash, 9000);
+    const trashedTo = await trashFiles(
+      db,
+      liveFilesForGroup(db, 1, 1),
+      libraryRootReal,
+      trash,
+      1,
+      9000,
+    );
     assert.notEqual(trashedTo, null);
 
     const [row] = filesForGroup(db, 1);
@@ -422,7 +444,7 @@ test('a live row pointing at a directory is refused rather than trashed', async 
     const libraryRootReal = await realpath(library);
 
     await assert.rejects(
-      trashLiveFiles(db, 1, 1, libraryRootReal, trash, 7000),
+      trashFiles(db, liveFilesForGroup(db, 1, 1), libraryRootReal, trash, 1, 7000),
       /not a regular file/,
     );
 
@@ -454,7 +476,7 @@ test('a live row that resolves outside the library root is refused rather than t
     const libraryRootReal = await realpath(library);
 
     await assert.rejects(
-      trashLiveFiles(db, 1, 1, libraryRootReal, trash, 8000),
+      trashFiles(db, liveFilesForGroup(db, 1, 1), libraryRootReal, trash, 1, 8000),
       /resolves outside the library root/,
     );
 
@@ -468,3 +490,81 @@ test('a live row that resolves outside the library root is refused rather than t
 async function tempRoot(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'pickarr-upgrade-'));
 }
+
+// --- trashFiles takes rows, not a group+download pair to derive them from ---
+//
+// These exercise the call shape `liveFilesForOtherReleases` needs (Task 7):
+// a caller hands trashFiles the exact rows it already decided are doomed,
+// rather than trashFiles rederiving a list itself. Unlike seedUpgrade's group
+// (one release still pending, one already picked), this fixture gives both
+// releases a completed, already-imported download — the shape an identity
+// merge acts on, where two releases each have their own import history and
+// one is about to lose to the other.
+
+/**
+ * One group owning two releases, each with one completed download and one
+ * `imported_files` row — release 1's row points at `keepPath`, release 2's at
+ * `goPath`. Minimal fixture for `liveFilesForOtherReleases`/`trashFiles`
+ * tests, which key off release ownership rather than the upgrade-in-flight
+ * shape `seedUpgrade` sets up above.
+ */
+function seedTwoImportedFiles(db: DatabaseSync, keepPath: string, goPath: string): void {
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'T1', 'https://indexer.invalid/1.nzb', 1),
+            (2, 'f', 'g2', 'T2', 'https://indexer.invalid/2.nzb', 1)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state,
+                               picked_release_id, upgrade_release_id, created_at, list_rank_at)
+     VALUES (1, 'test', 'k', '{"title":"T","fields":[]}', 't', 'picked', 1, NULL, 1, 9000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (1, 1, 1, '{}', 100, 1), (2, 1, 2, '{}', 200, 1)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, client_ref, kind, status,
+                            storage_path, created_at, updated_at)
+     VALUES (1, 1, 1, 'sab', 'nzo_1', 'initial', 'imported', '/old/complete1', 1, 1),
+            (2, 2, 1, 'sab', 'nzo_2', 'initial', 'imported', '/old/complete2', 1, 1)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+     VALUES (1, 1, '/src/keep', ?, 4, 1), (2, 1, '/src/go', ?, 2, 1)`,
+  ).run(keepPath, goPath);
+}
+
+test('trashFiles moves exactly the rows it is given and marks them trashed', async () => {
+  const db = openTestDatabase();
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  const libraryRoot = join(root, 'library');
+  const trashDir = join(root, 'trash');
+  await mkdir(libraryRoot, { recursive: true });
+  await writeFile(join(libraryRoot, 'keep.mp4'), 'keep');
+  await writeFile(join(libraryRoot, 'go.mp4'), 'go');
+
+  seedTwoImportedFiles(db, join(libraryRoot, 'keep.mp4'), join(libraryRoot, 'go.mp4'));
+  const libraryRootReal = await realpath(libraryRoot);
+  const doomed = liveFilesForOtherReleases(db, 1, 1);
+
+  const destination = await trashFiles(db, doomed, libraryRootReal, trashDir, 1, 7000);
+
+  assert.notEqual(destination, null);
+  assert.equal(await lstatOrNull(join(libraryRoot, 'keep.mp4')) === null, false, 'keep.mp4 stays');
+  assert.equal(await lstatOrNull(join(libraryRoot, 'go.mp4')), null, 'go.mp4 is gone');
+  const rows = filesForGroup(db, 1);
+  assert.equal(rows.find((row) => row.destPath.endsWith('keep.mp4'))?.trashedAt, null);
+  assert.equal(rows.find((row) => row.destPath.endsWith('go.mp4'))?.trashedAt, 7000);
+});
+
+test('trashFiles given no rows creates no trash directory', async () => {
+  const db = openTestDatabase();
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  const trashDir = join(root, 'trash');
+
+  const destination = await trashFiles(db, [], root, trashDir, 1, 7000);
+
+  assert.equal(destination, null);
+  assert.equal(await lstatOrNull(trashDir), null, 'nothing to trash means no directory');
+});
