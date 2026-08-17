@@ -216,10 +216,76 @@ export interface DismissResponse {
  * the one that was patched; `mergedInto` names it, and is null when nothing
  * merged. The caller knows the source id because it sent it, so the two
  * together are what let a paginated list drop one card and replace another.
+ *
+ * `renamed`, `trashed` and `failed` mirror `GroupEditResponse` in
+ * `packages/core/src/http/views.ts` — carried through rather than folded away,
+ * because a 200 that hid a per-file failure would tell the user their edit
+ * fully succeeded when a file the plan promised to move or trash is not where
+ * it said it would be.
  */
 export interface GroupEditResponse {
   group: GroupView;
   mergedInto: number | null;
+  renamed: number;
+  trashed: number;
+  failed: readonly { path: string; error: string }[];
+}
+
+/**
+ * One file `planIdentityChange` would move because the identity that placed
+ * it changed.
+ */
+export interface PlannedRenameView {
+  importedFileId: number;
+  from: string;
+  to: string;
+}
+
+/**
+ * One file `planIdentityChange` would trash because the release that owns it
+ * lost the pick.
+ */
+export interface PlannedTrashView {
+  importedFileId: number;
+  path: string;
+}
+
+/**
+ * Mirrors `IdentityPlan` in `packages/core/src/manual/identity-plan.ts` —
+ * duplicated rather than imported, the same way `DisplayFields` and
+ * `QualityTokens` already are, because the web package does not depend on
+ * core.
+ *
+ * Not to be confused with `useIdentityPreview`'s per-keystroke key preview:
+ * that hook knows only a plugin id and a draft set of values, never a group,
+ * and never anything about merges, renames or trashing. This is the read-only
+ * plan of everything a *specific group's* identity change would do, fetched
+ * once per attempted save rather than on every keystroke.
+ */
+export interface IdentityPlanView {
+  groupId: number;
+  identityKey: string;
+  /**
+   * `none` — the key and the display both survive the edit.
+   * `display-only` — the key survives, the display does not.
+   * `rekey` — the key changes and belongs to no other group.
+   * `merge` — the key belongs to another group, which will absorb this one.
+   */
+  kind: 'none' | 'display-only' | 'rekey' | 'merge';
+  mergeInto: { id: number; title: string } | null;
+  releasesMoving: number;
+  downloadsMoving: number;
+  pick: {
+    surviving: { releaseId: number; score: number; side: 'source' | 'target' } | null;
+    superseded: { releaseId: number; score: number } | null;
+  };
+  renames: readonly PlannedRenameView[];
+  trashing: readonly PlannedTrashView[];
+  /** Shown, and does not stop the apply. */
+  warnings: readonly string[];
+  /** Shown, and refuses the apply. */
+  blockers: readonly string[];
+  digest: string;
 }
 
 /**
@@ -282,6 +348,25 @@ export interface PickResponse {
 }
 
 /**
+ * Thrown by `request` in place of a bare `Error`, carrying the HTTP status
+ * alongside the message every existing `catch (cause) { (cause as
+ * Error).message }` site already reads. `useIdentityChange` is the reason
+ * `status` exists: a stale `planDigest` answers 409, and only that status
+ * means "re-plan and try again" rather than "this failed, stop and say so".
+ * Extending `Error` rather than standing alone keeps every caller written
+ * before this type existed working unchanged.
+ */
+export class RequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'RequestError';
+    this.status = status;
+  }
+}
+
+/**
  * `content-type: application/json` is set only when there is a body to
  * describe. Sending it on a bodyless POST is what broke retry from the day it
  * was written: Fastify's JSON parser sees the header, finds nothing to parse,
@@ -297,7 +382,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, request);
   if (!response.ok) {
     const body: { error?: string } = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? `Request to ${path} failed with ${response.status}`);
+    throw new RequestError(
+      body.error ?? `Request to ${path} failed with ${response.status}`,
+      response.status,
+    );
   }
   return (await response.json()) as T;
 }
@@ -451,9 +539,25 @@ export const api = {
     }),
   dismissFeedItem: (feedItemId: number) =>
     request<DismissResponse>(`/api/feed-items/${feedItemId}/dismiss`, { method: 'POST' }),
-  editGroup: (groupId: number, values: Record<string, string>) =>
+  /**
+   * `planDigest` is included in the body only when defined — `values` alone,
+   * unadorned, when it is not — because `exactOptionalPropertyTypes` treats
+   * `{ planDigest: undefined }` as a different shape from the key's absence,
+   * and the server's `editBodySchema` only accepts the latter.
+   */
+  editGroup: (groupId: number, values: Record<string, string>, planDigest?: string) =>
     request<GroupEditResponse>(`/api/groups/${groupId}`, {
       method: 'PATCH',
+      body: JSON.stringify(planDigest === undefined ? { values } : { values, planDigest }),
+    }),
+  /**
+   * Everything an identity change would do, and nothing done — see
+   * `IdentityPlanView`. Not to be confused with `manualPreview`, which asks
+   * only "what key would these values produce" and knows no group at all.
+   */
+  identityPlan: (groupId: number, values: Record<string, string>) =>
+    request<IdentityPlanView>(`/api/groups/${groupId}/identity-plan`, {
+      method: 'POST',
       body: JSON.stringify({ values }),
     }),
   editRelease: (releaseId: number, values: Record<string, string>) =>

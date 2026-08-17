@@ -7,8 +7,8 @@ import type { PluginRegistry } from '../plugins/registry.ts';
 import { completeUpgrade, getGroup } from '../db/groups.ts';
 import { getRelease } from '../db/releases.ts';
 import { setStatus, type DownloadRow } from '../db/downloads.ts';
-import { findLiveByDest, insertImportedFile } from '../db/imported-files.ts';
-import { trashLiveFiles } from './upgrade.ts';
+import { findLiveByDest, insertImportedFile, liveFilesForGroup } from '../db/imported-files.ts';
+import { trashFiles } from './upgrade.ts';
 
 export type RenameLike = (source: string, destination: string) => Promise<void>;
 
@@ -134,7 +134,7 @@ export function isContained(root: string, target: string, allowRootItself: boole
  * handled separately, with `realpath`, immediately before anything is
  * written or adopted, in `assertRealContainment` below.
  */
-function resolveDestination(libraryRoot: string, destination: string): string {
+export function resolveDestination(libraryRoot: string, destination: string): string {
   const root = resolve(libraryRoot);
   const target = resolve(root, destination);
   if (!isContained(root, target, false)) {
@@ -296,6 +296,24 @@ async function transfer(
   }
 }
 
+/**
+ * Moves a file from one place in the library to another.
+ *
+ * A thin, named wrapper over `transfer` in `'move'` mode, and named because the
+ * caller's intent matters: an identity change relocates a file that is *already*
+ * in the library, so the mode is never a configuration question. `importMode`
+ * decides how a file arrives from the download volume; copying inside the
+ * library would leave two copies of one file and a record of one.
+ */
+export async function moveWithinLibrary(
+  from: string,
+  to: string,
+  libraryRootReal: string,
+  renameImpl: RenameLike = rename,
+): Promise<void> {
+  await transfer(from, to, 'move', renameImpl, libraryRootReal);
+}
+
 export async function importDownload(deps: ImportDeps, download: DownloadRow): Promise<void> {
   const { db, registry } = deps;
   const now = deps.now();
@@ -348,10 +366,10 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
   // recoverable trail (the old files sitting in `trashedTo`), never a
   // half-deleted, half-written group.
   //
-  // `trashLiveFiles` runs *inside* the same try block as the transfer loop,
+  // `trashFiles` runs *inside* the same try block as the transfer loop,
   // not before it: if trashing itself throws partway through (one file moved,
   // a later one refused), `trashedTo` is never assigned, but the error
-  // trashLiveFiles throws already names its own destination directory (see
+  // trashFiles throws already names its own destination directory (see
   // upgrade.ts) — so the raw rethrow below still tells the caller where to
   // look. If trashing instead completes and `trashedTo` is assigned, and the
   // transfer loop is what fails, the catch below appends that directory to
@@ -361,16 +379,21 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
 
   try {
     if (download.kind === 'upgrade') {
-      // `download.id` is passed so this download's own rows are never trashed:
-      // on a retry they describe files this import already placed, not the
-      // release it supersedes. See trashLiveFiles for why that distinction is
-      // the whole safety property.
-      trashedTo = await trashLiveFiles(
+      // `download.id` is passed to `liveFilesForGroup` so this download's own
+      // rows are never trashed: on a retry they describe files this import
+      // already placed, not the release it supersedes. See
+      // `liveFilesForGroup` for why that distinction is the whole safety
+      // property.
+      trashedTo = await trashFiles(
         db,
-        download.groupId,
-        download.id,
+        // Unchanged in effect: everything live in this group except this
+        // download's own files, which on a retry are ones this import already
+        // placed. See trashFiles for why the selector now lives at the call
+        // site.
+        liveFilesForGroup(db, download.groupId, download.id),
         libraryRootReal,
         deps.trashDir,
+        download.groupId,
         now,
       );
     }
@@ -438,13 +461,13 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
       });
     }
   } catch (error) {
-    // `trashedTo` is only ever non-null once `trashLiveFiles` has *returned*
+    // `trashedTo` is only ever non-null once `trashFiles` has *returned*
     // successfully — so reaching this branch means trashing fully completed
     // and it was the transfer loop that failed afterward. A failure here must
     // not read as "the old file is gone with nothing to show for it." Naming
     // the trash location in the error is what lets the caller (reconcile.ts
     // marks the download `failed` with this exact message) tell the user
-    // where to look to restore it by hand. If `trashLiveFiles` itself threw
+    // where to look to restore it by hand. If `trashFiles` itself threw
     // instead, `trashedTo` was never assigned and this branch is skipped —
     // but that thrown error already names its own destination directory
     // (see upgrade.ts), so the raw rethrow below is not missing anything.

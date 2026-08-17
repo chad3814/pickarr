@@ -30,9 +30,13 @@ In scope:
 
 Out of scope:
 
-- **Moving files already imported.** Changing a group's identity changes where *future*
-  imports land. Files already on disk stay where they are. Renaming a live library is a
-  separate feature with its own failure modes.
+- **Moving files already imported.** This held until 2026-08-16. Until then, changing a
+  group's identity changed only where *future* imports land, and files already on disk
+  stayed where they were. It does not hold any more: an identity change a human makes now
+  renames the files that identity already placed — see
+  `docs/superpowers/specs/2026-08-16-editing-downloaded-identity-design.md`. Re-rendering
+  the whole library after a `pathTemplate` change is a different thing, config-driven and
+  library-wide rather than one group at a time, and remains out of scope (issue #22).
 - **Re-parsing.** Nothing re-runs the parser over existing items, then or now. The
   `edited_at` columns below exist so that a future re-parse pass can leave hand-entered
   data alone; nothing reads them yet.
@@ -41,7 +45,12 @@ Out of scope:
   "Show dismissed" checkbox, because otherwise `includeDismissed` has no caller in the SPA
   and a dismissal is unrecoverable in practice while claiming not to be. Fixing a shown
   dismissed item clears its `dismissed_at` (§7.1), which is the recovery path.
-- **Merging groups that have history.** See §7.3.
+- **Merging groups that have history.** This held until 2026-08-16, and §7.3 below still
+  records why it was the right call at the time. It does not hold any more — see §7.3's
+  final paragraph and
+  `docs/superpowers/specs/2026-08-16-editing-downloaded-identity-design.md` §5: a merge
+  with history now runs once the human confirms a read-only plan of its consequences,
+  rather than being refused.
 
 ## 3. Where the data lives
 
@@ -304,11 +313,16 @@ described by whatever produced it. Taking the display too would let a hasty edit
 a record the user was only pointing at. The releases move; the target's own description
 stands.
 
-**The merge is refused with 409 when the source group has any `downloads` row or any
+**The merge was refused with 409 when the source group had any `downloads` row or any
 `imported_files` row.** Those tables reference `group_id`; the target may already carry
 its own pick, its own upgrade flag and its own imported files, and silently reconciling
-two picks is a guess. The message names the obstruction. Lifting this restriction later
-is a self-contained change.
+two picks is a guess. That reasoning was sound, and it is why the refusal was the right
+call at the time — but nothing ever deletes a `downloads` row, so the refusal turned out
+to be permanent for any group ever picked from, not a "try again later".
+
+§5 of `docs/superpowers/specs/2026-08-16-editing-downloaded-identity-design.md` replaces
+the refusal: a merge with history now shows the user a read-only plan of every
+consequence, and only a plan the user confirms is applied.
 
 ### 7.4 Edit a release
 
@@ -331,7 +345,7 @@ imported keeps the path it was given (§2).
 | GET | `/api/failed?cursor=&limit=&includeDismissed=` | | `{ items: FailedItemView[], nextCursor }` |
 | POST | `/api/feed-items/:id/resolve` | `{ values }` | `{ group: GroupView, joinedExisting: boolean }` |
 | POST | `/api/feed-items/:id/dismiss` | | `{ id, dismissedAt }` |
-| PATCH | `/api/groups/:id` | `{ values }` | `{ group: GroupView, mergedInto: number \| null }` |
+| PATCH | `/api/groups/:id` | `{ values, planDigest? }` | `{ group: GroupView, mergedInto: number \| null, renamed: number, trashed: number, failed: { path: string, error: string }[] }` |
 | PATCH | `/api/releases/:id` | `{ values }` | `{ group: GroupView \| null }` |
 | POST | `/api/manual-preview` | `{ plugin, values }` | `{ identityKey }` or `{ error }` |
 
@@ -416,12 +430,16 @@ parsed ones for the same content.
 
 **Core.** Resolve creating a group; resolve joining an existing group; resolve rejected
 for an item that already parsed. Dismiss, and its 409. Group edit: display-only, key
-change, merge, merge refused for a group with a download, merge refused for a group with
-an imported file. The merge's bump rule and both of its boundaries: an incoming release
-that beats the target's pick bumps `list_rank_at`, one that beats nothing does not, and
-one that beats the pick but only ties an already-flagged upgrade does not. Release edit:
-rescored, upgrade flag re-derived, `list_rank_at` unchanged. A plugin implementing none of the hooks: no crash, no manual values, dismiss
-still works.
+change, merge. The two tests that once asserted a 409 for a merge whose source held a
+download or an imported file are rewritten, not deleted, to assert the replacement
+behaviour — the plan/confirm/apply sequence of
+`docs/superpowers/specs/2026-08-16-editing-downloaded-identity-design.md` §9 — and stand
+as the record that this was once refused. The merge's bump rule and both of its
+boundaries: an incoming release that beats the target's pick bumps `list_rank_at`, one
+that beats nothing does not, and one that beats the pick but only ties an
+already-flagged upgrade does not. Release edit: rescored, upgrade flag re-derived,
+`list_rank_at` unchanged. A plugin implementing none of the hooks: no crash, no manual
+values, dismiss still works.
 
 **Web.** Failed tab renders and paginates; Fix submits and removes the row; Dismiss
 removes the row; Browse edit patches in place and does not collapse pagination.
@@ -436,8 +454,18 @@ element, several hundred times. Compare booleans instead. See `gone()` in
 - **A wrong manual identity is as durable as a right one.** Nothing validates a key
   against reality; a typo'd site makes a new group and a new library directory. The
   identity-key preview in the form is the only guard, and it is a visual one.
-- **Editing a group with imported files leaves those files behind** under the old path,
-  while future imports use the new one. The group's history then spans two layouts.
+- **Editing a group with imported files left those files behind**, under the old path,
+  while future imports used the new one, and the group's history then spanned two
+  layouts. This held until 2026-08-16. It does not hold any more: an identity change now
+  renames the files that identity already placed, so the two layouts do not diverge. See
+  `docs/superpowers/specs/2026-08-16-editing-downloaded-identity-design.md` §5.
+- **A rename can interleave with a concurrent import for the same survivor.** Phases 2 and 3
+  of that same design's `editGroup` (§5) hold no lock across their `await`s, and the
+  scheduled import pipeline runs in the same process — nothing stops an upgrade import for
+  the survivor group from landing between one file's rename and the next. Traced through,
+  the worst case is a failed rename reported in `failed` with the row still truthful: §5.1's
+  failure model already covers exactly that outcome, and §5.2's retry finishes it. Recorded
+  here rather than fixed because nothing about it is wrong, only interleaved.
 - **`suggestManualValues` is best-effort by definition.** It runs on names the parser has
   already refused, so it will often return little or nothing. It must never throw; a
   suggestion is a convenience, not a contract.

@@ -97,6 +97,7 @@ function deps(
     bootConfigDocument: null,
     databasePath: '/tmp/pickarr-metadata-test-unused.db',
     requestRestart: () => {},
+    trashDir: '/trash',
   };
 }
 

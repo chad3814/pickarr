@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { importDownload, type ImportDeps } from '../../src/pipeline/import.ts';
+import { importDownload, type ImportDeps, lstatOrNull, moveWithinLibrary } from '../../src/pipeline/import.ts';
 import { getDownload } from '../../src/db/downloads.ts';
 import { liveFilesForGroup } from '../../src/db/imported-files.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
@@ -624,4 +624,51 @@ test('a symlink at the destination with the source already gone is still a colli
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('moveWithinLibrary moves a file and keeps it inside the library root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-move-'));
+  const libraryRoot = join(root, 'library');
+  await mkdir(join(libraryRoot, 'Old'), { recursive: true });
+  await writeFile(join(libraryRoot, 'Old', 'scene.mp4'), 'data');
+  const libraryRootReal = await realpath(libraryRoot);
+
+  await moveWithinLibrary(
+    join(libraryRoot, 'Old', 'scene.mp4'),
+    join(libraryRoot, 'New', '2026-08-14 - Title.mp4'),
+    libraryRootReal,
+  );
+
+  assert.equal(await readFile(join(libraryRoot, 'New', '2026-08-14 - Title.mp4'), 'utf8'), 'data');
+  assert.equal(await lstatOrNull(join(libraryRoot, 'Old', 'scene.mp4')), null);
+});
+
+test('moveWithinLibrary falls back to copy when rename reports EXDEV', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-move-'));
+  const libraryRoot = join(root, 'library');
+  await mkdir(libraryRoot, { recursive: true });
+  await writeFile(join(libraryRoot, 'a.mp4'), 'data');
+  const libraryRootReal = await realpath(libraryRoot);
+
+  await moveWithinLibrary(
+    join(libraryRoot, 'a.mp4'),
+    join(libraryRoot, 'b.mp4'),
+    libraryRootReal,
+    () => Promise.reject(Object.assign(new Error('cross-device'), { code: 'EXDEV' })),
+  );
+
+  assert.equal(await readFile(join(libraryRoot, 'b.mp4'), 'utf8'), 'data');
+  assert.equal(await lstatOrNull(join(libraryRoot, 'a.mp4')), null, 'the source is removed');
+});
+
+test('moveWithinLibrary refuses a destination outside the library root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-move-'));
+  const libraryRoot = join(root, 'library');
+  await mkdir(libraryRoot, { recursive: true });
+  await writeFile(join(libraryRoot, 'a.mp4'), 'data');
+  const libraryRootReal = await realpath(libraryRoot);
+
+  await assert.rejects(
+    moveWithinLibrary(join(libraryRoot, 'a.mp4'), join(root, 'escaped.mp4'), libraryRootReal),
+  );
 });
