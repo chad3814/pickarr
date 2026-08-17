@@ -80,6 +80,7 @@ function deps(db: DatabaseSync, untracked: UntrackedEntry[] = []): ServerDeps {
     bootConfigDocument: null,
     databasePath: '/tmp/pickarr-server-test-unused.db',
     requestRestart: () => {},
+    trashDir: '/trash',
   };
 }
 

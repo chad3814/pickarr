@@ -8,9 +8,12 @@ import {
   flagUpgrade,
   getGroup,
   markPicked,
+  moveDownloadsToGroup,
+  moveImportedFilesToGroup,
   pickedGroups,
   refreshUpgradeFlag,
 } from '../../src/db/groups.ts';
+import { num, type SqlRow } from '../../src/db/row.ts';
 
 // `upgrade_release_id` is an invariant, not an event log: it names the
 // highest-scoring release in the group that is strictly better than
@@ -433,4 +436,41 @@ test('browseGroups and pickedGroups agree on the order of the same tied, upgrade
   assert.deepEqual(picksIds, [1, 2, 3]);
   assert.deepEqual(browseIds, picksIds);
   db.close();
+});
+
+test('moveDownloadsToGroup and moveImportedFilesToGroup repoint both tables', () => {
+  const db = openTestDatabase();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state,
+                               created_at, list_rank_at)
+     VALUES (1, 'test', 'k1', '{"title":"A","fields":[]}', 'a', 'picked', 100, 100),
+            (2, 'test', 'k2', '{"title":"B","fields":[]}', 'b', 'new',    100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'T1', 'https://i.invalid/1.nzb', 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (1, 1, 1, '{}', 1080, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (1, 1, 1, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (1, 1, 1, '/dl/a.mp4', '/library/a.mp4', 10, 100)`,
+  ).run();
+
+  moveDownloadsToGroup(db, 1, 2);
+  moveImportedFilesToGroup(db, 1, 2);
+
+  assert.equal(num(db.prepare('SELECT group_id FROM downloads WHERE id = 1').get() as SqlRow, 'group_id'), 2);
+  assert.equal(
+    num(db.prepare('SELECT group_id FROM imported_files WHERE id = 1').get() as SqlRow, 'group_id'),
+    2,
+  );
 });

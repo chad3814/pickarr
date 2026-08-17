@@ -544,9 +544,53 @@ export function moveReleasesToGroup(
 }
 
 /**
- * Only ever called on a group already emptied by `moveReleasesToGroup`, and
- * only when `groupHasHistory` said no. Anything still referencing the row
- * raises a foreign key error rather than vanishing.
+ * The rest of a merge, and the reason the merge is now allowed at all.
+ *
+ * `moveReleasesToGroup` alone leaves `downloads` and `imported_files` pointing at
+ * a group that is about to be deleted, which is exactly what made the old
+ * refusal necessary. Both tables reference `group_id`, so both must move before
+ * `deleteGroup` — and both belong in the same transaction as the release move
+ * for the reason stated above it.
+ *
+ * Migration 4 already moves these three tables together when it collapses
+ * re-keyed clusters, so this is the established write pattern rather than a new
+ * one.
+ */
+export function moveDownloadsToGroup(
+  db: DatabaseSync,
+  fromGroupId: number,
+  toGroupId: number,
+): void {
+  db.prepare('UPDATE downloads SET group_id = ? WHERE group_id = ?').run(toGroupId, fromGroupId);
+}
+
+/**
+ * `dest_path` deliberately stands. This repoints the *record*; where the file
+ * actually is on disk is unchanged by it, and phase 3 of the identity change is
+ * what reconciles the two. Rewriting the path here would make the row lie for
+ * as long as it took the rename to happen.
+ */
+export function moveImportedFilesToGroup(
+  db: DatabaseSync,
+  fromGroupId: number,
+  toGroupId: number,
+): void {
+  db.prepare('UPDATE imported_files SET group_id = ? WHERE group_id = ?').run(
+    toGroupId,
+    fromGroupId,
+  );
+}
+
+/**
+ * Only ever called on a group already emptied of everything that references it:
+ * `moveReleasesToGroup`, `moveDownloadsToGroup` and `moveImportedFilesToGroup`
+ * have repointed all three tables at the survivor, and `clearGroupMetadata` has
+ * removed the rows that have no foreign key to insist on it. Anything still
+ * referencing the row raises a foreign key error rather than vanishing.
+ *
+ * It used to be guarded by `groupHistory` instead — a merge was refused outright
+ * if the source had ever been downloaded from — and that refusal, not the move of
+ * the other two tables, was what kept this statement safe. See `groupHistory`.
  */
 export function deleteGroup(db: DatabaseSync, id: number): void {
   db.prepare('DELETE FROM media_groups WHERE id = ?').run(id);
@@ -570,16 +614,28 @@ export type GroupHistory = 'downloads' | 'imported-files';
  * files are in the library under this group's name, which is the heavier fact
  * and the one the user has to go and look at.
  *
- * Only this group is inspected — in a merge that is the *source*, the group
- * about to be emptied and deleted. Why the merge refuses on a source with
- * history is a fact about the target (it may already carry its own pick, its
- * own upgrade flag and its own imported files, and silently reconciling two
- * picks is a guess), but that is spec §7.3's rationale for asking, not
- * something this observes. It answers about one group and nothing else.
+ * Only this group is inspected — in the merge this function once gated, that
+ * was the *source*, the group about to be emptied and deleted. Why that merge
+ * refused on a source with history was a fact about the target (it might
+ * already carry its own pick, its own upgrade flag and its own imported
+ * files, and silently reconciling two picks was a guess), but that was spec
+ * §7.3's rationale for asking, not something this function observed. It
+ * answers about one group and nothing else — which the note below explains is
+ * now a question nothing in production asks it.
  *
  * A trashed `imported_files` row still counts. The file was placed on disk
  * under this group's name, and trashing recorded where it went — history, not
  * an absence of it.
+ *
+ * It has no production caller as of the identity-change design of 2026-08-16.
+ * Its only one was `editGroup`'s merge refusal, which is now the plan-and-
+ * confirm flow in `manual/identity-plan.ts` and `editGroup`'s four phases: the
+ * question is no longer "has anything happened to this group" but "what exactly
+ * would this change do to what has". It is kept for the distinction it states —
+ * `db/migrations.ts` contrasts this question with "whose name is on a *live*
+ * file", and `db/metadata.ts` refers to it as well — and because its tests
+ * document that a trashed file still counts as history, which is not obvious
+ * and was decided once.
  */
 export function groupHistory(db: DatabaseSync, groupId: number): GroupHistory | null {
   const row = db

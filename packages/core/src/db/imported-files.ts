@@ -63,7 +63,7 @@ export function insertImportedFile(db: DatabaseSync, file: NewImportedFile): num
  * A group's live rows, optionally excluding one download's own.
  *
  * The exclusion exists because the only caller that acts on this list —
- * `trashLiveFiles` — is invoked *by* an import, to clear the way for that
+ * `trashFiles` — is invoked *by* an import, to clear the way for that
  * import's own output. "Live files of this group" and "files this import is
  * superseding" are the same set only on a first attempt: the moment an import
  * retries (a crash between the transfer and the status write, a boot recovery
@@ -92,6 +92,54 @@ export function liveFilesForGroup(
     )
     .all(groupId, excludeDownloadId)
     .map((row) => toRow(row as SqlRow));
+}
+
+/**
+ * Live files in a group belonging to any release *other* than the one named.
+ *
+ * Scoped by release, not by download, and that distinction is the reason this
+ * exists alongside `liveFilesForGroup`'s `excludeDownloadId`. A release that
+ * imported twice — a retry — has two `downloads` rows, so excluding one of them
+ * would hand back the other's file as trashable even though it belongs to the
+ * release being kept. The join is what makes the question answerable at all:
+ * `imported_files` records the download, and only `downloads` knows the release.
+ *
+ * A null `keepReleaseId` keeps nothing, which is the honest reading of "there is
+ * no surviving pick" — every live file in the group is then superseded.
+ */
+export function liveFilesForOtherReleases(
+  db: DatabaseSync,
+  groupId: number,
+  keepReleaseId: number | null,
+): ImportedFileRow[] {
+  const sql = `
+    SELECT f.id, f.download_id, f.group_id, f.source_path, f.dest_path, f.size_bytes,
+           f.trashed_at, f.trash_path, f.created_at
+      FROM imported_files f
+      JOIN downloads d ON d.id = f.download_id
+     WHERE f.group_id = ? AND f.trashed_at IS NULL
+       AND (? IS NULL OR d.release_id != ?)
+     ORDER BY f.id
+  `;
+  return db
+    .prepare(sql)
+    .all(groupId, keepReleaseId, keepReleaseId)
+    .map((row) => toRow(row as SqlRow));
+}
+
+export function getImportedFile(db: DatabaseSync, id: number): ImportedFileRow | null {
+  const row = db.prepare(`${SELECT} WHERE id = ?`).get(id);
+  return row === undefined ? null : toRow(row as SqlRow);
+}
+
+/**
+ * Written only after the file has actually moved, one row per move. That is
+ * what keeps the table describing the library rather than describing an
+ * intention: a row whose `dest_path` named where a file was *going* would be a
+ * lie for as long as the move took, and a permanent one if the move failed.
+ */
+export function setImportedFileDest(db: DatabaseSync, id: number, destPath: string): void {
+  db.prepare('UPDATE imported_files SET dest_path = ? WHERE id = ?').run(destPath, id);
 }
 
 export function findLiveByDest(

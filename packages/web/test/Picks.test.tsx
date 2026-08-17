@@ -7,7 +7,11 @@ import { Picks } from '../src/routes/Picks.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
 import type {
   DownloadsResponse,
+  GroupEditResponse,
   GroupView,
+  IdentityPlanView,
+  ManualField,
+  ManualFieldsResponse,
   MetadataRequestResponse,
   MetadataView,
   PicksResponse,
@@ -65,6 +69,179 @@ function failedPick(healthy: GroupView): GroupView {
   };
 }
 
+/** An identity schema, the same shape `Browse.test.tsx` uses for its own. */
+const FIELDS: ManualField[] = [
+  { name: 'key', label: 'Key', type: 'text', scope: 'identity', required: true },
+  { name: 'title', label: 'Title', type: 'text', scope: 'identity', required: true },
+];
+
+/**
+ * A picked group with an identity prefill, for the edit tests below —
+ * `group()` above carries none, since no test before this feature existed
+ * needed one.
+ */
+const PICKED_GROUP: GroupView = { ...group(1, 'Alpha'), manualValues: { key: 'k1', title: 'Alpha' } };
+
+/** A plan that moves nothing, so `useIdentityChange` applies it with no dialog. */
+const PLAN_NO_MOVES: IdentityPlanView = {
+  groupId: PICKED_GROUP.id,
+  identityKey: 'scenes:k1:Fixed',
+  kind: 'display-only',
+  mergeInto: null,
+  releasesMoving: 0,
+  downloadsMoving: 0,
+  pick: { surviving: null, superseded: null },
+  renames: [],
+  trashing: [],
+  warnings: [],
+  blockers: [],
+  digest: 'no-moves-digest',
+};
+
+/**
+ * A rekey with no file work but one blocker — the shape that used to escape
+ * confirmation entirely (`needsConfirmation` read only `kind`/`renames`/
+ * `trashing`, all of which say "nothing to confirm" here) and got refused 409
+ * by the applier, which this hook's contract can only read as a stale digest.
+ * The blocker text never reached the user under that bug.
+ */
+const PLAN_BLOCKED: IdentityPlanView = {
+  groupId: PICKED_GROUP.id,
+  identityKey: 'scenes:k3:Alpha',
+  kind: 'rekey',
+  mergeInto: null,
+  releasesMoving: 0,
+  downloadsMoving: 0,
+  pick: { surviving: null, superseded: null },
+  renames: [],
+  trashing: [],
+  warnings: [],
+  blockers: ['/library/k3/1080.mp4 is occupied by something this group did not put there'],
+  digest: 'blocked-digest',
+};
+
+/** A plan that merges into another group, so `useIdentityChange` requires confirmation. */
+const PLAN_MERGE: IdentityPlanView = {
+  groupId: PICKED_GROUP.id,
+  identityKey: 'scenes:k2:Alpha',
+  kind: 'merge',
+  mergeInto: { id: 2, title: 'Target' },
+  releasesMoving: 1,
+  downloadsMoving: 0,
+  pick: { surviving: { releaseId: 20, score: 1080, side: 'source' }, superseded: null },
+  renames: [],
+  trashing: [],
+  warnings: [],
+  blockers: [],
+  digest: 'merge-digest',
+};
+
+interface StubOptions {
+  picks: GroupView[];
+  manualFields?: ManualFieldsResponse;
+  identityPlan?: IdentityPlanView;
+  groupEdit?: GroupEditResponse;
+}
+
+/** One `PATCH /api/groups/:id` body, as the test can observe it. */
+interface Patched {
+  groupId: number;
+  values: Record<string, string>;
+  planDigest?: string;
+}
+
+/**
+ * Serves the endpoints the edit flow touches — `/api/picks`, `/api/manual-fields`,
+ * `POST .../identity-plan` and `PATCH /api/groups/:id` — distinct from `serve()`
+ * above, which answers a narrower slice with no schema and no plan to offer,
+ * since picking alone never needed either.
+ *
+ * `patched` and `pickCalls` are what a test reads back: `patched` proves
+ * *whether* and *with what digest* a save reached the server, and `pickCalls`
+ * proves Picks reloaded rather than patched its list, the way its own comment
+ * on `applyEdit` says it must.
+ */
+function stubApi(options: StubOptions): { patched: Patched[]; pickCalls: number } {
+  const state = { patched: [] as Patched[], pickCalls: 0 };
+
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://test.invalid');
+
+    if (url.pathname === '/api/metadata/request') {
+      const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
+      return new Response(
+        JSON.stringify({
+          queued: 0,
+          alreadyAnswered: body.groupIds.length,
+          pending: 0,
+          missing: 0,
+          unavailable: 0,
+        } satisfies MetadataRequestResponse),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.pathname === '/api/metadata') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
+      const response: Record<number, MetadataView> = {};
+      for (const id of ids) response[Number(id)] = { state: 'none' };
+      return new Response(JSON.stringify(response), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.pathname === '/api/manual-fields') {
+      return new Response(JSON.stringify(options.manualFields ?? ({} satisfies ManualFieldsResponse)), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.pathname.endsWith('/identity-plan')) {
+      if (options.identityPlan === undefined) {
+        throw new Error(`identity-plan requested but no plan stubbed for ${url.pathname}`);
+      }
+      return new Response(JSON.stringify(options.identityPlan), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (init?.method === 'PATCH') {
+      const body = JSON.parse(String(init.body)) as {
+        values: Record<string, string>;
+        planDigest?: string;
+      };
+      const groupId = Number(url.pathname.split('/')[3]);
+      // `planDigest` is omitted rather than set to `undefined` — the same
+      // idiom `api.editGroup` itself uses — so `patched[n]?.planDigest` reads
+      // `undefined` only because the key is genuinely absent, not because it
+      // was explicitly written as such.
+      state.patched.push(
+        body.planDigest === undefined
+          ? { groupId, values: body.values }
+          : { groupId, values: body.values, planDigest: body.planDigest },
+      );
+      return new Response(
+        JSON.stringify(
+          options.groupEdit ??
+            ({
+              group: options.picks[0]!,
+              mergedInto: null,
+              renamed: 0,
+              trashed: 0,
+              failed: [],
+            } satisfies GroupEditResponse),
+        ),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.pathname === '/api/picks') {
+      state.pickCalls += 1;
+      return new Response(JSON.stringify({ groups: options.picks } satisfies PicksResponse), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected request to ${url.pathname}`);
+  }) as unknown as typeof fetch;
+
+  return state;
+}
+
 /**
  * Every `groupIds` array `serve()`'s mock has seen on `POST
  * /api/metadata/request`, reset at the start of each `serve()` call. A test
@@ -109,6 +286,16 @@ function serve(first: GroupView[], reloaded?: GroupView[]): void {
       const response: Record<number, MetadataView> = {};
       for (const id of ids) response[Number(id)] = { state: 'none' };
       return new Response(JSON.stringify(response), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    // Picks now fetches its schema map unconditionally on mount (Task 10);
+    // answered here, off the `loads` counter below, so it cannot be mistaken
+    // for a `/api/picks` load and thrown off which of `first`/`reloaded` a
+    // test sees. No plugin has a schema in these tests, which is exactly what
+    // keeps every existing test's cards free of an Edit button.
+    if (url.pathname === '/api/manual-fields') {
+      return new Response(JSON.stringify({} satisfies ManualFieldsResponse), {
         headers: { 'content-type': 'application/json' },
       });
     }
@@ -269,6 +456,14 @@ test('a failed download on Downloads reaches its group on Picks', async () => {
         headers: { 'content-type': 'application/json' },
       });
     }
+    // Picks now fetches its schema map on mount (Task 10); no plugin has one
+    // here, which is what keeps every card free of an Edit button this test
+    // has no interest in.
+    if (url.pathname === '/api/manual-fields') {
+      return new Response(JSON.stringify({} satisfies ManualFieldsResponse), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     return new Response(JSON.stringify(picks), { headers: { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch;
 
@@ -387,6 +582,13 @@ test('polling stops once nothing is pending', async () => {
         headers: { 'content-type': 'application/json' },
       });
     }
+    // Picks now fetches its schema map on mount (Task 10); this test is about
+    // polling, not editing, so no plugin has one.
+    if (url.pathname === '/api/manual-fields') {
+      return new Response(JSON.stringify({} satisfies ManualFieldsResponse), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     throw new Error(`unexpected request to ${url.pathname}`);
   }) as unknown as typeof fetch;
 
@@ -440,6 +642,13 @@ test('does not poll forever when metadata is unavailable server-wide', async () 
         headers: { 'content-type': 'application/json' },
       });
     }
+    // Picks now fetches its schema map on mount (Task 10); this test is about
+    // polling, not editing, so no plugin has one.
+    if (url.pathname === '/api/manual-fields') {
+      return new Response(JSON.stringify({} satisfies ManualFieldsResponse), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     throw new Error(`unexpected request to ${url.pathname}`);
   }) as unknown as typeof fetch;
 
@@ -456,4 +665,160 @@ test('does not poll forever when metadata is unavailable server-wide', async () 
   // already made a second call.
   await new Promise((resolve) => setTimeout(resolve, 1_500));
   assert.equal(getCalls, 1);
+});
+
+// Picks had no edit affordance at all before this feature — that was half the
+// bug report: a picked group whose corrected identity belonged to another
+// group was unreachable here, because Browse only lists groups still
+// `state = 'new'` or flagged for upgrade.
+
+test('a picked group offers an edit form', async () => {
+  stubApi({ picks: [PICKED_GROUP], manualFields: { scenes: FIELDS } });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  assert.ok(await screen.findByRole('button', { name: /edit/i }));
+});
+
+test('a display-only edit saves without a confirmation', async () => {
+  const stub = stubApi({
+    picks: [PICKED_GROUP],
+    manualFields: { scenes: FIELDS },
+    identityPlan: PLAN_NO_MOVES,
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: /edit/i }));
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Fixed' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+  await waitFor(() => assert.equal(stub.patched.length, 1));
+  assert.equal(stub.patched[0]?.planDigest, undefined);
+  assert.equal(screen.queryByRole('dialog'), null);
+});
+
+test('a merge shows the confirmation and only saves once confirmed', async () => {
+  const stub = stubApi({
+    picks: [PICKED_GROUP],
+    manualFields: { scenes: FIELDS },
+    identityPlan: PLAN_MERGE,
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: /edit/i }));
+  fireEvent.change(screen.getByLabelText('Key'), { target: { value: 'k2' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+  const dialog = await screen.findByRole('dialog');
+  assert.ok(dialog);
+  assert.equal(stub.patched.length, 0, 'nothing is saved before confirmation');
+
+  fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+
+  await waitFor(() => assert.equal(stub.patched.length, 1));
+  assert.equal(stub.patched[0]?.planDigest, PLAN_MERGE.digest);
+});
+
+test('a merge reloads the list rather than patching it', async () => {
+  const stub = stubApi({
+    picks: [PICKED_GROUP],
+    manualFields: { scenes: FIELDS },
+    identityPlan: PLAN_MERGE,
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: /edit/i }));
+  fireEvent.change(screen.getByLabelText('Key'), { target: { value: 'k2' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+  fireEvent.click(await screen.findByRole('button', { name: /confirm/i }));
+
+  // Two: the initial load, then the reload after the merge. Which list a group
+  // belongs to after a merge is the server's answer, not one to reconstruct.
+  await waitFor(() => assert.equal(stub.pickCalls, 2));
+});
+
+test('a blocked plan with no file work still shows its blocker and saves nothing', async () => {
+  const stub = stubApi({
+    picks: [PICKED_GROUP],
+    manualFields: { scenes: FIELDS },
+    identityPlan: PLAN_BLOCKED,
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: /edit/i }));
+  fireEvent.change(screen.getByLabelText('Key'), { target: { value: 'k3' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+  const dialog = await screen.findByRole('dialog');
+  assert.ok(
+    within(dialog).getByText(/occupied by something this group did not put there/),
+    'the blocker text must reach the user, not just refuse silently later',
+  );
+  assert.equal(
+    screen.getByRole('button', { name: /confirm/i }).getAttribute('disabled'),
+    '',
+    'Confirm must be disabled while a blocker stands',
+  );
+  assert.equal(stub.patched.length, 0, 'a blocked plan must never reach the server unconfirmed');
+});
+
+test('a save that leaves files unmoved reports how many, and which', async () => {
+  // §5.1: a per-file failure in phases 2/3 does not abort the merge, so the
+  // save itself succeeds — but the library is left in two layouts, and this
+  // banner is the only thing that tells the user that. Exercised on Picks
+  // rather than Browse: both routes build the same message from the same
+  // `GroupEditResponse.failed` (see `applyEdit`'s own comment on each route),
+  // and Picks's `stubApi` already models `groupEdit` directly, with no
+  // card-patching to also account for.
+  const stub = stubApi({
+    picks: [PICKED_GROUP],
+    manualFields: { scenes: FIELDS },
+    identityPlan: PLAN_NO_MOVES,
+    groupEdit: {
+      group: PICKED_GROUP,
+      mergedInto: null,
+      renamed: 0,
+      trashed: 1,
+      failed: [{ path: '/library/k1/1080.mp4', error: 'EACCES' }],
+    },
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: /edit/i }));
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Fixed' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+  await waitFor(() => assert.equal(stub.patched.length, 1));
+  assert.ok(await screen.findByText(/Saved, but 1 file\(s\) could not be moved/));
+  assert.ok(screen.getByText(/\/library\/k1\/1080\.mp4/));
+  assert.ok(screen.getByText(/EACCES/));
 });

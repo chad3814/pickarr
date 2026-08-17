@@ -11,6 +11,7 @@ import { releasesForGroup } from '../db/releases.ts';
 import type { DownloadRow } from '../db/downloads.ts';
 import type { FeedItemRow } from '../db/feed-items.ts';
 import type { GroupMetadata } from '../db/metadata.ts';
+import type { IdentityPlan } from '../manual/identity-plan.ts';
 import type { PerformerRow } from '../db/performers.ts';
 import type { UntrackedEntry } from '../pipeline/reconcile.ts';
 import { str, type SqlRow } from '../db/row.ts';
@@ -224,11 +225,30 @@ export interface ResolveResponse {
  * the one that was patched. `mergedInto` names it, and is null when nothing
  * merged; the client knows the source id because it sent it, so those two
  * together are what let it drop one card and replace another.
+ *
+ * `renamed`, `trashed` and `failed` mirror `GroupEditOutcome` from
+ * `manual/operations.ts` — carried through rather than folded away, because a
+ * 200 that hid a per-file failure would tell the user their edit fully
+ * succeeded when a file it promised to move or trash is not where the plan
+ * said it would be.
  */
 export interface GroupEditResponse {
   group: GroupView;
   mergedInto: number | null;
+  renamed: number;
+  trashed: number;
+  failed: readonly { path: string; error: string }[];
 }
+
+/**
+ * The plan route answers the planner's own result verbatim — the whole point
+ * of `planIdentityChange` is that the preview and the apply run the same
+ * computation, so a view that reshaped it here could show the user something
+ * the apply then disagreed with. The alias exists so this file's routes are
+ * typed consistently through a `*Response` name like every other route,
+ * rather than because the shape needs to differ from `IdentityPlan`.
+ */
+export type IdentityPlanResponse = IdentityPlan;
 
 /**
  * `group` is the edited release's group as the browse list sees it afterwards,

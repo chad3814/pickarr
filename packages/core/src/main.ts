@@ -361,6 +361,7 @@ async function main(): Promise<void> {
     bootConfigDocument,
     databasePath: config.database.path,
     requestRestart: () => shutdown('restart requested'),
+    trashDir: config.trashDir,
   });
 
   await server.listen({ port: config.server.port, host: '0.0.0.0' });
