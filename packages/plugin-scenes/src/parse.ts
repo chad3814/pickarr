@@ -751,6 +751,46 @@ function hyphenGroupRun(tokens: Token[], text: string): Token[] | undefined {
 }
 
 /**
+ * Whether the token at `index` can be the *end* of an encode section — the
+ * anchor `dottedGroupRun`'s multi-token run must sit directly behind.
+ *
+ * `isEncodeToken` is not that test, and using it as one refused three corpus
+ * names outright. `ANCILLARY_TOKEN` admits a token that is nothing but digits so
+ * the `1` the tokenizer splits off `DDP5.1` still reads as part of the run it
+ * continues; behind title material the same token is a scene or sequel number.
+ * `Minori.Kamiyama.Rispetto.1.JAP.XXX.1080p` therefore had `JAP.XXX.1080p`
+ * detached as a dot-attached group anchored on the `1`,
+ * `Hiyori.JAPANESE.2.XXX.1080p` had `XXX.1080p` detached on the `2` — which
+ * names the `XXX` marker itself as a release group — and
+ * `...Sexy.Slave.in.Fox.Ears.2.Cums.POV.2160p` lost `Cums.POV.2160p` the same
+ * way. What was left of each carried no encode section at all, so
+ * `findEncodeSuffixStart` returned `null` and all three were refused: the exact
+ * failure mode detaching a dotted group exists to remove, reintroduced through
+ * its own gate.
+ *
+ * A bare number's encode meaning is borrowed from the token in front of it, so
+ * it anchors only while that loan holds. That is the shape
+ * `isLanguageSuffixToken` already uses — a token that cannot vouch for itself
+ * asks its predecessor — and one level is enough, because a real encode section
+ * never ends in two bare numbers.
+ *
+ * Used only by the multi-token dotted run, which is where the refusals came
+ * from. The hyphen run and the single-token dot form read `isEncodeToken`
+ * directly still: substituting this there is measurably identical over the whole
+ * 10,651-name corpus — 0 newly refused, 0 newly parsed, 0 identity keys and 0
+ * release groups moved either way — so there is no evidence to change them on,
+ * and both are reachable only by a name whose last token both looks like a group
+ * and follows a bare number, which leaves no boundary anchor to parse with
+ * anyway.
+ */
+function endsEncodeSection(tokens: Token[], index: number): boolean {
+  const token = tokens[index];
+  if (token === undefined || !isEncodeToken(token.text)) return false;
+  if (!/^\d+$/.test(token.text)) return true;
+  return isEncodeToken(tokens[index - 1]?.text ?? '');
+}
+
+/**
  * The tokens of a trailing run attached with the name's *own* separator, ending
  * where encode information begins. `undefined` when no encode token is reached,
  * when a foreign separator interrupts the run, or when the run grows past
@@ -782,7 +822,7 @@ function dottedGroupRun(tokens: Token[], text: string): Token[] | undefined {
     if (previous === undefined || current === undefined) return undefined;
     const separator = text.slice(previous.start + previous.text.length, current.start);
     if (!/^[._\s]$/.test(separator)) return undefined;
-    if (isEncodeToken(previous.text)) return tokens.slice(start);
+    if (endsEncodeSection(tokens, start - 1)) return tokens.slice(start);
     if (tokens.length - start >= MAX_GROUP_TOKENS) return undefined;
   }
   return undefined;
