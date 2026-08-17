@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { GroupView, ManualField } from '../api/client.ts';
 import { groupAnchor } from '../api/anchors.ts';
 import { formatDuration } from '../api/format.ts';
@@ -24,10 +24,15 @@ interface Props {
    * by the route, the same as the three handlers above: it is the route that
    * holds `useGroupMetadata`'s handle and can tell it to watch this id again
    * once the requery lands, which is machinery this card has no business
-   * duplicating. Rejecting is how the card learns the attempt failed; there
-   * is no boolean outcome the way `onEditGroup` has, because there is no
-   * "landed but was refused" case here — it either reached the server or it
-   * did not.
+   * duplicating.
+   *
+   * Rejecting is how the card learns the attempt did not happen, and that
+   * covers refusals as well as failures: `POST /api/metadata/requery` answers
+   * 200 with counters, so a call can succeed while requeuing nothing (no
+   * metadata provider configured, the group gone, its plugin unable to build
+   * a query). `requeryOneGroup` turns each of those into a rejection carrying
+   * the reason, so this card still has exactly one channel to render rather
+   * than a boolean outcome the way `onEditGroup` has.
    */
   onRequeryMetadata?(groupId: number): Promise<void>;
 }
@@ -88,6 +93,18 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // could live, disagreeing with the map the instant a poll updated one but
   // not the other.
   const { metadata } = group;
+
+  // A requery's error message describes one attempt, and a fresher answer
+  // outlives it: leaving it up would caption a card that has since updated
+  // with the reason an earlier attempt failed. The dependency is the view
+  // object itself rather than a deep compare of its contents — the parent's
+  // map hands out a new object for every answer it fetches and the same one
+  // on every other render, so object identity is exactly "a new answer
+  // arrived". Clearing an already-null error is a no-op React bails out of,
+  // so the mount-time run costs nothing.
+  useEffect(() => {
+    setRequeryError(null);
+  }, [metadata]);
 
   // A field's scope says which record it belongs to: the group owns its
   // identity and display (§7.3), each release its own quality (§7.4).
@@ -186,8 +203,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
            * (`settled`), independent of whether this plugin even offers
            * editing — the two controls have no requirement in common beyond
            * both belonging here.
+           *
+           * The condition is per *button*, not per capability: `canEdit` with
+           * the form already open renders no Edit button, so gating the row on
+           * `canEdit` alone left an empty `.card-actions` div — and its
+           * margin — under an open identity form on a plugin with no Requery
+           * button to keep it company.
            */}
-          {(canEdit || settled) && (
+          {((canEdit && !editing) || settled) && (
             <div className="card-actions">
               {canEdit && !editing && (
                 <button type="button" onClick={() => setEditing(true)}>

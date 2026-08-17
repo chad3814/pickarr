@@ -623,28 +623,29 @@ test('the schemas are fetched once for the screen, not once per card', async () 
   );
 });
 
-test('clicking Requery re-arms the poll end to end: no blanking on a pending answer, and a fresher one lands without a reload', async () => {
-  // The full stack this bug lived in: Browse wires the button's callback to
-  // `api.requeryMetadata` + `useGroupMetadata`'s `rearm`, and it is that
-  // wiring — not anything inside `MediaCard` — that has to keep the card
-  // from blanking. This test would have failed against the first cut, which
-  // had `MediaCard` call `api` directly and had no `rearm` at all: the
-  // second `GET /api/metadata` below answering `pending` would have
-  // reached the card as `group.metadata` unmodified, and the card renders a
-  // `pending` group with no title or synopsis panel at all (see "the
-  // metadata panel renders only once the answer is confirmed" in
-  // `MediaCard.test.tsx`).
-  const original: MetadataView = {
-    state: 'confirmed',
-    title: 'Original title',
-    performerNames: [],
-    releaseDate: null,
-    durationSeconds: null,
-    synopsis: 'The original synopsis.',
-    hasPoster: false,
-  };
-  const fresher: MetadataView = { ...original, synopsis: 'The fresher synopsis.' };
+/** The settled answer both Requery tests below start from, and the fresher one they end at. */
+const REQUERY_ORIGINAL: MetadataView = {
+  state: 'confirmed',
+  title: 'Original title',
+  performerNames: [],
+  releaseDate: null,
+  durationSeconds: null,
+  synopsis: 'The original synopsis.',
+  hasPoster: false,
+};
+const REQUERY_FRESHER: MetadataView = { ...REQUERY_ORIGINAL, synopsis: 'The fresher synopsis.' };
 
+/**
+ * One already-settled group on the first page, and a `GET /api/metadata` that
+ * walks `answers` by call count (the last one repeating). Shared by the two
+ * Requery tests below, which differ in nothing but that sequence — one drives
+ * the defensive `pending` the server never actually emits, the other the
+ * sequence it does.
+ *
+ * Returns a reader for the number of `GET /api/metadata` calls, which is how a
+ * test tells "the id is being watched again" from "the click did nothing".
+ */
+function serveSettledGroup(answers: readonly MetadataView[]): () => number {
   const alpha: GroupView = {
     id: 1,
     plugin: 'scenes',
@@ -654,17 +655,10 @@ test('clicking Requery re-arms the poll end to end: no blanking on a pending ans
     upgradeReleaseId: null,
     listRankAt: 1000,
     releases: [],
-    metadata: original,
+    metadata: answers[0]!,
   };
 
   let metadataCalls = 0;
-  // The sequence `GET /api/metadata` answers with, by call count: the
-  // group's already-settled answer (the hook's own mount-time check, before
-  // any click), a `pending` right after the requery — the exact shape the
-  // bug blanked the card over — and finally a genuinely different confirmed
-  // answer, which is what "without a reload" is actually asking to prove.
-  const answers: MetadataView[] = [original, { state: 'pending' }, fresher];
-
   globalThis.fetch = (async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/browse') {
@@ -712,15 +706,39 @@ test('clicking Requery re-arms the poll end to end: no blanking on a pending ans
     throw new Error(`unexpected request to ${url.pathname}`);
   }) as unknown as typeof fetch;
 
+  return () => metadataCalls;
+}
+
+test('clicking Requery re-arms the poll end to end: no blanking on a pending answer, and a fresher one lands without a reload', async () => {
+  // The full stack this bug lived in: Browse wires the button's callback to
+  // `api.requeryMetadata` + `useGroupMetadata`'s `rearm`, and it is that
+  // wiring — not anything inside `MediaCard` — that has to keep the card
+  // from blanking. This test would have failed against the first cut, which
+  // had `MediaCard` call `api` directly and had no `rearm` at all: the
+  // second `GET /api/metadata` below answering `pending` would have
+  // reached the card as `group.metadata` unmodified, and the card renders a
+  // `pending` group with no title or synopsis panel at all (see "the
+  // metadata panel renders only once the answer is confirmed" in
+  // `MediaCard.test.tsx`).
+  //
+  // The `pending` in the middle is defensive, not real: the server never
+  // reports an already-answered group as `pending`. The test below drives the
+  // sequence it does emit, which is the one the feature actually depends on.
+  const metadataCalls = serveSettledGroup([
+    REQUERY_ORIGINAL,
+    { state: 'pending' },
+    REQUERY_FRESHER,
+  ]);
+
   render(<Browse />);
   await waitFor(() => assert.ok(screen.getByText('The original synopsis.')));
-  const callsBeforeClick = metadataCalls;
+  const callsBeforeClick = metadataCalls();
 
   fireEvent.click(await waitFor(() => screen.getByRole('button', { name: 'Requery metadata' })));
 
   // The second answer (`pending`) must reach this hook — proof the id is
   // actually being watched again — but must never reach the card.
-  await waitFor(() => assert.ok(metadataCalls > callsBeforeClick), { timeout: 3_000 });
+  await waitFor(() => assert.ok(metadataCalls() > callsBeforeClick), { timeout: 3_000 });
   assert.ok(screen.getByText('The original synopsis.'));
   // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText('pending'));
@@ -728,6 +746,32 @@ test('clicking Requery re-arms the poll end to end: no blanking on a pending ans
   // The third answer is genuinely different, and it is what finally shows
   // up — without a reload, and without the button ever having been clicked
   // a second time.
+  await waitFor(() => assert.ok(screen.getByText('The fresher synopsis.')), { timeout: 3_000 });
+  assert.ok(!screen.queryByText('The original synopsis.'));
+});
+
+test('clicking Requery survives the answer sequence the real server emits: the same answer, then a fresher one', async () => {
+  // `[original, original, fresher]`, which is what actually happens:
+  // `requeueMetadata` leaves `group_metadata` alone and `metadataViewOf`
+  // short-circuits on the answer row, so every poll before the worker writes
+  // a new answer returns the *old* one, byte for byte. The test above cannot
+  // catch a regression here — its artificial `pending` keeps the poll alive on
+  // its own, so `sameMetadata` could be broken outright and the fresher answer
+  // would still land. This one goes back to "the click does nothing until you
+  // reload" the moment that comparison stops working.
+  const metadataCalls = serveSettledGroup([REQUERY_ORIGINAL, REQUERY_ORIGINAL, REQUERY_FRESHER]);
+
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('The original synopsis.')));
+  const callsBeforeClick = metadataCalls();
+
+  fireEvent.click(await waitFor(() => screen.getByRole('button', { name: 'Requery metadata' })));
+
+  // The answer that comes back first is the one already on screen, and the
+  // watch has to survive it.
+  await waitFor(() => assert.ok(metadataCalls() > callsBeforeClick), { timeout: 3_000 });
+  assert.ok(screen.getByText('The original synopsis.'));
+
   await waitFor(() => assert.ok(screen.getByText('The fresher synopsis.')), { timeout: 3_000 });
   assert.ok(!screen.queryByText('The original synopsis.'));
 });

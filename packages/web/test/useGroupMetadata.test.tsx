@@ -16,6 +16,12 @@ afterEach(cleanup);
  * `<li>`'s own text — nesting one in the same element would fold its label
  * into that `<li>`'s `textContent`, breaking every existing `getByText('N:state')`
  * assertion in this file that has nothing to do with `rearm`.
+ *
+ * The `title-<id>` lines are their own nodes for the same reason. A requery's
+ * whole point is an answer that is `confirmed` both before and after, so
+ * `state` alone cannot tell a fresher answer from the one it replaced — the
+ * title can, and the tests that drive the sequence the real server emits need
+ * exactly that distinction.
  */
 function Consumer({ ids }: { ids: readonly number[] }) {
   const { metadata, rearm } = useGroupMetadata(ids);
@@ -26,11 +32,42 @@ function Consumer({ ids }: { ids: readonly number[] }) {
           <li key={id}>{`${id}:${metadata.get(id)?.state ?? 'unknown'}`}</li>
         ))}
       </ul>
+      {ids.map((id) => {
+        const view = metadata.get(id);
+        const title = view?.state === 'confirmed' ? view.title ?? '-' : '-';
+        return <p key={id}>{`title-${id}:${title}`}</p>;
+      })}
       {ids.map((id) => (
         <button key={id} type="button" onClick={() => rearm(id)}>{`rearm-${id}`}</button>
       ))}
     </div>
   );
+}
+
+/**
+ * Moves `Date.now` forward without touching the real clock anything else runs
+ * on — the same shape as `spyOnSetTimeoutDelays` below, and installed for the
+ * duration of one test with a `finally` restore.
+ *
+ * This is how a test reaches a rearm's wall-clock deadline
+ * (`REARM_WATCH_MS`, two minutes) in under a second. Mocked timers are not an
+ * option in this file for the reason that helper documents, and the hook's own
+ * polls have to keep running on the real clock for the deadline to be
+ * *observed* at all: it is checked when a poll's answer arrives, not by a
+ * timer of its own.
+ */
+function skewClock(): { advance: (ms: number) => void; restore: () => void } {
+  const realNow = Date.now;
+  let offset = 0;
+  Date.now = () => realNow.call(Date) + offset;
+  return {
+    advance: (ms: number) => {
+      offset += ms;
+    },
+    restore: () => {
+      Date.now = realNow;
+    },
+  };
 }
 
 function jsonResponse(body: unknown): Response {
@@ -351,4 +388,163 @@ test('rearm re-polls a settled id rather than leaving it unwatched, and never sh
   const callsOnceStopped = getCalls;
   await new Promise((resolve) => setTimeout(resolve, 1_500));
   assert.equal(getCalls, callsOnceStopped);
+});
+
+/**
+ * The answer sequence a real requery actually produces, and the one the two
+ * tests below drive: `[original, original, …, fresher]`.
+ *
+ * The test above stubs a `pending` in the middle, which is a defensive case
+ * the server never emits — `requeueMetadata` does not touch `group_metadata`
+ * and `metadataViewOf` short-circuits on the answer row, so a group with an
+ * answer reads back as that answer no matter what its queue row says. That
+ * makes it the wrong sequence to prove the feature works: an artificial
+ * `pending` keeps the poll alive through `stillWatching`'s `state === 'pending'`
+ * branch, so `sameMetadata` could be broken outright and the poll would still
+ * reach the fresher answer. Replacing `sameMetadata` with `() => false` must
+ * fail the two tests below, and does.
+ */
+const ORIGINAL: MetadataView = {
+  state: 'confirmed',
+  title: 'Original title',
+  releaseDate: null,
+  durationSeconds: null,
+  synopsis: null,
+  hasPoster: false,
+};
+const FRESHER: MetadataView = { ...ORIGINAL, title: 'Fresher title' };
+
+test('a rearmed id polls through an unchanged answer and lands the fresher one — the sequence the real server emits', async () => {
+  const ID = 21;
+  // By call: the hook's own mount-time answer, the *same* answer again right
+  // after the requery (the worker has not drained the requeued row yet, and
+  // there is nothing on the wire to say so), and finally the new one.
+  const answers: MetadataView[] = [ORIGINAL, ORIGINAL, FRESHER];
+
+  let getCalls = 0;
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/request') {
+      return jsonResponse({ queued: 0, alreadyAnswered: 1, pending: 0, missing: 0, unavailable: 0 });
+    }
+    getCalls += 1;
+    return jsonResponse({ [ID]: answers[Math.min(getCalls, answers.length) - 1]! });
+  }) as unknown as typeof fetch;
+
+  render(<Consumer ids={[ID]} />);
+  await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Original title`)));
+  const callsBeforeRearm = getCalls;
+
+  fireEvent.click(screen.getByRole('button', { name: `rearm-${ID}` }));
+
+  // The second answer is byte-identical to the pre-rearm one, and that is
+  // precisely what must *not* end the watch: this is the round where a broken
+  // `sameMetadata` stops polling and the fresher answer below never arrives
+  // without a reload.
+  await waitFor(() => assert.ok(getCalls > callsBeforeRearm), { timeout: 3_000 });
+  assert.ok(screen.getByText(`title-${ID}:Original title`));
+
+  await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Fresher title`)), { timeout: 3_000 });
+  // #40: never `assert.equal(screen.queryByText(x), null)`.
+  assert.ok(!screen.queryByText(`title-${ID}:Original title`));
+
+  // And it stops there rather than carrying on against an answer it has
+  // already accepted.
+  const callsOnceStopped = getCalls;
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  assert.equal(getCalls, callsOnceStopped);
+});
+
+test('a rearm gives up after its deadline instead of polling an unchanged answer forever, and a second press re-arms it', async () => {
+  const ID = 22;
+  // The modal outcome of a requery: the provider says exactly the same thing
+  // it said before, so no poll will ever see a difference. Without a deadline
+  // this is one `GET /api/metadata` every 8 seconds for as long as the route
+  // stays mounted.
+  const ID_ANSWER = { current: ORIGINAL };
+
+  let getCalls = 0;
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/request') {
+      return jsonResponse({ queued: 0, alreadyAnswered: 1, pending: 0, missing: 0, unavailable: 0 });
+    }
+    getCalls += 1;
+    return jsonResponse({ [ID]: ID_ANSWER.current });
+  }) as unknown as typeof fetch;
+
+  const clock = skewClock();
+  try {
+    render(<Consumer ids={[ID]} />);
+    await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Original title`)));
+    const callsBeforeRearm = getCalls;
+
+    fireEvent.click(screen.getByRole('button', { name: `rearm-${ID}` }));
+    await waitFor(() => assert.ok(getCalls > callsBeforeRearm), { timeout: 3_000 });
+
+    // Past the two-minute watch. The deadline is read when a poll's answer
+    // lands, so exactly one more poll happens and it is the one that drops
+    // the id.
+    clock.advance(3 * 60_000);
+    await waitFor(() => assert.ok(getCalls >= callsBeforeRearm + 2), { timeout: 3_000 });
+    const callsOnceGivenUp = getCalls;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(getCalls, callsOnceGivenUp, 'the watch expired instead of polling forever');
+
+    // What the user is left with: the answer the card already had, still on
+    // screen — nothing blanked, nothing claimed to have changed.
+    assert.ok(screen.getByText(`title-${ID}:Original title`));
+
+    // And the way out is the button itself. A second press stores a fresh
+    // deadline, so the bound is per press rather than per session — this one
+    // finds the answer the expired watch never saw.
+    ID_ANSWER.current = FRESHER;
+    fireEvent.click(screen.getByRole('button', { name: `rearm-${ID}` }));
+    await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Fresher title`)), { timeout: 3_000 });
+  } finally {
+    clock.restore();
+  }
+});
+
+test('rearming before the hook has any answer of its own still watches the id', async () => {
+  // The window is real: the Requery button renders from the route's own
+  // `group.metadata`, so it is clickable before this hook's first
+  // `GET /api/metadata` comes back — and again for every "Load more" page.
+  // With no answer to snapshot, the id used to be fetched once as merely
+  // unknown, resolve on the *pre-requery* answer the server is still
+  // reporting, and need a reload to ever show the requery's result.
+  const ID = 23;
+  const answers: MetadataView[] = [ORIGINAL, FRESHER];
+
+  let getCalls = 0;
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/request') {
+      return jsonResponse({ queued: 0, alreadyAnswered: 1, pending: 0, missing: 0, unavailable: 0 });
+    }
+    getCalls += 1;
+    if (getCalls === 1) {
+      // Hangs until the rearm's own effect re-run aborts it, which is what
+      // "the click landed before the first answer did" means in practice.
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    }
+    return jsonResponse({ [ID]: answers[Math.min(getCalls - 1, answers.length) - 1]! });
+  }) as unknown as typeof fetch;
+
+  render(<Consumer ids={[ID]} />);
+  // In flight and unanswered: the hook knows nothing about this id yet.
+  await waitFor(() => assert.ok(getCalls === 1));
+  assert.ok(screen.getByText(`${ID}:unknown`));
+
+  fireEvent.click(screen.getByRole('button', { name: `rearm-${ID}` }));
+
+  // The first answer to arrive after the rearm is the old one, and it becomes
+  // the baseline rather than ending the watch — so the fresher answer lands
+  // without a reload.
+  await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Original title`)), { timeout: 3_000 });
+  await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Fresher title`)), { timeout: 3_000 });
 });

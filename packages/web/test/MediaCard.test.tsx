@@ -12,6 +12,11 @@ afterEach(cleanup);
 /** A stand-in `onRequeryMetadata` for tests that only need the button to render. */
 async function noop(): Promise<void> {}
 
+/** An `onRequeryMetadata` that always refuses, carrying a message a test can look for. */
+async function refuseRequery(): Promise<void> {
+  throw new Error('Metadata lookups are unavailable.');
+}
+
 /**
  * Absence, as a boolean.
  *
@@ -633,4 +638,55 @@ test('the card never overrides group.metadata itself — a fresher prop is what 
   assert.ok(screen.getByText('A fresher synopsis.'));
   // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText('A synopsis from the provider.'));
+});
+
+test('an open identity form with no Requery button leaves no empty actions row behind', () => {
+  // `.card-actions` carries vertical margin of its own, so an empty one is a
+  // visible band of nothing rather than a harmless wrapper. It can only be
+  // empty in one arrangement: a plugin that offers editing, on a group with no
+  // settled metadata to requery, with the form already open — Edit is gone
+  // because the form replaced it, and there is no second button to keep the
+  // row occupied.
+  render(
+    <MediaCard
+      group={EDITABLE}
+      onPick={() => {}}
+      fields={FIELDS}
+      onEditGroup={async () => true}
+    />,
+  );
+  assert.ok(card('Alex Coal').querySelector('.card-actions') !== null);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+
+  // #40 again, in its DOM-node form: `assert.equal(node, null)` is what makes
+  // node:assert deep-inspect a live element to build a message.
+  assert.equal(card('Alex Coal').querySelector('.card-actions') === null, true);
+});
+
+test('a requery error goes away once a fresher answer arrives', async () => {
+  // The message describes one attempt. A card that has since updated must not
+  // keep wearing the reason an earlier attempt failed — the answer on screen
+  // is no longer the one the error was about.
+  const { rerender } = render(
+    <MediaCard
+      group={{ ...GROUP, metadata: CONFIRMED }}
+      onPick={() => {}}
+      onRequeryMetadata={refuseRequery}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Requery metadata' }));
+  await waitFor(() => assert.ok(screen.getByText('Metadata lookups are unavailable.')));
+
+  const fresher: MetadataView = { ...CONFIRMED, synopsis: 'A fresher synopsis.' };
+  rerender(
+    <MediaCard
+      group={{ ...GROUP, metadata: fresher }}
+      onPick={() => {}}
+      onRequeryMetadata={refuseRequery}
+    />,
+  );
+
+  assert.ok(screen.getByText('A fresher synopsis.'));
+  assert.equal(gone('Metadata lookups are unavailable.'), true);
 });

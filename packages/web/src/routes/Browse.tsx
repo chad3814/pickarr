@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, RequestError, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
+import { requeryOneGroup } from '../api/requeryMetadata.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
 import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
@@ -26,15 +27,14 @@ export function Browse() {
 
   /**
    * `MediaCard`'s Requery button, via `onRequeryMetadata`. This route (not
-   * the card, and not the hook) is what holds both halves this needs: the
-   * server call, and the hook's own handle to tell it to watch the group
-   * again. `rearmMetadata` runs only after the requeue itself lands — a
-   * failed `POST /api/metadata/requery` throws before it, leaving nothing
-   * for the hook to re-arm and the card's own catch to report.
+   * the card, and not the hook) is what holds both halves `requeryOneGroup`
+   * needs: the server call, and the hook's own handle to tell it to watch the
+   * group again. The body of it is shared with Picks, which does exactly the
+   * same two things for the same reason — see that function's own doc for why
+   * a refused requeue must not reach `rearmMetadata`.
    */
-  async function requeryMetadata(groupId: number): Promise<void> {
-    await api.requeryMetadata([groupId]);
-    rearmMetadata(groupId);
+  function requeryMetadata(groupId: number): Promise<void> {
+    return requeryOneGroup(groupId, rearmMetadata);
   }
 
   const loadPage = useCallback(

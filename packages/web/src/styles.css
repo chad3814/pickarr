@@ -28,7 +28,10 @@ input.search { margin-bottom: 1rem; }
 /* Same row-of-buttons shape as `.failed-actions`/`.manual-actions`: a small
    gap, no wrapping system of its own. Edit and Requery are independent
    conditions (see `MediaCard`'s `canEdit`/`settled`), so this rule has to
-   look right with either button alone as well as with both. */
+   look right with either button alone as well as with both. The empty case
+   is not this rule's problem to solve: `MediaCard` renders the div only when
+   at least one of the two buttons is going in it, precisely so this margin
+   never shows up as a gap under a card with no actions. */
 .card-actions { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
 .subtitle, .date { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
 .badge { display: inline-block; margin-top: 0.4rem; padding: 0.1rem 0.5rem; border-radius: 0.25rem; background: #b45309; color: white; font-size: 0.8rem; }

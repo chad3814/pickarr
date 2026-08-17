@@ -616,13 +616,17 @@ export const api = {
   },
   /**
    * Re-asks the provider for a group that already has a settled answer —
-   * `MediaCard`'s Requery button is the only caller. Deliberately separate
-   * from `requestMetadata`: that call is `useGroupMetadata`'s own lazy
-   * trigger for a group nothing has asked about yet, and a settled group is
-   * never in the id list that hook builds, so there is no overlap between
-   * the two to reconcile. `signal` is threaded through for the same reason it
-   * is on `requestMetadata`, even though the button's own call never aborts
-   * one mid-flight today.
+   * `MediaCard`'s Requery button is the only caller — through
+   * `requeryOneGroup`, which is what the routes actually call. Deliberately
+   * separate from `requestMetadata`: that call is `useGroupMetadata`'s own
+   * lazy trigger, and it is the *server* that keeps the two apart rather than
+   * the id lists being disjoint. Settled ids do reach `requestMetadata` — the
+   * hook asks about every id it has not resolved itself yet, which on first
+   * mount is all of them — and `POST /api/metadata/request` refuses each of
+   * them as `alreadyAnswered` without queueing anything. This route is the
+   * one that treats already-answered as its precondition instead. `signal` is
+   * threaded through for the same reason it is on `requestMetadata`, even
+   * though the button's own call never aborts one mid-flight today.
    */
   requeryMetadata: (groupIds: number[], signal?: AbortSignal) => {
     const init: RequestInit = { method: 'POST', body: JSON.stringify({ groupIds }) };
