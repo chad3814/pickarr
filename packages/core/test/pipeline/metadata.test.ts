@@ -8,7 +8,9 @@ import type { MediaTypePlugin, MetadataCandidate, MetadataPerformer } from '@pic
 import createScenesPlugin from '@pickarr/plugin-scenes';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { insertGroup } from '../../src/db/groups.ts';
-import { dueMetadataQueue, enqueueMetadata, getGroupMetadata } from '../../src/db/metadata.ts';
+import {
+  dueMetadataQueue, enqueueMetadata, getGroupMetadata, recordMetadataAnswer, requeueMetadata,
+} from '../../src/db/metadata.ts';
 import { duePerformerQueue } from '../../src/db/performer-queue.ts';
 import { performersForGroups } from '../../src/db/performers.ts';
 import { getDiscoveredSite, recordDiscoveredSite } from '../../src/db/sites.ts';
@@ -850,4 +852,59 @@ test('a deferred row queues nothing, because it has not settled', async () => {
 
   assert.equal(result.deferred, 1);
   assert.deepEqual(duePerformerQueue(db, 1_000, 10), []);
+});
+
+test('a group requeried after settling none with no cast ends up with a performer_queue row', async () => {
+  // The end-to-end proof the requery button exists for: a group settled
+  // outside this pass entirely (directly, via `recordMetadataAnswer`, the way
+  // a group answered before this feature shipped would have settled) has no
+  // `metadata_queue` row and, because `insertPerformerSearch` was never
+  // reached for it, no `performer_queue` row either. `requeueMetadata` is
+  // Task 1's half of this feature; running the resulting row through
+  // `runMetadataPass` here proves the two halves actually connect.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: 500 });
+  assert.deepEqual(duePerformerQueue(db, 500, 10), [], 'no performer search was ever queued for this group');
+
+  assert.equal(requeueMetadata(db, [groupId], 1_000), 1);
+
+  const client = fakeSceneClient(() => []);
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(result.none, 1);
+  assert.equal(getGroupMetadata(db, groupId)?.state, 'none');
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
+});
+
+test('a group requeried after settling with a cast gains no performer_queue row, and keeps its cast', async () => {
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  recordMetadataAnswer(db, {
+    groupId,
+    source: 'theporndb',
+    confirmed: candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] }),
+    nearMisses: [],
+    now: 500,
+  });
+  assert.ok(
+    (performersForGroups(db, [groupId]).get(groupId) ?? []).length > 0,
+    'the first answer must have linked a cast',
+  );
+
+  assert.equal(requeueMetadata(db, [groupId], 1_000), 1);
+
+  const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] });
+  const client = fakeSceneClient(() => [scene]);
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(result.confirmed, 1);
+  assert.equal(getGroupMetadata(db, groupId)?.state, 'confirmed');
+  // `groupHasCast` still refuses it — the cast from the fresh answer, not a
+  // stale one left over from before the requery.
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10), []);
+  assert.ok(
+    (performersForGroups(db, [groupId]).get(groupId) ?? []).length > 0,
+    'the cast must still be linked after the requery',
+  );
 });

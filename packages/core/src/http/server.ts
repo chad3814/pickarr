@@ -27,6 +27,7 @@ import {
   getGroupMetadata,
   metadataForGroups,
   queuedMetadataNextAt,
+  requeueMetadata,
   type GroupMetadata,
 } from '../db/metadata.ts';
 import { getPerformer, performersForGroups, type PerformerRow } from '../db/performers.ts';
@@ -56,6 +57,7 @@ import {
   type GroupView,
   type IdentityPlanResponse,
   type MetadataRequestResponse,
+  type MetadataRequeryResponse,
   type MetadataView,
   type PickResponse,
   type ReleaseEditResponse,
@@ -746,6 +748,72 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     result.queued += enqueued.queued;
     result.alreadyAnswered += enqueued.alreadyAnswered;
     result.pending += enqueued.pending;
+    return result;
+  });
+
+  // The per-card counterpart to the lazy trigger above: a settled group is
+  // this route's precondition, not something it refuses, so — unlike
+  // `/api/metadata/request` — `getGroupMetadata` is never consulted here to
+  // short-circuit an id as already answered. Reuses that route's body schema
+  // and id cap rather than declaring a second, identical one: the two bodies
+  // are the same shape (a page's worth of group ids), and a second schema
+  // here would just be a second place for the cap to drift from.
+  server.post('/api/metadata/requery', async (request, reply) => {
+    const body = metadataRequestBodySchema.safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'Invalid request' });
+
+    const now = deps.now();
+    const result: MetadataRequeryResponse = {
+      requeued: 0,
+      missing: 0,
+      unavailable: 0,
+      unaskable: 0,
+    };
+    const askable: number[] = [];
+    // `requeueMetadata` has no per-id existence check of its own (a missing
+    // id would fail the insert via `metadata_queue`'s foreign key, and with
+    // it the whole batch, since every id runs in one transaction) and no
+    // dedup either — it reports `groupIds.length` back as `requeued`
+    // directly, so a repeated id would inflate that count past the number of
+    // rows actually touched. Deduping the request once, up front, satisfies
+    // both: every id below is classified exactly once, and the list handed
+    // to `requeueMetadata` can never repeat one.
+    const seen = new Set<number>();
+
+    for (const groupId of body.data.groupIds) {
+      if (seen.has(groupId)) continue;
+      seen.add(groupId);
+
+      const group = getGroup(db, groupId);
+      // Same reasoning as `/api/metadata/request`: a group that no longer
+      // exists cannot be queued, and there is nothing to answer either.
+      if (group === null) {
+        result.missing += 1;
+        continue;
+      }
+
+      // Same reasoning as `/api/metadata/request`: no worker is running to
+      // ever drain a row this would create, and that is a fact about how
+      // Pickarr is configured right now, not about the group — so it is
+      // never written to `group_metadata` here either.
+      if (!deps.metadataAvailable) {
+        result.unavailable += 1;
+        continue;
+      }
+
+      const plugin = deps.registry.byId(group.plugin) ?? null;
+      if (metadataAnswerability(plugin, group) === 'unaskable') {
+        // Deliberately *not* `answerUnaskable`, unlike `/api/metadata/request`
+        // above: that call exists to settle a row that had no answer yet, and
+        // this group already has one. Calling it again would just rewrite
+        // `fetched_at` on a row that is never going to be re-asked.
+        result.unaskable += 1;
+        continue;
+      }
+      askable.push(groupId);
+    }
+
+    result.requeued = requeueMetadata(db, askable, now);
     return result;
   });
 
