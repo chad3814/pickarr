@@ -5,7 +5,7 @@ import type { MetadataCandidate } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
   dueMetadataQueue, enqueueMetadata, getGroupMetadata, metadataForGroups,
-  queuedMetadataNextAt, recordMetadataAnswer, deferMetadata, setPosterPath,
+  queuedMetadataNextAt, recordMetadataAnswer, deferMetadata, requeueMetadata, setPosterPath,
 } from '../../src/db/metadata.ts';
 import { performersForGroups } from '../../src/db/performers.ts';
 
@@ -167,6 +167,63 @@ test('a deferral keeps the queue row, counts the attempt, and moves next_at', ()
   assert.equal(due[0]?.attempts, 1);
   assert.equal(due[0]?.lastError, 'ECONNRESET');
   assert.equal(getGroupMetadata(db, groupId), undefined, 'a failure is not an answer');
+});
+
+test('requeueMetadata queues a group whose metadata has already settled', () => {
+  const { db, ids } = withGroups(1);
+  const groupId = ids[0]!;
+  recordMetadataAnswer(db, {
+    groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: 1_000,
+  });
+  // enqueueMetadata's answered guard would refuse this group outright.
+  assert.equal(enqueueMetadata(db, [groupId], 2_000).alreadyAnswered, 1);
+
+  const queued = requeueMetadata(db, [groupId], 2_000);
+
+  assert.equal(queued, 1);
+  const due = dueMetadataQueue(db, 2_000, 10);
+  assert.equal(due.length, 1);
+  assert.equal(due[0]?.groupId, groupId);
+});
+
+test('requeueMetadata resets an in-flight row\'s attempts and next_at', () => {
+  const { db, ids } = withGroups(1);
+  const groupId = ids[0]!;
+  enqueueMetadata(db, [groupId], 1_000);
+  deferMetadata(db, groupId, 'ECONNRESET', 60_000);
+  deferMetadata(db, groupId, 'ECONNRESET', 120_000);
+
+  const queued = requeueMetadata(db, [groupId], 5_000);
+
+  assert.equal(queued, 1);
+  // Not due at the old backoff time — proof next_at actually moved rather
+  // than merely reporting the row as queued again.
+  assert.equal(dueMetadataQueue(db, 4_999, 10).length, 0);
+  const due = dueMetadataQueue(db, 5_000, 10);
+  assert.equal(due.length, 1);
+  assert.equal(due[0]?.attempts, 0, 'a fresh request, not a continuation of the failing one');
+  assert.equal(due[0]?.nextAt, 5_000);
+});
+
+test('requeueMetadata never touches group_metadata', () => {
+  const { db, ids } = withGroups(1);
+  const groupId = ids[0]!;
+  recordMetadataAnswer(db, {
+    groupId, source: 'theporndb', confirmed: candidate({ title: 'Standing' }), nearMisses: [],
+    now: 1_000,
+  });
+  const before = getGroupMetadata(db, groupId);
+
+  requeueMetadata(db, [groupId], 2_000);
+
+  assert.deepEqual(getGroupMetadata(db, groupId), before);
+});
+
+test('requeueMetadata returns the count queued, and an empty id list is a no-op', () => {
+  const { db, ids } = withGroups(2);
+
+  assert.equal(requeueMetadata(db, ids, 1_000), 2);
+  assert.equal(requeueMetadata(db, [], 1_000), 0);
 });
 
 test('metadataForGroups reads a page in one query', () => {
