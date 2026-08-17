@@ -190,19 +190,36 @@ export async function resolveSecrets(config: PickarrConfig): Promise<void> {
   }
 }
 
+/**
+ * The port the server will actually listen on: `PICKARR_PORT` when set, and the
+ * configured port otherwise.
+ *
+ * Exported, and a function rather than four lines inside `loadConfig`, because
+ * the container's healthcheck has to arrive at the same number boot does. It
+ * used to answer that question for itself — `process.env.PICKARR_PORT || 8080`
+ * inside the `HEALTHCHECK` line — which is the precedence written twice, and the
+ * second copy was wrong: it could not see `server.port`, so every deployment
+ * that set the port in `config.json` alone (the documented way to set it) probed
+ * a port nothing listened on and reported the container permanently unhealthy
+ * while the app served fine. One function, both callers.
+ */
+export function resolveServerPort(configuredPort: number): number {
+  const portOverride = process.env['PICKARR_PORT'];
+  if (portOverride === undefined) return configuredPort;
+
+  const port = Number.parseInt(portOverride, 10);
+  if (Number.isNaN(port) || port <= 0) {
+    throw new Error(`PICKARR_PORT is not a valid port: ${portOverride}`);
+  }
+  return port;
+}
+
 export async function loadConfig(path: string): Promise<PickarrConfig> {
   const json = await readConfigDocument(path);
   const config = parseConfig(json, path);
   await resolveSecrets(config);
 
-  const portOverride = process.env['PICKARR_PORT'];
-  if (portOverride !== undefined) {
-    const port = Number.parseInt(portOverride, 10);
-    if (Number.isNaN(port) || port <= 0) {
-      throw new Error(`PICKARR_PORT is not a valid port: ${portOverride}`);
-    }
-    config.server.port = port;
-  }
+  config.server.port = resolveServerPort(config.server.port);
 
   return config;
 }

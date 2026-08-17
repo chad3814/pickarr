@@ -47,7 +47,10 @@ COPY --from=build /app/packages/web/dist           packages/core/dist/web
 ENV PICKARR_CONFIG=/config/config.json
 EXPOSE 8080
 
+# Reads the port out of the config the way boot does, rather than guessing it.
+# See `resolveServerPort`: the `node -e` one-liner this replaces could not import
+# anything, so it fell back to 8080 and called every config-set port unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PICKARR_PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD ["node", "packages/core/dist/healthcheck.js"]
 
 CMD ["node", "packages/core/dist/main.js"]

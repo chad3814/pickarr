@@ -38,7 +38,7 @@ immediately rather than starting in a broken state.
 
 | Field | Belongs to | Meaning |
 |---|---|---|
-| `server.port` | top level | HTTP port Pickarr listens on. Overridable with the `PICKARR_PORT` environment variable, which is also what the container's healthcheck reads. |
+| `server.port` | top level | HTTP port Pickarr listens on. Overridable with the `PICKARR_PORT` environment variable. The container's healthcheck resolves the port the same way boot does — this field, with that variable winning — so setting either one alone is enough. |
 | `database.path` | top level | Path to the SQLite file. Put it under `/config` so it survives container recreation. |
 | `trashDir` | top level | Where superseded files are moved instead of deleted. See "Trash is never emptied" below. |
 | `plugins.<package>` | plugin | Per-plugin settings, keyed by package name. The bundled scenes plugin takes `libraryRoot`, the destination directory imports land in. |
