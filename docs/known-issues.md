@@ -558,6 +558,27 @@ These are not product defects. They are ways this repo's tests have been green w
 proving less than they appeared to, each found by mutating the source and watching nothing
 fail. They are recorded because every one of them has already recurred at least once.
 
+**`getByRole` and `getByText` cannot see whether a component is legible.** Both read the
+accessibility tree, and the accessibility tree is satisfied by attributes a sighted user
+never receives. `IdentityChangeConfirm` shipped with `role="dialog"`, an
+`aria-label="Confirm identity change"`, no visible heading, and — as it turned out — no
+`.confirm` rule in the stylesheet at all, so it rendered as an unstyled block of text
+inline, directly beneath each page's own error banner. Eight unit tests and two Playwright
+specs asserted `getByRole('dialog', { name: 'Confirm identity change' })` and passed
+throughout, because that name came from the `aria-label`. The first person to use it read
+it as an error, did not press Confirm, and reported the merge as silently broken; the
+merge had been working the whole time and was waiting for a click.
+
+The lesson is not "add a screenshot test". It is that `role` and `aria-*` are assertions
+about the *announced* interface, and asserting them proves nothing about the rendered one:
+a query that would still pass if every stylesheet were deleted is not evidence that anyone
+can use the thing. Where a component's whole job is to be understood — a confirmation, an
+error, a warning — assert the visible affordance too: a real heading via
+`getByRole('heading')`, and the accessible name sourced from that heading with
+`aria-labelledby` rather than duplicated in an `aria-label`, so the announced string and
+the visible one cannot drift apart. Playwright's `toBeVisible()` does not close this gap
+either: an unstyled `<div>` full of text is genuinely visible.
+
 **A round-trip assertion cannot pin any property of a helper shared by both directions.**
 `parse(name) → toManualValues → fromManualValues === parse(name)` looks like a strong
 property, and it is — until the two directions are deduplicated onto one function, which is

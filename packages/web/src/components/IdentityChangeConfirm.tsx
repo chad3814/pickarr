@@ -1,3 +1,4 @@
+import { useEffect, useId, useRef } from 'react';
 import type { IdentityPlanView } from '../api/client.ts';
 
 interface Props {
@@ -23,6 +24,25 @@ interface Props {
  * Renders full `from → to` paths rather than basenames: a plan the user
  * cannot read is a guess with extra steps, and the paths are the only thing
  * here that says whether a rename lands somewhere sane.
+ *
+ * Built on a native `<dialog>` opened with `showModal()`, for the same reasons
+ * `ImageModal` gives: the page behind goes inert, focus is trapped and then
+ * restored, Escape works, and a backdrop is painted — none of it worth
+ * hand-rolling. It began as a plain `<div role="dialog">` with an `aria-label`
+ * and no stylesheet rule at all, which made it invisible as a dialog to
+ * everyone not using a screen reader: it rendered as an unstyled block of text
+ * directly beneath the page's own error banner, and the first person to meet it
+ * read it as an error, did not press Confirm, and reported that their merge had
+ * silently not happened. The title is a real heading rather than an
+ * `aria-label` so that the announced name and the visible one are the same
+ * string by construction.
+ *
+ * Escape maps to Cancel, which is safe because nothing has been applied yet —
+ * but only while nothing is in flight: once Confirm is pressed there is a
+ * request whose outcome the dialog is still needed to report, so `busy`
+ * suppresses it. A click on the backdrop deliberately does NOT dismiss, unlike
+ * `ImageModal`: this dialog exists to be read, and a stray click while reading
+ * a list of file moves should not throw the plan away.
  */
 export function IdentityChangeConfirm({
   plan,
@@ -32,9 +52,26 @@ export function IdentityChangeConfirm({
   stale = false,
 }: Props) {
   const blocked = plan.blockers.length > 0;
+  const dialog = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (element === null || element.open) return;
+    element.showModal();
+  }, []);
 
   return (
-    <div className="confirm" role="dialog" aria-label="Confirm identity change">
+    <dialog
+      ref={dialog}
+      className="confirm"
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) onCancel();
+      }}
+    >
+      <h2 id={titleId}>Confirm identity change</h2>
       {stale && (
         <p className="warning">
           This plan changed since you opened it, so it was refreshed below — check it again
@@ -108,6 +145,6 @@ export function IdentityChangeConfirm({
       <button type="button" onClick={onCancel} disabled={busy}>
         Cancel
       </button>
-    </div>
+    </dialog>
   );
 }

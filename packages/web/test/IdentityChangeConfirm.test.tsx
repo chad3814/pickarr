@@ -88,3 +88,43 @@ test('cancel calls back without confirming', () => {
   assert.equal(cancelled, true);
   assert.equal(confirmed, false);
 });
+
+// The defect these three pin, reported 2026-08-17: a user read this dialog as
+// an error message and did not confirm, so their merge silently never happened.
+// Every test above passes on a dialog nobody can identify — they query by role
+// and by text, and `role`/`aria-label` are invisible. What was missing was any
+// assertion that a *sighted* user is told what this is, which is why the
+// stylesheet had no `.confirm` rule at all and the only title was an
+// `aria-label`. The dialog renders directly under the page's own error banner
+// (`Picks.tsx`), so "unlabelled block of text" reads as "something went wrong".
+test('it shows a visible heading, not just an accessible one', () => {
+  render(<IdentityChangeConfirm plan={MERGE} onConfirm={() => {}} onCancel={() => {}} />);
+
+  // getByRole('heading') rather than getByText: a heading is what makes this
+  // readable as a titled dialog rather than as prose that happens to contain
+  // the words.
+  assert.ok(screen.getByRole('heading', { name: 'Confirm identity change' }));
+});
+
+test("the dialog's accessible name is its visible heading, so the two cannot drift", () => {
+  render(<IdentityChangeConfirm plan={MERGE} onConfirm={() => {}} onCancel={() => {}} />);
+
+  const dialog = screen.getByRole('dialog', { name: 'Confirm identity change' });
+  const heading = screen.getByRole('heading', { name: 'Confirm identity change' });
+  // The name has to come FROM the heading, not merely equal it: an `aria-label`
+  // that duplicates the heading's words is exactly how the visible title and
+  // the announced one end up saying different things later.
+  assert.equal(dialog.getAttribute('aria-label'), null);
+  assert.equal(dialog.getAttribute('aria-labelledby'), heading.id);
+  assert.notEqual(heading.id, '');
+});
+
+test('it asks a question rather than presenting a verdict', () => {
+  render(<IdentityChangeConfirm plan={MERGE} onConfirm={() => {}} onCancel={() => {}} />);
+
+  // The buttons are the other half of "this is a question". Pinned here
+  // because the report was that the dialog looked like a failure, and a
+  // failure has nothing to accept.
+  assert.ok(screen.getByRole('button', { name: 'Confirm' }));
+  assert.ok(screen.getByRole('button', { name: 'Cancel' }));
+});
