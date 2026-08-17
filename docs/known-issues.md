@@ -411,8 +411,12 @@ structure, it held.
 - [Pickarr never empties `trashDir`](https://github.com/chad3814/pickarr/issues/36) — Deliberate: it is the only destructive operation in the system, so reclaiming the space stays a manual decision.
 - [There is no library scanning](https://github.com/chad3814/pickarr/issues/37) — Pickarr only knows about media it picked itself. Files already on disk are invisible to it.
 - [A chronically unparseable feed logs its cap of 50 parse-failure lines every tick, indefinitely](https://github.com/chad3814/pickarr/issues/38) — `MAX_REPORTED_PARSE_FAILURES` bounds one tick but not the feed's whole lifetime.
+- [The boot-time drift check re-parses every scene group, costs ~160-190 ms, and grows linearly with the library](https://github.com/chad3814/pickarr/issues/65) — Measured at ~120 ms cold over 1222 groups and ~192 ms after later changes on a loaded machine. Recorded rather than optimised: the cost is linear in the number of groups, so it scales with the library and not with anything self-limiting.
+- [A group the re-key pass leaves in `failed` is never retried, and one ordering case can put it there](https://github.com/chad3814/pickarr/issues/66) — The marker means the write pass runs once. `planRekey` buckets a mover by the slot it fills and never by the slot it vacates, so a group whose new key is another mover's *current* key can lose the `UNIQUE (plugin, identity_key)` race by id order. Measured 0 occurrences on a real database; recovery is deleting the `app_state` marker row by hand.
 
 ## Manual metadata
+
+- [Two merge implementations coexist, one gated on group history and one not](https://github.com/chad3814/pickarr/issues/68) — `editGroup` moves `releases`, `downloads` and `imported_files` and trashes what it supersedes; the re-key pass's `mergeGroupInto` moves `releases` alone and refuses any group with history. Not duplicates in the ordinary sense: they made opposite bargains about what a merge may destroy, so a fix to one silently does not reach the other. `deleteGroup`'s doc comment is currently the only place that is written down.
 
 **Closed: a group ingested before its site was learned no longer re-keys itself on a
 save that changed nothing.** This was #39, and the root cause was the identity key
