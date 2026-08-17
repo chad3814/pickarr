@@ -661,6 +661,21 @@ the code is coherent as it stands; deleting it is a judgment call for the owner,
 
 ## HANDOFF STATE
 
-Two commits on `fix/edit-picked-files` above 03cf4db, both SSH-signed, working tree clean, **nothing pushed**.
-Remaining owner decisions: whether to push / open a PR / merge locally, and whether to close issue #2 (left
-OPEN by owner decision, because the docs line this run added says "on merge" and nothing is merged yet).
+Four commits on `fix/edit-picked-files` above 03cf4db, all SSH-signed, working tree clean. Pushed to
+`origin/fix/edit-picked-files` and opened as **PR #64** against `main` on owner approval (2026-08-17), with
+`Closes #2` in the body — verified linked via `gh pr view --json closingIssuesReferences`, so #2 closes on
+merge and the `#2 is closed by this branch and should be marked closed on merge.` line this run added to
+`docs/known-issues.md` is discharged automatically rather than by hand.
+
+Issue #2 therefore stays OPEN until the merge, which is what the owner chose and what that docs line says.
+
+Still outstanding for the owner:
+  - Merging the PR (CI runs three jobs: lint/typecheck/unit, browser tests, container image).
+  - Deleting the two safety tags, `pre-rebase-edit-picked-files-2026-08-17` and
+    `pre-rebase2-edit-picked-files-2026-08-17`, once the merge lands. They are local-only — never pushed — and
+    they are the sole thing keeping five dead pre-rebase commits reachable.
+  - Ruling F14's open question: whether `groupHistory` should be deleted now that nothing calls it. Raised in
+    the PR body as a note for the reviewer rather than filed as an issue, because the code is coherent as it
+    stands and removal is a judgment call.
+  - Ruling F17's question, now filed as #58: whether a typed fetch-stub helper should retire the 28
+    `as unknown as typeof fetch` casts so the no-`unknown` constraint holds literally.
