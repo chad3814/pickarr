@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { useGroupMetadata } from '../src/api/useGroupMetadata.ts';
 import type { MetadataView } from '../src/api/client.ts';
 
@@ -9,16 +9,27 @@ import type { MetadataView } from '../src/api/client.ts';
 // copies of it.
 afterEach(cleanup);
 
-/** Renders what the hook currently knows, one line per id, so a test can
- * assert on rendered text instead of reaching into the hook directly. */
+/**
+ * Renders what the hook currently knows, one line per id, so a test can
+ * assert on rendered text instead of reaching into the hook directly. The
+ * `rearm-<id>` buttons live outside the `<ul>` rather than beside each
+ * `<li>`'s own text — nesting one in the same element would fold its label
+ * into that `<li>`'s `textContent`, breaking every existing `getByText('N:state')`
+ * assertion in this file that has nothing to do with `rearm`.
+ */
 function Consumer({ ids }: { ids: readonly number[] }) {
-  const metadata = useGroupMetadata(ids);
+  const { metadata, rearm } = useGroupMetadata(ids);
   return (
-    <ul>
+    <div>
+      <ul>
+        {ids.map((id) => (
+          <li key={id}>{`${id}:${metadata.get(id)?.state ?? 'unknown'}`}</li>
+        ))}
+      </ul>
       {ids.map((id) => (
-        <li key={id}>{`${id}:${metadata.get(id)?.state ?? 'unknown'}`}</li>
+        <button key={id} type="button" onClick={() => rearm(id)}>{`rearm-${id}`}</button>
       ))}
-    </ul>
+    </div>
   );
 }
 
@@ -282,4 +293,62 @@ test('unmounting cancels in-flight work rather than letting it land late', async
   // component that no longer exists.
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.ok(aborted);
+});
+
+test('rearm re-polls a settled id rather than leaving it unwatched, and never shows it as less settled than it already was', async () => {
+  // This is the direct regression test for the bug the Requery button's
+  // first cut had: rearming a `confirmed` id must resume this hook's own
+  // polling for it (not leave it orphaned), and must never let the display
+  // regress to `pending` even if a poll answers with one — which
+  // `requeueMetadata`'s own doc says the real server never actually does for
+  // an id it has already answered, but the display must not depend on that
+  // staying true to avoid blanking a card that already has an answer.
+  const ID = 20;
+  const original: MetadataView = {
+    state: 'confirmed',
+    title: 'Original title',
+    releaseDate: null,
+    durationSeconds: null,
+    synopsis: null,
+    hasPoster: false,
+  };
+  const fresher: MetadataView = { ...original, title: 'Fresher title' };
+  // Three answers in sequence: the settled answer this hook resolves to
+  // before any rearm, a `pending` right after the rearm (the defensive case
+  // above), and finally a genuinely different confirmed answer — the one
+  // that actually stops the poll, proving it did not just get stuck ignoring
+  // every future answer once it declined the `pending` one.
+  const answers: MetadataView[] = [original, { state: 'pending' }, fresher];
+
+  let getCalls = 0;
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/request') {
+      return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
+    }
+    getCalls += 1;
+    const view = answers[Math.min(getCalls, answers.length) - 1]!;
+    return jsonResponse({ [ID]: view });
+  }) as unknown as typeof fetch;
+
+  render(<Consumer ids={[ID]} />);
+  await waitFor(() => assert.ok(screen.getByText(`${ID}:confirmed`)));
+  const callsBeforeRearm = getCalls;
+
+  fireEvent.click(screen.getByRole('button', { name: `rearm-${ID}` }));
+
+  // Re-armed, not orphaned: a second `GET /api/metadata` for this id
+  // actually happens.
+  await waitFor(() => assert.ok(getCalls > callsBeforeRearm), { timeout: 3_000 });
+  // That second answer was `pending`, and it must never reach the screen.
+  assert.ok(screen.getByText(`${ID}:confirmed`));
+  // #40: never `assert.equal(screen.queryByText(x), null)`.
+  assert.ok(!screen.queryByText(`${ID}:pending`));
+
+  // The third answer differs from the pre-rearm snapshot, so the poll stops
+  // there instead of chasing a `pending` that was never real forever.
+  await waitFor(() => assert.ok(getCalls >= 3), { timeout: 3_000 });
+  const callsOnceStopped = getCalls;
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  assert.equal(getCalls, callsOnceStopped);
 });

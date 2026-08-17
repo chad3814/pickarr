@@ -20,7 +20,22 @@ export function Browse() {
   // `POST /api/metadata/request` and `GET /api/metadata` is per *request*, not
   // per page, so the hook itself chunks a list this long rather than the
   // caller having to.
-  const liveMetadata = useGroupMetadata(groups.map((group) => group.id));
+  const { metadata: liveMetadata, rearm: rearmMetadata } = useGroupMetadata(
+    groups.map((group) => group.id),
+  );
+
+  /**
+   * `MediaCard`'s Requery button, via `onRequeryMetadata`. This route (not
+   * the card, and not the hook) is what holds both halves this needs: the
+   * server call, and the hook's own handle to tell it to watch the group
+   * again. `rearmMetadata` runs only after the requeue itself lands — a
+   * failed `POST /api/metadata/requery` throws before it, leaving nothing
+   * for the hook to re-arm and the card's own catch to report.
+   */
+  async function requeryMetadata(groupId: number): Promise<void> {
+    await api.requeryMetadata([groupId]);
+    rearmMetadata(groupId);
+  }
 
   const loadPage = useCallback(
     async (from: string | null, term: string, replace: boolean): Promise<void> => {
@@ -216,6 +231,7 @@ export function Browse() {
           fields={fields[group.plugin]}
           onEditGroup={(values) => identityChange.begin(group.id, values)}
           onEditRelease={(releaseId, values) => editRelease(group.id, releaseId, values)}
+          onRequeryMetadata={requeryMetadata}
         />
       ))}
 

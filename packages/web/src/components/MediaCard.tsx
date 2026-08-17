@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, type GroupView, type ManualField, type MetadataView } from '../api/client.ts';
+import type { GroupView, ManualField } from '../api/client.ts';
 import { groupAnchor } from '../api/anchors.ts';
 import { formatDuration } from '../api/format.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
@@ -19,6 +19,17 @@ interface Props {
    */
   onEditGroup?(values: Record<string, string>): Promise<boolean>;
   onEditRelease?(releaseId: number, values: Record<string, string>): Promise<boolean>;
+  /**
+   * Re-asks the provider about this group's already-settled metadata. Owned
+   * by the route, the same as the three handlers above: it is the route that
+   * holds `useGroupMetadata`'s handle and can tell it to watch this id again
+   * once the requery lands, which is machinery this card has no business
+   * duplicating. Rejecting is how the card learns the attempt failed; there
+   * is no boolean outcome the way `onEditGroup` has, because there is no
+   * "landed but was refused" case here — it either reached the server or it
+   * did not.
+   */
+  onRequeryMetadata?(groupId: number): Promise<void>;
 }
 
 interface IdentityProps {
@@ -60,7 +71,7 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 /**
  * One card renders every media type. Plugins supply display fields, never UI.
  */
-export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }: Props) {
+export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, onRequeryMetadata }: Props) {
   const { display } = group;
   const [editing, setEditing] = useState(false);
   // One piece of state, so the poster and a performer's full image can never
@@ -68,18 +79,15 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   const [modal, setModal] = useState<{ src: string; alt: string } | null>(null);
   const [requerying, setRequerying] = useState(false);
   const [requeryError, setRequeryError] = useState<string | null>(null);
-  // This card's own memory of a fresher answer than the `group` prop carries.
-  // It exists because nothing else on this card's behalf will ever produce
-  // one: `useGroupMetadata` (the hook both `Browse` and `Picks` poll through)
-  // stops asking about an id the moment it first resolves to `confirmed` or
-  // `none` — exactly the state this button requires before it renders at
-  // all — so the parent has no reason to notice this group again, and no
-  // callback exists for this card to tell it to. Kept as an override rather
-  // than replacing `group.metadata` outright so a group whose *prop* changes
-  // for an unrelated reason (a pick, an edit) does not silently discard an
-  // answer this card already knows is newer.
-  const [refetchedMetadata, setRefetchedMetadata] = useState<MetadataView | null>(null);
-  const metadata = refetchedMetadata ?? group.metadata;
+  // No local override of `group.metadata` any more: the route re-arms
+  // `useGroupMetadata` for this id once `onRequeryMetadata` lands (see that
+  // prop's doc), and the *same* map Browse/Picks already merge in is what
+  // delivers the fresher answer back to this card — through `group.metadata`
+  // itself, on the next render, exactly like every other card's answer
+  // always has. A card-local copy here would be a second place that answer
+  // could live, disagreeing with the map the instant a poll updated one but
+  // not the other.
+  const { metadata } = group;
 
   // A field's scope says which record it belongs to: the group owns its
   // identity and display (§7.3), each release its own quality (§7.4).
@@ -97,8 +105,12 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   // never been asked or is still waiting on an answer; a button here for
   // either would be a second path to the one thing that hook already does.
   // Only a group with a recorded answer — an opinion the provider might now
-  // want to revise — is this button's business.
-  const settled = metadata.state === 'confirmed' || metadata.state === 'none';
+  // want to revise — is this button's business. Gated on the handler too,
+  // the same way `canEdit` is gated on `onEditGroup`: a caller with nowhere
+  // to send a requery gets a card with no button rather than one that does
+  // nothing.
+  const settled =
+    (metadata.state === 'confirmed' || metadata.state === 'none') && onRequeryMetadata !== undefined;
   const canEdit = values !== undefined && identityFields !== undefined && onEditGroup !== undefined;
 
   async function save(submitted: Record<string, string>): Promise<void> {
@@ -108,36 +120,23 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   }
 
   /**
-   * Re-asks the provider for this one group, then immediately reads its
-   * current answer back. `POST /api/metadata/requery` only resets the queue
-   * row — it does not wait for the worker to run — so the read afterwards is
-   * a best-effort check for an answer that was already sitting there (an
-   * unaskable group, or one the worker happened to drain between the two
-   * calls), not a guarantee of a fresh one. The far more likely immediate
-   * answer is `pending`, and this is deliberately as far as this button
-   * chases it: it only renders for a *settled* group, so the moment
-   * `refetchedMetadata` becomes `pending` the button disappears, and nothing
-   * on this page is polling that id any longer either — `useGroupMetadata`
-   * stopped the instant it first resolved, which is the very precondition
-   * for this button to have rendered at all. A reload picks up whatever the
-   * worker has produced by then; watching until answered would need this
-   * card polling on its own account, which is more machinery than "ask
-   * again" needs and nothing the brief for this button asked for.
-   *
-   * The two calls share one try/catch on purpose: a requeue that landed but
-   * whose immediate re-read failed is exactly as unfinished, from the user's
-   * side, as a requeue that never reached the server — either way nothing
-   * new is known yet, so both report the same retryable error and leave
-   * `metadata` exactly as it was.
+   * Asks the route to re-ask the provider for this one group. All the actual
+   * work — the `POST /api/metadata/requery` call, and re-arming
+   * `useGroupMetadata` so its existing poll notices whatever comes back —
+   * lives in `onRequeryMetadata` (Browse's or Picks' own callback); this
+   * function only owns the button's own in-flight/error presentation, the
+   * same division `save` above has with `onEditGroup`. Because the fresher
+   * answer arrives back through `group.metadata` on a later render rather
+   * than through this call's return value, there is nothing to do here on
+   * success beyond letting the button re-enable — `metadata` above already
+   * updates itself the moment the parent's map does.
    */
   async function requery(): Promise<void> {
+    if (onRequeryMetadata === undefined) return;
     setRequerying(true);
     setRequeryError(null);
     try {
-      await api.requeryMetadata([group.id]);
-      const answer = await api.metadata([group.id]);
-      const next = answer[group.id];
-      if (next !== undefined) setRefetchedMetadata(next);
+      await onRequeryMetadata(group.id);
     } catch (cause) {
       setRequeryError((cause as Error).message);
     } finally {
