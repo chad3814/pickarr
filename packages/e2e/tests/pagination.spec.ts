@@ -230,3 +230,65 @@ test('Load more still pages when the browser never reports the end coming into v
   await expect(cards).toHaveCount(PAGE_SIZE + tail.length);
   await expect(page.getByRole('heading', { name: 'Tailend Scene 3', exact: true })).toBeVisible();
 });
+
+// Wrapped so the console-error allowance below reaches this spec alone. The
+// harness fails any test whose page logs a `console.error`, and Chromium narrates
+// every failed request that way — so a spec that provokes a 400 on purpose has to
+// say so, narrowly, rather than the suite going quiet about network failures.
+test.describe('a cursor the server refuses', () => {
+  test.use({
+    allowedConsoleErrors: [/Failed to load resource: the server responded with a status of 400/],
+  });
+
+  test('is reported once, not retried into a loop', async ({ page, harness }) => {
+    // The seam where #33 and infinite scroll meet, and the reason #33 had to be
+    // fixed before this shipped. An unreadable cursor used to be answered with page
+    // one, and page one is appended to what is already on screen and then paged on
+    // from with the very cursor that produced it — the same cards forever, with no
+    // click left to make the repetition obvious. The server now refuses it, and the
+    // client's half of the contract is to report that and *stop*: asking again for a
+    // cursor it has just been told is unreadable is the loop under a different name.
+    //
+    // The corruption is applied to the request in flight rather than by stubbing the
+    // response, so the 400 is the real parser's answer rather than a fixture's — the
+    // whole point of pinning this in a browser. A stale bookmark or a hand-edited
+    // query arrives exactly this way.
+    const tail = sceneTitles('Tailend', 3);
+    harness.ingest(tail);
+    harness.ingest(sceneTitles('Padding', PAGE_SIZE));
+
+    let refusedRequests = 0;
+    await page.route(
+      (url) => url.pathname === '/api/browse',
+      async (route) => {
+        const url = new URL(route.request().url());
+        // The first page asks for no cursor and must be served normally; there is
+        // nothing to corrupt until the list tries to continue.
+        if (url.searchParams.get('cursor') === null) {
+          await route.continue();
+          return;
+        }
+        refusedRequests += 1;
+        url.searchParams.set('cursor', 'not-a-cursor');
+        await route.continue({ url: url.toString() });
+      },
+    );
+
+    await page.goto('/');
+    const cards = page.locator('article.media-card');
+    await expect(cards).toHaveCount(PAGE_SIZE);
+
+    await scrollToEnd(page);
+
+    // The server's own message, carried through `request()` to the banner.
+    await expect(page.locator('p.error')).toHaveText('Invalid cursor');
+    // Nothing was discarded to make room for a page that never arrived.
+    await expect(cards).toHaveCount(PAGE_SIZE);
+
+    // And the refusal was asked exactly once. This is the assertion the test exists
+    // for: a wait long enough that a second attempt would have been made and logged.
+    await page.waitForTimeout(700);
+    expect(refusedRequests).toBe(1);
+    await expect(cards).toHaveCount(PAGE_SIZE);
+  });
+});

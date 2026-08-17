@@ -388,7 +388,21 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
  * The suite's `test`. Every test gets its own server, on its own port, against
  * its own database, serving the SPA `global-setup.ts` built for the run.
  */
-export const test = base.extend<{ harness: Harness }>({
+export const test = base.extend<{ harness: Harness; allowedConsoleErrors: readonly RegExp[] }>({
+  /**
+   * Console-error texts a spec is allowed to produce, matched against the whole
+   * message. Empty by default: the strictness below is the point, and anything
+   * listed here is a hole in it.
+   *
+   * The one use so far is a spec that provokes an HTTP failure deliberately, to
+   * prove the SPA reports a refused cursor instead of retrying it. Chromium logs
+   * every failed request through `console.error` as "Failed to load resource",
+   * which is the browser narrating the network rather than our own code
+   * complaining — exactly the case the `page` fixture's comment anticipates.
+   * Scoped with `test.use` inside a `describe`, so it applies to that one spec
+   * and no other.
+   */
+  allowedConsoleErrors: [[], { option: true }],
   // Playwright reads a fixture's dependencies out of this destructuring
   // pattern, so the pattern is required even when — as here — there are none.
   // The linter's worry (destructuring null) cannot happen: Playwright always
@@ -427,16 +441,19 @@ export const test = base.extend<{ harness: Harness }>({
   // spec; that doesn't apply here, because the page under test is one SPA we
   // own, served with no third-party or ad script on it, so `console.error`
   // is a signal from our own code, not the browser's stray complaints. If
-  // that ever stops being true, filter here rather than removing the check.
-  page: async ({ page }, use) => {
+  // that ever stops being true, filter here rather than removing the check —
+  // which is what `allowedConsoleErrors` above is, kept opt-in and per-spec so
+  // that widening it for one test cannot quietly widen it for the rest.
+  page: async ({ page, allowedConsoleErrors }, use) => {
     const errors: string[] = [];
     page.on('pageerror', (error) => {
       errors.push(`uncaught page error: ${error.stack ?? error.message}`);
     });
     page.on('console', (message) => {
-      if (message.type() === 'error') {
-        errors.push(`console.error: ${message.text()}`);
-      }
+      if (message.type() !== 'error') return;
+      const text = message.text();
+      if (allowedConsoleErrors.some((allowed) => allowed.test(text))) return;
+      errors.push(`console.error: ${text}`);
     });
 
     await use(page);
