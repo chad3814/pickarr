@@ -177,7 +177,7 @@ const CORPUS: Entry[] = [
     scene: 'pornmegaload/suki-sin',
     key: 'pornmegaload:2026-08-05:suki-sin',
     title: 'Suki Sin',
-    quality: '1080|-|-|mp4|-|WRB',
+    quality: '1080|-|-|mp4|-|-|WRB',
     isNew: true,
   },
   {
@@ -185,7 +185,7 @@ const CORPUS: Entry[] = [
     scene: 'pornmegaload/suki-sin',
     key: 'pornmegaload:2026-08-05:suki-sin',
     title: 'Suki Sin',
-    quality: '2160|-|h265|mp4|-|GRP',
+    quality: '2160|-|h265|mp4|-|-|GRP',
     isNew: true,
   },
   {
@@ -193,7 +193,7 @@ const CORPUS: Entry[] = [
     scene: 'hollandschepassie/alessandra-sweet',
     key: 'hollandschepassie:2026-08-06:alessandra-sweet',
     title: 'Alessandra Sweet',
-    quality: '1080|-|-|mp4|-|WRB',
+    quality: '1080|-|-|mp4|-|-|WRB',
     isNew: true,
   },
   {
