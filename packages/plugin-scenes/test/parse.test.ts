@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseSceneRelease } from '../src/parse.ts';
+import { scoreScene } from '../src/score.ts';
 
 test('parses the canonical Site.YY.MM.DD.Names.XXX.quality-GROUP form', () => {
   const parsed = parseSceneRelease('Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB');
@@ -121,6 +122,123 @@ test('two scenes differing only by content after an in-title XXX followed by an 
   assert.notEqual(a.identityKey, b.identityKey);
   assert.equal(a.display.title, 'Anniversary XXX Web Party');
   assert.equal(b.display.title, 'Anniversary XXX Web Bash');
+});
+
+// --- A multi-token group attached with the name's own separator --------------
+//
+// `hyphenGroupRun` already detaches a multi-token group when a hyphen
+// introduces it (`XviD-iPT Team`). Some posters attach one with the name's own
+// separator instead — `MP4.NBQ.realesrgan`, the group plus the upscaler it was
+// run through — and that case had no branch at all: the trailing run no longer
+// reached the end of the name, so `findEncodeSuffixStart` refused a name whose
+// marker, resolution and container were all present and correctly classified.
+
+const NBQ_DOTTED = 'Nympho.24.03.04.Bianca.Bangs.And.Myra.Moans.XXX.2160p.MP4.NBQ.realesrgan';
+const NBQ_HYPHEN = 'Nympho.24.03.04.Bianca.Bangs.And.Myra.Moans.XXX.2160p.MP4-NBQ';
+
+test('a dot-attached multi-token group is detached instead of refusing the name', () => {
+  const parsed = parseSceneRelease(NBQ_DOTTED);
+  assert.ok(parsed);
+  assert.equal(parsed.identityKey, 'nympho:2024-03-04:bianca-bangs-and-myra-moans');
+  assert.equal(parsed.display.title, 'Bianca Bangs And Myra Moans');
+  assert.equal(parsed.display.subtitle, 'Nympho');
+  assert.equal(parsed.display.date, '2024-03-04');
+  // The upscaler is not part of the group's name — it is a stamp the poster
+  // appended behind it. Naming the group `NBQ.realesrgan` would invent a second
+  // group for every file NBQ happened to run through a model, so the same
+  // group's releases would no longer read as one group.
+  assert.equal(parsed.quality.releaseGroup, 'NBQ');
+});
+
+test('a dot-attached group and its hyphen twin report the same group name', () => {
+  const dotted = parseSceneRelease(NBQ_DOTTED);
+  const hyphen = parseSceneRelease(NBQ_HYPHEN);
+  assert.ok(dotted && hyphen);
+  assert.equal(dotted.quality.releaseGroup, hyphen.quality.releaseGroup);
+});
+
+test('a dot-attached multi-token group does not cost the name its quality tokens', () => {
+  // The refusal was the visible symptom; a boundary placed at the group
+  // instead would be the silent one, dropping the resolution the encode is
+  // ranked by.
+  const parsed = parseSceneRelease(NBQ_DOTTED);
+  assert.ok(parsed);
+  assert.equal(parsed.quality.resolution, 2160);
+  assert.equal(parsed.quality.extras?.['container'], 'mp4');
+});
+
+test('an ESRGAN upscale is recorded as one, so it cannot tie with a native encode', () => {
+  // Real-ESRGAN is a super-resolution model: the file is a lower-resolution
+  // source stretched to 2160p, carrying the better number without the detail.
+  // Unrecorded it scores exactly as the native 2160p it collates with, and that
+  // tie is what lets the upgrade path replace a genuine 2160p with a stretched
+  // one. Making the name parse at all is what created the tie — before, it was
+  // refused and never reached a score.
+  const parsed = parseSceneRelease(NBQ_DOTTED);
+  assert.ok(parsed);
+  assert.equal(parsed.quality.extras?.['upscaled'], true);
+});
+
+test('an ESRGAN upscale ranks below the native encode of the same scene', () => {
+  const native = parseSceneRelease(NBQ_HYPHEN);
+  const upscale = parseSceneRelease(NBQ_DOTTED);
+  assert.ok(native && upscale);
+  assert.equal(native.quality.resolution, upscale.quality.resolution);
+  assert.ok(
+    scoreScene(upscale.quality) < scoreScene(native.quality),
+    `expected the upscale to rank below the native encode at 2160p`,
+  );
+});
+
+test('the upscaler is recognised however its internal separator is spelled', () => {
+  // `Real-ESRGAN` is the tool's own spelling, so the hyphenated form is the
+  // likelier one in the wild. The tokenizer splits on `-`, `.` and `_`, so
+  // these arrive as two tokens and have to be re-joined like `WEB-DL` before
+  // any token-level test can see them.
+  // The space form is not hypothetical: whole names arrive space-separated in
+  // this corpus (`Seska 22 07 26 A Cuckold Quickie XXX XviD-iPT Team`), and
+  // `joinHyphenatedEncodeTokens` re-joins across any single separator, so the
+  // token it produces there is `real esrgan`.
+  for (const spelling of [
+    'realesrgan',
+    'real-esrgan',
+    'real.esrgan',
+    'real_esrgan',
+    'real esrgan',
+    'esrgan',
+  ]) {
+    const name = `Nympho.24.03.04.Bianca.Bangs.And.Myra.Moans.XXX.2160p.MP4.NBQ.${spelling}`;
+    const parsed = parseSceneRelease(name);
+    assert.ok(parsed, `expected ${name} to parse`);
+    assert.equal(parsed.quality.releaseGroup, 'NBQ', spelling);
+    assert.equal(parsed.quality.extras?.['upscaled'], true, spelling);
+    assert.equal(parsed.quality.resolution, 2160, spelling);
+  }
+});
+
+test('a release with no upscaler tag records no upscaled extra', () => {
+  const parsed = parseSceneRelease(NBQ_HYPHEN);
+  assert.ok(parsed);
+  assert.equal(parsed.quality.extras?.['upscaled'], undefined);
+});
+
+test('a group attached by dot or by hyphen collates as one scene', () => {
+  const dotted = parseSceneRelease(NBQ_DOTTED);
+  const hyphen = parseSceneRelease(NBQ_HYPHEN);
+  assert.ok(dotted && hyphen);
+  assert.equal(dotted.identityKey, hyphen.identityKey);
+});
+
+test('a trailing dot-attached run is only a group when encode information precedes it', () => {
+  // With no encode section there is no position that makes a tag a group, so
+  // two trailing words are title material. Detaching them would drop content
+  // from the identity and merge two different scenes.
+  const a = parseSceneRelease('Site.23.04.15.Gala.Bonus.Reel');
+  const b = parseSceneRelease('Site.23.04.15.Gala.Bonus.Short');
+  assert.ok(a && b);
+  assert.equal(a.display.title, 'Gala Bonus Reel');
+  assert.equal(b.display.title, 'Gala Bonus Short');
+  assert.notEqual(a.identityKey, b.identityKey);
 });
 
 // --- Invariants -------------------------------------------------------------

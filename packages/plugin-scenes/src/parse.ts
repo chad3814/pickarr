@@ -135,7 +135,7 @@ const SOURCE_TOKEN =
  * perfectly ordinary title words in this domain.
  */
 const ANCILLARY_TOKEN =
-  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bits?|8bits?|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTERED?|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|F4V|VERTICAL|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
+  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bits?|8bits?|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTERED?|(?:real[-_.\s]?)?esrgan|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|F4V|VERTICAL|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
 
 /**
  * An upscale is a lower-resolution source stretched to a higher one, so it
@@ -144,8 +144,20 @@ const ANCILLARY_TOKEN =
  * same resolution — left unrecorded the two tie, and a tie is enough for the
  * upgrade path to trash a genuine 2160p file and replace it with a stretched
  * 1080p one.
+ *
+ * The *tool's* name counts as saying so. A poster who ran a file through
+ * Real-ESRGAN — a super-resolution model — stamps `realesrgan` rather than the
+ * word `upscaled`, and the two claims are the same claim: the resolution in the
+ * name was computed, not captured. It is also in `ANCILLARY_TOKEN`, because it
+ * is encode information in the ordinary sense as well — it says how the file
+ * was produced — and that is what keeps it out of the release group's *name*.
+ *
+ * `esrgan` alone is admitted because the family name is used interchangeably
+ * with the full one. Neither spelling is an English word, so a title cannot
+ * produce one by accident — which is what makes matching a tool name safe here
+ * where a general vocabulary would not be.
  */
-const UPSCALED_TOKEN = /\bUPSCALED?\b/i;
+const UPSCALED_TOKEN = /\bUPSCALED?\b|\b(?:real[.\s_-]?)?esrgan\b/i;
 
 /**
  * An interlaced encode carries half the vertical detail per field, so `1080i`
@@ -175,6 +187,14 @@ const HYPHENATED_ENCODE_TOKENS = new Set([
   'H265',
   'X264',
   'X265',
+  // The upscaler's own spelling is `Real-ESRGAN`, so the separated form is the
+  // likelier one. Without this entry the `real[-_.\s]?esrgan` alternation in
+  // `ANCILLARY_TOKEN` is unreachable: the tokenizer splits on every separator,
+  // so no token can ever contain one and only the run-together spelling matched.
+  // The joined token keeps whichever separator was written — including a space,
+  // since this rejoins across any single one — which is why that class carries
+  // `\s` and matches the class in `UPSCALED_TOKEN`.
+  'REALESRGAN',
 ]);
 
 
@@ -640,6 +660,44 @@ function hyphenGroupRun(tokens: Token[], text: string): Token[] | undefined {
   return undefined;
 }
 
+/**
+ * The tokens of a trailing run attached with the name's *own* separator, ending
+ * where encode information begins. `undefined` when no encode token is reached,
+ * when a foreign separator interrupts the run, or when the run grows past
+ * `MAX_GROUP_TOKENS`.
+ *
+ * This is `hyphenGroupRun`'s counterpart for the dot-attached form, and it
+ * exists because the two forms had asymmetric support: a multi-token group was
+ * detachable only when a hyphen introduced it. A poster who attaches one with
+ * the name's own separator — `...MP4.NBQ.realesrgan`, a group plus the upscaler
+ * it was run through — produced a name no branch could read, and the failure
+ * was a *refusal* rather than a bad parse: the undetached tail meant the
+ * trailing encode run no longer reached the end of the name, so
+ * `findEncodeSuffixStart` could not see the `XXX` marker, the `2160p` or the
+ * `MP4` sitting in front of it. Everything needed to parse the name was present
+ * and correctly classified, merely unreachable.
+ *
+ * The gate is the same one the hyphen form and the single-token dot form both
+ * use — the run must sit directly behind encode information — so this widens
+ * *which separator* the positional rule accepts, not the rule itself. That
+ * matters for the collision argument: a run this detaches was previously
+ * unreachable by definition, because a trailing run of non-encode tokens is
+ * exactly what stopped the old walk. Any name it newly admits was refused
+ * before, so no existing identity key can move underneath it.
+ */
+function dottedGroupRun(tokens: Token[], text: string): Token[] | undefined {
+  for (let start = tokens.length - 1; start >= 1; start -= 1) {
+    const previous = tokens[start - 1];
+    const current = tokens[start];
+    if (previous === undefined || current === undefined) return undefined;
+    const separator = text.slice(previous.start + previous.text.length, current.start);
+    if (!/^[._\s]$/.test(separator)) return undefined;
+    if (isEncodeToken(previous.text)) return tokens.slice(start);
+    if (tokens.length - start >= MAX_GROUP_TOKENS) return undefined;
+  }
+  return undefined;
+}
+
 function detachReleaseGroup(tokens: Token[], text: string): Detached {
   const last = tokens.at(-1);
   const previous = tokens.at(-2);
@@ -670,6 +728,34 @@ function detachReleaseGroup(tokens: Token[], text: string): Detached {
     looksLikeGroupTag(last.text, 2)
   ) {
     return { tokens: tokens.slice(0, -1), group: last.text };
+  }
+
+  // Tried last, so it only ever sees names the single-token forms declined.
+  //
+  // The whole run leaves the identity, but only its leading, non-encode part is
+  // the group's *name*: `MP4.NBQ.realesrgan` is the group `NBQ` with the model
+  // it was run through stamped behind it, not a group called `NBQ.realesrgan`.
+  // Naming it the latter would mint a second group for every file NBQ happened
+  // to upscale, so one group's releases would stop reading as one group — and
+  // the same argument applies to `.NBQ.UPSCALED` and `.NBQ.HEVC`. The stamp is
+  // not lost by being left out of the name: the tail `extractQuality` reads is a
+  // raw slice of the release name, so it still sees the token and still records
+  // the `upscaled` extra that ranks this below a native encode.
+  //
+  // `run[0]` is always non-encode — the walk only continues past a token that
+  // is not encode information — so the trim can never empty the name.
+  const dotted = dottedGroupRun(tokens, text);
+  const runStart = dotted?.[0];
+  if (dotted !== undefined && dotted.length > 1 && runStart !== undefined) {
+    const named = [...dotted];
+    while (named.length > 1 && isEncodeToken(named.at(-1)?.text ?? '')) named.pop();
+    const runEnd = named.at(-1);
+    if (runEnd !== undefined && looksLikeGroupTag(named.map((token) => token.text).join(''), 2)) {
+      return {
+        tokens: tokens.slice(0, -dotted.length),
+        group: text.slice(runStart.start, runEnd.start + runEnd.text.length),
+      };
+    }
   }
   return { tokens, group: undefined };
 }
