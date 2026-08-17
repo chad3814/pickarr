@@ -165,12 +165,26 @@ export function enqueueMetadata(
  * immediately, rather than queueing behind whatever failing schedule the
  * worker had already given that row.
  *
+ * `last_error` is cleared in the same clause, for the same reason `attempts`
+ * is: `dueMetadataQueue` reads it into `MetadataQueueRow.lastError`, so
+ * leaving a stale `ECONNRESET` beside `attempts = 0` would hand every reader
+ * a row that contradicts itself — a request that has never been tried and
+ * has already failed. The error belonged to the schedule this press just
+ * discarded.
+ *
  * Callers must pass only ids that already have a `media_groups` row:
  * `metadata_queue.group_id` is a foreign key against it, and one missing id
  * fails the insert — and with it the whole batch, since all of this runs in
  * one transaction. Task 2's endpoint already loads groups by id before it can
  * reach this function, so checking existence here too would just be a second
  * copy of that check for the two to eventually disagree about.
+ *
+ * Callers must also pass no duplicate ids. The return value is
+ * `groupIds.length`, not a count of rows the upsert actually touched — a
+ * repeated id would upsert the same row twice and be counted twice, so the
+ * number reported back would claim more groups were requeued than exist.
+ * `POST /api/metadata/requery` dedups its request body before calling this
+ * for exactly that reason.
  *
  * Touches only `metadata_queue`. It does not read or write `group_metadata` —
  * the standing answer is exactly what a requery must leave alone until a new
@@ -188,7 +202,8 @@ export function requeueMetadata(
     `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
      VALUES (?, ?, 0, ?)
      ON CONFLICT (group_id) DO UPDATE SET
-       requested_at = excluded.requested_at, attempts = 0, next_at = excluded.next_at`,
+       requested_at = excluded.requested_at, attempts = 0, next_at = excluded.next_at,
+       last_error = NULL`,
   );
 
   db.exec('BEGIN');

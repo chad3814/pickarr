@@ -877,7 +877,12 @@ test('a group requeried after settling none with no cast ends up with a performe
   assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
 });
 
-test('a group requeried after settling with a cast gains no performer_queue row, and keeps its cast', async () => {
+test('a requery re-answered with the same cast keeps it linked and gains no performer_queue row', async () => {
+  // Scoped deliberately at "the same cast came back", which is what this
+  // stubbed client actually returns — it does *not* prove the broader
+  // "a requery never unlinks a cast" claim, because the shared settle path
+  // replaces the cast wholesale whenever the answer is written. The test
+  // below covers that case honestly rather than this one pretending to.
   const db = openTestDatabase();
   const groupId = makeGroup(db, 'A Scene', 'Some Site');
   recordMetadataAnswer(db, {
@@ -907,4 +912,48 @@ test('a group requeried after settling with a cast gains no performer_queue row,
     (performersForGroups(db, [groupId]).get(groupId) ?? []).length > 0,
     'the cast must still be linked after the requery',
   );
+});
+
+test('a requery re-confirmed with an empty cast replaces the cast, through the pre-existing settle path', async () => {
+  // The honest counterpart to the test above, and the limit of this branch's
+  // "a requery never unlinks a cast" claim: `requeueMetadata` itself never
+  // touches `group_performers`, but the answer it leads to goes through
+  // `recordMetadataAnswer`, whose cast write is a wholesale replacement
+  // whenever the upsert is written (`written.changes > 0`) — and
+  // `setGroupPerformers` with an empty list is a DELETE.
+  //
+  // Asserted rather than guarded: adding a guard would change how the
+  // ordinary metadata pass treats *every* group, which is out of this
+  // branch's scope. What this test pins is that the behaviour is known and
+  // deliberate rather than an accident nobody had looked at, and that a
+  // future guard would have exactly one test to update.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  recordMetadataAnswer(db, {
+    groupId,
+    source: 'theporndb',
+    confirmed: candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] }),
+    nearMisses: [],
+    now: 500,
+  });
+  assert.equal((performersForGroups(db, [groupId]).get(groupId) ?? []).length, 1);
+
+  assert.equal(requeueMetadata(db, [groupId], 1_000), 1);
+
+  // Same scene, re-confirmed, but the provider has since dropped its cast —
+  // a real shape for a scene whose performer records were removed upstream.
+  const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [] });
+  const client = fakeSceneClient(() => [scene]);
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(result.confirmed, 1);
+  assert.deepEqual(
+    performersForGroups(db, [groupId]).get(groupId) ?? [],
+    [],
+    'the empty cast in the fresh answer replaced the old one',
+  );
+  // And the now-castless group falls to the performer search queue, because
+  // `groupHasCast` is false by the time `enqueuePerformerSearch` looks —
+  // the settle path's enqueue runs after the answer is written.
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
 });

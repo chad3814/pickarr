@@ -186,7 +186,7 @@ test('requeueMetadata queues a group whose metadata has already settled', () => 
   assert.equal(due[0]?.groupId, groupId);
 });
 
-test('requeueMetadata resets an in-flight row\'s attempts and next_at', () => {
+test('requeueMetadata resets an in-flight row\'s attempts, next_at and last_error', () => {
   const { db, ids } = withGroups(1);
   const groupId = ids[0]!;
   enqueueMetadata(db, [groupId], 1_000);
@@ -203,6 +203,12 @@ test('requeueMetadata resets an in-flight row\'s attempts and next_at', () => {
   assert.equal(due.length, 1);
   assert.equal(due[0]?.attempts, 0, 'a fresh request, not a continuation of the failing one');
   assert.equal(due[0]?.nextAt, 5_000);
+  // The error belonged to the schedule this requeue just discarded. Leaving
+  // it beside `attempts = 0` would be a row claiming to have both never been
+  // tried and already failed.
+  // `null`, the same as a row that has never failed: `maybeStr` folds a NULL
+  // column into `null` rather than `undefined`.
+  assert.equal(due[0]?.lastError, null, 'the failing schedule\'s error went with it');
 });
 
 test('requeueMetadata never touches group_metadata', () => {
