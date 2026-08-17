@@ -2,6 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
 import { Browse } from '../src/routes/Browse.tsx';
+import { stubIntersectionObserver, type Intersection } from './intersection.ts';
 import type {
   BrowseResponse,
   GroupEditResponse,
@@ -278,6 +279,18 @@ async function loadBothPages(): Promise<void> {
 }
 
 /**
+ * The same two pages, reached the way a reader now normally reaches them. Kept
+ * beside `loadBothPages` rather than replacing it: the button is the fallback for
+ * an observer that never fires, so both paths need a test that uses them.
+ */
+async function loadBothPagesByScrolling(view: Intersection): Promise<void> {
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  view.enter();
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+}
+
+/**
  * The Edit controls wait on `/api/manual-fields`, so a test that clicks one
  * needs the schemas landed, not just the list.
  */
@@ -297,6 +310,40 @@ test('picking after "load more" keeps the pages already loaded', async () => {
 
   await waitFor(() => assert.ok(gone('Alpha')));
   assert.ok(screen.getByText('Beta'));
+});
+
+test('the next page arrives when the end of the list comes into view, with no click', async () => {
+  const view = stubIntersectionObserver();
+  try {
+    serve(null);
+    render(<Browse />);
+    await waitFor(() => assert.ok(screen.getByText('Alpha')));
+
+    view.enter();
+
+    await waitFor(() => assert.ok(screen.getByText('Beta')));
+  } finally {
+    view.restore();
+  }
+});
+
+test('picking after a page arrived by scrolling keeps the pages already loaded', async () => {
+  // The same regression as the "load more" test above, and the reason the issue
+  // called it out: under a button, a reader who lost twenty pages noticed. Under
+  // scrolling the list silently shortens and they scroll again, so the invariant
+  // has to be pinned on the path that now loads most pages.
+  const view = stubIntersectionObserver();
+  try {
+    serve(null);
+    await loadBothPagesByScrolling(view);
+
+    fireEvent.click(screen.getAllByRole('button', { name: /pick/i })[0]!);
+
+    await waitFor(() => assert.ok(gone('Alpha')));
+    assert.ok(screen.getByText('Beta'));
+  } finally {
+    view.restore();
+  }
 });
 
 test('a group the server still lists is updated in place, not dropped', async () => {
