@@ -401,9 +401,30 @@ structure, it held.
 
 - [`/api/downloads` returns every download row unpaginated, one query per row, and the SPA polls it every three seconds](https://github.com/chad3814/pickarr/issues/31) — Fine for a few hundred rows; not for a few thousand.
 - [The browse search parameter is interpolated into a LIKE with no ESCAPE, so `%` and `_` match more than intended](https://github.com/chad3814/pickarr/issues/32) — A query containing `%` or `_` matches more than intended.
-- [A malformed pagination cursor silently restarts from the first page instead of erroring](https://github.com/chad3814/pickarr/issues/33) — Would present as an infinite scroll that never terminates.
 - [Picks always go to `downloadClients[0]` regardless of which feed produced the release](https://github.com/chad3814/pickarr/issues/34) — The config accepts several clients with no indication that more than one is only half-wired.
 - [Identity-change UI: the failure message is built twice, and unmounting with the dialog open hangs the card's save](https://github.com/chad3814/pickarr/issues/61) — Browse and Picks each construct the "could not be moved" banner, and only one of the two is tested.
+
+**Closed: a malformed pagination cursor is refused rather than served as the first
+page.** This was #33. `parseCursor` answered `null` both for "no cursor was sent" and
+for "the cursor sent cannot be read", and every caller turned that into the first page,
+so a cursor the server could not read named a page other than the one asked for. Under
+the SPA that compounds: each page is appended to what is on screen and paging continues
+from the `nextCursor` just received, so page one's cursor fetches page two, whose
+refusal serves page one again — the list repeats the same cards and never terminates.
+
+Absence and unreadability are now separate answers. `cursorFrom` reports no cursor for
+an omitted parameter, which is the first-page request every list opens with, and an
+error for one that cannot be read; `/api/browse` and `/api/failed` both answer that
+with a 400, from one shared parser over a neutral `KeysetCursor`. Both halves are
+parsed digits-only, which also refuses `"100:2:3"` — the old two-binding
+`split(':')` discarded everything past the second colon and served the page after
+`100:2`, another real page that nobody asked for.
+
+A well-formed cursor whose row has since left the list is deliberately still valid: the
+keyset comparison is `(sortKey, id)` against the index rather than a lookup of that row.
+That is the ordinary case in both directions — a browse group can really be deleted,
+and a failed item is never deleted but stops matching `parse_error IS NOT NULL` once it
+is resolved — so refusing it would break paging during normal operation.
 
 ## Operational notes
 

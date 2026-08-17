@@ -5,7 +5,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { ManualField, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
 import createScenesPlugin from '@pickarr/plugin-scenes';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { getFeedItem } from '../../src/db/feed-items.ts';
+import { clearParseError, getFeedItem } from '../../src/db/feed-items.ts';
 import { browsableGroup, getGroup } from '../../src/db/groups.ts';
 import { getRelease } from '../../src/db/releases.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
@@ -408,6 +408,73 @@ test('failed paginates with a cursor and reports the last page as the last page'
   ).json();
   assert.deepEqual(idsOf(second), [1]);
   // One page exactly the length of the list is not a page with more behind it.
+  assert.equal(second['nextCursor'], null);
+  await server.close();
+  db.close();
+});
+
+test('a malformed failed cursor is a 400, never a silent first page', async () => {
+  const db = openTestDatabase();
+  seedFeedItems(db);
+  const server = buildServer(deps(db));
+
+  // A representative shape of each way a cursor can fail to be one: no
+  // separator, a present-but-empty cursor, an empty half, a second separator the
+  // old parser silently dropped, a sort key only `Number()` would accept, and
+  // one past `Number.MAX_SAFE_INTEGER`. The exhaustive table lives beside
+  // `/api/browse` in `server.test.ts` — both routes go through the same
+  // `parseCursor`, and what this test is for is that this one does too. A
+  // refused cursor answered with page one would scroll the Failed tab forever
+  // (issue #33), exactly as it did Browse.
+  for (const cursor of ['nonsense', '', ':2', '200:', '200:2:3', '1e3:2', '9007199254740993:2']) {
+    const response = await server.inject({
+      method: 'GET',
+      url: `/api/failed?cursor=${encodeURIComponent(cursor)}`,
+    });
+
+    assert.equal(response.statusCode, 400, `cursor ${JSON.stringify(cursor)} should be refused`);
+    assert.equal(response.json()['error'], 'Invalid cursor');
+    assert.equal(
+      Object.hasOwn(response.json(), 'items'),
+      false,
+      `cursor ${JSON.stringify(cursor)} should not answer with a page`,
+    );
+  }
+
+  // Sending none still means the first page, which is the request the screen
+  // opens with.
+  const firstPage = await server.inject({ method: 'GET', url: '/api/failed' });
+  assert.equal(firstPage.statusCode, 200);
+  assert.deepEqual(idsOf(firstPage.json()), [5, 2, 1]);
+  await server.close();
+  db.close();
+});
+
+test('a failed cursor whose item has since been resolved away still pages from where it pointed', async () => {
+  const db = openTestDatabase();
+  seedFeedItems(db);
+  const server = buildServer(deps(db));
+
+  const first = (await server.inject({ method: 'GET', url: '/api/failed?limit=2' })).json();
+  assert.equal(first['nextCursor'], '200:2');
+  // How a row actually leaves this list, rather than `DELETE FROM feed_items`:
+  // nothing in `packages/core/src` deletes a feed item, and resolving one goes
+  // through `clearParseError`, which nulls the column the list filters on and
+  // leaves the row where it was. A deleted row would exercise a state the
+  // application cannot reach, and would pass for the wrong reason — the boundary
+  // holds here *because* the comparison never looks the row up, so a row that is
+  // present but filtered out is the case that has to work.
+  clearParseError(db, 2);
+
+  const second = (
+    await server.inject({ method: 'GET', url: '/api/failed?limit=2&cursor=200:2' })
+  ).json();
+
+  // Well-formed and merely stale, which is not malformed: the comparison is
+  // `(first_seen_at, id)` against the index and not a lookup of that row, so the
+  // boundary still holds. This is the ordinary case — the row a cursor names is
+  // the one the user was working on, and resolving it is what the screen is for.
+  assert.deepEqual(idsOf(second), [1]);
   assert.equal(second['nextCursor'], null);
   await server.close();
   db.close();

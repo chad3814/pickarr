@@ -166,17 +166,25 @@ const POSTER_CONTENT_TYPES: Record<string, string> = {
 };
 
 /**
- * A digit-only positive integer, stricter than `Number()`/`z.coerce.number()`.
+ * A digit-only non-negative integer, stricter than `Number()`/`z.coerce.number()`.
  * Those accept `"+1"`, `"1e3"`, `"0x10"`, and surrounding whitespace, and —
  * worse — two different huge digit strings past `Number.MAX_SAFE_INTEGER`
  * ("9007199254740993" and "9007199254740992") silently collapse to the same
  * value. `/^\d+$/` plus `Number.isSafeInteger` rejects all of that at the
- * boundary, so a malformed id 400s instead of quietly meaning some other id.
+ * boundary, so a malformed number 400s instead of quietly meaning some other one.
  */
-function parsePositiveInt(raw: string): number | null {
+function parseNonNegativeInt(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
   const value = Number(raw);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The above, minus zero: every id here is a SQLite rowid, and rowids start at 1.
+ */
+function parsePositiveInt(raw: string): number | null {
+  const value = parseNonNegativeInt(raw);
+  return value !== null && value > 0 ? value : null;
 }
 
 /**
@@ -286,23 +294,78 @@ const configSubmissionSchema = z.object({
   }),
 });
 
-function parseCursor(raw: string | undefined): { listRankAt: number; id: number } | null {
-  if (raw === undefined) return null;
-  const [rank, id] = raw.split(':');
-  const listRankAt = Number(rank);
-  const groupId = Number(id);
-  if (!Number.isFinite(listRankAt) || !Number.isFinite(groupId)) return null;
-  return { listRankAt, id: groupId };
+/**
+ * One page boundary, in the neutral shape both paginated lists share. `sortKey`
+ * is whichever column that list orders on — `media_groups.list_rank_at` for
+ * browse, `feed_items.first_seen_at` for failed — and the caller renames it to
+ * its own column on the way into the query.
+ */
+interface KeysetCursor {
+  sortKey: number;
+  id: number;
 }
 
-/** The same `"<sort key>:<id>"` format browse uses, over the failed list's own sort key. */
-function parseFailedCursor(raw: string | undefined): { firstSeenAt: number; id: number } | null {
-  if (raw === undefined) return null;
-  const [seen, id] = raw.split(':');
-  const firstSeenAt = Number(seen);
-  const itemId = Number(id);
-  if (!Number.isFinite(firstSeenAt) || !Number.isFinite(itemId)) return null;
-  return { firstSeenAt, id: itemId };
+/**
+ * The `"<sort key>:<id>"` string a paginated route minted as its `nextCursor`,
+ * or `null` when the text is not one of those.
+ *
+ * `null` means *malformed*, and both callers answer it with a 400. It used to
+ * mean "start from the beginning", which is issue #33: the SPA appends each page
+ * to what is already on screen and then pages on with the cursor it was handed,
+ * so a cursor quietly refused here is answered with page one — whose
+ * `nextCursor` is the one page two was fetched with, so the list serves the same
+ * cards over and over and the scroll never terminates. A stale bookmark, a
+ * hand-edited query or anything but the SPA is enough to reach that; the rule is
+ * that a cursor must never silently name a page other than the one asked for.
+ *
+ * Where the boundary sits, deliberately:
+ *
+ * - `"100:2:3"` is refused. The previous `split(':')` into two bindings dropped
+ *   everything after the second colon, so it read as the page after `100:2` — a
+ *   real page, and not the one requested. What refuses it is the digits-only
+ *   parse below, not the split direction: either half would fail that check
+ *   whichever colon is split on. Splitting at the *last* one is only so that the
+ *   id, the half whose format is fixed, is the one anchored. Note that a sort key
+ *   containing a colon would not work here today regardless — the left half goes
+ *   straight to `parseNonNegativeInt` — so a list that sorted on something
+ *   colon-joined, as plugin ids and identity keys elsewhere here are, would need
+ *   that parser changed too.
+ * - Both halves are parsed digits-only, for `parseNonNegativeInt`'s reasons: a
+ *   sort key of `"1e3"`, `"0x10"`, `"+1"` or `" 1"` is not something either
+ *   route could have minted, and past `Number.MAX_SAFE_INTEGER` two different
+ *   digit strings collapse onto one boundary, which would skip or repeat rows.
+ * - The sort key may be `0` where the id may not: ids are rowids, but both sort
+ *   keys are epoch-millisecond stamps taken from an injected clock, and `0` is a
+ *   value such a clock hands out.
+ * - A well-formed cursor whose row has since left the list is *not* malformed and
+ *   is not rejected: the keyset comparison is `(sortKey, id)` against the index
+ *   rather than a lookup of that row, so it still names the right boundary. Both
+ *   ways a row leaves are ordinary and happen while a reader is paging — browse's
+ *   groups are really deleted (`deleteGroup`, and the re-keying migrations), while
+ *   a failed item is never deleted at all and instead stops matching
+ *   `parse_error IS NOT NULL` once it is resolved. 400ing on either would break
+ *   paging during normal operation.
+ */
+function parseCursor(raw: string): KeysetCursor | null {
+  const separator = raw.lastIndexOf(':');
+  if (separator === -1) return null;
+  const sortKey = parseNonNegativeInt(raw.slice(0, separator));
+  const id = parsePositiveInt(raw.slice(separator + 1));
+  if (sortKey === null || id === null) return null;
+  return { sortKey, id };
+}
+
+/**
+ * The boundary a paginated route should read from: `null` when the caller sent
+ * no cursor at all, which is the first-page request every list starts with, and
+ * an error only when one was sent that cannot be read. Absence and
+ * unreadability were the same answer before issue #33, which is exactly how a
+ * broken cursor passed for a first page.
+ */
+function cursorFrom(raw: string | undefined): { cursor: KeysetCursor | null } | { error: string } {
+  if (raw === undefined) return { cursor: null };
+  const cursor = parseCursor(raw);
+  return cursor === null ? { error: 'Invalid cursor' } : { cursor };
 }
 
 /**
@@ -641,13 +704,16 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/browse', async (request, reply) => {
     const query = browseQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
+    const from = cursorFrom(query.data.cursor);
+    if ('error' in from) return reply.code(400).send({ error: from.error });
+    const { cursor } = from;
 
     // Fetched one row past the requested page so a page that is exactly
     // `limit` long can be told apart from the last page: without the extra
     // row, "the page came back exactly `limit` long" is ambiguous between
     // "there is more" and "that was exactly everything left."
     const overFetched = browseGroups(db, {
-      cursor: parseCursor(query.data.cursor),
+      cursor: cursor === null ? null : { listRankAt: cursor.sortKey, id: cursor.id },
       limit: query.data.limit + 1,
       search: query.data.q ?? null,
     });
@@ -961,12 +1027,18 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/failed', async (request, reply) => {
     const query = failedQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
+    // Refused for the same reason and with the same message `/api/browse` uses:
+    // the two lists page identically, and a cursor rule that held on only one
+    // of them would leave the other scrolling forever.
+    const from = cursorFrom(query.data.cursor);
+    if ('error' in from) return reply.code(400).send({ error: from.error });
+    const { cursor } = from;
 
     // Over-fetched by one for the same reason `/api/browse` is: a page that
     // comes back exactly `limit` long is otherwise ambiguous between "there is
     // more" and "that was exactly everything left."
     const overFetched = failedFeedItems(db, {
-      cursor: parseFailedCursor(query.data.cursor),
+      cursor: cursor === null ? null : { firstSeenAt: cursor.sortKey, id: cursor.id },
       limit: query.data.limit + 1,
       includeDismissed: query.data.includeDismissed === '1',
     });

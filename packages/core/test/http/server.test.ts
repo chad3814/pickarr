@@ -177,6 +177,105 @@ test('browse paginates with a stable cursor', async () => {
   db.close();
 });
 
+/**
+ * Every shape that is not a cursor this route could have minted, and why each
+ * one is in the list. `parseCursor` is shared with `/api/failed`, so this table
+ * covers the rule for both lists; `manual.test.ts` checks that the failed route
+ * really does go through it.
+ */
+const MALFORMED_CURSORS: readonly string[] = [
+  '', // `?cursor=` — sent by a client that has no cursor, which is not the same as sending none.
+  'nonsense',
+  '100', // A sort key with no id: the tiebreak half is what makes paging stable.
+  '100:',
+  ':2',
+  ':',
+  '100:2:3', // The old `split(':')` read this as `100:2` — a real page, and not the one asked for.
+  '1e3:2', // Every shape `Number()` accepts and no route mints.
+  '0x64:2',
+  '+100:2',
+  ' 100:2',
+  '100.5:2',
+  '100:2.5',
+  '100:-2',
+  '100:0', // Rowids start at 1.
+  '9007199254740993:2', // Collapses onto 9007199254740992, a different boundary.
+  'abc:2',
+  '100:abc',
+];
+
+test('a malformed browse cursor is a 400, never a silent first page', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  for (const cursor of MALFORMED_CURSORS) {
+    const response = await server.inject({
+      method: 'GET',
+      url: `/api/browse?cursor=${encodeURIComponent(cursor)}`,
+    });
+
+    assert.equal(response.statusCode, 400, `cursor ${JSON.stringify(cursor)} should be refused`);
+    assert.equal(response.json()['error'], 'Invalid cursor');
+    // The failure that mattered was not the status but the payload: answering a
+    // cursor nobody minted with page one hands the SPA the same `nextCursor`
+    // page two already used, and the list scrolls forever (issue #33).
+    assert.equal(
+      Object.hasOwn(response.json(), 'groups'),
+      false,
+      `cursor ${JSON.stringify(cursor)} should not answer with a page`,
+    );
+  }
+  await server.close();
+  db.close();
+});
+
+test('an omitted browse cursor is still the first page', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  // The other half of the rule above: absence is the legitimate first-page
+  // request every list opens with, and the two were the same answer before
+  // issue #33 — which is exactly how a broken cursor passed for a first page.
+  const response = await server.inject({ method: 'GET', url: '/api/browse' });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(
+    response.json()['groups'].map((group: { display: { title: string } }) => group.display.title),
+    ['Beta', 'Alpha'],
+  );
+  await server.close();
+  db.close();
+});
+
+test('a browse cursor whose group has since been deleted still pages from where it pointed', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  const first = (await server.inject({ method: 'GET', url: '/api/browse?limit=1' })).json();
+  assert.equal(first['nextCursor'], '200:2');
+  db.prepare('DELETE FROM releases WHERE group_id = 2').run();
+  db.prepare('DELETE FROM media_groups WHERE id = 2').run();
+
+  const second = (
+    await server.inject({ method: 'GET', url: '/api/browse?limit=1&cursor=200:2' })
+  ).json();
+
+  // Not malformed — well-formed and merely stale. The keyset comparison is
+  // `(list_rank_at, id)` against the index rather than a lookup of that row, so
+  // it still names the right boundary; ingest and edits delete rows underneath a
+  // list that is being paged, and refusing this would break ordinary paging.
+  assert.deepEqual(
+    second['groups'].map((group: { display: { title: string } }) => group.display.title),
+    ['Alpha'],
+  );
+  assert.equal(second['nextCursor'], null);
+  await server.close();
+  db.close();
+});
+
 test('browse filters by q', async () => {
   const db = openTestDatabase();
   seedGroups(db);
