@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, RequestError, type ManualFieldsResponse } from '../api/client.ts';
+import { requeryOneGroup } from '../api/requeryMetadata.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { usePagedList } from '../api/usePagedList.ts';
 import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
@@ -37,7 +38,21 @@ export function Browse() {
   // pending. The cap on `POST /api/metadata/request` and `GET /api/metadata` is
   // per *request*, not per page, so the hook itself chunks a list this long
   // rather than the caller having to.
-  const liveMetadata = useGroupMetadata(groups.map((group) => group.id));
+  const { metadata: liveMetadata, rearm: rearmMetadata } = useGroupMetadata(
+    groups.map((group) => group.id),
+  );
+
+  /**
+   * `MediaCard`'s Requery button, via `onRequeryMetadata`. This route (not the
+   * card, and not the hook) is what holds both halves `requeryOneGroup` needs:
+   * the server call, and the hook's own handle to tell it to watch the group
+   * again. The body is shared with Picks, which does the same two things for
+   * the same reason — see that function's own doc for why a refused requeue
+   * must not reach `rearmMetadata`.
+   */
+  function requeryMetadata(groupId: number): Promise<void> {
+    return requeryOneGroup(groupId, rearmMetadata);
+  }
 
   // The schemas are configuration, one map for every card on every page, so
   // they are fetched once for the screen rather than per group.
@@ -216,6 +231,7 @@ export function Browse() {
           fields={fields[group.plugin]}
           onEditGroup={(values) => identityChange.begin(group.id, values)}
           onEditRelease={(releaseId, values) => editRelease(group.id, releaseId, values)}
+          onRequeryMetadata={requeryMetadata}
         />
       ))}
 

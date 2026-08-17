@@ -13,6 +13,7 @@ import type {
   ManualField,
   ManualFieldsResponse,
   MetadataRequestResponse,
+  MetadataRequeryResponse,
   MetadataView,
   PicksResponse,
 } from '../src/api/client.ts';
@@ -821,4 +822,54 @@ test('a save that leaves files unmoved reports how many, and which', async () =>
   assert.ok(await screen.findByText(/Saved, but 1 file\(s\) could not be moved/));
   assert.ok(screen.getByText(/\/library\/k1\/1080\.mp4/));
   assert.ok(screen.getByText(/EACCES/));
+});
+
+test('each card\'s Requery button reaches POST /api/metadata/requery with that card\'s group id', async () => {
+  // Picks' own `requeryMetadata` was a verbatim copy of Browse's with no test
+  // on this route at all. The body of it now lives in `requeryOneGroup`
+  // (`requeryMetadata.test.ts` covers the accept-then-rearm ordering and every
+  // refusal), so what is left to prove here is the wiring: the prop reaches
+  // the card, and the id that goes out is the card's own rather than the first
+  // group in the list.
+  //
+  // Layered over `serve()` rather than replacing it: that stub answers every
+  // other endpoint this route touches, including the `'none'` on
+  // `GET /api/metadata` that makes a group settled enough to show the button —
+  // but its blanket POST branch would swallow the requery.
+  serve([group(1, 'Alpha'), group(2, 'Beta')]);
+  const base = globalThis.fetch;
+  const requeried: number[][] = [];
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/requery') {
+      requeried.push((JSON.parse(String(init?.body)) as { groupIds: number[] }).groupIds);
+      return new Response(
+        JSON.stringify({
+          requeued: 1,
+          missing: 0,
+          unavailable: 0,
+          unaskable: 0,
+        } satisfies MetadataRequeryResponse),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return base(input, init);
+  }) as unknown as typeof fetch;
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  // The button appears only once the metadata answer has landed, which is what
+  // makes the group settled.
+  const beta = await waitFor(() => {
+    const element = screen.getByText('Beta').closest('article');
+    assert.ok(element !== null);
+    return element;
+  });
+  fireEvent.click(within(beta).getByRole('button', { name: 'Requery metadata' }));
+
+  await waitFor(() => assert.deepEqual(requeried, [[2]]));
 });

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { GroupView, ManualField } from '../api/client.ts';
 import { groupAnchor } from '../api/anchors.ts';
 import { formatDuration } from '../api/format.ts';
@@ -19,6 +19,22 @@ interface Props {
    */
   onEditGroup?(values: Record<string, string>): Promise<boolean>;
   onEditRelease?(releaseId: number, values: Record<string, string>): Promise<boolean>;
+  /**
+   * Re-asks the provider about this group's already-settled metadata. Owned
+   * by the route, the same as the three handlers above: it is the route that
+   * holds `useGroupMetadata`'s handle and can tell it to watch this id again
+   * once the requery lands, which is machinery this card has no business
+   * duplicating.
+   *
+   * Rejecting is how the card learns the attempt did not happen, and that
+   * covers refusals as well as failures: `POST /api/metadata/requery` answers
+   * 200 with counters, so a call can succeed while requeuing nothing (no
+   * metadata provider configured, the group gone, its plugin unable to build
+   * a query). `requeryOneGroup` turns each of those into a rejection carrying
+   * the reason, so this card still has exactly one channel to render rather
+   * than a boolean outcome the way `onEditGroup` has.
+   */
+  onRequeryMetadata?(groupId: number): Promise<void>;
 }
 
 interface IdentityProps {
@@ -60,12 +76,35 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 /**
  * One card renders every media type. Plugins supply display fields, never UI.
  */
-export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }: Props) {
+export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, onRequeryMetadata }: Props) {
   const { display } = group;
   const [editing, setEditing] = useState(false);
   // One piece of state, so the poster and a performer's full image can never
   // both be open at once.
   const [modal, setModal] = useState<{ src: string; alt: string } | null>(null);
+  const [requerying, setRequerying] = useState(false);
+  const [requeryError, setRequeryError] = useState<string | null>(null);
+  // No local override of `group.metadata` any more: the route re-arms
+  // `useGroupMetadata` for this id once `onRequeryMetadata` lands (see that
+  // prop's doc), and the *same* map Browse/Picks already merge in is what
+  // delivers the fresher answer back to this card — through `group.metadata`
+  // itself, on the next render, exactly like every other card's answer
+  // always has. A card-local copy here would be a second place that answer
+  // could live, disagreeing with the map the instant a poll updated one but
+  // not the other.
+  const { metadata } = group;
+
+  // A requery's error message describes one attempt, and a fresher answer
+  // outlives it: leaving it up would caption a card that has since updated
+  // with the reason an earlier attempt failed. The dependency is the view
+  // object itself rather than a deep compare of its contents — the parent's
+  // map hands out a new object for every answer it fetches and the same one
+  // on every other render, so object identity is exactly "a new answer
+  // arrived". Clearing an already-null error is a no-op React bails out of,
+  // so the mount-time run costs nothing.
+  useEffect(() => {
+    setRequeryError(null);
+  }, [metadata]);
 
   // A field's scope says which record it belongs to: the group owns its
   // identity and display (§7.3), each release its own quality (§7.4).
@@ -78,12 +117,48 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   // Optional on the wire, unlike core's `MetadataView`: a stale bundle or an
   // old-server response can omit it, so absence is folded into `null` rather
   // than trusted to mean anything on its own.
-  const sceneUrl = group.metadata.state === 'confirmed' ? group.metadata.sceneUrl ?? null : null;
+  const sceneUrl = metadata.state === 'confirmed' ? metadata.sceneUrl ?? null : null;
+  // The lazy trigger (`useGroupMetadata`) already owns every group that has
+  // never been asked or is still waiting on an answer; a button here for
+  // either would be a second path to the one thing that hook already does.
+  // Only a group with a recorded answer — an opinion the provider might now
+  // want to revise — is this button's business. Gated on the handler too,
+  // the same way `canEdit` is gated on `onEditGroup`: a caller with nowhere
+  // to send a requery gets a card with no button rather than one that does
+  // nothing.
+  const settled =
+    (metadata.state === 'confirmed' || metadata.state === 'none') && onRequeryMetadata !== undefined;
+  const canEdit = values !== undefined && identityFields !== undefined && onEditGroup !== undefined;
 
   async function save(submitted: Record<string, string>): Promise<void> {
     // Closed only on success, so a refused merge leaves the values the user
     // typed on screen next to the reason they were refused.
     if (await onEditGroup?.(submitted)) setEditing(false);
+  }
+
+  /**
+   * Asks the route to re-ask the provider for this one group. All the actual
+   * work — the `POST /api/metadata/requery` call, and re-arming
+   * `useGroupMetadata` so its existing poll notices whatever comes back —
+   * lives in `onRequeryMetadata` (Browse's or Picks' own callback); this
+   * function only owns the button's own in-flight/error presentation, the
+   * same division `save` above has with `onEditGroup`. Because the fresher
+   * answer arrives back through `group.metadata` on a later render rather
+   * than through this call's return value, there is nothing to do here on
+   * success beyond letting the button re-enable — `metadata` above already
+   * updates itself the moment the parent's map does.
+   */
+  async function requery(): Promise<void> {
+    if (onRequeryMetadata === undefined) return;
+    setRequerying(true);
+    setRequeryError(null);
+    try {
+      await onRequeryMetadata(group.id);
+    } catch (cause) {
+      setRequeryError((cause as Error).message);
+    } finally {
+      setRequerying(false);
+    }
   }
 
   return (
@@ -110,22 +185,46 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
             {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
           </header>
 
-          {values !== undefined &&
-            identityFields !== undefined &&
-            onEditGroup !== undefined &&
-            (editing ? (
-              <IdentityForm
-                plugin={group.plugin}
-                fields={identityFields}
-                values={values}
-                onSubmit={(submitted) => void save(submitted)}
-                onCancel={() => setEditing(false)}
-              />
-            ) : (
-              <button type="button" onClick={() => setEditing(true)}>
-                Edit
-              </button>
-            ))}
+          {canEdit && editing && (
+            <IdentityForm
+              plugin={group.plugin}
+              fields={identityFields}
+              values={values}
+              onSubmit={(submitted) => void save(submitted)}
+              onCancel={() => setEditing(false)}
+            />
+          )}
+
+          {/*
+           * Edit and Requery live in the same row because they are the same
+           * kind of thing to a user reading the card: two ways to correct
+           * what it shows, one for what the parser produced and one for what
+           * the provider answered. Requery renders on its own condition
+           * (`settled`), independent of whether this plugin even offers
+           * editing — the two controls have no requirement in common beyond
+           * both belonging here.
+           *
+           * The condition is per *button*, not per capability: `canEdit` with
+           * the form already open renders no Edit button, so gating the row on
+           * `canEdit` alone left an empty `.card-actions` div — and its
+           * margin — under an open identity form on a plugin with no Requery
+           * button to keep it company.
+           */}
+          {((canEdit && !editing) || settled) && (
+            <div className="card-actions">
+              {canEdit && !editing && (
+                <button type="button" onClick={() => setEditing(true)}>
+                  Edit
+                </button>
+              )}
+              {settled && (
+                <button type="button" onClick={() => void requery()} disabled={requerying}>
+                  {requerying ? 'Requerying…' : 'Requery metadata'}
+                </button>
+              )}
+            </div>
+          )}
+          {requeryError !== null && <p className="error">{requeryError}</p>}
 
           {/*
            * A field is rendered as a single text node ("Label: Value") rather
@@ -144,7 +243,7 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           </ul>
         </div>
 
-        {group.metadata.state === 'confirmed' && group.metadata.hasPoster && (
+        {metadata.state === 'confirmed' && metadata.hasPoster && (
           <button
             type="button"
             className="poster-thumb"
@@ -188,7 +287,7 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
        * asked) are both terminal from the SPA's point of view and stay
        * silent on purpose.
        */}
-      {group.metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
+      {metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
 
       {/*
        * A second opinion, never a replacement: `display.title` above stays
@@ -204,27 +303,27 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
        * is rendered above, out of this section: it is absolutely positioned
        * and out of flow, so it does not compete with anything here.
        */}
-      {group.metadata.state === 'confirmed' && (
+      {metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">
-          {group.metadata.title !== null && (
+          {metadata.title !== null && (
             <p className="metadata-title">
               {sceneUrl === null ? (
-                group.metadata.title
+                metadata.title
               ) : (
                 <a href={sceneUrl} target="_blank" rel="noopener noreferrer">
-                  {group.metadata.title}
+                  {metadata.title}
                 </a>
               )}
             </p>
           )}
-          {group.metadata.releaseDate !== null && (
-            <p className="metadata-release-date">{group.metadata.releaseDate}</p>
+          {metadata.releaseDate !== null && (
+            <p className="metadata-release-date">{metadata.releaseDate}</p>
           )}
-          {group.metadata.durationSeconds !== null && (
-            <p className="metadata-duration">{formatDuration(group.metadata.durationSeconds)}</p>
+          {metadata.durationSeconds !== null && (
+            <p className="metadata-duration">{formatDuration(metadata.durationSeconds)}</p>
           )}
-          {group.metadata.synopsis !== null && (
-            <p className="metadata-synopsis">{group.metadata.synopsis}</p>
+          {metadata.synopsis !== null && (
+            <p className="metadata-synopsis">{metadata.synopsis}</p>
           )}
           {/*
            * One list or the other, never both. The server already guarantees
@@ -235,9 +334,9 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
            * property of this component rather than a promise made elsewhere,
            * and picks the richer list when they disagree.
            */}
-          {(group.metadata.performers ?? []).length > 0 ? (
+          {(metadata.performers ?? []).length > 0 ? (
             <ul className="metadata-performers">
-              {(group.metadata.performers ?? []).map((performer) => (
+              {(metadata.performers ?? []).map((performer) => (
                 <li key={performer.id}>
                   {performer.hasAvatar &&
                     (performer.hasImage ? (
@@ -262,11 +361,11 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
               ))}
             </ul>
           ) : (
-            (group.metadata.performerNames ?? []).length > 0 && (
+            (metadata.performerNames ?? []).length > 0 && (
               // Answered before migration 7 and not yet refetched: names only,
               // and no link, because no slug was stored to build one from.
               <ul className="metadata-performers">
-                {(group.metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
+                {(metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
               </ul>
             )
           )}

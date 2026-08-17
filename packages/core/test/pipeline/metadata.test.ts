@@ -8,7 +8,9 @@ import type { MediaTypePlugin, MetadataCandidate, MetadataPerformer } from '@pic
 import createScenesPlugin from '@pickarr/plugin-scenes';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { insertGroup } from '../../src/db/groups.ts';
-import { dueMetadataQueue, enqueueMetadata, getGroupMetadata } from '../../src/db/metadata.ts';
+import {
+  dueMetadataQueue, enqueueMetadata, getGroupMetadata, recordMetadataAnswer, requeueMetadata,
+} from '../../src/db/metadata.ts';
 import { duePerformerQueue } from '../../src/db/performer-queue.ts';
 import { performersForGroups } from '../../src/db/performers.ts';
 import { getDiscoveredSite, recordDiscoveredSite } from '../../src/db/sites.ts';
@@ -850,4 +852,108 @@ test('a deferred row queues nothing, because it has not settled', async () => {
 
   assert.equal(result.deferred, 1);
   assert.deepEqual(duePerformerQueue(db, 1_000, 10), []);
+});
+
+test('a group requeried after settling none with no cast ends up with a performer_queue row', async () => {
+  // The end-to-end proof the requery button exists for: a group settled
+  // outside this pass entirely (directly, via `recordMetadataAnswer`, the way
+  // a group answered before this feature shipped would have settled) has no
+  // `metadata_queue` row and, because `insertPerformerSearch` was never
+  // reached for it, no `performer_queue` row either. `requeueMetadata` is
+  // Task 1's half of this feature; running the resulting row through
+  // `runMetadataPass` here proves the two halves actually connect.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: 500 });
+  assert.deepEqual(duePerformerQueue(db, 500, 10), [], 'no performer search was ever queued for this group');
+
+  assert.equal(requeueMetadata(db, [groupId], 1_000), 1);
+
+  const client = fakeSceneClient(() => []);
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(result.none, 1);
+  assert.equal(getGroupMetadata(db, groupId)?.state, 'none');
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
+});
+
+test('a requery re-answered with the same cast keeps it linked and gains no performer_queue row', async () => {
+  // Scoped deliberately at "the same cast came back", which is what this
+  // stubbed client actually returns — it does *not* prove the broader
+  // "a requery never unlinks a cast" claim, because the shared settle path
+  // replaces the cast wholesale whenever the answer is written. The test
+  // below covers that case honestly rather than this one pretending to.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  recordMetadataAnswer(db, {
+    groupId,
+    source: 'theporndb',
+    confirmed: candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] }),
+    nearMisses: [],
+    now: 500,
+  });
+  assert.ok(
+    (performersForGroups(db, [groupId]).get(groupId) ?? []).length > 0,
+    'the first answer must have linked a cast',
+  );
+
+  assert.equal(requeueMetadata(db, [groupId], 1_000), 1);
+
+  const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] });
+  const client = fakeSceneClient(() => [scene]);
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(result.confirmed, 1);
+  assert.equal(getGroupMetadata(db, groupId)?.state, 'confirmed');
+  // `groupHasCast` still refuses it — the cast from the fresh answer, not a
+  // stale one left over from before the requery.
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10), []);
+  assert.ok(
+    (performersForGroups(db, [groupId]).get(groupId) ?? []).length > 0,
+    'the cast must still be linked after the requery',
+  );
+});
+
+test('a requery re-confirmed with an empty cast replaces the cast, through the pre-existing settle path', async () => {
+  // The honest counterpart to the test above, and the limit of this branch's
+  // "a requery never unlinks a cast" claim: `requeueMetadata` itself never
+  // touches `group_performers`, but the answer it leads to goes through
+  // `recordMetadataAnswer`, whose cast write is a wholesale replacement
+  // whenever the upsert is written (`written.changes > 0`) — and
+  // `setGroupPerformers` with an empty list is a DELETE.
+  //
+  // Asserted rather than guarded: adding a guard would change how the
+  // ordinary metadata pass treats *every* group, which is out of this
+  // branch's scope. What this test pins is that the behaviour is known and
+  // deliberate rather than an accident nobody had looked at, and that a
+  // future guard would have exactly one test to update.
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  recordMetadataAnswer(db, {
+    groupId,
+    source: 'theporndb',
+    confirmed: candidate({ title: 'A Scene', siteName: 'Some Site', performers: [performer()] }),
+    nearMisses: [],
+    now: 500,
+  });
+  assert.equal((performersForGroups(db, [groupId]).get(groupId) ?? []).length, 1);
+
+  assert.equal(requeueMetadata(db, [groupId], 1_000), 1);
+
+  // Same scene, re-confirmed, but the provider has since dropped its cast —
+  // a real shape for a scene whose performer records were removed upstream.
+  const scene = candidate({ title: 'A Scene', siteName: 'Some Site', performers: [] });
+  const client = fakeSceneClient(() => [scene]);
+  const result = await runMetadataPass(deps({ db, client, now: () => 1_000 }));
+
+  assert.equal(result.confirmed, 1);
+  assert.deepEqual(
+    performersForGroups(db, [groupId]).get(groupId) ?? [],
+    [],
+    'the empty cast in the fresh answer replaced the old one',
+  );
+  // And the now-castless group falls to the performer search queue, because
+  // `groupHasCast` is false by the time `enqueuePerformerSearch` looks —
+  // the settle path's enqueue runs after the answer is written.
+  assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
 });

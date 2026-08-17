@@ -149,6 +149,77 @@ export function enqueueMetadata(
 }
 
 /**
+ * Re-asks groups whose metadata has already settled — the case
+ * `enqueueMetadata`'s `answered` guard exists to refuse. That guard stays on
+ * `enqueueMetadata` untouched, because the lazy, browse-driven trigger it
+ * serves still needs it: nothing about a button existing changes what browse
+ * should do on its own. This function serves a different trigger — a user
+ * pressing "ask again" on one card already knows the group has an answer and
+ * wants it superseded, so being answered is this function's precondition
+ * rather than a reason to refuse.
+ *
+ * The insert is `ON CONFLICT (group_id) DO UPDATE`, not `DO NOTHING`: a row
+ * already in the queue — sitting in backoff, or with attempts accumulated
+ * toward `MAX_METADATA_ATTEMPTS` — is not the request the button just made.
+ * Resetting `attempts` to 0 and `next_at` to `now` makes the press take effect
+ * immediately, rather than queueing behind whatever failing schedule the
+ * worker had already given that row.
+ *
+ * `last_error` is cleared in the same clause, for the same reason `attempts`
+ * is: `dueMetadataQueue` reads it into `MetadataQueueRow.lastError`, so
+ * leaving a stale `ECONNRESET` beside `attempts = 0` would hand every reader
+ * a row that contradicts itself — a request that has never been tried and
+ * has already failed. The error belonged to the schedule this press just
+ * discarded.
+ *
+ * Callers must pass only ids that already have a `media_groups` row:
+ * `metadata_queue.group_id` is a foreign key against it, and one missing id
+ * fails the insert — and with it the whole batch, since all of this runs in
+ * one transaction. Task 2's endpoint already loads groups by id before it can
+ * reach this function, so checking existence here too would just be a second
+ * copy of that check for the two to eventually disagree about.
+ *
+ * Callers must also pass no duplicate ids. The return value is
+ * `groupIds.length`, not a count of rows the upsert actually touched — a
+ * repeated id would upsert the same row twice and be counted twice, so the
+ * number reported back would claim more groups were requeued than exist.
+ * `POST /api/metadata/requery` dedups its request body before calling this
+ * for exactly that reason.
+ *
+ * Touches only `metadata_queue`. It does not read or write `group_metadata` —
+ * the standing answer is exactly what a requery must leave alone until a new
+ * one arrives — and it does not touch `group_performers`, which only an
+ * actual answer via `recordMetadataAnswer` ever changes.
+ */
+export function requeueMetadata(
+  db: DatabaseSync,
+  groupIds: readonly number[],
+  now: number,
+): number {
+  if (groupIds.length === 0) return 0;
+
+  const insert = db.prepare(
+    `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+     VALUES (?, ?, 0, ?)
+     ON CONFLICT (group_id) DO UPDATE SET
+       requested_at = excluded.requested_at, attempts = 0, next_at = excluded.next_at,
+       last_error = NULL`,
+  );
+
+  db.exec('BEGIN');
+  try {
+    for (const groupId of groupIds) {
+      insert.run(groupId, now, now);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return groupIds.length;
+}
+
+/**
  * Each of these groups' `metadata_queue.next_at`, in one query for the whole
  * batch — the same reasoning `metadataForGroups` documents, applied to the
  * other table `GET /api/metadata` has to consult to tell `pending` from

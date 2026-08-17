@@ -107,6 +107,40 @@ export interface MetadataRequestResponse {
 }
 
 /**
+ * The answer to `POST /api/metadata/requery`. Only four counters, not five:
+ * being already answered is this route's precondition rather than something
+ * it refuses, so there is no `alreadyAnswered`/`pending` pair here the way
+ * `MetadataRequestResponse` has one — a group in either state is exactly as
+ * eligible for `requeued` as one that was never asked at all.
+ *
+ * `missing` and `unavailable` mean exactly what they mean on
+ * `MetadataRequestResponse`, for the same reasons: an id naming a group that
+ * no longer exists is not the same non-answer as one this server is
+ * currently configured not to look up, and folding either into `requeued`
+ * would claim a queue row was written when it was not.
+ *
+ * `unaskable` replaces `MetadataRequestResponse`'s implicit fold of the same
+ * case into `alreadyAnswered` — `POST /api/metadata/request` answers an
+ * unaskable group with `answerUnaskable` and reports it as settled, which is
+ * honest there because the row had no answer yet. Here the group is already
+ * settled, so calling `answerUnaskable` again would just rewrite `fetched_at`
+ * for no reason; `unaskable` names the id as its own outcome instead of
+ * reusing a counter that would imply a write that never happened.
+ *
+ * The four counters are an honest partition of the request, the same way
+ * `MetadataRequestResponse`'s five are: `requeued + missing + unavailable +
+ * unaskable` always equals the number of distinct ids sent (a request naming
+ * the same id twice counts it once, matching `requeueMetadata`'s own
+ * precondition that its input hold no duplicates).
+ */
+export interface MetadataRequeryResponse {
+  requeued: number;
+  missing: number;
+  unavailable: number;
+  unaskable: number;
+}
+
+/**
  * `performers` is this group's cast, read by the caller with
  * `performersForGroups` for the whole page it is building — never one query
  * per group, the mistake issue #31 already records for `/api/downloads`.

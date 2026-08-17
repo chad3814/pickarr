@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router';
 import { api, RequestError, type GroupView, type ManualField } from '../api/client.ts';
+import { requeryOneGroup } from '../api/requeryMetadata.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
 import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
@@ -19,7 +20,21 @@ export function Picks() {
   // /api/metadata` share (see the hook's own comment), which is exactly why
   // the hook chunks internally rather than assuming its caller's list fits in
   // one request.
-  const liveMetadata = useGroupMetadata(groups.map((group) => group.id));
+  const { metadata: liveMetadata, rearm: rearmMetadata } = useGroupMetadata(
+    groups.map((group) => group.id),
+  );
+
+  /**
+   * `MediaCard`'s Requery button, via `onRequeryMetadata` — the same split
+   * between "call the server" and "re-arm the hook" that Browse's own
+   * `requeryMetadata` has, for the same reason: this route holds both the
+   * `api` client and `useGroupMetadata`'s handle, and the card holds neither.
+   * Literally the same implementation, too: this was a verbatim copy of
+   * Browse's callback until `requeryOneGroup` became the one place it lives.
+   */
+  function requeryMetadata(groupId: number): Promise<void> {
+    return requeryOneGroup(groupId, rearmMetadata);
+  }
 
   async function reload(): Promise<void> {
     try {
@@ -169,6 +184,7 @@ export function Picks() {
           fields={fields[group.plugin]}
           onEditGroup={(values) => identityChange.begin(group.id, values)}
           onEditRelease={(releaseId, values) => editRelease(releaseId, values)}
+          onRequeryMetadata={requeryMetadata}
         />
       ))}
     </section>

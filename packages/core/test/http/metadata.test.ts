@@ -386,6 +386,151 @@ test('a request naming a group that no longer exists reports it as missing, not 
   db.close();
 });
 
+test('a settled group is requeried and its group_metadata row is untouched', async () => {
+  const db = openTestDatabase();
+  const askable = group(db, 'askable', 'Alpha');
+  recordMetadataAnswer(db, {
+    groupId: askable, source: 'theporndb', confirmed: candidate(), nearMisses: [], now: NOW,
+  });
+  const before = getGroupMetadata(db, askable);
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/requery',
+    payload: { groupIds: [askable] },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { requeued: 1, missing: 0, unavailable: 0, unaskable: 0 });
+  assert.equal(dueMetadataQueue(db, NOW, 10).length, 1);
+  assert.deepEqual(getGroupMetadata(db, askable), before, 'a requery must never touch group_metadata');
+
+  await server.close();
+  db.close();
+});
+
+test('missing, unaskable and requeued ids are each counted, and the counters sum to the ids sent', async () => {
+  const db = openTestDatabase();
+  const askable = group(db, 'askable', 'Alpha');
+  const noHooks = group(db, 'no-hooks', 'Beta');
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/requery',
+    // 999999 was never inserted, so getGroup answers null for it. Unlike
+    // `/api/metadata/request`'s equivalent test, `unavailable` cannot join
+    // this mix in the same request: it is a server-wide flag
+    // (`ServerDeps.metadataAvailable`), not a per-id fact, so with it true
+    // every existing id here is either unaskable or requeued — never
+    // unavailable — the same limitation `/api/metadata/request` already has.
+    payload: { groupIds: [askable, noHooks, 999_999] },
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json() as {
+    requeued: number;
+    missing: number;
+    unavailable: number;
+    unaskable: number;
+  };
+  assert.deepEqual(body, { requeued: 1, missing: 1, unavailable: 0, unaskable: 1 });
+  assert.equal(
+    body.requeued + body.missing + body.unavailable + body.unaskable,
+    3,
+  );
+  assert.equal(dueMetadataQueue(db, NOW, 10).length, 1);
+  // Unlike `/api/metadata/request`, an unaskable id here is never answered:
+  // the group is already settled (or, as here, may never even have been
+  // asked), and there is nothing to answer.
+  assert.equal(getGroupMetadata(db, noHooks), undefined, 'a requery must not answer an unaskable group');
+
+  await server.close();
+  db.close();
+});
+
+test('metadata unavailable server-wide: the requery endpoint does not requeue', async () => {
+  const db = openTestDatabase();
+  const askable = group(db, 'askable', 'Alpha');
+  recordMetadataAnswer(db, {
+    groupId: askable, source: 'theporndb', confirmed: candidate(), nearMisses: [], now: NOW,
+  });
+  const server = buildServer(deps(db, { metadataAvailable: false }));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/requery',
+    payload: { groupIds: [askable] },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { requeued: 0, missing: 0, unavailable: 1, unaskable: 0 });
+  assert.equal(dueMetadataQueue(db, NOW, 10).length, 0);
+  assert.equal(
+    getGroupMetadata(db, askable)?.state,
+    'confirmed',
+    'unavailability must not disturb the standing answer',
+  );
+
+  await server.close();
+  db.close();
+});
+
+test('a duplicate id in a requery is requeued once, not double-counted', async () => {
+  // `requeueMetadata` has no dedup of its own and reports `groupIds.length`
+  // back directly — passing it a repeated id would inflate `requeued` past
+  // the number of rows actually touched. The route dedups before that call.
+  const db = openTestDatabase();
+  const askable = group(db, 'askable', 'Alpha');
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/requery',
+    payload: { groupIds: [askable, askable] },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { requeued: 1, missing: 0, unavailable: 0, unaskable: 0 });
+  assert.equal(dueMetadataQueue(db, NOW, 10).length, 1);
+
+  await server.close();
+  db.close();
+});
+
+test('an oversized id list is refused for requery too', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/requery',
+    payload: { groupIds: Array.from({ length: 500 }, (_, i) => i + 1) },
+  });
+
+  assert.equal(response.statusCode, 400);
+
+  await server.close();
+  db.close();
+});
+
+test('a malformed requery body is refused', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/requery',
+    payload: { groupIds: ['not-a-number'] },
+  });
+
+  assert.equal(response.statusCode, 400);
+
+  await server.close();
+  db.close();
+});
+
 test('metadata reads report pending, none and confirmed distinctly', async () => {
   const db = openTestDatabase();
   const confirmed = group(db, 'askable', 'Confirmed');
