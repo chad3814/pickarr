@@ -31,6 +31,19 @@ import { webDist } from './paths.ts';
 const SCENES_PACKAGE = '@pickarr/plugin-scenes';
 
 /**
+ * Seeded into the scenes plugin's config so a *dateless* release can parse at
+ * all. `parseDatelessForm` (see `packages/plugin-scenes/src/parse.ts`) refuses
+ * outright unless the leading run is a site the plugin already knows —
+ * without it there is no trustworthy place to cut the site from the title —
+ * and nothing in this harness otherwise teaches it one: `learnSites` is only
+ * ever driven by the site-lookup pipeline, which no e2e test wires up. Every
+ * other shape (dated, episode-anchored) falls back to the release's own first
+ * token when the site is unknown, so only `identity-change.spec.ts`, which
+ * exercises the dateless shape on purpose, needs this.
+ */
+const KNOWN_SITES = ['SomeSite'];
+
+/**
  * A fixed epoch for seeded rows, so that list order is a function of the
  * seeding calls a spec makes and not of when the spec happened to run.
  * 2023-11-14T22:13:20Z, chosen only for being round and in the past.
@@ -201,7 +214,7 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
   const config = configSchema.parse({
     database: { path: join(workDir, 'pickarr.db') },
     trashDir,
-    plugins: { [SCENES_PACKAGE]: { libraryRoot } },
+    plugins: { [SCENES_PACKAGE]: { libraryRoot, sites: KNOWN_SITES } },
     downloadClients: [
       {
         id: 'fake',
@@ -289,6 +302,7 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
     // restart route firing `process.exit` mid-suite would take the whole
     // e2e run down with it.
     requestRestart: () => {},
+    trashDir,
   });
 
   // Port 0, then read back what the OS assigned. A fixed port collides between

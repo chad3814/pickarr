@@ -369,6 +369,7 @@ structure, it held.
 - [The browse search parameter is interpolated into a LIKE with no ESCAPE, so `%` and `_` match more than intended](https://github.com/chad3814/pickarr/issues/32) — A query containing `%` or `_` matches more than intended.
 - [A malformed pagination cursor silently restarts from the first page instead of erroring](https://github.com/chad3814/pickarr/issues/33) — Would present as an infinite scroll that never terminates.
 - [Picks always go to `downloadClients[0]` regardless of which feed produced the release](https://github.com/chad3814/pickarr/issues/34) — The config accepts several clients with no indication that more than one is only half-wired.
+- [Identity-change UI: the failure message is built twice, and unmounting with the dialog open hangs the card's save](https://github.com/chad3814/pickarr/issues/61) — Browse and Picks each construct the "could not be moved" banner, and only one of the two is tested.
 
 ## Operational notes
 
@@ -407,7 +408,26 @@ reported shape end to end — a release parsed with no site list, whose group is
 back for editing after `learnSites` grew the list — and confirmed the round trip
 holds and the fallback the removed branch used to reach is never taken.
 
-#39 is closed by this branch and should be marked closed on merge.
+**Closed: editing the identity of a group that had already been downloaded was refused
+outright, and the refusal never lifted.** This was #2. `editGroup`'s merge branch answered
+409 whenever the source group had any `downloads` or `imported_files` row, and because
+nothing ever deletes a `downloads` row, that refusal was permanent for any group ever
+picked from — the exact correction (joining a dateless group to the dated group that
+supersedes it) that a human fixing metadata by hand most needs to make. The fix replaces
+the refusal with a shown plan: a read-only planner works out every consequence of the
+merge, the user confirms it, and only then does anything move or get renamed on disk. See
+`docs/superpowers/specs/2026-08-16-editing-downloaded-identity-design.md` for the design
+and `docs/superpowers/specs/2026-08-07-manual-metadata-design.md` §7.3 and §2 for the
+amended reasoning.
+
+#2 is closed by this branch and should be marked closed on merge.
+
+What that replacement left behind, all found by the branch's own whole-branch review and
+deliberately not fixed in it:
+
+- [An identity change reports two things imprecisely: the blocker's wording and the trashed count](https://github.com/chad3814/pickarr/issues/59) — the collision blocker blames a stranger for what can be the group's own untrashed file, and `trashed` counts rows rather than files that moved.
+- [Trashing failures surface at apply time instead of as blockers, and the vanished-row branch is untested](https://github.com/chad3814/pickarr/issues/60) — the planner pre-checks the files it renames but not the ones it trashes, so the same two conditions become a `failed` entry after the user commits rather than a blocker before.
+- [`resolveIdentityFor` runs twice per edit, so the identity applied comes from a different call than the digest matched](https://github.com/chad3814/pickarr/issues/62) — theoretical while the hook is pure, but the digest gate cannot see a hook that is not.
 
 ## Scene metadata
 
@@ -527,9 +547,12 @@ metadata answer itself rather than just its decoration.
 ## Test-suite blind spots
 
 These are hazards for whoever writes the next test rather than tracked work, so they are
-not filed as issues and stay here in full. One exception is mechanically preventable and
-has an issue of its own:
-[Add a lint rule or shared helper banning `assert.equal(screen.queryByText(x), null)` in web tests](https://github.com/chad3814/pickarr/issues/40).
+not filed as issues and stay here in full. The exceptions are the mechanically preventable
+ones, which have issues of their own:
+
+- [Add a lint rule or shared helper banning `assert.equal(screen.queryByText(x), null)` in web tests](https://github.com/chad3814/pickarr/issues/40).
+- [A typed fetch-stub helper would retire 28 uses of `as unknown as typeof fetch` in web tests](https://github.com/chad3814/pickarr/issues/58) — the global constraints ban `unknown`, and this one idiom is where every violation lives.
+- [Tests leave their `mkdtemp` directories behind — about 20 per full run](https://github.com/chad3814/pickarr/issues/63) — the real directories are deliberate; only the cleanup is missing.
 
 These are not product defects. They are ways this repo's tests have been green while
 proving less than they appeared to, each found by mutating the source and watching nothing

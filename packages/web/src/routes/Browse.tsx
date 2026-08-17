@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
+import { api, RequestError, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
+import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
+import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
 import { MediaCard } from '../components/MediaCard.tsx';
 
 export function Browse() {
@@ -82,7 +84,12 @@ export function Browse() {
   }
 
   /**
-   * Corrects a group's identity and display, and answers whether it saved.
+   * Corrects a group's identity and display, and answers whether it saved —
+   * `useIdentityChange`'s `apply`, not `MediaCard`'s `onEditGroup` (that is
+   * `identityChange.begin`, wired in below). Named `applyEdit` rather than
+   * `editGroup` for exactly that reason: this is one step of the plan →
+   * confirm → apply sequence, not the whole of what happens when the user
+   * clicks Edit.
    *
    * The response is patched in for the same reason a pick's is: refetching the
    * first page discards every page loaded past it. A merge is the one case
@@ -96,24 +103,47 @@ export function Browse() {
    * nobody has loaded, the card disappears and nothing else on screen changes,
    * so the notice is the only account of where the releases went — the same
    * thing the Failed tab reports when a fix joins an existing group.
+   *
+   * A stale `planDigest` answers 409 and is the one failure `confirm` retries
+   * by re-planning (see `useIdentityChange`'s `ApplyOutcome` doc) — reporting
+   * it through `setError` here as well would show a banner for a failure the
+   * dialog is about to silently correct. Every other failure has no such
+   * second chance, so it is reported and the dialog closes.
    */
-  async function editGroup(groupId: number, values: Record<string, string>): Promise<boolean> {
+  async function applyEdit(
+    groupId: number,
+    values: Record<string, string>,
+    planDigest?: string,
+  ): Promise<ApplyOutcome> {
     try {
-      const { group, mergedInto } = await api.editGroup(groupId, values);
+      const { group, mergedInto, failed } = await api.editGroup(groupId, values, planDigest);
       setGroups((previous) => {
         const kept =
           mergedInto === null ? previous : previous.filter((existing) => existing.id !== groupId);
         return kept.map((existing) => (existing.id === group.id ? group : existing));
       });
       setNotice(mergedInto === null ? null : `Releases moved into ${group.display.title}`);
-      setError(null);
-      return true;
+      // A save that landed but left files unmoved is not fully done — the
+      // library sits in two layouts until a retry finishes the job, so this
+      // has to be told apart from silence rather than folded into a plain
+      // success.
+      setError(
+        failed.length === 0
+          ? null
+          : `Saved, but ${failed.length} file(s) could not be moved: ${failed
+              .map((entry) => `${entry.path} (${entry.error})`)
+              .join('; ')}`,
+      );
+      return { saved: true };
     } catch (cause) {
       setNotice(null);
+      if (cause instanceof RequestError && cause.status === 409) return { saved: false, stale: true };
       setError((cause as Error).message);
-      return false;
+      return { saved: false, stale: false };
     }
   }
+
+  const identityChange = useIdentityChange(applyEdit, setError);
 
   /**
    * Corrects one release's quality, which rescores it and re-derives the
@@ -160,6 +190,15 @@ export function Browse() {
       />
       {notice !== null && <p className="notice">{notice}</p>}
       {error !== null && <p className="error">{error}</p>}
+      {identityChange.plan !== null && (
+        <IdentityChangeConfirm
+          plan={identityChange.plan}
+          onConfirm={() => void identityChange.confirm()}
+          onCancel={identityChange.cancel}
+          busy={identityChange.busy}
+          stale={identityChange.stale}
+        />
+      )}
 
       {groups.map((group) => (
         <MediaCard
@@ -175,7 +214,7 @@ export function Browse() {
           // group can outlive the package that made it; either way the card
           // finds no schema and offers no editing.
           fields={fields[group.plugin]}
-          onEditGroup={(values) => editGroup(group.id, values)}
+          onEditGroup={(values) => identityChange.begin(group.id, values)}
           onEditRelease={(releaseId, values) => editRelease(group.id, releaseId, values)}
         />
       ))}

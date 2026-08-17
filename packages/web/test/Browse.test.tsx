@@ -6,6 +6,7 @@ import type {
   BrowseResponse,
   GroupEditResponse,
   GroupView,
+  IdentityPlanView,
   ManualField,
   ManualFieldsResponse,
   MetadataRequestResponse,
@@ -96,6 +97,47 @@ interface Options {
   firstPage?: GroupView[];
   /** Replaces the second page, to tell "the page survived" from "the card was patched". */
   secondPage?: GroupView[];
+  /**
+   * The status `refusal`/`refuseOnce` answer with. Defaults to 409, right for
+   * a release edit (untouched by the identity-plan flow, so any status just
+   * reports through `setError`). A group edit's `applyEdit` treats 409
+   * specifically as a stale `planDigest` and says nothing to the user about
+   * it — `useIdentityChange`'s own contract — so a test proving a *reported*
+   * group-edit refusal must use a different status, as a real plugin
+   * rejection does (see `resolveIdentityFor`'s 400s in
+   * `packages/core/src/manual/values.ts`).
+   */
+  refusalStatus?: number;
+  /**
+   * Overrides `POST /api/groups/:id/identity-plan`'s answer. Defaults to a
+   * plan that moves nothing, which is what keeps a plain rename a one-click
+   * save with no confirmation — a test only needs this when it means to
+   * exercise the dialog, i.e. a merge.
+   */
+  identityPlan?: Partial<IdentityPlanView>;
+}
+
+/**
+ * The plan `useIdentityChange.begin` fetches before a card edit ever reaches
+ * a PATCH. `kind: 'display-only'` with no renames or trashing is the
+ * no-confirmation case (§ the hook's own `moves` check), so a test that never
+ * sets `Options.identityPlan` gets the one-click save Browse always offered.
+ */
+function defaultPlan(groupId: number): IdentityPlanView {
+  return {
+    groupId,
+    identityKey: 'scenes:brazzers:draft',
+    kind: 'display-only',
+    mergeInto: null,
+    releasesMoving: 0,
+    downloadsMoving: 0,
+    pick: { surviving: null, superseded: null },
+    renames: [],
+    trashing: [],
+    warnings: [],
+    blockers: [],
+    digest: 'plan-digest',
+  };
 }
 
 /** The values each PATCH carried, so a test can see which half was submitted. */
@@ -152,6 +194,11 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       for (const id of ids) response[Number(id)] = { state: 'none' };
       return response;
     }
+    if (url.pathname.endsWith('/identity-plan')) {
+      // `/api/groups/:id/identity-plan`; the id is the path's third segment.
+      const groupId = Number(url.pathname.split('/')[3]);
+      return { ...defaultPlan(groupId), ...options.identityPlan } satisfies IdentityPlanView;
+    }
     if (url.pathname === '/api/manual-preview') {
       // Echoes what it was asked, so a test can tell that the live draft is
       // what reached the server.
@@ -163,7 +210,14 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       sent.push({ path: url.pathname, values: body.values });
       return url.pathname.startsWith('/api/releases/')
         ? (options.releaseEdit ?? ({ group: group(1, 'Alpha') } satisfies ReleaseEditResponse))
-        : (options.groupEdit ?? ({ group: group(1, 'Alpha'), mergedInto: null } satisfies GroupEditResponse));
+        : (options.groupEdit ??
+            ({
+              group: group(1, 'Alpha'),
+              mergedInto: null,
+              renamed: 0,
+              trashed: 0,
+              failed: [],
+            } satisfies GroupEditResponse));
     }
     return picked;
   }
@@ -178,7 +232,7 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       const body = JSON.parse(String(init.body)) as { values: Record<string, string> };
       sent.push({ path: url.pathname, values: body.values });
       return new Response(JSON.stringify({ error: refusal }), {
-        status: 409,
+        status: options.refusalStatus ?? 409,
         headers: { 'content-type': 'application/json' },
       });
     }
@@ -301,7 +355,7 @@ test('the card Edit previews the identity key the draft would build', async () =
 
 test('saving a card edit patches that card in place and keeps the pages already loaded', async () => {
   const calls = serve(null, {
-    groupEdit: { group: group(1, 'Alpha Fixed'), mergedInto: null },
+    groupEdit: { group: group(1, 'Alpha Fixed'), mergedInto: null, renamed: 0, trashed: 0, failed: [] },
   });
   await loadEditable();
   const before = browseRequests(calls()).length;
@@ -336,13 +390,23 @@ test('a merge drops the card that was edited and patches the one it joined', asy
   // on its own.
   serve(null, {
     secondPage: [group(2, 'Beta'), group(3, 'Gamma')],
-    groupEdit: { group: { ...group(2, 'Beta'), upgradeReleaseId: 20 }, mergedInto: 2 },
+    // `kind: 'merge'` is what makes `useIdentityChange` show the
+    // confirmation before ever sending the PATCH.
+    identityPlan: { kind: 'merge', mergeInto: { id: 2, title: 'Beta' } },
+    groupEdit: {
+      group: { ...group(2, 'Beta'), upgradeReleaseId: 20 },
+      mergedInto: 2,
+      renamed: 0,
+      trashed: 0,
+      failed: [],
+    },
   });
   await loadEditable();
 
   fireEvent.click(within(card('Alpha')).getByRole('button', { name: 'Edit' }));
   fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'Beta' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  fireEvent.click(await screen.findByRole('button', { name: /confirm/i }));
 
   await waitFor(() => assert.ok(gone('Alpha')));
   const titles = screen.getAllByRole('heading', { level: 2 }).map((node) => node.textContent);
@@ -357,7 +421,33 @@ test('a merge into a group on no loaded page inserts nothing', async () => {
   // it twice, once the page it really lives on is loaded.
   serve(null, {
     firstPage: [group(1, 'Alpha'), group(3, 'Gamma')],
-    groupEdit: { group: group(7, 'Zeta'), mergedInto: 7 },
+    identityPlan: { kind: 'merge', mergeInto: { id: 7, title: 'Zeta' } },
+    groupEdit: { group: group(7, 'Zeta'), mergedInto: 7, renamed: 0, trashed: 0, failed: [] },
+  });
+  await loadEditable();
+
+  fireEvent.click(within(card('Alpha')).getByRole('button', { name: 'Edit' }));
+  fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'Zeta' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  fireEvent.click(await screen.findByRole('button', { name: /confirm/i }));
+
+  await waitFor(() => assert.ok(gone('Alpha')));
+  const titles = screen.getAllByRole('heading', { level: 2 }).map((node) => node.textContent);
+  assert.deepEqual(titles, ['Gamma', 'Beta']);
+});
+
+test('a merge says where the releases went, confirmation included', async () => {
+  // The card vanishes and, when the target is not loaded, nothing else on
+  // screen changes — so without this the user is told nothing at all. The
+  // Failed tab reports the same thing when a fix joins an existing group.
+  //
+  // This behaviour predates `useIdentityChange` — it is pinned here rather
+  // than only exercised incidentally, because routing `onEditGroup` through
+  // the plan/confirm hook is exactly the kind of change that could silence a
+  // notice that used to fire straight off a PATCH.
+  serve(null, {
+    identityPlan: { kind: 'merge', mergeInto: { id: 7, title: 'Zeta' } },
+    groupEdit: { group: group(7, 'Zeta'), mergedInto: 7, renamed: 0, trashed: 0, failed: [] },
   });
   await loadEditable();
 
@@ -365,30 +455,22 @@ test('a merge into a group on no loaded page inserts nothing', async () => {
   fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'Zeta' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-  await waitFor(() => assert.ok(gone('Alpha')));
-  const titles = screen.getAllByRole('heading', { level: 2 }).map((node) => node.textContent);
-  assert.deepEqual(titles, ['Gamma', 'Beta']);
-});
-
-test('a merge says where the releases went', async () => {
-  // The card vanishes and, when the target is not loaded, nothing else on
-  // screen changes — so without this the user is told nothing at all. The
-  // Failed tab reports the same thing when a fix joins an existing group.
-  serve(null, { groupEdit: { group: group(7, 'Zeta'), mergedInto: 7 } });
-  await loadEditable();
-
-  fireEvent.click(within(card('Alpha')).getByRole('button', { name: 'Edit' }));
-  fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'Zeta' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  // The notice must not appear before the merge is confirmed.
+  assert.ok(gone('Releases moved into Zeta'));
+  fireEvent.click(await screen.findByRole('button', { name: /confirm/i }));
 
   await waitFor(() => assert.ok(screen.getByText('Releases moved into Zeta')));
 });
 
-test('a refused merge says why and leaves the card as it was', async () => {
-  // 409: the source group has a download or imported files, so its releases
-  // cannot move (§7.3). Nothing changed, and the typed values are still needed.
+test('a refused group edit says why and leaves the card as it was', async () => {
+  // 400, not 409: a group edit's `applyEdit` treats 409 as a stale
+  // `planDigest` and says nothing on purpose (`useIdentityChange` retries
+  // that by re-planning) — a refusal meant to be *read* has to be the status
+  // a real plugin rejection uses (`resolveIdentityFor`'s 400s). Nothing
+  // changed, and the typed values are still needed.
   serve(null, {
-    refusal: 'cannot merge group 1 into group 2: group 1 has a download recorded against it.',
+    refusal: 'site must be one of the configured values',
+    refusalStatus: 400,
   });
   await loadEditable();
 
@@ -396,7 +478,7 @@ test('a refused merge says why and leaves the card as it was', async () => {
   fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'Beta' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-  await waitFor(() => assert.ok(screen.getByText(/has a download recorded against it/)));
+  await waitFor(() => assert.ok(screen.getByText('site must be one of the configured values')));
   assert.ok(screen.getByText('Alpha'));
   assert.equal((screen.getByLabelText('Scene') as HTMLInputElement).value, 'Beta');
 });
@@ -453,22 +535,26 @@ test('a refused release edit says why and leaves the row form open', async () =>
 });
 
 test('a card edit that lands clears the error the last one left', async () => {
+  // 400, not 409, for the same reason the refusal tests above use it: a
+  // group edit's `applyEdit` treats 409 as a stale `planDigest` and reports
+  // nothing on purpose.
   serve(null, {
-    refuseOnce: 'group 1 has a download recorded against it.',
-    groupEdit: { group: group(1, 'Alpha Fixed'), mergedInto: null },
+    refuseOnce: 'site must be one of the configured values',
+    refusalStatus: 400,
+    groupEdit: { group: group(1, 'Alpha Fixed'), mergedInto: null, renamed: 0, trashed: 0, failed: [] },
   });
   await loadEditable();
 
   fireEvent.click(within(card('Alpha')).getByRole('button', { name: 'Edit' }));
   fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'Alpha Fixed' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-  await waitFor(() => assert.ok(screen.getByText(/has a download recorded against it/)));
+  await waitFor(() => assert.ok(screen.getByText('site must be one of the configured values')));
 
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
   // A banner left standing over a list that just did what it was asked reads as
   // a failure that did not happen.
-  await waitFor(() => assert.ok(gone('group 1 has a download recorded against it.')));
+  await waitFor(() => assert.ok(gone('site must be one of the configured values')));
   assert.ok(screen.getByText('Alpha Fixed'));
 });
 

@@ -1,24 +1,24 @@
 import { copyFile, mkdir, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { liveFilesForGroup, markTrashed } from '../db/imported-files.ts';
+import { markTrashed, type ImportedFileRow } from '../db/imported-files.ts';
 import { isContained, lstatOrNull } from './import.ts';
 
 /**
- * Moves a group's live imported files into the trash directory — every one of
- * them *except* those `importingDownloadId` itself recorded.
+ * Moves the given files out of the library and marks their rows trashed.
  *
- * That exclusion is what makes this operation safe to repeat. An import is
- * retried whenever it is interrupted between its transfer loop and its final
- * status write (a crash plus boot recovery, an operator retry), and on the
- * second pass the rows the first pass inserted are indistinguishable, to a
- * plain "live files of this group" query, from the rows of the old release
- * being superseded. Trashing them moves this download's freshly imported files
- * out of the library and leaves the transfer loop with nothing to re-place —
- * the group ends up claiming a release whose files are all in trash. Scoping
- * the query to *other* downloads' rows states the real rule: an upgrade
- * supersedes what came before it, never its own output. No generation counter
- * is needed because a download's id already is one.
+ * Takes rows rather than deriving them, because two callers need two different
+ * questions answered and neither is a special case of the other. An upgrade
+ * import trashes everything live in the group *except its own download's*
+ * files (`liveFilesForGroup`), since on a retry those describe files it just
+ * placed. An identity change trashes the files of every release *except the
+ * surviving pick's* (`liveFilesForOtherReleases`) — and a release that
+ * imported twice makes those two questions give different answers, so
+ * deriving either one in here would be wrong for the other caller.
+ *
+ * `groupId` is now only used to name the trash directory. It is still a
+ * parameter rather than read off the rows: the rows may be empty, and a
+ * caller that knows the group should not have to prove it by finding a row.
  *
  * Trash-first ordering is required by the caller because the replacement
  * usually wants the same destination path as the file it supersedes: the old
@@ -83,22 +83,21 @@ import { isContained, lstatOrNull } from './import.ts';
  * trash (the initial-import case, and the benign retry-of-a-failed-initial-
  * pick case — see the Task 14 report).
  */
-export async function trashLiveFiles(
+export async function trashFiles(
   db: DatabaseSync,
-  groupId: number,
-  importingDownloadId: number,
+  files: readonly ImportedFileRow[],
   libraryRootReal: string,
   trashDir: string,
+  groupId: number,
   now: number,
 ): Promise<string | null> {
-  const live = liveFilesForGroup(db, groupId, importingDownloadId);
-  if (live.length === 0) return null;
+  if (files.length === 0) return null;
 
   const destinationDir = join(trashDir, String(groupId), String(now));
   await mkdir(destinationDir, { recursive: true });
 
   try {
-    for (const file of live) {
+    for (const file of files) {
       const occupant = await lstatOrNull(file.destPath);
 
       if (occupant === null) {

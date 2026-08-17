@@ -92,6 +92,13 @@ test('editing a group into another merges it and leaves no card behind', async (
   await form.getByLabel('Scene', { exact: true }).fill('Emma Stone');
   await form.getByRole('button', { name: 'Save' }).click();
 
+  // A merge always needs confirming now (2026-08-16's identity-change work),
+  // regardless of whether either side is picked — `needsConfirmation` gates on
+  // `plan.kind === 'merge'` alone. Nothing here moves a file (neither release
+  // is downloaded), so the dialog names only the merge target, not a rename.
+  await expect(page.getByRole('dialog', { name: 'Confirm identity change' })).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+
   // The source card is gone — this is the assertion the `mergedInto` bug fails.
   await expect(page.getByRole('heading', { name: 'Jane Doe' })).toHaveCount(0);
   // One card, not two and not two copies of one: the count is what catches a
