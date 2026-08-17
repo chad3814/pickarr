@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { GroupView, ManualField } from '../api/client.ts';
+import { api, type GroupView, type ManualField, type MetadataView } from '../api/client.ts';
 import { groupAnchor } from '../api/anchors.ts';
 import { formatDuration } from '../api/format.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
@@ -66,6 +66,20 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   // One piece of state, so the poster and a performer's full image can never
   // both be open at once.
   const [modal, setModal] = useState<{ src: string; alt: string } | null>(null);
+  const [requerying, setRequerying] = useState(false);
+  const [requeryError, setRequeryError] = useState<string | null>(null);
+  // This card's own memory of a fresher answer than the `group` prop carries.
+  // It exists because nothing else on this card's behalf will ever produce
+  // one: `useGroupMetadata` (the hook both `Browse` and `Picks` poll through)
+  // stops asking about an id the moment it first resolves to `confirmed` or
+  // `none` — exactly the state this button requires before it renders at
+  // all — so the parent has no reason to notice this group again, and no
+  // callback exists for this card to tell it to. Kept as an override rather
+  // than replacing `group.metadata` outright so a group whose *prop* changes
+  // for an unrelated reason (a pick, an edit) does not silently discard an
+  // answer this card already knows is newer.
+  const [refetchedMetadata, setRefetchedMetadata] = useState<MetadataView | null>(null);
+  const metadata = refetchedMetadata ?? group.metadata;
 
   // A field's scope says which record it belongs to: the group owns its
   // identity and display (§7.3), each release its own quality (§7.4).
@@ -78,12 +92,57 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
   // Optional on the wire, unlike core's `MetadataView`: a stale bundle or an
   // old-server response can omit it, so absence is folded into `null` rather
   // than trusted to mean anything on its own.
-  const sceneUrl = group.metadata.state === 'confirmed' ? group.metadata.sceneUrl ?? null : null;
+  const sceneUrl = metadata.state === 'confirmed' ? metadata.sceneUrl ?? null : null;
+  // The lazy trigger (`useGroupMetadata`) already owns every group that has
+  // never been asked or is still waiting on an answer; a button here for
+  // either would be a second path to the one thing that hook already does.
+  // Only a group with a recorded answer — an opinion the provider might now
+  // want to revise — is this button's business.
+  const settled = metadata.state === 'confirmed' || metadata.state === 'none';
+  const canEdit = values !== undefined && identityFields !== undefined && onEditGroup !== undefined;
 
   async function save(submitted: Record<string, string>): Promise<void> {
     // Closed only on success, so a refused merge leaves the values the user
     // typed on screen next to the reason they were refused.
     if (await onEditGroup?.(submitted)) setEditing(false);
+  }
+
+  /**
+   * Re-asks the provider for this one group, then immediately reads its
+   * current answer back. `POST /api/metadata/requery` only resets the queue
+   * row — it does not wait for the worker to run — so the read afterwards is
+   * a best-effort check for an answer that was already sitting there (an
+   * unaskable group, or one the worker happened to drain between the two
+   * calls), not a guarantee of a fresh one. The far more likely immediate
+   * answer is `pending`, and this is deliberately as far as this button
+   * chases it: it only renders for a *settled* group, so the moment
+   * `refetchedMetadata` becomes `pending` the button disappears, and nothing
+   * on this page is polling that id any longer either — `useGroupMetadata`
+   * stopped the instant it first resolved, which is the very precondition
+   * for this button to have rendered at all. A reload picks up whatever the
+   * worker has produced by then; watching until answered would need this
+   * card polling on its own account, which is more machinery than "ask
+   * again" needs and nothing the brief for this button asked for.
+   *
+   * The two calls share one try/catch on purpose: a requeue that landed but
+   * whose immediate re-read failed is exactly as unfinished, from the user's
+   * side, as a requeue that never reached the server — either way nothing
+   * new is known yet, so both report the same retryable error and leave
+   * `metadata` exactly as it was.
+   */
+  async function requery(): Promise<void> {
+    setRequerying(true);
+    setRequeryError(null);
+    try {
+      await api.requeryMetadata([group.id]);
+      const answer = await api.metadata([group.id]);
+      const next = answer[group.id];
+      if (next !== undefined) setRefetchedMetadata(next);
+    } catch (cause) {
+      setRequeryError((cause as Error).message);
+    } finally {
+      setRequerying(false);
+    }
   }
 
   return (
@@ -110,22 +169,40 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
             {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
           </header>
 
-          {values !== undefined &&
-            identityFields !== undefined &&
-            onEditGroup !== undefined &&
-            (editing ? (
-              <IdentityForm
-                plugin={group.plugin}
-                fields={identityFields}
-                values={values}
-                onSubmit={(submitted) => void save(submitted)}
-                onCancel={() => setEditing(false)}
-              />
-            ) : (
-              <button type="button" onClick={() => setEditing(true)}>
-                Edit
-              </button>
-            ))}
+          {canEdit && editing && (
+            <IdentityForm
+              plugin={group.plugin}
+              fields={identityFields}
+              values={values}
+              onSubmit={(submitted) => void save(submitted)}
+              onCancel={() => setEditing(false)}
+            />
+          )}
+
+          {/*
+           * Edit and Requery live in the same row because they are the same
+           * kind of thing to a user reading the card: two ways to correct
+           * what it shows, one for what the parser produced and one for what
+           * the provider answered. Requery renders on its own condition
+           * (`settled`), independent of whether this plugin even offers
+           * editing — the two controls have no requirement in common beyond
+           * both belonging here.
+           */}
+          {(canEdit || settled) && (
+            <div className="card-actions">
+              {canEdit && !editing && (
+                <button type="button" onClick={() => setEditing(true)}>
+                  Edit
+                </button>
+              )}
+              {settled && (
+                <button type="button" onClick={() => void requery()} disabled={requerying}>
+                  {requerying ? 'Requerying…' : 'Requery metadata'}
+                </button>
+              )}
+            </div>
+          )}
+          {requeryError !== null && <p className="error">{requeryError}</p>}
 
           {/*
            * A field is rendered as a single text node ("Label: Value") rather
@@ -144,7 +221,7 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
           </ul>
         </div>
 
-        {group.metadata.state === 'confirmed' && group.metadata.hasPoster && (
+        {metadata.state === 'confirmed' && metadata.hasPoster && (
           <button
             type="button"
             className="poster-thumb"
@@ -188,7 +265,7 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
        * asked) are both terminal from the SPA's point of view and stay
        * silent on purpose.
        */}
-      {group.metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
+      {metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
 
       {/*
        * A second opinion, never a replacement: `display.title` above stays
@@ -204,27 +281,27 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
        * is rendered above, out of this section: it is absolutely positioned
        * and out of flow, so it does not compete with anything here.
        */}
-      {group.metadata.state === 'confirmed' && (
+      {metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">
-          {group.metadata.title !== null && (
+          {metadata.title !== null && (
             <p className="metadata-title">
               {sceneUrl === null ? (
-                group.metadata.title
+                metadata.title
               ) : (
                 <a href={sceneUrl} target="_blank" rel="noopener noreferrer">
-                  {group.metadata.title}
+                  {metadata.title}
                 </a>
               )}
             </p>
           )}
-          {group.metadata.releaseDate !== null && (
-            <p className="metadata-release-date">{group.metadata.releaseDate}</p>
+          {metadata.releaseDate !== null && (
+            <p className="metadata-release-date">{metadata.releaseDate}</p>
           )}
-          {group.metadata.durationSeconds !== null && (
-            <p className="metadata-duration">{formatDuration(group.metadata.durationSeconds)}</p>
+          {metadata.durationSeconds !== null && (
+            <p className="metadata-duration">{formatDuration(metadata.durationSeconds)}</p>
           )}
-          {group.metadata.synopsis !== null && (
-            <p className="metadata-synopsis">{group.metadata.synopsis}</p>
+          {metadata.synopsis !== null && (
+            <p className="metadata-synopsis">{metadata.synopsis}</p>
           )}
           {/*
            * One list or the other, never both. The server already guarantees
@@ -235,9 +312,9 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
            * property of this component rather than a promise made elsewhere,
            * and picks the richer list when they disagree.
            */}
-          {(group.metadata.performers ?? []).length > 0 ? (
+          {(metadata.performers ?? []).length > 0 ? (
             <ul className="metadata-performers">
-              {(group.metadata.performers ?? []).map((performer) => (
+              {(metadata.performers ?? []).map((performer) => (
                 <li key={performer.id}>
                   {performer.hasAvatar &&
                     (performer.hasImage ? (
@@ -262,11 +339,11 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease }:
               ))}
             </ul>
           ) : (
-            (group.metadata.performerNames ?? []).length > 0 && (
+            (metadata.performerNames ?? []).length > 0 && (
               // Answered before migration 7 and not yet refetched: names only,
               // and no link, because no slug was stored to build one from.
               <ul className="metadata-performers">
-                {(group.metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
+                {(metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
               </ul>
             )
           )}

@@ -1,9 +1,17 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MediaCard } from '../src/components/MediaCard.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
 import type { GroupView, ManualField, MetadataView } from '../src/api/client.ts';
+
+/** A `fetch` `Response` carrying JSON, the same shape every real endpoint answers with. */
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its card behind, and every later query sees two.
@@ -489,4 +497,124 @@ test('the metadata title without a url is not a link', () => {
   assert.ok(screen.getByText('Scene'));
   // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('link', { name: 'Scene' }));
+});
+
+test('the Requery button renders only once metadata is settled', () => {
+  // `absent` (never asked) and `pending` (already queued) are both the lazy
+  // trigger's business, not this button's — a button that duplicated it
+  // would be two paths to the one outcome.
+  const { rerender } = render(
+    <MediaCard group={{ ...GROUP, metadata: { state: 'absent' } }} onPick={() => {}} />,
+  );
+  assert.ok(!screen.queryByRole('button', { name: /requery/i }));
+
+  rerender(<MediaCard group={{ ...GROUP, metadata: { state: 'pending' } }} onPick={() => {}} />);
+  assert.ok(!screen.queryByRole('button', { name: /requery/i }));
+
+  // `none` (asked, nothing came back) and `confirmed` are both settled: an
+  // answer is recorded either way, and either can be worth re-asking about.
+  rerender(<MediaCard group={{ ...GROUP, metadata: { state: 'none' } }} onPick={() => {}} />);
+  assert.ok(screen.getByRole('button', { name: 'Requery metadata' }));
+
+  rerender(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
+  assert.ok(screen.getByRole('button', { name: 'Requery metadata' }));
+});
+
+test('clicking the Requery button disables it and shows in-flight text', async () => {
+  let resolveRequery: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    resolveRequery = resolve;
+  });
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/requery') {
+      await held;
+      return jsonResponse({ requeued: 1, missing: 0, unavailable: 0, unaskable: 0 });
+    }
+    return jsonResponse({ 1: CONFIRMED });
+  }) as unknown as typeof fetch;
+
+  render(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Requery metadata' }));
+
+  const inFlight = await waitFor(() => screen.getByRole('button', { name: /requerying/i }));
+  assert.equal((inFlight as HTMLButtonElement).disabled, true);
+
+  resolveRequery?.();
+  // Settle the follow-up refetch too, so nothing is still in flight once
+  // this test hands off to the next one.
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: 'Requery metadata' })));
+});
+
+test('the card keeps its title and cast on screen while a requery is in flight', async () => {
+  let resolveRequery: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    resolveRequery = resolve;
+  });
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/requery') {
+      await held;
+      return jsonResponse({ requeued: 1, missing: 0, unavailable: 0, unaskable: 0 });
+    }
+    return jsonResponse({ 1: CONFIRMED });
+  }) as unknown as typeof fetch;
+
+  render(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Requery metadata' }));
+  await waitFor(() => screen.getByRole('button', { name: /requerying/i }));
+
+  // No blanking: the card keeps rendering the metadata it already has for as
+  // long as the request is in flight.
+  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'Alex Coal');
+  assert.ok(screen.getByText('Alex Coal', { selector: 'li' }));
+  assert.ok(screen.getByText('A synopsis from the provider.'));
+
+  resolveRequery?.();
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: 'Requery metadata' })));
+});
+
+test('a rejected requery re-enables the button, shows the error, and keeps the existing metadata', async () => {
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/requery') return jsonResponse({ error: 'Invalid request' }, 400);
+    return jsonResponse({ 1: CONFIRMED });
+  }) as unknown as typeof fetch;
+
+  render(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Requery metadata' }));
+
+  await waitFor(() => assert.ok(screen.getByText('Invalid request')));
+
+  // Re-enabled, not left disabled, so a retry is possible.
+  const button = screen.getByRole('button', { name: 'Requery metadata' });
+  assert.equal((button as HTMLButtonElement).disabled, false);
+
+  // The existing metadata — untouched by the failure — is still on screen.
+  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'Alex Coal');
+  assert.ok(screen.getByText('A synopsis from the provider.'));
+});
+
+test('a successful requery shows the fresher answer without a reload', async () => {
+  // The provider drained the queue between the two calls this button makes —
+  // the best case, and the one "a fast answer appears without a reload" is
+  // actually about.
+  const fresher: MetadataView = { ...CONFIRMED, synopsis: 'A fresher synopsis.' };
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/requery') {
+      return jsonResponse({ requeued: 1, missing: 0, unavailable: 0, unaskable: 0 });
+    }
+    return jsonResponse({ 1: fresher });
+  }) as unknown as typeof fetch;
+
+  render(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
+  assert.ok(screen.getByText('A synopsis from the provider.'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Requery metadata' }));
+
+  await waitFor(() => assert.ok(screen.getByText('A fresher synopsis.')));
+  // #40: never `assert.equal(screen.queryByText(x), null)`.
+  assert.ok(!screen.queryByText('A synopsis from the provider.'));
+  assert.ok(screen.getByRole('button', { name: 'Requery metadata' }));
 });

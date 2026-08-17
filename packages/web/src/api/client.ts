@@ -159,6 +159,35 @@ export interface MetadataRequestResponse {
   unavailable: number;
 }
 
+/**
+ * The answer to `POST /api/metadata/requery`. Mirrors `MetadataRequeryResponse`
+ * in `packages/core/src/http/views.ts` — duplicated rather than imported, the
+ * same way `MetadataRequestResponse` above already is, because the web
+ * package does not depend on core.
+ *
+ * Four counters, not `MetadataRequestResponse`'s five: this route's
+ * precondition is that the group is already settled, so there is no
+ * `alreadyAnswered`/`pending` pair to report here — every id either gets
+ * requeued or falls into one of the three ways it cannot. `unaskable` is the
+ * one with no counterpart there: `/api/metadata/request` folds the same
+ * "provider cannot answer this group" case into `alreadyAnswered`, which is
+ * honest for a route whose group had no answer yet; here the group is already
+ * settled, so the id gets its own outcome rather than reusing a counter that
+ * would imply this route rewrote something.
+ *
+ * `requeued + missing + unavailable + unaskable` always equals the number of
+ * distinct ids sent. The SPA does not currently read any of these counts —
+ * the Requery button only cares whether the call succeeded — but the shape
+ * is kept accurate rather than loosened to `Record<string, number>`, the same
+ * choice `MetadataRequestResponse` already made.
+ */
+export interface MetadataRequeryResponse {
+  requeued: number;
+  missing: number;
+  unavailable: number;
+  unaskable: number;
+}
+
 export interface GroupView {
   id: number;
   plugin: string;
@@ -582,6 +611,23 @@ export const api = {
     const init: RequestInit = { method: 'POST', body: JSON.stringify({ groupIds }) };
     return request<MetadataRequestResponse>(
       '/api/metadata/request',
+      signal === undefined ? init : { ...init, signal },
+    );
+  },
+  /**
+   * Re-asks the provider for a group that already has a settled answer —
+   * `MediaCard`'s Requery button is the only caller. Deliberately separate
+   * from `requestMetadata`: that call is `useGroupMetadata`'s own lazy
+   * trigger for a group nothing has asked about yet, and a settled group is
+   * never in the id list that hook builds, so there is no overlap between
+   * the two to reconcile. `signal` is threaded through for the same reason it
+   * is on `requestMetadata`, even though the button's own call never aborts
+   * one mid-flight today.
+   */
+  requeryMetadata: (groupIds: number[], signal?: AbortSignal) => {
+    const init: RequestInit = { method: 'POST', body: JSON.stringify({ groupIds }) };
+    return request<MetadataRequeryResponse>(
+      '/api/metadata/requery',
       signal === undefined ? init : { ...init, signal },
     );
   },
