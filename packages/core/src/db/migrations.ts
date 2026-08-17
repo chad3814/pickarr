@@ -475,6 +475,29 @@ CREATE INDEX metadata_candidates_group ON metadata_candidates (group_id);
 ALTER TABLE discovered_sites ADD COLUMN source_id INTEGER;
 `;
 
+/**
+ * One small operational fact about this installation per row.
+ *
+ * A generic key-value table earns its keep only while it stays small, so the
+ * rule is written here rather than left to taste: a row is a pass marker, a
+ * cursor, a "when did this last run" — something singular, operational, and
+ * never read in bulk. Not user data. Not anything joined against. Not anything
+ * with enough structure to want columns; that earns a real table. Keys are
+ * namespaced `subsystem:name` so a reader can tell at a glance who owns one.
+ *
+ * It exists because the re-key pass is deliberately not a migration — it runs
+ * the live parser, so it has no place in `schema_migrations` — and it still
+ * needs somewhere to record that it has run. See
+ * docs/superpowers/specs/2026-08-14-rekey-scene-slugs-design.md.
+ */
+const APP_STATE = `
+CREATE TABLE app_state (
+  key        TEXT PRIMARY KEY,
+  value      TEXT    NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`;
+
 export const migrations: Migration[] = [
   {
     version: 1,
@@ -641,6 +664,21 @@ export const migrations: Migration[] = [
 
         CREATE INDEX performer_queue_due ON performer_queue (next_at);
       `);
+    },
+  },
+  // 10, and the fourth instance of the story above — which is now less a
+  // recurring accident than a property of how this project works. This table
+  // was written as `7`, renumbered to `8` when `main` took 7 for the performer
+  // tables, and renumbered again when `main` took both 8 and 9 while the
+  // re-key branch was in flight. Three parallel branches, each picking the
+  // next free number correctly at the moment it looked, is enough to collide;
+  // checking before picking is necessary but not sufficient, because the
+  // answer expires. `assertUniqueVersions` is what actually holds the line,
+  // and it has now caught this four times.
+  {
+    version: 10,
+    up(db) {
+      db.exec(APP_STATE);
     },
   },
 ];

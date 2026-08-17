@@ -174,6 +174,18 @@ export function markTrashed(
   );
 }
 
+/**
+ * Rewrites where a live file's row says it lives, after the file underneath
+ * it is moved without becoming a different file — the re-key pass's rename
+ * (`pipeline/rekey.ts`), not a new import. `trash_path` is untouched by
+ * design and has its own writer, `markTrashed`: a trashed file's `trash_path`
+ * records where it went once, a historical fact, not a location that tracks
+ * a still-live `dest_path` around.
+ */
+export function updateDestPath(db: DatabaseSync, id: number, destPath: string): void {
+  db.prepare('UPDATE imported_files SET dest_path = ? WHERE id = ?').run(destPath, id);
+}
+
 /** Every row for a group, live or already trashed — for inspection/tests. */
 export function filesForGroup(db: DatabaseSync, groupId: number): ImportedFileRow[] {
   return db

@@ -1,6 +1,8 @@
 import { realpathSync } from 'node:fs';
+import { rename } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { loadConfig, readConfigDocument } from './config/load.ts';
 import { openDatabase } from './db/open.ts';
@@ -20,6 +22,7 @@ import { ingestEntries } from './ingest/ingest.ts';
 import { reconcileClient } from './pipeline/reconcile.ts';
 import { importDownload } from './pipeline/import.ts';
 import { recoverInterruptedWork } from './pipeline/recover.ts';
+import { runRekeyOnBoot, type RekeyDeps } from './pipeline/rekey.ts';
 import { createScheduler } from './pipeline/scheduler.ts';
 import { createMetadataRunner } from './pipeline/metadata.ts';
 import { createPerformerRunner } from './pipeline/performers.ts';
@@ -83,6 +86,70 @@ export function composeMetadataTick(
   };
 }
 
+/**
+ * The Task 6 wiring point: runs the re-key pass (or, once it has ever run,
+ * its every-boot drift check) and turns whatever `runRekeyOnBoot` did into
+ * the one boot-log line an operator reads to learn what happened to their
+ * library. Exported, with its own `log` parameter, and kept to exactly this
+ * — call `runRekeyOnBoot`, log, never rethrow — rather than folded inline
+ * into `main()`, so this exact wiring can be exercised without booting a
+ * whole server: see `main.test.ts`'s "startup test" for what breaks when the
+ * `try`/`catch` below is removed.
+ *
+ * The `try`/`catch` is the whole point of this function existing separately
+ * from `runRekeyOnBoot`. `migrate`'s own runner rethrows on failure by design
+ * (`db/migrate.ts:69-80`) — correct for a schema change a broken database
+ * cannot run without. This pass is different: it re-parses already-live user
+ * data with the *current* parser, so a parser regression is a real
+ * possibility here in a way it structurally is not for a migration, and it
+ * must never be able to make the application unbootable. Every failure mode
+ * `runRekeyOnBoot` cannot itself convert into a counted, logged outcome —
+ * which per its own contract should be none of them, since `applyRekey`
+ * already counts a per-group throw as `failed` rather than propagating it —
+ * is logged here and swallowed instead.
+ */
+export async function runRekeyAtBoot(
+  db: DatabaseSync,
+  registry: PluginRegistry,
+  deps: RekeyDeps,
+  // Named distinctly from the module-level `log` below (not just `log`,
+  // which `oxlint`'s no-shadow rule flags): this parameter is what makes the
+  // function testable without a real console, and shadowing the very
+  // function it stands in for in tests is exactly the confusion that rule
+  // exists to catch.
+  emitLog: (message: string) => void,
+): Promise<void> {
+  try {
+    const outcome = await runRekeyOnBoot(db, registry, deps);
+    if (outcome.report === null) {
+      // The marker was already set: nothing was written this boot, only
+      // `countDrift`'s read. `skippedDestinationExists` and friends do not
+      // apply here — there is no report — so the only thing worth an
+      // operator's attention is whether anything has drifted since the pass
+      // last ran.
+      emitLog(
+        'rekey: marker already set, drift check only' +
+          (outcome.drift > 0 ? ` — ${outcome.drift} group(s) no longer agree with a fresh parse` : ''),
+      );
+    } else {
+      const r = outcome.report;
+      // Every bucket named explicitly, `skippedDestinationExists` included
+      // and kept distinct from `failed` — see `RekeyReport`'s own doc comment
+      // for why folding a correct refusal into the failure count would send
+      // whoever reads this line hunting a bug that does not exist.
+      emitLog(
+        `rekey: moved ${r.moved} (${r.renamed} file(s) renamed), merged ${r.merged}, ` +
+          `skipped ${r.skippedEdited} edited / ${r.skippedUnparsable} unparsable / ` +
+          `${r.skippedCollision} collision / ${r.skippedDestinationExists} destination-exists, ` +
+          `failed ${r.failed}` +
+          (outcome.drift > 0 ? `, ${outcome.drift} group(s) still not agreeing with a fresh parse` : ''),
+      );
+    }
+  } catch (error) {
+    emitLog(`rekey: pass threw and was skipped, startup continuing — ${(error as Error).message}`);
+  }
+}
+
 async function main(): Promise<void> {
   const config = await loadConfig(CONFIG_PATH);
   // Captured before the server can rewrite the file, and parsed rather than
@@ -95,6 +162,42 @@ async function main(): Promise<void> {
   const bootConfigDocument = await readConfigDocument(CONFIG_PATH);
   const db = openDatabase(config.database.path);
   const registry = await loadPlugins(config);
+
+  // Task 6: the re-key pass. Run here — after the plugins that parse titles
+  // are loaded, before anything below reads a group's identity for real work
+  // — so that whatever this boot's clients, scheduler and server end up
+  // seeing is already whatever this pass leaves behind. `migrate` has
+  // already run inside `openDatabase` above; this pass is deliberately not
+  // part of that, since it runs the live parser rather than a fixed schema
+  // change (see `runRekeyOnBoot`'s doc comment).
+  //
+  // This call MUST stay before `await server.listen(...)` below. `planRekey`
+  // reads every group once and `applyRekey` acts on that single snapshot —
+  // safe only because nothing else can be creating a download, an imported
+  // file, or a group between the read and the write. Once `server.listen`
+  // has run, incoming HTTP traffic can do exactly that, and the snapshot a
+  // merge decided against stops being a fact about "now" by the time the
+  // merge's delete actually runs (see the comment on the merge branch inside
+  // `applyRekey`, which names this exact scenario). Moving this pass after
+  // `listen` — to boot faster, or to start serving while it runs — would
+  // reopen that window. The `groupHistory` re-check inside the merge's own
+  // transaction (`rekey.ts`, Task 4a) is the backstop if that ordering is
+  // ever violated: it turns a merge that raced a real write into a clean
+  // `skipped-collision` rather than a deleted group with live history. It is
+  // a backstop, not a substitute for keeping this above `listen` — it only
+  // catches the merge case, not a `move` racing a concurrent import.
+  await runRekeyAtBoot(
+    db,
+    registry,
+    // The real implementations, wired here rather than defaulted inside
+    // `pipeline/rekey.ts`: `rename` is `node:fs/promises`' own function,
+    // unadapted, and `commit` is documented as having exactly one legitimate
+    // body — see `RekeyDeps`'s own doc comment for why both exist as a seam
+    // at all (a deterministic failure point for tests) rather than being
+    // called directly.
+    { now: () => Date.now(), rename, commit: (handle) => handle.exec('COMMIT') },
+    log,
+  );
 
   const clients = new Map<string, DownloadClient>();
   for (const clientConfig of config.downloadClients) {

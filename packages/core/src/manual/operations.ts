@@ -28,6 +28,7 @@ import {
   releasesForGroup,
   updateReleaseQuality,
 } from '../db/releases.ts';
+import { inTransaction } from '../db/transaction.ts';
 import { commitRelease, validateParsed } from '../ingest/commit.ts';
 import type { PluginRegistry } from '../plugins/registry.ts';
 import { lstatOrNull, moveWithinLibrary, type RenameLike } from '../pipeline/import.ts';
@@ -63,25 +64,6 @@ export type ManualResult<T> = { ok: T } | { error: string; status: 400 | 404 | 4
 
 function refuse<T>(status: 400 | 404 | 409, error: string): ManualResult<T> {
   return { error, status };
-}
-
-/**
- * Every operation writes several rows that only make sense together — a
- * release and the parse error it clears, a merge and the group it deletes — so
- * each runs in one transaction, as `ingestEntries` does. A refusal commits an
- * empty transaction rather than opening one late, which keeps the precondition
- * checks and the writes reading the same snapshot.
- */
-function inTransaction<T>(db: DatabaseSync, body: () => T): T {
-  db.exec('BEGIN');
-  try {
-    const result = body();
-    db.exec('COMMIT');
-    return result;
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
 }
 
 /**

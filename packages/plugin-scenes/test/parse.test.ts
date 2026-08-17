@@ -241,6 +241,53 @@ test('a trailing dot-attached run is only a group when encode information preced
   assert.notEqual(a.identityKey, b.identityKey);
 });
 
+test("a title's own trailing number cannot anchor a dot-attached group", () => {
+  // `ANCILLARY_TOKEN` admits a bare number so the `1` split off `DDP5.1` reads
+  // as part of the run it continues. Behind title material the same token is a
+  // scene or sequel number, and reading it as an encode anchor detached
+  // `JAP.XXX.1080p` and `XXX.1080p` as groups — the second naming the `XXX`
+  // marker itself. Both names then had no encode section left to find and were
+  // refused outright, which is the failure the dotted branch exists to remove.
+  const sequel = parseSceneRelease('ClubSweethearts.26.08.05.Minori.Kamiyama.Rispetto.1.JAP.XXX.1080p');
+  assert.ok(sequel);
+  assert.equal(sequel.display.title, 'Minori Kamiyama Rispetto 1');
+  assert.equal(sequel.quality.releaseGroup, undefined);
+  assert.equal(sequel.quality.resolution, 1080);
+
+  const kept = parseSceneRelease('ClubSweethearts.26.08.05.Hiyori.JAPANESE.2.XXX.1080p');
+  assert.ok(kept);
+  assert.equal(kept.display.title, 'Hiyori JAPANESE 2');
+  assert.equal(kept.quality.releaseGroup, undefined);
+  assert.equal(kept.quality.resolution, 1080);
+
+  // The one name in the 10,651-title corpus that this reaches, and the reason
+  // the class is worth a rule rather than two fixtures: `Cums.POV.2160p` left as
+  // a group, on the strength of the `2` in front of it.
+  const corpus = parseSceneRelease('Manyvids.SweetieFox.23.02.09.Sexy.Slave.in.Fox.Ears.2.Cums.POV.2160p');
+  assert.ok(corpus);
+  assert.equal(corpus.display.title, 'Sexy Slave in Fox Ears 2 Cums POV');
+  assert.equal(corpus.quality.releaseGroup, undefined);
+  assert.equal(corpus.quality.resolution, 2160);
+});
+
+test('a channel count still anchors a dot-attached group, on the token behind it', () => {
+  // The other half of the same rule, and the reason the fix asks the previous
+  // token rather than refusing bare numbers outright: here the `1` really is
+  // encode information, because `DDP5` is. Both spellings must still name `NBQ`.
+  const upscale = parseSceneRelease(
+    'Nympho.24.03.04.Bianca.Bangs.And.Myra.Moans.XXX.2160p.DDP5.1.NBQ.realesrgan',
+  );
+  assert.ok(upscale);
+  assert.equal(upscale.quality.releaseGroup, 'NBQ');
+  assert.equal(upscale.quality.resolution, 2160);
+  assert.equal(upscale.quality.extras?.['upscaled'], true);
+
+  const native = parseSceneRelease('Nympho.24.03.04.Bianca.Bangs.And.Myra.Moans.XXX.2160p.DDP5.1.NBQ');
+  assert.ok(native);
+  assert.equal(native.quality.releaseGroup, 'NBQ');
+  assert.equal(native.identityKey, upscale.identityKey);
+});
+
 // --- Invariants -------------------------------------------------------------
 // The three properties below are what collation quality actually depends on.
 // They are asserted over a corpus rather than one input each, so a new

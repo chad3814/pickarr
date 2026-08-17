@@ -151,12 +151,49 @@ const CORPUS: Entry[] = [
     isNew: true,
   },
   // --- Names the encode vocabulary nearly missed ----------------------------
+  //
+  // `26282` is PornMegaLoad's own content id, the same shape as `42466` in
+  // the suffix-parse tests, and the title suffix walk now drops it with the
+  // rest of the trailing run instead of leaving it in the scene title.
   {
     name: 'PornMegaLoad.24.03.17.Cherry.Brady.26282.XXX.REMASTERED.XviD-iPT Team',
-    scene: 'pornmegaload/cherry-brady-26282',
-    key: 'pornmegaload:2024-03-17:cherry-brady-26282',
-    title: 'Cherry Brady 26282',
+    scene: 'pornmegaload/cherry-brady',
+    key: 'pornmegaload:2024-03-17:cherry-brady',
+    title: 'Cherry Brady',
     quality: '-|-|xvid|-|-|-|iPT Team',
+    isNew: true,
+  },
+  // --- Content-type and language tags, pinned inside the corpus table -------
+  //
+  // Before this pair the corpus carried no entry ending in a content-type or
+  // language token at all, so `corpus: no two distinct scenes ever share an
+  // identity key` never actually exercised a name the vocabulary walk trims —
+  // it could not have caught a merge caused by this feature no matter what
+  // broke. Two encodes of the same `Solo`-tagged scene, so the walk's
+  // trimming is checked against both the collision and the shares-a-key
+  // invariants at once.
+  {
+    name: 'PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.1080p.MP4-WRB',
+    scene: 'pornmegaload/suki-sin',
+    key: 'pornmegaload:2026-08-05:suki-sin',
+    title: 'Suki Sin',
+    quality: '1080|-|-|mp4|-|-|WRB',
+    isNew: true,
+  },
+  {
+    name: 'PornMegaLoad.26.08.05.Suki.Sin.Solo.42466.XXX.2160p.HEVC.MP4-GRP',
+    scene: 'pornmegaload/suki-sin',
+    key: 'pornmegaload:2026-08-05:suki-sin',
+    title: 'Suki Sin',
+    quality: '2160|-|h265|mp4|-|-|GRP',
+    isNew: true,
+  },
+  {
+    name: 'HollandschePassie.26.08.06.Alessandra.Sweet.Hardcore.DUTCH.XXX.1080p.MP4-WRB',
+    scene: 'hollandschepassie/alessandra-sweet',
+    key: 'hollandschepassie:2026-08-06:alessandra-sweet',
+    title: 'Alessandra Sweet',
+    quality: '1080|-|-|mp4|-|-|WRB',
     isNew: true,
   },
   {
