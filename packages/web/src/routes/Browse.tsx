@@ -6,6 +6,7 @@ import { usePagedList } from '../api/usePagedList.ts';
 import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
 import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
 import { MediaCard } from '../components/MediaCard.tsx';
+import { SearchBox } from '../components/SearchBox.tsx';
 
 export function Browse() {
   const [fields, setFields] = useState<ManualFieldsResponse>({});
@@ -196,13 +197,15 @@ export function Browse() {
   return (
     <section>
       <h1>Browse</h1>
-      <input
-        className="search"
-        type="search"
-        placeholder="Search"
-        value={search}
-        onChange={(event) => setSearch(event.target.value)}
-      />
+      {/*
+        The same control Picks and Downloads render, but not the same job: this
+        term goes to `/api/browse?q=` rather than filtering rows already in hand,
+        because browse is paginated and the matches may be on pages nobody has
+        loaded. Rebuilding `fetchPage` is what starts the list over — see the
+        callback above, and `usePagedList`'s `generation` for how a page still in
+        flight for the previous term is dropped rather than appended.
+      */}
+      <SearchBox label="Search groups" value={search} onChange={setSearch} />
       {notice !== null && <p className="notice">{notice}</p>}
       {error !== null && <p className="error">{error}</p>}
       {identityChange.plan !== null && (
