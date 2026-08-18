@@ -19,6 +19,13 @@ export interface ParseFailure {
   reason: string;
 }
 
+/**
+ * Which pass is ingesting: the feed's current page, or a walk back through its
+ * history. It changes how a release is *ordered*, never whether it is stored —
+ * see `Arrival` in `commit.ts` for the rule itself.
+ */
+export type IngestSource = 'live' | 'backfill';
+
 export interface IngestResult {
   seen: number;
   inserted: number;
@@ -94,6 +101,16 @@ export function ingestEntries(
   feed: FeedConfig,
   entries: FeedEntry[],
   now: number,
+  /**
+   * Trailing and defaulted, so the live poll, the e2e harness and every existing
+   * test call this exactly as they did. Only the backfill pass passes anything.
+   *
+   * A mode rather than a full `Arrival`, because a backfilled item's age is the
+   * *entry's* `publishedAt` and that differs down the page — the caller knows it
+   * is backfilling, this function knows which item it is looking at, and the
+   * `Arrival` handed to `commitRelease` is built per entry from the two.
+   */
+  source: IngestSource = 'live',
 ): IngestResult {
   const result: IngestResult = {
     seen: entries.length,
@@ -137,7 +154,14 @@ export function ingestEntries(
         continue;
       }
 
-      const committed = commitRelease(db, outcome.prepared, plugin, feedItemId, now);
+      const committed = commitRelease(
+        db,
+        outcome.prepared,
+        plugin,
+        feedItemId,
+        now,
+        source === 'live' ? { kind: 'live' } : { kind: 'backfill', publishedAt: entry.publishedAt },
+      );
       if (committed.groupCreated) result.groupsCreated += 1;
       result.releasesAdded += 1;
       if (committed.upgradeFlagged) result.upgradesFlagged += 1;

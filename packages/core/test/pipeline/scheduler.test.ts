@@ -449,3 +449,91 @@ test('an unchanged reconcile situation is stated once, and again only when it ch
   assert.equal(logged.length, 3, 'it happened again, so it is said again');
   db.close();
 });
+
+test('no backfill timer is registered when runBackfill is not supplied', (t) => {
+  // The mirror of the metadata assertion above, and it is what keeps backfill
+  // inert: an install where no feed opted in must gain no timer, not a timer
+  // ticking every hour over a runner that would walk nothing.
+  const db = openTestDatabase();
+  const timerSpy = t.mock.method(global, 'setInterval');
+
+  const baseDeps = {
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => NO_RECONCILE_WORK,
+    clientIds: [],
+    log: () => {},
+  };
+
+  const withoutBackfill = createScheduler(baseDeps);
+  withoutBackfill.start();
+  const callsWithout = timerSpy.mock.calls.length;
+  withoutBackfill.stop();
+
+  timerSpy.mock.resetCalls();
+
+  const withBackfill = createScheduler({
+    ...baseDeps,
+    runBackfill: async () => {},
+    backfillIntervalMs: 1_000,
+  });
+  withBackfill.start();
+  const callsWith = timerSpy.mock.calls.length;
+  withBackfill.stop();
+
+  assert.equal(
+    callsWith,
+    callsWithout + 1,
+    'supplying runBackfill must register exactly one additional timer',
+  );
+  db.close();
+});
+
+test('a backfill pass still walking is skipped rather than queued', async () => {
+  // `tryRun`, not `run`. A walk that is still fetching has nothing to gain from a
+  // second pass starting behind it, and queueing them would turn a slow indexer
+  // into a growing backlog of passes that each re-read the same page.
+  const db = openTestDatabase();
+  mock.timers.enable({ apis: ['setInterval'] });
+  let started = 0;
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+
+  const scheduler = createScheduler({
+    db,
+    feeds: [],
+    ingestFeed: async () => {
+      throw new Error('unused');
+    },
+    reconcile: async () => NO_RECONCILE_WORK,
+    clientIds: [],
+    log: () => {},
+    runBackfill: async () => {
+      started += 1;
+      await held;
+    },
+    backfillIntervalMs: 1_000,
+  });
+
+  try {
+    scheduler.start();
+    mock.timers.tick(1_000);
+    await settle();
+    mock.timers.tick(1_000);
+    mock.timers.tick(1_000);
+    await settle();
+
+    assert.equal(started, 1);
+    release();
+    await settle();
+  } finally {
+    scheduler.stop();
+    mock.timers.reset();
+    db.close();
+  }
+});

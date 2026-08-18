@@ -13,6 +13,19 @@ export const RECONCILE_INTERVAL_MS = 10_000;
  */
 export const DEFAULT_METADATA_INTERVAL_MS = 5_000;
 
+/**
+ * How often a backfill pass runs when `runBackfill` is supplied without an
+ * interval. An hour, and deliberately three orders of magnitude slower than the
+ * feed poll: the poll wants to be frequent and shallow so a new scene is noticed,
+ * while the walk wants to be occasional and deep because it is reading a history
+ * that is not going anywhere. Sharing one timer would make one of them wrong.
+ *
+ * It is also the rate limit. A pass fetches `pagesPerPass` pages and every title
+ * on them goes through the same site resolution the live poll uses, against a
+ * provider the metadata passes also budget for.
+ */
+export const DEFAULT_BACKFILL_INTERVAL_MS = 60 * 60_000;
+
 export interface SchedulerDeps {
   db: DatabaseSync;
   feeds: FeedConfig[];
@@ -28,6 +41,13 @@ export interface SchedulerDeps {
    */
   runMetadata?: () => Promise<void>;
   metadataIntervalMs?: number;
+  /**
+   * Runs one backfill pass. Absent when no feed has opted in — main.ts decides
+   * that once at startup, for the same reason it decides `runMetadata`: this
+   * scheduler asks whether there is a runner, never why there might not be.
+   */
+  runBackfill?: () => Promise<void>;
+  backfillIntervalMs?: number;
 }
 
 export interface Scheduler {
@@ -43,6 +63,16 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   const ingestMutex = createMutex();
   const reconcileMutex = createMutex();
   const metadataMutex = createMutex();
+  // Its own mutex, and emphatically not `ingestMutex`. That one is shared by
+  // every feed and uses queueing `run`, so a walk holding it across several
+  // fetches of up to 30s each would stall every live poll and stack their ticks
+  // up behind it — the failure the reconcile and metadata timers use `tryRun` to
+  // avoid. Running concurrently with a live ingest is safe: `ingestEntries` is
+  // synchronous, so two flows can only interleave at their `await` points, which
+  // are the fetches. Neither the `(feed_id, guid)` constraint nor
+  // `UNIQUE (plugin, identity_key)` can be raced by database work that cannot be
+  // interleaved.
+  const backfillMutex = createMutex();
   const untracked = new Map<string, UntrackedEntry[]>();
   const timers: NodeJS.Timeout[] = [];
 
@@ -218,6 +248,26 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         }, deps.metadataIntervalMs ?? DEFAULT_METADATA_INTERVAL_MS);
         metadataTimer.unref();
         timers.push(metadataTimer);
+      }
+
+      // Registered only when a feed has opted in, so an install that has not
+      // configured backfill gains no timer at all — which is also what keeps the
+      // timer-count assertion in scheduler.test.ts honest about what `start`
+      // creates by default.
+      const runBackfill = deps.runBackfill;
+      if (runBackfill !== undefined) {
+        // `tryRun` and `.catch()` for the same reasons as the metadata tick: a
+        // pass that is still walking has nothing to gain from a second one
+        // starting, and an unhandled rejection would take the process down over a
+        // transient indexer fault. Per-feed failures are already swallowed inside
+        // the runner, so this catch is for the query that lists the feeds.
+        const backfillTimer = setInterval(() => {
+          void backfillMutex
+            .tryRun(runBackfill)
+            .catch((error: Error) => deps.log(`backfill pass failed: ${error.message}`));
+        }, deps.backfillIntervalMs ?? DEFAULT_BACKFILL_INTERVAL_MS);
+        backfillTimer.unref();
+        timers.push(backfillTimer);
       }
     },
 

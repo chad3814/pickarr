@@ -472,3 +472,106 @@ test('a plugin that keeps no reason still records one', () => {
   const result = ingestEntries(db, plugin, FEED, [entry('g1', 'Whatever.2160p')], 1000);
   assert.deepEqual(result.parseFailures, [{ title: 'Whatever.2160p', reason: 'unrecognized' }]);
 });
+
+/** A dated entry, since a backfilled item's age is the whole question below. */
+function dated(guid: string, title: string, publishedAt: number | null): FeedEntry {
+  return { ...entry(guid, title), publishedAt };
+}
+
+function listRankAt(db: DatabaseSync, groupId: number): number {
+  const row = db.prepare('SELECT list_rank_at AS r FROM media_groups WHERE id = ?').get(groupId);
+  return Number(row?.['r']);
+}
+
+test('a backfilled group is ordered by when the scene published, not when we read it', () => {
+  // `insertGroup` writes `created_at` into `list_rank_at` too, so a 2019 scene
+  // pulled off page forty would otherwise sort as though it had just arrived and
+  // push genuinely new groups down the browse list.
+  const db = openTestDatabase();
+  const published = 1_500_000_000_000;
+
+  ingestEntries(db, PLUGIN, FEED, [dated('g1', 'alpha|1080', published)], 9_000_000_000_000, 'backfill');
+
+  const group = findGroup(db, PLUGIN.id, 'alpha');
+  assert.ok(group !== null);
+  assert.equal(listRankAt(db, group.id), published);
+  // `created_at` still records when the row was made, which is now. Only the
+  // ordering column is backdated.
+  const created = db.prepare('SELECT created_at AS c FROM media_groups WHERE id = ?').get(group.id);
+  assert.equal(Number(created?.['c']), 9_000_000_000_000);
+  db.close();
+});
+
+test('a live group is still ordered by arrival', () => {
+  const db = openTestDatabase();
+
+  ingestEntries(db, PLUGIN, FEED, [dated('g1', 'alpha|1080', 1_500_000_000_000)], 4000);
+
+  const group = findGroup(db, PLUGIN.id, 'alpha');
+  assert.ok(group !== null);
+  // The publish date is deliberately ignored on the live path: a scene the feed
+  // published last week is still news to this install today.
+  assert.equal(listRankAt(db, group.id), 4000);
+  db.close();
+});
+
+test('a backfilled upgrade is flagged without moving the group up the list', () => {
+  // The issue's own worry: a backfilled 2160p legitimately beats a picked 1080p,
+  // so `earnsListBump` fires and `flagUpgrade` re-sorts the list around a
+  // discovery about the past. The flag is still wanted — a better encode exists
+  // and the user should be offered it — so this is `refreshUpgradeFlag`'s
+  // distinction, not a suppression.
+  const db = openTestDatabase();
+  ingestEntries(db, PLUGIN, FEED, [entry('g1', 'alpha|1080')], 1000);
+  const group = findGroup(db, PLUGIN.id, 'alpha');
+  assert.ok(group !== null);
+  pick(db, group.id, latestReleaseId(db));
+  const before = listRankAt(db, group.id);
+
+  const result = ingestEntries(
+    db,
+    PLUGIN,
+    FEED,
+    [dated('g2', 'alpha|2160', 1_500_000_000_000)],
+    9_000_000_000_000,
+    'backfill',
+  );
+
+  const after = getGroup(db, group.id);
+  assert.ok(after !== null);
+  // Flagged: the better release is on offer.
+  assert.equal(after.upgradeReleaseId, latestReleaseId(db));
+  // Not bumped: nothing happened to this group, we merely learned something.
+  assert.equal(listRankAt(db, group.id), before);
+  // And it is not reported as an upgrade *event* either, since no bump was earned.
+  assert.equal(result.upgradesFlagged, 0);
+  db.close();
+});
+
+test('a live upgrade still bumps the group up the list', () => {
+  const db = openTestDatabase();
+  ingestEntries(db, PLUGIN, FEED, [entry('g1', 'alpha|1080')], 1000);
+  const group = findGroup(db, PLUGIN.id, 'alpha');
+  assert.ok(group !== null);
+  pick(db, group.id, latestReleaseId(db));
+
+  const result = ingestEntries(db, PLUGIN, FEED, [entry('g2', 'alpha|2160')], 5000);
+
+  assert.equal(listRankAt(db, group.id), 5000);
+  assert.equal(result.upgradesFlagged, 1);
+  db.close();
+});
+
+test('a backfilled item with no publish date falls back to now, as documented', () => {
+  // The limitation §12 records rather than hides: a feed that publishes no dates
+  // cannot be ordered, and inventing a timestamp would be worse than a
+  // degradation someone can read about.
+  const db = openTestDatabase();
+
+  ingestEntries(db, PLUGIN, FEED, [dated('g1', 'alpha|1080', null)], 7000, 'backfill');
+
+  const group = findGroup(db, PLUGIN.id, 'alpha');
+  assert.ok(group !== null);
+  assert.equal(listRankAt(db, group.id), 7000);
+  db.close();
+});

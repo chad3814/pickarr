@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { loadConfig, readConfigDocument } from './config/load.ts';
+import type { FeedConfig } from './config/schema.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins, type PluginRegistry } from './plugins/registry.ts';
 import { createSabnzbdClient } from './clients/sabnzbd.ts';
@@ -25,6 +26,7 @@ import { recoverInterruptedWork } from './pipeline/recover.ts';
 import { runRekeyOnBoot, type RekeyDeps } from './pipeline/rekey.ts';
 import { createScheduler } from './pipeline/scheduler.ts';
 import { createMetadataRunner } from './pipeline/metadata.ts';
+import { createBackfillRunner } from './pipeline/backfill.ts';
 import { createPerformerRunner } from './pipeline/performers.ts';
 import type { ArtworkDeps } from './media/artwork.ts';
 import { buildServer } from './http/server.ts';
@@ -311,6 +313,70 @@ async function main(): Promise<void> {
     );
   }
 
+  /**
+   * Resolve the sites named by a batch of titles, and say what happened.
+   *
+   * Shared by the live poll and the backfill walk rather than duplicated, because
+   * a backfilled title has to resolve its site by exactly the same rule: an
+   * identity key outlives the tick, so an old release keyed without a site
+   * lookup would land in a different group from the same scene arriving live —
+   * one scene, two groups, and no way to notice.
+   */
+  async function resolveSitesFor(
+    feed: FeedConfig,
+    plugin: MediaTypePlugin,
+    titles: readonly string[],
+  ): Promise<void> {
+    // Before parsing, not after: an identity key outlives the tick, so a
+    // site learned too late cannot be applied without re-keying a group the
+    // user may already have picked.
+    const sites = await resolveSitesForBatch(
+      { db, plugin, client: tpdbClient, now: () => Date.now(), log },
+      [...titles],
+    );
+    if (sites.queried > 0 || sites.confirmed.length > 0) {
+      log(
+        `site lookup ${feed.id}: ${sites.confirmed.length} confirmed ` +
+          `(${sites.queried} queried, ${sites.cached} cached)`,
+      );
+    }
+    for (const title of sites.unresolved) {
+      log(
+        `site lookup ${feed.id}: unresolved, filing under its first word — ${title}. ` +
+          'This identity key is durable; it will not change once lookups recover.',
+      );
+    }
+  }
+
+  // Absent unless some feed opted in, so an install that has not configured
+  // backfill gets no timer at all rather than an hourly tick over nothing —
+  // the same shape as `runMetadata` above.
+  const walksHistory = config.feeds.some((feed) => feed.backfill !== undefined);
+  const runBackfill = walksHistory
+    ? createBackfillRunner({
+        db,
+        feeds: config.feeds,
+        fetchPage: (feed, page) =>
+          fetchFeed(feed, {
+            page,
+            // `exactOptionalPropertyTypes` again: `pagination: undefined` is not
+            // assignable, and only a feed with a `backfill` block reaches here.
+            ...(feed.backfill === undefined ? {} : { pagination: feed.backfill }),
+          }),
+        ingestPage: async (feed, entries, source) => {
+          const plugin = registry.byPackage(feed.plugin);
+          await resolveSitesFor(
+            feed,
+            plugin,
+            entries.map((item) => item.title),
+          );
+          return ingestEntries(db, plugin, feed, entries, Date.now(), source);
+        },
+        now: () => Date.now(),
+        log,
+      })
+    : undefined;
+
   const scheduler = createScheduler({
     db,
     feeds: config.feeds,
@@ -322,30 +388,15 @@ async function main(): Promise<void> {
     ...(runMetadata === undefined
       ? {}
       : { runMetadata, metadataIntervalMs: config.metadata.intervalSeconds * 1000 }),
+    ...(runBackfill === undefined ? {} : { runBackfill }),
     ingestFeed: async (feed) => {
       const plugin = registry.byPackage(feed.plugin);
       const entries = await fetchFeed(feed);
-
-      // Before parsing, not after: an identity key outlives the tick, so a
-      // site learned too late cannot be applied without re-keying a group the
-      // user may already have picked.
-      const sites = await resolveSitesForBatch(
-        { db, plugin, client: tpdbClient, now: () => Date.now(), log },
+      await resolveSitesFor(
+        feed,
+        plugin,
         entries.map((entry) => entry.title),
       );
-      if (sites.queried > 0 || sites.confirmed.length > 0) {
-        log(
-          `site lookup ${feed.id}: ${sites.confirmed.length} confirmed ` +
-            `(${sites.queried} queried, ${sites.cached} cached)`,
-        );
-      }
-      for (const title of sites.unresolved) {
-        log(
-          `site lookup ${feed.id}: unresolved, filing under its first word — ${title}. ` +
-            'This identity key is durable; it will not change once lookups recover.',
-        );
-      }
-
       return ingestEntries(db, plugin, feed, entries, Date.now());
     },
     reconcile: async (clientId) => {

@@ -498,6 +498,40 @@ CREATE TABLE app_state (
 );
 `;
 
+/**
+ * Where each feed's walk back through its own pagination has reached.
+ *
+ * A table rather than an `app_state` row, on `app_state`'s own terms: what is
+ * stored here has a position, a terminal state and a reason, which is "enough
+ * structure to want columns". Packing it into one JSON `value` is exactly what
+ * that comment rules out.
+ *
+ * `next_page` is a **zero-based page index for both pagination styles**, not an
+ * offset. The offset arithmetic and the one-based `?page=` conversion both live in
+ * URL composition, so a position keeps meaning the same thing if a feed's `style`
+ * is corrected after the walk has started.
+ *
+ * `state` distinguishes three ways of stopping that a boolean would collapse:
+ * `done` (a page held nothing new — the history is read), `exhausted`
+ * (`maxPages` reached, so there is more and we stopped anyway) and `broken` (the
+ * indexer is not paginating at all; asking again is pointless). `detail` carries
+ * which, in words, so the difference survives without reading logs.
+ *
+ * `feed_id` is a config id, so there is deliberately no foreign key — nothing in
+ * the database owns the feed list. A feed removed from config leaves a row that
+ * harmlessly says "if this comes back, here is where it had reached".
+ */
+const FEED_BACKFILL = `
+  CREATE TABLE IF NOT EXISTS feed_backfill (
+    feed_id    TEXT    PRIMARY KEY,
+    next_page  INTEGER NOT NULL,
+    pages_read INTEGER NOT NULL,
+    state      TEXT    NOT NULL,
+    detail     TEXT,
+    updated_at INTEGER NOT NULL
+  )
+`;
+
 export const migrations: Migration[] = [
   {
     version: 1,
@@ -679,6 +713,16 @@ export const migrations: Migration[] = [
     version: 10,
     up(db) {
       db.exec(APP_STATE);
+    },
+  },
+  // 11 was free when this was written, and the comment above is the reason that
+  // sentence is worth nothing on its own. Checked again immediately before
+  // committing; `assertUniqueVersions` is what will actually catch it if another
+  // branch took it first.
+  {
+    version: 11,
+    up(db) {
+      db.exec(FEED_BACKFILL);
     },
   },
 ];

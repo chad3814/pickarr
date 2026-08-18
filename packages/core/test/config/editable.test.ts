@@ -263,3 +263,46 @@ test('a document that is not a JSON object is refused', () => {
   const result = applyEdits(['not', 'an', 'object'], submission());
   assert.ok('error' in result);
 });
+
+test('a feed backfill block written by hand survives a save from the Settings form', () => {
+  // The guarantee the backfill feature is built on. `backfill` is deliberately
+  // absent from `EditableFeed` and from `FeedFields` — one advanced field is not
+  // worth nine files and two hand-synced type mirrors — so the *only* thing
+  // keeping it on disk is `applyEdits` merging over the existing feed rather than
+  // rebuilding it. If that ever stops being true, backfill silently switches
+  // itself off the first time somebody opens Settings and presses Save.
+  const document = structuredClone(VALID) as unknown as JsonObject;
+  const feeds = asJsonArray(document['feeds']);
+  const feed = asJsonObject(feeds[0]);
+  assert.ok(feed !== null);
+  feed['backfill'] = { style: 'newznab', pageSize: 50, pagesPerPass: 3, maxPages: 20 };
+
+  const saved = applied(document);
+
+  const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
+  assert.deepEqual(savedFeed?.['backfill'], {
+    style: 'newznab',
+    pageSize: 50,
+    pagesPerPass: 3,
+    maxPages: 20,
+  });
+});
+
+test('renaming a feed drops its backfill block, which is the cost of not modelling it', () => {
+  // Not a bug to fix here, but a documented consequence worth pinning so it is
+  // discovered by a failing test rather than by a user whose walk restarted.
+  // `applyEdits` matches feeds by id, so a renamed feed has no existing entry to
+  // merge with — the same reason a kept secret cannot survive a rename.
+  const document = structuredClone(VALID) as unknown as JsonObject;
+  const feed = asJsonObject(asJsonArray(document['feeds'])[0]);
+  assert.ok(feed !== null);
+  feed['backfill'] = { style: 'page', pageSize: 100, pagesPerPass: 2, maxPages: 100 };
+
+  const saved = applied(document, (draft) => {
+    draft.feeds[0]!.id = 'renamed';
+  });
+
+  const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
+  assert.equal(savedFeed?.['id'], 'renamed');
+  assert.equal(savedFeed?.['backfill'], undefined);
+});

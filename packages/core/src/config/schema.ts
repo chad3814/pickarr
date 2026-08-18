@@ -51,11 +51,50 @@ export const downloadClientSchema = z.object({
   pathMappings: z.array(pathMappingSchema).default([]),
 });
 
+/**
+ * How to walk a feed backwards through its own pagination, and absent by default
+ * — a feed without this block is polled for its current page exactly as before.
+ *
+ * `style` is stated rather than detected. The failure of a wrong guess is silent
+ * (an indexer ignoring the parameter serves page one forever, and every item on it
+ * is already known, so the walk reports itself finished having read nothing), and
+ * there is nothing in a generic RSS document to detect from — Newznab's
+ * `<newznab:response offset= total=>` is exactly what the non-Newznab feeds this
+ * also serves do not carry.
+ *
+ * `pageSize` has to match what the indexer really returns per page, because
+ * `newznab` offsets are computed from it: too large silently skips items, too
+ * small merely re-reads them, and re-reading is free. It is the one field here a
+ * user can get quietly wrong.
+ */
+export const feedBackfillSchema = z.object({
+  style: z.enum(['newznab', 'page']),
+  pageSize: z.number().int().positive().default(100),
+  /**
+   * Pages per pass, which is also the rate limit. Backfilled titles go through
+   * the same site resolution the live poll uses — skipping it would key old
+   * groups differently from new ones and split one scene in two — so this bounds
+   * a burst against a provider the metadata passes also budget for.
+   *
+   * At least two, and that floor is load-bearing rather than taste. The only
+   * defence against an indexer that ignores the pagination parameter is noticing
+   * that consecutive pages carry the same items, and comparing them requires
+   * fetching two of them in one pass. At one page per pass there is nothing to
+   * compare against and the walk would report itself `done` having read page one
+   * repeatedly. Someone wanting a gentler walk should raise the interval, which
+   * costs nothing, rather than lower this, which costs the guard.
+   */
+  pagesPerPass: z.number().int().min(2).default(2),
+  /** Total pages ever walked for this feed, after which it stops as `exhausted`. */
+  maxPages: z.number().int().positive().default(100),
+});
+
 export const feedSchema = z.object({
   id: z.string().min(1),
   url: z.string().url(),
   plugin: z.string().min(1),
   intervalSeconds: z.number().int().positive().default(900),
+  backfill: feedBackfillSchema.optional(),
 });
 
 /**
@@ -118,4 +157,5 @@ export const configSchema = z.object({
 export type PickarrConfig = z.infer<typeof configSchema>;
 export type DownloadClientConfig = z.infer<typeof downloadClientSchema>;
 export type FeedConfig = z.infer<typeof feedSchema>;
+export type FeedBackfillConfig = z.infer<typeof feedBackfillSchema>;
 export type PathMapping = z.infer<typeof pathMappingSchema>;
