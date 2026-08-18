@@ -15,7 +15,13 @@ import {
   setPosterPath,
   type GroupMetadata,
 } from '../../src/db/metadata.ts';
-import { upsertPerformers, setPerformerArtwork, type PerformerRow } from '../../src/db/performers.ts';
+import {
+  performersForGroups,
+  setGroupPerformers,
+  setPerformerArtwork,
+  upsertPerformers,
+  type PerformerRow,
+} from '../../src/db/performers.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
 import { metadataViewOf } from '../../src/http/views.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
@@ -573,12 +579,19 @@ test('metadata reads report pending, none and confirmed distinctly', async () =>
     hasPoster: false,
     sceneUrl: null,
   });
-  assert.deepEqual(body[String(none)], { state: 'none' });
+  // The cast rides beside every state now (see `CastView`), so a castless
+  // group reads two empty lists rather than the bare state it used to.
+  assert.deepEqual(body[String(none)], { state: 'none', performers: [], performerNames: [] });
   // enqueueMetadata (via the `pending` group() call above) inserted the queue
   // row with next_at = NOW, so the response must carry that value back
   // rather than merely saying "pending".
-  assert.deepEqual(body[String(pending)], { state: 'pending', nextAttemptAt: NOW });
-  assert.deepEqual(body[String(absent)], { state: 'absent' });
+  assert.deepEqual(body[String(pending)], {
+    state: 'pending',
+    nextAttemptAt: NOW,
+    performers: [],
+    performerNames: [],
+  });
+  assert.deepEqual(body[String(absent)], { state: 'absent', performers: [], performerNames: [] });
 
   await server.close();
   db.close();
@@ -619,7 +632,12 @@ test('GET /api/metadata reads the queue for a whole page in one query, not one p
   );
   const body = response.json() as Record<string, { state: string; nextAttemptAt?: number }>;
   for (const id of [g1, g2, g3]) {
-    assert.deepEqual(body[String(id)], { state: 'pending', nextAttemptAt: NOW });
+    assert.deepEqual(body[String(id)], {
+      state: 'pending',
+      nextAttemptAt: NOW,
+      performers: [],
+      performerNames: [],
+    });
   }
 
   await server.close();
@@ -755,8 +773,8 @@ test('browse carries metadata and reads it in one query', async () => {
     hasPoster: false,
     sceneUrl: null,
   });
-  assert.deepEqual(byId.get(g2), { state: 'none' });
-  assert.deepEqual(byId.get(g3), { state: 'absent' });
+  assert.deepEqual(byId.get(g2), { state: 'none', performers: [], performerNames: [] });
+  assert.deepEqual(byId.get(g3), { state: 'absent', performers: [], performerNames: [] });
 
   await server.close();
   db.close();
@@ -988,6 +1006,113 @@ test('the image route refuses a traversal in the id', async () => {
 
   const response = await server.inject({ method: 'GET', url: '/api/performers/..%2f..%2fetc/image' });
   assert.equal(response.statusCode, 400);
+
+  await server.close();
+  db.close();
+});
+
+// The cast is a property of the *group*, not of the scene answer. The performer
+// search exists precisely for a group whose scene lookup settled without one —
+// and the commonest form of that is `state = 'none'`, no scene matched at all.
+// Reported live: a group with no scene data never showed a cast, because
+// `metadataViewOf` returned a bare `{ state: 'none' }` and threw the performers
+// it had been handed away, so the search's whole output was unreachable in the
+// case it was built for.
+
+/** Links a cast to a group the way `recordPerformerOutcome` does. */
+function linkCast(db: DatabaseSync, groupId: number, names: readonly string[]): void {
+  const ids = upsertPerformers(
+    db,
+    'theporndb',
+    names.map((name) => ({
+      sourceUuid: `uuid-${name.toLowerCase().replace(/\s+/g, '-')}`,
+      slug: name.toLowerCase().replace(/\s+/g, '-'),
+      name,
+      kind: 'performer' as const,
+      faceUrl: null,
+      imageUrl: null,
+    })),
+    NOW,
+  );
+  setGroupPerformers(db, groupId, ids);
+}
+
+test('a group whose scene lookup found nothing still reports the cast the performer search linked', () => {
+  const db = openTestDatabase();
+  const groupId = group(db, 'askable', 'Amalia Davis');
+
+  // The scene lookup ran and matched nothing — `confirmed: null`.
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: NOW });
+  // The performer search then answered, which is the whole point of the fallback.
+  linkCast(db, groupId, ['Amalia Davis']);
+
+  const view = metadataViewOf(getGroupMetadata(db, groupId), performersForGroups(db, [groupId]).get(groupId) ?? []);
+
+  assert.equal(view.state, 'none', 'the scene answer is unchanged: nothing was found');
+  assert.deepEqual(
+    view.performers.map((performer) => performer.name),
+    ['Amalia Davis'],
+    'the cast must survive a scene answer of none',
+  );
+
+  db.close();
+});
+
+test('the cast rides beside the scene answer in every state, not inside the confirmed one', () => {
+  // The shape, stated once: `performers`/`performerNames` are readable whatever
+  // `state` says, so no caller has to narrow the union before asking who is in
+  // a group. A group that was never asked (`absent`) can hold a cast too — a
+  // metadata row is not a precondition for `group_performers`.
+  const db = openTestDatabase();
+  const never = group(db, 'askable', 'Never Asked');
+  linkCast(db, never, ['Riley Reid']);
+
+  const view = metadataViewOf(getGroupMetadata(db, never), performersForGroups(db, [never]).get(never) ?? []);
+
+  assert.equal(view.state, 'absent');
+  assert.deepEqual(view.performers.map((performer) => performer.name), ['Riley Reid']);
+  assert.deepEqual(view.performerNames, [], 'the legacy list stays empty when there is a structured cast');
+
+  db.close();
+});
+
+test('/api/metadata carries the cast of a group with no scene data', async () => {
+  const db = openTestDatabase();
+  const groupId = group(db, 'askable', 'Amalia Davis');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: NOW });
+  linkCast(db, groupId, ['Amalia Davis']);
+
+  const server = buildServer(deps(db));
+  const response = await server.inject({ method: 'GET', url: `/api/metadata?ids=${groupId}` });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json() as Record<string, { state: string; performers: { name: string }[] }>;
+  assert.equal(body[String(groupId)]?.state, 'none');
+  assert.deepEqual(body[String(groupId)]?.performers.map((p) => p.name), ['Amalia Davis']);
+
+  await server.close();
+  db.close();
+});
+
+test('browse carries the cast of a group with no scene data', async () => {
+  // The other endpoint that builds a `MetadataView`. Both are fed by the same
+  // `metadataViewOf`, but only a test through each says the SPA can actually
+  // see the cast on the screens it uses.
+  const db = openTestDatabase();
+  const groupId = group(db, 'askable', 'Amalia Davis');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: NOW });
+  linkCast(db, groupId, ['Amalia Davis']);
+
+  const server = buildServer(deps(db));
+  const response = await server.inject({ method: 'GET', url: '/api/browse?limit=10' });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json() as {
+    groups: { id: number; metadata: { state: string; performers: { name: string }[] } }[];
+  };
+  const found = body.groups.find((entry) => entry.id === groupId);
+  assert.equal(found?.metadata.state, 'none');
+  assert.deepEqual(found?.metadata.performers.map((p) => p.name), ['Amalia Davis']);
 
   await server.close();
   db.close();

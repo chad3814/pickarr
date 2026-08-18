@@ -47,37 +47,65 @@ export interface PerformerView {
 }
 
 /**
- * What browse (and `GET /api/metadata`) can say about a group's scene
- * metadata. `'pending'` and `'absent'` only ever come from the standalone
- * metadata endpoint — it is the only caller that also consults
- * `metadata_queue` to tell "asked, not yet answered" from "never asked" —
- * while `metadataViewOf` answers browse's simpler question (is there a
- * recorded answer at all) from `group_metadata` alone.
+ * A group's cast, which is a fact about the *group* and not about the scene
+ * answer — which is why it sits beside `state` rather than inside any one
+ * variant of it.
+ *
+ * That distinction is load-bearing, not tidiness. `group_performers` is keyed by
+ * group and has two independent writers: the scene answer's own performer list,
+ * and `runPerformerPass`, whose entire purpose is to find a cast for a group
+ * whose scene lookup settled *without* one. The commonest form of that is
+ * `state: 'none'` — no scene matched at all — so a cast modelled inside the
+ * `'confirmed'` variant is unreachable in exactly the case the performer search
+ * exists to serve. It was: `metadataViewOf` returned a bare `{ state: 'none' }`
+ * and discarded the performers it had been handed, and no endpoint anywhere else
+ * serves a cast, so the search's whole output was invisible on those groups.
+ *
+ * `'absent'` and `'pending'` carry a cast for the same reason: a
+ * `group_metadata` row is not a precondition for a `group_performers` row.
  */
-export type MetadataView =
-  | {
-      state: 'confirmed';
-      title: string | null;
-      performers: PerformerView[];
-      /**
-       * The legacy cast, as plain names, for a group whose cast has no rows
-       * in `group_performers` yet — migration 7 queued every already-answered
-       * group for a refetch, but they drain at the worker's own rate. Never
-       * populated at the same time as `performers`: a caller that had to
-       * choose between the two lists could choose differently in two places,
-       * and a field that is absent cannot be misused the way one holding a
-       * value that must not be dereferenced can.
-       */
-      performerNames: string[];
-      releaseDate: string | null;
-      durationSeconds: number | null;
-      synopsis: string | null;
-      hasPoster: boolean;
-      sceneUrl: string | null;
-    }
-  | { state: 'none' }
-  | { state: 'pending'; nextAttemptAt: number }
-  | { state: 'absent' };
+export interface CastView {
+  performers: PerformerView[];
+  /**
+   * The legacy cast, as plain names, for a group whose cast has no rows in
+   * `group_performers` yet — migration 7 queued every already-answered group for
+   * a refetch, but they drain at the worker's own rate. Never populated at the
+   * same time as `performers`: a caller that had to choose between the two lists
+   * could choose differently in two places.
+   *
+   * Only ever non-empty alongside `state: 'confirmed'`, since the names come off
+   * the recorded scene answer — but it lives here rather than in that variant so
+   * that a reader never has to narrow the union to ask who is in a group.
+   */
+  performerNames: string[];
+}
+
+/**
+ * What browse (and `GET /api/metadata`) can say about a group's scene metadata,
+ * plus the group's cast beside it. `'pending'` and `'absent'` only ever come
+ * from the standalone metadata endpoint — it is the only caller that also
+ * consults `metadata_queue` to tell "asked, not yet answered" from "never
+ * asked" — while `metadataViewOf` answers browse's simpler question (is there a
+ * recorded answer at all) from `group_metadata` alone.
+ *
+ * An intersection rather than four variants each repeating the cast: the cast is
+ * readable without narrowing, and adding a fifth state cannot forget it.
+ */
+export type MetadataView = CastView &
+  (
+    | {
+        state: 'confirmed';
+        title: string | null;
+        releaseDate: string | null;
+        durationSeconds: number | null;
+        synopsis: string | null;
+        hasPoster: boolean;
+        sceneUrl: string | null;
+      }
+    | { state: 'none' }
+    | { state: 'pending'; nextAttemptAt: number }
+    | { state: 'absent' }
+  );
 
 /**
  * The answer to `POST /api/metadata/request`. Five counters: an id naming a
@@ -156,13 +184,11 @@ export function metadataViewOf(
   performers: readonly PerformerRow[],
   queuedNextAt?: number,
 ): MetadataView {
-  if (metadata === undefined) {
-    return queuedNextAt === undefined ? { state: 'absent' } : { state: 'pending', nextAttemptAt: queuedNextAt };
-  }
-  if (metadata.state === 'none') return { state: 'none' };
-  return {
-    state: 'confirmed',
-    title: metadata.title,
+  // Built once, before the state is decided, and spread into every branch —
+  // which is the whole point of `CastView`. Computing it inside one branch is
+  // what made the performer search invisible on the groups it exists for: the
+  // `'none'` branch returned early and the cast it had been handed went nowhere.
+  const cast: CastView = {
     performers: performers.map((performer) => ({
       id: performer.id,
       name: performer.name,
@@ -170,10 +196,23 @@ export function metadataViewOf(
       hasAvatar: performer.facePath !== null,
       hasImage: performer.imagePath !== null,
     })),
-    // Only when there is nothing better. The two fields are never both
-    // populated: a caller that had to choose between them could choose
-    // differently in two places.
-    performerNames: performers.length > 0 ? [] : metadata.performers,
+    // Only when there is nothing better, and only a recorded scene answer has
+    // any: the two fields are never both populated, because a caller that had to
+    // choose between them could choose differently in two places.
+    performerNames:
+      performers.length > 0 || metadata === undefined ? [] : metadata.performers,
+  };
+
+  if (metadata === undefined) {
+    return queuedNextAt === undefined
+      ? { ...cast, state: 'absent' }
+      : { ...cast, state: 'pending', nextAttemptAt: queuedNextAt };
+  }
+  if (metadata.state === 'none') return { ...cast, state: 'none' };
+  return {
+    ...cast,
+    state: 'confirmed',
+    title: metadata.title,
     releaseDate: metadata.releaseDate,
     durationSeconds: metadata.durationSeconds,
     synopsis: metadata.synopsis,

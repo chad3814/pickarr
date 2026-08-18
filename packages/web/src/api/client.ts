@@ -85,7 +85,43 @@ export interface PerformerView {
  * yet answered" from "never asked"; `GroupView.metadata` (from browse) reads
  * `group_metadata` alone and so is never `'pending'` there.
  */
-export type MetadataView =
+/**
+ * A group's cast, mirroring `CastView` in `packages/core/src/http/views.ts`.
+ *
+ * Beside `state` rather than inside the `'confirmed'` variant, for the reason
+ * that type spells out: `group_performers` is keyed by group and one of its two
+ * writers is the performer search, whose whole purpose is a group whose scene
+ * lookup settled *without* a cast — most often `state: 'none'`. While the cast
+ * lived inside `'confirmed'`, that search's output was unreachable in exactly
+ * the case it exists for.
+ *
+ * Both fields optional here, unlike core's `CastView`, and for two different
+ * reasons.
+ *
+ * `performerNames` is a new key, so a response from a build that predates it
+ * genuinely lacks it — a tab left open across a restart onto an older build, or
+ * a stale SPA bundle talking to a rolled-back API — and the `?? []` at each use
+ * is what keeps that from being a crash.
+ *
+ * `performers` is not that case, and saying so matters because the obvious
+ * reading is wrong: the key already existed before performer rows did, carrying
+ * `string[]` — the same names `performerNames` holds now. An older server
+ * therefore sends `performers`, not nothing, so `?? []` never fires and what
+ * arrives is an array of strings where this code reads `.id` and `.name`. No
+ * type can describe that away; only reloading onto the matching bundle fixes it.
+ * The field stays optional for consistency with the one beside it, and because a
+ * compiler that forces a check at each use costs nothing.
+ *
+ * Optional also keeps a bare `{ state: 'none' }` a valid `MetadataView`, which
+ * is what a response from a server predating this change literally is.
+ */
+export interface CastView {
+  performers?: PerformerView[];
+  performerNames?: string[];
+}
+
+export type MetadataView = CastView &
+  (
   | {
       state: 'confirmed';
       title: string | null;
@@ -94,28 +130,10 @@ export type MetadataView =
       synopsis: string | null;
       hasPoster: boolean;
       /**
-       * Optional here, unlike core's `MetadataView` — but for a narrower
-       * reason than "an older server might omit them", which is only true of
-       * two of the three.
-       *
-       * `performerNames` and `sceneUrl` are new keys. A response from a build
-       * that predates them genuinely lacks them — a tab left open across a
-       * restart onto an older build, or a stale SPA bundle talking to a
-       * rolled-back API — and the `?? []` / `?? null` at each use is what
-       * keeps that from being a crash.
-       *
-       * `performers` is not that case, and saying so matters because the
-       * obvious reading is wrong: the key already existed before this branch,
-       * carrying `string[]` — the same names `performerNames` holds now. An
-       * older server therefore sends `performers`, not nothing, so `?? []`
-       * never fires and what arrives is an array of strings where this code
-       * reads `.id` and `.name`. No type can describe that away; only
-       * reloading onto the matching bundle fixes it. The field stays optional
-       * for consistency with the two beside it, and because a compiler that
-       * forces a check at each use costs nothing.
+       * Optional for the same "new key, older server" reason `performerNames`
+       * is; `?? null` at the use site is what keeps its absence from being a
+       * crash.
        */
-      performers?: PerformerView[];
-      performerNames?: string[];
       sceneUrl?: string | null;
     }
   | { state: 'none' }
@@ -135,7 +153,8 @@ export type MetadataView =
    * field to mean anything.
    */
   | { state: 'pending'; nextAttemptAt?: number }
-  | { state: 'absent' };
+  | { state: 'absent' }
+  );
 
 /**
  * The answer to `POST /api/metadata/request`. Mirrors `MetadataRequestResponse`

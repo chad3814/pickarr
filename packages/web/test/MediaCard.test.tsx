@@ -690,3 +690,66 @@ test('a requery error goes away once a fresher answer arrives', async () => {
   assert.ok(screen.getByText('A fresher synopsis.'));
   assert.equal(gone('Metadata lookups are unavailable.'), true);
 });
+
+// The cast is a fact about the group, not about the scene answer. The performer
+// search exists to find one for a group whose scene lookup settled *without* a
+// cast, and the commonest form of that is `state: 'none'` — no scene matched.
+// Reported live: such a group never showed a cast, because the server dropped it
+// (`metadataViewOf`) and this card renders performers only inside its
+// confirmed-only block. Both halves had to change; this is the card's half.
+
+test('a group with no scene data still shows the cast the performer search found', () => {
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        metadata: {
+          state: 'none',
+          performers: [
+            { id: 9, name: 'Amalia Davis', url: 'https://theporndb.net/performers/amalia-davis',
+              hasAvatar: false, hasImage: false },
+          ],
+        },
+      }}
+      onPick={() => {}}
+    />,
+  );
+
+  const link = screen.getByRole('link', { name: 'Amalia Davis' });
+  assert.equal(link.getAttribute('href'), 'https://theporndb.net/performers/amalia-davis');
+});
+
+test('a cast shows without scene data, and the scene panel still does not', () => {
+  // The fix must not smuggle the rest of the metadata panel out of its
+  // confirmed-only gate: a group the provider was asked about and had nothing
+  // for has no title, synopsis, date or poster to show, and never gains one by
+  // acquiring a cast.
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        metadata: {
+          state: 'none',
+          performers: [
+            { id: 9, name: 'Amalia Davis', url: 'https://theporndb.net/performers/amalia-davis',
+              hasAvatar: false, hasImage: false },
+          ],
+        },
+      }}
+      onPick={() => {}}
+    />,
+  );
+
+  assert.ok(screen.getByRole('link', { name: 'Amalia Davis' }));
+  // #40: never `assert.equal(screen.queryByText(x), null)`.
+  assert.ok(!screen.queryByText('A synopsis from the provider.'));
+  assert.ok(!screen.queryByText('A Different Title'));
+  assert.equal(gone('pending'), true);
+});
+
+test('a group with neither scene data nor a cast renders no performer list at all', () => {
+  // The empty case stays empty: an `<ul>` with no items is a stray bullet on
+  // every unanswered card in the library.
+  render(<MediaCard group={{ ...GROUP, metadata: { state: 'none', performers: [] } }} onPick={() => {}} />);
+  assert.equal(document.querySelectorAll('.metadata-performers').length, 0);
+});

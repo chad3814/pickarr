@@ -130,6 +130,59 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
     (metadata.state === 'confirmed' || metadata.state === 'none') && onRequeryMetadata !== undefined;
   const canEdit = values !== undefined && identityFields !== undefined && onEditGroup !== undefined;
 
+  /**
+   * The group's cast as one list, or `null` when there is nobody to list.
+   *
+   * Built once here rather than inline, because it is rendered from two places —
+   * inside the scene panel for a confirmed group, and on its own for one the
+   * provider had nothing for. `null` rather than an empty `<ul>` is what lets
+   * each call site decide whether to draw a wrapper at all: an empty list is a
+   * stray bullet on every unanswered card in the library.
+   *
+   * One list or the other, never both. The server already guarantees that —
+   * `metadataViewOf` empties `performerNames` the moment there is a structured
+   * cast — but as two independent `&&` blocks the card would happily render both
+   * if that ever stopped being true, showing every performer twice. The ternary
+   * makes the exclusivity a property of this component rather than a promise
+   * made elsewhere, and picks the richer list when they disagree.
+   */
+  const performers = metadata.performers ?? [];
+  const performerNames = metadata.performerNames ?? [];
+  const cast =
+    performers.length > 0 ? (
+      <ul className="metadata-performers">
+        {performers.map((performer) => (
+          <li key={performer.id}>
+            {performer.hasAvatar &&
+              (performer.hasImage ? (
+                <button
+                  type="button"
+                  className="avatar-thumb"
+                  onClick={() => setModal({ src: `/api/performers/${performer.id}/image`,
+                                            alt: performer.name })}
+                >
+                  <img src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
+                </button>
+              ) : (
+                // A face with no full image: shown, not clickable. Opening a
+                // modal onto a 404 is worse than not offering.
+                <img className="avatar-thumb"
+                     src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
+              ))}
+            <a href={performer.url} target="_blank" rel="noopener noreferrer">
+              {performer.name}
+            </a>
+          </li>
+        ))}
+      </ul>
+    ) : performerNames.length > 0 ? (
+      // Answered before migration 7 and not yet refetched: names only, and no
+      // link, because no slug was stored to build one from.
+      <ul className="metadata-performers">
+        {performerNames.map((name) => <li key={name}>{name}</li>)}
+      </ul>
+    ) : null;
+
   async function save(submitted: Record<string, string>): Promise<void> {
     // Closed only on success, so a refused merge leaves the values the user
     // typed on screen next to the reason they were refused.
@@ -325,50 +378,27 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
           {metadata.synopsis !== null && (
             <p className="metadata-synopsis">{metadata.synopsis}</p>
           )}
-          {/*
-           * One list or the other, never both. The server already guarantees
-           * that — `metadataViewOf` empties `performerNames` the moment there
-           * is a structured cast — but as two independent `&&` blocks the
-           * card would happily render both if that ever stopped being true,
-           * showing every performer twice. The `else` makes the exclusivity a
-           * property of this component rather than a promise made elsewhere,
-           * and picks the richer list when they disagree.
-           */}
-          {(metadata.performers ?? []).length > 0 ? (
-            <ul className="metadata-performers">
-              {(metadata.performers ?? []).map((performer) => (
-                <li key={performer.id}>
-                  {performer.hasAvatar &&
-                    (performer.hasImage ? (
-                      <button
-                        type="button"
-                        className="avatar-thumb"
-                        onClick={() => setModal({ src: `/api/performers/${performer.id}/image`,
-                                                  alt: performer.name })}
-                      >
-                        <img src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
-                      </button>
-                    ) : (
-                      // A face with no full image: shown, not clickable.
-                      // Opening a modal onto a 404 is worse than not offering.
-                      <img className="avatar-thumb"
-                           src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
-                    ))}
-                  <a href={performer.url} target="_blank" rel="noopener noreferrer">
-                    {performer.name}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            (metadata.performerNames ?? []).length > 0 && (
-              // Answered before migration 7 and not yet refetched: names only,
-              // and no link, because no slug was stored to build one from.
-              <ul className="metadata-performers">
-                {(metadata.performerNames ?? []).map((name) => <li key={name}>{name}</li>)}
-              </ul>
-            )
-          )}
+          {cast}
+        </section>
+      )}
+
+      {/*
+       * The cast again, for a group the scene panel above does not render.
+       *
+       * Not a duplicate: exactly one of the two ever renders, because this is
+       * gated on the state that one is not. Both call sites exist because the
+       * cast belongs *inside* the scene panel when there is one — it reads as
+       * part of that answer — and has to stand alone when there is not.
+       *
+       * `state !== 'confirmed'` rather than `=== 'none'`: a cast is a fact about
+       * the group and the server now sends it whatever the scene answer is (see
+       * `CastView`), so a group still `pending` or never asked shows whoever the
+       * performer search already found rather than hiding them until a scene
+       * lookup that may never succeed.
+       */}
+      {metadata.state !== 'confirmed' && cast !== null && (
+        <section className="metadata" aria-label="Cast">
+          {cast}
         </section>
       )}
 
