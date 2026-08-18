@@ -873,3 +873,107 @@ test('each card\'s Requery button reaches POST /api/metadata/requery with that c
 
   await waitFor(() => assert.deepEqual(requeried, [[2]]));
 });
+
+// The search box. `/api/picks` answers everything picked in one response, so
+// there is nothing off-screen for a term to reach and the filtering is done
+// here rather than by a round trip per keystroke — see `groupSearchText`'s own
+// doc for why the haystack is built the way the server's `search_text` is.
+
+test('typing a term leaves only the cards that match it', async () => {
+  serve([group(1, 'Alpha'), group(2, 'Beta'), group(3, 'Gamma')]);
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await waitFor(() => assert.ok(screen.getByText('Gamma')));
+
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search picks' }), {
+    target: { value: 'bet' },
+  });
+
+  assert.ok(screen.getByText('Beta'));
+  assert.equal(screen.queryByText('Alpha'), null);
+  assert.equal(screen.queryByText('Gamma'), null);
+});
+
+test('the term reaches the same parts of a display the server matches on', async () => {
+  // Not just the title. `/api/browse?q=` matches `search_text`, which holds the
+  // subtitle, the date and every field *value* too — so a term that finds a
+  // group on Browse has to find it here, or the two tabs disagree about what
+  // the same word means.
+  serve([
+    {
+      ...group(1, 'Alpha'),
+      display: {
+        title: 'Alpha',
+        subtitle: 'Backroom Casting',
+        date: '2026-02-14',
+        fields: [{ label: 'Site', value: 'BangBros' }],
+      },
+    },
+    group(2, 'Beta'),
+  ]);
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  const box = screen.getByRole('searchbox', { name: 'Search picks' });
+
+  for (const term of ['casting', '2026-02', 'bangbros']) {
+    fireEvent.change(box, { target: { value: term } });
+    assert.ok(screen.getByText('Alpha'), `"${term}" must reach the card`);
+    assert.equal(screen.queryByText('Beta'), null, `"${term}" must not reach the other card`);
+  }
+});
+
+test('clearing the term restores the whole list', async () => {
+  serve([group(1, 'Alpha'), group(2, 'Beta')]);
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  const box = screen.getByRole('searchbox', { name: 'Search picks' });
+
+  fireEvent.change(box, { target: { value: 'alpha' } });
+  assert.equal(screen.queryByText('Beta'), null);
+
+  // Whitespace, not '': a term deleted with the keyboard often leaves a space
+  // behind, and a lone space is not a query.
+  fireEvent.change(box, { target: { value: ' ' } });
+  assert.ok(screen.getByText('Alpha'));
+  assert.ok(screen.getByText('Beta'));
+});
+
+test('a filtered-out card keeps its metadata polled', async () => {
+  // `useGroupMetadata` is handed every group the route holds, not the ones
+  // currently rendered. Narrowing it to the visible cards would make typing
+  // look like a new page to the hook — a fresh `POST /api/metadata/request`
+  // per keystroke — and would abandon a pending answer for a card the reader
+  // is about to bring back by clearing the box.
+  serve([group(1, 'Alpha'), group(2, 'Beta'), group(3, 'Gamma')]);
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await waitFor(() => assert.ok(screen.getByText('Gamma')));
+  await waitFor(() => assert.deepEqual(metadataRequestBodies, [[1, 2, 3]]));
+
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search picks' }), {
+    target: { value: 'alpha' },
+  });
+  await waitFor(() => assert.equal(screen.queryByText('Gamma'), null));
+
+  // Long enough that a hook handed a narrowed list would have asked again.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(metadataRequestBodies, [[1, 2, 3]]);
+});

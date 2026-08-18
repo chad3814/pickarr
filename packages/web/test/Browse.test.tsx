@@ -822,3 +822,30 @@ test('clicking Requery survives the answer sequence the real server emits: the s
   await waitFor(() => assert.ok(screen.getByText('The fresher synopsis.')), { timeout: 3_000 });
   assert.ok(!screen.queryByText('The original synopsis.'));
 });
+
+test('typing a term sends it to the server and starts the list over from page one', async () => {
+  // Browse's search box had no test at all, which made it the one place the
+  // shared `SearchBox` could be wired in wrongly and nothing would say so.
+  // Unlike Picks and Downloads, this term is not a filter over rows already in
+  // hand: browse is paginated, so the matches may be on pages nobody has
+  // loaded, and the term has to reach `/api/browse?q=` and reset the cursor.
+  const calls = serve(null);
+
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search groups' }), {
+    target: { value: 'coal' },
+  });
+
+  await waitFor(() =>
+    assert.deepEqual(browseRequests(calls()), [
+      'GET /api/browse',
+      'GET /api/browse?cursor=999%3A1',
+      // No cursor: a new term is a new list, not the next page of the old one.
+      'GET /api/browse?q=coal',
+    ]),
+  );
+});

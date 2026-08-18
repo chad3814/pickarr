@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, type DownloadsResponse } from '../api/client.ts';
+import { matchesTerm } from '../api/search.ts';
 import { DownloadRow } from '../components/DownloadRow.tsx';
+import { SearchBox } from '../components/SearchBox.tsx';
 
 const POLL_MS = 3000;
 
@@ -10,6 +12,7 @@ const POLL_MS = 3000;
  */
 export function Downloads() {
   const [data, setData] = useState<DownloadsResponse>({ tracked: [], untracked: [] });
+  const [search, setSearch] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -55,22 +58,53 @@ export function Downloads() {
     }
   }
 
+  /**
+   * The rows the box leaves on screen, both halves of the list.
+   *
+   * Filtered here rather than by asking the server. `/api/downloads` returns
+   * every row unpaginated (issue #31) and this screen re-polls all of it every
+   * `POLL_MS`, so there is nothing off-screen for a term to reach — and a term
+   * the server had to be told about would put a request behind every keystroke
+   * on the one screen already making one every three seconds.
+   *
+   * Derived on each render, from the term and the latest `data` together, rather
+   * than stored: the poll replaces `data` wholesale while the reader is still
+   * reading, and a filtered copy in state would either need re-deriving inside
+   * `poll` and `retry` both, or would go stale at whichever one forgot. It is
+   * also what makes a row that *arrives* under a term get filtered by it.
+   *
+   * A download matches on its title, and an untracked entry on its name —
+   * nothing else. Both are the row's own headline text and the only part of it a
+   * reader would think to type; matching `status` as well would mean the term
+   * "failed" quietly behaves like a state filter, which is a different feature
+   * with a different control.
+   */
+  const tracked = data.tracked.filter((download) => matchesTerm(search, download.title));
+  const untracked = data.untracked.filter((entry) => matchesTerm(search, entry.name));
+
   return (
     <section>
       <h1>Downloads</h1>
+      <SearchBox label="Search downloads" value={search} onChange={setSearch} />
       {error !== null && <p className="error">{error}</p>}
 
       <ul className="downloads">
-        {data.tracked.map((download) => (
+        {tracked.map((download) => (
           <DownloadRow key={download.id} download={download} onRetry={(id) => void retry(id)} />
         ))}
       </ul>
 
-      {data.untracked.length > 0 && (
+      {/*
+        The heading goes with the rows it labels. It is the whole of what says
+        these downloads are not Pickarr's, so leaving it standing over an empty
+        list once a term has excluded every one of them would read as Pickarr
+        having lost track of something.
+      */}
+      {untracked.length > 0 && (
         <>
           <h2>Not managed by Pickarr</h2>
           <ul className="downloads untracked">
-            {data.untracked.map((entry) => (
+            {untracked.map((entry) => (
               <li key={entry.ref} className="download-row untracked">
                 <span className="download-title">{entry.name}</span>
                 <span className="download-status">{entry.state}</span>
