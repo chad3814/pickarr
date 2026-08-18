@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router';
 import { api, RequestError, type GroupView, type ManualField } from '../api/client.ts';
 import { requeryOneGroup } from '../api/requeryMetadata.ts';
+import { groupSearchText, matchesTerm } from '../api/search.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
 import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
 import { MediaCard } from '../components/MediaCard.tsx';
+import { SearchBox } from '../components/SearchBox.tsx';
 
 export function Picks() {
   const [groups, setGroups] = useState<GroupView[]>([]);
   const [fields, setFields] = useState<Record<string, ManualField[]>>({});
+  const [search, setSearch] = useState('');
   const [error, setError] = useState<string | null>(null);
   const { hash } = useLocation();
   const landed = useRef<string | null>(null);
@@ -155,9 +158,37 @@ export function Picks() {
     }
   }
 
+  /**
+   * The cards the box leaves on screen.
+   *
+   * Filtered here rather than by asking the server: `/api/picks` answers
+   * everything picked in one response — it has no cursor and no page — so there
+   * is nothing off-screen for a term to reach, and a request per keystroke would
+   * buy only latency. `groupSearchText` is what keeps the answer the same one
+   * `/api/browse?q=` would give for the term (see its doc), and `matchesTerm` is
+   * a plain substring test rather than a copy of that route's unescaped LIKE
+   * (issue #32).
+   *
+   * Derived on each render rather than kept in state, so the term and the list
+   * cannot drift apart: every reload — after a pick, an edit, a merge — replaces
+   * `groups` wholesale, and a stored filtered copy would need re-deriving at
+   * each of those call sites or would quietly go stale at whichever one forgot.
+   *
+   * `groups`, not this, is what `useGroupMetadata` above is handed: a card the
+   * term is currently hiding is still one the reader will bring back by clearing
+   * the box, and abandoning its pending answer — or re-asking for a narrowed
+   * list on every keystroke — is not worth the requests it saves. For the same
+   * reason the landing effect keeps looking at `groups`: whether the DOM holds
+   * the card a `#group-N` link names is a question about what rendered, and the
+   * effect already answers it by finding the element or giving up until a render
+   * where it exists.
+   */
+  const shown = groups.filter((group) => matchesTerm(search, groupSearchText(group.display)));
+
   return (
     <section>
       <h1>Picks</h1>
+      <SearchBox label="Search picks" value={search} onChange={setSearch} />
       {error !== null && <p className="error">{error}</p>}
       {identityChange.plan !== null && (
         <IdentityChangeConfirm
@@ -168,7 +199,7 @@ export function Picks() {
           stale={identityChange.stale}
         />
       )}
-      {groups.map((group) => (
+      {shown.map((group) => (
         <MediaCard
           key={group.id}
           // The live answer once the poll has one, falling back to what

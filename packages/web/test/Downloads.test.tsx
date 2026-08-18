@@ -286,3 +286,111 @@ test('untracked entries render inert and labelled', async () => {
   assert.ok(screen.getByText(/not managed by pickarr/i));
   assert.equal(screen.queryByRole('button', { name: /retry/i }), null);
 });
+
+// The search box. `/api/downloads` returns every row unpaginated and this screen
+// re-polls all of it every three seconds (issue #31), so the term filters what
+// is already in hand — there is nothing for a server-side query to reach, and a
+// term that had to survive a round trip would fight the poll.
+
+/** Answers `/api/downloads` with one fixed body, and nothing else. */
+function serveDownloads(body: DownloadsResponse): void {
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch;
+}
+
+test('typing a term leaves only the tracked rows that match it', async () => {
+  serveDownloads({
+    tracked: [download({ id: 1, title: 'Alex Coal' }), download({ id: 2, title: 'Riley Reid' })],
+    untracked: [],
+  });
+
+  render(routed(<Downloads />));
+  await waitFor(() => assert.ok(screen.getByText('Riley Reid')));
+
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search downloads' }), {
+    target: { value: 'coal' },
+  });
+
+  assert.ok(screen.getByText('Alex Coal'));
+  assert.ok(gone('Riley Reid'));
+});
+
+test('the term filters untracked entries too, and takes their heading with them', async () => {
+  // The heading is the whole of what says these rows are not Pickarr's. Leaving
+  // it standing over an empty list would read as "Pickarr has lost track of
+  // something", when all that happened is the reader typed.
+  serveDownloads({
+    tracked: [download({ id: 1, title: 'Alex Coal' }), download({ id: 2, title: 'Riley Reid' })],
+    untracked: [
+      { ref: 'a', name: 'Someone Elses', state: 'downloading', percentage: 40 },
+      { ref: 'b', name: 'Alex Coal Extras', state: 'completed', percentage: 100 },
+    ],
+  });
+
+  render(routed(<Downloads />));
+  await waitFor(() => assert.ok(screen.getByText('Someone Elses')));
+  const box = screen.getByRole('searchbox', { name: 'Search downloads' });
+
+  // A term both halves can satisfy filters each of them and keeps the heading
+  // between: the two lists are filtered independently, not one and then the
+  // other discarded.
+  fireEvent.change(box, { target: { value: 'alex' } });
+  assert.ok(screen.getByText('Alex Coal'));
+  assert.ok(screen.getByText('Alex Coal Extras'));
+  assert.ok(screen.getByText(/not managed by pickarr/i));
+  assert.ok(gone('Riley Reid'));
+  assert.ok(gone('Someone Elses'));
+
+  // A term only a tracked row can satisfy takes the whole section, heading and
+  // all, rather than leaving the label over nothing.
+  fireEvent.change(box, { target: { value: 'riley' } });
+  assert.ok(screen.getByText('Riley Reid'));
+  assert.ok(gone('Alex Coal Extras'));
+  assert.ok(gone('Someone Elses'));
+  assert.ok(gone(/not managed by pickarr/i));
+});
+
+test('a poll landing does not clear the term or unfilter the list', async (t) => {
+  // The term is the reader's, and `data` is the server's; the poll replaces the
+  // second every three seconds. Deriving the visible rows from both on each
+  // render is what keeps a tick from undoing a search mid-read — the failure
+  // this pins is a box that still holds "coal" over a list that has silently
+  // gone back to everything.
+  t.mock.timers.enable({ apis: ['setInterval'] });
+
+  let polls = 0;
+  globalThis.fetch = (async () => {
+    polls += 1;
+    // The second poll brings a new row, which is the case that matters: a
+    // filter re-derived from fresh data must apply to what just arrived, not
+    // only to what was there when the term was typed.
+    const tracked =
+      polls === 1
+        ? [download({ id: 1, title: 'Alex Coal' }), download({ id: 2, title: 'Riley Reid' })]
+        : [
+            download({ id: 1, title: 'Alex Coal' }),
+            download({ id: 2, title: 'Riley Reid' }),
+            download({ id: 3, title: 'Riley Reid Again' }),
+          ];
+    return new Response(JSON.stringify({ tracked, untracked: [] } satisfies DownloadsResponse), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+
+  render(routed(<Downloads />));
+  await waitFor(() => assert.ok(screen.getByText('Riley Reid')));
+
+  const box = screen.getByRole('searchbox', { name: 'Search downloads' });
+  fireEvent.change(box, { target: { value: 'coal' } });
+  assert.ok(gone('Riley Reid'));
+
+  t.mock.timers.tick(3000);
+  await waitFor(() => assert.equal(polls, 2));
+
+  assert.equal((box as HTMLInputElement).value, 'coal', 'the term is still what was typed');
+  assert.ok(screen.getByText('Alex Coal'));
+  assert.ok(gone('Riley Reid'));
+  assert.ok(gone('Riley Reid Again'), 'a row that arrived under a term must be filtered by it');
+});
