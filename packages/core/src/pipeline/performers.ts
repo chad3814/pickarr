@@ -10,8 +10,10 @@ import {
   removePerformerSearch,
   type PerformerQueueRow,
 } from '../db/performer-queue.ts';
-import { setGroupPerformers, upsertPerformers } from '../db/performers.ts';
+import { performersForGroups, setGroupPerformers, upsertPerformers } from '../db/performers.ts';
+import type { ArtworkDeps } from '../media/artwork.ts';
 import { backoffFor } from './backoff.ts';
+import { cachePerformerArtwork } from './performer-artwork.ts';
 import { pickPerformer } from './pick-performer.ts';
 
 export interface PerformerEnqueueDeps {
@@ -101,6 +103,19 @@ export const MAX_PERFORMER_ATTEMPTS = 50;
  */
 export interface PerformerPassDeps extends PerformerEnqueueDeps {
   client: PerformerLookupClient | undefined;
+  /**
+   * Where a linked performer's avatar and full image are cached, and how they
+   * are fetched.
+   *
+   * This pass needs it because it is one of the two writers that can first link
+   * a performer, and until it had this the other one did all the caching — the
+   * scene pass, in a loop that runs before `enqueuePerformerSearch` is even
+   * called for the group, so a performer *this* pass linked was never in the set
+   * that loop looked at. The search recorded `face_url` and nothing ever fetched
+   * it, and `hasAvatar` reads `face_path`, so every performer found this way
+   * rendered with no avatar. See `cachePerformerArtwork`.
+   */
+  artwork: ArtworkDeps;
   perTick: number;
   now: () => number;
 }
@@ -251,8 +266,27 @@ export async function runPerformerPass(deps: PerformerPassDeps): Promise<Perform
       const outcome = recordPerformerOutcome(
         deps, row.groupId, pickPerformer(query, page.results), client.source, now,
       );
-      if (outcome === 'linked') result.linked += 1;
-      else result.unmatched += 1;
+      if (outcome === 'linked') {
+        result.linked += 1;
+        // After the transaction, never inside it: these are remote fetches, and
+        // holding a write transaction open across the network is how a busy
+        // database starts timing out on everything else. The link is already
+        // committed, which is also what makes a failed avatar cost only the
+        // image — see `cachePerformerArtwork`, which never throws.
+        //
+        // The group's cast is read back rather than threaded out of
+        // `recordPerformerOutcome`, so this call site reads exactly like the
+        // scene pass's: one shared helper, given the ids of whoever is now
+        // linked to the group.
+        // eslint-disable-next-line no-await-in-loop -- rows are answered one at a time, deliberately sequential
+        await cachePerformerArtwork(
+          deps.artwork,
+          deps.db,
+          (performersForGroups(deps.db, [row.groupId]).get(row.groupId) ?? []).map(
+            (performer) => performer.id,
+          ),
+        );
+      } else result.unmatched += 1;
     } catch (error) {
       if (error instanceof RateLimited) {
         // A rate limit is a fact about the service, not about this row: the row

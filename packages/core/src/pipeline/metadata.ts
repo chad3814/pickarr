@@ -7,7 +7,7 @@ import type {
   MetadataVerdict,
 } from '@pickarr/plugin-api';
 import { RateLimited, type SceneLookupClient } from '../clients/theporndb.ts';
-import { cacheImage, performerArtworkKey, type ArtworkDeps } from '../media/artwork.ts';
+import { cacheImage, type ArtworkDeps } from '../media/artwork.ts';
 import { getGroup } from '../db/groups.ts';
 import {
   deferMetadata,
@@ -17,9 +17,10 @@ import {
   setPosterPath,
   type MetadataQueueRow,
 } from '../db/metadata.ts';
-import { performersForGroups, performersNeedingArtwork, setPerformerArtwork } from '../db/performers.ts';
+import { performersForGroups } from '../db/performers.ts';
 import { rememberSiteId, siteIdForName } from '../db/sites.ts';
 import { backoffFor } from './backoff.ts';
+import { cachePerformerArtwork } from './performer-artwork.ts';
 import { enqueuePerformerSearch } from './performers.ts';
 
 /**
@@ -423,8 +424,8 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   // written, and `cacheImage` never throws, so nothing here can undo it.
   //
   // Skipped when a path is already stored, which is the same rule
-  // `performersNeedingArtwork` applies to avatars twenty lines below, for the
-  // same reason and now stated once for both. Without it, migration 7's
+  // `cachePerformerArtwork` applies to avatars just below, for the same reason.
+  // Without it, migration 7's
   // backfill spends one full image download per confirmed group in the
   // library to overwrite a byte-identical file: `cacheImage` keys the poster
   // on the group id alone, so a refetch of the same scene writes the same
@@ -445,35 +446,20 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   }
 
   // Performer artwork, on the same terms as the poster above: the answer is
-  // already written, `cacheImage` never throws, and a missing avatar is not a
+  // already written, caching never throws, and a missing avatar is not a
   // missing scene.
   //
-  // `performersNeedingArtwork` and the per-kind check below guard different
-  // things. The query's WHERE is an OR across the two url/path pairs, so it
-  // skips only a performer who needs neither image — the common case, once
-  // most of the table is already cached — sparing that performer the loop
-  // below entirely. It still returns a performer who needs just one of the
-  // two, because the OR is satisfied by either half. The per-kind `path !==
-  // null` check is what stops that performer's *other*, already-cached half
-  // from being fetched again: one url succeeding while the other 404s or
-  // times out is an ordinary partial failure, not a hypothetical, and this
-  // is the only thing standing between it and a repeat fetch every time a
-  // later group names the same performer.
-  const performerIds = (performersForGroups(deps.db, [row.groupId]).get(row.groupId) ?? [])
-    .map((performer) => performer.id);
-  for (const performer of performersNeedingArtwork(deps.db, performerIds)) {
-    for (const kind of ['face', 'image'] as const) {
-      const url = kind === 'face' ? performer.faceUrl : performer.imageUrl;
-      const path = kind === 'face' ? performer.facePath : performer.imagePath;
-      if (url === null || path !== null) continue;
-      // Sequential on purpose: these are remote fetches against one provider,
-      // and the pass already walks groups one at a time rather than opening
-      // the throttle this file's cooldown logic exists to respect.
-      // eslint-disable-next-line no-await-in-loop -- one provider, one group at a time; not batched on purpose
-      const stored = await cacheImage(deps.artwork, performerArtworkKey(performer.id, kind), url);
-      if (stored !== null) setPerformerArtwork(deps.db, performer.id, kind, stored);
-    }
-  }
+  // Shared with the performer pass rather than owned here — see
+  // `cachePerformerArtwork` for the guards it applies, and for why this loop
+  // living only in *this* pass meant a performer the performer search found
+  // never had an avatar cached at all.
+  await cachePerformerArtwork(
+    deps.artwork,
+    deps.db,
+    (performersForGroups(deps.db, [row.groupId]).get(row.groupId) ?? []).map(
+      (performer) => performer.id,
+    ),
+  );
 
   return { kind: confirmed === null ? 'none' : 'confirmed', cooldownUntil: null };
 }

@@ -36,6 +36,18 @@ function gone(text: string | RegExp): boolean {
   return screen.queryByText(text) === null;
 }
 
+/**
+ * Lets every already-queued microtask run, and React commit what they produced.
+ *
+ * For tests that mock `setInterval` and so cannot use `waitFor` — see the poll
+ * test below for why. `setTimeout(0)` rather than a bare `await`: the chain from
+ * a settled `fetch` to a painted row crosses `response.json()` and React's own
+ * scheduling, which is several turns deep rather than one.
+ */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function download(over: Partial<DownloadView> = {}): DownloadView {
   return {
     id: 1,
@@ -358,14 +370,30 @@ test('a poll landing does not clear the term or unfilter the list', async (t) =>
   // render is what keeps a tick from undoing a search mid-read — the failure
   // this pins is a box that still holds "coal" over a list that has silently
   // gone back to everything.
+  //
+  // Nothing here waits on `waitFor`, and that is not a style preference.
+  // `waitFor` polls with `setInterval` (@testing-library/dom's `wait-for.js`),
+  // which this test mocks in order to freeze the component's own poll — so its
+  // polling never fires and it is left depending on its `MutationObserver`. That
+  // delivered fast enough in isolation and lost to the 1s deadline inside a
+  // loaded full-suite run, which is how this test was first seen failing. The
+  // deferreds below remove the race instead of widening the window it has to win.
   t.mock.timers.enable({ apis: ['setInterval'] });
+
+  // One deferred per expected poll, resolved as that poll's response is handed
+  // back. Pre-created so the resolvers exist before the first call can need one.
+  const resolvers: (() => void)[] = [];
+  const handedBack = Array.from(
+    { length: 2 },
+    () => new Promise<void>((resolve) => resolvers.push(resolve)),
+  );
 
   let polls = 0;
   globalThis.fetch = (async () => {
     polls += 1;
-    // The second poll brings a new row, which is the case that matters: a
-    // filter re-derived from fresh data must apply to what just arrived, not
-    // only to what was there when the term was typed.
+    // The second poll brings a new row, which is the case that matters: a filter
+    // re-derived from fresh data must apply to what just arrived, not only to
+    // what was there when the term was typed.
     const tracked =
       polls === 1
         ? [download({ id: 1, title: 'Alex Coal' }), download({ id: 2, title: 'Riley Reid' })]
@@ -374,23 +402,36 @@ test('a poll landing does not clear the term or unfilter the list', async (t) =>
             download({ id: 2, title: 'Riley Reid' }),
             download({ id: 3, title: 'Riley Reid Again' }),
           ];
+    resolvers[polls - 1]?.();
     return new Response(JSON.stringify({ tracked, untracked: [] } satisfies DownloadsResponse), {
       headers: { 'content-type': 'application/json' },
     });
   }) as unknown as typeof fetch;
 
   render(routed(<Downloads />));
-  await waitFor(() => assert.ok(screen.getByText('Riley Reid')));
+  await handedBack[0];
+  await flush();
+  assert.ok(screen.getByText('Riley Reid'));
 
   const box = screen.getByRole('searchbox', { name: 'Search downloads' });
   fireEvent.change(box, { target: { value: 'coal' } });
   assert.ok(gone('Riley Reid'));
 
   t.mock.timers.tick(3000);
-  await waitFor(() => assert.equal(polls, 2));
+  assert.equal(polls, 2, 'the mocked interval fires the poll synchronously');
+  await handedBack[1];
+  await flush();
 
+  // The term survived the landing, and the row that arrived under it is filtered
+  // by it rather than appearing through the search.
   assert.equal((box as HTMLInputElement).value, 'coal', 'the term is still what was typed');
   assert.ok(screen.getByText('Alex Coal'));
   assert.ok(gone('Riley Reid'));
   assert.ok(gone('Riley Reid Again'), 'a row that arrived under a term must be filtered by it');
+
+  // And it really did arrive — without this, every assertion above would also
+  // hold if the second response had simply never reached state, which is the
+  // vacuous pass this guards against.
+  fireEvent.change(box, { target: { value: '' } });
+  assert.ok(screen.getByText('Riley Reid Again'));
 });

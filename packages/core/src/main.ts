@@ -300,6 +300,11 @@ async function main(): Promise<void> {
       db,
       client,
       pluginFor,
+      // The same `artwork` the scene pass above gets, not a second one: both
+      // passes cache into one directory under one key scheme
+      // (`performerArtworkKey`), and two configurations of that is two places for
+      // the path to be wrong.
+      artwork,
       perTick: config.metadata.perTick,
       now: () => Date.now(),
       log,

@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { GroupIdentity, MediaTypePlugin, MetadataPerformer } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
@@ -107,9 +110,29 @@ function deps(
     perTick: 10,
     now: () => 1000,
     log: (message) => logged.push(message),
+    // Refuses to be called, the way `metadata.test.ts`'s `unusedArtwork` does:
+    // every test written before artwork caching existed passes performers with
+    // no urls, so any fetch at all would be one nothing asked for.
+    artwork: {
+      dir: '/tmp/pickarr-performer-pass-unused-artwork',
+      fetchImpl: () => {
+        throw new Error('fetchImpl should not be called in this test');
+      },
+      log: () => undefined,
+    },
     calls,
     logged,
     ...overrides,
+  };
+}
+
+/** Serves `image/jpeg` for every request, recording the url each call asked for. */
+function trackingFetchJpeg(fetched: string[]) {
+  return (url: string) => {
+    fetched.push(url);
+    return Promise.resolve(
+      new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+    );
   };
 }
 
@@ -423,4 +446,153 @@ test('the runner asks again once a cooldown lapses, and announces the next one a
     'the second cooldown is announced too, not swallowed by the first',
   );
   db.close();
+});
+
+// Artwork. Reported live: "if a performer is retrieved from the performer_queue
+// they don't seem to have an avatar image."
+//
+// The search result carries `face`/`image` urls and `upsertPerformers` stores
+// them, so the row knew where the avatar was — but nothing fetched it. The only
+// caching loop lived inside the *scene* pass's `lookUpOne`, and it runs before
+// `enqueuePerformerSearch` is even called for that group, so it structurally
+// cannot see the performer this pass is about to link. `hasAvatar` reads
+// `face_path !== null`, so every search-found performer rendered nameless.
+
+/** A search result that carries artwork urls, unlike `found` above. */
+function foundWithArtwork(name: string, faceUrl: string | null, imageUrl: string | null) {
+  const result = found(name);
+  return { ...result, performer: { ...result.performer, faceUrl, imageUrl } };
+}
+
+function artworkOf(db: DatabaseSync, groupId: number): { facePath: string | null; imagePath: string | null }[] {
+  return (performersForGroups(db, [groupId]).get(groupId) ?? []).map((row) => ({
+    facePath: row.facePath,
+    imagePath: row.imagePath,
+  }));
+}
+
+test('a linked performer has its face and image cached, not merely its urls recorded', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-performer-artwork-'));
+  try {
+    const db = openTestDatabase();
+    seedGroup(db, 1, 'Jessica Jaymes Loves It');
+    insertPerformerSearch(db, 1, 100);
+
+    const fetched: string[] = [];
+    const result = await runPerformerPass(
+      deps(
+        db,
+        [{ results: [foundWithArtwork('Jessica Jaymes', 'https://p.invalid/face.jpg', 'https://p.invalid/full.jpg')], truncated: false }],
+        { artwork: { dir, fetchImpl: trackingFetchJpeg(fetched), log: () => undefined } },
+      ),
+    );
+
+    assert.equal(result.linked, 1);
+    assert.deepEqual(castOf(db, 1), ['Jessica Jaymes']);
+    assert.deepEqual(
+      fetched.toSorted(),
+      ['https://p.invalid/face.jpg', 'https://p.invalid/full.jpg'],
+      'both urls the result carried must be fetched',
+    );
+    const [artwork] = artworkOf(db, 1);
+    assert.ok(artwork !== undefined);
+    assert.notEqual(artwork.facePath, null, 'face_path is what `hasAvatar` reads');
+    assert.notEqual(artwork.imagePath, null);
+
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a performer the result gave no urls for is linked with no fetch attempted', async () => {
+  // The common shape for a performer the provider holds no images of. A fetch of
+  // `null` would be a crash, and a link withheld for want of an avatar would
+  // lose a correct cast over decoration.
+  const db = openTestDatabase();
+  seedGroup(db, 1, 'Jessica Jaymes Loves It');
+  insertPerformerSearch(db, 1, 100);
+
+  const fetched: string[] = [];
+  const result = await runPerformerPass(
+    deps(db, [{ results: [found('Jessica Jaymes')], truncated: false }], {
+      artwork: { dir: '/tmp/pickarr-unused-artwork', fetchImpl: trackingFetchJpeg(fetched), log: () => undefined },
+    }),
+  );
+
+  assert.equal(result.linked, 1);
+  assert.deepEqual(castOf(db, 1), ['Jessica Jaymes']);
+  assert.deepEqual(fetched, [], 'nothing to fetch, so nothing fetched');
+  db.close();
+});
+
+test('an avatar that 404s costs the image, never the cast', async () => {
+  // `cacheImage` never throws, and the link is already committed before any
+  // fetch is attempted. A provider serving a dead image url must not undo a
+  // correct match.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-performer-artwork-'));
+  try {
+    const db = openTestDatabase();
+    seedGroup(db, 1, 'Jessica Jaymes Loves It');
+    insertPerformerSearch(db, 1, 100);
+
+    const result = await runPerformerPass(
+      deps(
+        db,
+        [{ results: [foundWithArtwork('Jessica Jaymes', 'https://p.invalid/gone.jpg', null)], truncated: false }],
+        {
+          artwork: {
+            dir,
+            fetchImpl: () => Promise.resolve(new Response(null, { status: 404 })),
+            log: () => undefined,
+          },
+        },
+      ),
+    );
+
+    assert.equal(result.linked, 1, 'the cast survives a failed avatar');
+    assert.deepEqual(castOf(db, 1), ['Jessica Jaymes']);
+    const [artwork] = artworkOf(db, 1);
+    assert.equal(artwork?.facePath, null, 'nothing was stored, so nothing claims to be cached');
+    // The row keeps its `face_url`, so a later pass over this performer can try
+    // again rather than treating the 404 as final.
+    assert.deepEqual(duePerformerQueue(db, 9999, 10), [], 'and the queue row is still settled');
+
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a performer already holding both images is not refetched', async () => {
+  // Two groups can name one performer, and this pass will reach the second after
+  // the first has already cached the files. Refetching would spend two provider
+  // requests per already-answered performer, forever — the same guard the scene
+  // pass's own loop documents at length.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-performer-artwork-'));
+  try {
+    const db = openTestDatabase();
+    seedGroup(db, 1, 'Jessica Jaymes Loves It');
+    seedGroup(db, 2, 'Jessica Jaymes Again Now');
+    insertPerformerSearch(db, 1, 100);
+    insertPerformerSearch(db, 2, 100);
+
+    const fetched: string[] = [];
+    const page = {
+      results: [foundWithArtwork('Jessica Jaymes', 'https://p.invalid/face.jpg', 'https://p.invalid/full.jpg')],
+      truncated: false,
+    };
+    await runPerformerPass(
+      deps(db, [page, page], {
+        artwork: { dir, fetchImpl: trackingFetchJpeg(fetched), log: () => undefined },
+      }),
+    );
+
+    // Two rows, one performer, two images — fetched once each, not twice.
+    assert.deepEqual(fetched.toSorted(), ['https://p.invalid/face.jpg', 'https://p.invalid/full.jpg']);
+
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
