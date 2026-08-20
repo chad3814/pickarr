@@ -32,11 +32,31 @@ export interface EditableDownloadClient {
   pathMappings: EditablePathMapping[];
 }
 
+/**
+ * A feed's backfill settings as the form holds them, with `null` for "not
+ * backfilling" rather than an object carrying a disabled flag — the same way
+ * `siteLookup` and `artworkDir` express absence.
+ */
+export interface EditableFeedBackfill {
+  style: 'newznab' | 'page';
+  pageSize: number;
+  pagesPerPass: number;
+  maxPages: number;
+}
+
 export interface EditableFeed {
   id: string;
   url: string;
   plugin: string;
   intervalSeconds: number;
+  /**
+   * Modelled here rather than left as an unknown key the merge preserves, and
+   * that is the whole point of modelling it: `applyEdits` matches feeds by id,
+   * so a block it does not know about cannot survive a rename. Carrying it
+   * through the form means a renamed feed keeps its walk position instead of
+   * silently starting over.
+   */
+  backfill: EditableFeedBackfill | null;
 }
 
 export interface EditableSiteLookup {
@@ -127,6 +147,9 @@ export function toEditableConfig(config: PickarrConfig): EditableConfig {
       url: feed.url,
       plugin: feed.plugin,
       intervalSeconds: feed.intervalSeconds,
+      // Spread into a fresh object rather than passed through, so the editable
+      // view never aliases the parsed config the caller still holds.
+      backfill: feed.backfill === undefined ? null : { ...feed.backfill },
     })),
     siteLookup:
       config.siteLookup === undefined
@@ -281,14 +304,22 @@ export function applyEdits(
   next['trashDir'] = submitted.trashDir;
   next['plugins'] = copyPluginSettings(submitted.plugins);
   next['downloadClients'] = clients;
-  next['feeds'] = submitted.feeds.map((feed) =>
-    mergeKnownFields(existingFeedsById.get(feed.id), {
+  // Absence deletes the key after the merge rather than being omitted from the
+  // patch, for the reason spelled out for `artworkDir` below: omitting it would
+  // let the merge resurrect whatever `backfill` block the file already had, so
+  // turning backfill off in the form would not turn it off on disk.
+  next['feeds'] = submitted.feeds.map((feed) => {
+    const patch: JsonObject = {
       id: feed.id,
       url: feed.url,
       plugin: feed.plugin,
       intervalSeconds: feed.intervalSeconds,
-    }),
-  );
+    };
+    if (feed.backfill !== null) patch['backfill'] = { ...feed.backfill };
+    const merged = mergeKnownFields(existingFeedsById.get(feed.id), patch);
+    if (feed.backfill === null) delete merged['backfill'];
+    return merged;
+  });
 
   // Absence is expressed by deleting the key, never by writing `null` or `''`:
   // `metadataSchema.artworkDir` is `.min(1).optional()`, so an empty string is a

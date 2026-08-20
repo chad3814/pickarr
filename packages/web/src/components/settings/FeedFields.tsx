@@ -1,5 +1,5 @@
 import { useId } from 'react';
-import type { FeedDraft } from './ConfigForm.tsx';
+import { BACKFILL_DEFAULTS, type BackfillStyleDraft, type FeedDraft } from './ConfigForm.tsx';
 
 export interface FeedFieldsProps {
   feeds: FeedDraft[];
@@ -35,6 +35,12 @@ export function FeedFields({ feeds, pluginNames, onChange }: FeedFieldsProps) {
       // `feedSchema`'s own default, so a row added here matches a row omitted
       // from the file.
       intervalSeconds: '900',
+      // Off, matching `backfill` being optional: adding a feed must not quietly
+      // start walking an indexer's history.
+      backfillStyle: 'off',
+      backfillPageSize: BACKFILL_DEFAULTS.pageSize,
+      backfillPagesPerPass: BACKFILL_DEFAULTS.pagesPerPass,
+      backfillMaxPages: BACKFILL_DEFAULTS.maxPages,
     };
     onChange([...feeds, blankFeed]);
   }
@@ -101,6 +107,73 @@ export function FeedFields({ feeds, pluginNames, onChange }: FeedFieldsProps) {
               onChange={(event) => updateFeed(index, { ...feed, intervalSeconds: event.target.value })}
             />
           </div>
+          <div className="manual-field">
+            <label htmlFor={`${formId}-backfill-${index}`}>Backfill history</label>
+            <select
+              id={`${formId}-backfill-${index}`}
+              value={feed.backfillStyle}
+              onChange={(event) =>
+                updateFeed(index, {
+                  ...feed,
+                  backfillStyle: event.target.value as BackfillStyleDraft,
+                })
+              }
+            >
+              {/*
+                The styles are named by what they send rather than by jargon.
+                Pickarr cannot detect which an indexer speaks — nothing in an RSS
+                document says — and guessing wrong is the silent failure, so this
+                control has no "auto" and the wording has to be enough for someone
+                to match it against their indexer's docs.
+              */}
+              <option value="off">Off</option>
+              <option value="newznab">Newznab (offset &amp; limit)</option>
+              <option value="page">Page number</option>
+            </select>
+          </div>
+          {/*
+            The numbers only mean anything once a style is chosen, and showing
+            three disabled boxes beside an "Off" selector is noise. The values
+            survive in the draft while hidden, so switching off and back on does
+            not lose what was typed.
+          */}
+          {feed.backfillStyle !== 'off' && (
+            <>
+              <div className="manual-field">
+                <label htmlFor={`${formId}-backfill-size-${index}`}>Items per page</label>
+                <input
+                  id={`${formId}-backfill-size-${index}`}
+                  type="text"
+                  value={feed.backfillPageSize}
+                  onChange={(event) =>
+                    updateFeed(index, { ...feed, backfillPageSize: event.target.value })
+                  }
+                />
+              </div>
+              <div className="manual-field">
+                <label htmlFor={`${formId}-backfill-per-pass-${index}`}>Pages per pass</label>
+                <input
+                  id={`${formId}-backfill-per-pass-${index}`}
+                  type="text"
+                  value={feed.backfillPagesPerPass}
+                  onChange={(event) =>
+                    updateFeed(index, { ...feed, backfillPagesPerPass: event.target.value })
+                  }
+                />
+              </div>
+              <div className="manual-field">
+                <label htmlFor={`${formId}-backfill-max-${index}`}>Maximum pages</label>
+                <input
+                  id={`${formId}-backfill-max-${index}`}
+                  type="text"
+                  value={feed.backfillMaxPages}
+                  onChange={(event) =>
+                    updateFeed(index, { ...feed, backfillMaxPages: event.target.value })
+                  }
+                />
+              </div>
+            </>
+          )}
           {/*
             Named by its own id, the same reason as "Remove download client"
             in `DownloadClientFields`: one of these renders per feed, and a

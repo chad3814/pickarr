@@ -122,7 +122,7 @@ function submission(over: (draft: SubmittedConfig) => void = () => {}): Submitte
         pathMappings: [{ from: '/downloads', to: '/data/downloads' }],
       },
     ],
-    feeds: [{ id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900 }],
+    feeds: [{ id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null }],
     siteLookup: null,
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
   };
@@ -264,23 +264,15 @@ test('a document that is not a JSON object is refused', () => {
   assert.ok('error' in result);
 });
 
-test('a feed backfill block written by hand survives a save from the Settings form', () => {
-  // The guarantee the backfill feature is built on. `backfill` is deliberately
-  // absent from `EditableFeed` and from `FeedFields` — one advanced field is not
-  // worth nine files and two hand-synced type mirrors — so the *only* thing
-  // keeping it on disk is `applyEdits` merging over the existing feed rather than
-  // rebuilding it. If that ever stops being true, backfill silently switches
-  // itself off the first time somebody opens Settings and presses Save.
+test('a feed backfill block is projected for the form to edit', () => {
   const document = structuredClone(VALID) as unknown as JsonObject;
-  const feeds = asJsonArray(document['feeds']);
-  const feed = asJsonObject(feeds[0]);
+  const feed = asJsonObject(asJsonArray(document['feeds'])[0]);
   assert.ok(feed !== null);
   feed['backfill'] = { style: 'newznab', pageSize: 50, pagesPerPass: 3, maxPages: 20 };
 
-  const saved = applied(document);
+  const editable = toEditableConfig(parseConfig(document as unknown as JsonValue, 'test'));
 
-  const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
-  assert.deepEqual(savedFeed?.['backfill'], {
+  assert.deepEqual(editable.feeds[0]?.backfill, {
     style: 'newznab',
     pageSize: 50,
     pagesPerPass: 3,
@@ -288,21 +280,57 @@ test('a feed backfill block written by hand survives a save from the Settings fo
   });
 });
 
-test('renaming a feed drops its backfill block, which is the cost of not modelling it', () => {
-  // Not a bug to fix here, but a documented consequence worth pinning so it is
-  // discovered by a failing test rather than by a user whose walk restarted.
-  // `applyEdits` matches feeds by id, so a renamed feed has no existing entry to
-  // merge with — the same reason a kept secret cannot survive a rename.
+test('a feed that is not backfilling projects null, not a missing key', () => {
+  // `null` the way `siteLookup` and `artworkDir` say absent, so the form has one
+  // shape to render rather than two.
+  const editable = editableOf();
+  assert.equal(editable.feeds[0]?.backfill, null);
+});
+
+test('a renamed feed keeps its backfill block', () => {
+  // The bug this change exists to fix. `applyEdits` merges a feed with the
+  // on-disk entry of the same id, so while `backfill` was a key the form did not
+  // model, renaming a feed had nothing to merge with and dropped it silently —
+  // the walk would restart from page one and nobody would be told. Carried
+  // through the submission, the rename keeps it.
   const document = structuredClone(VALID) as unknown as JsonObject;
   const feed = asJsonObject(asJsonArray(document['feeds'])[0]);
   assert.ok(feed !== null);
   feed['backfill'] = { style: 'page', pageSize: 100, pagesPerPass: 2, maxPages: 100 };
 
   const saved = applied(document, (draft) => {
-    draft.feeds[0]!.id = 'renamed';
+    draft.feeds[0] = {
+      ...draft.feeds[0]!,
+      id: 'renamed',
+      backfill: { style: 'page', pageSize: 100, pagesPerPass: 2, maxPages: 100 },
+    };
   });
 
   const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
   assert.equal(savedFeed?.['id'], 'renamed');
-  assert.equal(savedFeed?.['backfill'], undefined);
+  assert.deepEqual(savedFeed?.['backfill'], {
+    style: 'page',
+    pageSize: 100,
+    pagesPerPass: 2,
+    maxPages: 100,
+  });
+});
+
+test('turning backfill off deletes the block rather than writing null', () => {
+  // The `artworkDir` rule: absence is a missing key, because `feedBackfillSchema`
+  // is `.optional()` and would refuse a null outright. Deleted *after* the merge,
+  // since omitting it from the patch would let the on-disk block survive and the
+  // form would not be able to turn the feature off at all.
+  const document = structuredClone(VALID) as unknown as JsonObject;
+  const feed = asJsonObject(asJsonArray(document['feeds'])[0]);
+  assert.ok(feed !== null);
+  feed['backfill'] = { style: 'newznab', pageSize: 100, pagesPerPass: 2, maxPages: 100 };
+
+  const saved = applied(document, (draft) => {
+    draft.feeds[0] = { ...draft.feeds[0]!, backfill: null };
+  });
+
+  const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
+  assert.ok(savedFeed !== null);
+  assert.equal('backfill' in savedFeed, false);
 });

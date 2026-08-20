@@ -461,12 +461,21 @@ export interface EditableDownloadClient {
   pathMappings: EditablePathMapping[];
 }
 
+/** Mirrors `EditableFeedBackfill` in `packages/core/src/config/editable.ts`. */
+export interface EditableFeedBackfill {
+  style: 'newznab' | 'page';
+  pageSize: number;
+  pagesPerPass: number;
+  maxPages: number;
+}
+
 /** Mirrors `EditableFeed` in `packages/core/src/config/editable.ts`. */
 export interface EditableFeed {
   id: string;
   url: string;
   plugin: string;
   intervalSeconds: number;
+  backfill: EditableFeedBackfill | null;
 }
 
 /** Mirrors `EditableSiteLookup` in `packages/core/src/config/editable.ts`. */

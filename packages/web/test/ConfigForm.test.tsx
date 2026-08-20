@@ -24,7 +24,7 @@ function config(over: Partial<EditableConfig> = {}): EditableConfig {
       },
     ],
     feeds: [
-      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900 },
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null },
     ],
     siteLookup: null,
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
@@ -52,7 +52,7 @@ test('a round trip with no edits submits the config unchanged, keeping secrets',
       },
     ],
     feeds: [
-      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900 },
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null },
     ],
     siteLookup: null,
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
@@ -180,4 +180,77 @@ test('adding a site lookup starts with an empty literal key, not a keep', () => 
   const submitted = toSubmission(draft, original);
   assert.ok(!('error' in submitted));
   assert.deepEqual(submitted.siteLookup?.apiKey, { kind: 'literal', value: '' });
+});
+
+test('a chosen backfill style submits as a block, numbers and all', () => {
+  const original = config();
+  const draft = toDraft(original);
+  draft.feeds[0]!.backfillStyle = 'newznab';
+  draft.feeds[0]!.backfillPageSize = '50';
+  draft.feeds[0]!.backfillPagesPerPass = '3';
+  draft.feeds[0]!.backfillMaxPages = '20';
+
+  const submitted = toSubmission(draft, original);
+
+  assert.ok(!('error' in submitted), 'error' in submitted ? submitted.error : '');
+  assert.deepEqual(submitted.feeds[0]?.backfill, {
+    style: 'newznab',
+    pageSize: 50,
+    pagesPerPass: 3,
+    maxPages: 20,
+  });
+});
+
+test('backfill left off submits as null, whatever numbers the boxes still hold', () => {
+  // The draft keeps the numbers so they survive a toggle; the submission must not
+  // carry them, or turning backfill off would look like leaving it on.
+  const original = config();
+  const draft = toDraft(original);
+  draft.feeds[0]!.backfillStyle = 'off';
+  draft.feeds[0]!.backfillPageSize = '250';
+
+  const submitted = toSubmission(draft, original);
+
+  assert.ok(!('error' in submitted), 'error' in submitted ? submitted.error : '');
+  assert.equal(submitted.feeds[0]?.backfill, null);
+});
+
+test('fewer than two pages per pass is refused here, and the message says why', () => {
+  // The floor is not arbitrary: below two pages a pass there is no previous page
+  // to compare against, so a walk cannot notice an indexer that ignores the
+  // pagination parameter and would report the history read having read one page
+  // repeatedly. `feedBackfillSchema` enforces it too, but a 400 saying only
+  // "invalid" would leave someone guessing at a number that looks reasonable.
+  const original = config();
+  const draft = toDraft(original);
+  draft.feeds[0]!.backfillStyle = 'page';
+  draft.feeds[0]!.backfillPagesPerPass = '1';
+
+  const submitted = toSubmission(draft, original);
+
+  assert.ok('error' in submitted);
+  assert.match(submitted.error, /pagesPerPass must be at least 2/);
+  assert.match(submitted.error, /paginating at all/);
+});
+
+test('a non-numeric backfill page size is caught here rather than sent for a 400', () => {
+  const original = config();
+  const draft = toDraft(original);
+  draft.feeds[0]!.backfillStyle = 'newznab';
+  draft.feeds[0]!.backfillPageSize = 'lots';
+
+  const submitted = toSubmission(draft, original);
+
+  assert.ok('error' in submitted);
+  assert.match(submitted.error, /backfill\.pageSize must be a whole number/);
+});
+
+test('a feed already backfilling round-trips unchanged', () => {
+  const original = config();
+  original.feeds[0]!.backfill = { style: 'page', pageSize: 100, pagesPerPass: 2, maxPages: 100 };
+
+  const submitted = toSubmission(toDraft(original), original);
+
+  assert.ok(!('error' in submitted), 'error' in submitted ? submitted.error : '');
+  assert.deepEqual(submitted.feeds[0]?.backfill, original.feeds[0]?.backfill);
 });

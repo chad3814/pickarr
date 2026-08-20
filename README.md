@@ -63,7 +63,7 @@ immediately rather than starting in a broken state.
 | `feeds[].url` | feed | The RSS feed URL, including any indexer API key. |
 | `feeds[].plugin` | feed | Which configured plugin package interprets this feed's entries. |
 | `feeds[].intervalSeconds` | feed | Poll interval in seconds. Defaults to 900. |
-| `feeds[].backfill` | feed | Optional, and **absent by default**. Walks the feed's own pagination to build a backlog — see "Backfilling a feed's history" below. Not editable from the Settings screen; write it by hand. |
+| `feeds[].backfill` | feed | Optional, and **absent by default**. Walks the feed's own pagination to build a backlog — see "Backfilling a feed's history" below. Editable from the Settings screen, or by hand. |
 | `feeds[].backfill.style` | backfill | `newznab` (sends `offset` and `limit`) or `page` (sends a one-based `page`). Stated, never guessed — a wrong value is caught, see below. |
 | `feeds[].backfill.pageSize` | backfill | Items the indexer returns per page. Defaults to 100. Must match reality: too large silently skips items, too small merely re-reads them. |
 | `feeds[].backfill.pagesPerPass` | backfill | Pages fetched per pass. Defaults to 2, minimum 2. This is also the rate limit. |
@@ -123,9 +123,12 @@ SELECT feed_id, next_page, pages_read, state, detail FROM feed_backfill;
 `broken` if the indexer turned out not to paginate, with `detail` saying which parameter
 it ignored.
 
-One wart worth knowing: **renaming a feed's `id` on the Settings screen drops its
-`backfill` block**, because the form matches feeds by id and does not model this field.
-The walk then starts over, which is cheap, but the configuration is gone.
+Each feed's row on the **Settings** screen carries a "Backfill history" selector — `Off`,
+`Newznab (offset & limit)`, or `Page number` — and reveals the three numbers once a style
+is chosen. There is deliberately no "detect automatically" option: nothing in an RSS
+document says how an indexer pages, and a wrong guess is the one failure that would be
+silent, so the options are named by what they send in order to be matched against your
+indexer's own documentation.
 
 The SABnzbd API key can be supplied two ways: directly as a string in the config, or as
 `file:/run/secrets/sabnzbd_api_key`, which Pickarr resolves by reading that file at

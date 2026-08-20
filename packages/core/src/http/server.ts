@@ -283,6 +283,17 @@ const configSubmissionSchema = z.object({
       url: z.string(),
       plugin: z.string(),
       intervalSeconds: z.number(),
+      // Shape only, per the note above: the `min(2)` on `pagesPerPass` and the
+      // rest of the value rules stay in `feedBackfillSchema`, which
+      // `parseConfig` runs over the merged document.
+      backfill: z
+        .object({
+          style: z.enum(['newznab', 'page']),
+          pageSize: z.number(),
+          pagesPerPass: z.number(),
+          maxPages: z.number(),
+        })
+        .nullable(),
     }),
   ),
   siteLookup: z

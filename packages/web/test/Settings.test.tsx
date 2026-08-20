@@ -36,7 +36,7 @@ function configResponse(over: Partial<ConfigResponse> = {}): ConfigResponse {
         },
       ],
       feeds: [
-        { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900 },
+        { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null },
       ],
       siteLookup: null,
       metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },

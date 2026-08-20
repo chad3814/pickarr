@@ -36,12 +36,38 @@ export interface ClientDraft {
   pathMappings: EditablePathMapping[];
 }
 
+/**
+ * `'off'` sits in the same control as the two styles, so enabling backfill and
+ * choosing how it pages is one decision rather than a checkbox plus a select
+ * that can disagree with each other.
+ */
+export type BackfillStyleDraft = 'off' | 'newznab' | 'page';
+
 export interface FeedDraft {
   id: string;
   url: string;
   plugin: string;
   intervalSeconds: string;
+  backfillStyle: BackfillStyleDraft;
+  /**
+   * Kept while the style is `'off'` rather than cleared, so toggling backfill
+   * off to look at something and back on again does not silently discard the
+   * numbers that were typed. `toSubmission` ignores them when off.
+   */
+  backfillPageSize: string;
+  backfillPagesPerPass: string;
+  backfillMaxPages: string;
 }
+
+/**
+ * `feedBackfillSchema`'s own defaults, so a row switched on here matches a block
+ * written by hand with only `style` set.
+ */
+export const BACKFILL_DEFAULTS = {
+  pageSize: '100',
+  pagesPerPass: '2',
+  maxPages: '100',
+} as const;
 
 export interface PluginDraft {
   name: string;
@@ -81,6 +107,12 @@ export function toDraft(config: EditableConfig): ConfigDraft {
       url: feed.url,
       plugin: feed.plugin,
       intervalSeconds: String(feed.intervalSeconds),
+      backfillStyle: feed.backfill?.style ?? 'off',
+      // A feed that is not backfilling still shows the defaults, so switching it
+      // on presents the same starting point as a freshly added row.
+      backfillPageSize: String(feed.backfill?.pageSize ?? BACKFILL_DEFAULTS.pageSize),
+      backfillPagesPerPass: String(feed.backfill?.pagesPerPass ?? BACKFILL_DEFAULTS.pagesPerPass),
+      backfillMaxPages: String(feed.backfill?.maxPages ?? BACKFILL_DEFAULTS.maxPages),
     })),
     plugins: Object.entries(config.plugins).map(([name, settings]) => ({
       name,
@@ -174,7 +206,35 @@ export function toSubmission(draft: ConfigDraft, config: EditableConfig): Submit
   for (const [index, feed] of draft.feeds.entries()) {
     const intervalSeconds = asCount(feed.intervalSeconds, `feeds[${index}].intervalSeconds`);
     if (typeof intervalSeconds !== 'number') return intervalSeconds;
-    feeds.push({ id: feed.id, url: feed.url, plugin: feed.plugin, intervalSeconds });
+
+    if (feed.backfillStyle === 'off') {
+      feeds.push({ id: feed.id, url: feed.url, plugin: feed.plugin, intervalSeconds, backfill: null });
+      continue;
+    }
+
+    const pageSize = asCount(feed.backfillPageSize, `feeds[${index}].backfill.pageSize`);
+    if (typeof pageSize !== 'number') return pageSize;
+    const pagesPerPass = asCount(feed.backfillPagesPerPass, `feeds[${index}].backfill.pagesPerPass`);
+    if (typeof pagesPerPass !== 'number') return pagesPerPass;
+    const maxPages = asCount(feed.backfillMaxPages, `feeds[${index}].backfill.maxPages`);
+    if (typeof maxPages !== 'number') return maxPages;
+    // Caught here as well as by `feedBackfillSchema`, because the floor is not
+    // arbitrary: below two pages a pass there is no previous page to compare
+    // against, so the walk cannot notice an indexer that ignores the pagination
+    // parameter. Saying so in the form beats a 400 that only says "invalid".
+    if (pagesPerPass < 2) {
+      return {
+        error: `feeds[${index}].backfill.pagesPerPass must be at least 2, so a pass can tell whether the indexer is paginating at all`,
+      };
+    }
+
+    feeds.push({
+      id: feed.id,
+      url: feed.url,
+      plugin: feed.plugin,
+      intervalSeconds,
+      backfill: { style: feed.backfillStyle, pageSize, pagesPerPass, maxPages },
+    });
   }
 
   const downloadClients: SubmittedDownloadClient[] = draft.downloadClients.map((client) => {
