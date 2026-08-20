@@ -1,6 +1,12 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DisplayFields, MediaTypePlugin, ParsedRelease } from '@pickarr/plugin-api';
-import { earnsListBump, findGroup, flagUpgrade, insertGroup } from '../db/groups.ts';
+import {
+  earnsListBump,
+  findGroup,
+  flagUpgrade,
+  insertGroup,
+  refreshUpgradeFlag,
+} from '../db/groups.ts';
 import { insertRelease } from '../db/releases.ts';
 
 function isText(value: string | undefined): boolean {
@@ -159,6 +165,19 @@ export function validateParsed(
   }
 }
 
+/**
+ * Whether this release is turning up now or being read out of the feed's history.
+ *
+ * A named pair rather than a boolean because the two cases differ in two ways at
+ * once, and both follow from the same fact. A live release is an *event*: it sorts
+ * by now, and if it beats the pick the group earns a lift up the browse list. A
+ * backfilled release is a *discovery*: it sorts by when it was published, and it
+ * earns no lift, because nothing happened to the group — we merely finished
+ * reading. `publishedAt` rides along because only the caller holding the feed
+ * entry knows it.
+ */
+export type Arrival = { kind: 'live' } | { kind: 'backfill'; publishedAt: number | null };
+
 export interface CommitOutcome {
   groupId: number;
   releaseId: number;
@@ -181,8 +200,14 @@ export function commitRelease(
   plugin: MediaTypePlugin,
   feedItemId: number,
   now: number,
+  arrival: Arrival = { kind: 'live' },
 ): CommitOutcome {
   const existing = findGroup(db, plugin.id, prepared.identityKey);
+  // A backfilled item with no publish date is genuinely unorderable — the feed
+  // never said how old it is — so it falls back to now and sorts as though it
+  // arrived. That is the documented limitation rather than an oversight:
+  // inventing an age would be worse, and biasing it old would be inventing one.
+  const listRankAt = arrival.kind === 'live' ? now : (arrival.publishedAt ?? now);
   const groupId =
     existing?.id ??
     insertGroup(db, {
@@ -191,6 +216,7 @@ export function commitRelease(
       display: prepared.displayJson,
       searchText: prepared.searchText,
       createdAt: now,
+      listRankAt,
     });
 
   const releaseId = insertRelease(db, {
@@ -208,10 +234,26 @@ export function commitRelease(
   // Which release ends up flagged is not decided here: `flagUpgrade`
   // re-derives that from the group's own releases, so the flag cannot disagree
   // with the table it summarizes.
+  //
+  // Backfill takes the other of the two writes that already encode this
+  // distinction. `flagUpgrade` moves `list_rank_at` and `refreshUpgradeFlag`
+  // does not — "that is earned only by something *happening* to the group", as
+  // the latter's own comment puts it. Reading further down a feed is not that.
+  // The flag itself is still wanted: a better encode exists and the user should
+  // be offered it. What is not wanted is the browse list re-sorting itself
+  // around a discovery about 2019, which on a first-run walk of forty pages is
+  // the whole list, repeatedly.
+  //
+  // `upgradeFlagged` stays false for backfill for the same reason: it counts
+  // upgrade *events* into `IngestResult`, and this was not one.
   let upgradeFlagged = false;
   if (existing !== null && earnsListBump(db, existing, prepared.score)) {
-    flagUpgrade(db, groupId, now);
-    upgradeFlagged = true;
+    if (arrival.kind === 'live') {
+      flagUpgrade(db, groupId, now);
+      upgradeFlagged = true;
+    } else {
+      refreshUpgradeFlag(db, groupId);
+    }
   }
 
   return { groupId, releaseId, groupCreated: existing === null, upgradeFlagged };

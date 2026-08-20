@@ -63,6 +63,69 @@ immediately rather than starting in a broken state.
 | `feeds[].url` | feed | The RSS feed URL, including any indexer API key. |
 | `feeds[].plugin` | feed | Which configured plugin package interprets this feed's entries. |
 | `feeds[].intervalSeconds` | feed | Poll interval in seconds. Defaults to 900. |
+| `feeds[].backfill` | feed | Optional, and **absent by default**. Walks the feed's own pagination to build a backlog — see "Backfilling a feed's history" below. Not editable from the Settings screen; write it by hand. |
+| `feeds[].backfill.style` | backfill | `newznab` (sends `offset` and `limit`) or `page` (sends a one-based `page`). Stated, never guessed — a wrong value is caught, see below. |
+| `feeds[].backfill.pageSize` | backfill | Items the indexer returns per page. Defaults to 100. Must match reality: too large silently skips items, too small merely re-reads them. |
+| `feeds[].backfill.pagesPerPass` | backfill | Pages fetched per pass. Defaults to 2, minimum 2. This is also the rate limit. |
+| `feeds[].backfill.maxPages` | backfill | Total pages ever walked for this feed before it stops. Defaults to 100. |
+
+### Backfilling a feed's history
+
+A feed is normally polled for its current page only, so Pickarr sees a release if it
+happens to be looking when that release appears, and knows nothing older than the first
+poll. Adding a `backfill` block to a feed makes a second, much slower pass walk that
+feed's pagination backwards:
+
+```json
+"feeds": [
+  {
+    "id": "indexer",
+    "url": "https://your-indexer.example/rss?t=6000&apikey=...",
+    "plugin": "@pickarr/plugin-scenes",
+    "backfill": { "style": "newznab", "pageSize": 100 }
+  }
+]
+```
+
+This is safe to re-run and safe to interrupt. Items are deduplicated on
+`(feed_id, guid)`, so a page read twice costs a few rejected inserts and nothing else,
+and the walk's position is stored per feed and resumed rather than restarted.
+
+**Pagination is not standardised, so you have to say which kind your indexer speaks.**
+Newznab-style indexers take `offset` and `limit`; others take `page`. Pickarr does not
+guess, because a wrong guess is the one failure that would be silent — an indexer that
+ignores the parameter serves page one forever, and every item on it is already known.
+If that does happen anyway, the walk notices that two consecutive pages carried the same
+items and stops, recording why.
+
+**It runs once an hour and reads two pages, by design.** The poll wants to be frequent
+and shallow; the walk wants to be occasional and deep, because it is reading a history
+that is not going anywhere. Backfilled titles also go through the same site lookup live
+ones do — skipping that would file an old release under a different identity from the
+same scene arriving today — so `pagesPerPass` is what keeps the walk from becoming a
+burst against that service.
+
+**Backfilled releases do not jump the queue.** A group created from a 2019 release sorts
+by when that release was published, not by when Pickarr read it, and a backfilled
+release that beats something you have already picked is flagged as an available upgrade
+without lifting the group up the Browse list. Learning about the past is not the same
+event as something new arriving. A feed that publishes no dates at all cannot be ordered
+this way, and its backfilled items will sort as though they had just arrived.
+
+**How to see where a walk has got to**, since there is no UI for it:
+
+```sql
+SELECT feed_id, next_page, pages_read, state, detail FROM feed_backfill;
+```
+
+`state` is `running` while there is more to read, `done` once a page came back empty,
+`exhausted` if `maxPages` stopped it first (raise it and delete the row to continue), or
+`broken` if the indexer turned out not to paginate, with `detail` saying which parameter
+it ignored.
+
+One wart worth knowing: **renaming a feed's `id` on the Settings screen drops its
+`backfill` block**, because the form matches feeds by id and does not model this field.
+The walk then starts over, which is cheap, but the configuration is gone.
 
 The SABnzbd API key can be supplied two ways: directly as a string in the config, or as
 `file:/run/secrets/sabnzbd_api_key`, which Pickarr resolves by reading that file at

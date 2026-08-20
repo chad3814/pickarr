@@ -62,6 +62,19 @@ export interface NewGroup {
   display: string;
   searchText: string;
   createdAt: number;
+  /**
+   * Where this group sorts in the browse list, which is `createdAt` for anything
+   * arriving now and defaults to it so every existing caller means what it did
+   * before.
+   *
+   * It is separate because backfill exists: a scene read off page forty was
+   * published years ago, and a group created for it that sorted on `createdAt`
+   * would claim the top of the list and push genuinely new groups under it. The
+   * two columns answer different questions — when the row was made, and how
+   * recently the thing it describes mattered — and only backfill makes them
+   * disagree.
+   */
+  listRankAt?: number;
 }
 
 export function insertGroup(db: DatabaseSync, group: NewGroup): number {
@@ -76,7 +89,7 @@ export function insertGroup(db: DatabaseSync, group: NewGroup): number {
       group.display,
       group.searchText,
       group.createdAt,
-      group.createdAt,
+      group.listRankAt ?? group.createdAt,
     );
   return Number(result.lastInsertRowid);
 }

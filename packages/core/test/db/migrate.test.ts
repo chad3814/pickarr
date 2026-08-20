@@ -938,7 +938,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   db.close();
 });
 
@@ -1044,5 +1044,40 @@ test('app_state arrives at version 10 and takes no other version', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+});
+
+// --- Migration 11: the feed backfill position -------------------------------
+
+test('migration 11 adds feed_backfill, keyed by the config feed id', () => {
+  const db = openTestDatabase();
+  const columns = db
+    .prepare('PRAGMA table_info(feed_backfill)')
+    .all()
+    .map((row) => String(row['name']));
+  assert.deepEqual(columns, [
+    'feed_id',
+    'next_page',
+    'pages_read',
+    'state',
+    'detail',
+    'updated_at',
+  ]);
+  db.close();
+});
+
+test('a feed_backfill row survives its feed leaving configuration', () => {
+  // Deliberately no foreign key: nothing in the database owns the feed list, so
+  // there is nothing for one to point at. A row for a feed that is no longer
+  // configured is a note about where its walk had reached, not an orphan to clean
+  // up — and adding a foreign key here would need a `feeds` table that does not
+  // and should not exist.
+  const db = openTestDatabase();
+  db.prepare(
+    `INSERT INTO feed_backfill (feed_id, next_page, pages_read, state, updated_at)
+     VALUES ('gone-from-config', 4, 4, 'running', 1000)`,
+  ).run();
+  const row = db.prepare('SELECT state FROM feed_backfill WHERE feed_id = ?').get('gone-from-config');
+  assert.equal(row?.['state'], 'running');
+  db.close();
 });
