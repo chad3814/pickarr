@@ -149,6 +149,73 @@ export function enqueueMetadata(
 }
 
 /**
+ * What `enqueueRefresh` did with the ids it was given. No `alreadyAnswered`,
+ * unlike `EnqueueResult`: every id here is *known* to be already answered —
+ * that is the precondition, not an outcome.
+ */
+export interface RefreshResult {
+  queued: number;
+  pending: number;
+}
+
+/**
+ * Queues a re-ask for groups that already have an answer, without disturbing a
+ * row the worker is already working through.
+ *
+ * The third corner of a 2x2 the other two functions here leave open. Whether an
+ * existing *answer* blocks the enqueue, and whether an existing *queue row* is
+ * reset, are independent questions:
+ *
+ *   `enqueueMetadata`  answer blocks    queue row blocks, no reset
+ *   `requeueMetadata`  answer ignored   queue row reset (attempts 0, next_at now)
+ *   `enqueueRefresh`   answer ignored   queue row respected, no reset
+ *
+ * `/api/metadata/request` needs this one when a `'none'` answer has gone stale
+ * enough to be worth asking again. Neither of the others will do. `enqueueMetadata`
+ * refuses on sight of the answer. `requeueMetadata` would take the id, but it
+ * zeroes `attempts` and pulls `next_at` back to now — and this caller fires on
+ * every page view, so a group the worker keeps failing on would be rewound to the
+ * front of the queue by nothing more than a reader refreshing the tab, and its
+ * backoff would never advance. `ON CONFLICT DO NOTHING` is the whole difference.
+ *
+ * The answer row is left exactly as it stands. The card keeps showing the last
+ * thing the provider said until a better answer replaces it, which is the same
+ * rule `requeueMetadata` follows and the reason `GET /api/metadata` can never
+ * report a group as less settled than it already was.
+ */
+export function enqueueRefresh(
+  db: DatabaseSync,
+  groupIds: readonly number[],
+  now: number,
+): RefreshResult {
+  const result: RefreshResult = { queued: 0, pending: 0 };
+  if (groupIds.length === 0) return result;
+
+  const waiting = db.prepare('SELECT 1 AS hit FROM metadata_queue WHERE group_id = ?');
+  const insert = db.prepare(
+    `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+     VALUES (?, ?, 0, ?) ON CONFLICT (group_id) DO NOTHING`,
+  );
+
+  db.exec('BEGIN');
+  try {
+    for (const groupId of groupIds) {
+      if (waiting.get(groupId) !== undefined) {
+        result.pending += 1;
+        continue;
+      }
+      insert.run(groupId, now, now);
+      result.queued += 1;
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return result;
+}
+
+/**
  * Re-asks groups whose metadata has already settled — the case
  * `enqueueMetadata`'s `answered` guard exists to refuse. That guard stays on
  * `enqueueMetadata` untouched, because the lazy, browse-driven trigger it

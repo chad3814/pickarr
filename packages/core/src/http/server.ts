@@ -24,6 +24,7 @@ import { allDownloads, getDownload, resetForRetry } from '../db/downloads.ts';
 import { failedFeedItems } from '../db/feed-items.ts';
 import {
   enqueueMetadata,
+  enqueueRefresh,
   getGroupMetadata,
   metadataForGroups,
   queuedMetadataNextAt,
@@ -152,6 +153,31 @@ const browseQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(30),
   q: z.string().min(1).optional(),
 });
+
+/**
+ * How long a `'none'` answer stands before viewing the group asks again.
+ *
+ * A `'none'` is settled — the provider was asked and had nothing — but "had
+ * nothing" is a fact about a moment, not forever: scenes are added to the
+ * provider after release, so the answer for a fresh release is routinely no and
+ * later yes. Without a window, `/api/metadata/request` treated the first no as
+ * final and the group was never looked up again for the life of the database.
+ *
+ * Thirty-six hours rather than twenty-four so the re-ask does not land at the
+ * same time of day it last ran — a group viewed each evening would otherwise sit
+ * just under a 24-hour bar every time and never refresh at all. Long enough that
+ * a library browsed daily costs one extra provider request per empty group every
+ * day and a half, which the worker's own `perTick` already paces.
+ */
+const METADATA_RETRY_AFTER_MS = 36 * 60 * 60 * 1000;
+
+/** Whether a recorded answer has gone stale enough to be worth asking again. */
+function worthReasking(answer: GroupMetadata, now: number): boolean {
+  // Only an empty answer. A confirmed scene is not re-asked at any age: that is
+  // a different feature with a different cost, and folding it in here silently
+  // would multiply provider traffic by the size of the library.
+  return answer.state === 'none' && now - answer.fetchedAt >= METADATA_RETRY_AFTER_MS;
+}
 
 const metadataRequestBodySchema = z.object({
   groupIds: z.array(z.number().int().positive()).max(MAX_PAGE_LIMIT),
@@ -759,13 +785,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       pending: 0,
       missing: 0,
       unavailable: 0,
+      refreshed: [],
     };
+    // Split, because the two lists cannot go through the same enqueue: an id
+    // that has never been answered is `enqueueMetadata`'s business, and one
+    // being deliberately re-asked despite its answer is `enqueueRefresh`'s.
     const askable: number[] = [];
+    const refreshable: number[] = [];
 
     for (const groupId of body.data.groupIds) {
-      // Already settled — cheaper to notice here than to let `enqueueMetadata`
-      // notice it again per id inside its own transaction below.
-      if (getGroupMetadata(db, groupId) !== undefined) {
+      const answer = getGroupMetadata(db, groupId);
+      // Settled, and not yet stale enough to revisit — cheaper to notice here
+      // than to let `enqueueMetadata` notice it again per id inside its own
+      // transaction below.
+      if (answer !== undefined && !worthReasking(answer, now)) {
         result.alreadyAnswered += 1;
         continue;
       }
@@ -799,11 +832,19 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         // Answered directly, the same way `lookUpOne` would answer it: never
         // queued, because the worker could only ever discard the row. From
         // the client's side the question is just as settled either way.
+        //
+        // A stale `'none'` that is *still* unaskable lands here too, and is
+        // simply re-answered — one cheap write per group per window, and no
+        // provider request. Not special-cased out, because answerability is not
+        // permanent: a group unaskable only because its site had not been
+        // discovered yet becomes askable once it has, and this is the path that
+        // notices.
         answerUnaskable(db, groupId, now);
         result.alreadyAnswered += 1;
         continue;
       }
-      askable.push(groupId);
+      if (answer === undefined) askable.push(groupId);
+      else refreshable.push(groupId);
     }
 
     // `enqueueMetadata` is itself idempotent — it treats an id that is
@@ -814,6 +855,16 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     result.queued += enqueued.queued;
     result.alreadyAnswered += enqueued.alreadyAnswered;
     result.pending += enqueued.pending;
+
+    // Every id in `refreshable` comes out of this holding a queue row — inserted
+    // now, or already there from an earlier view — so the whole list is what the
+    // SPA must start watching again, not just the freshly inserted half. An id
+    // whose row was already waiting still has an answer coming that the client
+    // has stopped listening for.
+    const refreshed = enqueueRefresh(db, refreshable, now);
+    result.queued += refreshed.queued;
+    result.pending += refreshed.pending;
+    result.refreshed = refreshable;
     return result;
   });
 

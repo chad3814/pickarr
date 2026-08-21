@@ -548,3 +548,70 @@ test('rearming before the hook has any answer of its own still watches the id', 
   await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Original title`)), { timeout: 3_000 });
   await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Fresher title`)), { timeout: 3_000 });
 });
+
+// `refreshed` on the POST response. The server re-asks a `'none'` answer that
+// has gone stale, and the id it re-asked is one this hook has already stopped
+// watching — a settled answer drops out of `unresolved` for the rest of the
+// mount. Without the rearm the new answer would sit unread until a reload, which
+// is the whole reason the route reports which ids it refreshed rather than only
+// how many.
+
+test('an id the server reports as refreshed is watched again, with no button pressed', async () => {
+  const ID = 4;
+  let gets = 0;
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/request') {
+      return jsonResponse({
+        queued: 1, alreadyAnswered: 0, pending: 0, missing: 0, unavailable: 0, refreshed: [ID],
+      });
+    }
+    gets += 1;
+    // The stale answer the card already had, then the answer the re-ask found.
+    // A hook that stopped watching on the first would never reach the second.
+    const view: MetadataView =
+      gets === 1
+        ? { state: 'none' }
+        : {
+            state: 'confirmed',
+            title: 'Found on the retry',
+            releaseDate: null,
+            durationSeconds: null,
+            synopsis: null,
+            hasPoster: false,
+          };
+    return jsonResponse({ [ID]: view });
+  }) as unknown as typeof fetch;
+
+  render(<Consumer ids={[ID]} />);
+
+  await waitFor(() => assert.ok(screen.getByText(`${ID}:none`)));
+  // Nothing clicked `rearm-4`; the response alone kept the id in view.
+  await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Found on the retry`)), { timeout: 3_000 });
+});
+
+test('a response with no refreshed field settles as before', async () => {
+  // Every server built before this field sends exactly this, and so does every
+  // ordinary request where nothing went stale. Treating an absent field as
+  // "rearm everything" would turn the lazy trigger into a permanent poll of the
+  // whole page, which is the property `unresolved` exists to protect.
+  const ID = 5;
+  let gets = 0;
+  globalThis.fetch = (async (input: string) => {
+    const url = new URL(input, 'http://test.invalid');
+    if (url.pathname === '/api/metadata/request') {
+      return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
+    }
+    gets += 1;
+    return jsonResponse({ [ID]: { state: 'none' } satisfies MetadataView });
+  }) as unknown as typeof fetch;
+
+  render(<Consumer ids={[ID]} />);
+  await waitFor(() => assert.ok(screen.getByText(`${ID}:none`)));
+
+  const settledAfter = gets;
+  // Comfortably longer than the hook's first backoff step, so a hook that kept
+  // watching would have polled again by now.
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(gets, settledAfter, 'a settled id with no refresh is not polled again');
+});

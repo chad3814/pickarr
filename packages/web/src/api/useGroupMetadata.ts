@@ -250,6 +250,23 @@ export function useGroupMetadata(groupIds: readonly number[]): GroupMetadataHand
   // variable dedicated to "something asked this effect to look again" is.
   const [generation, setGeneration] = useState(0);
 
+  /**
+   * Records the watch a rearm needs, without asking the effect to re-run.
+   *
+   * Split out because there are now two things that rearm an id — the public
+   * `rearm` below, driven by the Requery button, and a `refreshed` id on a
+   * `POST /api/metadata/request` response, which the server decided on its own.
+   * The bookkeeping has to be identical for both or the two paths watch an id on
+   * different terms; only *when* to re-run the effect differs, so only that stays
+   * at the call sites.
+   */
+  const watchAgain = useCallback((groupId: number): void => {
+    rearmedSnapshotsRef.current.set(groupId, {
+      baseline: metadataRef.current.get(groupId),
+      until: Date.now() + REARM_WATCH_MS,
+    });
+  }, []);
+
   const key = groupIds.join(',');
 
   useEffect(() => {
@@ -291,12 +308,37 @@ export function useGroupMetadata(groupIds: readonly number[]): GroupMetadataHand
       return found;
     }
 
+    /**
+     * Asks the server about every id this hook has not already asked about, and
+     * starts watching again any id the server says it refreshed.
+     *
+     * `refreshed` names ids whose settled `'none'` answer was stale enough that
+     * the server re-queued it (see `MetadataRequestResponse`). Those are exactly
+     * the ids this hook has *stopped* watching — a settled answer drops out of
+     * `unresolved` for the rest of the mount — so without this the fresher answer
+     * would land in the database and sit unread until a reload. It is the same
+     * treatment the Requery button gets, arrived at by the server's decision
+     * rather than the reader's.
+     *
+     * `?? []` because the field is absent from any response predating it, and
+     * from a request where nothing went stale. The generation is bumped once for
+     * the whole call rather than per id: each bump re-runs this effect, and one
+     * re-run sees every watch that was just recorded.
+     */
     async function ensureRequested(ids: readonly number[]): Promise<void> {
       const unseen = ids.filter((id) => !requestedRef.current.has(id));
+      let refreshed = false;
       for (const batch of chunk(unseen, BATCH_LIMIT)) {
-        await api.requestMetadata(batch, controller.signal);
+        const outcome = await api.requestMetadata(batch, controller.signal);
         for (const id of batch) requestedRef.current.add(id);
+        for (const id of outcome.refreshed ?? []) {
+          watchAgain(id);
+          refreshed = true;
+        }
       }
+      // After the loop, and only if something was refreshed: a bump per batch
+      // would re-run this effect while later batches were still in flight.
+      if (refreshed && !cancelled) setGeneration((previous) => previous + 1);
     }
 
     async function poll(ids: number[], delay: number): Promise<void> {
@@ -420,7 +462,7 @@ export function useGroupMetadata(groupIds: readonly number[]): GroupMetadataHand
     // second poller (which the design this hook now serves specifically
     // rules out). It does not change which answer that other id eventually
     // settles on, only when the next of its own polls lands.
-  }, [key, generation]);
+  }, [key, generation, watchAgain]);
 
   const rearm = useCallback((groupId: number): void => {
     // An entry goes in whether or not this hook has an answer for the id yet.
@@ -436,12 +478,9 @@ export function useGroupMetadata(groupIds: readonly number[]): GroupMetadataHand
     // No fabricated stand-in `MetadataView` for the missing baseline, on
     // purpose: `sameMetadata` compares `JSON.stringify` output and is only
     // safe while both sides come from the server's own JSON.
-    rearmedSnapshotsRef.current.set(groupId, {
-      baseline: metadataRef.current.get(groupId),
-      until: Date.now() + REARM_WATCH_MS,
-    });
+    watchAgain(groupId);
     setGeneration((previous) => previous + 1);
-  }, []);
+  }, [watchAgain]);
 
   return { metadata, rearm };
 }

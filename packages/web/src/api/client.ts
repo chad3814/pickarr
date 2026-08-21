@@ -176,6 +176,21 @@ export interface MetadataRequestResponse {
   pending: number;
   missing: number;
   unavailable: number;
+  /**
+   * The ids whose settled `'none'` answer was old enough that the server asked
+   * again, and which therefore have a fresher answer coming.
+   *
+   * Optional here, unlike core's, for the reason the other new keys in this file
+   * are: a response can come from a build that predates the field. `?? []` at the
+   * use site is what makes that mean "nothing was refreshed" rather than a crash
+   * — and treating an absent field as anything else would turn `useGroupMetadata`'s
+   * lazy trigger into a permanent poll of the whole page.
+   *
+   * A list rather than a count because its only consumer needs to know *which*:
+   * the hook has already stopped watching these ids, since a settled answer drops
+   * out of its `unresolved` filter, so it rearms exactly this set.
+   */
+  refreshed?: number[];
 }
 
 /**

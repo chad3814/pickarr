@@ -23,7 +23,7 @@ import {
   type PerformerRow,
 } from '../../src/db/performers.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
-import { metadataViewOf } from '../../src/http/views.ts';
+import { metadataViewOf, type MetadataRequestResponse } from '../../src/http/views.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 import type { DownloadClient } from '../../src/clients/types.ts';
 
@@ -87,13 +87,16 @@ function registryWith(plugins: readonly MediaTypePlugin[]): PluginRegistry {
 
 function deps(
   db: DatabaseSync,
-  overrides: Partial<Pick<ServerDeps, 'registry' | 'artworkDir' | 'metadataAvailable'>> = {},
+  // `now` is overridable because the stale-answer tests below need a clock far
+  // enough past `NOW` to cross a 36-hour window, which `NOW = 1000` cannot
+  // express by moving `fetched_at` backwards instead.
+  overrides: Partial<Pick<ServerDeps, 'registry' | 'artworkDir' | 'metadataAvailable' | 'now'>> = {},
 ): ServerDeps {
   return {
     db,
     defaultClient: fakeClient(),
     untrackedFor: () => [],
-    now: () => NOW,
+    now: overrides.now ?? (() => NOW),
     webRoot: null,
     registry: overrides.registry ?? registryWith([ASKABLE, NO_HOOKS, NULL_QUERY]),
     pluginForFeed: () => null,
@@ -248,7 +251,11 @@ test('requesting metadata queues only the unanswered', async () => {
   });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { queued: 2, alreadyAnswered: 0, pending: 0, missing: 0, unavailable: 0 });
+  // `refreshed` is empty because nothing here had a previous answer; only an id
+  // whose settled answer is being replaced needs the SPA to watch it again.
+  assert.deepEqual(response.json(), {
+    queued: 2, alreadyAnswered: 0, pending: 0, missing: 0, unavailable: 0, refreshed: [],
+  });
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 2);
 
   await server.close();
@@ -320,7 +327,9 @@ test('a request for a group whose plugin cannot look up is answered, not queued'
   });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0, unavailable: 0 });
+  assert.deepEqual(response.json(), {
+    queued: 0, alreadyAnswered: 3, pending: 0, missing: 0, unavailable: 0, refreshed: [],
+  });
 
   // Settled as an answer, not left in the queue for the worker to discard.
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 0);
@@ -336,7 +345,9 @@ test('a request for a group whose plugin cannot look up is answered, not queued'
     url: '/api/metadata/request',
     payload: { groupIds: [noHooks, nullQuery, noPlugin] },
   });
-  assert.deepEqual(again.json(), { queued: 0, alreadyAnswered: 3, pending: 0, missing: 0, unavailable: 0 });
+  assert.deepEqual(again.json(), {
+    queued: 0, alreadyAnswered: 3, pending: 0, missing: 0, unavailable: 0, refreshed: [],
+  });
   assert.equal(dueMetadataQueue(db, NOW, 10).length, 0);
 
   await server.close();
@@ -378,8 +389,11 @@ test('a request naming a group that no longer exists reports it as missing, not 
     pending: number;
     missing: number;
     unavailable: number;
+    refreshed: number[];
   };
-  assert.deepEqual(body, { queued: 1, alreadyAnswered: 0, pending: 0, missing: 1, unavailable: 0 });
+  assert.deepEqual(body, {
+    queued: 1, alreadyAnswered: 0, pending: 0, missing: 1, unavailable: 0, refreshed: [],
+  });
   // The five counters are meant to be an honest partition of the request: a
   // caller can detect a bug in this arithmetic without knowing anything else
   // about what was sent.
@@ -1115,5 +1129,136 @@ test('browse carries the cast of a group with no scene data', async () => {
   assert.deepEqual(found?.metadata.performers.map((p) => p.name), ['Amalia Davis']);
 
   await server.close();
+  db.close();
+});
+
+// Re-asking a group whose metadata came back empty. A `'none'` answer is
+// settled, and `/api/metadata/request` used to treat settled as final for all
+// time — so a scene the provider simply did not have yet was never looked up
+// again, however long the SPA kept showing the card. Past `RETRY_AFTER_MS`,
+// viewing the group is what asks again.
+
+/** The window the route uses, restated so a change to it fails these tests loudly. */
+const RETRY_AFTER_MS = 36 * 60 * 60 * 1000;
+
+function queueRow(db: DatabaseSync, groupId: number): { attempts: number; nextAt: number } | null {
+  const queued = db
+    .prepare('SELECT attempts, next_at FROM metadata_queue WHERE group_id = ?')
+    .get(groupId) as { attempts: number; next_at: number } | undefined;
+  return queued === undefined
+    ? null
+    : { attempts: Number(queued.attempts), nextAt: Number(queued.next_at) };
+}
+
+async function requestFor(db: DatabaseSync, ids: number[], now: number) {
+  const server = buildServer(deps(db, { now: () => now }));
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/metadata/request',
+    payload: { groupIds: ids },
+  });
+  const body = response.json() as MetadataRequestResponse & { refreshed: number[] };
+  await server.close();
+  return body;
+}
+
+test('a none answer older than the retry window is asked again', async () => {
+  const db = openTestDatabase();
+  const groupId = group(db, 'askable', 'Nothing Found');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: NOW });
+
+  const body = await requestFor(db, [groupId], NOW + RETRY_AFTER_MS);
+
+  assert.equal(body.queued, 1, 'a queue row was written, so `queued` is the honest counter');
+  assert.equal(body.alreadyAnswered, 0);
+  assert.deepEqual(body.refreshed, [groupId], 'the SPA has stopped watching this id and must rearm it');
+  assert.notEqual(queueRow(db, groupId), null, 'the worker has something to drain');
+
+  db.close();
+});
+
+test('a none answer younger than the retry window is left alone', async () => {
+  // One millisecond short. The boundary is the whole of what this feature is,
+  // so it is pinned from both sides rather than tested at a comfortable margin.
+  const db = openTestDatabase();
+  const groupId = group(db, 'askable', 'Nothing Found');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: NOW });
+
+  const body = await requestFor(db, [groupId], NOW + RETRY_AFTER_MS - 1);
+
+  assert.equal(body.queued, 0);
+  assert.equal(body.alreadyAnswered, 1);
+  assert.deepEqual(body.refreshed, []);
+  assert.equal(queueRow(db, groupId), null, 'nothing queued, so no provider request will be spent');
+
+  db.close();
+});
+
+test('a confirmed answer is never re-asked, however old', async () => {
+  // Only an empty answer is worth revisiting. A confirmed scene going stale is
+  // a different feature with a different cost, and this one must not quietly
+  // become it.
+  const db = openTestDatabase();
+  const groupId = group(db, 'askable', 'Found It');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: candidate(), nearMisses: [], now: NOW });
+
+  const body = await requestFor(db, [groupId], NOW + RETRY_AFTER_MS * 100);
+
+  assert.equal(body.alreadyAnswered, 1);
+  assert.equal(body.queued, 0);
+  assert.deepEqual(body.refreshed, []);
+  assert.equal(queueRow(db, groupId), null);
+
+  db.close();
+});
+
+test('a stale none already queued keeps its backoff rather than being rewound', async () => {
+  // Viewing the page must not reset a row the worker has already failed on
+  // several times: `requeueMetadata` would zero `attempts` and pull `next_at`
+  // back to now, so a reader idly refreshing would hold a failing group at the
+  // front of the queue forever. This is why the route does not reuse it.
+  const db = openTestDatabase();
+  const groupId = group(db, 'askable', 'Nothing Found');
+  recordMetadataAnswer(db, { groupId, source: 'theporndb', confirmed: null, nearMisses: [], now: NOW });
+  const farFuture = NOW + RETRY_AFTER_MS * 10;
+  db.prepare(
+    `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at)
+     VALUES (?, ?, 4, ?)`,
+  ).run(groupId, NOW, farFuture);
+
+  const body = await requestFor(db, [groupId], NOW + RETRY_AFTER_MS);
+
+  assert.equal(body.pending, 1, 'already queued is `pending`, not a second queueing');
+  assert.equal(body.queued, 0);
+  assert.deepEqual(queueRow(db, groupId), { attempts: 4, nextAt: farFuture }, 'untouched');
+
+  db.close();
+});
+
+test('the five counters still partition a mixed request', async () => {
+  // The invariant `MetadataRequestResponse` documents. Adding a sixth outcome
+  // to the route is exactly the change that would quietly break it.
+  const db = openTestDatabase();
+  const stale = group(db, 'askable', 'Stale None');
+  const fresh = group(db, 'askable', 'Fresh None');
+  const confirmed = group(db, 'askable', 'Confirmed');
+  const never = group(db, 'askable', 'Never Asked');
+  const now = NOW + RETRY_AFTER_MS;
+  recordMetadataAnswer(db, { groupId: stale, source: 'theporndb', confirmed: null, nearMisses: [], now: NOW });
+  recordMetadataAnswer(db, { groupId: fresh, source: 'theporndb', confirmed: null, nearMisses: [], now });
+  recordMetadataAnswer(db, { groupId: confirmed, source: 'theporndb', confirmed: candidate(), nearMisses: [], now: NOW });
+
+  const ids = [stale, fresh, confirmed, never, 9999];
+  const body = await requestFor(db, ids, now);
+
+  assert.equal(
+    body.queued + body.alreadyAnswered + body.pending + body.missing + body.unavailable,
+    ids.length,
+  );
+  assert.equal(body.queued, 2, 'the stale none and the never-asked one');
+  assert.equal(body.alreadyAnswered, 2, 'the fresh none and the confirmed one');
+  assert.equal(body.missing, 1);
+  assert.deepEqual(body.refreshed, [stale], 'only the id that had an answer before needs a rearm');
+
   db.close();
 });

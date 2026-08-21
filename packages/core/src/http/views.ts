@@ -124,7 +124,8 @@ export type MetadataView = CastView &
  *
  * The five counters are an honest partition of the request:
  * `queued + alreadyAnswered + pending + missing + unavailable` always equals
- * the number of ids sent.
+ * the number of ids sent. `refreshed` below is a list, not a sixth bucket, and
+ * deliberately overlaps them rather than adding to them.
  */
 export interface MetadataRequestResponse {
   queued: number;
@@ -132,6 +133,22 @@ export interface MetadataRequestResponse {
   pending: number;
   missing: number;
   unavailable: number;
+  /**
+   * The ids that already had a `'none'` answer old enough to be worth asking
+   * again, and now have a re-ask outstanding.
+   *
+   * A list rather than a counter, and the only one here, because its consumer
+   * needs to know *which* ids rather than how many. The SPA stops watching an id
+   * the moment it reads a settled answer, so a group re-queued behind its back
+   * would have its new answer sit unread until the next page load;
+   * `useGroupMetadata` rearms exactly these.
+   *
+   * Not a sixth bucket in the partition above — it cuts across it. Every id here
+   * is also counted in `queued` or in `pending` (pending when the worker already
+   * had a row for it), so `queued + alreadyAnswered + pending + missing +
+   * unavailable` still equals the number of ids sent.
+   */
+  refreshed: number[];
 }
 
 /**
