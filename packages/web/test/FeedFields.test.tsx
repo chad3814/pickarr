@@ -8,7 +8,7 @@ afterEach(cleanup);
 
 function feeds(): FeedDraft[] {
   return [
-    { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: '900' },
+    { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: '900', backfillStyle: 'off', backfillPageSize: '100', backfillPagesPerPass: '2', backfillMaxPages: '100' },
   ];
 }
 
@@ -40,8 +40,19 @@ test('an added feed defaults its interval to the schema default', () => {
 // stand-in option, the <select> renders nothing selected while `feed.plugin`
 // still holds the old name, so the form shows one thing and submits another.
 test('a feed whose plugin was renamed away still shows its (now unlisted) plugin selected', () => {
-  const stale = [
-    { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-old-name', intervalSeconds: '900' },
+  // Annotated so `backfillStyle` narrows to the union rather than widening to
+  // `string`, which an unannotated literal does.
+  const stale: FeedDraft[] = [
+    {
+      id: 'feed1',
+      url: 'https://example.invalid/rss',
+      plugin: '@pickarr/plugin-old-name',
+      intervalSeconds: '900',
+      backfillStyle: 'off',
+      backfillPageSize: '100',
+      backfillPagesPerPass: '2',
+      backfillMaxPages: '100',
+    },
   ];
   render(<FeedFields feeds={stale} pluginNames={['@pickarr/plugin-new-name']} onChange={() => {}} />);
   const select = screen.getByLabelText(/plugin/i) as HTMLSelectElement;
@@ -64,4 +75,77 @@ test('removing a feed drops exactly that row, leaving the others in order', () =
   // failing the test - if the per-row aria-label were ever removed.
   fireEvent.click(screen.getByRole('button', { name: /remove feed feed2/i }));
   assert.deepEqual(next.map((feed) => feed.id), ['feed1', 'feed3']);
+});
+
+test('a feed defaults to not backfilling, and its settings stay out of the way', () => {
+  // Off is the schema's own default — `backfill` is optional — and showing three
+  // disabled boxes beside an Off selector is noise on the common case.
+  render(
+    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} onChange={() => {}} />,
+  );
+
+  const select = screen.getByLabelText(/backfill history/i) as HTMLSelectElement;
+  assert.equal(select.value, 'off');
+  assert.equal(screen.queryByLabelText(/items per page/i), null);
+  assert.equal(screen.queryByLabelText(/pages per pass/i), null);
+});
+
+test('choosing a pagination style reveals the settings it needs', () => {
+  const drafts = feeds();
+  drafts[0]!.backfillStyle = 'newznab';
+  render(
+    <FeedFields feeds={drafts} pluginNames={['@pickarr/plugin-scenes']} onChange={() => {}} />,
+  );
+
+  assert.ok(screen.getByLabelText(/items per page/i));
+  assert.ok(screen.getByLabelText(/pages per pass/i));
+  assert.ok(screen.getByLabelText(/maximum pages/i));
+});
+
+test('the style offers no automatic option, because Pickarr cannot detect one', () => {
+  // Deliberate, not an omission. Nothing in an RSS document says how the indexer
+  // pages, and a wrong guess is the silent failure — an indexer that ignores the
+  // parameter serves page one forever and every item on it is already known. The
+  // options are named by what they send so they can be matched against an
+  // indexer's own documentation.
+  render(
+    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} onChange={() => {}} />,
+  );
+
+  const select = screen.getByLabelText(/backfill history/i) as HTMLSelectElement;
+  const values = [...select.options].map((option) => option.value);
+  assert.deepEqual(values, ['off', 'newznab', 'page']);
+});
+
+test('an added feed is not backfilling', () => {
+  // Adding a feed must not quietly start walking someone's indexer.
+  let added: FeedDraft[] = [];
+  render(
+    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} onChange={(next) => (added = next)} />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
+
+  assert.equal(added[1]?.backfillStyle, 'off');
+  // ...but carrying the schema's defaults, so switching it on presents the same
+  // starting point as a block written by hand with only `style` set.
+  assert.equal(added[1]?.backfillPageSize, '100');
+  assert.equal(added[1]?.backfillPagesPerPass, '2');
+});
+
+test('switching backfill off keeps the numbers that were typed', () => {
+  // They are hidden, not cleared: someone toggling off to compare against another
+  // feed and back on again should not have to retype what they had.
+  const drafts = feeds();
+  drafts[0]!.backfillStyle = 'newznab';
+  drafts[0]!.backfillPageSize = '250';
+  let updated: FeedDraft[] = [];
+  render(
+    <FeedFields feeds={drafts} pluginNames={['@pickarr/plugin-scenes']} onChange={(next) => (updated = next)} />,
+  );
+
+  fireEvent.change(screen.getByLabelText(/backfill history/i), { target: { value: 'off' } });
+
+  assert.equal(updated[0]?.backfillStyle, 'off');
+  assert.equal(updated[0]?.backfillPageSize, '250');
 });

@@ -2,6 +2,8 @@
 
 Date: 2026-08-17
 Status: implemented without review — decisions taken autonomously, see §13
+Superseded in part: §5's "no web UI" was reversed on `feat/settings-feed-backfill`; see
+the note in §5 and the limitation struck from §12.
 Branch: `feat/47-follow-rss-pagination-to-backfill-older-items`
 Issue: [#47](https://github.com/chad3814/pickarr/issues/47)
 
@@ -108,6 +110,13 @@ is the one field a user can get quietly wrong, and §7's guard does not catch it
 noted in §12.
 
 ## 5. Why no web UI, and what it costs
+
+> **Reversed.** The form now models `backfill`, on a follow-up branch. The argument
+> below stands as written except for the part that mattered most: the rename footgun
+> in the last paragraph existed *only because* the field was unmodelled, so it was a
+> cost the decision created rather than one it accepted. Modelling the field removes
+> it. Kept here because the nine-file accounting is still the reason it was not done
+> the first time.
 
 `applyEdits` documents its own guarantee (`config/editable.ts:212-228`): a key the
 form does not model survives a save, including a key *inside* a feed block, as
@@ -319,7 +328,9 @@ walking it would spend a fetch re-reading the freshest thing the install has.
   biasing it old would be inventing one.
 - **A wrong `pageSize` skips items silently** (§4). §7's guard catches a parameter
   being *ignored*, not one being *miscalibrated*.
-- **Renaming a feed's id in the UI drops its backfill config** (§5).
+- ~~**Renaming a feed's id in the UI drops its backfill config** (§5).~~ Fixed by
+  modelling the field in the form; the submission carries the block, so there is
+  nothing for a rename to fail to merge with.
 - **A page of entirely malformed items reads as empty and ends the walk as
   `done`.** `parse-rss.ts:80` drops items missing a title or link before the pass
   ever counts them, so "the feed returned nothing" and "the feed returned nothing
