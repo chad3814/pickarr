@@ -23,6 +23,16 @@ export interface DownloadRow {
   kind: DownloadKind;
   status: DownloadStatus;
   storagePath: string | null;
+  /**
+   * The plan the first attempt at importing this download resolved, as the
+   * JSON array of `{ source, destination }` the plugin answered — or null if
+   * no attempt has got that far. Read back by `importDownload` on every later
+   * attempt instead of asking the plugin again: in `move` mode a retry's
+   * listing has lost whatever the previous attempt already moved, so a plugin
+   * asked a second time answers a plan that no longer names the destinations
+   * already written. See `parseStoredPlan` in `pipeline/import.ts` and #23.
+   */
+  importPlan: string | null;
   error: string | null;
   attempts: number;
   absentSince: number | null;
@@ -38,7 +48,7 @@ export interface DownloadRow {
  */
 const SELECT = `
   SELECT id, release_id, group_id, client_id, client_ref, kind, status,
-         storage_path, error, attempts, absent_since,
+         storage_path, import_plan, error, attempts, absent_since,
          created_at, updated_at
   FROM downloads
 `;
@@ -64,6 +74,7 @@ function toDownloadRow(row: SqlRow): DownloadRow {
     kind: str(row, 'kind') === 'upgrade' ? 'upgrade' : 'initial',
     status: status as DownloadStatus,
     storagePath: maybeStr(row, 'storage_path'),
+    importPlan: maybeStr(row, 'import_plan'),
     error: maybeStr(row, 'error'),
     attempts: num(row, 'attempts'),
     absentSince: maybeNum(row, 'absent_since'),
@@ -324,6 +335,28 @@ export function setStatus(
   requireAffected('setStatus', id, result.changes);
 }
 
+/**
+ * Also drops any committed `import_plan`, in the same statement.
+ *
+ * Every source in a stored plan is an absolute path into the directory the
+ * plan was resolved against, so a plan that outlives a change of that
+ * directory describes somewhere else. Reconcile calls this whenever the
+ * client's reported path disagrees with the row's — a remote-path mapping
+ * corrected in configuration is enough to move every job at once — and a row
+ * left in `importing` by a crash, or put back to `completed` by boot
+ * recovery, is exactly the kind that has both a committed plan and a path
+ * still liable to be rewritten. Without this, that row's every later attempt
+ * would refuse with `Planned source is missing` naming the old directory,
+ * forever, where before the plan was stored it would simply have re-planned
+ * against the new one.
+ *
+ * `resetForRetry`'s `'queued'` branch is the same guard reached the other
+ * way, and neither subsumes the other: that one clears a plan whose files are
+ * about to be fetched again, this one clears a plan whose files turn out to
+ * have been somewhere else all along. Clearing unconditionally rather than
+ * only when the path really moved costs nothing — the first call for any
+ * download happens before an import has committed anything.
+ */
 export function setStoragePath(
   db: DatabaseSync,
   id: number,
@@ -331,9 +364,28 @@ export function setStoragePath(
   now: number,
 ): void {
   const result = db
-    .prepare('UPDATE downloads SET storage_path = ?, updated_at = ? WHERE id = ?')
+    .prepare(
+      'UPDATE downloads SET storage_path = ?, import_plan = NULL, updated_at = ? WHERE id = ?',
+    )
     .run(storagePath, now, id);
   requireAffected('setStoragePath', id, result.changes);
+}
+
+/**
+ * Commits the plan an import resolved, so every later attempt at the same
+ * download acts on it rather than asking the plugin again.
+ *
+ * Written once, by the attempt that first got a plan past
+ * `assertSourcesWereListed`, and never overwritten — `importDownload` only
+ * calls this on the branch where the column was null. Overwriting it on each
+ * attempt would defeat the point: the value a retry would write is precisely
+ * the re-derived plan the stored one exists to displace.
+ */
+export function setImportPlan(db: DatabaseSync, id: number, plan: string): void {
+  const result = db
+    .prepare('UPDATE downloads SET import_plan = ? WHERE id = ?')
+    .run(plan, id);
+  requireAffected('setImportPlan', id, result.changes);
 }
 
 /**
@@ -498,6 +550,17 @@ export function clearAbsent(db: DatabaseSync, id: number): void {
  * mark from a previous attempt. `missing_polls` is not touched: nothing reads
  * it any more, and writing a column no reader consults would be the only
  * remaining pretence that it still means something.
+ *
+ * `import_plan` is cleared on the `'queued'` branch and only there, and that
+ * asymmetry is the guard on the whole stored-plan mechanism. Going back to
+ * `'queued'` means the client fetches the files again, so the plan describes
+ * a download directory that no longer exists — and every source in it is an
+ * absolute path into that directory, which a later attempt would either fail
+ * to find or, worse, find occupied by an unrelated job the client has since
+ * put at the same path. Going to `'completed'` is the import-only retry this
+ * column exists for, and keeping the plan there is the entire point. Both are
+ * one statement so a reader can never see a row whose status and plan
+ * disagree.
  */
 export function resetForRetry(db: DatabaseSync, id: number, now: number): DownloadRow | null {
   const download = getDownload(db, id);
@@ -508,9 +571,10 @@ export function resetForRetry(db: DatabaseSync, id: number, now: number): Downlo
     `UPDATE downloads
      SET status = ?, error = NULL, attempts = 0, absent_since = NULL,
          client_ref = CASE WHEN ? = 'queued' THEN NULL ELSE client_ref END,
+         import_plan = CASE WHEN ? = 'queued' THEN NULL ELSE import_plan END,
          updated_at = ?
      WHERE id = ?`,
-  ).run(status, status, now, id);
+  ).run(status, status, status, now, id);
 
   return getDownload(db, id);
 }

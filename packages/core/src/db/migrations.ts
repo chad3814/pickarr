@@ -725,4 +725,23 @@ export const migrations: Migration[] = [
       db.exec(FEED_BACKFILL);
     },
   },
+  // 12 was free when this was written, checked again immediately before
+  // committing, and — as the four comments above say at increasing length —
+  // that is a fact with a short shelf life. This one is already known to
+  // expire: #31 was specified against 12 as well, and is not built yet.
+  // Whichever of the two lands second renumbers, and `assertUniqueVersions` is
+  // what will say so, rather than a UNIQUE violation on a fresh database or a
+  // silently skipped migration on an existing one.
+  //
+  // Nullable with no default, and not backfilled. A row that predates this
+  // column has no plan any attempt committed to, and null is exactly that
+  // statement — inventing one from the current contents of a download
+  // directory would be inventing the very thing this column exists to stop a
+  // retry from re-deriving.
+  {
+    version: 12,
+    up(db) {
+      db.exec('ALTER TABLE downloads ADD COLUMN import_plan TEXT;');
+    },
+  },
 ];

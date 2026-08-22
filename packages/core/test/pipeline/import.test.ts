@@ -1,13 +1,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink, realpath } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  realpath,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempDir } from '../temp-dir.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { importDownload, type ImportDeps, lstatOrNull, moveWithinLibrary } from '../../src/pipeline/import.ts';
+import {
+  importDownload,
+  type ImportDeps,
+  lstatOrNull,
+  moveWithinLibrary,
+  type RenameLike,
+} from '../../src/pipeline/import.ts';
 import { getDownload } from '../../src/db/downloads.ts';
 import { liveFilesForGroup } from '../../src/db/imported-files.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
@@ -328,6 +344,117 @@ test('retry after a partial import skips files already in place', async () => {
     db.close();
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The single-download half of the same crash: no upgrade, nothing trashed,
+ * just a plan whose second file inherits the first one's destination once the
+ * first one is gone from the listing. Assigning destinations by rank is an
+ * ordinary thing for a plugin to do — the largest file is the feature and the
+ * rest are extras — and it is what turns a shrunken listing from "a shorter
+ * plan" into "a different plan for the same paths".
+ */
+test('a retry uses the plan the first attempt recorded, not one re-derived from the shrunken listing', async () => {
+  const root = await tempImportRoot();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    await writeFile(join(downloadDir, 'aaa.mp4'), 'the-feature');
+    await writeFile(join(downloadDir, 'bbb.mp4'), 'extra');
+
+    const library = join(root, 'library');
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+
+    const registry = registryFor(
+      plugin((_media, files): ImportPlan => ({
+        files: files
+          .toSorted((a, b) => b.sizeBytes - a.sizeBytes)
+          .map((file, index) => ({
+            source: file.absolutePath,
+            destination: index === 0 ? 'scene.mp4' : 'scene-extra.mp4',
+          })),
+      })),
+      library,
+    );
+
+    // Kills the first attempt in the window between the rename landing and
+    // `insertImportedFile`, and lets every later call through.
+    let crashed = false;
+    const crashAfterFirstRename: RenameLike = async (source, destination) => {
+      await rename(source, destination);
+      if (crashed) return;
+      crashed = true;
+      throw new Error('killed mid-import');
+    };
+
+    await assert.rejects(
+      importDownload(
+        deps(db, registry, join(root, 'trash'), { rename: crashAfterFirstRename }),
+        getDownload(db, 1)!,
+      ),
+      /killed mid-import/,
+    );
+    const committed = getDownload(db, 1)?.importPlan;
+    assert.notEqual(committed, null, 'the plan is committed before anything is moved');
+
+    db.prepare("UPDATE downloads SET status = 'completed' WHERE id = 1").run();
+    await importDownload(
+      deps(db, registry, join(root, 'trash'), { rename: crashAfterFirstRename }),
+      getDownload(db, 1)!,
+    );
+
+    assert.equal(getDownload(db, 1)?.status, 'imported');
+    assert.equal(await readFile(join(library, 'scene.mp4'), 'utf8'), 'the-feature');
+    assert.equal(await readFile(join(library, 'scene-extra.mp4'), 'utf8'), 'extra');
+    assert.equal(liveFilesForGroup(db, 1).length, 2);
+    // Committed once, by the attempt that resolved it — a retry reads it and
+    // does not overwrite it with what the shrunken listing would have said.
+    assert.equal(getDownload(db, 1)?.importPlan, committed);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The cost of storing the plan: a column that cannot be read takes this
+ * download from retryable to failing the same way forever. That is the right
+ * trade against half-reading a plan and moving files somewhere nobody asked
+ * for, but only if the failure says which row to clear — which is the recovery.
+ */
+test('a stored import plan that cannot be read fails the import, naming the download', async () => {
+  for (const stored of ['not json at all', '[]', '[{"source":"/a"}]', '[{"source":"","destination":"d"}]']) {
+    const root = await tempImportRoot();
+    try {
+      const downloadDir = join(root, 'complete');
+      await mkdir(downloadDir, { recursive: true });
+      const source = join(downloadDir, 'scene.mp4');
+      await writeFile(source, 'video-bytes');
+
+      const library = join(root, 'library');
+      const db = openTestDatabase();
+      seed(db, downloadDir);
+      db.prepare('UPDATE downloads SET import_plan = ? WHERE id = 1').run(stored);
+
+      const registry = registryFor(
+        plugin((): ImportPlan => ({ files: [{ source, destination: 'scene.mp4' }] })),
+        library,
+      );
+
+      await assert.rejects(
+        importDownload(deps(db, registry, join(root, 'trash')), getDownload(db, 1)!),
+        /Stored import plan for download 1 is unreadable/,
+        stored,
+      );
+      // Refused before anything moved, so clearing the column by hand is all
+      // the recovery there is to do.
+      assert.equal(await readFile(source, 'utf8'), 'video-bytes');
+      db.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 

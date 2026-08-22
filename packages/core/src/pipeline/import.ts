@@ -6,9 +6,10 @@ import type { DownloadedFile, ImportFile, ParsedRelease } from '@pickarr/plugin-
 import type { PluginRegistry } from '../plugins/registry.ts';
 import { completeUpgrade, getGroup } from '../db/groups.ts';
 import { getRelease } from '../db/releases.ts';
-import { setStatus, type DownloadRow } from '../db/downloads.ts';
+import { setImportPlan, setStatus, type DownloadRow } from '../db/downloads.ts';
 import { findLiveByDest, insertImportedFile, liveFilesForGroup } from '../db/imported-files.ts';
 import { trashFiles } from './upgrade.ts';
+import { asJsonArray, asJsonObject, type JsonValue } from '../json.ts';
 
 export type RenameLike = (source: string, destination: string) => Promise<void>;
 
@@ -141,6 +142,61 @@ export function resolveDestination(libraryRoot: string, destination: string): st
     throw new Error(`Destination ${destination} escapes the library root`);
   }
   return target;
+}
+
+/**
+ * Reads back the plan an earlier attempt committed to `downloads.import_plan`.
+ *
+ * Every attempt after the first one acts on this rather than on a fresh
+ * `planImport`, so it is a trust boundary in the same sense a plugin's answer
+ * is: the value is a string out of the database, which a hand-edit, a
+ * truncated write or a restore from a differently-shaped backup can make into
+ * anything at all. Read through the `JsonValue` helpers so nothing here is
+ * `any` or `unknown`, and refused outright rather than half-read — a plan
+ * missing an entry, or with a blank destination, would send this download's
+ * files somewhere nobody asked for, and an import that refuses to run is
+ * always recoverable while a file moved to the wrong place is not.
+ *
+ * `asText` is deliberately not used for the two fields: it turns a number or a
+ * boolean into a string, and `42` is not a path anything in this download's
+ * listing ever had. The rule is the literal one — a non-empty string — so a
+ * stored plan that does not have that shape is refused rather than coerced
+ * into one.
+ *
+ * An empty array is unreadable too, not an empty plan. `setImportPlan` is only
+ * ever called with a plan that already passed the `plan.files.length === 0`
+ * check, so nothing legitimate ever stores one; and `asJsonArray` answers `[]`
+ * for a value that is not an array at all, which this way needs no second
+ * branch to catch.
+ *
+ * The download is named because this is the one failure in `importDownload`
+ * that takes a retryable download and makes it fail forever — every attempt
+ * reads the same bad column and refuses the same way. Clearing the column by
+ * hand is the recovery, and the message has to be enough to find the row.
+ */
+function parseStoredPlan(downloadId: number, json: string): ImportFile[] {
+  const unreadable = (): Error =>
+    new Error(`Stored import plan for download ${downloadId} is unreadable`);
+
+  let parsed: JsonValue;
+  try {
+    parsed = JSON.parse(json) as JsonValue;
+  } catch {
+    throw unreadable();
+  }
+
+  const entries = asJsonArray(parsed);
+  if (entries.length === 0) throw unreadable();
+
+  return entries.map((entry) => {
+    const object = asJsonObject(entry);
+    if (object === null) throw unreadable();
+    const source = object['source'];
+    const destination = object['destination'];
+    if (typeof source !== 'string' || source === '') throw unreadable();
+    if (typeof destination !== 'string' || destination === '') throw unreadable();
+    return { source, destination };
+  });
 }
 
 /**
@@ -416,18 +472,63 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
   };
 
   const files = await listFiles(download.storagePath);
-  const plan = plugin.planImport(media, files);
-  if (plan === null || plan.files.length === 0) {
-    throw new Error('no-importable-files');
-  }
 
   // The set of paths core actually offered the plugin, built once and used
-  // twice: by the fail-fast sweep here, and again inside the transfer loop for
+  // twice: by the fail-fast sweep below, and again inside the transfer loop for
   // each source that turns out to exist by the time we reach it.
   const offered = new Set(files.map((file) => file.absolutePath));
-  await assertSourcesWereListed(offered, plan.files);
 
-  const resolved = plan.files.map((file) => ({
+  // A retry decides what to do from the plan the first attempt committed to,
+  // not from a listing that attempt has already changed. `listFiles` runs on
+  // every attempt regardless — the loop below needs `offered` whichever plan
+  // it is acting on — but `planImport` is asked exactly once per download.
+  //
+  // Asking again is what the bug was. In `move` mode the previous attempt
+  // renamed its sources out of the download directory, so a retry hands the
+  // plugin a strictly smaller listing and gets back a different plan: one that
+  // no longer names the destination the crashed attempt already wrote. The
+  // recovery branch in the loop can only repair a destination the plan gives
+  // it, so that file becomes an orphan — in the library, absent from
+  // `imported_files`, invisible to `liveFilesForGroup`, and therefore never
+  // trashed and never adopted. The next upgrade of the group trashes the
+  // group's genuinely live files and *then* collides with the orphan, which is
+  // a failure that repeats forever and needs a human. See #23.
+  //
+  // The plan is stored, rather than the placed files being recorded earlier or
+  // the listing being cached: what a retry needs is not "what was on disk" but
+  // "what this download decided to do", and only the plan says that. It is
+  // stored as the plugin gave it, with destinations still relative, so
+  // `resolveDestination` below runs over it on every attempt and the
+  // configured library root stays authoritative — a plan committed before the
+  // root was reconfigured resolves against the new root, not the old one.
+  const stored = download.importPlan;
+  let planned: ImportFile[];
+  if (stored === null) {
+    const plan = plugin.planImport(media, files);
+    // First attempt only. A stored plan is never empty, because an empty one
+    // was never persisted.
+    if (plan === null || plan.files.length === 0) {
+      throw new Error('no-importable-files');
+    }
+    planned = plan.files;
+  } else {
+    planned = parseStoredPlan(download.id, stored);
+  }
+
+  // Runs over whichever plan was chosen, including a stored one. The sweep
+  // permits a source that is absent from both the listing and the disk (see
+  // its doc comment), which is exactly the shape a stored plan takes on a
+  // retry, and the `offered` set it builds is the same one the loop re-asks
+  // against.
+  await assertSourcesWereListed(offered, planned);
+
+  // Committed after the sweep and before anything touches the filesystem: a
+  // plan core has already refused is not one a retry should be handed back,
+  // and a plan that only gets written once the first file has moved is missing
+  // for precisely the crash it exists to survive.
+  if (stored === null) setImportPlan(db, download.id, JSON.stringify(planned));
+
+  const resolved = planned.map((file) => ({
     source: file.source,
     destination: resolveDestination(libraryRoot, file.destination),
   }));

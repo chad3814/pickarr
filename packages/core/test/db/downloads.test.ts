@@ -16,6 +16,7 @@ import {
   recordError,
   resetForRetry,
   setClientRef,
+  setImportPlan,
   setStatus,
   setStoragePath,
 } from '../../src/db/downloads.ts';
@@ -243,6 +244,58 @@ test('resetForRetry clears absent_since so a retry does not inherit a stale abse
   markAbsent(db, id, 5);
   resetForRetry(db, id, 10);
   assert.equal(getDownload(db, id)?.absentSince, null);
+  db.close();
+});
+
+const PLAN = '[{"source":"/complete/Release/scene.mp4","destination":"scene.mp4"}]';
+
+test('setStoragePath drops a committed import plan, because the plan named the old directory', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  setStoragePath(db, id, '/complete/Release', 2);
+  setImportPlan(db, id, PLAN);
+
+  // Reconcile rewrites the path whenever the client disagrees with the row —
+  // a remote-path mapping corrected in config is enough. Every source in a
+  // committed plan is an absolute path into the directory it was resolved
+  // against, so a plan surviving that rewrite would be applied to a directory
+  // it does not describe.
+  setStoragePath(db, id, '/mnt/complete/Release', 3);
+
+  assert.equal(getDownload(db, id)?.importPlan, null);
+  db.close();
+});
+
+test('resetForRetry keeps a committed import plan when the download directory survives', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  setStoragePath(db, id, '/complete/Release', 2);
+  setImportPlan(db, id, PLAN);
+  failDownload(db, id, 'killed mid-import', 3);
+
+  const reset = resetForRetry(db, id, 10);
+
+  // A storage path means only the import has to be redone, against the same
+  // directory the plan was resolved from — which is the whole case a stored
+  // plan exists for.
+  assert.equal(reset?.status, 'completed');
+  assert.equal(reset?.importPlan, PLAN);
+  db.close();
+});
+
+test('resetForRetry drops a committed import plan when the files will be fetched again', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+  setImportPlan(db, id, PLAN);
+  failDownload(db, id, 'disappeared-from-client', 3);
+
+  const reset = resetForRetry(db, id, 10);
+
+  // No storage path, so the client downloads again and the directory the
+  // stored plan names is not the one the next import will read. Keeping it
+  // would mean applying a plan to the wrong directory.
+  assert.equal(reset?.status, 'queued');
+  assert.equal(reset?.importPlan, null);
   db.close();
 });
 
