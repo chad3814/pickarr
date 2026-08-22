@@ -397,20 +397,36 @@ export async function editGroup(
           }
           rows.push(row);
         }
+        let threw = false;
+        let reason = '';
         try {
           await trashFiles(db, rows, libraryRootReal, deps.trashDir, survivorId, now);
-          trashed = rows.length;
         } catch (error) {
-          // `trashFiles` marks each row trashed immediately after moving that
-          // file, so the rows themselves say how far it got. Read back rather
-          // than guessed: blaming the first row for a later one's failure would
-          // send an operator to look at a file that moved perfectly well.
-          const reason = (error as Error).message;
-          for (const row of rows) {
-            const after = getImportedFile(db, row.id);
-            if (after !== null && after.trashedAt !== null) trashed += 1;
-            else failed.push({ path: row.destPath, error: reason });
-          }
+          threw = true;
+          reason = error instanceof Error ? error.message : String(error);
+        }
+        // Read back on both paths, not just the failing one. `trashFiles` marks
+        // each row immediately after moving that file, so the rows themselves
+        // say how far it got — and `rows.length` says only how many were asked
+        // for. Blaming the first row for a later one's failure would send an
+        // operator to look at a file that moved perfectly well; claiming a file
+        // moved when none did sends them to a trash directory holding nothing.
+        //
+        // `trashPath`, not `trashedAt`, is the field read. A row whose file was
+        // already gone from disk is still marked trashed — it no longer
+        // describes a live file either way — but `trashFiles` passes a null
+        // `trash_path` for it, having not moved it and having nowhere honest to
+        // point. `trashed_at` is set in both cases and so cannot tell a file
+        // that reached `trashDir` from a row that was merely retired.
+        //
+        // On a clean return a row with no `trash_path` is neither counted nor
+        // failed: §4.3 of the design already rules that a file gone from disk is
+        // a warning rather than a failure. Only a throw turns one into a
+        // `failed` entry, and only for the rows that did not move.
+        for (const row of rows) {
+          const after = getImportedFile(db, row.id);
+          if (after !== null && after.trashPath !== null) trashed += 1;
+          else if (threw) failed.push({ path: row.destPath, error: reason });
         }
       }
 
