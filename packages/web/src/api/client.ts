@@ -402,6 +402,13 @@ export interface UntrackedEntry {
 export interface DownloadsResponse {
   tracked: DownloadView[];
   untracked: UntrackedEntry[];
+  /**
+   * The next page of `tracked`, or null at the end of the list. `untracked`
+   * arrives whole on every page — it is the client's live queue rather than a
+   * slice of the downloads table — so paging back through history never loses
+   * it.
+   */
+  nextCursor: string | null;
 }
 
 /** `group` is the group's standing in browse afterwards; null means it left. */
@@ -586,7 +593,11 @@ export const api = {
     return request<BrowseResponse>(`/api/browse?${params.toString()}`);
   },
   picks: () => request<PicksResponse>('/api/picks'),
-  downloads: () => request<DownloadsResponse>('/api/downloads'),
+  downloads: (cursor: string | null) => {
+    const params = new URLSearchParams();
+    if (cursor !== null) params.set('cursor', cursor);
+    return request<DownloadsResponse>(`/api/downloads?${params.toString()}`);
+  },
   pick: (groupId: number, releaseId: number) =>
     request<PickResponse>(`/api/groups/${groupId}/pick`, {
       method: 'POST',

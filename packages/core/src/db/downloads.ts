@@ -208,10 +208,53 @@ export function getDownload(db: DatabaseSync, id: number): DownloadRow | null {
   return row === undefined ? null : toDownloadRow(row as SqlRow);
 }
 
-export function allDownloads(db: DatabaseSync): DownloadRow[] {
+export interface DownloadPageQuery {
+  cursor: { createdAt: number; id: number } | null;
+  limit: number;
+}
+
+/**
+ * One page of the Downloads list, newest first. Replaced `allDownloads`, which
+ * had no limit and no cursor: with a few hundred rows in the table the SPA's
+ * three-second poll fetched every download the database had ever held, for the
+ * life of an open tab (issue #31).
+ *
+ * Keyset pagination on `(created_at, id)`, assembled the way `browseGroups`
+ * assembles its conditions, and served by the `downloads_list` index migration
+ * 13 adds — without which the page would still be cut from a sort of the whole
+ * table.
+ *
+ * **The tiebreak is descending `id`, the opposite of `browseGroups` and
+ * `failedFeedItems`.** Both of those compare `id >` inside a tie, and copying
+ * either here would skip or repeat rows silently rather than fail anywhere
+ * visible. The difference is not a style choice: those two list rows written by
+ * ingest, which walks a newest-first feed and so gives the *newest* item in a
+ * batch the *lowest* id — ascending id inside a tie already is newest-first
+ * there. A download's id is minted one pick at a time, so a higher id is
+ * genuinely later, and descending id is what "newest first" means for this
+ * list. `test/db/downloads.test.ts` pins it with two rows sharing one
+ * `created_at`.
+ *
+ * The cursor comparison's tiebreak direction mirrors the ORDER BY's, as it must:
+ * with `id` descending inside a tie, the next page holds ids *smaller* than the
+ * cursor's.
+ *
+ * No search predicate here, deliberately. The Downloads screen still filters in
+ * the client; moving that term into SQL is the rest of #31 and is left to be
+ * judged on its own, since it changes what the search box means as well as
+ * where it runs.
+ */
+export function pageOfDownloads(db: DatabaseSync, query: DownloadPageQuery): DownloadRow[] {
+  const where =
+    query.cursor === null ? '' : 'WHERE (created_at < ? OR (created_at = ? AND id < ?))';
+  const params =
+    query.cursor === null
+      ? [query.limit]
+      : [query.cursor.createdAt, query.cursor.createdAt, query.cursor.id, query.limit];
+
   return db
-    .prepare(`${SELECT} ORDER BY created_at DESC, id DESC`)
-    .all()
+    .prepare(`${SELECT} ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
+    .all(...params)
     .map((row) => toDownloadRow(row as SqlRow));
 }
 

@@ -577,6 +577,189 @@ test('downloads reports absentSince, null and populated', async () => {
   db.close();
 });
 
+/**
+ * `count` downloads, one per group, `created_at` climbing with the id — which
+ * is how downloads are really minted, one pick at a time, and so the direction
+ * `/api/downloads`' `created_at DESC, id DESC` ordering assumes. A group each,
+ * rather than one group shared, because the per-row group query this pins is
+ * keyed on `group_id` and a single shared group would let a per-row loop look
+ * like a batch.
+ */
+function seedManyDownloads(db: DatabaseSync, count: number): void {
+  for (let id = 1; id <= count; id += 1) {
+    db.prepare(
+      `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+       VALUES (?, 'f', ?, ?, 'https://indexer.invalid/n.nzb', 1)`,
+    ).run(id, `g${id}`, `Title ${id}`);
+    db.prepare(
+      `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state,
+                                 created_at, list_rank_at)
+       VALUES (?, 'test', ?, ?, ?, 'new', ?, ?)`,
+    ).run(id, `k${id}`, JSON.stringify({ title: `Title ${id}`, fields: [] }), `title ${id}`, id, id);
+    db.prepare(
+      `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+       VALUES (?, ?, ?, '{"resolution":1080}', 1080, 1)`,
+    ).run(id, id, id);
+    db.prepare(
+      `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                              attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'sab', 'initial', 'downloading', 0, ?, ?)`,
+    ).run(id, id, id, id, id);
+  }
+}
+
+test('downloads paginates with a stable cursor, newest first', async () => {
+  const db = openTestDatabase();
+  seedManyDownloads(db, 5);
+  const server = buildServer(deps(db));
+
+  // Annotated because the loop is circular for the inference: `cursor` is read
+  // to build the url and written from the response the url produced.
+  const seen: number[] = [];
+  const titles: string[] = [];
+  let cursor: string | null = null;
+  let pages = 0;
+  do {
+    const url: string =
+      cursor === null
+        ? '/api/downloads?limit=2'
+        : `/api/downloads?limit=2&cursor=${encodeURIComponent(cursor)}`;
+    const page = (await server.inject({ method: 'GET', url })).json<{
+      tracked: { id: number; title: string }[];
+      nextCursor: string | null;
+    }>();
+    pages += 1;
+    assert.ok(page.tracked.length <= 2, 'a page never exceeds the limit asked for');
+    for (const download of page.tracked) {
+      seen.push(download.id);
+      titles.push(download.title);
+    }
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+
+  // Every row exactly once, newest first, and the walk terminated on its own —
+  // the last page's `nextCursor` is what ends the loop, so a route that always
+  // answered one would hang here rather than assert.
+  assert.deepEqual(seen, [5, 4, 3, 2, 1]);
+  assert.deepEqual(titles, ['Title 5', 'Title 4', 'Title 3', 'Title 2', 'Title 1']);
+  assert.equal(pages, 3);
+  await server.close();
+  db.close();
+});
+
+test('the last downloads page reports no next cursor even when it is exactly full', async () => {
+  // The over-fetch-by-one is what tells these apart: four rows at limit two
+  // gives a second page that is exactly `limit` long *and* is the end.
+  const db = openTestDatabase();
+  seedManyDownloads(db, 4);
+  const server = buildServer(deps(db));
+
+  const first = (await server.inject({ method: 'GET', url: '/api/downloads?limit=2' })).json();
+  // The last row of page one, `created_at:id` — both 3, since this seed climbs
+  // them together.
+  assert.equal(first['nextCursor'], '3:3');
+
+  const second = (
+    await server.inject({ method: 'GET', url: '/api/downloads?limit=2&cursor=3:3' })
+  ).json();
+
+  assert.deepEqual(
+    second['tracked'].map((download: { id: number }) => download.id),
+    [2, 1],
+  );
+  assert.equal(second['nextCursor'], null);
+  await server.close();
+  db.close();
+});
+
+test('a malformed downloads cursor is a 400, never a silent first page', async () => {
+  // The same table `/api/browse` is held to, because it is the same parser: a
+  // cursor rule that held on two of the three paginated lists would leave the
+  // third scrolling forever (issue #33).
+  const db = openTestDatabase();
+  seedManyDownloads(db, 3);
+  const server = buildServer(deps(db));
+
+  for (const cursor of MALFORMED_CURSORS) {
+    const response = await server.inject({
+      method: 'GET',
+      url: `/api/downloads?cursor=${encodeURIComponent(cursor)}`,
+    });
+
+    assert.equal(response.statusCode, 400, `cursor ${JSON.stringify(cursor)} should be refused`);
+    assert.equal(response.json()['error'], 'Invalid cursor');
+    assert.equal(
+      Object.hasOwn(response.json(), 'tracked'),
+      false,
+      `cursor ${JSON.stringify(cursor)} should not answer with a page`,
+    );
+  }
+  await server.close();
+  db.close();
+});
+
+test('one downloads page costs one group query, not one per row', async () => {
+  // The N+1 this issue is really about. `toDownloadView` opened with
+  // `SELECT display FROM media_groups WHERE id = ?` and the route called it
+  // once per row: measured at 501 prepared statements for 500 downloads, every
+  // three seconds. Counting prepared statements rather than timing anything is
+  // what makes the assertion stable — and asserting the *total* rather than
+  // only the absence of the per-row query is what stops a batch being added
+  // beside the loop instead of in place of it.
+  const db = openTestDatabase();
+  seedManyDownloads(db, 40);
+  const server = buildServer(deps(db));
+
+  const prepare = db.prepare.bind(db);
+  const prepared: string[] = [];
+  db.prepare = (sql: string) => {
+    prepared.push(sql);
+    return prepare(sql);
+  };
+
+  const response = await server.inject({ method: 'GET', url: '/api/downloads?limit=30' });
+
+  db.prepare = prepare;
+  assert.equal(response.json()['tracked'].length, 30);
+  assert.deepEqual(
+    prepared.filter((sql) => /FROM media_groups WHERE id = \?/.test(sql)),
+    [],
+    'no per-row group lookup',
+  );
+  // The page itself and one batched lookup for its groups.
+  assert.equal(prepared.length, 2, prepared.join('\n'));
+  await server.close();
+  db.close();
+});
+
+test('a download whose group is missing still lists, under a placeholder title', async () => {
+  // The fallback `toDownloadView` always had, kept through the batching: a row
+  // absent from the batch's map is the same fact as `get` answering undefined
+  // was, and losing it would drop the download off the screen entirely rather
+  // than name it awkwardly.
+  //
+  // Arranged with the foreign key off because that constraint is exactly what
+  // makes this unreachable by ordinary writes — which is the point. The
+  // fallback is for a database that got there anyway, and a test that could
+  // only reach it through a supported code path would be testing that path
+  // instead.
+  const db = openTestDatabase();
+  seedManyDownloads(db, 2);
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.prepare('UPDATE downloads SET group_id = 99 WHERE id = 2').run();
+  db.exec('PRAGMA foreign_keys = ON');
+  const server = buildServer(deps(db));
+
+  const body = (await server.inject({ method: 'GET', url: '/api/downloads' })).json();
+
+  assert.deepEqual(
+    body['tracked'].map((download: { title: string }) => download.title),
+    ['Group 99', 'Title 1'],
+  );
+  await server.close();
+  db.close();
+});
+
 test('retrying a failed import resumes at completed', async () => {
   const db = openTestDatabase();
   seedGroups(db);

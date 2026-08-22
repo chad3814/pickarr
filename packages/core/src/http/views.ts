@@ -6,7 +6,7 @@ import type {
   QualityTokens,
 } from '@pickarr/plugin-api';
 import type { EditableConfig } from '../config/editable.ts';
-import { failedReleaseIds, type GroupRow } from '../db/groups.ts';
+import { displayJsonForGroups, failedReleaseIds, type GroupRow } from '../db/groups.ts';
 import { releasesForGroup } from '../db/releases.ts';
 import type { DownloadRow } from '../db/downloads.ts';
 import type { FeedItemRow } from '../db/feed-items.ts';
@@ -369,6 +369,12 @@ export interface DownloadView {
 export interface DownloadsResponse {
   tracked: DownloadView[];
   untracked: UntrackedEntry[];
+  /**
+   * The next page of `tracked`, or null at the end of the list. `untracked` is
+   * whole on every page — it is the client's live queue rather than a slice of
+   * this table — so a reader paging back through history keeps seeing it.
+   */
+  nextCursor: string | null;
 }
 
 /**
@@ -546,25 +552,74 @@ export function toFailedItemView(
   };
 }
 
-export function toDownloadView(db: DatabaseSync, download: DownloadRow): DownloadView {
-  const group = db.prepare('SELECT display FROM media_groups WHERE id = ?').get(download.groupId);
-  const display =
-    group === undefined
-      ? { title: `Group ${download.groupId}`, fields: [] }
-      : (JSON.parse(str(group as SqlRow, 'display')) as DisplayFields);
+/**
+ * A whole page of downloads, with one query for the groups they belong to
+ * rather than one per row.
+ *
+ * This function is the fix for issue #31's second half. `toDownloadView` opened
+ * with `SELECT display FROM media_groups WHERE id = ?`, and `/api/downloads`
+ * called it once per row: 500 downloads meant 501 statements, every three
+ * seconds, for the life of an open tab. `/api/browse` already refuses to do
+ * this — `metadataForGroups` and `performersForGroups` exist for exactly that
+ * reason, and `viewOf`'s doc comment in `server.ts` names this route as the
+ * defect not to repeat.
+ *
+ * Duplicate group ids in the batch cost nothing worth removing: `IN (?, ?, …)`
+ * accepts them, the map collapses them, and two downloads of one group is the
+ * ordinary case (an initial and its later upgrade).
+ *
+ * The `Group N` stand-in for a group the map has no entry for is the fallback
+ * this function inherited, unchanged. With the foreign key on it is
+ * unreachable by ordinary writes, and that is the point of keeping it: a
+ * database that got there anyway lists the download awkwardly instead of not
+ * at all.
+ */
+export function toDownloadViews(
+  db: DatabaseSync,
+  downloads: readonly DownloadRow[],
+): DownloadView[] {
+  const displays = displayJsonForGroups(
+    db,
+    downloads.map((download) => download.groupId),
+  );
 
-  return {
-    id: download.id,
-    groupId: download.groupId,
-    releaseId: download.releaseId,
-    title: display.title,
-    kind: download.kind,
-    status: download.status,
-    error: download.error,
-    attempts: download.attempts,
-    updatedAt: download.updatedAt,
-    absentSince: download.absentSince,
-  };
+  return downloads.map((download) => {
+    const json = displays.get(download.groupId);
+    const display =
+      json === undefined
+        ? { title: `Group ${download.groupId}`, fields: [] }
+        : (JSON.parse(json) as DisplayFields);
+
+    return {
+      id: download.id,
+      groupId: download.groupId,
+      releaseId: download.releaseId,
+      title: display.title,
+      kind: download.kind,
+      status: download.status,
+      error: download.error,
+      attempts: download.attempts,
+      updatedAt: download.updatedAt,
+      absentSince: download.absentSince,
+    };
+  });
+}
+
+/**
+ * The single-row form, for the pick and retry routes — each of which already
+ * answers about one download and so is not the per-page loop above exists to
+ * avoid.
+ *
+ * Implemented through `toDownloadViews` rather than beside it so there is one
+ * parse of `display` and one fallback, not two that can drift. The empty branch
+ * cannot be taken — `map` over a one-element array yields one element — and is
+ * the type system's, not a real one; the same shape `failDownload` uses for the
+ * same impossibility.
+ */
+export function toDownloadView(db: DatabaseSync, download: DownloadRow): DownloadView {
+  const [view] = toDownloadViews(db, [download]);
+  if (view === undefined) throw new Error(`toDownloadView: no view for download ${download.id}`);
+  return view;
 }
 
 /**

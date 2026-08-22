@@ -56,6 +56,36 @@ export function getGroup(db: DatabaseSync, id: number): GroupRow | null {
   return row === undefined ? null : toGroupRow(row as SqlRow);
 }
 
+/**
+ * The `display` column for a whole page of groups, in one query — the same
+ * shape as `metadataForGroups`, empty-input early return included, and for the
+ * same reason: `/api/downloads` used to ask for one group's display per
+ * download row, which at 500 rows was 500 statements every three seconds
+ * (issue #31).
+ *
+ * Yields the raw JSON rather than a parsed `DisplayFields`. Parsing it, and
+ * choosing the `Group N` stand-in for a group that is not here, both already
+ * live in the view layer; doing either here would put a second copy of them in
+ * the database layer, free to drift from the one `toDownloadViews` applies.
+ *
+ * A missing id is simply absent from the map, which is the same fact a `get`
+ * returning undefined carried before.
+ */
+export function displayJsonForGroups(
+  db: DatabaseSync,
+  groupIds: readonly number[],
+): Map<number, string> {
+  const found = new Map<number, string>();
+  if (groupIds.length === 0) return found;
+  const holes = groupIds.map(() => '?').join(', ');
+  for (const row of db
+    .prepare(`SELECT id, display FROM media_groups WHERE id IN (${holes})`)
+    .all(...groupIds)) {
+    found.set(num(row as SqlRow, 'id'), str(row as SqlRow, 'display'));
+  }
+  return found;
+}
+
 export interface NewGroup {
   plugin: string;
   identityKey: string;
