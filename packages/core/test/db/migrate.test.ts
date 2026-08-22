@@ -269,6 +269,47 @@ test('a database carrying another branch’s migration 4 still gets ours', () =>
   db.close();
 });
 
+test('an upgraded database has its short cached site names cleared', () => {
+  // The floor on a confirmed site's own name arrived after these rows were
+  // written, so an installation that ran the pre-floor code is still holding
+  // the answers it produced. Filtering on read hides them; this is what
+  // corrects the stored answer.
+  const db = databaseAtVersion(13);
+  const insert = db.prepare(
+    `INSERT INTO discovered_sites (prefix, site, source, source_uuid, source_id, found_at)
+     VALUES (?, ?, 'tpdb', ?, ?, 1)`,
+  );
+  insert.run('big', 'BIG', 'uuid-big', 1);
+  insert.run('dp', 'DP', 'uuid-dp', 2);
+  insert.run('bangbros', 'Bang Bros', 'uuid-bangbros', 3);
+
+  migrate(db);
+
+  // Nulled, not deleted. Every prefix is still present: a NULL row is a
+  // recorded negative that a later lookup may correct, where a missing row
+  // reads as never-asked and re-spends a query on the same rejected answer.
+  const rows = db
+    .prepare('SELECT prefix, site, source_uuid, source_id FROM discovered_sites ORDER BY prefix')
+    .all();
+  assert.deepEqual(
+    rows.map((row) => [String(row['prefix']), row['site']]),
+    [
+      ['bangbros', 'Bang Bros'],
+      ['big', null],
+      ['dp', null],
+    ],
+  );
+  // The identifiers go with the name they identified; leaving them behind
+  // would leave `siteIdForName` answering for a site nothing confirms.
+  const big = rows.find((row) => row['prefix'] === 'big');
+  assert.equal(big?.['source_uuid'], null);
+  assert.equal(big?.['source_id'], null);
+  const kept = rows.find((row) => row['prefix'] === 'bangbros');
+  assert.equal(kept?.['source_uuid'], 'uuid-bangbros');
+  assert.equal(kept?.['source_id'], 3);
+  db.close();
+});
+
 test('feed_items rejects a duplicate guid within a feed', () => {
   const db = openTestDatabase();
   const insert = db.prepare(
@@ -938,7 +979,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   db.close();
 });
 
@@ -1044,7 +1085,7 @@ test('app_state arrives at version 10 and takes no other version', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
 });
 
 // --- Migration 11: the feed backfill position -------------------------------

@@ -45,6 +45,43 @@ export function sitePrefixKey(text: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+/**
+ * The shortest a confirmed site's own name may be.
+ *
+ * The service knows sites called `BIG`, `DP`, `Ex` and `Rk`. They are real, so
+ * the lookup answers correctly — and the answer is still wrong, because a name
+ * that short is indistinguishable from an ordinary first word.
+ * `Big.Boobs.For.The.Win` resolved to the site `BIG` with the title `Boobs For
+ * The Win`, and `DP.Addiction.Vol.1.Elegant.Angel` to the site `DP`.
+ *
+ * Measured across 6,884 corpus titles: rejecting these costs ten titles that
+ * previously parsed, every one of them with a fabricated site and a truncated
+ * title. The parse rate drops and the output improves, which is the second
+ * time that pair has come up — rate is not the objective.
+ *
+ * This bounds the *answer*, not the query. A short query is still worth
+ * sending, because it is how a longer site name gets found: `2 Chicks` finds
+ * `2 Chicks Same Time`.
+ */
+const MIN_CONFIRMED_SITE_LENGTH = 4;
+
+/**
+ * Whether a site name is long enough to be believed as a site.
+ *
+ * Here rather than beside `pickSite`, which is where the rule was first
+ * written, because a fresh search result is only one of the ways a name
+ * reaches a plugin: a cached row and `knownSiteNames` are the other two, and
+ * both are this table's business. `db` is also the lower layer — importing the
+ * predicate from `pipeline` would invert that.
+ *
+ * Separators are deleted rather than counted, so `D.P.` is two characters and
+ * fails, as it should: the floor is about how much name there is, not how it
+ * happened to be punctuated.
+ */
+export function isConfirmableSiteName(name: string): boolean {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '').length >= MIN_CONFIRMED_SITE_LENGTH;
+}
+
 function text(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
 }
@@ -98,12 +135,23 @@ export function recordDiscoveredSite(
   );
 }
 
-/** Every confirmed site name, for seeding a plugin at boot. */
+/**
+ * Every confirmed site name, for seeding a plugin at boot.
+ *
+ * Filtered, because rows written before the floor existed are still in the
+ * table and a name that never met it must not reach a plugin by the back door
+ * — being read at boot is not a second opinion about whether `BIG` is a site.
+ * The filter is in TypeScript and not in the SQL because the predicate strips
+ * non-alphanumerics, which SQLite cannot express without a user-defined
+ * function; `SELECT ... WHERE length(site) >= 4` would count separators and
+ * disagree at the edges.
+ */
 export function knownSiteNames(db: DatabaseSync): string[] {
   return db
     .prepare('SELECT site FROM discovered_sites WHERE site IS NOT NULL ORDER BY prefix')
     .all()
-    .map((row) => String(row['site']));
+    .map((row) => String(row['site']))
+    .filter(isConfirmableSiteName);
 }
 
 /**

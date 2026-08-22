@@ -768,4 +768,39 @@ export const migrations: Migration[] = [
       db.exec('CREATE INDEX downloads_list ON downloads (created_at DESC, id DESC);');
     },
   },
+  // 14 was free when this was written — 12 went to #23 and 13 to #31, both
+  // already merged — and checked again immediately before committing, which
+  // the five comments above establish is necessary and not sufficient.
+  //
+  // A floor on how short a confirmed site's own name may be has existed in
+  // `pickSite` for some time, but `pickSite` only ever judges a *fresh* search
+  // result. Rows written before the floor landed are still in this table, and
+  // an installation carrying `big → BIG` hands `BIG` to a plugin on every
+  // cache hit and at every boot. The read paths now refuse those rows; this
+  // corrects the stored answer, so the repair does not depend on the filter
+  // being remembered forever.
+  //
+  // `length(site) < 4` is deliberately *narrower* than `isConfirmableSiteName`:
+  // that predicate deletes separators before counting, so `D.P.` is two
+  // characters to it and four to SQLite and survives this statement. Steps in
+  // `db/sites.ts` are the authority on the rule; SQLite cannot express it
+  // without a user-defined function, and this statement exists only to clear
+  // the observed cases — `BIG`, `DP`, `Ex`, `Rk` — from the table itself.
+  //
+  // `site = NULL` rather than `DELETE`: a NULL row is a recorded negative,
+  // which `recordDiscoveredSite`'s `ON CONFLICT DO UPDATE` lets a later lookup
+  // correct, while a deleted row reads as never-asked and re-spends a query on
+  // the same rejected answer. The identifiers go with the name — they
+  // identified the site that is no longer confirmed, and `siteIdForName` keys
+  // on `site`.
+  {
+    version: 14,
+    up(db) {
+      db.exec(`
+        UPDATE discovered_sites
+           SET site = NULL, source_uuid = NULL, source_id = NULL
+         WHERE site IS NOT NULL AND length(site) < 4;
+      `);
+    },
+  },
 ];
