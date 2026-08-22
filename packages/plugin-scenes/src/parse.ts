@@ -125,7 +125,7 @@ const MARKER_TOKEN = 'XXX';
  * Tokens that can only plausibly be encode information, never title words.
  * These are strong enough on their own to anchor a boundary.
  */
-const RESOLUTION_TOKEN = /^(?:\d{3,4}[pi](?:\d{2,3})?|4K|8K|UHD)$/i;
+const RESOLUTION_TOKEN = /^(?:\d{3,4}[pi](?:\d{2,3})?|(?:4K|8K|UHD)(?:\d{2,3})?)$/i;
 const SOURCE_TOKEN =
   /^(?:WEB[-_.]?DL|WEB[-_.]?Rip|SiteRip|Blu[-_.]?Ray|BD[-_.]?Rip|BR[-_.]?Rip|DVD[-_.]?Rip|HD[-_.]?TV)$/i;
 
@@ -417,11 +417,18 @@ const DOTTED_DATE_RUN = /(?:^|[._])(?:(?:19|20)?\d{2}[._]\d{2}[._]\d{2}|\d{6}|\d
  * 2160p encode, and without this it matched nothing and scored as resolution
  * zero — ranking below a 480p inside its own group, which is the same
  * upgrade-inversion the underscore bug caused.
+ *
+ * The word spellings need it just as much, and for a sharper reason: `\b4K\b`
+ * cannot match inside `4K60` at all, because `K` and `6` are both word
+ * characters so no boundary exists between them. Left off, `4K60` scored
+ * resolution zero the same way. On a bare `4K` the group simply matches empty
+ * and the trailing `\b` still holds before the separator, so `4K.100.Girls` is
+ * read as 2160 exactly as before.
  */
 const FPS = '(?:\\d{2,3})?';
 const RESOLUTIONS: [RegExp, number][] = [
-  [/\b8K\b/i, 4320],
-  [new RegExp(`\\b4K\\b|\\b2160[pi]${FPS}\\b|\\bUHD\\b`, 'i'), 2160],
+  [new RegExp(`\\b8K${FPS}\\b`, 'i'), 4320],
+  [new RegExp(`\\b4K${FPS}\\b|\\b2160[pi]${FPS}\\b|\\bUHD${FPS}\\b`, 'i'), 2160],
   [new RegExp(`\\b1440[pi]${FPS}\\b`, 'i'), 1440],
   [new RegExp(`\\b1080[pi]${FPS}\\b`, 'i'), 1080],
   [new RegExp(`\\b720[pi]${FPS}\\b`, 'i'), 720],
@@ -1162,6 +1169,13 @@ export function extractQuality(tail: string, releaseGroup: string | undefined): 
   if (VR_TOKEN.test(haystack)) extras['vr'] = true;
   if (UPSCALED_TOKEN.test(haystack)) extras['upscaled'] = true;
   if (INTERLACED_TOKEN.test(haystack)) extras['interlaced'] = true;
+  // Every spelling that carries a frame rate — `4K60`, `1080p60`, `60fps` —
+  // records it. Nothing scores on it (`scoreScene` reads only `upscaled` and
+  // `interlaced`), but throwing the number away is what let `4K60` look like an
+  // unknown word and refuse the whole name.
+  const fps = /\b(?:\d{3,4}[pi]|4K|8K|UHD)(\d{2,3})\b|\b(\d{2,3})fps\b/i.exec(haystack);
+  const fpsValue = fps?.[1] ?? fps?.[2];
+  if (fpsValue !== undefined) extras['fps'] = Number(fpsValue);
 
   const quality: QualityTokens = { extras };
   const resolution = firstMatch(RESOLUTIONS, haystack);
