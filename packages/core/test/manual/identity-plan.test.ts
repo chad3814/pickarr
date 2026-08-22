@@ -260,6 +260,52 @@ test('a destination occupied by a file this plan is trashing is not a blocker', 
   ]);
 });
 
+/**
+ * The third occupant, and the one the blocker's old wording described wrongly:
+ * the file in the way is a live file of the merge's own *target*, which this
+ * plan is not trashing. A dangling `picked_release_id` on the target makes
+ * `reconcilePick` return a null `superseded`, so `doomed` — and with it
+ * `trashedPaths` — is empty, and the target's own file at the contested path
+ * gets no exemption. The refusal is right; the old text blamed a stranger for a
+ * file the surviving group already owned.
+ */
+test("a destination occupied by the merge target's own untrashed file is refused without blaming a stranger", async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  await seedWithFile(db, libraryRoot);
+  // Same resolution on both sides, so the target's own file already sits at
+  // exactly the path the source's is being renamed to...
+  db.prepare(`UPDATE releases SET quality = '{"resolution":1080}' WHERE id = 2`).run();
+  // ...and the target's pick names a release it does not hold, which is what
+  // leaves `pick.superseded` null and so trashes nothing.
+  db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 99 WHERE id = 2").run();
+  await mkdir(join(libraryRoot, 'k2'), { recursive: true });
+  await writeFile(join(libraryRoot, 'k2', '1080.mp4'), 'the targets own');
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (2, 2, 2, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (2, 2, 2, '/dl/b.mp4', ?, 10, 100)`,
+  ).run(join(libraryRoot, 'k2', '1080.mp4'));
+
+  const plan = ok(
+    await planIdentityChange(makeDeps(db, FILING, libraryRoot), 1, { key: 'k2', title: 'A' }),
+  );
+
+  assert.equal(plan.trashing.length, 0, 'a dangling target pick supersedes nothing');
+  assert.equal(plan.blockers.length, 1);
+  assert.match(plan.blockers[0]!, /is already occupied/);
+  assert.doesNotMatch(
+    plan.blockers[0]!,
+    /did not put there/,
+    "the occupant is the surviving group's own file, so the plan must claim no ownership",
+  );
+});
+
 test('a destination occupied by a directory is a blocker', async () => {
   const db = openTestDatabase();
   const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));

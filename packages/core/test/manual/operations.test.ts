@@ -1327,6 +1327,57 @@ test('a rename is refused when phase 2 failed to clear its destination', async (
   db.close();
 });
 
+/**
+ * `trashFiles` marks a row trashed with a *null* `trash_path` when its file has
+ * already left the disk — deliberately, since it did not move the file and has
+ * nowhere honest to point. Counting `rows.length` on a clean return therefore
+ * reported a file as having reached `trashDir` when the trash directory held
+ * nothing but the empty folder the attempt had just created.
+ *
+ * Reading `trashedAt` back does not tell the two apart: `markTrashed` stamps it
+ * in the vanished-file case too. `trashPath` is the field that distinguishes a
+ * file that moved from a row that was merely retired, which is why the
+ * read-back below asserts on both.
+ *
+ * Not a failure either — §4.3 of the design rules a file already gone from disk
+ * a warning, not a failure — so the row is neither counted nor named in
+ * `failed`.
+ */
+test('a doomed row whose file is already gone is not counted as trashed', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const trashDir = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  await seedWithFile(db, libraryRoot);
+  // The target's pick scores below the source's, so it is the target's row that
+  // is doomed — and its file is never written, standing in for one an operator
+  // deleted by hand or an interrupted upgrade already moved.
+  db.prepare('UPDATE releases SET score = 500 WHERE id = 2').run();
+  db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 2 WHERE id = 2").run();
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (2, 2, 2, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (2, 2, 2, '/dl/b.mp4', ?, 5, 100)`,
+  ).run(join(libraryRoot, 'k2', '2160.mp4'));
+  const deps: ManualDeps = { ...makeDeps(db, FILING, libraryRoot), trashDir };
+
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+  assert.equal(plan.trashing.length, 1, 'the vanished file is still planned for trashing');
+  const outcome = ok(await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest));
+
+  assert.equal(outcome.trashed, 0, 'nothing reached trashDir, so nothing is counted');
+  assert.deepEqual(outcome.failed, [], 'a file already gone is a warning, not a failure');
+  assert.equal(outcome.renamed, 1, 'the rest of the edit went through');
+  const retired = filesForGroup(db, 2).find((file) => file.id === 2);
+  assert.notEqual(retired?.trashedAt, null, 'the row is still retired...');
+  assert.equal(retired?.trashPath, null, '...but nothing moved, so it names no trash location');
+  db.close();
+});
+
 // --- Edit a release ----------------------------------------------------
 
 test('editing a release writes the quality, the recomputed score and the stamp', () => {

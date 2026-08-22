@@ -294,10 +294,10 @@ export async function planIdentityChange(
    * This is the *motivating* case for trash-before-rename, not a corner of it:
    * the design's own rationale for that ordering is that "a superseded file
    * frequently occupies the exact path a renamed file wants". A file this same
-   * plan is about to trash is not a foreign occupant — the blocker's subject is
-   * something the group did not put there — so refusing on it would make the
-   * commonest merge in the feature permanently unappliable, and would make phase
-   * 2 unreachable through the one situation it exists for.
+   * plan is about to trash will not be at that path by the time phase 3 runs, so
+   * refusing on it would make the commonest merge in the feature permanently
+   * unappliable, and would make phase 2 unreachable through the one situation it
+   * exists for.
    *
    * Do not "simplify" this away: without it, `editGroup`'s phases 2 and 3 are
    * ordered for a collision the planner never lets through.
@@ -349,12 +349,22 @@ export async function planIdentityChange(
     }
 
     // Occupied by something *other than* a file this plan is already removing.
-    // See `trashedPaths` above for why the exemption exists; the blocker still
-    // stands for every other occupant, which is the case it was written for —
-    // an unrelated file, or one an operator put there by hand.
+    // See `trashedPaths` above for why the exemption exists; the blocker stands
+    // for every other occupant. Not only the strangers it was first written for
+    // — an unrelated file, or one an operator put there by hand — but also a
+    // live file of the merge's own *target*: a dangling `picked_release_id` on
+    // either side leaves `pick.superseded` null, which empties `doomed` and with
+    // it `trashedPaths`, so the target keeps a file sitting at the exact path a
+    // source file is being renamed onto.
+    //
+    // Hence the wording. The planner can *identify* the occupant — it has its
+    // path — but it cannot attribute it: the row that owns those bytes may
+    // belong to the surviving group, to no group, or to nothing on record at
+    // all. The text names the occupied path and the file that wanted it, and
+    // claims nothing about who put it there.
     const occupant = await lstatOrNull(to);
     if (occupant !== null && !trashedPaths.has(to)) {
-      blockers.push(`${to} is occupied by something this group did not put there`);
+      blockers.push(`${to} is already occupied, so ${file.destPath} cannot be moved there`);
       continue;
     }
 

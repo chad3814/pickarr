@@ -117,7 +117,9 @@ const PLAN_BLOCKED: IdentityPlanView = {
   renames: [],
   trashing: [],
   warnings: [],
-  blockers: ['/library/k3/1080.mp4 is occupied by something this group did not put there'],
+  blockers: [
+    '/library/k3/1080.mp4 is already occupied, so /library/k1/1080.mp4 cannot be moved there',
+  ],
   digest: 'blocked-digest',
 };
 
@@ -776,7 +778,7 @@ test('a blocked plan with no file work still shows its blocker and saves nothing
 
   const dialog = await screen.findByRole('dialog');
   assert.ok(
-    within(dialog).getByText(/occupied by something this group did not put there/),
+    within(dialog).getByText(/is already occupied, so .* cannot be moved there/),
     'the blocker text must reach the user, not just refuse silently later',
   );
   assert.equal(
