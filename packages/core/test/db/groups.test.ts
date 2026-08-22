@@ -390,6 +390,28 @@ test('keyset pagination over a list_rank_at tie yields every row exactly once, i
   db.close();
 });
 
+// The `_` half of the same wildcard leak. No HTTP test reaches it — browse's
+// own case is `%` — but `_` matches any single character under LIKE, so a term
+// wrapped in `%…%` found `axb scene` for a reader who typed `a_b`.
+test('browseGroups matches _ in a search term as itself, not as any character', () => {
+  const db = openTestDatabase();
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'T1', 'https://indexer.invalid/1.nzb', 1),
+            (2, 'f', 'g2', 'T2', 'https://indexer.invalid/2.nzb', 1)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+     VALUES (1, 'test', 'k1', '{"title":"A_B","fields":[]}', 'a_b scene', 100, 500),
+            (2, 'test', 'k2', '{"title":"AxB","fields":[]}', 'axb scene', 100, 400)`,
+  ).run();
+
+  const page = browseGroups(db, { cursor: null, limit: 10, search: 'a_b' });
+
+  assert.deepEqual(page.map((group) => group.searchText), ['a_b scene']);
+  db.close();
+});
+
 // pickedGroups backs the unpaginated Picks page and has no cursor to keep in
 // step, but it orders on the same (list_rank_at, id) pair as browseGroups and
 // must agree with it — a picked group with an upgrade flagged appears on

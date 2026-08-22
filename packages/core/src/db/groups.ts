@@ -401,14 +401,29 @@ export interface BrowseQuery {
  * The cursor comparison's tiebreak direction has to mirror the ORDER BY's:
  * with `id` ascending inside a tie, the next page holds ids *greater* than
  * the cursor's, not smaller.
+ *
+ * The search term goes to `instr`, not to `LIKE`. Wrapped in `%…%` and handed
+ * to `LIKE`, a `%` or `_` the reader typed is read as a pattern operator
+ * rather than as itself — a lone `%` becomes the pattern `%%%` and the search
+ * box stops filtering at all (issue #32). `LIKE ? ESCAPE '\'` with the term's
+ * `\`, `%` and `_` backslash-prefixed does work here, and was verified to
+ * return the same single row, but it needs a helper that every future call
+ * site has to remember to call; `instr` has nothing to forget. Case folding is
+ * not lost either: `search_text` is written already lowercased by
+ * `searchTextFor`, and the term is lowercased here in JS, so a binary
+ * substring compare is the comparison both sides already intend — where `LIKE`
+ * would ASCII-case-fold on top of that, which is the part that can disagree
+ * with JS `toLowerCase`, and so with the SPA's `matchesTerm`. No index is
+ * given up: `media_groups_browse` is on `list_rank_at`, and `LIKE '%…%'` scans
+ * the table exactly as `instr` does.
  */
 export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
   const conditions = [BROWSABLE];
   const params: (string | number)[] = [];
 
   if (query.search !== null) {
-    conditions.push('search_text LIKE ?');
-    params.push(`%${query.search.toLowerCase()}%`);
+    conditions.push('instr(search_text, ?) > 0');
+    params.push(query.search.toLowerCase());
   }
   if (query.cursor !== null) {
     conditions.push('(list_rank_at < ? OR (list_rank_at = ? AND id > ?))');
