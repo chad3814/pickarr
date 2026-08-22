@@ -298,6 +298,65 @@ test('an initial import trashes nothing and leaves the pointer alone', async () 
   }
 });
 
+test('a planned source that only exists because this import trashed it is refused', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(library, { recursive: true });
+    await writeFile(join(library, 'private.mp4'), 'the superseded file');
+
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    await writeFile(join(downloadDir, 'scene.mp4'), 'new-version');
+
+    const db = openTestDatabase();
+    seedUpgrade(db, downloadDir);
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (9, 1, '/old/source', ?, 19, 1)`,
+    ).run(join(library, 'private.mp4'));
+
+    // Every segment of this path is one a plugin can compute for itself: the
+    // configured trash directory, the group id, and whatever `deps.now()`
+    // returns. Nothing is there when the plan is made, so the plan-time sweep
+    // waves it through as a source that exists nowhere — and by the time the
+    // transfer loop reaches it, this import's own trashing step has put the
+    // superseded file exactly there.
+    const trashedPrivate = join(trash, '1', '2000', 'private.mp4');
+    const registry = registryFor(
+      (): ImportPlan => ({
+        files: [
+          { source: join(downloadDir, 'scene.mp4'), destination: 'scene.mp4' },
+          { source: trashedPrivate, destination: 'stolen.mp4' },
+        ],
+      }),
+      library,
+    );
+
+    await assert.rejects(
+      importDownload(deps(db, registry, trash, { now: () => 2000 }), getDownload(db, 1)!),
+      // Trashing has completed by the time this throws, so importDownload's
+      // catch appends ` — previous files were moved to ...`; match the part
+      // that identifies the refusal, not the whole message.
+      /was not in this download's file listing/,
+    );
+
+    assert.equal(
+      await stat(join(library, 'stolen.mp4')).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+    // Still in trash, where the upgrade put it for safekeeping.
+    assert.equal(await readFile(trashedPrivate, 'utf8'), 'the superseded file');
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // --- Direct unit tests against trashFiles ---
 //
 // The tests above exercise trashFiles only through importDownload, and

@@ -144,6 +144,18 @@ export function resolveDestination(libraryRoot: string, destination: string): st
 }
 
 /**
+ * The membership rule itself, split out of the sweep below so the transfer
+ * loop can ask the same question at the moment it acts on the answer. The
+ * message lives here and nowhere else: a source refused at plan time and a
+ * source refused mid-import are the same refusal, and must not become
+ * distinguishable by their wording.
+ */
+function assertSourceWasListed(offered: ReadonlySet<string>, source: string): void {
+  if (offered.has(source)) return;
+  throw new Error(`Planned source ${source} was not in this download's file listing`);
+}
+
+/**
  * Refuses a plan that names a source core never offered the plugin.
  *
  * A plugin's *destinations* have always been policed — lexically by
@@ -170,18 +182,28 @@ export function resolveDestination(libraryRoot: string, destination: string): st
  * present on disk but absent from the listing is the attack, and is refused
  * before anything — including an upgrade's trashing step — has touched the
  * filesystem.
+ *
+ * That last scoping decision is sound at the instant this runs and stops being
+ * sound a few lines later, which is why this sweep is no longer the only place
+ * the rule is applied. `importDownload` creates files while the import is
+ * running: `trashFiles` moves every superseded file of the group to
+ * `<trashDir>/<groupId>/<now>/<path-relative-to-the-library-root>`, a path
+ * built entirely from values a plugin can compute for itself. A plan naming
+ * one of those paths is absent from the listing *and* absent from disk when
+ * this sweep looks, so it passes here, and exists by the time the transfer
+ * loop reaches it. "Absent from disk" is therefore a fact with a short shelf
+ * life, and the loop re-asks `assertSourceWasListed` for every source it finds
+ * present. This sweep is kept because it is the one that fails the import
+ * before `trashFiles` has moved anything, which is a far more useful error
+ * than one raised halfway through.
  */
 async function assertSourcesWereListed(
-  listed: DownloadedFile[],
+  offered: ReadonlySet<string>,
   planned: ImportFile[],
 ): Promise<void> {
-  const offered = new Set(listed.map((file) => file.absolutePath));
   for (const file of planned) {
-    if (offered.has(file.source)) continue;
     if ((await statOrNull(file.source)) === null) continue;
-    throw new Error(
-      `Planned source ${file.source} was not in this download's file listing`,
-    );
+    assertSourceWasListed(offered, file.source);
   }
 }
 
@@ -399,7 +421,11 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
     throw new Error('no-importable-files');
   }
 
-  await assertSourcesWereListed(files, plan.files);
+  // The set of paths core actually offered the plugin, built once and used
+  // twice: by the fail-fast sweep here, and again inside the transfer loop for
+  // each source that turns out to exist by the time we reach it.
+  const offered = new Set(files.map((file) => file.absolutePath));
+  await assertSourcesWereListed(offered, plan.files);
 
   const resolved = plan.files.map((file) => ({
     source: file.source,
@@ -460,6 +486,17 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
       // refused below rather than adopted.
       const destStat = await lstatOrNull(file.destination);
       const sourceStat = await statOrNull(file.source);
+
+      // Re-asked here, not just at plan time, because the plan-time answer was
+      // about a filesystem this function has since changed: an upgrade's
+      // `trashFiles` above creates paths a plugin can name in advance. Gated
+      // on the source existing so the rule stays word-for-word the plan-time
+      // one — a source absent from both listing and disk is still allowed
+      // through, which is what the crash-recovery branch below depends on.
+      // Placed before the branches rather than beside the `transfer` call so
+      // it also covers adoption, which stats the source and, in copy mode,
+      // reads its bytes.
+      if (sourceStat !== null) assertSourceWasListed(offered, file.source);
 
       // A row already recorded for this exact destination means an earlier
       // attempt already finished this file (transferred it and recorded it)
