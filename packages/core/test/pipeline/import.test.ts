@@ -508,7 +508,7 @@ test('a destination that already exists with no surviving source and no recorded
   }
 });
 
-test('copy mode: a destination that already matches the source in size is adopted as crash recovery', async () => {
+test('copy mode: a destination that already matches the source byte for byte is adopted as crash recovery', async () => {
   const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
@@ -519,9 +519,9 @@ test('copy mode: a destination that already matches the source in size is adopte
     const library = join(root, 'library');
     await mkdir(library, { recursive: true });
     const destination = join(library, 'scene.mp4');
-    // Same byte count as the source: exactly what an earlier attempt's
-    // completed copy (via copyIntoPlace's atomic rename) would have left
-    // behind before crashing prior to insertImportedFile.
+    // Byte-for-byte the source: exactly what an earlier attempt's completed
+    // copy (via copyIntoPlace's atomic rename) would have left behind before
+    // crashing prior to insertImportedFile.
     await writeFile(destination, 'payload-of-known-size');
 
     const db = openTestDatabase();
@@ -582,6 +582,129 @@ test('copy mode: a destination with different content than the source is a colli
     );
     assert.equal(await readFile(destination, 'utf8'), 'unrelated');
     assert.equal(liveFilesForGroup(db, 1).length, 0);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('copy mode: a destination the same size as the source but with different content is a collision, not recovery', async () => {
+  const root = await tempImportRoot();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    const source = join(downloadDir, 'aaa.mp4');
+    await writeFile(source, 'new-version');
+
+    const library = join(root, 'library');
+    await mkdir(library, { recursive: true });
+    const destination = join(library, 'scene.mp4');
+    // Eleven bytes on both sides and not one of them shared. The size
+    // pre-filter says yes here, so this is the case that separates "the
+    // destination is the copy we would have made" from "the destination is
+    // merely as long as it".
+    await writeFile(destination, 'AAAAAAAAAAA');
+
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+    const registry = registryFor(
+      plugin((): ImportPlan => ({ files: [{ source, destination: 'scene.mp4' }] })),
+      library,
+    );
+
+    await assert.rejects(
+      importDownload(
+        deps(db, registry, join(root, 'trash'), { importMode: 'copy' }),
+        getDownload(db, 1)!,
+      ),
+      /occupied by something this download did not write/,
+    );
+
+    assert.equal(await readFile(destination, 'utf8'), 'AAAAAAAAAAA');
+    assert.equal(await readFile(source, 'utf8'), 'new-version');
+    assert.equal(liveFilesForGroup(db, 1).length, 0);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('copy mode: a large destination differing only in its final byte is a collision', async () => {
+  const root = await tempImportRoot();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    const source = join(downloadDir, 'scene.mp4');
+    // 256 KiB is four times the comparison's chunk size, and the only
+    // difference is in the last chunk: an implementation that reads one
+    // chunk and calls it a match adopts this destination and fails here.
+    const payload = Buffer.alloc(256 * 1024, 0x61);
+    const occupant = Buffer.from(payload);
+    occupant[occupant.length - 1] = 0x62;
+    await writeFile(source, payload);
+
+    const library = join(root, 'library');
+    await mkdir(library, { recursive: true });
+    const destination = join(library, 'scene.mp4');
+    await writeFile(destination, occupant);
+
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+    const registry = registryFor(
+      plugin((): ImportPlan => ({ files: [{ source, destination: 'scene.mp4' }] })),
+      library,
+    );
+
+    await assert.rejects(
+      importDownload(
+        deps(db, registry, join(root, 'trash'), { importMode: 'copy' }),
+        getDownload(db, 1)!,
+      ),
+      /occupied by something this download did not write/,
+    );
+
+    assert.equal(Buffer.compare(await readFile(destination), occupant), 0);
+    assert.equal(Buffer.compare(await readFile(source), payload), 0);
+    assert.equal(liveFilesForGroup(db, 1).length, 0);
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('copy mode: a zero-byte source adopts a zero-byte destination', async () => {
+  const root = await tempImportRoot();
+  try {
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    const source = join(downloadDir, 'scene.mp4');
+    await writeFile(source, '');
+
+    const library = join(root, 'library');
+    await mkdir(library, { recursive: true });
+    const destination = join(library, 'scene.mp4');
+    // Two empty files are byte-identical, not coincidentally the same
+    // length, so adoption is the right answer and content comparison has to
+    // reach it without a special case for "nothing to compare".
+    await writeFile(destination, '');
+
+    const db = openTestDatabase();
+    seed(db, downloadDir);
+    const registry = registryFor(
+      plugin((): ImportPlan => ({ files: [{ source, destination: 'scene.mp4' }] })),
+      library,
+    );
+
+    await importDownload(
+      deps(db, registry, join(root, 'trash'), { importMode: 'copy' }),
+      getDownload(db, 1)!,
+    );
+
+    assert.equal(getDownload(db, 1)?.status, 'imported');
+    const recorded = liveFilesForGroup(db, 1);
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0]?.destPath, destination);
+    assert.equal(recorded[0]?.sizeBytes, 0);
     db.close();
   } finally {
     await rm(root, { recursive: true, force: true });

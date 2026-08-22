@@ -1,4 +1,4 @@
-import { copyFile, lstat, mkdir, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, open, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -227,6 +227,55 @@ async function copyIntoPlace(source: string, destination: string): Promise<void>
   await rename(tmp, destination);
 }
 
+const COMPARE_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Whether two paths hold the same bytes, read a chunk at a time rather than
+ * whole: the files this compares are the library's media files, so a
+ * `readFile` of each would make the answer depend on a multi-gigabyte pair
+ * fitting in memory, and the comparison would pay for reading all of both
+ * even when they diverge in the first kilobyte.
+ *
+ * A short read that lands differently on the two handles reads as a
+ * difference and returns `false`. Regular files on a local filesystem don't
+ * do that, and if one ever did the wrong answer is the refusing one — the
+ * caller's only use of `true` is to adopt a file it did not write.
+ */
+async function filesHaveSameContent(a: string, b: string): Promise<boolean> {
+  // Nested rather than one `finally` closing both: opening `b` can fail
+  // (it is the destination, and the only thing we know of it is that it
+  // lstat'd as a regular file a moment ago), and the handle on `a` has to
+  // close anyway. Two attempts a few files into a retry is all it takes for
+  // a leaked handle to become an EMFILE that looks like an unrelated fault.
+  const handleA = await open(a, 'r');
+  try {
+    const handleB = await open(b, 'r');
+    try {
+      const bufferA = Buffer.allocUnsafe(COMPARE_CHUNK_BYTES);
+      const bufferB = Buffer.allocUnsafe(COMPARE_CHUNK_BYTES);
+      for (;;) {
+        const [readA, readB] = await Promise.all([
+          handleA.read(bufferA, 0, COMPARE_CHUNK_BYTES, null),
+          handleB.read(bufferB, 0, COMPARE_CHUNK_BYTES, null),
+        ]);
+        if (readA.bytesRead !== readB.bytesRead) return false;
+        // Both at EOF with everything so far equal, which for two empty
+        // files is the very first pass.
+        if (readA.bytesRead === 0) return true;
+        const differs = Buffer.compare(
+          bufferA.subarray(0, readA.bytesRead),
+          bufferB.subarray(0, readB.bytesRead),
+        );
+        if (differs !== 0) return false;
+      }
+    } finally {
+      await handleB.close();
+    }
+  } finally {
+    await handleA.close();
+  }
+}
+
 /**
  * Whether a regular file already sitting at a planned destination can be
  * trusted as this download's own output from an earlier, crashed attempt —
@@ -247,26 +296,32 @@ async function copyIntoPlace(source: string, destination: string): Promise<void>
  * destination really is this download's copy.
  *
  * In `copy` mode the source is never removed by design, so its presence
- * proves nothing either way — the only available signal is whether the
- * destination's content actually is the source's content. `copyIntoPlace`
- * only ever brings a destination into existence by atomically renaming a
- * *complete* temp copy into place, so a byte-size match between source and
- * destination is not something an accidental foreign file would produce by
- * coincidence; it means an earlier attempt's copy finished before crashing,
- * before `insertImportedFile` could run. The residual risk this doesn't
- * close: a foreign file that already happens to sit at this exact,
- * identity-derived destination path *and* happens to match the source's
- * byte count exactly would still be adopted. That's judged acceptable for
- * the MVP — narrow and stateable, not a designed-in gap — rather than
- * closed with a stronger (and slower) content comparison.
+ * proves nothing either way, and nothing about this branch requires a crash
+ * to have happened: any regular file sitting at the destination with no
+ * `imported_files` row for it arrives here, on a first attempt as readily as
+ * on a retry. The only signal that survives that is the destination's own
+ * content. Size is the pre-filter and not the answer — a different length is
+ * a decisive no that costs no read, but a byte count is a 64-bit summary of a
+ * file and every other file of that length matches it, so an equal length is
+ * only ever a reason to go on and read. Byte-identical is the whole test, and
+ * it is sufficient on its own: a destination holding exactly the source's
+ * bytes is indistinguishable from the copy `copyIntoPlace` would have made
+ * there, so adopting it produces precisely the intended result whether an
+ * earlier attempt wrote it or something else did.
  */
-function wasAlreadyWrittenHere(
+async function wasAlreadyWrittenHere(
   mode: 'move' | 'copy',
+  source: string,
+  destination: string,
   sourceStat: Stats | null,
   destStat: Stats,
-): boolean {
+): Promise<boolean> {
   if (sourceStat === null) return true;
-  return mode === 'copy' && sourceStat.size === destStat.size;
+  return (
+    mode === 'copy' &&
+    sourceStat.size === destStat.size &&
+    (await filesHaveSameContent(source, destination))
+  );
 }
 
 async function transfer(
@@ -425,7 +480,13 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
         );
       } else if (
         destStat.isFile() &&
-        wasAlreadyWrittenHere(deps.importMode, sourceStat, destStat)
+        (await wasAlreadyWrittenHere(
+          deps.importMode,
+          file.source,
+          file.destination,
+          sourceStat,
+          destStat,
+        ))
       ) {
         // Idempotent crash recovery: a *regular file* already sits at the
         // destination, and `wasAlreadyWrittenHere` has judged — by the signal
@@ -439,10 +500,10 @@ export async function importDownload(deps: ImportDeps, download: DownloadRow): P
         // Anything else occupying the destination is a collision, not
         // recovery, and must not be guessed at: either `wasAlreadyWrittenHere`
         // found no mode-appropriate signal that this download wrote it (the
-        // source is still present in `move` mode, or its size doesn't match in
-        // `copy` mode), or the occupant is not a regular file at all (a
-        // symlink or a directory), which is never treated as "the file we
-        // wrote" regardless of the source's state. Failing loudly and never
+        // source is still present in `move` mode, or its size or its content
+        // doesn't match in `copy` mode), or the occupant is not a regular
+        // file at all (a symlink or a directory), which is never treated as
+        // "the file we wrote" regardless of the source's state. Failing loudly and never
         // touching the source is strictly safer than adopting the unknown
         // occupant and losing track of the only copy of the actual download.
         throw new Error(
