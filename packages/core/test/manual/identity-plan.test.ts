@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { planIdentityChange } from '../../src/manual/identity-plan.ts';
@@ -363,6 +364,95 @@ test('a superseded pick on the target side has its files trashed too', async () 
     !plan.renames.some((r) => r.importedFileId === 2),
     'a file about to be trashed is never also renamed',
   );
+});
+
+/**
+ * The merge shape the three trashing checks below need, and the only thing they
+ * vary is what — if anything — sits at `doomedPath`. Local to this trio rather
+ * than added to `fixtures.ts`: nothing else needs a doomed row whose file is
+ * deliberately wrong, and the seed is only meaningful alongside the assertions
+ * it sets up. The target is picked on a release the source's outscores, so it
+ * is the *target's* file (imported file 2) that the merge dooms.
+ */
+async function seedDoomedTargetFile(
+  db: DatabaseSync,
+  libraryRoot: string,
+  doomedPath: string,
+): Promise<void> {
+  await seedWithFile(db, libraryRoot);
+  db.prepare('UPDATE releases SET score = 500 WHERE id = 2').run();
+  db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 2 WHERE id = 2").run();
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (2, 2, 2, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (2, 2, 2, '/dl/b.mp4', ?, 5, 100)`,
+  ).run(doomedPath);
+}
+
+/**
+ * The trash side of the same fact the rename side has blocked all along. Before
+ * this, a doomed row pointing at a directory sailed through planning and came
+ * back as a `failed` entry from `trashFiles` — after the merge had already
+ * committed — while the identical directory under a *renamed* row was refused
+ * up front. The row stays in `trashing` either way; see `trashedPaths`.
+ */
+test('a doomed row that is not a regular file is a blocker', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const doomedPath = join(libraryRoot, 'k2', '2160.mp4');
+  await seedDoomedTargetFile(db, libraryRoot, doomedPath);
+  await mkdir(doomedPath, { recursive: true });
+
+  const plan = ok(
+    await planIdentityChange(makeDeps(db, FILING, libraryRoot), 1, { key: 'k2', title: 'A' }),
+  );
+
+  assert.equal(plan.blockers.length, 1, `unexpected blockers: ${JSON.stringify(plan.blockers)}`);
+  assert.match(plan.blockers[0]!, /is not a regular file/);
+  assert.equal(plan.trashing.length, 1, 'a blocked row still stands in the plan that blocked it');
+});
+
+test('a doomed row outside the library root is a blocker', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const outside = await mkdtemp(join(tmpdir(), 'pickarr-outside-'));
+  const doomedPath = join(outside, 'stray.mp4');
+  await seedDoomedTargetFile(db, libraryRoot, doomedPath);
+  await writeFile(doomedPath, 'stray');
+
+  const plan = ok(
+    await planIdentityChange(makeDeps(db, FILING, libraryRoot), 1, { key: 'k2', title: 'A' }),
+  );
+
+  assert.equal(plan.blockers.length, 1, `unexpected blockers: ${JSON.stringify(plan.blockers)}`);
+  assert.match(plan.blockers[0]!, /resolves outside the library root/);
+  assert.equal(plan.trashing.length, 1);
+});
+
+/**
+ * The guard against the two checks above over-reaching. A doomed file already
+ * off disk is the one case `trashFiles` handles without complaint — it retires
+ * the row with a null `trash_path` — so refusing the whole edit over it would
+ * make a group nobody can correct out of a file an operator deleted by hand.
+ */
+test('a doomed row whose file is gone warns rather than blocks', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  await seedDoomedTargetFile(db, libraryRoot, join(libraryRoot, 'k2', '2160.mp4'));
+
+  const plan = ok(
+    await planIdentityChange(makeDeps(db, FILING, libraryRoot), 1, { key: 'k2', title: 'A' }),
+  );
+
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.warnings.length, 1, `unexpected warnings: ${JSON.stringify(plan.warnings)}`);
+  assert.match(plan.warnings[0]!, /already gone from disk/);
+  assert.equal(plan.trashing.length, 1, 'phase 2 still has a row to retire');
 });
 
 test('the source file itself not being a regular file is a blocker', async () => {
