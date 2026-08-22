@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
-import { openTestDatabase } from '../../src/db/open.ts';
+import { installLabelToken } from '../../src/db/app-state.ts';
+import {
+  openDatabase,
+  openTestDatabase,
+  TEST_LABEL_TOKEN,
+  TEST_LABEL_TOKEN_MINTED_AT,
+} from '../../src/db/open.ts';
 import {
   bumpAttempts,
   clearAbsent,
@@ -12,6 +18,7 @@ import {
   getDownload,
   indexDownloadsForClient,
   insertDownload,
+  labelsFor,
   markAbsent,
   pageOfDownloads,
   recordError,
@@ -24,6 +31,9 @@ import {
 import { getGroup } from '../../src/db/groups.ts';
 
 const BAD_ID = 9999;
+
+/** What `openTestDatabase` pre-mints, as `labelsFor` and friends want it. */
+const SCHEME = { token: TEST_LABEL_TOKEN, mintedAt: TEST_LABEL_TOKEN_MINTED_AT };
 
 function seed(db: DatabaseSync): number {
   db.prepare(
@@ -312,7 +322,7 @@ test('indexDownloadsForClient.byRef includes failed rows and excludes imported r
   setClientRef(db, imported, 'nzo_imported', 1);
   setStatus(db, imported, 'imported', 2);
 
-  const { byRef } = indexDownloadsForClient(db, 'sab');
+  const { byRef } = indexDownloadsForClient(db, 'sab', SCHEME);
   assert.deepEqual([...byRef.keys()].toSorted(), ['nzo_failed', 'nzo_kept']);
   assert.equal(byRef.get('nzo_kept')?.id, kept);
   assert.equal(byRef.get('nzo_failed')?.id, failed);
@@ -320,7 +330,7 @@ test('indexDownloadsForClient.byRef includes failed rows and excludes imported r
   db.close();
 });
 
-test('indexDownloadsForClient.byLabel keys on pickarr-<id> for the same row set as byRef', () => {
+test('indexDownloadsForClient.byLabel keys on the salted label for the same row set as byRef', () => {
   const db = openTestDatabase();
   const kept = seed(db);
   const imported = seedSecond(db, 2);
@@ -329,9 +339,9 @@ test('indexDownloadsForClient.byLabel keys on pickarr-<id> for the same row set 
   setClientRef(db, imported, 'nzo_imported', 1);
   setStatus(db, imported, 'imported', 2);
 
-  const { byLabel } = indexDownloadsForClient(db, 'sab');
-  assert.deepEqual([...byLabel.keys()], [downloadLabel(kept)]);
-  assert.equal(byLabel.get(downloadLabel(kept))?.id, kept);
+  const { byLabel } = indexDownloadsForClient(db, 'sab', SCHEME);
+  assert.deepEqual([...byLabel.keys()], [downloadLabel(TEST_LABEL_TOKEN, kept)]);
+  assert.equal(byLabel.get(downloadLabel(TEST_LABEL_TOKEN, kept))?.id, kept);
   db.close();
 });
 
@@ -340,14 +350,78 @@ test('indexDownloadsForClient builds both maps from one query: a kept row is the
   const kept = seed(db);
   setClientRef(db, kept, 'nzo_kept', 1);
 
-  const { byRef, byLabel } = indexDownloadsForClient(db, 'sab');
+  const { byRef, byLabel } = indexDownloadsForClient(db, 'sab', SCHEME);
   // Strict identity, not just equal values: this is what a single query
   // building both maps from one row array actually guarantees, and what a
   // second, separately-run query could not — two queries would give two
   // distinct row objects with the same field values, and this assertion
   // would still pass on that broken version if it only checked deepEqual.
-  assert.equal(byRef.get('nzo_kept'), byLabel.get(downloadLabel(kept)));
+  assert.equal(byRef.get('nzo_kept'), byLabel.get(downloadLabel(TEST_LABEL_TOKEN, kept)));
   db.close();
+});
+
+// --- The per-installation salt ------------------------------------------
+//
+// A label used to be `pickarr-<id>` and nothing else, so its whole namespace
+// was one database's rowid sequence. These pin the three properties the salt
+// has to have for #28 to stay closed: it is stable within an installation,
+// distinct between installations, and it does not strand the jobs already at
+// the client when it first appears.
+
+test('installLabelToken mints once and answers the same token on every later call', () => {
+  const db = openDatabase(':memory:');
+  const first = installLabelToken(db, 1_700_000_000_000);
+  const second = installLabelToken(db, 1_700_000_999_999);
+
+  assert.equal(second.token, first.token);
+  // `mintedAt` matters more than the token: it is what bounds legacy-label
+  // acceptance, so a second call re-stamping it would quietly make every
+  // existing row legacy-eligible again.
+  assert.equal(second.mintedAt, first.mintedAt);
+  assert.equal(first.mintedAt, 1_700_000_000_000);
+  assert.match(first.token, /^[0-9a-f]{8}$/);
+  db.close();
+});
+
+test('two databases mint different tokens, which is the whole of what the salt buys', () => {
+  // Not `openTestDatabase`: that pre-mints a fixed token so job names stay
+  // writable as literals, and a fixed token is exactly what this is about.
+  const a = openDatabase(':memory:');
+  const b = openDatabase(':memory:');
+
+  assert.notEqual(installLabelToken(a, 1).token, installLabelToken(b, 1).token);
+  a.close();
+  b.close();
+});
+
+test('a marker written before the salt existed still parses', () => {
+  // The read pattern has to keep accepting the unsalted shape or every job
+  // already at the client becomes unrecognisable the moment this ships.
+  // Whether an unsalted label is *believed* is `labelsFor`'s decision, not
+  // this one.
+  assert.equal(
+    extractLabel(clientJobName(TEST_LABEL_TOKEN, 'T', 7)),
+    downloadLabel(TEST_LABEL_TOKEN, 7),
+  );
+  assert.equal(extractLabel('T [pickarr-7]'), 'pickarr-7');
+});
+
+test('labelsFor admits the legacy label only for a row older than the token', () => {
+  const db = openTestDatabase();
+  const id = seed(db);
+
+  const before = { ...getDownload(db, id)!, createdAt: TEST_LABEL_TOKEN_MINTED_AT - 1 };
+  assert.deepEqual(labelsFor(SCHEME, before), [
+    downloadLabel(TEST_LABEL_TOKEN, id),
+    `pickarr-${id}`,
+  ]);
+
+  // Exactly one, and this assertion is the cheap alarm on the bound: a row
+  // created after the token was minted was submitted under a salted label, so
+  // an unsalted marker naming its id came from somewhere else. If `mintedAt`
+  // is ever overwritten, or the comparison loosened, this is what fails.
+  const after = { ...getDownload(db, id)!, createdAt: TEST_LABEL_TOKEN_MINTED_AT + 1 };
+  assert.deepEqual(labelsFor(SCHEME, after), [downloadLabel(TEST_LABEL_TOKEN, id)]);
 });
 
 // --- The job-name round trip --------------------------------------------
@@ -382,14 +456,14 @@ const HOSTILE_TITLES = [
 
 test('no truncation of a job name can read as a label other than the one it was minted for', () => {
   for (const title of HOSTILE_TITLES) {
-    const name = clientJobName(title, 1);
+    const name = clientJobName(TEST_LABEL_TOKEN, title, 1);
     // Every prefix rather than one hand-picked offset: the claim is about
     // truncation in general, not about the one offset the issue reported.
     for (let end = 0; end <= name.length; end += 1) {
       const prefix = name.slice(0, end);
       const label = extractLabel(prefix);
       assert.ok(
-        label === null || label === downloadLabel(1),
+        label === null || label === downloadLabel(TEST_LABEL_TOKEN, 1),
         `${JSON.stringify(name)} truncated to ${JSON.stringify(prefix)} reads as ${label}`,
       );
     }
@@ -398,24 +472,33 @@ test('no truncation of a job name can read as a label other than the one it was 
 
 test('a title already ending in the marker shape has it removed rather than escaped', () => {
   assert.equal(
-    clientJobName('Site.25.01.02.Scene [pickarr-2]', 1),
-    'Site.25.01.02.Scene [pickarr-1]',
+    clientJobName(TEST_LABEL_TOKEN, 'Site.25.01.02.Scene [pickarr-2]', 1),
+    'Site.25.01.02.Scene [pickarr-7e57ab1e-1]',
   );
 });
 
 test('a marker shape removed from the middle of a title leaves no double space behind', () => {
-  assert.equal(clientJobName('A [pickarr-2] B', 1), 'A B [pickarr-1]');
+  assert.equal(
+    clientJobName(TEST_LABEL_TOKEN, 'A [pickarr-2] B', 1),
+    'A B [pickarr-7e57ab1e-1]',
+  );
 });
 
 test('a title that was nothing but a marker shape becomes the bare marker, still recoverable', () => {
-  assert.equal(clientJobName('[pickarr-77]', 1), '[pickarr-1]');
-  assert.equal(extractLabel(clientJobName('[pickarr-77]', 1)), downloadLabel(1));
+  assert.equal(clientJobName(TEST_LABEL_TOKEN, '[pickarr-77]', 1), '[pickarr-7e57ab1e-1]');
+  assert.equal(
+    extractLabel(clientJobName(TEST_LABEL_TOKEN, '[pickarr-77]', 1)),
+    downloadLabel(TEST_LABEL_TOKEN, 1),
+  );
 });
 
 // The cheapest signal that the sanitiser has not started eating ordinary
 // titles: this name is byte-identical to what the unsanitised version sent.
 test('an ordinary title pays nothing: its job name is the title and the marker', () => {
-  assert.equal(clientJobName('Ordinary.Release.1080p', 1), 'Ordinary.Release.1080p [pickarr-1]');
+  assert.equal(
+    clientJobName(TEST_LABEL_TOKEN, 'Ordinary.Release.1080p', 1),
+    'Ordinary.Release.1080p [pickarr-7e57ab1e-1]',
+  );
 });
 
 /**

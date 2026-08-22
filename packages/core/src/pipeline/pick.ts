@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClient } from '../clients/types.ts';
+import { installLabelToken } from '../db/app-state.ts';
 import { getGroup, markPicked, refreshUpgradeFlag } from '../db/groups.ts';
 import { liveFilesForGroup } from '../db/imported-files.ts';
 import { getRelease, linkForRelease, titleForRelease } from '../db/releases.ts';
@@ -130,15 +131,19 @@ export async function pickRelease(
   // submission already happened; recording that identically to an addUrl
   // failure would make a naive reconcile retry addUrl and double-submit the
   // same nzb, so that case is recorded with a distinct message naming the
-  // ref that was already accepted. addUrl is given clientJobName(title,
-  // downloadId), which carries downloadLabel(downloadId) as a bracketed
-  // marker rather than anything else derived from the release, so that if
-  // this call succeeds and only the persist below fails, a reconcile tick
-  // can recover the ref from the client's own queue/history by that same
-  // marker instead of submitting the nzb a second time.
+  // ref that was already accepted. addUrl is given clientJobName(token,
+  // title, downloadId), which carries downloadLabel(token, downloadId) as a
+  // bracketed marker rather than anything else derived from the release, so
+  // that if this call succeeds and only the persist below fails, a reconcile
+  // tick can recover the ref from the client's own queue/history by that same
+  // marker instead of submitting the nzb a second time. The token is this
+  // installation's own salt, minted here on first use: without it the marker
+  // names nothing but a rowid, which a second installation sharing the
+  // category mints too (#28).
+  const scheme = installLabelToken(db, now);
   let clientRef: string;
   try {
-    clientRef = await client.addUrl(link, clientJobName(title, downloadId));
+    clientRef = await client.addUrl(link, clientJobName(scheme.token, title, downloadId));
   } catch (error) {
     recordError(db, downloadId, (error as Error).message, now);
     return mustGetDownload(db, downloadId);

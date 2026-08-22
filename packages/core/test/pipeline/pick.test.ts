@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
-import { openTestDatabase } from '../../src/db/open.ts';
+import { openTestDatabase, TEST_LABEL_TOKEN } from '../../src/db/open.ts';
 import { pickRelease } from '../../src/pipeline/pick.ts';
 import { importDownload } from '../../src/pipeline/import.ts';
 import { browsableGroup, getGroup } from '../../src/db/groups.ts';
@@ -113,7 +113,7 @@ test('addUrl is sent a name carrying the release title, with the label recoverab
   const download = await pickRelease(db, client, { groupId, releaseId }, 500);
 
   assert.match(seenName ?? '', /^Title /);
-  assert.equal(extractLabel(seenName ?? ''), downloadLabel(download.id));
+  assert.equal(extractLabel(seenName ?? ''), downloadLabel(TEST_LABEL_TOKEN, download.id));
   db.close();
 });
 

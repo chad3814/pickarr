@@ -379,13 +379,13 @@ export function createSabnzbdClient(
 
     async snapshot(): Promise<ClientSnapshot> {
       // No `category` on either call. We match entries to downloads on
-      // `nzo_id` with the `[pickarr-N]` label as a fallback (reconcile.ts),
-      // not on the client's category, and asking SABnzbd to filter for us
-      // would break the completeness check below: queue_info's `noofslots`
-      // is the size of the *whole* queue regardless of what was requested,
-      // so comparing a filtered result's length against it would report
-      // every snapshot incomplete forever. Filtering, if any is wanted, is
-      // the caller's job on data that is provably everything.
+      // `nzo_id` with the `[pickarr-<token>-<id>]` label as a fallback
+      // (reconcile.ts), not on the client's category, and asking SABnzbd to
+      // filter for us would break the completeness check below: queue_info's
+      // `noofslots` is the size of the *whole* queue regardless of what was
+      // requested, so comparing a filtered result's length against it would
+      // report every snapshot incomplete forever. Filtering, if any is
+      // wanted, is the caller's job on data that is provably everything.
       //
       // `limit=0` is passed explicitly rather than omitted, even though
       // queue_info already treats a missing limit as unlimited: the two

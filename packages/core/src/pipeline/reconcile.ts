@@ -7,6 +7,7 @@ import type {
   ClientSnapshot,
   DownloadClient,
 } from '../clients/types.ts';
+import { installLabelToken, type InstallLabelToken } from '../db/app-state.ts';
 import { linkForRelease, titleForRelease } from '../db/releases.ts';
 import {
   activeDownloads,
@@ -18,7 +19,9 @@ import {
   failDownload,
   getDownload,
   indexDownloadsForClient,
+  labelsFor,
   markAbsent,
+  type LabelledDownload,
   reattachClientRef,
   recordError,
   setClientRef,
@@ -154,8 +157,12 @@ function collapse(snapshot: ClientSnapshot): Map<string, SnapshotEntry> {
  * removing the folder is Pickarr's job — and it is the one piece of cleanup
  * that can destroy something it did not create. The proof required is the
  * label Pickarr itself put in the job name: `clientJobName` appends
- * `[pickarr-<id>]`, SABnzbd names the folder after the job, and this checks
- * that the folder in hand carries *this* download's label.
+ * `[pickarr-<token>-<id>]`, SABnzbd names the folder after the job, and this
+ * checks that the folder in hand carries *this* download's label. It takes
+ * the whole row rather than an id because `labelsFor` needs the row's age to
+ * decide whether the pre-#28 unsalted marker is admissible for it — a folder
+ * made for a job submitted before the token was minted still carries that
+ * one, and refusing it would leave those directories behind forever.
  *
  * Both shapes of storage path are covered, because both occur: the directory
  * itself, and — for a job that unpacked to a single file — the file inside it,
@@ -169,14 +176,22 @@ function collapse(snapshot: ClientSnapshot): Map<string, SnapshotEntry> {
  * no label, so it is refused, and the worst case is a folder left behind
  * rather than a category wiped out.
  */
-function jobDirectory(id: number, storagePath: string | null): string | null {
+function jobDirectory(
+  scheme: InstallLabelToken,
+  download: LabelledDownload,
+  storagePath: string | null,
+): string | null {
   if (storagePath === null) return null;
-  const label = downloadLabel(id);
+  const labels = labelsFor(scheme, download);
   const path = storagePath.replace(/\/+$/, '');
   if (path.length === 0) return null;
-  if (extractLabel(basename(path)) === label) return path;
+  const carriesOurLabel = (candidate: string): boolean => {
+    const label = extractLabel(basename(candidate));
+    return label !== null && labels.includes(label);
+  };
+  if (carriesOurLabel(path)) return path;
   const parent = dirname(path);
-  return extractLabel(basename(parent)) === label ? parent : null;
+  return carriesOurLabel(parent) ? parent : null;
 }
 
 /**
@@ -201,13 +216,14 @@ let warnedLabelMismatch = false;
 
 /**
  * The same once-per-process treatment for the other way matching can go
- * wrong: an entry whose `nzo_id` names one download while its `[pickarr-N]`
- * label names another. The ref wins (see `resolve`), so this is not a failure
- * — but it means one of the two keys is lying about which download a job
- * belongs to, and the only way that happens is a ref written against the
- * wrong row or two Pickarr installations sharing one category (the deployment
- * constraint `downloadLabel` documents). Neither is diagnosable from the
- * outcome, so it is said out loud.
+ * wrong: an entry whose `nzo_id` names one download while its marker label
+ * names another. The ref wins (see `resolve`), so this is not a failure —
+ * but it means one of the two keys is lying about which download a job
+ * belongs to. A second installation sharing the category used to be the
+ * likely cause and is no longer one: labels carry this installation's salt
+ * (#28), so a foreign job's label resolves to no row of ours at all. What is
+ * left is a `client_ref` written against the wrong row, which is not
+ * diagnosable from the outcome, so it is said out loud.
  */
 let warnedRefLabelDisagreement = false;
 
@@ -221,10 +237,19 @@ export function resetReconcileWarningsForTests(): void {
   warnedRefLabelDisagreement = false;
 }
 
-function warnIfLabelMismatch(download: DownloadRow, actualName: string): void {
+function warnIfLabelMismatch(
+  scheme: InstallLabelToken,
+  download: DownloadRow,
+  actualName: string,
+): void {
   if (warnedLabelMismatch) return;
-  const expected = downloadLabel(download.id);
-  if (extractLabel(actualName) === expected) return;
+  const labels = labelsFor(scheme, download);
+  const actual = extractLabel(actualName);
+  if (actual !== null && labels.includes(actual)) return;
+  // The salted label, not whichever of `labels` happened to be admissible:
+  // it is the one every new submission is made under, so it is the one an
+  // operator comparing against their client's queue should be looking for.
+  const expected = downloadLabel(scheme.token, download.id);
   warnedLabelMismatch = true;
   console.warn(
     `pickarr: download ${download.id} is named '${actualName}' at the client, expected ` +
@@ -238,8 +263,8 @@ function warnRefLabelDisagreement(ref: string, byRef: DownloadRow, byLabel: Down
   warnedRefLabelDisagreement = true;
   console.warn(
     `pickarr: client job ${ref} matches download ${byRef.id} by ref but download ` +
-      `${byLabel.id} by label; taking the ref. One of the two is wrong — check that ` +
-      'no second Pickarr installation shares this client category.',
+      `${byLabel.id} by label; taking the ref. One of the two is wrong — a client_ref ` +
+      'has been written against the wrong download row.',
   );
 }
 
@@ -273,8 +298,8 @@ function warnRefLabelDisagreement(ref: string, byRef: DownloadRow, byLabel: Down
  * `addUrl` unconditionally for that row would double-submit the nzb whenever
  * the ambiguous case is the true one, leaving one submission permanently
  * untracked in the client. So every `addUrl` call — the very first, from
- * `pick.ts`, and every retry here — is given `downloadLabel(id)` as the
- * client's job label, and before calling `addUrl` again this looks in the
+ * `pick.ts`, and every retry here — is given `downloadLabel(token, id)` as
+ * the client's job label, and before calling `addUrl` again this looks in the
  * snapshot it has *already fetched* for an entry carrying that label. A
  * submission pass that ran first would have nothing to look in and would
  * resubmit every download whose ref write was lost. Finding one means the
@@ -290,6 +315,10 @@ function warnRefLabelDisagreement(ref: string, byRef: DownloadRow, byLabel: Down
 export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileResult> {
   const { db, client } = deps;
   const now = deps.now();
+  // Read once for the whole tick rather than per call site: the token is
+  // write-once, so a second read could only ever answer the same thing, and
+  // every pass below has to agree about which labels are ours.
+  const scheme = installLabelToken(db, now);
   const result: ReconcileResult = {
     untracked: [],
     advanced: 0,
@@ -353,8 +382,13 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
   for (const download of activeDownloads(db, client.id)) {
     if (download.clientRef !== null) continue;
 
-    const label = downloadLabel(download.id);
-    const recovered = refByLabel.get(label);
+    // Salted first, legacy second, and only for a row old enough to have
+    // been submitted under a legacy label (`labelsFor`). A foreign
+    // installation's job matches neither, so it is left where it is and
+    // reported as untracked rather than adopted — which is the whole of #28.
+    const recovered = labelsFor(scheme, download)
+      .map((label) => refByLabel.get(label))
+      .find((ref) => ref !== undefined);
     if (recovered !== undefined) {
       // The client already has this job under our label — nothing to submit.
       // Recorded here without touching `attempts`: this is a recovery of an
@@ -393,7 +427,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
 
     try {
       // eslint-disable-next-line no-await-in-loop -- one submission at a time, deliberately
-      const ref = await client.addUrl(link, clientJobName(title, download.id));
+      const ref = await client.addUrl(link, clientJobName(scheme.token, title, download.id));
       setClientRef(db, download.id, ref, now);
       result.advanced += 1;
     } catch (error) {
@@ -420,7 +454,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
   // `failed` ones (see `indexDownloadsForClient`). `knownRefs` filters by no
   // status at all, which is what lets an entry belonging to an imported row be
   // recognised as ours rather than reported as an orphan.
-  const index = indexDownloadsForClient(db, client.id);
+  const index = indexDownloadsForClient(db, client.id, scheme);
   const knownRefs = new Set<string>(
     db
       .prepare('SELECT client_ref FROM downloads WHERE client_id = ? AND client_ref IS NOT NULL')
@@ -430,11 +464,11 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
 
   /**
    * The download a client entry belongs to: its `nzo_id` against
-   * `client_ref`, falling back to the `[pickarr-N]` label parsed out of its
-   * name. The ref is the primary key and correct in every observed case; the
-   * label exists because a ref can be lost or, in principle, change, and a
-   * ref that cannot be corrected is a download that can never be reconciled
-   * again. Matching is not filtered by category, so a job of ours
+   * `client_ref`, falling back to the `[pickarr-<token>-<id>]` label parsed
+   * out of its name. The ref is the primary key and correct in every observed
+   * case; the label exists because a ref can be lost or, in principle,
+   * change, and a ref that cannot be corrected is a download that can never
+   * be reconciled again. Matching is not filtered by category, so a job of ours
    * re-categorised at the client is still found — that was one of the blind
    * spots this design set out to remove.
    */
@@ -496,7 +530,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
     if (download.status === 'failed' && download.error !== RECOVERABLE_FAILURE) continue;
 
     seen.add(download.id);
-    warnIfLabelMismatch(download, entry.name);
+    warnIfLabelMismatch(scheme, download, entry.name);
 
     // Re-attachment, reached two ways: a ref that is wrong (the label matched
     // and the ref did not), and a row failed as `disappeared-from-client` whose
@@ -664,16 +698,27 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
   const importedJobs = new Map<string, { id: number; directory: string | null }>(
     db
       .prepare(
-        `SELECT id, client_ref, storage_path FROM downloads
+        // `created_at` is selected for `jobDirectory`, which needs the row's
+        // age to decide whether a directory carrying the pre-#28 unsalted
+        // marker is admissible for it.
+        `SELECT id, client_ref, storage_path, created_at FROM downloads
          WHERE client_id = ? AND status = 'imported' AND client_ref IS NOT NULL`,
       )
       .all(client.id)
       .map((row) => {
         const id = Number(row['id']);
         const storagePath = row['storage_path'];
+        const created = { id, createdAt: Number(row['created_at']) };
         return [
           String(row['client_ref']),
-          { id, directory: jobDirectory(id, storagePath === null ? null : String(storagePath)) },
+          {
+            id,
+            directory: jobDirectory(
+              scheme,
+              created,
+              storagePath === null ? null : String(storagePath),
+            ),
+          },
         ] as const;
       }),
   );
@@ -705,7 +750,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       // so this loop will not see it again.
       deps.log?.(
         `reconcile ${client.id}: removed ${entry.ref} but left its directory in place; ` +
-          `nothing at its storage path carries the ${downloadLabel(job.id)} label`,
+          `nothing at its storage path carries the ${downloadLabel(scheme.token, job.id)} label`,
       );
       continue;
     }
