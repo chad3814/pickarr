@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
+import { tempDir } from '../temp-dir.ts';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { planIdentityChange } from '../../src/manual/identity-plan.ts';
@@ -127,9 +127,9 @@ test('planning a group that does not exist is 404', async () => {
   assert.equal(failure(await planIdentityChange(makeDeps(db), 77, { key: 'k1' })).status, 404);
 });
 
-test('a merge plans a rename for each live file, under its own releases quality', async () => {
+test('a merge plans a rename for each live file, under its own releases quality', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
 
   const plan = ok(
@@ -154,9 +154,9 @@ test('a merge plans a rename for each live file, under its own releases quality'
  * a second release at a different quality, so a rename that renders the wrong
  * file's resolution shows up as the wrong path rather than as a coincidence.
  */
-test('each live file is renamed under its own release quality, not the picks', async () => {
+test('each live file is renamed under its own release quality, not the picks', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithTwoQualityFiles(db, libraryRoot);
 
   const plan = ok(
@@ -179,9 +179,9 @@ test('each live file is renamed under its own release quality, not the picks', a
   assert.deepEqual(plan.blockers, []);
 });
 
-test('a rename that would not move the file is dropped', async () => {
+test('a rename that would not move the file is dropped', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
 
   const plan = ok(
@@ -192,9 +192,9 @@ test('a rename that would not move the file is dropped', async () => {
   assert.deepEqual(plan.renames, [], 'the template does not read the title, so nothing moves');
 });
 
-test('an occupied destination is a blocker', async () => {
+test('an occupied destination is a blocker', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
   await mkdir(join(libraryRoot, 'k2'), { recursive: true });
   await writeFile(join(libraryRoot, 'k2', '1080.mp4'), 'someone else');
@@ -219,9 +219,9 @@ test('an occupied destination is a blocker', async () => {
  * exact path a renamed file wants", and refusing on it meant the ordering could
  * never be reached through the one situation it was ordered for.
  */
-test('a destination occupied by a file this plan is trashing is not a blocker', async () => {
+test('a destination occupied by a file this plan is trashing is not a blocker', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
   // The target is picked on a release of the *same* resolution as the source's
   // pick but a lower score, so its own file sits at exactly the path the
@@ -260,9 +260,9 @@ test('a destination occupied by a file this plan is trashing is not a blocker', 
   ]);
 });
 
-test('a destination occupied by a directory is a blocker', async () => {
+test('a destination occupied by a directory is a blocker', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
   await mkdir(join(libraryRoot, 'k2', '1080.mp4'), { recursive: true });
 
@@ -273,9 +273,9 @@ test('a destination occupied by a directory is a blocker', async () => {
   assert.equal(plan.blockers.length, 1);
 });
 
-test('a file already gone from disk warns and is not renamed', async () => {
+test('a file already gone from disk warns and is not renamed', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
   await rm(join(libraryRoot, 'k1', '1080.mp4'));
 
@@ -288,9 +288,9 @@ test('a file already gone from disk warns and is not renamed', async () => {
   assert.deepEqual(plan.blockers, []);
 });
 
-test('a superseded pick has its files trashed, not renamed', async () => {
+test('a superseded pick has its files trashed, not renamed', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
   // Target picks release 2 (2160), which outscores the source's 1080.
   db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 2 WHERE id = 2").run();
@@ -313,9 +313,9 @@ test('a superseded pick has its files trashed, not renamed', async () => {
  * earlier, buggy version of this planner did, via a `-1` sentinel group id)
  * would silently drop the target's file from `trashing` entirely.
  */
-test('a superseded pick on the target side has its files trashed too', async () => {
+test('a superseded pick on the target side has its files trashed too', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
 
   // Give the target (group 2) a download and a live file of its own...
@@ -365,9 +365,9 @@ test('a superseded pick on the target side has its files trashed too', async () 
   );
 });
 
-test('the source file itself not being a regular file is a blocker', async () => {
+test('the source file itself not being a regular file is a blocker', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
   // Replace the live file with a directory at the same path. `lstatOrNull`
   // finds something there, so this does not take the "already gone" warning
@@ -399,12 +399,12 @@ test('the source file itself not being a regular file is a blocker', async () =>
  * rename turned into a false "resolves outside the library root" refusal.
  * This test fails on that bug and passes with the fix.
  */
-test('an imported file recorded outside the library root is a blocker', async () => {
+test('an imported file recorded outside the library root is a blocker', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
 
-  const outside = await mkdtemp(join(tmpdir(), 'pickarr-outside-'));
+  const outside = await tempDir(t, 'pickarr-outside-');
   const strayPath = join(outside, 'stray.mp4');
   await writeFile(strayPath, 'stray');
   db.prepare(
@@ -436,9 +436,9 @@ test('an imported file recorded outside the library root is a blocker', async ()
   ]);
 });
 
-test('a live file the plugin refuses to place is a blocker', async () => {
+test('a live file the plugin refuses to place is a blocker', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
 
   const plan = ok(
@@ -458,9 +458,9 @@ test('a live file the plugin refuses to place is a blocker', async () => {
  * not, is the point of the test: an unguarded throw here would surface as a
  * 500 over the HTTP route this feeds, not as a shown blocker.
  */
-test('a plugin destination that escapes the library root is a blocker, not a throw', async () => {
+test('a plugin destination that escapes the library root is a blocker, not a throw', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
 
   const ESCAPING: MediaTypePlugin = {
@@ -491,9 +491,9 @@ test('a plugin destination that escapes the library root is a blocker, not a thr
 });
 
 /** The mirror case: `planImport` itself throws, rather than returning a bad path. */
-test('a plugin that throws while planning a file is a blocker, not a rejection', async () => {
+test('a plugin that throws while planning a file is a blocker, not a rejection', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-plan-'));
+  const libraryRoot = await tempDir(t, 'pickarr-plan-');
   await seedWithFile(db, libraryRoot);
 
   const THROWING: MediaTypePlugin = {

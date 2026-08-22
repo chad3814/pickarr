@@ -68,8 +68,12 @@ function setup(): { db: DatabaseSync; plugin: MediaTypePlugin; registry: PluginR
  * rather than the fixed `/library` placeholder — for the tests below that
  * exercise real renames rather than only the paths `planRekey` computes.
  * Callers are responsible for `rm(libraryRoot, { recursive: true })` when
- * done; there is no registration-based cleanup here because `node:test` has
- * no per-test teardown hook to hang it on.
+ * done. This comment used to add "there is no registration-based cleanup here
+ * because `node:test` has no per-test teardown hook to hang it on", which is
+ * false — `t.after` exists and runs whether the test passed or threw. Thirty
+ * three call sites across four other files were written under that licence and
+ * never removed anything; `../temp-dir.ts` is the hook they should have used,
+ * and is what to reach for rather than a new inline `mkdtemp`.
  */
 async function setupWithRealLibrary(): Promise<{
   db: DatabaseSync;

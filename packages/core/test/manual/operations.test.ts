@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tempDir } from '../temp-dir.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
@@ -981,9 +981,9 @@ test('a plugin that throws while prefilling the form is a 400, not a 500', async
 
 // --- Apply an identity change to the library ---------------------------
 
-test('the reported scenario: correcting a picked group merges it into the other one', async () => {
+test('the reported scenario: correcting a picked group merges it into the other one', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
   const deps = makeDeps(db, FILING, libraryRoot);
 
@@ -1016,9 +1016,9 @@ test('the reported scenario: correcting a picked group merges it into the other 
   db.close();
 });
 
-test('a stale digest is refused and changes nothing', async () => {
+test('a stale digest is refused and changes nothing', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
   const deps = makeDeps(db, FILING, libraryRoot);
 
@@ -1030,9 +1030,9 @@ test('a stale digest is refused and changes nothing', async () => {
   db.close();
 });
 
-test('a missing digest is refused when the plan moves anything', async () => {
+test('a missing digest is refused when the plan moves anything', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
 
   const result = await editGroup(makeDeps(db, FILING, libraryRoot), 1, { key: 'k2', title: 'A' });
@@ -1057,9 +1057,9 @@ test('a display-only edit still applies with no digest', async () => {
   db.close();
 });
 
-test('a blocked plan is refused', async () => {
+test('a blocked plan is refused', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
   // Something the group did not put there sits at the path the rename wants.
   await mkdir(join(libraryRoot, 'k2'), { recursive: true });
@@ -1077,9 +1077,9 @@ test('a blocked plan is refused', async () => {
   db.close();
 });
 
-test('a failing rename leaves the merge standing and reports the file', async () => {
+test('a failing rename leaves the merge standing and reports the file', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
   const deps: ManualDeps = {
     ...makeDeps(db, FILING, libraryRoot),
@@ -1101,9 +1101,9 @@ test('a failing rename leaves the merge standing and reports the file', async ()
   db.close();
 });
 
-test('re-saving after a failed rename finishes the remaining work', async () => {
+test('re-saving after a failed rename finishes the remaining work', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
   const failing: ManualDeps = {
     ...makeDeps(db, FILING, libraryRoot),
@@ -1128,10 +1128,10 @@ test('re-saving after a failed rename finishes the remaining work', async () => 
   db.close();
 });
 
-test('a superseded pick is trashed before the survivors are renamed', async () => {
+test('a superseded pick is trashed before the survivors are renamed', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
-  const trashDir = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
+  const trashDir = await tempDir(t, 'pickarr-trash-');
   await seedWithFile(db, libraryRoot);
   // The target is picked too, on a release scoring *below* the source's — so it
   // is the target's own file that is superseded, and the source's pick and file
@@ -1191,10 +1191,10 @@ test('a superseded pick is trashed before the survivors are renamed', async () =
  * The ordering test above proves phase 2 runs first by observation; this one
  * proves it matters.
  */
-test('a rename into the path a superseded file occupies succeeds', async () => {
+test('a rename into the path a superseded file occupies succeeds', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
-  const trashDir = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
+  const trashDir = await tempDir(t, 'pickarr-trash-');
   await seedWithFile(db, libraryRoot);
   // Same resolution on both picks, so both files are filed under `1080.mp4`, and
   // a lower score on the target's, so the source's pick and file survive.
@@ -1244,9 +1244,9 @@ test('a rename into the path a superseded file occupies succeeds', async () => {
  * what is new here is that the group *has a file*, so a phase-1 failure has
  * something to prove about the filesystem.
  */
-test('a phase 1 failure leaves every file exactly where it was', async () => {
+test('a phase 1 failure leaves every file exactly where it was', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
   const deps = makeDeps(db, FILING, libraryRoot);
   const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
@@ -1280,9 +1280,9 @@ test('a phase 1 failure leaves every file exactly where it was', async () => {
  * straight over a file the design promises is recoverable from `trashDir`,
  * destroying it and leaving two live rows naming one path.
  */
-test('a rename is refused when phase 2 failed to clear its destination', async () => {
+test('a rename is refused when phase 2 failed to clear its destination', async (t) => {
   const db = openTestDatabase();
-  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const libraryRoot = await tempDir(t, 'pickarr-edit-');
   await seedWithFile(db, libraryRoot);
   // The same collision as the test above: both picks are 1080p, so both files
   // are filed under `1080.mp4`, and the target's scores lower and loses.
@@ -1303,7 +1303,7 @@ test('a rename is refused when phase 2 failed to clear its destination', async (
   // A regular file where the trash directory should be, so `trashFiles`' own
   // `mkdir` fails with ENOTDIR — a misconfigured or unwritable `trashDir` in
   // miniature, and one that fails before it has moved anything.
-  const trashDir = join(await mkdtemp(join(tmpdir(), 'pickarr-trash-')), 'not-a-directory');
+  const trashDir = join(await tempDir(t, 'pickarr-trash-'), 'not-a-directory');
   await writeFile(trashDir, 'in the way');
   const deps: ManualDeps = { ...makeDeps(db, FILING, libraryRoot), trashDir };
 
