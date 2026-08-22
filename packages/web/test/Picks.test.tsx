@@ -425,6 +425,7 @@ test('a failed download on Downloads reaches its group on Picks', async () => {
       },
     ],
     untracked: [],
+    nextCursor: null,
   };
   const picks: PicksResponse = {
     groups: [failedPick(group(2, 'Beta')), group(1, 'Alpha')],

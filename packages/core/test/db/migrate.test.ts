@@ -938,7 +938,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   db.close();
 });
 
@@ -1044,7 +1044,7 @@ test('app_state arrives at version 10 and takes no other version', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 });
 
 // --- Migration 11: the feed backfill position -------------------------------
@@ -1104,4 +1104,51 @@ test('migration 12 adds import_plan, NULL for rows that already existed', () => 
     null,
     'a row that predates the column has no committed plan, which is exactly what null means',
   );
+});
+
+// --- Migration 13: the ordering the downloads list pages on -----------------
+
+test('migration 13 adds downloads_list, on a fresh database and on an upgrade', () => {
+  // Both paths, for the reason migration 3's index test gives: the upgrade runs
+  // the CREATE INDEX against a populated table and the fresh create runs it
+  // against an empty one, and an index missing from either would make
+  // `/api/downloads` sort the whole table on every three-second poll.
+  const upgraded = databaseAtVersion(12);
+  addGroup(upgraded, { id: 1, key: 'a' });
+  addRelease(upgraded, { id: 1, groupId: 1, score: 100 });
+  addDownload(upgraded, { id: 1, releaseId: 1, groupId: 1 });
+  migrate(upgraded);
+  const fresh = openTestDatabase();
+
+  for (const [name, db] of [['upgraded', upgraded], ['fresh', fresh]] as const) {
+    const index = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'downloads_list'")
+      .get();
+    assert.ok(index !== undefined, `${name} database is missing downloads_list`);
+  }
+  upgraded.close();
+  fresh.close();
+});
+
+test('the downloads page reads downloads_list rather than sorting the table', () => {
+  // The index is the load-bearing half of the pagination: a keyset page still
+  // has to be *ordered*, and without something serving `(created_at DESC, id
+  // DESC)` SQLite builds a temp b-tree over every row in the table before it
+  // can answer with thirty — four times a minute, for the life of an open tab.
+  // Asserting the plan rather than a timing is what makes that check stable.
+  const db = openTestDatabase();
+  const plan = db
+    .prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT id FROM downloads
+       WHERE (created_at < 5 OR (created_at = 5 AND id < 3))
+       ORDER BY created_at DESC, id DESC LIMIT 31`,
+    )
+    .all()
+    .map((row) => String(row['detail']))
+    .join(' | ');
+
+  assert.match(plan, /downloads_list/, plan);
+  assert.doesNotMatch(plan, /TEMP B-TREE/i, plan);
+  db.close();
 });

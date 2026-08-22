@@ -20,7 +20,7 @@ import {
   pickedGroups,
   type GroupRow,
 } from '../db/groups.ts';
-import { allDownloads, getDownload, resetForRetry } from '../db/downloads.ts';
+import { getDownload, pageOfDownloads, resetForRetry } from '../db/downloads.ts';
 import { failedFeedItems } from '../db/feed-items.ts';
 import {
   enqueueMetadata,
@@ -48,11 +48,13 @@ import type { UntrackedEntry } from '../pipeline/reconcile.ts';
 import {
   metadataViewOf,
   toDownloadView,
+  toDownloadViews,
   toFailedItemView,
   toGroupView,
   type BrowseResponse,
   type ConfigResponse,
   type ConfigSaveResponse,
+  type DownloadsResponse,
   type FailedResponse,
   type GroupEditResponse,
   type GroupView,
@@ -152,6 +154,18 @@ const browseQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(30),
   q: z.string().min(1).optional(),
+});
+
+/**
+ * The same two fields `browseQuerySchema` has, and deliberately no `q`. The
+ * Downloads screen's search box still filters in the client; moving that term
+ * into SQL changes what the box *means* — it would reach rows no page has
+ * loaded — and belongs with the rest of issue #31 rather than smuggled in
+ * behind the pagination.
+ */
+const downloadsQuerySchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(30),
 });
 
 /**
@@ -1102,10 +1116,42 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     }
   });
 
-  server.get('/api/downloads', async () => ({
-    tracked: allDownloads(db).map((download) => toDownloadView(db, download)),
-    untracked: deps.untrackedFor(deps.defaultClient.id),
-  }));
+  server.get('/api/downloads', async (request, reply) => {
+    const query = downloadsQuerySchema.safeParse(request.query);
+    if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
+    // Refused with the same message `/api/browse` and `/api/failed` use, from
+    // the same parser: three lists paging identically, and a cursor rule that
+    // held on only two of them would leave the third scrolling forever (#33).
+    const from = cursorFrom(query.data.cursor);
+    if ('error' in from) return reply.code(400).send({ error: from.error });
+    const { cursor } = from;
+
+    // Over-fetched by one for the reason the other two lists are: a page that
+    // comes back exactly `limit` long is otherwise ambiguous between "there is
+    // more" and "that was exactly everything left."
+    const overFetched = pageOfDownloads(db, {
+      cursor: cursor === null ? null : { createdAt: cursor.sortKey, id: cursor.id },
+      limit: query.data.limit + 1,
+    });
+    const hasMore = overFetched.length > query.data.limit;
+    const rows = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
+
+    // One query for the whole page's groups, not one per row: this route is
+    // what `metadataForGroups` and the `viewOf` doc comment above both point at
+    // as the defect, and this is where it stops being one.
+    const last = rows.at(-1);
+    const response: DownloadsResponse = {
+      tracked: toDownloadViews(db, rows),
+      // Unpaginated, and staying that way. It is a read of the scheduler's
+      // in-memory map (`untrackedFor`), bounded by what the client is actually
+      // running rather than by how much history the database holds, and never a
+      // query. It rides on every page for the same reason: there is no cheaper
+      // moment to send it.
+      untracked: deps.untrackedFor(deps.defaultClient.id),
+      nextCursor: hasMore && last !== undefined ? `${last.createdAt}:${last.id}` : null,
+    };
+    return response;
+  });
 
   // Retry is only ever meaningful for a `failed` row, or a row the reconcile
   // tick has marked absent, and it is actively dangerous for the others.

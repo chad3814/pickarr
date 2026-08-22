@@ -13,6 +13,7 @@ import {
   indexDownloadsForClient,
   insertDownload,
   markAbsent,
+  pageOfDownloads,
   recordError,
   resetForRetry,
   setClientRef,
@@ -415,4 +416,87 @@ test('a title that was nothing but a marker shape becomes the bare marker, still
 // titles: this name is byte-identical to what the unsanitised version sent.
 test('an ordinary title pays nothing: its job name is the title and the marker', () => {
   assert.equal(clientJobName('Ordinary.Release.1080p', 1), 'Ordinary.Release.1080p [pickarr-1]');
+});
+
+/**
+ * Three more downloads on top of `seed`'s, each on a release of its own: ids 2
+ * and 3 share `created_at` 5, id 4 sits alone at 4, and `seed`'s id 1 at 1.
+ *
+ * The tie is the whole point. It is the only arrangement that can tell this
+ * list's descending id tiebreak from the ascending one `browseGroups` uses,
+ * and getting that wrong skips or repeats a row silently rather than failing
+ * anywhere a reader would see.
+ */
+function seedForPaging(db: DatabaseSync): void {
+  for (const [id, createdAt] of [
+    [2, 5],
+    [3, 5],
+    [4, 4],
+  ] as const) {
+    db.prepare(
+      `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+       VALUES (?, 'f', ?, 'Title', 'https://indexer.invalid/n.nzb', 1)`,
+    ).run(id, `g${id}`);
+    db.prepare(
+      `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+       VALUES (?, 1, ?, '{}', 100, 1)`,
+    ).run(id, id);
+    db.prepare(
+      `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                              attempts, created_at, updated_at)
+       VALUES (?, ?, 1, 'sab', 'initial', 'downloading', 0, ?, ?)`,
+    ).run(id, id, createdAt, createdAt);
+  }
+}
+
+test('pageOfDownloads breaks a created_at tie on descending id', () => {
+  const db = openTestDatabase();
+  seed(db);
+  seedForPaging(db);
+
+  const first = pageOfDownloads(db, { cursor: null, limit: 1 });
+  assert.deepEqual(first.map((download) => download.id), [3], 'newest first, highest id in a tie');
+
+  // The cursor names the tie's higher id, so the row after it is the *lower*
+  // one sharing that `created_at`. `browseGroups` and `failedFeedItems` both
+  // compare `id >` inside a tie and this list has to compare `id <`; a copy of
+  // either would answer id 4 here and lose id 2 for good.
+  const second = pageOfDownloads(db, { cursor: { createdAt: 5, id: 3 }, limit: 2 });
+  assert.deepEqual(second.map((download) => download.id), [2, 4]);
+  db.close();
+});
+
+test('paging pageOfDownloads one row at a time visits every row exactly once', () => {
+  // The tie test above says which row comes next; this one says the walk as a
+  // whole neither skips nor repeats, which is the failure a wrong tiebreak
+  // actually produces for a reader.
+  const db = openTestDatabase();
+  seed(db);
+  seedForPaging(db);
+
+  const seen: number[] = [];
+  let cursor: { createdAt: number; id: number } | null = null;
+  for (;;) {
+    const page = pageOfDownloads(db, { cursor, limit: 1 });
+    const row = page[0];
+    if (row === undefined) break;
+    seen.push(row.id);
+    cursor = { createdAt: row.createdAt, id: row.id };
+  }
+
+  assert.deepEqual(seen, [3, 2, 4, 1]);
+  db.close();
+});
+
+test('pageOfDownloads returns at most limit rows and nothing past the end', () => {
+  const db = openTestDatabase();
+  seed(db);
+  seedForPaging(db);
+
+  assert.equal(pageOfDownloads(db, { cursor: null, limit: 2 }).length, 2);
+  assert.equal(pageOfDownloads(db, { cursor: null, limit: 99 }).length, 4);
+  // The oldest row's own cursor: there is nothing older, and an empty page is
+  // how the route learns to answer `nextCursor: null`.
+  assert.deepEqual(pageOfDownloads(db, { cursor: { createdAt: 1, id: 1 }, limit: 99 }), []);
+  db.close();
 });

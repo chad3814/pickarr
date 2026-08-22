@@ -744,4 +744,28 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE downloads ADD COLUMN import_plan TEXT;');
     },
   },
+  // 13, and the fifth instance of the story above — this time predicted by
+  // name. The comment on 12 said its number was already known to expire
+  // because #31 had been specified against 12 as well; #23 landed first, so
+  // this is the one that moves. Nothing new was learned: `assertUniqueVersions`
+  // is still what would have said so, and checking before picking is still
+  // necessary and still not sufficient.
+  //
+  // The index is not an optimisation on top of the pagination in #31 — it is
+  // half of it. A keyset page still has to be ordered before it can be cut,
+  // and `downloads` carried indexes on `(client_id, client_ref)`, `group_id`
+  // and `release_id` only, none of which serves this list's ordering. Without
+  // this, `EXPLAIN QUERY PLAN` answers `SCAN downloads` + `USE TEMP B-TREE FOR
+  // ORDER BY`: every row in the table sorted to return thirty, on every
+  // three-second poll of every open tab. The direction is spelled out rather
+  // than left to SQLite reading a plain index backwards, because the tiebreak
+  // is descending on both columns together — `(created_at DESC, id DESC)` is
+  // the exact ordering `pageOfDownloads` asks for, and a matching index is
+  // what turns the sort into a walk.
+  {
+    version: 13,
+    up(db) {
+      db.exec('CREATE INDEX downloads_list ON downloads (created_at DESC, id DESC);');
+    },
+  },
 ];

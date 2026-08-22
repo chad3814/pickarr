@@ -216,6 +216,7 @@ test('a refused retry surfaces instead of vanishing', async () => {
               },
             ],
             untracked: [],
+            nextCursor: null,
           }),
           { headers: { 'content-type': 'application/json' } },
         )) as unknown as typeof fetch;
@@ -231,39 +232,39 @@ test('retry refreshes the row immediately, without waiting on the poll', async (
   // Enabling only `setInterval` freezes `Downloads`' 3-second poll on a mock
   // clock this test never ticks, while leaving `setTimeout` — what `waitFor`
   // below polls with — running on the real one. So the only way the row can
-  // reach `queued` here is the immediate `setData(await api.downloads())` in
-  // `Downloads.retry`; the 3-second poll physically cannot fire.
+  // reach `queued` here is `Downloads.retry` patching it from the retry's own
+  // response; the 3-second poll physically cannot fire.
   //
-  // This is what pins the regression `setData` guards against: dropping that
-  // line still left every assertion below green when nothing froze the poll,
-  // because `waitFor`'s real timeout is longer than 3 seconds — it just made
-  // the e2e spec 1.6s -> 5.3s slower, waiting the poll interval out inside its
-  // own 5-second assertion window. On a loaded CI runner that margin is what
-  // turns into an unreproducible flake, and nothing else in the repo pins it.
+  // This is what pins the regression that patch guards against. It used to be
+  // `setData(await api.downloads())`, and dropping *that* still left every
+  // assertion green when nothing froze the poll, because `waitFor`'s real
+  // timeout is longer than three seconds — it just made the e2e spec 1.6s ->
+  // 5.3s slower, waiting the poll interval out inside its own 5-second
+  // assertion window. On a loaded CI runner that margin is what turns into an
+  // unreproducible flake, and nothing else in the repo pins it.
   t.mock.timers.enable({ apis: ['setInterval'] });
 
-  let retried = false;
   let downloadsRequests = 0;
   globalThis.fetch = (async (_input: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
-      retried = true;
-      return new Response('{}', { headers: { 'content-type': 'application/json' } });
+      // The row as the server left it. `/api/downloads/:id/retry` has always
+      // answered with the updated `DownloadView`; the screen now uses it,
+      // which is also what lets a retry reach a row that has scrolled off page
+      // one — a refetch of page one no longer can.
+      return new Response(
+        JSON.stringify(download({ status: 'queued', error: null, attempts: 1 })),
+        { headers: { 'content-type': 'application/json' } },
+      );
     }
     downloadsRequests += 1;
-    const download = {
-      id: 1,
-      groupId: 1,
-      releaseId: 1,
-      title: 'Alex Coal',
-      kind: 'initial' as const,
-      status: retried ? 'queued' : 'failed',
-      error: retried ? null : 'disk full',
-      attempts: 1,
-      updatedAt: 1,
-    };
-    return new Response(JSON.stringify({ tracked: [download], untracked: [] }), {
-      headers: { 'content-type': 'application/json' },
-    });
+    return new Response(
+      JSON.stringify({
+        tracked: [download({ status: 'failed', error: 'disk full', attempts: 1 })],
+        untracked: [],
+        nextCursor: null,
+      } satisfies DownloadsResponse),
+      { headers: { 'content-type': 'application/json' } },
+    );
   }) as unknown as typeof fetch;
 
   // `routed`, like every other render here. This test arrived from `main`,
@@ -276,16 +277,16 @@ test('retry refreshes the row immediately, without waiting on the poll', async (
   fireEvent.click(screen.getByRole('button', { name: /retry/i }));
 
   await waitFor(() => assert.equal(screen.getByText('queued').textContent, 'queued'));
-  // The mount's poll plus the post-retry refresh — two, not three: the mocked
-  // interval never ticked, so a third would only be possible if something
-  // else re-fetched, and nothing should.
-  assert.equal(downloadsRequests, 2);
+  // The mount's page one, and nothing else: the mocked interval never ticked,
+  // and the retry no longer refetches the list at all.
+  assert.equal(downloadsRequests, 1);
 });
 
 test('untracked entries render inert and labelled', async () => {
   const body: DownloadsResponse = {
     tracked: [],
     untracked: [{ ref: 'x', name: 'Someone Elses', state: 'downloading', percentage: 40 }],
+    nextCursor: null,
   };
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(body), {
@@ -299,10 +300,12 @@ test('untracked entries render inert and labelled', async () => {
   assert.equal(screen.queryByRole('button', { name: /retry/i }), null);
 });
 
-// The search box. `/api/downloads` returns every row unpaginated and this screen
-// re-polls all of it every three seconds (issue #31), so the term filters what
-// is already in hand — there is nothing for a server-side query to reach, and a
-// term that had to survive a round trip would fight the poll.
+// The search box. It filters the rows the screen already holds rather than
+// going to the server: `/api/downloads` is paginated now, so "already in hand"
+// means the pages that have been loaded rather than the whole table, and the
+// term reaches the rest as they load. Moving it to `?q=` is the remaining half
+// of issue #31 and would start the list over on each keystroke, which is a
+// different behaviour to judge on its own.
 
 /** Answers `/api/downloads` with one fixed body, and nothing else. */
 function serveDownloads(body: DownloadsResponse): void {
@@ -316,6 +319,7 @@ test('typing a term leaves only the tracked rows that match it', async () => {
   serveDownloads({
     tracked: [download({ id: 1, title: 'Alex Coal' }), download({ id: 2, title: 'Riley Reid' })],
     untracked: [],
+    nextCursor: null,
   });
 
   render(routed(<Downloads />));
@@ -339,6 +343,7 @@ test('the term filters untracked entries too, and takes their heading with them'
       { ref: 'a', name: 'Someone Elses', state: 'downloading', percentage: 40 },
       { ref: 'b', name: 'Alex Coal Extras', state: 'completed', percentage: 100 },
     ],
+    nextCursor: null,
   });
 
   render(routed(<Downloads />));
@@ -403,9 +408,10 @@ test('a poll landing does not clear the term or unfilter the list', async (t) =>
             download({ id: 3, title: 'Riley Reid Again' }),
           ];
     resolvers[polls - 1]?.();
-    return new Response(JSON.stringify({ tracked, untracked: [] } satisfies DownloadsResponse), {
-      headers: { 'content-type': 'application/json' },
-    });
+    return new Response(
+      JSON.stringify({ tracked, untracked: [], nextCursor: null } satisfies DownloadsResponse),
+      { headers: { 'content-type': 'application/json' } },
+    );
   }) as unknown as typeof fetch;
 
   render(routed(<Downloads />));
@@ -434,4 +440,111 @@ test('a poll landing does not clear the term or unfilter the list', async (t) =>
   // vacuous pass this guards against.
   fireEvent.change(box, { target: { value: '' } });
   assert.ok(screen.getByText('Riley Reid Again'));
+});
+
+/**
+ * One `/api/downloads` mock over two pages: no cursor answers page one, any
+ * cursor answers page two and ends the list. Every response resolves the next
+ * deferred, so a test can wait for the exact fetch it caused rather than
+ * racing a timeout — see the poll test above for why `waitFor` is unavailable
+ * once `setInterval` is mocked.
+ */
+function servePagedDownloads(expected: number): {
+  handedBack: Promise<void>[];
+  pageOneFetches: () => number;
+} {
+  const resolvers: (() => void)[] = [];
+  const handedBack = Array.from(
+    { length: expected },
+    () => new Promise<void>((resolve) => resolvers.push(resolve)),
+  );
+  let calls = 0;
+  let pageOne = 0;
+
+  globalThis.fetch = (async (input: string) => {
+    const cursor = new URL(input, 'http://test.invalid').searchParams.get('cursor');
+    let body: DownloadsResponse;
+    if (cursor === null) {
+      pageOne += 1;
+      // The poll's page one differs from the mount's in one row's status,
+      // which is the patch this has to land without disturbing page two.
+      body = {
+        tracked: [
+          download({ id: 3, title: 'Newest', status: pageOne === 1 ? 'downloading' : 'imported' }),
+          download({ id: 2, title: 'Middle' }),
+        ],
+        untracked: [],
+        nextCursor: '2:2',
+      };
+    } else {
+      body = {
+        tracked: [download({ id: 1, title: 'Oldest' })],
+        untracked: [],
+        nextCursor: null,
+      };
+    }
+    calls += 1;
+    resolvers[calls - 1]?.();
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+
+  return { handedBack, pageOneFetches: () => pageOne };
+}
+
+test('a poll landing keeps page two on screen and patches page one in place', async (t) => {
+  // The interaction issue #31 names as its second risk. The poll now fetches
+  // page one only, four times a minute, and it has two ways to be wrong:
+  // replacing the list discards every page the reader scrolled to, and
+  // appending page one grows the list by a page each tick. Asserting the row
+  // *count* rather than only what is present is what separates them — an
+  // append leaves every assertion about presence green.
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { handedBack, pageOneFetches } = servePagedDownloads(3);
+
+  render(routed(<Downloads />));
+  await handedBack[0];
+  await flush();
+  assert.ok(screen.getByText('Middle'));
+  assert.ok(gone('Oldest'), 'page two is not loaded yet');
+
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await handedBack[1];
+  await flush();
+  assert.ok(screen.getByText('Oldest'));
+
+  t.mock.timers.tick(3000);
+  assert.equal(pageOneFetches(), 2, 'the mocked interval fires the poll synchronously');
+  await handedBack[2];
+  await flush();
+
+  // Page two survived the landing, page one's changed row took its new status,
+  // and the list is still three rows rather than five.
+  assert.ok(screen.getByText('Oldest'), 'a poll must not discard a page the reader scrolled to');
+  assert.equal(screen.getAllByText('Newest').length, 1);
+  assert.ok(screen.getByText('imported'));
+  assert.equal(document.querySelectorAll('ul.downloads > li').length, 3);
+});
+
+test('the search term filters rows from every page loaded, not only the newest', async (t) => {
+  // The term stays a client-side filter through the pagination, so what it
+  // must not do is stop reaching a page the reader has already scrolled to.
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { handedBack } = servePagedDownloads(2);
+
+  render(routed(<Downloads />));
+  await handedBack[0];
+  await flush();
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await handedBack[1];
+  await flush();
+
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search downloads' }), {
+    target: { value: 'oldest' },
+  });
+
+  assert.ok(screen.getByText('Oldest'));
+  assert.ok(gone('Newest'));
+  assert.ok(gone('Middle'));
 });
