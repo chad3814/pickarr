@@ -1,32 +1,17 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin, SiteLookupCandidates } from '@pickarr/plugin-api';
 import type { SiteLookupClient, SiteSearchResult } from '../clients/theporndb.ts';
-import { getDiscoveredSite, recordDiscoveredSite, sitePrefixKey } from '../db/sites.ts';
+import {
+  getDiscoveredSite,
+  isConfirmableSiteName,
+  recordDiscoveredSite,
+  sitePrefixKey,
+} from '../db/sites.ts';
 
 /** Lowercase, alphanumerics only — see `SiteLookupCandidates`. */
 function comparisonKey(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
-
-/**
- * The shortest a confirmed site's own name may be.
- *
- * The service knows sites called `BIG`, `DP`, `Ex` and `Rk`. They are real, so
- * the lookup answers correctly — and the answer is still wrong, because a name
- * that short is indistinguishable from an ordinary first word.
- * `Big.Boobs.For.The.Win` resolved to the site `BIG` with the title `Boobs For
- * The Win`, and `DP.Addiction.Vol.1.Elegant.Angel` to the site `DP`.
- *
- * Measured across 6,884 corpus titles: rejecting these costs ten titles that
- * previously parsed, every one of them with a fabricated site and a truncated
- * title. The parse rate drops and the output improves, which is the second
- * time that pair has come up — rate is not the objective.
- *
- * This bounds the *answer*, not the query. A short query is still worth
- * sending, because it is how a longer site name gets found: `2 Chicks` finds
- * `2 Chicks Same Time`.
- */
-const MIN_CONFIRMED_SITE_LENGTH = 4;
 
 /** A confirmed site: the name to use, plus the service's identifier for it. */
 export interface PickedSite {
@@ -55,7 +40,7 @@ export function pickSite(
   for (const site of results) {
     const display = site.name.length > 0 ? site.name : site.shortName;
     if (display.length === 0) continue;
-    if (comparisonKey(display).length < MIN_CONFIRMED_SITE_LENGTH) continue;
+    if (!isConfirmableSiteName(display)) continue;
     const picked: PickedSite = { name: display, sourceUuid: site.sourceUuid };
     for (const spelling of [site.name, site.shortName]) {
       const key = comparisonKey(spelling);
@@ -156,9 +141,18 @@ export async function resolveSitesForBatch(
       const cachedRow = getDiscoveredSite(deps.db, key);
       if (cachedRow !== undefined) {
         result.cached += 1;
-        answered.set(key, cachedRow.site);
-        if (cachedRow.site !== null) {
-          confirmed.add(cachedRow.site);
+        // A cached name below the floor is the negative it should have been.
+        // `pickSite` only ever judges a fresh search result, so rows written
+        // before the floor existed — `big → BIG` is the observed one — would
+        // otherwise walk past it every time the same prefix comes round again.
+        // Rejected on the read and not repaired here: a read path that writes
+        // is a surprise, and migration 14 is where the stored answer is fixed.
+        const site = cachedRow.site !== null && isConfirmableSiteName(cachedRow.site)
+          ? cachedRow.site
+          : null;
+        answered.set(key, site);
+        if (site !== null) {
+          confirmed.add(site);
           settled = true;
           break;
         }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import createScenesPlugin from '@pickarr/plugin-scenes';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { getDiscoveredSite, knownSiteNames } from '../../src/db/sites.ts';
+import { getDiscoveredSite, knownSiteNames, recordDiscoveredSite } from '../../src/db/sites.ts';
 import { pickSite, resolveSitesForBatch } from '../../src/pipeline/resolve-sites.ts';
 import type { SiteLookupClient } from '../../src/clients/theporndb.ts';
 
@@ -388,4 +388,35 @@ test('a short query still finds a longer site', () => {
   // how "2 Chicks Same Time" is found.
   const results = [{ name: '2 Chicks Same Time', shortName: '2chickssametime', sourceUuid: 'u', sourceId: null }];
   assert.equal(pickSite(results, ['2 Chicks Same Time', '2 Chicks'])?.name, '2 Chicks Same Time');
+});
+
+// --- The floor outlives one search -------------------------------------------
+//
+// `pickSite` only ever sees a fresh search result. Everything below is a path
+// that reaches a plugin *without* passing through it, carrying a name a
+// pre-floor run had already written into `discovered_sites`.
+
+test('a cached site below the floor is not confirmed', async () => {
+  // The exact pair a pre-floor run leaves behind for Big.Boobs.*: a negative
+  // for the two-word query and "BIG" for the one-word retry. The client throws
+  // so that a re-query would be a visible failure rather than a quiet repair —
+  // the row is rejected on the read, not asked about again.
+  const context = deps(scenes(), {
+    source: 'never',
+    searchSites: () => Promise.reject(new Error('the cache must settle this')),
+  });
+  recordDiscoveredSite(context.db, 'big-boobs', { site: null }, 'tpdb', 1);
+  recordDiscoveredSite(context.db, 'big', { site: 'BIG' }, 'tpdb', 1);
+
+  const result = await resolveSitesForBatch(context, ['Big.Boobs.For.The.Win.2024.01.02.1080p']);
+  assert.deepEqual(result.confirmed, []);
+  assert.equal(result.queried, 0);
+  assert.equal(result.cached, 2, 'both rows are still consulted');
+});
+
+test('knownSiteNames withholds a name below the floor from the plugin', async () => {
+  const db = openTestDatabase();
+  recordDiscoveredSite(db, 'Big', { site: 'BIG' }, 'tpdb', 1);
+  recordDiscoveredSite(db, 'Bangbros', { site: 'Bang Bros' }, 'tpdb', 1);
+  assert.deepEqual(knownSiteNames(db), ['Bang Bros']);
 });
