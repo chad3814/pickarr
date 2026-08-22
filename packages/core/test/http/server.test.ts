@@ -287,6 +287,37 @@ test('browse filters by q', async () => {
   db.close();
 });
 
+// `%` is a LIKE wildcard, so wrapping the term in `%…%` and handing it to
+// LIKE turned a search for a per-cent sign into the pattern `%%%`, which every
+// row matches — the search box stopped being a filter. `%25` reaches the
+// handler as a bare `%`.
+test('browse matches a literal % in q rather than every group', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (4, 'f', 'g4', '100.Percent.Natural.1080p', 'https://indexer.invalid/4.nzb', 1)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state, created_at, list_rank_at)
+     VALUES (3, 'test', 'natural', '{"title":"100% Natural","fields":[]}', '100% natural', 'new', 300, 300)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (4, 3, 4, '{"resolution":1080}', 1080, 1)`,
+  ).run();
+  const server = buildServer(deps(db));
+
+  const body = (await server.inject({ method: 'GET', url: '/api/browse?q=%25' })).json();
+
+  assert.deepEqual(
+    body['groups'].map((group: { display: { title: string } }) => group.display.title),
+    ['100% Natural'],
+  );
+  await server.close();
+  db.close();
+});
+
 test('a picked group with no upgrade drops out of browse and appears in picks', async () => {
   const db = openTestDatabase();
   seedGroups(db);

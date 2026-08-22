@@ -35,11 +35,12 @@ export function groupSearchText(display: DisplayFields): string {
  * everything, so an empty box is not a filter and clearing one restores the
  * whole list.
  *
- * A plain substring test, not a LIKE: `%` and `_` mean themselves. Issue #32 is
- * that `/api/browse?q=` interpolates the term into `search_text LIKE ?` with no
- * ESCAPE, so on Browse those two characters quietly match more than they were
- * typed to. Filtering in the client is what keeps that defect from being copied
- * onto two more tabs.
+ * A plain substring test: `%` and `_` mean themselves. The server matches the
+ * same way — `/api/browse?q=` goes through SQLite's `instr` rather than a
+ * `LIKE` pattern (issue #32) — so a term containing either character finds the
+ * same groups on Browse as it does here. Picks and Downloads filter in the
+ * client for the reason given above, that `/api/picks` answers everything
+ * picked in one response, not to dodge a difference in matching.
  *
  * `text` is lowercased here rather than only in `groupSearchText`, because not
  * every caller has one: Downloads passes a download's title and an untracked
