@@ -5,6 +5,13 @@ export interface FeedFieldsProps {
   feeds: FeedDraft[];
   /** The plugins the file already configures; a feed's plugin must be one of these. */
   pluginNames: string[];
+  /**
+   * The download clients the draft configures; a feed's client must be one of
+   * these. Taken as a prop the same way `pluginNames` is, and from the same
+   * place — the draft, not the on-disk config — so a client added or renamed
+   * in this same edit is offered here before it has been saved.
+   */
+  clientIds: string[];
   onChange(next: FeedDraft[]): void;
 }
 
@@ -13,7 +20,7 @@ export interface FeedFieldsProps {
  * `DownloadClientFields`: every edit is a whole new array reported through
  * `onChange`, never a mutation of the array passed in.
  */
-export function FeedFields({ feeds, pluginNames, onChange }: FeedFieldsProps) {
+export function FeedFields({ feeds, pluginNames, clientIds, onChange }: FeedFieldsProps) {
   const formId = useId();
 
   function updateFeed(index: number, next: FeedDraft) {
@@ -32,6 +39,12 @@ export function FeedFields({ feeds, pluginNames, onChange }: FeedFieldsProps) {
       // requires a plugin that `plugins` also configures, so an empty value
       // is never valid and offering it only produces a 400.
       plugin: pluginNames[0] ?? '',
+      // The first configured client, for the same reason as `plugin` above:
+      // `parseConfig` refuses a feed naming a client `downloadClients` does
+      // not carry, and it is also what an omitted `downloadClient` resolves
+      // to at boot — so a row added here matches a row written by hand
+      // without one.
+      downloadClient: clientIds[0] ?? '',
       // `feedSchema`'s own default, so a row added here matches a row omitted
       // from the file.
       intervalSeconds: '900',
@@ -94,6 +107,32 @@ export function FeedFields({ feeds, pluginNames, onChange }: FeedFieldsProps) {
               {pluginNames.map((name) => (
                 <option key={name} value={name}>
                   {name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="manual-field">
+            <label htmlFor={`${formId}-client-${index}`}>Download client</label>
+            <select
+              id={`${formId}-client-${index}`}
+              value={feed.downloadClient}
+              onChange={(event) => updateFeed(index, { ...feed, downloadClient: event.target.value })}
+            >
+              {/*
+                The same stand-in the plugin select carries above, for the same
+                case: a client renamed in this same draft leaves the feed
+                holding an id `clientIds` no longer offers, and without an
+                option for it the control would show nothing selected while the
+                draft still submitted the old name.
+              */}
+              {!clientIds.includes(feed.downloadClient) && (
+                <option value={feed.downloadClient} disabled>
+                  {feed.downloadClient || '(none)'}
+                </option>
+              )}
+              {clientIds.map((id) => (
+                <option key={id} value={id}>
+                  {id}
                 </option>
               ))}
             </select>

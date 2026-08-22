@@ -285,6 +285,44 @@ test('parseConfig applies the cross-field checks', () => {
   assert.throws(() => parseConfig(orphan as unknown as JsonValue, 'test'), /not configured/i);
 });
 
+test('a feed naming a download client that is not configured is refused by name', () => {
+  const orphan = {
+    ...structuredClone(VALID),
+    feeds: [{ ...structuredClone(VALID.feeds[0]!), downloadClient: 'sab-elsewhere' }],
+  };
+  assert.throws(
+    () => parseConfig(orphan as unknown as JsonValue, 'test'),
+    (error: Error) => {
+      assert.match(error.message, /feed1/);
+      assert.match(error.message, /sab-elsewhere/);
+      assert.match(error.message, /not configured/i);
+      return true;
+    },
+  );
+});
+
+// The half that fails loudest before the field exists: `feedSchema` did not
+// declare `downloadClient`, and zod strips what it does not declare, so a
+// second client named on a feed was dropped between the file and the config
+// without a word (#34).
+test('a feed keeps the download client it names', () => {
+  const base = structuredClone(VALID);
+  const twoClients = {
+    ...base,
+    downloadClients: [...base.downloadClients, { ...base.downloadClients[0]!, id: 'sab-b', category: 'pickarr-b' }],
+    feeds: [{ ...base.feeds[0]!, downloadClient: 'sab-b' }],
+  };
+  const config = parseConfig(twoClients as unknown as JsonValue, 'test');
+  assert.equal(config.feeds[0]?.downloadClient, 'sab-b');
+});
+
+// The overwhelmingly common config, pinned so the routing change cannot start
+// requiring an annotation that no existing file carries.
+test('a feed naming no download client parses, leaving the field unset', () => {
+  const config = parseConfig(structuredClone(VALID) as unknown as JsonValue, 'test');
+  assert.equal(config.feeds[0]?.downloadClient, undefined);
+});
+
 test('resolveSecrets replaces a file: reference in place', async () => {
   await withTempDir(async (dir) => {
     const secretPath = join(dir, 'sab_key');

@@ -192,8 +192,17 @@ export function Downloads() {
         <>
           <h2>Not managed by Pickarr</h2>
           <ul className="downloads untracked">
+            {/*
+              Keyed on the client *and* the ref. A `ref` is the download
+              client's own id for a job and is unique only within that client,
+              so with more than one configured (#34) two entries can arrive
+              carrying the same one. React's answer to a duplicate key is that
+              children "may be duplicated and/or omitted" and that the
+              behaviour could change — not something to leave a list that
+              re-renders from a poll every three seconds resting on.
+            */}
             {visibleUntracked.map((entry) => (
-              <li key={entry.ref} className="download-row untracked">
+              <li key={`${entry.clientId}:${entry.ref}`} className="download-row untracked">
                 <span className="download-title">{entry.name}</span>
                 <span className="download-status">{entry.state}</span>
                 {entry.percentage !== null && <span>{entry.percentage}%</span>}

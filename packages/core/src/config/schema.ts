@@ -105,6 +105,14 @@ export const feedSchema = z.object({
   url: z.string().url(),
   plugin: z.string().min(1),
   intervalSeconds: z.number().int().positive().default(900),
+  // Which entry of `downloadClients` a pick on this feed is submitted to.
+  //
+  // Optional rather than defaulted, for the same reason `metadata.artworkDir`
+  // above is left unresolved here: the default is another block's *first
+  // element*, which this schema cannot see while validating a feed in
+  // isolation. `main.ts` settles it against `downloadClients[0]`, and
+  // `parseConfig` is where a name that no client answers to is refused.
+  downloadClient: z.string().min(1).optional(),
   backfill: feedBackfillSchema.optional(),
 });
 

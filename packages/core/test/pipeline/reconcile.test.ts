@@ -696,6 +696,13 @@ test('entries with no matching row are reported as untracked and never imported'
     result.untracked.map((entry) => entry.state).sort(),
     ['completed', 'downloading'],
   );
+  // Stamped with the client the tick was driven for. With more than one
+  // configured, `ref` is unique only within a client and the Downloads screen
+  // has nothing else to tell two entries apart by (#34).
+  assert.deepEqual(
+    result.untracked.map((entry) => entry.clientId),
+    ['sab', 'sab'],
+  );
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM downloads').get()?.['n']), 0);
   db.close();
 });
@@ -1089,6 +1096,7 @@ test("a second installation's job is submitted around, not adopted, and is repor
   assert.equal(addUrlCalls, 1);
   assert.equal(result.untracked.length, 1);
   assert.equal(result.untracked[0]?.ref, 'nzo_A');
+  assert.equal(result.untracked[0]?.clientId, 'sab');
   db.close();
 });
 

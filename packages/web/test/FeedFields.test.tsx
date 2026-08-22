@@ -8,13 +8,13 @@ afterEach(cleanup);
 
 function feeds(): FeedDraft[] {
   return [
-    { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: '900', backfillStyle: 'off', backfillPageSize: '100', backfillPagesPerPass: '2', backfillMaxPages: '100' },
+    { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', downloadClient: 'sab', intervalSeconds: '900', backfillStyle: 'off', backfillPageSize: '100', backfillPagesPerPass: '2', backfillMaxPages: '100' },
   ];
 }
 
 test('a feed picks its plugin from the configured ones, not free text', () => {
   render(
-    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} onChange={() => {}} />,
+    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={() => {}} />,
   );
   const select = screen.getByLabelText(/plugin/i);
   assert.equal(select.tagName, 'SELECT');
@@ -27,7 +27,7 @@ test('a feed picks its plugin from the configured ones, not free text', () => {
 test('an added feed defaults its interval to the schema default', () => {
   let next = feeds();
   render(
-    <FeedFields feeds={next} pluginNames={['@pickarr/plugin-scenes']} onChange={(value) => { next = value; }} />,
+    <FeedFields feeds={next} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={(value) => { next = value; }} />,
   );
   fireEvent.click(screen.getByRole('button', { name: /add feed/i }));
   assert.equal(next.length, 2);
@@ -47,6 +47,7 @@ test('a feed whose plugin was renamed away still shows its (now unlisted) plugin
       id: 'feed1',
       url: 'https://example.invalid/rss',
       plugin: '@pickarr/plugin-old-name',
+      downloadClient: 'sab',
       intervalSeconds: '900',
       backfillStyle: 'off',
       backfillPageSize: '100',
@@ -54,7 +55,7 @@ test('a feed whose plugin was renamed away still shows its (now unlisted) plugin
       backfillMaxPages: '100',
     },
   ];
-  render(<FeedFields feeds={stale} pluginNames={['@pickarr/plugin-new-name']} onChange={() => {}} />);
+  render(<FeedFields feeds={stale} pluginNames={['@pickarr/plugin-new-name']} clientIds={['sab']} onChange={() => {}} />);
   const select = screen.getByLabelText(/plugin/i) as HTMLSelectElement;
   assert.equal(select.value, '@pickarr/plugin-old-name');
   assert.deepEqual(
@@ -69,7 +70,7 @@ test('removing a feed drops exactly that row, leaving the others in order', () =
   // the one under test here.
   let next = [...feeds(), { ...feeds()[0]!, id: 'feed2' }, { ...feeds()[0]!, id: 'feed3' }];
   render(
-    <FeedFields feeds={next} pluginNames={['@pickarr/plugin-scenes']} onChange={(value) => { next = value; }} />,
+    <FeedFields feeds={next} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={(value) => { next = value; }} />,
   );
   // Named by id: this query would fail to resolve to a single element -
   // failing the test - if the per-row aria-label were ever removed.
@@ -81,7 +82,7 @@ test('a feed defaults to not backfilling, and its settings stay out of the way',
   // Off is the schema's own default — `backfill` is optional — and showing three
   // disabled boxes beside an Off selector is noise on the common case.
   render(
-    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} onChange={() => {}} />,
+    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={() => {}} />,
   );
 
   const select = screen.getByLabelText(/backfill history/i) as HTMLSelectElement;
@@ -94,7 +95,7 @@ test('choosing a pagination style reveals the settings it needs', () => {
   const drafts = feeds();
   drafts[0]!.backfillStyle = 'newznab';
   render(
-    <FeedFields feeds={drafts} pluginNames={['@pickarr/plugin-scenes']} onChange={() => {}} />,
+    <FeedFields feeds={drafts} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={() => {}} />,
   );
 
   assert.ok(screen.getByLabelText(/items per page/i));
@@ -109,7 +110,7 @@ test('the style offers no automatic option, because Pickarr cannot detect one', 
   // options are named by what they send so they can be matched against an
   // indexer's own documentation.
   render(
-    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} onChange={() => {}} />,
+    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={() => {}} />,
   );
 
   const select = screen.getByLabelText(/backfill history/i) as HTMLSelectElement;
@@ -121,7 +122,7 @@ test('an added feed is not backfilling', () => {
   // Adding a feed must not quietly start walking someone's indexer.
   let added: FeedDraft[] = [];
   render(
-    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} onChange={(next) => (added = next)} />,
+    <FeedFields feeds={feeds()} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={(next) => (added = next)} />,
   );
 
   fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
@@ -141,11 +142,63 @@ test('switching backfill off keeps the numbers that were typed', () => {
   drafts[0]!.backfillPageSize = '250';
   let updated: FeedDraft[] = [];
   render(
-    <FeedFields feeds={drafts} pluginNames={['@pickarr/plugin-scenes']} onChange={(next) => (updated = next)} />,
+    <FeedFields feeds={drafts} pluginNames={['@pickarr/plugin-scenes']} clientIds={['sab']} onChange={(next) => (updated = next)} />,
   );
 
   fireEvent.change(screen.getByLabelText(/backfill history/i), { target: { value: 'off' } });
 
   assert.equal(updated[0]?.backfillStyle, 'off');
   assert.equal(updated[0]?.backfillPageSize, '250');
+});
+
+// #34: a feed names the download client its picks go to. Chosen from the
+// configured ids for the same reason the plugin is: `parseConfig` refuses a
+// name `downloadClients` does not carry, so free text can only produce a 400.
+test('a feed picks its download client from the configured ids, not free text', () => {
+  render(
+    <FeedFields
+      feeds={feeds()}
+      pluginNames={['@pickarr/plugin-scenes']}
+      clientIds={['sab', 'sab-b']}
+      onChange={() => {}}
+    />,
+  );
+  const select = screen.getByLabelText(/download client/i) as HTMLSelectElement;
+  assert.equal(select.tagName, 'SELECT');
+  assert.equal(select.value, 'sab');
+  assert.deepEqual([...select.options].map((option) => option.value), ['sab', 'sab-b']);
+});
+
+test('choosing a different download client is reported through onChange', () => {
+  let next: FeedDraft[] = [];
+  render(
+    <FeedFields
+      feeds={feeds()}
+      pluginNames={['@pickarr/plugin-scenes']}
+      clientIds={['sab', 'sab-b']}
+      onChange={(value) => (next = value)}
+    />,
+  );
+
+  fireEvent.change(screen.getByLabelText(/download client/i), { target: { value: 'sab-b' } });
+
+  assert.equal(next[0]?.downloadClient, 'sab-b');
+});
+
+test('an added feed defaults to the first configured client', () => {
+  // The same rule as `plugin`, and for the same reason: an empty value is
+  // never valid against `feedSchema`, so offering one only produces a 400.
+  let next: FeedDraft[] = [];
+  render(
+    <FeedFields
+      feeds={feeds()}
+      pluginNames={['@pickarr/plugin-scenes']}
+      clientIds={['sab', 'sab-b']}
+      onChange={(value) => (next = value)}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
+
+  assert.equal(next[1]?.downloadClient, 'sab');
 });

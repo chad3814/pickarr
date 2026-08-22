@@ -47,6 +47,12 @@ export interface FeedDraft {
   id: string;
   url: string;
   plugin: string;
+  /**
+   * Which download client this feed's picks go to. Always a real id, never a
+   * blank standing for "the first one": the server resolves the default before
+   * the form ever sees it, so what is shown is what is in use.
+   */
+  downloadClient: string;
   intervalSeconds: string;
   backfillStyle: BackfillStyleDraft;
   /**
@@ -106,6 +112,7 @@ export function toDraft(config: EditableConfig): ConfigDraft {
       id: feed.id,
       url: feed.url,
       plugin: feed.plugin,
+      downloadClient: feed.downloadClient,
       intervalSeconds: String(feed.intervalSeconds),
       backfillStyle: feed.backfill?.style ?? 'off',
       // A feed that is not backfilling still shows the defaults, so switching it
@@ -208,7 +215,14 @@ export function toSubmission(draft: ConfigDraft, config: EditableConfig): Submit
     if (typeof intervalSeconds !== 'number') return intervalSeconds;
 
     if (feed.backfillStyle === 'off') {
-      feeds.push({ id: feed.id, url: feed.url, plugin: feed.plugin, intervalSeconds, backfill: null });
+      feeds.push({
+        id: feed.id,
+        url: feed.url,
+        plugin: feed.plugin,
+        downloadClient: feed.downloadClient,
+        intervalSeconds,
+        backfill: null,
+      });
       continue;
     }
 
@@ -232,6 +246,7 @@ export function toSubmission(draft: ConfigDraft, config: EditableConfig): Submit
       id: feed.id,
       url: feed.url,
       plugin: feed.plugin,
+      downloadClient: feed.downloadClient,
       intervalSeconds,
       backfill: { style: feed.backfillStyle, pageSize, pagesPerPass, maxPages },
     });
@@ -448,6 +463,10 @@ export function ConfigForm({ config, draft, portOverride, onChange }: ConfigForm
       <FeedFields
         feeds={draft.feeds}
         pluginNames={draft.plugins.map((plugin) => plugin.name)}
+        // From the draft rather than `config`, matching `pluginNames` beside
+        // it: a client added or renamed in this same edit is choosable for a
+        // feed before either has been saved.
+        clientIds={draft.downloadClients.map((client) => client.id)}
         onChange={(feeds) => onChange({ ...draft, feeds })}
       />
       <PluginFields plugins={draft.plugins} onChange={(plugins) => onChange({ ...draft, plugins })} />

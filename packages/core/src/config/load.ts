@@ -150,6 +150,16 @@ export function parseConfig(json: JsonValue, source: string): PickarrConfig {
     if (config.plugins[feed.plugin] === undefined) {
       throw new Error(`Feed ${feed.id} references plugin ${feed.plugin}, which is not configured`);
     }
+    // Deliberately shaped like the plugin message above it, because it is the
+    // same mistake about a different block and the two should read the same.
+    // Only a feed that *names* a client is checked: an absent `downloadClient`
+    // means `downloadClients[0]`, which the `.min(1)` on that array already
+    // guarantees exists.
+    if (feed.downloadClient !== undefined && !clientIds.has(feed.downloadClient)) {
+      throw new Error(
+        `Feed ${feed.id} references download client ${feed.downloadClient}, which is not configured`,
+      );
+    }
   }
 
   return config;

@@ -285,7 +285,7 @@ test('retry refreshes the row immediately, without waiting on the poll', async (
 test('untracked entries render inert and labelled', async () => {
   const body: DownloadsResponse = {
     tracked: [],
-    untracked: [{ ref: 'x', name: 'Someone Elses', state: 'downloading', percentage: 40 }],
+    untracked: [{ clientId: 'sab', ref: 'x', name: 'Someone Elses', state: 'downloading', percentage: 40 }],
     nextCursor: null,
   };
   globalThis.fetch = (async () =>
@@ -340,8 +340,8 @@ test('the term filters untracked entries too, and takes their heading with them'
   serveDownloads({
     tracked: [download({ id: 1, title: 'Alex Coal' }), download({ id: 2, title: 'Riley Reid' })],
     untracked: [
-      { ref: 'a', name: 'Someone Elses', state: 'downloading', percentage: 40 },
-      { ref: 'b', name: 'Alex Coal Extras', state: 'completed', percentage: 100 },
+      { clientId: 'sab', ref: 'a', name: 'Someone Elses', state: 'downloading', percentage: 40 },
+      { clientId: 'sab', ref: 'b', name: 'Alex Coal Extras', state: 'completed', percentage: 100 },
     ],
     nextCursor: null,
   });
@@ -547,4 +547,38 @@ test('the search term filters rows from every page loaded, not only the newest',
   assert.ok(screen.getByText('Oldest'));
   assert.ok(gone('Newest'));
   assert.ok(gone('Middle'));
+});
+
+// Two clients can each be running a job the other knows nothing about, and
+// `nzo_id` is unique only within one SABnzbd — so once #34 made a second client
+// reachable, two untracked entries can arrive sharing a `ref`.
+//
+// The console is asserted on rather than the rows, because keying on `ref`
+// alone does *not* visibly drop a row on first render: React renders both and
+// complains that the behaviour "may cause children to be duplicated and/or
+// omitted" and "could change in a future version". That warning is the whole
+// observable defect on mount, and this screen re-renders this list every three
+// seconds from a poll, which is exactly the update React is declining to
+// promise anything about.
+test('two untracked entries from different clients sharing a ref are keyed apart', async () => {
+  serveDownloads({
+    tracked: [],
+    untracked: [
+      { clientId: 'sab-a', ref: 'nzo_1', name: 'Stranger On A', state: 'downloading', percentage: 5 },
+      { clientId: 'sab-b', ref: 'nzo_1', name: 'Stranger On B', state: 'completed', percentage: null },
+    ],
+    nextCursor: null,
+  });
+
+  const complaints: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => complaints.push(args.map(String).join(' '));
+  try {
+    render(routed(<Downloads />));
+    await waitFor(() => assert.ok(screen.getByText('Stranger On A')));
+    assert.ok(screen.getByText('Stranger On B'));
+  } finally {
+    console.error = realError;
+  }
+  assert.deepEqual(complaints, []);
 });

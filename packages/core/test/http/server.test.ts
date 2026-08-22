@@ -35,12 +35,12 @@ function seedGroups(db: DatabaseSync): void {
   ).run();
 }
 
-function fakeClient(): DownloadClient {
+function fakeClient(id = 'sab'): DownloadClient {
   return {
-    id: 'sab',
+    id,
     importMode: 'move',
     category: 'pickarr',
-    addUrl: async () => 'nzo_1',
+    addUrl: async () => `nzo_${id}`,
     snapshot: async () => ({ queue: [], history: [], complete: true }),
   remove: async () => {},
     mapPath: (path) => path,
@@ -65,11 +65,21 @@ function emptyRegistry(): PluginRegistry {
   };
 }
 
-function deps(db: DatabaseSync, untracked: UntrackedEntry[] = []): ServerDeps {
+/**
+ * `clientForFeed` defaults to one client for every feed, which is what a
+ * one-client config resolves to in `main.ts`. Every pick test below leans on
+ * that default and none of them names a feed: a routing change that started
+ * requiring an annotation would break them here rather than in production.
+ */
+function deps(
+  db: DatabaseSync,
+  untracked: UntrackedEntry[] = [],
+  clientForFeed: (feedId: string) => DownloadClient | null = () => fakeClient(),
+): ServerDeps {
   return {
     db,
-    defaultClient: fakeClient(),
-    untrackedFor: () => untracked,
+    clientForFeed,
+    untrackedAll: () => untracked,
     now: () => 1000,
     webRoot: null,
     registry: emptyRegistry(),
@@ -546,7 +556,7 @@ test('downloads merges tracked rows with the untracked snapshot', async () => {
   const db = openTestDatabase();
   seedGroups(db);
   const untracked: UntrackedEntry[] = [
-    { ref: 'foreign', name: 'Someone Elses', state: 'downloading', percentage: 33 },
+    { clientId: 'sab', ref: 'foreign', name: 'Someone Elses', state: 'downloading', percentage: 33 },
   ];
   const server = buildServer(deps(db, untracked));
   await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
@@ -557,6 +567,74 @@ test('downloads merges tracked rows with the untracked snapshot', async () => {
   assert.equal(body['tracked'][0]['title'], 'Alpha');
   assert.equal(body['untracked'].length, 1);
   assert.equal(body['untracked'][0]['name'], 'Someone Elses');
+  await server.close();
+  db.close();
+});
+
+// #34: the feed a release arrived on is what decides the client, and the pick
+// route is the only place that decision is made. Group 2's release is moved to
+// a second feed here so the two clients are distinguishable in the row.
+test('a pick on a release from a second feed is submitted to that feed\'s client', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  db.prepare("UPDATE feed_items SET feed_id = 'f-b' WHERE id = 3").run();
+
+  const server = buildServer(
+    deps(db, [], (feedId) => (feedId === 'f-b' ? fakeClient('sab-b') : fakeClient('sab-a'))),
+  );
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/groups/2/pick',
+    payload: { releaseId: 3 },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(db.prepare('SELECT client_id FROM downloads WHERE id = 1').get()?.['client_id'], 'sab-b');
+  await server.close();
+  db.close();
+});
+
+// A feed that has left configuration: the route's existing catch turns the
+// thrown message into a 400, which is the right answer for something only a
+// config edit can fix.
+test('a pick on a release whose feed has no client is a 400 naming the feed', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db, [], () => null));
+
+  const response = await server.inject({
+    method: 'POST',
+    url: '/api/groups/1/pick',
+    payload: { releaseId: 2 },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.match(String(response.json()['error']), /feed f/);
+  await server.close();
+  db.close();
+});
+
+// `untrackedAll` replaced `untrackedFor(defaultClient.id)`: every configured
+// client's orphans reach the screen, and each entry says which client it came
+// from because `ref` alone is unique only within one of them.
+test('downloads reports untracked entries from every client, each stamped with its own', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const untracked: UntrackedEntry[] = [
+    { clientId: 'sab-a', ref: 'shared', name: 'On A', state: 'downloading', percentage: 10 },
+    { clientId: 'sab-b', ref: 'shared', name: 'On B', state: 'completed', percentage: null },
+  ];
+  const server = buildServer(deps(db, untracked));
+
+  const body = (await server.inject({ method: 'GET', url: '/api/downloads' })).json();
+
+  assert.deepEqual(
+    body['untracked'].map((entry: { clientId: string; name: string }) => [entry.clientId, entry.name]),
+    [
+      ['sab-a', 'On A'],
+      ['sab-b', 'On B'],
+    ],
+  );
   await server.close();
   db.close();
 });
@@ -996,7 +1074,7 @@ function configSubmission(): Record<string, JsonValue> {
       },
     ],
     feeds: [
-      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null },
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', downloadClient: 'sab', intervalSeconds: 900, backfill: null },
     ],
     siteLookup: null,
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
@@ -1132,6 +1210,14 @@ test('a PUT keeping a secret for a renamed client is refused with a usable messa
 test('PUT /api/config answers restartRequired: false when the save matches the boot document', async () => {
   const unchanged: JsonObject = {
     ...structuredClone(CONFIG_DOCUMENT),
+    // Carrying the feed's `downloadClient` explicitly, because that is what a
+    // save writes: the form is shown the *effective* client and writes back
+    // what it was shown. A boot document lacking the key would differ from
+    // the saved one and this test would be measuring that, not the no-op it
+    // is here to measure — see the test below, which measures it deliberately.
+    feeds: [
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', downloadClient: 'sab', intervalSeconds: 900 },
+    ],
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5 },
   };
   await withConfigDir(async ({ deps: configDeps }) => {
@@ -1147,6 +1233,29 @@ test('PUT /api/config answers restartRequired: false when the save matches the b
     assert.equal(response.json()['restartRequired'], false);
     await server.close();
   }, unchanged);
+});
+
+// The one visible effect of #34 on a config written before it: the first save
+// makes each feed's client explicit. The value is the one already in force, so
+// nothing about routing changes — but the *document* changes, and saying
+// `restartRequired: false` about a file that is not byte-identical to the one
+// booted from would be a claim this route cannot support.
+test('a save on a file that named no download client writes the effective one', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const server = buildServer(configDeps);
+
+    const response = await server.inject({
+      method: 'PUT',
+      url: '/api/config',
+      payload: configSubmission(),
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json()['restartRequired'], true);
+    const written = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, JsonValue>;
+    assert.equal(asJsonObject(asJsonArray(written['feeds'])[0])?.['downloadClient'], 'sab');
+    await server.close();
+  });
 });
 
 test('PUT /api/config answers restartRequired: true when the save actually changes something', async () => {

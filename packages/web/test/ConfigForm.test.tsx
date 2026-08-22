@@ -24,7 +24,7 @@ function config(over: Partial<EditableConfig> = {}): EditableConfig {
       },
     ],
     feeds: [
-      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null },
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', downloadClient: 'sab', intervalSeconds: 900, backfill: null },
     ],
     siteLookup: null,
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
@@ -52,7 +52,7 @@ test('a round trip with no edits submits the config unchanged, keeping secrets',
       },
     ],
     feeds: [
-      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null },
+      { id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', downloadClient: 'sab', intervalSeconds: 900, backfill: null },
     ],
     siteLookup: null,
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },

@@ -112,6 +112,32 @@ export function linkForRelease(db: DatabaseSync, releaseId: number): string | nu
 }
 
 /**
+ * Which configured feed a release arrived on, or null when there is no such
+ * release.
+ *
+ * The same join as `linkForRelease` and `titleForRelease` above, and it is
+ * total for the same reason: `releases.feed_item_id` is `NOT NULL UNIQUE`, so
+ * a release has exactly one feed item and that item names exactly one feed.
+ * `null` therefore means the release id is unknown, never that a known release
+ * has no feed.
+ *
+ * The feed is what decides which download client a pick is submitted to (see
+ * `pickRelease`), and this join is the only path from a release back to it —
+ * the `downloads` row records the client, not the feed, and by the time
+ * anything reads that row the routing decision has already been made.
+ */
+export function feedIdForRelease(db: DatabaseSync, releaseId: number): string | null {
+  const row = db
+    .prepare(
+      `SELECT feed_items.feed_id AS feed_id
+       FROM releases JOIN feed_items ON feed_items.id = releases.feed_item_id
+       WHERE releases.id = ?`,
+    )
+    .get(releaseId);
+  return row === undefined ? null : str(row as SqlRow, 'feed_id');
+}
+
+/**
  * The feed's own raw title for a release, used as the readable half of the
  * job name sent to the download client (see `clientJobName` in
  * `db/downloads.ts`). Deliberately the raw feed title, not anything derived

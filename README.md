@@ -44,7 +44,7 @@ immediately rather than starting in a broken state.
 | `plugins.<package>` | plugin | Per-plugin settings, keyed by package name. The bundled scenes plugin takes `libraryRoot`, the destination directory imports land in. |
 | `plugins.<package>.pathTemplate` | plugin (scenes) | Where imports land under `libraryRoot`. Defaults to scene naming — see "Naming your files" below. |
 | `plugins.<package>.sites` | plugin (scenes) | Optional list of site names. Used only for releases that put the date at the *end* of the name, where nothing separates the site from the title — see "Naming your sites" below. |
-| `downloadClients[]` | top level | One or more download clients. The MVP supports `type: "sabnzbd"` only. |
+| `downloadClients[]` | top level | One or more download clients. The MVP supports `type: "sabnzbd"` only. Configure more than one and use `feeds[].downloadClient` to say which feed's picks go where. |
 | `downloadClients[].url` | download client | Base URL of the SABnzbd instance. |
 | `downloadClients[].apiKey` | download client | The SABnzbd API key, or a `file:/run/secrets/<name>` reference to read it from a Docker secret instead of embedding it in the config file. |
 | `downloadClients[].category` | download client | The SABnzbd category Pickarr uses for its own jobs. **Must be unique to this Pickarr instance** — see below. |
@@ -62,6 +62,7 @@ immediately rather than starting in a broken state.
 | `feeds[]` | top level | One or more RSS feeds to poll. |
 | `feeds[].url` | feed | The RSS feed URL, including any indexer API key. |
 | `feeds[].plugin` | feed | Which configured plugin package interprets this feed's entries. |
+| `feeds[].downloadClient` | feed | Optional. The `downloadClients[].id` that picks on this feed are submitted to. Defaults to the **first entry in `downloadClients`**, so a config that names no client anywhere behaves exactly as it always has. Naming a client that is not configured fails at startup. Editable from the Settings screen. |
 | `feeds[].intervalSeconds` | feed | Poll interval in seconds. Defaults to 900. |
 | `feeds[].backfill` | feed | Optional, and **absent by default**. Walks the feed's own pagination to build a backlog — see "Backfilling a feed's history" below. Editable from the Settings screen, or by hand. |
 | `feeds[].backfill.style` | backfill | `newznab` (sends `offset` and `limit`) or `page` (sends a one-based `page`). Stated, never guessed — a wrong value is caught, see below. |

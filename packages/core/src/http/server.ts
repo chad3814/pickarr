@@ -69,8 +69,25 @@ import {
 
 export interface ServerDeps {
   db: DatabaseSync;
-  defaultClient: DownloadClient;
-  untrackedFor(clientId: string): UntrackedEntry[];
+  /**
+   * The download client a pick on this feed goes to, or null when that feed
+   * has left configuration. Mirrors `pluginForFeed` below, and for the same
+   * reason: only configuration holds the mapping, and a feed item has neither
+   * a group nor a release to hang it off.
+   *
+   * This replaced a single `defaultClient`, which was `downloadClients[0]` and
+   * the only client anything here could ever name — a second configured client
+   * was polled, reconciled and imported from, but nothing could route a pick
+   * to it (#34). A one-client config resolves every feed to that one client,
+   * so it is unaffected.
+   */
+  clientForFeed(feedId: string): DownloadClient | null;
+  /**
+   * Every configured client's untracked entries, not one client's. Each entry
+   * carries its own `clientId`, which is what keeps two clients' identically
+   * `ref`-ed jobs apart downstream.
+   */
+  untrackedAll(): UntrackedEntry[];
   now(): number;
   /** Absolute path to the built SPA, or null to run API-only. */
   webRoot: string | null;
@@ -323,6 +340,10 @@ const configSubmissionSchema = z.object({
       url: z.string(),
       plugin: z.string(),
       intervalSeconds: z.number(),
+      // Shape only, per the note above: whether this names a client the
+      // `downloadClients` block actually configures is `parseConfig`'s
+      // question, asked of the merged document.
+      downloadClient: z.string(),
       // Shape only, per the note above: the `min(2)` on `pagesPerPass` and the
       // rest of the value rules stay in `feedBackfillSchema`, which
       // `parseConfig` runs over the merged document.
@@ -1096,7 +1117,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     try {
       const download = await pickRelease(
         db,
-        deps.defaultClient,
+        (feedId) => deps.clientForFeed(feedId),
         { groupId: params.data.id, releaseId: body.data.releaseId },
         deps.now(),
       );
@@ -1143,11 +1164,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const response: DownloadsResponse = {
       tracked: toDownloadViews(db, rows),
       // Unpaginated, and staying that way. It is a read of the scheduler's
-      // in-memory map (`untrackedFor`), bounded by what the client is actually
-      // running rather than by how much history the database holds, and never a
-      // query. It rides on every page for the same reason: there is no cheaper
-      // moment to send it.
-      untracked: deps.untrackedFor(deps.defaultClient.id),
+      // in-memory map (`untrackedAll`), bounded by what the clients are
+      // actually running rather than by how much history the database holds,
+      // and never a query. It rides on every page for the same reason: there is
+      // no cheaper moment to send it.
+      untracked: deps.untrackedAll(),
       nextCursor: hasMore && last !== undefined ? `${last.createdAt}:${last.id}` : null,
     };
     return response;
