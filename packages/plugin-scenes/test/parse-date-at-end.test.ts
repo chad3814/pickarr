@@ -947,6 +947,37 @@ test('the bare-4K poster is never looked up', () => {
   assert.equal(sceneSiteCandidates('4K.kleo.34ans.de.clapiers'), null);
 });
 
+test('a 4K in front of an encode section is not the poster and falls through', () => {
+  // The branch exists for a bare resolution followed by words. `4K.Alex.Coal.
+  // XXX.1080p.MP4-WRB` is any release at all that happens to open with 4K: it
+  // used to be filed under Jacquie et Michel TV on no evidence, with the
+  // marker and the whole encode section swallowed into both the title and the
+  // key, and — worse than the misfiling — reported 2160 for a 1080p release,
+  // which wins an upgrade comparison it should lose. Falling through to the
+  // ordinary dateless path refuses it for the ordinary reason.
+  assert.equal(parseSceneRelease('4K.Alex.Coal.XXX.1080p.MP4-WRB'), null);
+  assert.equal(lastRefusalReason(), 'no date, and the site is not in the known list');
+});
+
+test('the dateless path\'s own counter-example is not admitted by a leading 4K', () => {
+  // `Some.Random.Movie.2023.1080p.BluRay-GRP` is the name the dateless path
+  // refuses a first-token fallback over. Behind a `4K` the same shape reached
+  // a hardcoded site with no confirmation at all, which is that hole re-opened
+  // one prefix wide.
+  assert.equal(parseSceneRelease('4K.Some.Band.Live.At.Wembley.1080p.WEB-DL'), null);
+});
+
+test('the poster\'s site is marked as inferred, and only there', () => {
+  // Nothing in the text says Jacquie et Michel TV; the code does. A second
+  // bare-resolution poster is indistinguishable from this one, so the card has
+  // to admit where the name came from rather than presenting it as read.
+  const bare = parsed('4K.kleo.34ans.de.clapiers');
+  assert.ok(bare.display.fields.some((field) => field.label === 'Site source'));
+
+  const read = parsed('JacquieEtMichelTV.26.06.02.Lena.XXX.2160p.MP4-NABL0G');
+  assert.ok(!read.display.fields.some((field) => field.label === 'Site source'));
+});
+
 test('a configured spelling reaches every shape, not just the ones that look sites up', () => {
   // The dated form takes its site verbatim from the text and never consulted
   // the list, so configuring a site split it in two: dated releases under one

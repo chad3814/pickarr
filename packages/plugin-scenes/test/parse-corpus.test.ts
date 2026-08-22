@@ -1195,6 +1195,19 @@ const REFUSED: [string, string][] = [
   ['Site.23.04.15.Name.XXX.1080p.MP4-UNCENSORED', 'a different cut, not a group'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-DIRECTORSCUT', 'the same at the full twelve characters'],
   ['Site.23.04.15.Name.XXX.1080p.MP4-COMPILATION', 'different content entirely, not one scene'],
+  // The bare-4K branch is admitted only for a name that is a resolution and
+  // then words. These two open with `4K` and carry a full encode section, so
+  // they are ordinary dateless names with no confirmed site. Taking them filed
+  // both under Jacquie et Michel TV on no evidence and recorded 2160 for a
+  // 1080p release, which outranks the real 2160p encode beside it.
+  [
+    '4K.Alex.Coal.XXX.1080p.MP4-WRB',
+    'a leading 4K is not a site, and nothing else here confirms one; the encode section says this is not the bare-resolution poster',
+  ],
+  [
+    '4K.Some.Band.Live.At.Wembley.1080p.WEB-DL',
+    'the dateless path\'s own counter-example behind a 4K: a first-token fallback is exactly what that path refuses to have',
+  ],
 ];
 
 /**
