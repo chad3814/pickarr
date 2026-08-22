@@ -15,12 +15,19 @@ export function App() {
         <NavLink to="/failed">Failed</NavLink>
         {/*
           Settings is not a view of the library, it is a view of the
-          installation, and the em dash is what says so. `aria-hidden` because
-          it is punctuation: without it a screen reader announces "em dash" as a
-          nav item, which is noise for the one class of user who cannot see the
-          visual grouping it exists to convey.
+          installation, and this rule is what says so.
+
+          An `<hr>` rather than the em dash it replaces, and not only because a
+          dash between two stacked links reads as a stray character once the nav
+          is a column. The dash carried `aria-hidden="true"` because a screen
+          reader announcing "em dash" is noise — which meant the grouping was
+          conveyed to sighted readers and to nobody else. An `<hr>` is a thematic
+          break with an implicit `role="separator"`, so it announces the division
+          itself. That is the whole reason there is no `aria-hidden` here: hiding
+          it would throw away the one thing this element can express that the
+          dash could not.
         */}
-        <span className="nav-separator" aria-hidden="true">—</span>
+        <hr className="nav-separator" />
         <NavLink to="/settings">Settings</NavLink>
       </nav>
       <main>

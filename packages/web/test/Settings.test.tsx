@@ -72,7 +72,10 @@ test('a config that cannot be read is reported instead of rendering an empty for
   assert.equal(screen.queryByRole('button', { name: /^save$/i }), null);
 });
 
-test('the nav separates Settings from the library tabs with an em dash', () => {
+test('the nav separates Settings from the library tabs with a rule', () => {
+  // Settings is a view of the installation, not of the library, and the rule is
+  // what says so. It was an em dash until the nav went vertical, where a dash
+  // between two stacked links reads as a stray character rather than a divider.
   stubFetch(async () => json({ groups: [], nextCursor: null }));
   render(
     <MemoryRouter>
@@ -80,10 +83,34 @@ test('the nav separates Settings from the library tabs with an em dash', () => {
     </MemoryRouter>,
   );
   const nav = screen.getByRole('navigation');
-  assert.match(nav.textContent ?? '', /Failed—Settings/);
-  // Decorative: a screen reader should announce five tabs, not an em dash
-  // between them.
-  assert.equal(nav.querySelector('.nav-separator')?.getAttribute('aria-hidden'), 'true');
+
+  const rule = nav.querySelector('hr.nav-separator');
+  assert.ok(rule !== null, 'the separator is an <hr>, not a glyph');
+
+  // Position, not mere presence. The old test matched the concatenated text
+  // `Failed—Settings`, which a rule cannot produce — and presence alone would
+  // pass with the divider at the top of the nav, which is the one place it must
+  // not be. `compareDocumentPosition` states the ordering directly rather than
+  // inferring it from text.
+  const failed = screen.getByRole('link', { name: 'Failed' });
+  const settings = screen.getByRole('link', { name: 'Settings' });
+  const preceding = Node.DOCUMENT_POSITION_PRECEDING;
+  const following = Node.DOCUMENT_POSITION_FOLLOWING;
+  assert.ok(
+    (rule.compareDocumentPosition(failed) & preceding) !== 0,
+    'the rule comes after Failed',
+  );
+  assert.ok(
+    (rule.compareDocumentPosition(settings) & following) !== 0,
+    'the rule comes before Settings',
+  );
+
+  // Deliberately *not* aria-hidden, unlike the em dash it replaces. That dash
+  // was hidden because a screen reader announcing "em dash" is noise; an `<hr>`
+  // has an implicit `role="separator"`, so it announces the grouping itself —
+  // the very thing the dash could only ever convey visually.
+  assert.equal(rule.getAttribute('aria-hidden'), null);
+  assert.ok(nav.querySelector('[role="separator"], hr') !== null);
 });
 
 test('Save is offered only once the draft differs from what was loaded', async () => {

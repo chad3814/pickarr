@@ -585,9 +585,20 @@ test('an id the server reports as refreshed is watched again, with no button pre
 
   render(<Consumer ids={[ID]} />);
 
-  await waitFor(() => assert.ok(screen.getByText(`${ID}:none`)));
-  // Nothing clicked `rearm-4`; the response alone kept the id in view.
+  // Deliberately not `waitFor('4:none')` first. The DOM does pass through that
+  // state, but observing it is a race this test kept losing under a loaded
+  // suite: `waitFor` polls on an interval, and when the rearm is quick both
+  // commits land between two polls, so the first check it makes already reads
+  // `confirmed`. Asserting an intermediate render the implementation is under no
+  // obligation to hold still for tests nothing and fails at random.
+  //
+  // The property survives without it. The stub answers `'none'` first and can
+  // only answer `'confirmed'` on a *second* GET, so a hook that stopped watching
+  // at the settled answer — the behaviour before `refreshed` existed — leaves the
+  // title at `-` forever. Reaching the title at all is the whole claim, and
+  // nothing clicked `rearm-4` to get there.
   await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Found on the retry`)), { timeout: 3_000 });
+  assert.ok(gets >= 2, 'the confirmed answer can only have come from a second poll');
 });
 
 test('a response with no refreshed field settles as before', async () => {

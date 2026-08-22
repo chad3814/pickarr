@@ -29,7 +29,24 @@ test('a config edit reaches the file on disk', async ({ page, harness }) => {
 
 test('the nav separates Settings from the library tabs', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByRole('navigation')).toContainText('Failed—Settings');
+  const nav = page.getByRole('navigation');
+
+  // Was `toContainText('Failed—Settings')` while the divider was an em dash. A
+  // rule contributes no text, so the property has to be stated as geometry
+  // instead: the divider sits below Failed and above Settings in a column that
+  // now stacks. That is a stronger claim than the text match ever made, which
+  // would have passed with the divider anywhere the two labels stayed adjacent.
+  const rule = nav.locator('hr.nav-separator');
+  await expect(rule).toBeVisible();
+
+  const failed = await nav.getByRole('link', { name: 'Failed' }).boundingBox();
+  const settings = await nav.getByRole('link', { name: 'Settings' }).boundingBox();
+  const divider = await rule.boundingBox();
+  expect(failed).not.toBeNull();
+  expect(settings).not.toBeNull();
+  expect(divider).not.toBeNull();
+  expect(divider!.y).toBeGreaterThan(failed!.y);
+  expect(settings!.y).toBeGreaterThan(divider!.y);
 });
 
 test('the database downloads as a real SQLite file', async ({ page }) => {
