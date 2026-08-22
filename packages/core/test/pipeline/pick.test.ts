@@ -83,7 +83,7 @@ test('picking marks the group picked and starts a download', async () => {
   const db = openTestDatabase();
   const { groupId, releaseId } = seed(db);
 
-  const download = await pickRelease(db, fakeClient(), { groupId, releaseId }, 500);
+  const download = await pickRelease(db, () => fakeClient(), { groupId, releaseId }, 500);
 
   const group = getGroup(db, groupId)!;
   assert.equal(group.state, 'picked');
@@ -110,7 +110,7 @@ test('addUrl is sent a name carrying the release title, with the label recoverab
     },
   });
 
-  const download = await pickRelease(db, client, { groupId, releaseId }, 500);
+  const download = await pickRelease(db, () => client, { groupId, releaseId }, 500);
 
   assert.match(seenName ?? '', /^Title /);
   assert.equal(extractLabel(seenName ?? ''), downloadLabel(TEST_LABEL_TOKEN, download.id));
@@ -120,7 +120,7 @@ test('addUrl is sent a name carrying the release title, with the label recoverab
 test('picking sets picked_release_id immediately, before any download finishes', async () => {
   const db = openTestDatabase();
   const { groupId, releaseId } = seed(db);
-  await pickRelease(db, fakeClient(), { groupId, releaseId }, 500);
+  await pickRelease(db, () => fakeClient(), { groupId, releaseId }, 500);
   assert.equal(getGroup(db, groupId)?.pickedReleaseId, releaseId);
   db.close();
 });
@@ -134,7 +134,7 @@ test('an addUrl failure leaves the download queued and the pick intact', async (
     },
   });
 
-  const download = await pickRelease(db, client, { groupId, releaseId }, 500);
+  const download = await pickRelease(db, () => client, { groupId, releaseId }, 500);
 
   assert.equal(download.status, 'queued');
   assert.equal(download.clientRef, null);
@@ -156,9 +156,9 @@ test('a pick on a group holding a live file is an upgrade and leaves the pick un
   const { groupId } = seed(db);
   addRelease(db, 2, 200);
 
-  const first = await pickRelease(db, fakeClient(), { groupId, releaseId: 1 }, 500);
+  const first = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 1 }, 500);
   addLiveFile(db, first.id);
-  const second = await pickRelease(db, fakeClient(), { groupId, releaseId: 2 }, 600);
+  const second = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 2 }, 600);
 
   assert.equal(second.kind, 'upgrade');
   // The file on disk is still release 1's, so that is still what the group
@@ -172,14 +172,14 @@ test('picking an upgrade takes the group out of the browse list', async () => {
   const { groupId } = seed(db);
   addRelease(db, 2, 200);
 
-  const first = await pickRelease(db, fakeClient(), { groupId, releaseId: 1 }, 500);
+  const first = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 1 }, 500);
   addLiveFile(db, first.id);
   // Holding release 1, release 2 is the better one on offer — which is exactly
   // what puts this picked group in the browse list at all (`BROWSABLE` is
   // "unpicked, or something better available").
   assert.equal(browsableGroup(db, groupId)?.upgradeReleaseId, 2);
 
-  await pickRelease(db, fakeClient(), { groupId, releaseId: 2 }, 600);
+  await pickRelease(db, () => fakeClient(), { groupId, releaseId: 2 }, 600);
 
   // The reported bug. An upgrade deliberately leaves `picked_release_id` on
   // release 1 until the replacement imports, and that was mistaken for having
@@ -208,10 +208,10 @@ test('a pick on a picked group whose download failed is an initial pick and move
   // The reported case: the better release is picked, the download fails, and
   // the user goes with the other one. Nothing is on disk, so there is nothing
   // to replace and nothing to trash — an ordinary acquisition.
-  const failed = await pickRelease(db, fakeClient(), { groupId, releaseId: 2 }, 500);
+  const failed = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 2 }, 500);
   failDownload(db, failed.id, 'Repair failed, not enough repair blocks (92 short)', 600);
 
-  const second = await pickRelease(db, fakeClient(), { groupId, releaseId: 1 }, 700);
+  const second = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 1 }, 700);
 
   assert.equal(second.kind, 'initial');
   assert.equal(getGroup(db, groupId)?.pickedReleaseId, 1);
@@ -223,12 +223,12 @@ test('a file that has been trashed is not a file: the next pick is initial again
   const { groupId } = seed(db);
   addRelease(db, 2, 200);
 
-  const first = await pickRelease(db, fakeClient(), { groupId, releaseId: 1 }, 500);
+  const first = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 1 }, 500);
   // Imported, then superseded by an upgrade that has already taken it away.
   // The row is history; the file is gone, so there is nothing left to replace.
   markTrashed(db, addLiveFile(db, first.id), '/trash/scene.mp4', 600);
 
-  const second = await pickRelease(db, fakeClient(), { groupId, releaseId: 2 }, 700);
+  const second = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 2 }, 700);
 
   assert.equal(second.kind, 'initial');
   assert.equal(getGroup(db, groupId)?.pickedReleaseId, 2);
@@ -245,8 +245,8 @@ test('a second pick while the first is still downloading moves the pick, because
   const { groupId } = seed(db);
   addRelease(db, 2, 200);
 
-  const first = await pickRelease(db, fakeClient(), { groupId, releaseId: 1 }, 500);
-  const second = await pickRelease(db, fakeClient(), { groupId, releaseId: 2 }, 600);
+  const first = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 1 }, 500);
+  const second = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 2 }, 600);
 
   assert.equal(first.kind, 'initial');
   assert.equal(second.kind, 'initial');
@@ -265,7 +265,7 @@ test('picking a release that belongs to another group is rejected', async () => 
   ).run();
 
   await assert.rejects(
-    pickRelease(db, fakeClient(), { groupId: 2, releaseId: 1 }, 500),
+    pickRelease(db, () => fakeClient(), { groupId: 2, releaseId: 1 }, 500),
     /does not belong/,
   );
   db.close();
@@ -275,7 +275,7 @@ test('picking an unknown release is rejected', async () => {
   const db = openTestDatabase();
   seed(db);
   await assert.rejects(
-    pickRelease(db, fakeClient(), { groupId: 1, releaseId: 999 }, 500),
+    pickRelease(db, () => fakeClient(), { groupId: 1, releaseId: 999 }, 500),
     /999/,
   );
   db.close();
@@ -284,9 +284,9 @@ test('picking an unknown release is rejected', async () => {
 test('picking the same release twice while in flight is rejected', async () => {
   const db = openTestDatabase();
   const { groupId, releaseId } = seed(db);
-  await pickRelease(db, fakeClient(), { groupId, releaseId }, 500);
+  await pickRelease(db, () => fakeClient(), { groupId, releaseId }, 500);
   await assert.rejects(
-    pickRelease(db, fakeClient(), { groupId, releaseId }, 600),
+    pickRelease(db, () => fakeClient(), { groupId, releaseId }, 600),
     /already/i,
   );
   db.close();
@@ -295,7 +295,7 @@ test('picking the same release twice while in flight is rejected', async () => {
 test('the download row records the client id and timestamps', async () => {
   const db = openTestDatabase();
   const { groupId, releaseId } = seed(db);
-  const download = await pickRelease(db, fakeClient(), { groupId, releaseId }, 500);
+  const download = await pickRelease(db, () => fakeClient(), { groupId, releaseId }, 500);
   const stored = getDownload(db, download.id)!;
   assert.equal(stored.clientId, 'sab');
   assert.equal(stored.createdAt, 500);
@@ -315,7 +315,7 @@ test('a persist failure after a successful addUrl is recorded distinctly from an
     END;
   `);
 
-  const download = await pickRelease(db, fakeClient(), { groupId, releaseId }, 500);
+  const download = await pickRelease(db, () => fakeClient(), { groupId, releaseId }, 500);
 
   // Still looks queued/untried at the status level (the ref never made it
   // in), but the error must name the ref that was already accepted so a
@@ -343,7 +343,7 @@ test('a failure between marking picked and inserting the download rolls back the
   `);
 
   await assert.rejects(
-    pickRelease(db, fakeClient(), { groupId, releaseId }, 500),
+    pickRelease(db, () => fakeClient(), { groupId, releaseId }, 500),
     /induced failure for rollback test/,
   );
 
@@ -393,10 +393,10 @@ test('after a failed pick, the alternative imports and the failed release is not
     // Release 1 is the 1080p (score 100, from seed); release 2 is the 2160p.
     const better = addRelease(db, 2, 200);
 
-    const failed = await pickRelease(db, fakeClient(), { groupId, releaseId: better }, 500);
+    const failed = await pickRelease(db, () => fakeClient(), { groupId, releaseId: better }, 500);
     failDownload(db, failed.id, 'Repair failed, not enough repair blocks (92 short)', 600);
 
-    const lesser = await pickRelease(db, fakeClient(), { groupId, releaseId: 1 }, 700);
+    const lesser = await pickRelease(db, () => fakeClient(), { groupId, releaseId: 1 }, 700);
     // 3a, at the moment it acts: no file on disk, so this is an acquisition
     // and the group is pointed at the 1080p straight away.
     assert.equal(lesser.kind, 'initial');
@@ -433,4 +433,42 @@ test('after a failed pick, the alternative imports and the failed release is not
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// The routing the whole of #34 is about: `seed` puts the release's feed item on
+// feed 'f', and a second client is configured for it. Before this change
+// `pickRelease` took one client and the server always handed it
+// `downloadClients[0]`, so this same scenario wrote 'a' and called a's addUrl.
+test('a pick is submitted to the client its feed names, not the first one', async () => {
+  const db = openTestDatabase();
+  const { groupId, releaseId } = seed(db);
+  const called: string[] = [];
+  const a = fakeClient({ id: 'a', addUrl: async () => { called.push('a'); return 'nzo_a'; } });
+  const b = fakeClient({ id: 'b', addUrl: async () => { called.push('b'); return 'nzo_b'; } });
+
+  const download = await pickRelease(
+    db,
+    (feedId) => (feedId === 'f' ? b : a),
+    { groupId, releaseId },
+    500,
+  );
+
+  assert.equal(getDownload(db, download.id)?.clientId, 'b');
+  assert.deepEqual(called, ['b']);
+  db.close();
+});
+
+// A feed that has left configuration between the poll that ingested the item
+// and the click that picks it. The message names the feed because that is the
+// thing the operator has to go and look at, and no row may survive: a queued
+// download nothing can ever submit is worse than a refused pick.
+test('a release whose feed has no download client is refused, leaving no row', async () => {
+  const db = openTestDatabase();
+  const { groupId, releaseId } = seed(db);
+
+  await assert.rejects(pickRelease(db, () => null, { groupId, releaseId }, 500), /feed f/);
+
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM downloads').get()!['n'], 0);
+  assert.equal(getGroup(db, groupId)?.pickedReleaseId, null);
+  db.close();
 });

@@ -5,7 +5,7 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import type { ReconcileResult, UntrackedEntry } from '../../src/pipeline/reconcile.ts';
 
 const UNTRACKED: UntrackedEntry[] = [
-  { ref: 'foreign', name: 'Not Ours', state: 'downloading', percentage: 10 },
+  { clientId: 'sab', ref: 'foreign', name: 'Not Ours', state: 'downloading', percentage: 10 },
 ];
 
 const NO_RECONCILE_WORK: ReconcileResult = {

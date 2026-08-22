@@ -50,6 +50,19 @@ export interface EditableFeed {
   plugin: string;
   intervalSeconds: number;
   /**
+   * Which download client this feed's picks go to, always the *effective* one
+   * — `toEditableConfig` resolves an absent value to `downloadClients[0].id`
+   * rather than passing a blank through. A blank would read as "the first
+   * one", which is a meaning the form has nowhere to display and which
+   * `feedSchema`'s `.min(1)` would refuse the moment it was saved back.
+   *
+   * Modelled for exactly the reason `backfill` below is, and it is not
+   * optional polish: an unmodelled field does not survive a rename, so
+   * shipping `feeds[].downloadClient` without this would let an ordinary
+   * Settings save silently send a feed's picks back to the first client.
+   */
+  downloadClient: string;
+  /**
    * Modelled here rather than left as an unknown key the merge preserves, and
    * that is the whole point of modelling it: `applyEdits` matches feeds by id,
    * so a block it does not know about cannot survive a rename. Carrying it
@@ -128,6 +141,11 @@ function copyPluginSettings(
  * silently losing the path the user needs to see.
  */
 export function toEditableConfig(config: PickarrConfig): EditableConfig {
+  // What a feed naming no client actually resolves to at boot, resolved here
+  // too so the form shows it rather than a blank. `configSchema` puts
+  // `.min(1)` on `downloadClients`, so the `''` branch is unreachable for a
+  // config that parsed; it exists because the index signature cannot say so.
+  const defaultClientId = config.downloadClients[0]?.id ?? '';
   return {
     server: { port: config.server.port },
     database: { path: config.database.path },
@@ -147,6 +165,7 @@ export function toEditableConfig(config: PickarrConfig): EditableConfig {
       url: feed.url,
       plugin: feed.plugin,
       intervalSeconds: feed.intervalSeconds,
+      downloadClient: feed.downloadClient ?? defaultClientId,
       // Spread into a fresh object rather than passed through, so the editable
       // view never aliases the parsed config the caller still holds.
       backfill: feed.backfill === undefined ? null : { ...feed.backfill },
@@ -315,8 +334,16 @@ export function applyEdits(
       plugin: feed.plugin,
       intervalSeconds: feed.intervalSeconds,
     };
+    // Written explicitly, including for a feed that had no `downloadClient` on
+    // disk: the form showed the effective client, so saving it is saving what
+    // the user was looking at. The empty case is the `''` `toEditableConfig`
+    // cannot rule out by type, and it is deleted rather than written, because
+    // `feedSchema` is `.min(1)` and an empty string would fail the very
+    // `parseConfig` this document is about to be handed to.
+    if (feed.downloadClient !== '') patch['downloadClient'] = feed.downloadClient;
     if (feed.backfill !== null) patch['backfill'] = { ...feed.backfill };
     const merged = mergeKnownFields(existingFeedsById.get(feed.id), patch);
+    if (feed.downloadClient === '') delete merged['downloadClient'];
     if (feed.backfill === null) delete merged['backfill'];
     return merged;
   });

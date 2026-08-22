@@ -122,7 +122,7 @@ function submission(over: (draft: SubmittedConfig) => void = () => {}): Submitte
         pathMappings: [{ from: '/downloads', to: '/data/downloads' }],
       },
     ],
-    feeds: [{ id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', intervalSeconds: 900, backfill: null }],
+    feeds: [{ id: 'feed1', url: 'https://example.invalid/rss', plugin: '@pickarr/plugin-scenes', downloadClient: 'sab', intervalSeconds: 900, backfill: null }],
     siteLookup: null,
     metadata: { enabled: true, intervalSeconds: 5, perTick: 5, artworkDir: null },
   };
@@ -333,4 +333,43 @@ test('turning backfill off deletes the block rather than writing null', () => {
   const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
   assert.ok(savedFeed !== null);
   assert.equal('backfill' in savedFeed, false);
+});
+
+// The form must show the client that is actually in use, not a blank standing
+// for "whichever comes first" — a blank is what a user would then save, and
+// `feedSchema` refuses an empty string.
+test('a feed naming no download client projects the first configured one', () => {
+  assert.equal(editableOf().feeds[0]?.downloadClient, 'sab');
+});
+
+test('a feed naming a download client projects that one', () => {
+  const editable = editableOf((document) => {
+    document.downloadClients.push({
+      ...document.downloadClients[0]!,
+      id: 'sab-b',
+      category: 'pickarr-b',
+    });
+    Object.assign(document.feeds[0]!, { downloadClient: 'sab-b' });
+  });
+  assert.equal(editable.feeds[0]?.downloadClient, 'sab-b');
+});
+
+// The same guarantee `backfill` above makes, and the reason `downloadClient`
+// had to be modelled by the form at all rather than left as an unknown key the
+// merge preserves: `applyEdits` matches feeds by id, so a rename has nothing to
+// merge with and would silently send the feed's picks back to
+// `downloadClients[0]`.
+test('a renamed feed keeps its download client', () => {
+  const document = structuredClone(VALID) as unknown as JsonObject;
+  const feed = asJsonObject(asJsonArray(document['feeds'])[0]);
+  assert.ok(feed !== null);
+  feed['downloadClient'] = 'sab-b';
+
+  const saved = applied(document, (draft) => {
+    draft.feeds[0] = { ...draft.feeds[0]!, id: 'renamed', downloadClient: 'sab-b' };
+  });
+
+  const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
+  assert.equal(savedFeed?.['id'], 'renamed');
+  assert.equal(savedFeed?.['downloadClient'], 'sab-b');
 });

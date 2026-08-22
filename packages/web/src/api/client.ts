@@ -393,6 +393,13 @@ export interface DownloadView {
 }
 
 export interface UntrackedEntry {
+  /**
+   * Which configured download client holds this job. `ref` is that client's
+   * own id for it and is unique only within it, so this is the other half of
+   * what identifies an entry once more than one client is configured — see
+   * `UntrackedEntry` in core's `pipeline/reconcile.ts`.
+   */
+  clientId: string;
   ref: string;
   name: string;
   state: 'downloading' | 'completed' | 'failed' | 'in-progress';
@@ -497,6 +504,12 @@ export interface EditableFeed {
   url: string;
   plugin: string;
   intervalSeconds: number;
+  /**
+   * Always the effective client, never a blank meaning "the first one" — the
+   * server resolves an absent value to `downloadClients[0].id` before it gets
+   * here, so the form can show and round-trip one value.
+   */
+  downloadClient: string;
   backfill: EditableFeedBackfill | null;
 }
 

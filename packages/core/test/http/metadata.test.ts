@@ -94,8 +94,8 @@ function deps(
 ): ServerDeps {
   return {
     db,
-    defaultClient: fakeClient(),
-    untrackedFor: () => [],
+    clientForFeed: () => fakeClient(),
+    untrackedAll: () => [],
     now: overrides.now ?? (() => NOW),
     webRoot: null,
     registry: overrides.registry ?? registryWith([ASKABLE, NO_HOOKS, NULL_QUERY]),

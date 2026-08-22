@@ -46,6 +46,17 @@ export const MAX_ADDURL_ATTEMPTS = 5;
 const RECOVERABLE_FAILURE = 'disappeared-from-client';
 
 export interface UntrackedEntry {
+  /**
+   * Which configured download client is holding this job.
+   *
+   * Required, not optional. `ref` is the client's own id for a job and is
+   * unique only *within* that client, so once more than one is configured —
+   * which is what #34 made reachable — two entries from two clients can carry
+   * the same `ref`. Anything collecting these into one list (the scheduler's
+   * map, `/api/downloads`, the Downloads screen's keys) needs the pair, and a
+   * field the producer might omit would leave those callers guessing.
+   */
+  clientId: string;
   ref: string;
   name: string;
   state: 'downloading' | 'completed' | 'failed' | 'in-progress';
@@ -508,6 +519,7 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       // ours by definition.
       if (entry.category !== client.category) continue;
       result.untracked.push({
+        clientId: client.id,
         ref: entry.ref,
         name: entry.name,
         state: entry.outcome,

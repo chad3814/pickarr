@@ -29,6 +29,7 @@
       "id": "primary",
       "url": "https://your-indexer.example/rss?t=6000&apikey=...",
       "plugin": "@pickarr/plugin-scenes",
+      "downloadClient": "sab",
       "intervalSeconds": 900
     }
   ]

@@ -206,13 +206,14 @@ async function main(): Promise<void> {
     clients.set(clientConfig.id, createSabnzbdClient(clientConfig));
   }
 
+  // The default a feed naming no client falls back to, and what makes that
+  // fallback total: `configSchema` puts `.min(1)` on the array, so this is
+  // unreachable, but every feed's client is resolved through it below and a
+  // silent `undefined` there would turn each unannotated feed's picks into a
+  // 400.
   const firstClientConfig = config.downloadClients[0];
   if (firstClientConfig === undefined) {
     throw new Error('downloadClients: at least one download client must be configured');
-  }
-  const defaultClient = clients.get(firstClientConfig.id);
-  if (defaultClient === undefined) {
-    throw new Error(`downloadClients: no client registered for id ${firstClientConfig.id}`);
   }
 
   // One client, used for site lookup, scene metadata and performer search:
@@ -439,6 +440,34 @@ async function main(): Promise<void> {
     config.feeds.map((feed) => [feed.id, registry.byPackage(feed.plugin)]),
   );
 
+  // The same mapping for download clients, and the reason the pick route can
+  // reach a client other than the first one (#34).
+  //
+  // Every feed gets an entry, including one that names no client: the fallback
+  // to `downloadClients[0]` is settled here rather than left to the lookup,
+  // because a map that simply omitted unannotated feeds would answer null for
+  // them and turn every pick on an ordinary single-client config into a 400.
+  // That is the whole compatibility story — with one client configured, every
+  // feed resolves to it and nothing about picking changes.
+  //
+  // `parseConfig` has already refused a feed naming a client that is not
+  // configured, and `clients` was built from that same array, so the throw
+  // below is a guard against this file drifting rather than a user-facing
+  // error — it says the same thing `parseConfig` would, so a reader hitting
+  // either recognises the other.
+  const clientsByFeed = new Map<string, DownloadClient>(
+    config.feeds.map((feed) => {
+      const clientId = feed.downloadClient ?? firstClientConfig.id;
+      const client = clients.get(clientId);
+      if (client === undefined) {
+        throw new Error(
+          `Feed ${feed.id} references download client ${clientId}, which is not configured`,
+        );
+      }
+      return [feed.id, client];
+    }),
+  );
+
   // `server` does not exist until `buildServer` below returns, so `shutdown`
   // (declared here, closing over a `server` binding it does not read until it
   // actually runs) cannot be built from it directly. `requestRestart` below
@@ -503,8 +532,12 @@ async function main(): Promise<void> {
 
   const server = buildServer({
     db,
-    defaultClient,
-    untrackedFor: (clientId) => scheduler.untrackedFor(clientId),
+    clientForFeed: (feedId) => clientsByFeed.get(feedId) ?? null,
+    // Flattened over every configured client rather than asked of one, so the
+    // Downloads screen shows the orphans of all of them. `untrackedFor` itself
+    // is unchanged: the scheduler still keys its map per client, because that
+    // is the granularity a reconcile tick produces.
+    untrackedAll: () => [...clients.keys()].flatMap((id) => scheduler.untrackedFor(id)),
     now: () => Date.now(),
     webRoot,
     registry,

@@ -281,8 +281,10 @@ async function startHarness(): Promise<{ harness: Harness; stop: () => Promise<v
 
   const server = buildServer({
     db,
-    defaultClient: client,
-    untrackedFor: () => untracked,
+    // One client in the harness, so every feed resolves to it — exactly what
+    // a one-client config does in `main.ts`.
+    clientForFeed: () => client,
+    untrackedAll: () => untracked,
     now: () => Date.now(),
     webRoot: webDist,
     registry,

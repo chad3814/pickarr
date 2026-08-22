@@ -3,7 +3,7 @@ import type { DownloadClient } from '../clients/types.ts';
 import { installLabelToken } from '../db/app-state.ts';
 import { getGroup, markPicked, refreshUpgradeFlag } from '../db/groups.ts';
 import { liveFilesForGroup } from '../db/imported-files.ts';
-import { getRelease, linkForRelease, titleForRelease } from '../db/releases.ts';
+import { feedIdForRelease, getRelease, linkForRelease, titleForRelease } from '../db/releases.ts';
 import {
   clientJobName,
   getDownload,
@@ -64,10 +64,18 @@ export interface PickRequest {
  *
  * An unreachable download client must never block a pick, so an addUrl failure
  * leaves the row queued for the reconcile tick to retry.
+ *
+ * The client is resolved from the release's *feed* rather than handed in,
+ * which is the whole of #34. It used to be a single `DownloadClient` and the
+ * only caller passed `downloadClients[0]`, so a second configured client could
+ * be polled, reconciled and imported from but could never be submitted to.
+ * Taking a lookup keeps that resolution in one place — the config knows which
+ * feed goes to which client, and nothing between the feed item and this
+ * function needs to carry the answer.
  */
 export async function pickRelease(
   db: DatabaseSync,
-  client: DownloadClient,
+  clientFor: (feedId: string) => DownloadClient | null,
   request: PickRequest,
   now: number,
 ): Promise<DownloadRow> {
@@ -83,6 +91,24 @@ export async function pickRelease(
   const existing = inFlightForRelease(db, request.releaseId);
   if (existing !== null) {
     throw new Error(`Release ${request.releaseId} already has download ${existing.id}`);
+  }
+
+  // Resolved here — after the checks above, before the transaction below — and
+  // the position is deliberate at both ends. After, so a request that is wrong
+  // about its group or its release still gets the message about *that*, which
+  // is the more useful complaint. Before, so a feed with no client costs
+  // nothing: no row is inserted, the group is not marked picked, and the
+  // caller's 400 describes a configuration to go and fix rather than a queued
+  // download that can never be submitted.
+  //
+  // `feedIdForRelease` returning null is the same condition `linkForRelease`
+  // guards further down, reached earlier; both mean the feed item this release
+  // hangs off has gone.
+  const feedId = feedIdForRelease(db, request.releaseId);
+  if (feedId === null) throw new Error(`Release ${request.releaseId} has no feed item link`);
+  const client = clientFor(feedId);
+  if (client === null) {
+    throw new Error(`Release ${request.releaseId} arrived on feed ${feedId}, which has no download client`);
   }
 
   const kind: DownloadKind =

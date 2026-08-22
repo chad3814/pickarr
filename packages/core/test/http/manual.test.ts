@@ -128,8 +128,8 @@ function fakeClient(): DownloadClient {
 function deps(db: DatabaseSync, plugin: MediaTypePlugin = PLUGIN): ServerDeps {
   return {
     db,
-    defaultClient: fakeClient(),
-    untrackedFor: () => [],
+    clientForFeed: () => fakeClient(),
+    untrackedAll: () => [],
     now: () => NOW,
     webRoot: null,
     registry: registryFor(plugin),
