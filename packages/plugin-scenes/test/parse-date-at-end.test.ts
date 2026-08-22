@@ -592,6 +592,65 @@ test('VERTICAL and F4V are encode information, not title words', () => {
   assert.equal(f4v.quality.extras?.['container'], 'f4v');
 });
 
+// --- A listing holding two dates ---------------------------------------------
+
+test('a second date in a listing is a display field, not title material', () => {
+  // The segment loop only asked whether a segment held a date while the anchor
+  // was still unset, so a later date-only segment was never examined and fell
+  // through to the residues untested. From there it was indistinguishable from
+  // a title part — `splitSegment` finds no encode token in `2024-01-02`, so it
+  // survived whole and `sceneSlugFromParts` sorted it into the scene slug,
+  // ahead of `alex-coal`, giving `site:2023-07-19:2024-01-02--alex-coal--deep`.
+  const result = parsed('[Site] Alex Coal - Deep - 2023-07-19 - 2024-01-02 - 1080p');
+  assert.equal(result.identityKey, 'site:2023-07-19:alex-coal--deep');
+  assert.equal(result.display.title, 'Alex Coal - Deep');
+  // The anchor stays the first date in reading order, and it is the only one
+  // that reaches `display.date`.
+  assert.equal(result.display.date, '2023-07-19');
+  assert.deepEqual(
+    result.display.fields.find((field) => field.label === 'Second date'),
+    { label: 'Second date', value: '2024-01-02' },
+  );
+});
+
+test('a listing collates with and without its second date', () => {
+  // The collation the defect broke: one scene listed twice, one of the two
+  // listings carrying a posting or scrape date the other omits.
+  assert.equal(
+    parsed('[Site] Alex Coal - Deep - 2023-07-19 - 2024-01-02 - 1080p').identityKey,
+    parsed('[Site] Alex Coal - Deep - 2023-07-19 - 1080p').identityKey,
+    'with and without the second date must be one scene',
+  );
+});
+
+test('a date with other text around it stays a title part', () => {
+  // The boundary of the rule. Text beside a date is evidence the date is part
+  // of the title, and there is nothing in the name to justify splitting the
+  // segment — so `Party 2024-01-02` keeps its date and stays in the key. This
+  // passes both before and after the fix; it is pinned so that loosening the
+  // "nothing but a date" test has to break something.
+  const result = parsed('[Site] Alex Coal - Deep - 2023-07-19 - Party 2024-01-02 - 1080p');
+  assert.equal(result.display.title, 'Alex Coal - Deep - Party 2024-01-02');
+  assert.equal(
+    result.display.fields.find((field) => field.label === 'Second date'),
+    undefined,
+  );
+});
+
+test('the anchor is the first date in reading order, not the earlier one', () => {
+  // `2024-01-02` is the earlier calendar date but the later segment, and the
+  // anchor is `2025-06-24`. Pinned because without it the rule reads as
+  // "earliest wins" and the next person to touch it will change it — which
+  // would move the date half of every two-date key, the expensive half.
+  const result = parsed('Studio - Alex Coal - Deep (June 24, 2025) - 2024-01-02');
+  assert.equal(result.identityKey, 'studio:2025-06-24:alex-coal--deep');
+  assert.equal(result.display.date, '2025-06-24');
+  assert.deepEqual(
+    result.display.fields.find((field) => field.label === 'Second date'),
+    { label: 'Second date', value: '2024-01-02' },
+  );
+});
+
 // --- The date at the very end, with the encode before it ---------------------
 
 test('a date at the very end parses, with the encode ahead of it', () => {

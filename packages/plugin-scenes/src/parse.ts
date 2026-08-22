@@ -1,4 +1,5 @@
 import type {
+  DisplayField,
   DisplayFields,
   ParsedRelease,
   QualityExtra,
@@ -1322,6 +1323,7 @@ export function buildRelease(
   sceneTitle: string,
   sceneSlug: string,
   quality: QualityTokens,
+  extraFields: readonly DisplayField[] = [],
 ): ParsedRelease | null {
   const siteSlug = siteComparisonKey(site);
   if (siteSlug.length === 0) return refuse('site slug is empty');
@@ -1339,6 +1341,10 @@ export function buildRelease(
   } else if (anchor?.kind === 'episode') {
     fields.push({ label: 'Episode', value: anchor.key.toUpperCase() });
   }
+
+  // Between the anchor and the scene, so a caller adding a field never gets
+  // between the two that every release has.
+  fields.push(...extraFields);
 
   fields.push({ label: 'Scene', value: sceneTitle });
 
@@ -2204,12 +2210,19 @@ function parseDelimitedForm(name: string, options: SceneParseOptions): ParsedRel
   if (segments.length === 0) return null;
 
   let dateIso: string | null = null;
+  const otherDates: string[] = [];
   const residues: string[] = [];
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     if (segment === undefined) continue;
+    // Every segment is asked, not just the ones ahead of the anchor. Asking
+    // only while `dateIso` was null meant a second date was never examined at
+    // all: it fell through to `residues` untested, `splitSegment` found no
+    // encode token in `2024-01-02` so it survived whole, and
+    // `sceneSlugFromParts` sorted it into the scene slug ahead of the
+    // performer — so the same scene listed without it never collated.
+    const found = findSegmentDate(segment);
     if (dateIso === null) {
-      const found = findSegmentDate(segment);
       if (found !== null) {
         dateIso = found.iso;
         // A leading segment that is *only* a date cannot also be the studio.
@@ -2218,6 +2231,15 @@ function parseDelimitedForm(name: string, options: SceneParseOptions): ParsedRel
         residues.push(residue);
         continue;
       }
+    } else if (found !== null && found.before.length === 0 && found.after.length === 0) {
+      // Nothing but a date, so it is not title material and leaves the
+      // identity. `before`/`after` are what `splitAround` already computes, so
+      // the test costs nothing. A segment holding a date *and* other text —
+      // `- Party 2024-01-02 -` — stays a title part: text around a date is
+      // evidence the date belongs to the title, and there is nothing here to
+      // justify splitting the segment.
+      otherDates.push(found.iso);
+      continue;
     }
     residues.push(segment);
   }
@@ -2246,12 +2268,19 @@ function parseDelimitedForm(name: string, options: SceneParseOptions): ParsedRel
 
   // This is the one parser shape whose parts have no fixed order — see
   // `sceneSlugFromParts` for why they are sorted and why the join is `--`.
+  //
+  // The `Second date` label describes the date's *position*, not its meaning.
+  // The parser cannot tell a posting date from a scrape date from a re-release
+  // date, and a label that claimed to would be a guess rendered into the UI.
+  // It is a field and not `display.date` for the reason `buildRelease` gives
+  // about the episode anchor: that field carries a real scene date or nothing.
   return buildRelease(
     canonicalSiteName(site, options.sites ?? []),
     { kind: 'date', key: dateIso, startOffset: 0, endOffset: 0 },
     titleParts.join(' - '),
     sceneSlugFromParts(titleParts),
     extractQuality(qualityParts.join(' '), group),
+    otherDates.map((iso) => ({ label: 'Second date', value: iso })),
   );
 }
 
