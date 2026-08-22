@@ -279,7 +279,6 @@ five before — a small share of the corpus, but complete coverage of the shape.
 - [The same scene in a dotted and a bracketed listing gets two groups](https://github.com/chad3814/pickarr/issues/17) — The dotted form carries no component boundaries. Under-collation, and probably irreducible.
 - [In a listing, a hyphen-attached group inside the quality segment leaks into the identity and the quality is lost](https://github.com/chad3814/pickarr/issues/19) — `- 1080p-GRP`. One of the "Smaller, all pre-existing" defects.
 - [When a listing holds two dates the first wins and the second ends up in the title](https://github.com/chad3814/pickarr/issues/20) — One of the "Smaller, all pre-existing" defects.
-- [`4K60` matches no resolution because there is no word boundary before the `60`](https://github.com/chad3814/pickarr/issues/21) — One of the "Smaller, all pre-existing" defects.
 
 **A trailing content-type tag and a bare site id are also dropped from the title, and that
 is a second, accepted way to over-collate.** `Solo`, `Hardcore` and `Lesbian` name a

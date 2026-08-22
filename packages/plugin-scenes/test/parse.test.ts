@@ -50,6 +50,56 @@ test('extracts resolution from every common token', () => {
   }
 });
 
+test('a frame-rate suffix on a word resolution spelling is still that resolution', () => {
+  const parsed = parseSceneRelease('Site.23.01.01.Name.XXX.4K60.MP4-G');
+  assert.ok(parsed);
+  assert.equal(parsed.identityKey, 'site:2023-01-01:name');
+  assert.equal(parsed.quality.resolution, 2160);
+});
+
+test('every resolution spelling tolerates a frame-rate suffix', () => {
+  const cases: [string, number][] = [
+    ['Site.23.01.01.Name.XXX.720p60.MP4-G', 720],
+    ['Site.23.01.01.Name.XXX.1080p60.MP4-G', 1080],
+    ['Site.23.01.01.Name.XXX.2160p60.MP4-G', 2160],
+    ['Site.23.01.01.Name.XXX.4K60.MP4-G', 2160],
+    ['Site.23.01.01.Name.XXX.UHD60.MP4-G', 2160],
+    ['Site.23.01.01.Name.XXX.8K60.MP4-G', 4320],
+  ];
+  for (const [name, expected] of cases) {
+    assert.equal(parseSceneRelease(name)?.quality.resolution, expected, name);
+  }
+});
+
+test('the two spellings of one 2160p encode collate', () => {
+  const a = parseSceneRelease('Site.23.01.01.Name.XXX.4K60.MP4-G');
+  const b = parseSceneRelease('Site.23.01.01.Name.XXX.2160p.MP4-G');
+  assert.ok(a && b);
+  assert.equal(a.identityKey, b.identityKey);
+  assert.equal(a.quality.resolution, 2160);
+  assert.equal(b.quality.resolution, 2160);
+});
+
+test('a frame rate is recorded rather than absorbed into the resolution token', () => {
+  const cases: [string, number | undefined][] = [
+    ['Site.23.01.01.Name.XXX.4K60.MP4-G', 60],
+    ['Site.23.01.01.Name.XXX.1080p60.MP4-G', 60],
+    ['Site.23.01.01.Name.XXX.1080p.60fps.MP4-G', 60],
+    // A resolution with no frame rate must record none: the last row is what
+    // stops the pattern reading a channel count or a bare number as one.
+    ['Site.23.01.01.Name.XXX.1080p.MP4-G', undefined],
+  ];
+  for (const [name, expected] of cases) {
+    assert.equal(parseSceneRelease(name)?.quality.extras?.['fps'], expected, name);
+  }
+});
+
+test('a bare 4K in a title does not start absorbing the word after it', () => {
+  const parsed = parseSceneRelease('Site.23.04.15.Anniversary.XXX.4K.Party.XXX.MP4-GRP1');
+  assert.ok(parsed);
+  assert.equal(parsed.display.title, 'Anniversary XXX 4K Party');
+});
+
 test('extracts video codec and source', () => {
   const parsed = parseSceneRelease('Site.23.01.01.Name.XXX.1080p.WEB-DL.H265.MP4-G');
   assert.equal(parsed?.quality.videoCodec, 'h265');
