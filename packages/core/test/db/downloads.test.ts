@@ -5,7 +5,9 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import {
   bumpAttempts,
   clearAbsent,
+  clientJobName,
   downloadLabel,
+  extractLabel,
   failDownload,
   getDownload,
   indexDownloadsForClient,
@@ -292,4 +294,72 @@ test('indexDownloadsForClient builds both maps from one query: a kept row is the
   // would still pass on that broken version if it only checked deepEqual.
   assert.equal(byRef.get('nzo_kept'), byLabel.get(downloadLabel(kept)));
   db.close();
+});
+
+// --- The job-name round trip --------------------------------------------
+//
+// `extractLabel` is anchored at the end of whatever name the client reports
+// and has no way to tell one occurrence of the marker shape from another, so
+// the write side owes the read side an invariant: no name Pickarr sends a
+// client carries the marker shape anywhere except as its own trailing
+// marker. Once that holds, a client that truncates a name can only ever cut
+// the marker off — `extractLabel` answers null, the unrecognised-entry case
+// `warnIfLabelMismatch` exists for — and can never expose a second one.
+
+const HOSTILE_TITLES = [
+  // The dangerous position: a title that itself ends in the marker shape, so
+  // a truncation at exactly the title's own length reads as a whole job name
+  // belonging to download 2.
+  'Site.25.01.02.Scene [pickarr-2]',
+  // The same shape mid-string. Not the issue's case, and worth keeping
+  // because it turns out not to be safe either: a deeper truncation, one
+  // that also removes the text after the decoy, leaves the decoy trailing
+  // just the same. Position in the title only decides which offset is
+  // dangerous, not whether one exists.
+  'A [pickarr-2] B',
+  // A title that is nothing but the shape.
+  '[pickarr-77]',
+  // Spaces inside the brackets, which `LABEL_MARKER_PATTERN` does not read.
+  // This offends nothing today; it is here to pin that the sanitiser is
+  // deliberately wider than the pattern it defends.
+  'Weird [ pickarr-3 ] thing',
+  'Ordinary.Site.25.01.02.Scene.1080p',
+];
+
+test('no truncation of a job name can read as a label other than the one it was minted for', () => {
+  for (const title of HOSTILE_TITLES) {
+    const name = clientJobName(title, 1);
+    // Every prefix rather than one hand-picked offset: the claim is about
+    // truncation in general, not about the one offset the issue reported.
+    for (let end = 0; end <= name.length; end += 1) {
+      const prefix = name.slice(0, end);
+      const label = extractLabel(prefix);
+      assert.ok(
+        label === null || label === downloadLabel(1),
+        `${JSON.stringify(name)} truncated to ${JSON.stringify(prefix)} reads as ${label}`,
+      );
+    }
+  }
+});
+
+test('a title already ending in the marker shape has it removed rather than escaped', () => {
+  assert.equal(
+    clientJobName('Site.25.01.02.Scene [pickarr-2]', 1),
+    'Site.25.01.02.Scene [pickarr-1]',
+  );
+});
+
+test('a marker shape removed from the middle of a title leaves no double space behind', () => {
+  assert.equal(clientJobName('A [pickarr-2] B', 1), 'A B [pickarr-1]');
+});
+
+test('a title that was nothing but a marker shape becomes the bare marker, still recoverable', () => {
+  assert.equal(clientJobName('[pickarr-77]', 1), '[pickarr-1]');
+  assert.equal(extractLabel(clientJobName('[pickarr-77]', 1)), downloadLabel(1));
+});
+
+// The cheapest signal that the sanitiser has not started eating ordinary
+// titles: this name is byte-identical to what the unsanitised version sent.
+test('an ordinary title pays nothing: its job name is the title and the marker', () => {
+  assert.equal(clientJobName('Ordinary.Release.1080p', 1), 'Ordinary.Release.1080p [pickarr-1]');
 });

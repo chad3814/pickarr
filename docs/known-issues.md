@@ -395,7 +395,40 @@ structure, it held.
 - [A finished job is dropped from the client, with its files](https://github.com/chad3814/pickarr/issues/27) — The client is asked to delete rather than Pickarr doing it; failed, untracked and still-running jobs are left alone.
 - [Labels are unique only within one database, so two Pickarr instances sharing a SABnzbd category can recover each other's jobs](https://github.com/chad3814/pickarr/issues/28) — `downloadLabel` is `pickarr-<id>` with no per-installation salt. Give each instance its own SABnzbd category.
 - [The `nzbname` round-trip is unverified against a real server](https://github.com/chad3814/pickarr/issues/29) — If SABnzbd renames jobs instead of surfacing our label, recovery silently never fires and the same NZB can be submitted twice.
-- [A release title ending in something shaped like `[pickarr-N]`, plus truncation at exactly that offset, can misattribute a ref](https://github.com/chad3814/pickarr/issues/30) — Reproduced under test, but the preconditions make it vanishingly unlikely in practice.
+
+**Closed: a release title that itself carries `[pickarr-N]` can no longer misattribute a
+ref.** This was #30. `clientJobName` appended the marker without looking at what the title
+already held, so a title ending in the marker shape produced a name carrying it twice.
+`extractLabel` is anchored at the end of whatever the client reports and cannot tell one
+occurrence from another, so a client truncating that name at exactly the title's own length
+handed back a well-formed marker naming a *different* download.
+
+The entry that stood here said "reproduced under test", and that was wrong: it was added by
+`affb78c` as prose, with no test alongside it, and nothing in the tree covered the case until
+this fix. Driven directly, both harms the issue predicted land in one tick — the truncated
+name resolves to download 2, which adopts download 1's job, and download 1, now finding its
+own label nowhere in the snapshot, is submitted a second time.
+
+There is a third and worse outcome the issue did not predict. When the colliding label
+resolves to a row that already holds a different ref, `setClientRef` hits
+`UNIQUE (client_id, client_ref)` and throws out of `reconcileClient`. `reconcilePass` catches
+and logs it, so the whole tick aborts before the matching, sweep and cleanup passes run — and
+aborts identically on every tick after, because an aborted tick changes nothing that would
+make the next one go differently. That is a stuck pipeline, not one misattributed row.
+
+The fix is on the write side: `clientJobName` strips the marker shape out of the title before
+appending its own, maintaining the invariant that no name Pickarr sends a client carries the
+shape anywhere except as its own trailing marker. Truncation can then only ever remove the
+marker, yielding the `null` that `warnIfLabelMismatch` already exists to surface. The marker
+format is deliberately unchanged and so are `extractLabel` and its pattern — complicating the
+read side is what the original entry declined to do, and it stays declined; the anchor was
+never the unsound half. A property test asserts over *every* prefix of the name built from
+each of a small table of hostile titles that `extractLabel` answers either that download's own
+label or `null`, which states the claim about truncation in general rather than about the one
+offset the issue named.
+
+Names already at the client that carry a decoy keep it: there is no way to rename a job at
+SABnzbd, and the affected population is downloads whose title contained `[pickarr-N]`.
 
 ## Web and API
 

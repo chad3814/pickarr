@@ -107,6 +107,22 @@ export function downloadLabel(id: number): string {
 const LABEL_MARKER_PATTERN = /\[(pickarr-\d+)\]\s*$/;
 
 /**
+ * What `clientJobName` strips out of a release title before appending its
+ * own marker: anything bracketed carrying this application's namespace,
+ * anywhere in the string.
+ *
+ * Deliberately wider than `LABEL_MARKER_PATTERN` — spaces inside the
+ * brackets, a non-numeric tail, any case — because the two are not symmetric
+ * in what they cost when wrong. A shape this misses that the pattern can
+ * still read is a misattributed ref; a shape this removes that the pattern
+ * would never have read is a few characters missing from a display name, and
+ * the only strings it can remove are ones already carrying our namespace,
+ * which has no business in an indexer title. Widening the read pattern later
+ * (the per-installation salt in #28, say) therefore needs no change here.
+ */
+const MARKER_SHAPE = /\[\s*pickarr-[^\]]*\]/gi;
+
+/**
  * The name pickarr sends the client as a job's display name: the release
  * title, for legibility in the client's own UI (SABnzbd's queue/history
  * otherwise shows every job as an unreadable `pickarr-<id>`), with
@@ -117,9 +133,27 @@ const LABEL_MARKER_PATTERN = /\[(pickarr-\d+)\]\s*$/;
  * truncate the name outright, which is exactly the failure `extractLabel`
  * returning null is meant to surface (see `warnIfLabelMismatch` in
  * `pipeline/reconcile.ts`).
+ *
+ * The invariant this maintains, and the reason for the sanitising step: no
+ * name Pickarr sends a client carries the marker shape anywhere except as
+ * its own trailing marker. `extractLabel` is anchored at the end of whatever
+ * it is handed and cannot tell one occurrence from another, so a name
+ * carrying the shape twice is a name whose truncation reads as a *different*
+ * download's label — the anchor is sound, and what was unsound was minting a
+ * name with a second thing the anchor would accept. Once the invariant
+ * holds, truncation can only ever remove the marker, never expose one. It is
+ * enforced over every prefix of every name built from a hostile title by the
+ * property test in `test/db/downloads.test.ts`, and #30 is the report.
+ *
+ * The whitespace collapse is not cosmetic: a shape removed from the middle
+ * of a title would otherwise leave a double space. The empty-title guard
+ * covers a title that was nothing but the shape, whose name becomes the bare
+ * marker and stays recoverable.
  */
 export function clientJobName(title: string, id: number): string {
-  return `${title} [${downloadLabel(id)}]`;
+  const clean = title.replace(MARKER_SHAPE, ' ').replace(/\s+/g, ' ').trim();
+  const marker = `[${downloadLabel(id)}]`;
+  return clean === '' ? marker : `${clean} ${marker}`;
 }
 
 /**

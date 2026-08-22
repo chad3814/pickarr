@@ -964,6 +964,77 @@ test('a tracked download whose client-side name matches its label never warns', 
   db.close();
 });
 
+// --- A decoy marker in the release title -------------------------------
+//
+// `extractLabel` is anchored at the end of the name and cannot tell one
+// occurrence of the marker shape from another, so a job name carrying the
+// shape twice is a name whose truncation reads as some other download's
+// label. `clientJobName` is what refuses to mint such a name; these two pin
+// what went wrong when it did not. #30.
+//
+// The title is chosen so that the client truncating the name at exactly the
+// title's own length — the offset the issue names — leaves the decoy
+// `[pickarr-2]` trailing and readable.
+
+const DECOY_TITLE = 'Site.25.01.02.Scene [pickarr-2]';
+
+/** Download 1's job name as a client that cut it at the title's length reports it. */
+function truncatedAtTitleLength(): string {
+  return clientJobName(DECOY_TITLE, 1).slice(0, DECOY_TITLE.length);
+}
+
+/** Distinct refs per call, so a ref collision here can only come from recovery. */
+function freshRefs(): DownloadClient['addUrl'] {
+  let minted = 0;
+  return () => {
+    minted += 1;
+    return Promise.resolve(`nzo_fresh_${minted}`);
+  };
+}
+
+test('a decoy marker in download 1 title does not hand download 1 job to download 2', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'queued', clientRef: null });
+  seedDownload(db, { id: 2, status: 'queued', clientRef: null });
+  db.prepare('UPDATE feed_items SET raw_title = ? WHERE id = 1').run(DECOY_TITLE);
+  const client = fakeClient(
+    { queue: [queued('nzo_ONE', truncatedAtTitleLength())], history: [], complete: true },
+    { addUrl: freshRefs() },
+  );
+
+  await reconcileClient(deps(db, client));
+
+  // Both halves of the reported harm are this one assertion: download 2
+  // adopting nzo_ONE is also what left download 1 with no ref in the
+  // snapshot and got its NZB submitted a second time.
+  assert.notEqual(getDownload(db, 2)?.clientRef, 'nzo_ONE');
+  db.close();
+});
+
+test('a decoy marker naming a download that already holds the ref does not abort the tick', async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_ONE' });
+  seedDownload(db, { id: 2, status: 'queued', clientRef: null });
+  db.prepare('UPDATE feed_items SET raw_title = ? WHERE id = 1').run(DECOY_TITLE);
+  const client = fakeClient(
+    { queue: [queued('nzo_ONE', truncatedAtTitleLength())], history: [], complete: true },
+    { addUrl: freshRefs() },
+  );
+
+  // Worse than the misattribution above and not what the issue predicted:
+  // recovery tries to give download 2 a ref download 1 already holds, which
+  // is `UNIQUE (client_id, client_ref)`, and `setClientRef` throws out of
+  // reconcileClient before the matching, sweep and cleanup passes run at
+  // all. `reconcilePass` catches and logs it, so the tick is simply lost —
+  // and lost identically every tick after, because an aborted tick changes
+  // nothing that would make the next one go differently.
+  await assert.doesNotReject(() => reconcileClient(deps(db, client)));
+
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_ONE');
+  assert.notEqual(getDownload(db, 2)?.clientRef, 'nzo_ONE');
+  db.close();
+});
+
 // --- Cleanup after a successful import ---------------------------------------
 
 function removalTracking(): { removed: { ref: string; deleteFiles: boolean }[]; remove: DownloadClient['remove'] } {
