@@ -1,13 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempDir } from '../temp-dir.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { importDownload, lstatOrNull, type ImportDeps } from '../../src/pipeline/import.ts';
+import {
+  importDownload,
+  lstatOrNull,
+  type ImportDeps,
+  type RenameLike,
+} from '../../src/pipeline/import.ts';
 import { trashFiles } from '../../src/pipeline/upgrade.ts';
 import { getGroup } from '../../src/db/groups.ts';
 import { getDownload } from '../../src/db/downloads.ts';
@@ -541,6 +546,124 @@ test('a live row that resolves outside the library root is refused rather than t
     );
 
     assert.equal(await readFile(outside, 'utf8'), 'not-in-the-library');
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The crash window this covers is between `transfer` and `insertImportedFile`
+ * in the loop: the file is at its destination and nothing in the database
+ * names it. Recovery is possible only if the retry's plan still names that
+ * destination, and in `move` mode it is exactly the retry whose listing has
+ * lost the file the previous attempt already moved — so a plugin that reads
+ * the listing answers a *different*, shorter plan, and the placed file becomes
+ * an orphan no `imported_files` row knows about.
+ */
+test('a crash between a multi-file transfer and its row does not orphan the file the next upgrade collides with', async () => {
+  const root = await tempRoot();
+  try {
+    const library = join(root, 'library');
+    const trash = join(root, 'trash');
+    await mkdir(library, { recursive: true });
+    await writeFile(join(library, 'scene-aaa.mp4'), 'old-a');
+    await writeFile(join(library, 'scene-bbb.mp4'), 'old-b');
+
+    const downloadDir = join(root, 'complete');
+    await mkdir(downloadDir, { recursive: true });
+    await writeFile(join(downloadDir, 'scene-aaa.mp4'), 'new-a');
+    await writeFile(join(downloadDir, 'scene-bbb.mp4'), 'new-b');
+
+    const db = openTestDatabase();
+    seedUpgrade(db, downloadDir);
+    db.prepare(
+      `INSERT INTO imported_files (download_id, group_id, source_path, dest_path, size_bytes, created_at)
+       VALUES (9, 1, '/old/a', ?, 5, 1), (9, 1, '/old/b', ?, 5, 1)`,
+    ).run(join(library, 'scene-aaa.mp4'), join(library, 'scene-bbb.mp4'));
+
+    // Derived from the listing, which is the ordinary case and the whole
+    // mechanism: hand this plugin a shorter listing and it answers a shorter
+    // plan, naming none of the destinations the missing entries would have had.
+    const planFromListing: MediaTypePlugin['planImport'] = (_media, files): ImportPlan => ({
+      files: files
+        .map((file) => file.relativePath)
+        .toSorted()
+        .map((name) => ({ source: join(downloadDir, name), destination: name })),
+    });
+
+    // The kill: the rename lands and the process dies before the row is
+    // written. Only the first call, so the retry runs to completion.
+    let crashed = false;
+    const crashAfterFirstRename: RenameLike = async (source, destination) => {
+      await rename(source, destination);
+      if (crashed) return;
+      crashed = true;
+      throw new Error('killed mid-import');
+    };
+
+    const registry = registryFor(planFromListing, library);
+    await assert.rejects(
+      importDownload(
+        deps(db, registry, trash, { rename: crashAfterFirstRename }),
+        getDownload(db, 1)!,
+      ),
+      /killed mid-import/,
+    );
+    assert.equal(await readFile(join(library, 'scene-aaa.mp4'), 'utf8'), 'new-a');
+    assert.equal(liveFilesForGroup(db, 1).length, 0);
+
+    // Boot recovery puts the `importing` row back to `completed` and the next
+    // tick imports it again.
+    db.prepare("UPDATE downloads SET status = 'completed' WHERE id = 1").run();
+    await importDownload(
+      deps(db, registry, trash, { rename: crashAfterFirstRename, now: () => 3000 }),
+      getDownload(db, 1)!,
+    );
+
+    assert.equal(getDownload(db, 1)?.status, 'imported');
+    const live = liveFilesForGroup(db, 1);
+    assert.equal(live.length, 2, 'the file the crashed attempt placed is recorded, not orphaned');
+    assert.deepEqual(
+      live.map((file) => file.downloadId),
+      [1, 1],
+    );
+
+    // And the convergence that matters to an operator: the *next* upgrade of
+    // this group is an ordinary import, not a permanent failure that has
+    // already trashed the files the retry got right.
+    db.prepare(
+      `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+       VALUES (3, 'f', 'g3', 'T3', 'https://indexer.invalid/3.nzb', 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+       VALUES (3, 1, 3, '{}', 300, 1)`,
+    ).run();
+    const nextDir = join(root, 'complete-3');
+    await mkdir(nextDir, { recursive: true });
+    await writeFile(join(nextDir, 'scene-aaa.mp4'), 'newer-a');
+    await writeFile(join(nextDir, 'scene-bbb.mp4'), 'newer-b');
+    db.prepare(
+      `INSERT INTO downloads (id, release_id, group_id, client_id, client_ref, kind, status,
+                              storage_path, created_at, updated_at)
+       VALUES (2, 3, 1, 'sab', 'nzo_3', 'upgrade', 'completed', ?, 1, 1)`,
+    ).run(nextDir);
+
+    const nextRegistry = registryFor(
+      (_media, files): ImportPlan => ({
+        files: files
+          .map((file) => file.relativePath)
+          .toSorted()
+          .map((name) => ({ source: join(nextDir, name), destination: name })),
+      }),
+      library,
+    );
+    await importDownload(deps(db, nextRegistry, trash, { now: () => 4000 }), getDownload(db, 2)!);
+
+    assert.equal(getDownload(db, 2)?.status, 'imported');
+    assert.equal(await readFile(join(library, 'scene-aaa.mp4'), 'utf8'), 'newer-a');
+    assert.equal(await readFile(join(library, 'scene-bbb.mp4'), 'utf8'), 'newer-b');
     db.close();
   } finally {
     await rm(root, { recursive: true, force: true });

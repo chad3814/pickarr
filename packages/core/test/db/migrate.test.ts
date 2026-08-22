@@ -938,7 +938,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   db.close();
 });
 
@@ -1044,7 +1044,7 @@ test('app_state arrives at version 10 and takes no other version', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 });
 
 // --- Migration 11: the feed backfill position -------------------------------
@@ -1080,4 +1080,28 @@ test('a feed_backfill row survives its feed leaving configuration', () => {
   const row = db.prepare('SELECT state FROM feed_backfill WHERE feed_id = ?').get('gone-from-config');
   assert.equal(row?.['state'], 'running');
   db.close();
+});
+
+// --- Migration 12: the plan a retry is not allowed to re-derive -------------
+
+test('migration 12 adds import_plan, NULL for rows that already existed', () => {
+  const db = databaseAtVersion(11);
+  addGroup(db, { id: 1, key: 'a' });
+  addRelease(db, { id: 1, groupId: 1, score: 100 });
+  addDownload(db, { id: 1, releaseId: 1, groupId: 1 });
+
+  migrations.find((m) => m.version === 12)!.up(db);
+
+  const columns = db
+    .prepare('PRAGMA table_info(downloads)')
+    .all()
+    .map((row) => String(row['name']));
+  assert.ok(columns.includes('import_plan'));
+
+  const row = db.prepare('SELECT import_plan FROM downloads WHERE id = 1').get();
+  assert.equal(
+    row?.['import_plan'],
+    null,
+    'a row that predates the column has no committed plan, which is exactly what null means',
+  );
 });
