@@ -142,9 +142,12 @@ one is still examined, since an exact match tends to rank first. The cost is pai
 per prefix ever, because both hits and misses are cached.
 
 The list deliberately does **not** apply to the ordinary date-in-the-middle form, where
-the date already supplies the boundary, nor to the bare-domain case below. Extending it
-there would change how names that parse correctly today are read, which is a different
-decision from adding a shape that currently fails.
+the date already supplies the boundary. It *does* now apply to the bare-domain case
+below, which this entry used to exclude on the grounds that extending it there would
+change how names that parse correctly today are read. That reading is right about the
+consequence and wrong to stop at it: the names it changes are the ones parsing correctly
+by accident, and the change is gated on the list settling the question rather than on
+the list merely existing.
 
 **A confirmed site can stand in for the encode boundary.** A dateless name used to need
 *both* a site and a trustworthy encode boundary. The boundary was only ever needed to
@@ -191,8 +194,10 @@ would turn every unrecognised release in a feed into a group filed under its fir
 `BralessForever.com.Emma.G.and.Rocky.Beach.Days.2160p` files under `Braless Forever`
 with the title `Emma G and Rocky Beach Days`; without the rule the title would begin
 `com`. It only ever runs *behind a confirmation*, which is what keeps it clear of the
-bare-domain problem below: nothing confirms `Bang` in `Bang.com - Alex Coal`, so the rule
-never fires there. It also never consumes the last remaining token.
+bare-domain rule below: it needs the site ahead of the TLD already matched, so it cannot
+fire on `Bang.com - Alex Coal` before `Bang` is known, and once `Bang` *is* known the
+bare-domain rule reads that same fact as "this domain is the studio" and leaves the name
+alone. It also never consumes the last remaining token.
 
 - [One unknown encode word refuses the whole name, so the encode vocabulary is worth extending on evidence](https://github.com/chad3814/pickarr/issues/12) — A token the vocabulary does not know interrupts the trailing run and the whole name is refused.
 
@@ -275,10 +280,72 @@ date. It surfaces as its own `Episode` field and renders in the library path as 
 Measured: 40 corpus titles carry an E-number and 38 of them now parse, against roughly
 five before — a small share of the corpus, but complete coverage of the shape.
 
-- [A bare-domain prefix becomes the site, so a genuine bare-domain stamp files the scene under the wrong directory](https://github.com/chad3814/pickarr/issues/16) — Wrong path, never a wrong merge.
 - [The same scene in a dotted and a bracketed listing gets two groups](https://github.com/chad3814/pickarr/issues/17) — The dotted form carries no component boundaries. Under-collation, and probably irreducible.
 - [In a listing, a hyphen-attached group inside the quality segment leaks into the identity and the quality is lost](https://github.com/chad3814/pickarr/issues/19) — `- 1080p-GRP`. One of the "Smaller, all pre-existing" defects.
 - [When a listing holds two dates the first wins and the second ends up in the title](https://github.com/chad3814/pickarr/issues/20) — One of the "Smaller, all pre-existing" defects.
+
+**Closed: a bare-domain stamp no longer becomes the site, and a studio named after its
+domain still keeps it.** This was #16. `stripWebsitePrefix` took the name and nothing
+else, so a leading bare domain had to be judged on shape, and the two things that shape
+can be — a tracker's stamp and a studio's own name — are written identically:
+`pornsite.net - Vixen - Alex Coal - Deep - 2023-07-19` and
+`Bang.com - Alex Coal - Deep - 2023-01-01` are both "a domain, then ` - `". The rule
+declined, so the tracker's domain became the site, `Vixen` was demoted into the title,
+and the scene filed under `Pornsitenet/` with the key
+`pornsitenet:2023-07-19:alex-coal--deep--vixen`.
+
+The discriminating fact is two-sided and both halves are on the confirmed-site list —
+configured names plus `discovered_sites` — which was already threaded in as
+`options.sites`. A studio named after its domain **is** a site, so its label is on the
+list; a tracker's is not. And a stamp sits in front of the studio field, so what follows
+it *is* on the list. `isTrackerStamp` requires both, and the conjunction is what makes it
+safe: on a cold list neither test passes, nothing is stripped, and every name reads
+exactly as it did before. `Bang.com`, `Deeper.com`, `Private.com`, `Nubiles.net` and
+`Tushy.com` are held by the label test alone even once they are confirmed. Membership is
+`siteComparisonKey`, not a slug, for the reason in "Site matching drops separators".
+
+The delimiter is spelled with whitespace on both sides, the way `SEGMENT_SPLIT` spells
+it, and that is load-bearing rather than cosmetic. The looser form the fix was first
+drafted with — no space required around the dash — also matches the hyphen that attaches
+a release group to a *dotted* name, so `Site.23.04.15.Scene.XXX-Vixen` offered
+`Site.23.04.15.Scene` as a domain and the group tag as the studio behind it. With `Vixen`
+confirmed, that stripped the entire name and **refused** the release. It was driven
+directly and no existing test caught it, because the corpus passes no site list at all;
+it now has a test of its own.
+
+The dotted form stays out of scope for the same reason: it carries no field boundaries
+this rule can read, so `pornsite.net.Brazzers.23.04.15.Alex.Coal.XXX.1080p.MP4-WRB` keeps
+its current reading. The rule is also not self-starting — `sceneSiteCandidates` declines
+on anything the delimited form accepts, so the site behind a stamp has to be known
+already, from configuration or from discovery on some other release. Offering the second
+field as a lookup candidate would fix that and would also send performer names to the
+provider to confirm, which is precisely the input that makes the residual failure below
+fire.
+
+**The residual failure is narrower than the defect and points the other way, so it is
+pinned by a test rather than left to be found.** A misfire used to produce a wrong path;
+now it produces a wrong *merge*. All three facts must hold at once: a leading bare
+domain, a label that is not a known site, and a next field that is. The realistic
+instance is a performer-branded site — `pornsite.net - Alex Coal - Deep` where the
+provider genuinely lists a site called `Alex Coal` — and that name now files under
+`Alex Coal`.
+
+**Landing this re-keys and renames a live library.** Any release already filed under a
+bare-domain site whose next field is a confirmed site moves. The boot re-key pass
+(`packages/core/src/pipeline/rekey.ts`) re-parses the stored raw titles, produces a `move`
+outcome and renames the imported files, and where the correct group already exists a
+`merge` — except that a group whose destination is already occupied reports
+`skipped-collision` instead. That is the intended repair, and it is a real file rename on
+a real library rather than a silent internal fixup.
+
+Corpus invariants do not move, and that was verified rather than assumed: `parsed()`
+calls `parseSceneRelease(name)` with no options, so both membership tests fail on every
+row and the new arm never fires. Measured further, since an unexercised half of the
+parser is exactly how this kind of change hides — re-parsing all 110 corpus names against
+the 34 site names the first pass learns from them moves **zero** keys and produces zero
+new refusals, before and after. The `'a studio named after its domain keeps the studio as
+the site'` test is joined by a second that runs the same five studios *with* their labels
+confirmed, because without it the corpus cannot see this feature at all.
 
 **A trailing content-type tag and a bare site id are also dropped from the title, and that
 is a second, accepted way to over-collate.** `Solo`, `Hardcore` and `Lesbian` name a

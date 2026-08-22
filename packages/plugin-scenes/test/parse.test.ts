@@ -356,6 +356,85 @@ test('both spellings of a remaster are encode vocabulary and collate with the or
   }
 });
 
+// --- A bare-domain tracker stamp in front of a listing -----------------------
+// A leading bare domain is either the tracker that indexed the release or the
+// studio that made it, and the two are shaped identically. The site list
+// settles it, from both ends at once: a studio named after its domain is a
+// site, so its label is on the list, and a tracker's is not.
+
+test('a bare-domain stamp is stripped when the field behind it is a confirmed site', () => {
+  const sites = ['Vixen'];
+  const stamped = parseSceneRelease('pornsite.net - Vixen - Alex Coal - Deep - 2023-07-19', { sites });
+  const plain = parseSceneRelease('[Vixen] Alex Coal - Deep - 2023-07-19', { sites });
+  assert.ok(stamped);
+  assert.ok(plain);
+  assert.equal(stamped.identityKey, plain.identityKey);
+  assert.equal(stamped.display.subtitle, 'Vixen');
+  assert.equal(stamped.display.title, 'Alex Coal - Deep');
+});
+
+test('the same stamp survives untouched when nothing behind it is confirmed', () => {
+  // The strip is driven by confirmation, not by shape: with no site list there
+  // is no evidence that `pornsite.net` is a tracker rather than the studio,
+  // and guessing on shape alone is what collapses `Bang.com` onto its
+  // performer. This is today's output, pinned.
+  const parsed = parseSceneRelease('pornsite.net - Vixen - Alex Coal - Deep - 2023-07-19');
+  assert.ok(parsed);
+  assert.equal(parsed.identityKey, 'pornsitenet:2023-07-19:alex-coal--deep--vixen');
+  assert.equal(parsed.display.subtitle, 'pornsite.net');
+});
+
+test('a bracketed bare-domain stamp in a listing reads like the unbracketed one', () => {
+  // The bracketed arm used to decline on any listing, because there a leading
+  // bracket is normally the studio field. The same two-sided evidence tells
+  // the two apart, so `[pornsite.net]` goes and `[Bang.com]` stays.
+  const stamped = parseSceneRelease('[pornsite.net] - Vixen - Alex Coal - Deep - 2023-07-19', {
+    sites: ['Vixen'],
+  });
+  assert.ok(stamped);
+  assert.equal(stamped.identityKey, 'vixen:2023-07-19:alex-coal--deep');
+  const studio = parseSceneRelease('[Bang.com] - Alex Coal - Deep - 2023-01-01 - 1080p', {
+    sites: ['Bang'],
+  });
+  assert.ok(studio);
+  assert.equal(studio.identityKey, 'bangcom:2023-01-01:alex-coal--deep');
+});
+
+test('a dotted name whose release group is a confirmed site is left alone', () => {
+  // The delimiter this rule requires is spelled with whitespace on both sides
+  // for this case. A hyphen-attached group is the *same* punctuation without
+  // the spaces, so a rule that tolerated `Site.23.04.15.Scene.XXX-Vixen` would
+  // read `Site.23.04.15.Scene` as a domain and `Vixen` as the studio behind
+  // it, strip everything, and refuse the name outright — driven directly
+  // against the loose form before this landed, on all three names below. The
+  // corpus cannot see this: it passes no site list, so the arm never fires.
+  const sites = ['Vixen', 'Tushy', 'Brazzers'];
+  for (const [name, key] of [
+    ['Site.23.04.15.Scene.XXX-Vixen', 'site:2023-04-15:scene'],
+    ['Brazzers.23.04.15.Alex.Coal.XXX-Vixen', 'brazzers:2023-04-15:alex-coal'],
+    ['Tushy.com.23.04.15.Emily.Willis.XXX-Tushy', 'tushycom:2023-04-15:emily-willis'],
+  ]) {
+    const parsed = parseSceneRelease(name ?? '', { sites });
+    assert.ok(parsed, `expected ${name} to parse`);
+    assert.equal(parsed.identityKey, key, name);
+  }
+});
+
+test('a performer-branded site behind a bare domain is the residual failure, pinned', () => {
+  // The rule fires on three facts at once — a leading bare domain, a label
+  // that is not a known site, and a next field that is. When the provider
+  // genuinely lists a site called `Alex Coal` all three hold and the performer
+  // takes the site slot. Narrower than the defect it replaces and pointing the
+  // other way: this is a wrong *merge* rather than a wrong path, so it is
+  // asserted here rather than left to be discovered.
+  const parsed = parseSceneRelease('pornsite.net - Alex Coal - Deep - 2023-01-01 - 1080p', {
+    sites: ['Alex Coal'],
+  });
+  assert.ok(parsed);
+  assert.equal(parsed.display.subtitle, 'Alex Coal');
+  assert.equal(parsed.identityKey, 'alexcoal:2023-01-01:deep');
+});
+
 // --- Invariants -------------------------------------------------------------
 // The three properties below are what collation quality actually depends on.
 // They are asserted over a corpus rather than one input each, so a new
