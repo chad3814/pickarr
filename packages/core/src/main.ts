@@ -135,12 +135,18 @@ export async function runRekeyAtBoot(
       );
     } else {
       const r = outcome.report;
+      // Why the pass ran, named before the counts. Since #5 this branch is
+      // reachable in two forms, and the operator cannot tell them apart from
+      // the numbers: a boot that renames files on an installation years past
+      // its first one reads as a bug unless the line says the site list is
+      // what changed.
+      const why = outcome.reason === 'sites-changed' ? 'site inputs changed, ' : '';
       // Every bucket named explicitly, `skippedDestinationExists` included
       // and kept distinct from `failed` — see `RekeyReport`'s own doc comment
       // for why folding a correct refusal into the failure count would send
       // whoever reads this line hunting a bug that does not exist.
       emitLog(
-        `rekey: moved ${r.moved} (${r.renamed} file(s) renamed), merged ${r.merged}, ` +
+        `rekey: ${why}moved ${r.moved} (${r.renamed} file(s) renamed), merged ${r.merged}, ` +
           `skipped ${r.skippedEdited} edited / ${r.skippedUnparsable} unparsable / ` +
           `${r.skippedCollision} collision / ${r.skippedDestinationExists} destination-exists, ` +
           `failed ${r.failed}` +

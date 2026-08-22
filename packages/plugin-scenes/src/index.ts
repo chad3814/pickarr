@@ -79,6 +79,11 @@ const createScenesPlugin: PluginFactory = (config: PluginConfig): MediaTypePlugi
       }
       options = { sites: merged };
     },
+    // Reads `options` at call time for the same reason every hook above does:
+    // `learnSites` reassigns it, and a list captured at construction would
+    // report only what configuration supplied — which is precisely the half
+    // of the answer that never changes.
+    siteInputs: () => [...(options.sites ?? [])],
   };
 };
 
