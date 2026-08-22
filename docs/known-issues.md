@@ -157,14 +157,32 @@ there was no trustworthy place to cut one, so if what follows the site *starts* 
 encode vocabulary the name is site plus encode with no scene: `Brazzers.1080p.MP4-WRB`
 would otherwise have taken `1080p MP4-WRB` as its title. An existing test caught it.
 
-**The bare-4K poster is filed under the site it comes from.**
-`4K.kleo.34ans.de.clapiers` — 24 corpus titles, all distinct, none in ThePornDB. A
-resolution cannot be a site, so there is no site anywhere in the text and nothing to look
-up. They are Jacquie et Michel TV's output, which appears in the same feeds under its own
-name, so they file there rather than in a bucket of their own — `4K.kleo...` and
-`JacquieEtMichelTV.26.06.02.Lena...` belong in one directory.
+**The bare-4K poster is filed under the site it comes from, and only when the name is a
+resolution and then words.** `4K.kleo.34ans.de.clapiers` — 24 corpus titles, all distinct,
+none in ThePornDB. A resolution cannot be a site, so there is no site anywhere in the text
+and nothing to look up. They are Jacquie et Michel TV's output, which appears in the same
+feeds under its own name, so they file there rather than in a bucket of their own —
+`4K.kleo...` and `JacquieEtMichelTV.26.06.02.Lena...` belong in one directory.
 
-- [The bare-4K rule is a named case rather than a structural rule, so another bare-resolution poster would be filed wrongly](https://github.com/chad3814/pickarr/issues/10) — The site is not detected from the text; it cannot be, there is nothing there.
+The prefix alone used to be the whole rule, and that made it a first-token fallback in
+disguise — the one thing the dateless path deliberately refuses to have, since without a
+date a confirmed site is the only evidence that a name is a scene release at all.
+`4K.Alex.Coal.XXX.1080p.MP4-WRB` is any release that happens to open with `4K`, and it was
+filed under Jacquie et Michel TV on no evidence, with the marker and the entire encode
+section swallowed into both the title and the identity key, reported as 2160 for a 1080p
+release. That last part is a wrong score rather than a wrong path: it wins upgrade
+comparisons it should lose. The admission test is therefore that the remainder carries no
+encode vocabulary and no `XXX` marker — the same fact `parseSceneForm` uses to read a whole
+remainder as title, used here to decide whether the branch may run at all. All three known
+poster names pass it. A name that fails falls through to the ordinary dateless readers and
+is refused there for the ordinary reason, which is a visible `parse_error` row rather than
+a silent group. Under-collation by design, and recoverable through the Failed list.
+
+Where the branch does fire the card carries a `Site source` field saying the site was
+inferred from the leading `4K` rather than read out of the name, so a second
+bare-resolution poster is at least visible in the UI.
+
+- [The bare-4K rule is a named case rather than a structural rule, so another bare-resolution poster would be filed wrongly](https://github.com/chad3814/pickarr/issues/10) — The admission test narrows the branch to the shape it was written for, but it does not identify the poster, and nothing can. The site is still not detected from the text; it cannot be, there is nothing there. What remains is the residue the test cannot touch: a *different* poster whose names open with a bare resolution and carry no encode vocabulary at all — `4K.Ultra.Collection.2023` is the shape — is indistinguishable from this one and still files under Jacquie et Michel TV. The field on the card is the only warning.
 
 **Every shape canonicalises its site against the configured list, including the ones that
 never look a site up.** The ordinary dated form takes its site verbatim from the text

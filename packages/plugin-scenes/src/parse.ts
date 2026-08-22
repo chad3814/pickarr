@@ -1811,8 +1811,56 @@ function datelessPrefixTokens(name: string): DatelessPrefix | null {
  * poster opening names with a bare resolution would be filed here wrongly. No
  * other bare-resolution lead appears in the corpus. The `4K` is still read as
  * the resolution it is.
+ *
+ * The prefix alone is not enough to enter the branch; see `isBare4kPoster`.
  */
 const BARE_4K_PREFIX = /^4K[.\-_ ]/i;
+
+/**
+ * The admission test that keeps the branch from being a first-token fallback
+ * in disguise: a bare `4K`, then words, and nothing that is encode vocabulary
+ * or the marker.
+ *
+ * The prefix on its own admitted any release at all that happened to open
+ * with `4K`. `4K.Alex.Coal.XXX.1080p.MP4-WRB` was filed under a hardcoded
+ * site on no evidence, with the marker and the whole encode section swallowed
+ * into both the title and the identity key, and — worse than the misfiling —
+ * `extractQuality('4K', …)` recorded 2160 for a 1080p release, so it outranked
+ * the genuine 2160p encode of whatever it landed beside. A wrong score, not
+ * merely a wrong path.
+ *
+ * It also re-opened the hole the rest of `parseDatelessForm` exists to close.
+ * That function deliberately has no first-token fallback, because without a
+ * date `Some.Random.Movie.2023.1080p.BluRay-GRP` has exactly the dateless
+ * shape and a confirmed site is what replaces the date as evidence that the
+ * name is a scene release at all. This branch needs no confirmation, so every
+ * name it admits without one is that argument being ignored.
+ *
+ * The vocabulary test is `parseSceneForm`'s, used from the other end. There it
+ * licenses reading a whole remainder as title — with no encode section there
+ * is no run to mistake for title and no title to mistake for a run. Here the
+ * same fact is what makes the name *look like* this poster's, so it is an
+ * admission test rather than a parsing rule. `MARKER_TOKEN` is checked
+ * alongside it because `XXX` is not encode vocabulary but ends a title
+ * everywhere else, so a name carrying one has structure this branch cannot
+ * read.
+ *
+ * A name that fails the test is not refused here. It falls through to the
+ * ordinary `datelessPrefixTokens` / `matchSitePrefix` path and is judged by
+ * the same rules as every other dateless name, which without a confirmed site
+ * means a visible `parse_error` row rather than a silent group with a
+ * resolution wrong by a factor of four. That is the documented preferred
+ * direction, and it is what the residue rests on: `4K.Ultra.Collection.2023`
+ * carries no encode vocabulary either, so it still lands here. A bare
+ * resolution followed only by words is genuinely indistinguishable from this
+ * poster, and this test does not pretend otherwise.
+ */
+function isBare4kPoster(name: string): boolean {
+  if (!BARE_4K_PREFIX.test(name)) return false;
+  return !tokensOf(name.replace(BARE_4K_PREFIX, '')).some(
+    (token) => isEncodeToken(token.text) || token.text.toUpperCase() === MARKER_TOKEN,
+  );
+}
 
 /**
  * Spelled as the site's own releases spell it, so the two agree on a slug
@@ -1861,11 +1909,17 @@ export function canonicalSiteName(name: string, sites: readonly string[]): strin
  * name can separate them.
  */
 function parseDatelessForm(name: string, options: SceneParseOptions): ParsedRelease | null {
-  if (BARE_4K_PREFIX.test(name)) {
+  if (isBare4kPoster(name)) {
     const title = prettify(name.replace(BARE_4K_PREFIX, ''));
     if (title.length === 0) return refuse('nothing follows the leading 4K');
     const site = canonicalSiteName(BARE_4K_SITE, options.sites ?? []);
-    return buildRelease(site, null, title, slug(title), extractQuality('4K', undefined));
+    const release = buildRelease(site, null, title, slug(title), extractQuality('4K', undefined));
+    // Every other shape reads its site out of the name. This one is told, and
+    // a second bare-resolution poster would be told the same thing just as
+    // confidently, so the card says where the site came from instead of
+    // presenting an inference as something observed.
+    release?.display.fields.push({ label: 'Site source', value: 'inferred from the leading 4K' });
+    return release;
   }
 
   const prefix = datelessPrefixTokens(name);
