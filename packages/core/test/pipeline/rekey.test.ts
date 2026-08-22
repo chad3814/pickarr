@@ -21,6 +21,8 @@ import {
   planRekey,
   REKEY_MARKER_KEY,
   runRekeyOnBoot,
+  SITE_INPUTS_KEY,
+  siteInputsFingerprint,
   type RekeyDeps,
   type RekeyOutcome,
 } from '../../src/pipeline/rekey.ts';
@@ -1849,6 +1851,13 @@ test('runRekeyOnBoot test 2: with the marker present, the pass does not apply �
     display: '{"title":"stale","fields":[]}',
   });
   setAppState(db, REKEY_MARKER_KEY, 'done', 1);
+  // The fingerprint too, since #5: the marker alone no longer means "do not
+  // write". A boot whose site inputs disagree with the stored ones runs the
+  // pass however old the installation is, and an installation upgrading into
+  // #5 has no stored fingerprint at all, so its first boot legitimately runs
+  // one more pass. "The marker is set and nothing has changed" is the state
+  // this test is about, and it takes both rows to express it.
+  setAppState(db, SITE_INPUTS_KEY, siteInputsFingerprint(registry), 1);
 
   // Same sentinel technique as applyRekey test 4: a value the writer would
   // clobber if it ran at all, not an equality check against the (already
@@ -2049,4 +2058,128 @@ test('runRekeyOnBoot test 6: a group that fails to apply still counts as drift, 
   } finally {
     await rm(libraryRoot, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// #5: the site inputs a key was derived from are a second reason to run the
+// write pass. Before this, `REKEY_MARKER_KEY` alone gated it, so an
+// installation past its first boot could never re-key: a user who configured
+// a site the parser had been guessing at got a rising drift count and a
+// second group the next time that scene was released.
+// ---------------------------------------------------------------------------
+
+test('runRekeyOnBoot test 7: with the marker set but the site list changed, the pass applies', async () => {
+  const db = openTestDatabase();
+  const rawTitle = 'Anal.Only.Getting.In.Savannahs.Booty.Savannah.Bond.2022.09.29.2160p';
+
+  // Keyed the way an installation with no configured site list keys it — the
+  // date-at-end shape's documented first-token guess. Both slugs below are
+  // written out rather than derived from the plugin, which is the sanctioned
+  // exception in this file: these two exact keys, and the fact that they
+  // differ, are the whole of #5. Deriving them would let the test pass on a
+  // build where the site list changed nothing at all.
+  const unconfigured = createScenesPlugin({}) as MediaTypePlugin;
+  const groupId = groupWithRelease(db, { rawTitle, ...agreeingIdentity(unconfigured, rawTitle) });
+  assert.equal(
+    getGroup(db, groupId)?.identityKey,
+    'anal:2022-09-29:only-getting-in-savannahs-booty-savannah-bond',
+  );
+
+  // The pass ran on some earlier boot, before the user configured the site.
+  setAppState(db, REKEY_MARKER_KEY, 'done', 1);
+
+  const configured = createScenesPlugin({ sites: ['Anal Only'] }) as MediaTypePlugin;
+  const outcome = await runRekeyOnBoot(db, registryFor(configured), DEPS);
+
+  assert.equal(outcome.applied, true, 'the changed site list is a reason to run even with the marker set');
+  assert.equal(outcome.reason, 'sites-changed');
+  assert.equal(outcome.report?.moved, 1);
+  assert.equal(
+    getGroup(db, groupId)?.identityKey,
+    'analonly:2022-09-29:getting-in-savannahs-booty-savannah-bond',
+  );
+  assert.notEqual(getAppState(db, SITE_INPUTS_KEY), null, 'the fingerprint must be written after applying');
+});
+
+test('runRekeyOnBoot test 8: with the site inputs unchanged, a second boot still does not apply', async () => {
+  const { db, registry } = setup();
+  const rawTitle = 'Site.26.09.07.Golf.Boot.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-09-07:golf-boot-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+
+  const first = await runRekeyOnBoot(db, registry, DEPS);
+  assert.equal(first.applied, true);
+  assert.equal(first.reason, 'first-run');
+
+  // Same sentinel technique as test 2: a value the writer would clobber if it
+  // ran at all. This is the test that fails if the fingerprint is not stable
+  // across two identical boots — an unsorted array or a map iteration order
+  // would re-run the write pass, and the renames, forever.
+  const sentinel = 'SENTINEL-runRekeyOnBoot-site-inputs-unchanged-search-text';
+  db.prepare('UPDATE media_groups SET search_text = ? WHERE id = ?').run(sentinel, groupId);
+
+  const second = await runRekeyOnBoot(db, registry, DEPS);
+  assert.equal(second.applied, false);
+  assert.equal(second.reason, null);
+  assert.equal(second.report, null);
+  assert.equal(getGroup(db, groupId)?.searchText, sentinel, 'the sentinel surviving proves nothing was written');
+});
+
+test('runRekeyOnBoot: a site discovered between two boots re-runs the pass', async () => {
+  const { db, plugin, registry } = setup();
+  const rawTitle = 'JulesJordan.26.03.01.Hotel.India.XXX.1080p.MP4-GRP';
+
+  // Case 7's fixture exactly: stored before the site was confirmed, so the
+  // unresolved spelling reached the display while the key is the same either
+  // way. `planRekey` has always proposed the correction; until now nothing on
+  // a booted installation ever applied it.
+  const unresolved = agreeingIdentity(plugin, rawTitle);
+  const groupId = groupWithRelease(db, { rawTitle, ...unresolved });
+
+  const first = await runRekeyOnBoot(db, registry, DEPS);
+  assert.equal(first.applied, true);
+  assert.equal(first.report?.moved, 0, 'nothing to correct yet — the site is not confirmed');
+
+  recordDiscoveredSite(db, 'JulesJordan', { site: 'Jules Jordan' }, 'test', 1);
+
+  const second = await runRekeyOnBoot(db, registry, DEPS);
+  assert.equal(second.applied, true, 'a discovered site changes the inputs as surely as a configured one');
+  assert.equal(second.reason, 'sites-changed');
+  assert.equal(second.report?.moved, 1);
+
+  const row = getGroup(db, groupId);
+  assert.equal(row?.identityKey, unresolved.identityKey, 'case 7 is display-only: the key does not move');
+  assert.ok(row?.display.includes('Jules Jordan'), 'the corrected display is written, not merely proposed');
+});
+
+test('runRekeyOnBoot: pathTemplate is not a site input', async () => {
+  const db = openTestDatabase();
+  const rawTitle = 'Site.26.09.08.Hotel.Boot.GERMAN.XXX.1080p.MP4-GRP';
+  const groupId = groupWithRelease(db, {
+    rawTitle,
+    identityKey: 'site:2026-09-08:hotel-boot-german',
+    display: '{"title":"stale","fields":[]}',
+  });
+
+  const first = await runRekeyOnBoot(db, registryFor(createScenesPlugin({}) as MediaTypePlugin), DEPS);
+  assert.equal(first.applied, true);
+
+  const sentinel = 'SENTINEL-runRekeyOnBoot-path-template-search-text';
+  db.prepare('UPDATE media_groups SET search_text = ? WHERE id = ?').run(sentinel, groupId);
+
+  // A template edit changes where files are filed, never what a group is —
+  // #22 records renaming a whole library on one as deliberately not
+  // happening, and folding the template into the fingerprint is exactly how
+  // that would start.
+  const retemplated = createScenesPlugin({
+    pathTemplate: '{sitename}/{date}/{sitename}.{date}{episode}.{titledots}.{resolution}-{group}',
+  }) as MediaTypePlugin;
+  const second = await runRekeyOnBoot(db, registryFor(retemplated), DEPS);
+
+  assert.equal(second.applied, false);
+  assert.equal(second.report, null);
+  assert.equal(getGroup(db, groupId)?.searchText, sentinel, 'the sentinel surviving proves nothing was written');
 });

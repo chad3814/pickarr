@@ -196,6 +196,26 @@ export interface MediaTypePlugin {
   learnSites?(sites: readonly string[]): void;
 
   /**
+   * Every site name this plugin would key against right now — whatever
+   * configuration supplied and whatever `learnSites` has since added, as one
+   * list. Order and duplicates are the plugin's own business; the host sorts
+   * before it compares.
+   *
+   * The host uses this to notice that the inputs a stored identity key was
+   * derived from have changed since that key was written, and to re-key the
+   * affected groups. It is deliberately *only* the site names and not the
+   * whole plugin configuration: a plugin whose path template changed keys
+   * every title exactly as before, and saying otherwise here would rename an
+   * entire library on a cosmetic edit.
+   *
+   * Optional, like `learnSites`. A plugin that does not implement it
+   * contributes nothing, which reads as "no site input ever changes" — right
+   * for a plugin that has no site notion at all, and the reason the two hooks
+   * are usually implemented together.
+   */
+  siteInputs?(): readonly string[];
+
+  /**
    * What to ask a scene-metadata service about this group. `null` means the
    * group cannot be looked up — no site, typically — and it is then never
    * queued.

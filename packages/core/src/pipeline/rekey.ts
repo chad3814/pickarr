@@ -380,17 +380,30 @@ interface Bucket {
   moverIds: number[];
 }
 
-export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProposal[] {
-  // Every plugin is seeded with whatever sites this installation has
-  // confirmed, exactly as `main.ts` does once at boot. Skipping this would
-  // make case 7's whole class of correction invisible: the identity key
-  // would still agree, so nothing would look wrong, but the corrected
-  // display this pass exists to notice would never be computed, because the
-  // plugin would still be guessing off configuration alone. `learnSites` is
-  // documented additive, so re-seeding a plugin that already knows a site is
-  // a no-op, not a second write of anything.
+/**
+ * Seeds every plugin with whatever sites this installation has confirmed,
+ * exactly as `main.ts` does once at boot. Skipping this would make case 7's
+ * whole class of correction invisible: the identity key would still agree, so
+ * nothing would look wrong, but the corrected display this pass exists to
+ * notice would never be computed, because the plugin would still be guessing
+ * off configuration alone. `learnSites` is documented additive, so re-seeding
+ * a plugin that already knows a site is a no-op, not a second write of
+ * anything.
+ *
+ * Exported, and a function rather than two lines inside `planRekey`, because
+ * `runRekeyOnBoot` has to do this *before* it reads `siteInputs` off the same
+ * plugins: an unseeded plugin reports only its configured list, so the
+ * fingerprint would never notice a newly discovered site and the pass would
+ * never re-run for one. Calling it twice in a boot is deliberate and free —
+ * see the additivity note above.
+ */
+export function seedPluginSites(db: DatabaseSync, registry: PluginRegistry): void {
   const sites = knownSiteNames(db);
   for (const plugin of registry.all()) plugin.learnSites?.(sites);
+}
+
+export function planRekey(db: DatabaseSync, registry: PluginRegistry): RekeyProposal[] {
+  seedPluginSites(db, registry);
 
   const rows = db
     .prepare(
@@ -874,13 +887,16 @@ async function destinationOccupied(path: string): Promise<boolean> {
  * pass needs one at all: it runs the live parser rather than a fixed schema
  * change, so it has no place in `schema_migrations`.
  *
- * The write pass this key gates is deliberately never re-run automatically
- * (see `runRekeyOnBoot`'s own comment): once set, every later boot only
- * drift-checks. That means a group left in `failed` or
- * `skippedDestinationExists` by the one boot that ran the write pass is never
- * retried by anything in this codebase — recovery is manual. To force the
- * write pass to run again (for example after fixing whatever made a group
- * fail), delete this key's row from `app_state`:
+ * This key's meaning is unchanged by `SITE_INPUTS_KEY` below and is still
+ * exactly "the pass has run at least once": once set, no boot runs the write
+ * pass *for this reason* again. It is no longer the only reason, though, so
+ * the marker being set no longer implies a read-only boot. That means a group
+ * left in `failed` or `skippedDestinationExists` by a boot that ran the write
+ * pass is retried only if the site inputs happen to change afterwards —
+ * recovery is otherwise still manual (#66 item 1 is the control that would
+ * make it deliberate). To force the write pass to run again (for example
+ * after fixing whatever made a group fail), delete this key's row from
+ * `app_state`:
  *
  *   DELETE FROM app_state WHERE key = 'pass:rekey-scene-slugs';
  *
@@ -890,6 +906,57 @@ async function destinationOccupied(path: string): Promise<boolean> {
  * only whatever is genuinely still outstanding is retried.
  */
 export const REKEY_MARKER_KEY = 'pass:rekey-scene-slugs';
+
+/**
+ * The `app_state` key holding a fingerprint of the site names every plugin
+ * would key against, as of the last boot that ran the write pass.
+ *
+ * The marker above answers "has the pass ever run"; this answers "has
+ * anything a stored key was *derived from* changed since it last ran". Both
+ * are needed, and neither subsumes the other: an installation past its first
+ * boot has the marker set forever, so without this a user who adds a site to
+ * `plugins.<pkg>.sites` and restarts gets nothing but a rising drift count,
+ * and the next release of an affected scene ingests as a second group (#5).
+ *
+ * The fingerprint deliberately covers site names only, never the whole plugin
+ * configuration. Including `pathTemplate` would make a template edit rename
+ * every file in the library on the next boot, which is exactly what
+ * [#22](https://github.com/chad3814/pickarr/issues/22) records as deliberately
+ * not happening — a template governs where a file is filed, not what the group
+ * *is*, and re-keying is the identity repair.
+ *
+ * It covers configured and discovered names together, because `siteInputs` is
+ * read after `seedPluginSites` has already folded `knownSiteNames` into each
+ * plugin. Both belong: a site confirmed by lookup after a group was keyed
+ * leaves that key exactly as stale as one the user typed into the config, and
+ * `planRekey`'s case 7 is that staleness in its display-only form.
+ *
+ * Sorted at both levels before it is stringified, so two boots that discover
+ * the same sites in different orders produce the same value. That stability is
+ * the whole safety property: a fingerprint that wobbled would re-run the write
+ * pass, and the renames, on every boot forever.
+ */
+export const SITE_INPUTS_KEY = 'pass:rekey-site-inputs';
+
+/**
+ * The value stored under `SITE_INPUTS_KEY`: every plugin's `siteInputs`,
+ * sorted within each plugin and across them, as JSON.
+ *
+ * Named rather than inlined into `runRekeyOnBoot` so that a test can say "the
+ * inputs are unchanged" by calling this, instead of pasting a JSON literal
+ * that would keep agreeing with a stored value long after it stopped
+ * describing the plugins. Takes an already-seeded registry — `siteInputs`
+ * reports what a plugin knows now, and `seedPluginSites` is what makes that
+ * include discovered sites.
+ */
+export function siteInputsFingerprint(registry: PluginRegistry): string {
+  return JSON.stringify(
+    registry
+      .all()
+      .map((plugin) => [plugin.id, [...(plugin.siteInputs?.() ?? [])].sort()] as const)
+      .sort((a, b) => a[0].localeCompare(b[0])),
+  );
+}
 
 /**
  * How many groups a fresh `planRekey` would still act on — every proposal
@@ -926,8 +993,18 @@ export function countDrift(db: DatabaseSync, registry: PluginRegistry): number {
 
 /** What one boot's worth of `runRekeyOnBoot` did — see that function. */
 export interface RekeyBootOutcome {
-  /** True on the one boot that actually writes: the marker was unset. */
+  /** True on a boot that actually writes: see `reason` for which one. */
   applied: boolean;
+  /**
+   * Why the write pass ran, or `null` on the ordinary boot where it did not
+   * — non-null exactly when `applied` is true. `'first-run'` is the marker
+   * having been unset; `'sites-changed'` is `SITE_INPUTS_KEY` disagreeing
+   * with the plugins' current site lists. This exists for the boot log line
+   * in `main.ts` and nothing else: an operator who sees a rename count on a
+   * boot that is not the first one needs the reason named, or the only
+   * available reading is "the pass has started running twice".
+   */
+  reason: 'first-run' | 'sites-changed' | null;
   /** `applyRekey`'s own tally, present only when `applied` is true. */
   report: RekeyReport | null;
   /**
@@ -948,14 +1025,25 @@ export interface RekeyBootOutcome {
 }
 
 /**
- * The Task 6 entry point: run the write pass exactly once, ever, then settle
- * into an every-boot read-only drift check. Gated on `REKEY_MARKER_KEY`
- * rather than on whether anything is actually left to do, so the *decision*
- * to stop writing survives independently of the data — the alternative
- * (write until `planRekey` returns nothing but `unchanged`) would run the
- * write pass again on every boot for as long as even one group is
- * permanently stationary by design (`skipped-edited`, `skipped-collision`),
- * which is forever.
+ * The Task 6 entry point: run the write pass on the first boot and on any
+ * later boot whose site inputs have changed, and otherwise settle into an
+ * every-boot read-only drift check. Gated on two stored values rather than on
+ * whether anything is actually left to do, so the *decision* to stop writing
+ * survives independently of the data — the alternative (write until
+ * `planRekey` returns nothing but `unchanged`) would run the write pass again
+ * on every boot for as long as even one group is permanently stationary by
+ * design (`skipped-edited`, `skipped-collision`), which is forever.
+ *
+ * The second gate is `SITE_INPUTS_KEY`, and it is not a weakening of the
+ * first. The site names a plugin keys against are an *input* to every stored
+ * identity, so changing them makes those identities stale in the same way a
+ * parser fix does; leaving them alone means the next release of an
+ * already-picked scene arrives as a second group (#5). This runs the write
+ * pass on more boots than one — on a young installation, on the boot after
+ * any site discovery — and that is the repair rather than a side effect. It
+ * converges for the same reason an interrupted first run does: `planRekey`
+ * reads an already-moved group as `unchanged`, so the second boot's pass
+ * moves nothing.
  *
  * Takes `deps` and returns its outcome rather than logging anything itself;
  * `main.ts`'s `runRekeyAtBoot` owns the log line and the try/catch that keeps
@@ -966,8 +1054,19 @@ export async function runRekeyOnBoot(
   registry: PluginRegistry,
   deps: RekeyDeps,
 ): Promise<RekeyBootOutcome> {
-  if (getAppState(db, REKEY_MARKER_KEY) !== null) {
-    return { applied: false, report: null, drift: countDrift(db, registry) };
+  // Before the fingerprint, not after: `siteInputs` reports what a plugin
+  // knows *now*, and a plugin that has not been handed `knownSiteNames` yet
+  // knows only its configured list. Reading it unseeded would make every
+  // discovered site invisible to this comparison, which is half the staleness
+  // the fingerprint exists to catch. `planRekey` seeds again below; that is a
+  // documented no-op.
+  seedPluginSites(db, registry);
+  const siteInputs = siteInputsFingerprint(registry);
+
+  const changed = getAppState(db, SITE_INPUTS_KEY) !== siteInputs;
+  const markerSet = getAppState(db, REKEY_MARKER_KEY) !== null;
+  if (!changed && markerSet) {
+    return { applied: false, reason: null, report: null, drift: countDrift(db, registry) };
   }
 
   const report = await applyRekey(db, registry, deps);
@@ -992,6 +1091,13 @@ export async function runRekeyOnBoot(
   // proposes nothing against an already-converged copy of the owner's real
   // database.
   setAppState(db, REKEY_MARKER_KEY, 'done', deps.now());
+  // The fingerprint alongside the marker, last and for the same reason: a
+  // throw anywhere above leaves both untouched, so the next boot re-runs from
+  // the top rather than recording that it has already handled a site list it
+  // never finished acting on. Written with the value read *before* the pass,
+  // which is also the value after it — `applyRekey` moves groups, it does not
+  // touch `discovered_sites` or any plugin's config.
+  setAppState(db, SITE_INPUTS_KEY, siteInputs, deps.now());
 
   // `RekeyBootOutcome.drift` documents "groups not agreeing with a fresh
   // parse, as of this check" — a state, not an activity log. `moved` and
@@ -1012,5 +1118,5 @@ export async function runRekeyOnBoot(
     report.skippedDestinationExists +
     report.failed;
 
-  return { applied: true, report, drift };
+  return { applied: true, reason: markerSet ? 'sites-changed' : 'first-run', report, drift };
 }
