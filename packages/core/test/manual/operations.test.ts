@@ -1378,6 +1378,70 @@ test('a doomed row whose file is already gone is not counted as trashed', async 
   db.close();
 });
 
+/**
+ * Phase 2's answer to a doomed row that is no longer there when it goes to read
+ * it, which until now had no coverage at all. It needs no concurrency to reach:
+ * phase 1's `moveImportedFilesToGroup` is an `UPDATE` on `imported_files`, so an
+ * `AFTER UPDATE` trigger on that table can delete the doomed row out from under
+ * the plan inside phase 1's own transaction — the same trigger technique the
+ * phase-1 rollback tests above use, pointed at a different statement.
+ *
+ * Reported rather than skipped, and that is the whole point: the planner lifted
+ * the occupant blocker off this path on the strength of phase 2 clearing it, so
+ * a silent skip would drop an occupied path out of the outcome while leaving the
+ * file itself in the way.
+ */
+test('a doomed row that vanishes between plan and apply is reported, not skipped', async () => {
+  const db = openTestDatabase();
+  const libraryRoot = await mkdtemp(join(tmpdir(), 'pickarr-edit-'));
+  const trashDir = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  await seedWithFile(db, libraryRoot);
+  // The target is picked on a release scoring below the source's, so it is the
+  // target's own file that the merge dooms.
+  db.prepare('UPDATE releases SET score = 500 WHERE id = 2').run();
+  db.prepare("UPDATE media_groups SET state = 'picked', picked_release_id = 2 WHERE id = 2").run();
+  await mkdir(join(libraryRoot, 'k2'), { recursive: true });
+  await writeFile(join(libraryRoot, 'k2', '2160.mp4'), 'superseded');
+  db.prepare(
+    `INSERT INTO downloads (id, release_id, group_id, client_id, kind, status,
+                            created_at, updated_at)
+     VALUES (2, 2, 2, 'sab', 'initial', 'imported', 100, 100)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO imported_files (id, download_id, group_id, source_path, dest_path,
+                                 size_bytes, created_at)
+     VALUES (2, 2, 2, '/dl/b.mp4', ?, 5, 100)`,
+  ).run(join(libraryRoot, 'k2', '2160.mp4'));
+  const deps: ManualDeps = { ...makeDeps(db, FILING, libraryRoot), trashDir };
+
+  // Planned before the trigger exists, so the plan names a row that is really
+  // there — the row goes between the plan and phase 2, which is the case under
+  // test rather than a plan that was wrong when it was made.
+  const plan = ok(await planIdentityChange(deps, 1, { key: 'k2', title: 'A' }));
+  assert.deepEqual(plan.trashing, [
+    { importedFileId: 2, path: join(libraryRoot, 'k2', '2160.mp4') },
+  ]);
+  db.exec(`
+    CREATE TRIGGER drop_doomed AFTER UPDATE ON imported_files
+    BEGIN DELETE FROM imported_files WHERE id = 2; END
+  `);
+
+  const outcome = ok(await editGroup(deps, 1, { key: 'k2', title: 'A' }, plan.digest));
+
+  assert.equal(outcome.trashed, 0);
+  assert.equal(outcome.renamed, 1, 'one row going missing does not abort the rest');
+  assert.deepEqual(outcome.failed, [
+    {
+      path: join(libraryRoot, 'k2', '2160.mp4'),
+      error: 'imported file 2 is no longer on record, so it was not trashed',
+    },
+  ]);
+  // Nothing was invented about the file the vanished row named: it is still on
+  // disk, untouched and untrashed.
+  assert.equal(await readFile(join(libraryRoot, 'k2', '2160.mp4'), 'utf8'), 'superseded');
+  db.close();
+});
+
 // --- Edit a release ----------------------------------------------------
 
 test('editing a release writes the quality, the recomputed score and the stamp', () => {

@@ -282,7 +282,35 @@ export async function planIdentityChange(
           ...liveFilesForOtherReleases(db, group.id, keepReleaseId),
           ...(merging ? liveFilesForOtherReleases(db, target.id, keepReleaseId) : []),
         ];
+  // The same three checks the rename loop below makes, in the same order and
+  // with the same wording, because two of them are the same conditions
+  // `trashFiles` (`pipeline/upgrade.ts`) throws on. Without them the identical
+  // filesystem fact — a directory where a regular file should be, a `dest_path`
+  // outside the root — reached the operator as a blocker before they committed
+  // when it belonged to a *renamed* row, and as a `failed` entry after the merge
+  // had already happened when it belonged to a *doomed* one. §4.3 of the design
+  // phrases both blockers about the row rather than about the rename, so this is
+  // the code coming to the design rather than the other way round.
+  //
+  // Every doomed row is pushed regardless of what its check found, and that is
+  // load-bearing rather than laziness: `trashing` and `trashedPaths` are the
+  // plan's account of which paths phase 2 will clear, a blocked plan never
+  // reaches the applier at all (`editGroup` refuses on `blockers`), and dropping
+  // a blocked entry would only change the plan the dialog renders while
+  // re-opening the occupant blocker below on a path this plan already speaks
+  // for — see `trashedPaths`.
   for (const file of doomed) {
+    const source = await lstatOrNull(file.destPath);
+    if (source === null) {
+      // A warning rather than a blocker, matching the rename side and matching
+      // what phase 2 will actually do with it: `trashFiles` retires a row whose
+      // file is already gone with a null `trash_path` instead of failing.
+      warnings.push(`${file.destPath} is already gone from disk; nothing to trash`);
+    } else if (!source.isFile()) {
+      blockers.push(`${file.destPath} is not a regular file; refusing to trash it`);
+    } else if (!isContained(libraryRoot, file.destPath, false)) {
+      blockers.push(`${file.destPath} resolves outside the library root; refusing to trash it`);
+    }
     trashing.push({ importedFileId: file.id, path: file.destPath });
   }
   const doomedIds = new Set(doomed.map((file) => file.id));
