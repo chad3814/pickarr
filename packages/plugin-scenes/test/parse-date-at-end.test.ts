@@ -544,6 +544,44 @@ test('the same listing with a two-digit year is not a listing to the parser, and
   assert.equal(a.identityKey, b.identityKey);
 });
 
+test('a hyphen-attached group inside a quality segment is a group, not title text', () => {
+  // `- 1080p-GRP -` is quality material with the group stuck on the end of it,
+  // and the segment carries no encode cut of its own: the backward walk in
+  // `findEncodeSuffixStart` stops immediately on `GRP`, which is not encode
+  // vocabulary. So the whole segment used to survive into `titleParts` — the
+  // resolution never reached `extractQuality` and a group tag sat in the
+  // identity key, which read `site:2023-07-19:1080p-grp--alex-coal--deep`.
+  const result = parsed('[Site] Alex Coal - Deep - 1080p-GRP - 2023-07-19');
+  assert.equal(result.identityKey, 'site:2023-07-19:alex-coal--deep');
+  assert.equal(result.display.title, 'Alex Coal - Deep');
+  assert.equal(result.quality.resolution, 1080);
+  assert.equal(result.quality.releaseGroup, 'GRP');
+});
+
+test('a listing collates with and without the group stamped on its quality segment', () => {
+  // The collation the defect broke, and the reason it matters: two encodes of
+  // one scene, one of them carrying the group that made it, are one scene.
+  assert.equal(
+    parsed('[Site] Alex Coal - Deep - 1080p-GRP - 2023-07-19').identityKey,
+    parsed('[Site] Alex Coal - Deep - 1080p - 2023-07-19').identityKey,
+    'with and without the group tag must be one scene',
+  );
+});
+
+test('a hyphen inside a title segment stays punctuation, not a group separator', () => {
+  // `detachReleaseGroup`'s hyphen branch is permissive on purpose —
+  // `docs/known-issues.md` explains why no shape rule tells `-Throat` from
+  // `-GRP` — so the detach above is accepted only when `findEncodeSuffixStart`
+  // reads what is left as encode information from its very first token, which
+  // is to say only when the segment contributed no title at all. `Deep` is
+  // title material, so the detach is discarded here. This passes with or
+  // without the gate; it is pinned so that widening the gate has to break a
+  // test rather than quietly rename a scene.
+  const result = parsed('[Site] Alex Coal - Deep-Throat - 1080p - 2023-07-19');
+  assert.equal(result.display.title, 'Alex Coal - Deep-Throat');
+  assert.equal(result.quality.releaseGroup, undefined);
+});
+
 test('VERTICAL and F4V are encode information, not title words', () => {
   assert.equal(
     parsed('FoxxedUp.23.07.19.Buns.And.Boobs.Joi.XXX.VERTICAL.XviD-iPT Team').identityKey,

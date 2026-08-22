@@ -593,6 +593,14 @@ const CORPUS: Entry[] = [
     isNew: true,
   },
   {
+    name: '[Vixen] Beautiful Episode - Alex Coal - 2023-07-19 - 1080p-SLUT',
+    scene: 'vixen/alex-coal-beautiful-episode',
+    key: 'vixen:2023-07-19:alex-coal--beautiful-episode',
+    title: 'Beautiful Episode - Alex Coal',
+    quality: '1080|-|-|-|-|-|SLUT',
+    isNew: true,
+  },
+  {
     name: '[Vixen] Beautiful Episode - Alex Coal - 2023-07-19 - 1080p',
     scene: 'vixen/alex-coal-beautiful-episode',
     key: 'vixen:2023-07-19:alex-coal--beautiful-episode',
