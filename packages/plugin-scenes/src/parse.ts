@@ -81,6 +81,24 @@ import type {
  * anchor-introduced run of encode words; the parser refuses whenever that run
  * is interrupted rather than guessing, which is why names like
  * `Site.23.04.15.The.1080p.Club.MP4-G` return `null`.
+ *
+ * Where the run is *not* interrupted the risk is real, and it is accepted
+ * rather than reducible. Worked: `Site.23.01.01.Party.4K.MP4-G` is the scene
+ * `Party` released in 4K, and `Site.23.01.01.Party.4K.1080p.MP4-G` is the
+ * scene `Party 4K` released at 1080p. Rule 2 cuts both at `4K`, so both key
+ * as `site:2023-01-01:party` — and the second also reports 2160, because
+ * `extractQuality` reads the tail from the same cut and finds `4K` before it
+ * finds `1080p`. Every token in either name is accounted for under either
+ * reading, so the string does not carry the information needed to choose.
+ * Cutting later would put `4K` into the title of every ordinary 4K release;
+ * cutting earlier is precisely what rule 1 already does when a marker is
+ * there to justify it, and `Site.23.01.01.Party.4K.XXX.1080p.MP4-G` duly keys
+ * as `site:2023-01-01:party-4k` at 1080. So the fix is a marker in the name
+ * or a scene id from upstream, neither of which is the parser's to supply.
+ * The collision is pinned by name in `parse-corpus.test.ts` — it cannot be a
+ * corpus row, because the no-over-collation invariant would fail on it — so a
+ * future change to the anchor rule has to move it rather than move it
+ * silently.
  */
 
 /**
