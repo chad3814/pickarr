@@ -288,6 +288,24 @@ test('a channel count still anchors a dot-attached group, on the token behind it
   assert.equal(native.identityKey, upscale.identityKey);
 });
 
+test('both spellings of a remaster are encode vocabulary and collate with the original', () => {
+  // `REMASTER` and `REMASTERED` are the same claim about the same scene, so
+  // both have to sit inside the encode run and neither may change the key.
+  // The vocabulary entry once read `REMASTER` and refused `REMASTERED`; the
+  // fix for that spelled it `REMASTERED?`, where the `?` binds to the `D`
+  // alone, and the refusal simply moved to the shorter form. Naming both
+  // literals here is what stops the pair being half-fixed a third time.
+  for (const name of [
+    'Site.23.04.15.Name.XXX.REMASTER.XviD-iPT Team',
+    'Site.23.04.15.Name.XXX.REMASTERED.XviD-iPT Team',
+    'Site.23.04.15.Name.XXX.REMASTERED.1080p.MP4-G',
+  ]) {
+    const parsed = parseSceneRelease(name);
+    assert.ok(parsed, `expected ${name} to parse`);
+    assert.equal(parsed.identityKey, 'site:2023-04-15:name', name);
+  }
+});
+
 // --- Invariants -------------------------------------------------------------
 // The three properties below are what collation quality actually depends on.
 // They are asserted over a corpus rather than one input each, so a new

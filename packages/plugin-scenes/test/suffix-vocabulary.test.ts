@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LANGUAGE_TERMS, NON_GROUP_EDIT_TERMS, NON_GROUP_TERMS } from '../src/parse.ts';
+import { isEncodeToken, LANGUAGE_TERMS, NON_GROUP_EDIT_TERMS, NON_GROUP_TERMS } from '../src/parse.ts';
 
 /**
  * Every term the single undivided set held before the split. Spelled out as a
@@ -56,5 +56,16 @@ test('terms that can be title words stay out of the language half', () => {
   // language half is ever dropped from a title, so these must not be in it.
   for (const term of ['FULL', 'COMPILATION', 'SCENE', 'PART', 'UNCUT', 'EXTENDED']) {
     assert.ok(!LANGUAGE_TERMS.has(term), `${term} must not be droppable from a title`);
+  }
+});
+
+test('both spellings of a remaster are encode tokens, and neither is in the non-group half', () => {
+  // Spelled out as two literals rather than one, because one is exactly what
+  // let the last regression through: the corpus carries `REMASTERED` and
+  // nothing carries `REMASTER`, so a single-spelling test passed while the
+  // shorter form was refusing whole names.
+  for (const term of ['REMASTER', 'REMASTERED']) {
+    assert.ok(isEncodeToken(term), `${term} should be encode vocabulary`);
+    assert.ok(!NON_GROUP_TERMS.has(term), `${term} must not be a non-group term as well`);
   }
 });

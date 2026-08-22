@@ -133,9 +133,19 @@ const SOURCE_TOKEN =
  * Tokens that routinely appear in an encode section but are too weak to
  * anchor a boundary by themselves — several of them (`Web`, `HD`, `MP4`) are
  * perfectly ordinary title words in this domain.
+ *
+ * `UPSCALED?` and `REMASTER(?:ED)?` are deliberately spelled differently. A
+ * bare `?` binds to the letter in front of it, so `UPSCALED?` covers `UPSCALE`
+ * and `UPSCALED` — both real spellings, both wanted — while `REMASTERED?`
+ * would cover `REMASTERE` and `REMASTERED` and miss `REMASTER`. The group has
+ * to take the whole `ED` for the second and only the `D` for the first.
+ * Getting this wrong is not hypothetical: the entry has now been mis-spelled
+ * three times, once as `REMASTER` refusing `REMASTERED` and once the other way
+ * round, and each time an unknown token stopped the backward walk in
+ * `findEncodeSuffixStart` and the whole name was refused.
  */
 const ANCILLARY_TOKEN =
-  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bits?|8bits?|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTERED?|(?:real[-_.\s]?)?esrgan|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|F4V|VERTICAL|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
+  /^(?:WEB|DL|HD|SD|FHD|QHD|HDR(?:10)?|DV|10bits?|8bits?|\d{2,3}fps|iNTERNAL|REPACK|PROPER|MULTi|DUAL|UPSCALED?|REMASTER(?:ED)?|(?:real[-_.\s]?)?esrgan|x26[45]|H[-_.]?26[45]|HEVC|AVC|AV1|XviD|DivX|VP9|AAC\d?|AC3|EAC3|DDP?\d?|MP3|FLAC|Opus|MP4|MKV|WMV|AVI|MOV|FLV|M4V|F4V|VERTICAL|VR|3D|SBS|TB|LR|OU|MONO|MKX200|MKX220|FISHEYE190|FISHEYE|OCULUS|GEARVR|PSVR|SMARTPHONE|\d)$/i;
 
 /**
  * An upscale is a lower-resolution source stretched to a higher one, so it
