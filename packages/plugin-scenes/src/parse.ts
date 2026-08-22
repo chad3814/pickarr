@@ -2119,7 +2119,36 @@ function splitSegment(segment: string): SegmentSplit {
   // in dropped tokens — so it is not a defect, but it is not excluded either,
   // and a comment claiming the shape is safe would be wrong. Both spellings
   // are pinned by tests in `parse-date-at-end.test.ts`.
-  const tokens = tokensOf(text);
+  let tokens = tokensOf(text);
+
+  // A hyphen-attached group inside a quality segment: `- 1080p-GRP -`. Nothing
+  // else on this path finds one — the bracket loop above wants `[...]`/`{...}`,
+  // and the cut below never fires, because the backward walk stops on the group
+  // tag itself and there is nothing behind it to anchor on. So the whole
+  // segment used to reach `titleParts`, putting a group in the identity key and
+  // taking the resolution out of `extractQuality`'s reach entirely.
+  //
+  // The gate is the whole design. `detachReleaseGroup`'s hyphen branch is
+  // deliberately permissive — `docs/known-issues.md` explains at length why no
+  // shape rule separates `-Ghost` from `-Bonus` — and in a listing a hyphen is
+  // ordinary punctuation as well as a group separator, so detaching
+  // unconditionally would read `Deep-Throat` as the scene "Deep" from a group
+  // called "Throat". Requiring the cut on what remains to be exactly `0` means
+  // the detach is accepted only when the remainder is encode information from
+  // its *first* token — only when the segment contributed no title at all. That
+  // is the dotted form's positional argument ("a tag reads as a group because of
+  // where it sits, behind the encode section") applied to a segment rather than
+  // a whole name, and it is self-validating: a wrong detach leaves title
+  // material at index 0, the cut does not land there, and the detach is dropped.
+  const detached = detachReleaseGroup(tokens, text);
+  if (detached.group !== undefined && findEncodeSuffixStart(detached.tokens, 0) === 0) {
+    // The bracketed form keeps precedence; this only fills a gap it left.
+    if (group === undefined) group = detached.group;
+    tokens = detached.tokens;
+    const last = tokens.at(-1);
+    if (last !== undefined) text = text.slice(0, last.start + last.text.length);
+  }
+
   const cut = findEncodeSuffixStart(tokens, 0);
   const cutToken = cut === null ? undefined : tokens[cut];
   if (cutToken !== undefined) {
