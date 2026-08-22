@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { openTestDatabase } from '../../src/db/open.ts';
+import {
+  openTestDatabase,
+  TEST_LABEL_TOKEN,
+  TEST_LABEL_TOKEN_MINTED_AT,
+} from '../../src/db/open.ts';
 import {
   reconcileClient,
   resetReconcileWarningsForTests,
@@ -46,6 +50,13 @@ function seedDownload(
     error?: string;
     storagePath?: string;
     absentSince?: number;
+    /**
+     * Defaults to `TEST_LABEL_TOKEN_MINTED_AT`, which is *not* before it, so
+     * an ordinary fixture row is post-token and answers only to the salted
+     * label. A test that wants the pre-#28 compatibility path has to seed a
+     * row older than the token and say so.
+     */
+    createdAt?: number;
   },
 ): void {
   db.prepare(
@@ -63,7 +74,7 @@ function seedDownload(
   db.prepare(
     `INSERT INTO downloads (id, release_id, group_id, client_id, client_ref, kind, status,
                             error, storage_path, absent_since, created_at, updated_at)
-     VALUES (?, 1, 1, 'sab', ?, 'initial', ?, ?, ?, ?, 1, 1)`,
+     VALUES (?, 1, 1, 'sab', ?, 'initial', ?, ?, ?, ?, ?, ?)`,
   ).run(
     fields.id,
     fields.clientRef,
@@ -71,6 +82,8 @@ function seedDownload(
     fields.error ?? null,
     fields.storagePath ?? null,
     fields.absentSince ?? null,
+    fields.createdAt ?? TEST_LABEL_TOKEN_MINTED_AT,
+    fields.createdAt ?? TEST_LABEL_TOKEN_MINTED_AT,
   );
 }
 
@@ -551,7 +564,7 @@ test('a client ref that no longer matches is corrected from the label rather tha
   const db = openTestDatabase();
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_stale' });
   const client = fakeClient({
-    queue: [queued('nzo_current', clientJobName('Some.Release.Title', 1))],
+    queue: [queued('nzo_current', clientJobName(TEST_LABEL_TOKEN, 'Some.Release.Title', 1))],
     history: [],
     complete: true,
   });
@@ -577,7 +590,7 @@ test('two entries carrying one label import that download once, not twice', asyn
     queue: [],
     history: [
       finished('nzo_a', '/sab/complete/R'),
-      finished('nzo_b', '/sab/complete/R', clientJobName('Some.Release.Title', 1)),
+      finished('nzo_b', '/sab/complete/R', clientJobName(TEST_LABEL_TOKEN, 'Some.Release.Title', 1)),
     ],
     complete: true,
   });
@@ -598,7 +611,7 @@ test('a ref and a label naming different downloads takes the ref, and says so on
   seedDownload(db, { id: 2, status: 'downloading', clientRef: 'nzo_2' });
   const client = fakeClient({
     // The ref belongs to download 1; the label claims download 2.
-    queue: [queued('nzo_1', clientJobName('Some.Release.Title', 2))],
+    queue: [queued('nzo_1', clientJobName(TEST_LABEL_TOKEN, 'Some.Release.Title', 2))],
     history: [],
     complete: true,
   });
@@ -800,7 +813,7 @@ test('a queued download whose addUrl already succeeded is recovered from the que
     // Recovery has to extract the marker out of a name that also carries the
     // release title (see clientJobName), not match on the bare label alone.
     {
-      queue: [queued('nzo_orphan', clientJobName('Some.Release.Title', 1), 5)],
+      queue: [queued('nzo_orphan', clientJobName(TEST_LABEL_TOKEN, 'Some.Release.Title', 1), 5)],
       history: [],
       complete: true,
     },
@@ -831,7 +844,7 @@ test('a queued download whose addUrl already succeeded and finished is recovered
     {
       queue: [],
       history: [
-        finished('nzo_finished', '/sab/complete/R', clientJobName('Some.Release.Title', 1)),
+        finished('nzo_finished', '/sab/complete/R', clientJobName(TEST_LABEL_TOKEN, 'Some.Release.Title', 1)),
       ],
       complete: true,
     },
@@ -861,7 +874,7 @@ test('recovering a ref by label does not consume an addurl attempt, unlike a rea
   let addUrlCalls = 0;
   const client = fakeClient(
     {
-      queue: [queued('nzo_orphan', clientJobName('Some.Release.Title', 1), 1)],
+      queue: [queued('nzo_orphan', clientJobName(TEST_LABEL_TOKEN, 'Some.Release.Title', 1), 1)],
       history: [],
       complete: true,
     },
@@ -902,7 +915,7 @@ test('a fresh addUrl call sends a name carrying the release title, with the labe
 
   assert.ok(seenName !== undefined);
   assert.match(seenName ?? '', /^T /);
-  assert.equal(extractLabel(seenName ?? ''), downloadLabel(1));
+  assert.equal(extractLabel(seenName ?? ''), downloadLabel(TEST_LABEL_TOKEN, 1));
   db.close();
 });
 
@@ -936,7 +949,7 @@ test('a tracked download whose client-side name does not match its label warns e
     const message = String(warnMock.mock.calls[0]?.arguments[0] ?? '');
     assert.match(message, /download 1/);
     assert.match(message, /Some\.Release\.Name/);
-    assert.match(message, /pickarr-1/);
+    assert.match(message, /pickarr-7e57ab1e-1/);
   } finally {
     warnMock.mock.restore();
   }
@@ -949,7 +962,7 @@ test('a tracked download whose client-side name matches its label never warns', 
   seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_1' });
   const client = fakeClient({
     // A real client reports the title-plus-marker name, not the bare label.
-    queue: [queued('nzo_1', clientJobName('T', 1), 10)],
+    queue: [queued('nzo_1', clientJobName(TEST_LABEL_TOKEN, 'T', 1), 10)],
     history: [],
     complete: true,
   });
@@ -980,7 +993,7 @@ const DECOY_TITLE = 'Site.25.01.02.Scene [pickarr-2]';
 
 /** Download 1's job name as a client that cut it at the title's length reports it. */
 function truncatedAtTitleLength(): string {
-  return clientJobName(DECOY_TITLE, 1).slice(0, DECOY_TITLE.length);
+  return clientJobName(TEST_LABEL_TOKEN, DECOY_TITLE, 1).slice(0, DECOY_TITLE.length);
 }
 
 /** Distinct refs per call, so a ref collision here can only come from recovery. */
@@ -1035,6 +1048,160 @@ test('a decoy marker naming a download that already holds the ref does not abort
   db.close();
 });
 
+// --- A second installation sharing our category ------------------------
+//
+// A label used to be `pickarr-<id>` and nothing else, so its whole namespace
+// was one database's rowid sequence: a second Pickarr sharing this SABnzbd
+// category mints `pickarr-1` for its own first download, and so do we. These
+// pin that a job we did not submit is never taken for ours, however exactly
+// its marker matches. #28.
+//
+// The other installation's job, as it appears in a snapshot we poll: in our
+// category, carrying a well-formed marker, and naming a release we have never
+// heard of.
+const FOREIGN_NAME = 'Alpha.Site.25.01.02.Scene [pickarr-1]';
+
+function foreignQueued(ref = 'nzo_A') {
+  return { ref, name: FOREIGN_NAME, percentage: 30, category: OURS };
+}
+
+test("a second installation's job is submitted around, not adopted, and is reported untracked", async () => {
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'queued', clientRef: null });
+  let addUrlCalls = 0;
+  const client = fakeClient(
+    { queue: [foreignQueued()], history: [], complete: true },
+    {
+      addUrl: async () => {
+        addUrlCalls += 1;
+        return 'nzo_new';
+      },
+    },
+  );
+
+  const result = await reconcileClient(deps(db, client));
+
+  // All three halves of the reported harm. Before the salt this row came back
+  // holding `nzo_A`, `addUrl` was never called — so our own release was never
+  // submitted at all — and the other installation's job was reported as
+  // nothing, because it had been silently accounted for as ours.
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_new');
+  assert.equal(addUrlCalls, 1);
+  assert.equal(result.untracked.length, 1);
+  assert.equal(result.untracked[0]?.ref, 'nzo_A');
+  db.close();
+});
+
+test("a second installation's finished job is never imported into our library", async () => {
+  // The sharpest end of the same mistake: the adopted ref carried a storage
+  // path, so the other installation's files were imported under our group's
+  // identity — and the cleanup pass at the end of the tick would then ask
+  // SABnzbd to delete their job and their files.
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'queued', clientRef: null });
+  const imported: DownloadRow[] = [];
+  const client = fakeClient({
+    queue: [],
+    history: [
+      {
+        ref: 'nzo_A',
+        name: FOREIGN_NAME,
+        outcome: 'completed',
+        storagePath: '/sab/complete/Alpha.Site.25.01.02.Scene [pickarr-1]',
+        failMessage: null,
+        category: OURS,
+      },
+    ],
+    complete: true,
+  });
+
+  await reconcileClient(deps(db, client, imported));
+
+  assert.deepEqual(imported, []);
+  db.close();
+});
+
+test("a second installation's job does not take a ref off our own live download", async () => {
+  // Not the double-submit case: this row already has a ref and a running job.
+  // The colliding label resolved to it anyway, and `reattachClientRef` moved
+  // it onto the stranger's job — abandoning the download we really were
+  // running, in the same tick, with nothing logged and nothing reported
+  // untracked.
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo_MINE' });
+  const client = fakeClient({
+    queue: [foreignQueued(), queued('nzo_MINE', clientJobName(TEST_LABEL_TOKEN, 'T', 1), 60)],
+    history: [],
+    complete: true,
+  });
+
+  const result = await reconcileClient(deps(db, client));
+
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_MINE');
+  assert.equal(result.untracked.length, 1);
+  db.close();
+});
+
+test('a colliding label naming a job another row already holds does not abort the tick', async () => {
+  // Worse than any single misattribution, and the reason this is not merely a
+  // correctness nicety: `setClientRef` writes into `UNIQUE (client_id,
+  // client_ref)`, so recovering a ref one of our other rows already holds
+  // throws out of `reconcileClient` before the matching, sweep and cleanup
+  // passes run. `reconcilePass` catches and logs it, so the whole tick is
+  // lost — and lost identically on every tick after, because an aborted tick
+  // changes nothing that would make the next one go differently. Every other
+  // download of this client stops being reconciled for as long as the
+  // colliding job is at the server.
+  //
+  // The shape needs two of our rows: one already attached to the stranger's
+  // job, and one with no ref whose colliding label names that same job.
+  const db = openTestDatabase();
+  seedDownload(db, { id: 1, status: 'queued', clientRef: null });
+  seedDownload(db, { id: 2, status: 'downloading', clientRef: 'nzo_A' });
+  const client = fakeClient({ queue: [foreignQueued()], history: [], complete: true });
+
+  const result = await reconcileClient(deps(db, client));
+
+  assert.equal(result.untracked.length, 0, 'nzo_A is accounted for by download 2');
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_new', 'download 1 submitted its own release');
+  db.close();
+});
+
+test('a download older than the token still recovers from its unsalted marker', async () => {
+  // The compatibility path, and the only place a legacy label is honoured.
+  // A job submitted before the salt existed is at the client under
+  // `[pickarr-<id>]` and cannot be renamed there, so a row that predates the
+  // token has to keep answering to it — otherwise shipping this resubmits
+  // every in-flight download exactly once.
+  const db = openTestDatabase();
+  seedDownload(db, {
+    id: 1,
+    status: 'queued',
+    clientRef: null,
+    createdAt: TEST_LABEL_TOKEN_MINTED_AT - 1,
+  });
+  let addUrlCalls = 0;
+  const client = fakeClient(
+    {
+      queue: [queued('nzo_legacy', 'Some.Release.Title [pickarr-1]', 5)],
+      history: [],
+      complete: true,
+    },
+    {
+      addUrl: async () => {
+        addUrlCalls += 1;
+        return 'nzo_should_never_be_returned';
+      },
+    },
+  );
+
+  await reconcileClient(deps(db, client));
+
+  assert.equal(addUrlCalls, 0);
+  assert.equal(getDownload(db, 1)?.clientRef, 'nzo_legacy');
+  db.close();
+});
+
 // --- Cleanup after a successful import ---------------------------------------
 
 function removalTracking(): { removed: { ref: string; deleteFiles: boolean }[]; remove: DownloadClient['remove'] } {
@@ -1057,7 +1224,7 @@ test('an imported download is removed from the client, with its files', async ()
   const client = fakeClient(
     {
       queue: [],
-      history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-1]')],
+      history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-7e57ab1e-1]')],
       complete: true,
     },
     { remove },
@@ -1073,7 +1240,7 @@ test('a download still running is left alone', async () => {
   const { removed, remove } = removalTracking();
   const client = fakeClient(
     {
-      queue: [queued('nzo-live', 'Scene [pickarr-1]', 40)],
+      queue: [queued('nzo-live', 'Scene [pickarr-7e57ab1e-1]', 40)],
       history: [],
       complete: true,
     },
@@ -1094,7 +1261,7 @@ test('a failed download is left in the client for inspection', async () => {
       history: [
         {
           ref: 'nzo-bad',
-          name: 'Scene [pickarr-1]',
+          name: 'Scene [pickarr-7e57ab1e-1]',
           outcome: 'failed',
           storagePath: null,
           failMessage: null,
@@ -1133,7 +1300,7 @@ test('a download imported during this same tick is cleaned up in it', async () =
   const client = fakeClient(
     {
       queue: [],
-      history: [finished('nzo-now', '/sab/x', 'Scene [pickarr-1]')],
+      history: [finished('nzo-now', '/sab/x', 'Scene [pickarr-7e57ab1e-1]')],
       complete: true,
     },
     { remove },
@@ -1171,13 +1338,13 @@ function importedWithStorage(db: DatabaseSync, storagePath: string): void {
 
 const DONE = {
   queue: [],
-  history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-1]')],
+  history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-7e57ab1e-1]')],
   complete: true,
 };
 
 test('the job directory goes too — the client empties it but leaves it standing', async () => {
   const db = openTestDatabase();
-  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]');
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-7e57ab1e-1]');
   const { deleted, rm } = directoryTracking();
 
   await reconcileClient({
@@ -1188,14 +1355,14 @@ test('the job directory goes too — the client empties it but leaves it standin
     importDownload: async () => {},
   });
 
-  assert.deepEqual(deleted, ['/downloads/Scene.1080p [pickarr-1]']);
+  assert.deepEqual(deleted, ['/downloads/Scene.1080p [pickarr-7e57ab1e-1]']);
   db.close();
 });
 
 test('a storage path naming the file removes the directory holding it', async () => {
   // The single-file shape SABnzbd reports for a one-video job.
   const db = openTestDatabase();
-  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]/scene.mp4');
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-7e57ab1e-1]/scene.mp4');
   const { deleted, rm } = directoryTracking();
 
   await reconcileClient({
@@ -1206,7 +1373,7 @@ test('a storage path naming the file removes the directory holding it', async ()
     importDownload: async () => {},
   });
 
-  assert.deepEqual(deleted, ['/downloads/Scene.1080p [pickarr-1]']);
+  assert.deepEqual(deleted, ['/downloads/Scene.1080p [pickarr-7e57ab1e-1]']);
   db.close();
 });
 
@@ -1235,7 +1402,7 @@ test('an unlabelled directory is never deleted, and the refusal is logged', asyn
 
 test("another download's label is not this one's licence to delete", async () => {
   const db = openTestDatabase();
-  importedWithStorage(db, '/downloads/Other.Scene [pickarr-99]');
+  importedWithStorage(db, '/downloads/Other.Scene [pickarr-7e57ab1e-99]');
   const { deleted, rm } = directoryTracking();
 
   await reconcileClient({
@@ -1255,7 +1422,7 @@ test('a directory is only removed once the client has let the job go', async () 
   // is the folder ours to remove. A removal that never happened leaves the
   // directory alone so the next tick can try the whole sequence again.
   const db = openTestDatabase();
-  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]');
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-7e57ab1e-1]');
   const { deleted, rm } = directoryTracking();
 
   await reconcileClient({
@@ -1272,7 +1439,7 @@ test('a directory is only removed once the client has let the job go', async () 
 
 test('a directory that will not delete is logged, not fatal', async () => {
   const db = openTestDatabase();
-  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-1]');
+  importedWithStorage(db, '/downloads/Scene.1080p [pickarr-7e57ab1e-1]');
   const lines: string[] = [];
 
   const result = await reconcileClient({
@@ -1286,7 +1453,7 @@ test('a directory that will not delete is logged, not fatal', async () => {
 
   assert.equal(result.removed, 1, 'the client entry did go');
   assert.equal(getDownload(db, 1)?.status, 'imported');
-  assert.match(lines.join('\n'), /could not remove \/downloads\/Scene\.1080p \[pickarr-1\]: EACCES/);
+  assert.match(lines.join('\n'), /could not remove \/downloads\/Scene\.1080p \[pickarr-7e57ab1e-1\]: EACCES/);
   db.close();
 });
 
@@ -1296,7 +1463,7 @@ test('the real filesystem, with no injected rm and a directory that is not empty
   // state SABnzbd leaves behind when `del_files` misses something.
   const root = await mkdtemp(join(tmpdir(), 'pickarr-cleanup-'));
   try {
-    const jobDir = join(root, 'Scene.1080p [pickarr-1]');
+    const jobDir = join(root, 'Scene.1080p [pickarr-7e57ab1e-1]');
     await mkdir(jobDir, { recursive: true });
     await writeFile(join(jobDir, 'leftover.nzb'), 'x');
 
@@ -1330,7 +1497,7 @@ test('a removal that fails does not undo the import, and is retried next tick', 
   const client = fakeClient(
     {
       queue: [],
-      history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-1]')],
+      history: [finished('nzo-done', '/sab/x', 'Scene [pickarr-7e57ab1e-1]')],
       complete: true,
     },
     {

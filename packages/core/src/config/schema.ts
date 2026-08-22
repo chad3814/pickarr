@@ -41,11 +41,22 @@ export const downloadClientSchema = z.object({
         value.startsWith(SECRET_REFERENCE_PREFIX) || value.length >= MIN_API_KEY_LENGTH,
       `apiKey must be at least ${MIN_API_KEY_LENGTH} characters, or a "${SECRET_REFERENCE_PREFIX}" reference to a file containing such a key`,
     ),
-  // Must be unique to this Pickarr installation if multiple instances share
-  // one SABnzbd server: reconcile recovers an orphaned download by a label
-  // derived only from the download's own row id (see downloadLabel in
-  // db/downloads.ts), with no per-installation salt, so two instances
-  // polling the same category could each recover the other's job.
+  // Which of a shared server's jobs are worth reporting on, and nothing
+  // more. Reconcile matches every job by ref or by this installation's own
+  // salted label (downloadLabel in db/downloads.ts) without filtering on
+  // category at all, so a job of ours re-categorised at the client is still
+  // found and a foreign job in our category is still refused. What the
+  // category decides is the narrower question of which *unrecognised* entries
+  // are reported as untracked rather than ignored as some other
+  // application's.
+  //
+  // It used to be the boundary between two Pickarr installations sharing one
+  // SABnzbd server, because the label carried no per-installation salt and
+  // each instance would recover the other's jobs (#28). It is no longer:
+  // sharing a category across instances is an operator preference now, not a
+  // correctness requirement. The field stays required because `snapshot()` is
+  // unfiltered and this is the only thing that says which of its entries are
+  // ours to talk about.
   category: z.string().min(1),
   importMode: z.enum(['move', 'copy']),
   pathMappings: z.array(pathMappingSchema).default([]),

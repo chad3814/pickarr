@@ -427,8 +427,51 @@ structure, it held.
 ## Download client
 
 - [A finished job is dropped from the client, with its files](https://github.com/chad3814/pickarr/issues/27) — The client is asked to delete rather than Pickarr doing it; failed, untracked and still-running jobs are left alone.
-- [Labels are unique only within one database, so two Pickarr instances sharing a SABnzbd category can recover each other's jobs](https://github.com/chad3814/pickarr/issues/28) — `downloadLabel` is `pickarr-<id>` with no per-installation salt. Give each instance its own SABnzbd category.
 - [The `nzbname` round-trip is unverified against a real server](https://github.com/chad3814/pickarr/issues/29) — If SABnzbd renames jobs instead of surfacing our label, recovery silently never fires and the same NZB can be submitted twice.
+
+**Closed: a label minted by one installation is no longer readable as another
+installation's.** This was #28. `downloadLabel` was `pickarr-<id>` and nothing else, so
+its whole namespace was one database's `downloads` rowid sequence — which two
+installations sharing a SABnzbd category, or one installation whose database was deleted
+and recreated, walk in lockstep from 1. Driven directly, a second instance polling a
+snapshot holding only the first instance's `Alpha.Site.25.01.02.Scene [pickarr-1]` under
+`nzo_A` came back holding `nzo_A`, having submitted nothing of its own and reported
+nothing untracked; with that job `completed` it called `importDownload` with the other
+installation's storage path, and the cleanup pass would then have asked SABnzbd to delete
+the other installation's job and its files. A row that already had a live job of its own
+was moved off it onto the stranger's in the same tick, silently.
+
+There is a worse outcome than any single misattribution, reachable when two of our rows
+are involved: one already attached to the stranger's job and one with no ref whose
+colliding label names that same job. `setClientRef` writes into `UNIQUE (client_id,
+client_ref)` and throws out of `reconcileClient` before the matching, sweep and cleanup
+passes run. `reconcilePass` catches and logs it, so the whole tick is lost — and lost
+identically on every tick after, because an aborted tick changes nothing that would make
+the next one go differently. A permanently wedged reconcile loop is worse than the
+wrong-job adoption the title describes.
+
+The fix is a per-installation salt. `installLabelToken` mints eight hex characters of a
+v4 UUID into the write-once `app_state` key `install:label-token` on first use, and
+`downloadLabel` is now `pickarr-<token>-<id>`, so a foreign job's label resolves to no
+row of ours at all: it is submitted around, and reported as untracked rather than
+adopted. The recreated-database case is the same mechanism — a new database mints a new
+token, so it does not answer to the jobs the old one left at the server.
+
+Legacy labels are honoured in exactly one place, `labelsFor`, and only for a download
+whose `createdAt` is strictly before the token's `mintedAt`. That bound is what makes the
+compatibility self-limiting rather than permanent: a row created after the token was
+minted was submitted under a salted label and can never legitimately match an unsalted
+one, so the hole closes on its own as pre-existing rows drain, with no dated cutoff to
+remember. It costs one edge — a pre-token row created in the very millisecond the token
+is first minted is treated as post-token and, if its ref write had been lost, is
+submitted once more — which is bounded to that single tick and visible in the client's
+own history. If `mintedAt` were ever overwritten, every existing row would become
+legacy-eligible again and the collision would come back silently; the test that a
+post-token row yields exactly one label is the alarm on that.
+
+`category` is still how Pickarr decides which of a shared server's unrecognised jobs are
+worth reporting as untracked. What it stops being is a correctness boundary: configuring
+a distinct category per instance is an operator preference now.
 
 **Closed: a release title that itself carries `[pickarr-N]` can no longer misattribute a
 ref.** This was #30. `clientJobName` appended the marker without looking at what the title

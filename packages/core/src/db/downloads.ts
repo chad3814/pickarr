@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import type { InstallLabelToken } from './app-state.ts';
 import { flagUpgrade } from './groups.ts';
 import { maybeNum, maybeStr, num, str, type SqlRow } from './row.ts';
 
@@ -94,17 +95,19 @@ function toDownloadRow(row: SqlRow): DownloadRow {
  * download's own id, so the same label is produced on every attempt without
  * needing to be stored anywhere new.
  *
- * This id is unique only within one Pickarr installation's own database — it
- * carries no per-installation salt. Two Pickarr instances sharing one
- * SABnzbd server *and* one category will eventually mint the same label for
- * two different downloads, and reconcile's label-based recovery would then
- * attach the wrong ref to a row rather than merely double-submitting.
- * Avoiding this is a deployment constraint, not something this function
- * enforces: each Pickarr instance must be configured with its own SABnzbd
- * category (see the `category` field in config/schema.ts).
+ * The `token` is this installation's own salt (`installLabelToken` in
+ * `db/app-state.ts`), and it is what makes the label mean anything outside
+ * one database. A row id alone is unique only within one Pickarr
+ * installation's `downloads` sequence, so two installations sharing a
+ * SABnzbd category — or one installation whose database was deleted and
+ * recreated — both mint `pickarr-1` and each adopt the other's job: the ref,
+ * the imported files, and the delete at cleanup (#28). With the salt in
+ * front of the id, a label one installation minted can never be read as
+ * another's, and a distinct category per instance goes back to being an
+ * operator preference rather than a correctness requirement.
  */
-export function downloadLabel(id: number): string {
-  return `pickarr-${id}`;
+export function downloadLabel(token: string, id: number): string {
+  return `pickarr-${token}-${id}`;
 }
 
 /**
@@ -114,8 +117,13 @@ export function downloadLabel(id: number): string {
  * the release title, is deliberate — free-text matching against a release
  * title is exactly what has cost this project multiple fix rounds elsewhere
  * (the scenes parser).
+ *
+ * The salt group is optional so that a marker written before #28 still
+ * parses. That is not indefinite compatibility — it only says the *shape* is
+ * readable. Whether an unsalted label may be believed for a given download is
+ * `labelsFor`'s decision, and it is bounded by that download's own age.
  */
-const LABEL_MARKER_PATTERN = /\[(pickarr-\d+)\]\s*$/;
+const LABEL_MARKER_PATTERN = /\[(pickarr-(?:[0-9a-f]{8}-)?\d+)\]\s*$/;
 
 /**
  * What `clientJobName` strips out of a release title before appending its
@@ -137,8 +145,8 @@ const MARKER_SHAPE = /\[\s*pickarr-[^\]]*\]/gi;
  * The name pickarr sends the client as a job's display name: the release
  * title, for legibility in the client's own UI (SABnzbd's queue/history
  * otherwise shows every job as an unreadable `pickarr-<id>`), with
- * `downloadLabel(id)` appended as a bracketed marker `extractLabel` can pull
- * back out deterministically. The marker goes at the end rather than
+ * `downloadLabel(token, id)` appended as a bracketed marker `extractLabel`
+ * can pull back out deterministically. The marker goes at the end rather than
  * anywhere else in the string so it survives a client that reflows or
  * re-punctuates the title ahead of it — as long as the client does not
  * truncate the name outright, which is exactly the failure `extractLabel`
@@ -161,9 +169,9 @@ const MARKER_SHAPE = /\[\s*pickarr-[^\]]*\]/gi;
  * covers a title that was nothing but the shape, whose name becomes the bare
  * marker and stays recoverable.
  */
-export function clientJobName(title: string, id: number): string {
+export function clientJobName(token: string, title: string, id: number): string {
   const clean = title.replace(MARKER_SHAPE, ' ').replace(/\s+/g, ' ').trim();
-  const marker = `[${downloadLabel(id)}]`;
+  const marker = `[${downloadLabel(token, id)}]`;
   return clean === '' ? marker : `${clean} ${marker}`;
 }
 
@@ -176,6 +184,51 @@ export function clientJobName(title: string, id: number): string {
  */
 export function extractLabel(name: string): string | null {
   return LABEL_MARKER_PATTERN.exec(name)?.[1] ?? null;
+}
+
+/**
+ * The whole of what `labelsFor` needs of a download. `DownloadRow` satisfies
+ * it structurally; it exists so the cleanup pass in `pipeline/reconcile.ts`,
+ * which selects a handful of columns rather than a whole row, can ask the
+ * same question without inventing a `DownloadRow` it does not have.
+ */
+export interface LabelledDownload {
+  id: number;
+  createdAt: number;
+}
+
+/**
+ * Every label a client-reported name may carry and still be believed to be
+ * this download's — the salted one it would be submitted under today, and,
+ * for a row old enough, the unsalted `pickarr-<id>` it was actually submitted
+ * under before #28.
+ *
+ * **This is the only place a legacy label is honoured, and the only reason
+ * the compatibility does not reintroduce the bug it closes.** The bound is
+ * the row's own age: a download created at or after the token was minted was
+ * submitted under a salted label, so an unsalted marker naming its id came
+ * from somewhere else and must never match it. A download created before the
+ * token existed has a real job at the client under the unsalted marker, and
+ * there is no way to rename a job at SABnzbd, so refusing it outright would
+ * strand every job in flight when this shipped. The hole is therefore
+ * self-limiting: it closes on its own as pre-token rows drain, with no dated
+ * cutoff to remember and no second pass to run.
+ *
+ * The strict `<` costs one edge: a pre-token row created in the very
+ * millisecond the token was minted is treated as post-token and, if its ref
+ * write had been lost, is submitted a second time. That is one duplicate
+ * download in the single tick a token is first minted, which
+ * `inFlightForRelease` and the client's own history make visible — cheaper
+ * than a `<=` that would admit a legacy label for a row minted alongside the
+ * token.
+ *
+ * Salted first, so a caller taking the first hit prefers the label this
+ * installation actually mints.
+ */
+export function labelsFor(scheme: InstallLabelToken, download: LabelledDownload): string[] {
+  const labels = [downloadLabel(scheme.token, download.id)];
+  if (download.createdAt < scheme.mintedAt) labels.push(`pickarr-${download.id}`);
+  return labels;
 }
 
 export interface NewDownload {
@@ -288,15 +341,25 @@ export interface DownloadIndex {
  * purpose too: reconcile decides which of those are eligible for
  * re-attachment (only ones whose error is exactly `disappeared-from-client`),
  * and that decision belongs to the caller, not to this query.
+ *
+ * `byLabel` carries one entry per string `labelsFor` admits for a row, so a
+ * row old enough to still answer to its pre-#28 unsalted label is reachable
+ * by either. `byRef` is one entry per row, as it always was.
  */
-export function indexDownloadsForClient(db: DatabaseSync, clientId: string): DownloadIndex {
+export function indexDownloadsForClient(
+  db: DatabaseSync,
+  clientId: string,
+  scheme: InstallLabelToken,
+): DownloadIndex {
   const rows = db
     .prepare(`${SELECT} WHERE client_id = ? AND client_ref IS NOT NULL AND status != 'imported'`)
     .all(clientId)
     .map((row) => toDownloadRow(row as SqlRow));
   return {
     byRef: new Map(rows.map((row) => [row.clientRef as string, row])),
-    byLabel: new Map(rows.map((row) => [downloadLabel(row.id), row])),
+    byLabel: new Map(
+      rows.flatMap((row) => labelsFor(scheme, row).map((label) => [label, row] as const)),
+    ),
   };
 }
 
