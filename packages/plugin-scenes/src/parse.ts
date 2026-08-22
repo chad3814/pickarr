@@ -404,8 +404,15 @@ const HOST = `[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9-]+)*?\\.${TLD}`;
  * both are "a domain, then ` - `" — and stripping one promotes the *performer*
  * to the site slot, which collapses every such studio onto one key and files
  * their scenes under the performer's name. `www.` and `http://` are markers no
- * studio puts in its own name, so requiring one restores the distinction. A
- * studio allowlist would not: it fails for every studio nobody thought of.
+ * studio puts in its own name, so requiring one restores the distinction, and
+ * a marked prefix is stripped unconditionally — no list is consulted here.
+ *
+ * A *bare* domain is now also stripped, but only where the release itself
+ * settles the question; see `isTrackerStamp`. That is not the studio allowlist
+ * this comment used to reject. An allowlist fails for every studio nobody
+ * thought of, because a name missing from it reads as a tracker; the rule
+ * below needs a confirmation on *both* sides and so falls silent — leaving
+ * this arm's answer standing — for every name the list does not cover.
  */
 const MARKED_DOMAIN = `(?:https?://(?:www\\.)?|www\\.)${HOST}(?:/\\S*)?`;
 
@@ -422,12 +429,26 @@ const WEBSITE_PREFIXES = [
 ];
 
 /**
- * A bracketed *bare* domain. Only safe to strip when the name is not a
+ * A bracketed *bare* domain. Safe to strip outright when the name is not a
  * delimited listing, because there a leading bracket is the studio field
  * itself (`[Vixen] ...`) and `[Bang.com] - Alex Coal - ...` means the studio,
- * not a tracker stamp.
+ * not a tracker stamp. Inside a listing it needs the confirmation
+ * `isTrackerStamp` supplies.
  */
-const BRACKETED_BARE_DOMAIN = new RegExp(`^[[(]\\s*${HOST}\\s*[\\])]\\s*[-–—]?\\s*`, 'i');
+const BRACKETED_BARE_DOMAIN = new RegExp(`^[[(]\\s*(${HOST})\\s*[\\])]\\s*[-–—]?\\s*`, 'i');
+
+/**
+ * An unbracketed *bare* domain at the head of a delimited listing.
+ *
+ * The delimiter is what scopes this to the listing form, and it is spelled the
+ * way `SEGMENT_SPLIT` spells it — whitespace on both sides of the dash. The
+ * looser `[\s._-]*[-–—]\s*` was tried and reaches too far: with no space
+ * required it matches the hyphen that attaches a release group to a *dotted*
+ * name, so `Site.23.04.15.Scene.XXX-Vixen` offers `Site.23.04.15.Scene` as the
+ * domain's label and the group tag as the field behind it. The dotted form is
+ * out of scope here — it carries no field boundaries for this rule to read.
+ */
+const BARE_DOMAIN_LEAD = new RegExp(`^(${HOST})\\s+[-–—]\\s+`, 'i');
 
 /** Splits the delimited listing form into its fields. */
 const SEGMENT_SPLIT = /\s+[-–—]\s+/;
@@ -1220,16 +1241,54 @@ export function extractQuality(tail: string, releaseGroup: string | undefined): 
 
 // --- Preprocessing ----------------------------------------------------------
 
-function stripWebsitePrefix(name: string): string {
+/**
+ * Is a leading bare domain the tracker's stamp rather than the studio's name?
+ *
+ * The question used to be unanswerable from the text, so the shape alone had
+ * to decide it and decided it conservatively — see `MARKED_DOMAIN`. It is
+ * answerable now, and from *both* ends at once, which is what makes the answer
+ * safe. A studio named after its domain is a site, so its label is on the
+ * confirmed list (`Bang.com` gives `Bang`); a tracker's domain is not. And the
+ * field a stamp sits in front of is the studio, so it is on the list too.
+ * Requiring both is what keeps `Bang.com - Alex Coal - Deep` intact even
+ * before `Bang` has been learned: `Alex Coal` is not a site either, so the
+ * second test fails as well and nothing is stripped.
+ *
+ * Membership is `siteComparisonKey`, not a slug, for the reason recorded under
+ * "Site matching drops separators" — the separator-blind form is what makes
+ * `Bang Bros` and `bangbros` one site, and matching on a slug here would let a
+ * configured spelling fail to protect the studio it names.
+ */
+function isTrackerStamp(host: string, rest: string, sites: readonly string[]): boolean {
+  const confirmed = new Set(sites.map(siteComparisonKey));
+  const label = siteComparisonKey(host.slice(0, host.lastIndexOf('.')));
+  if (label.length === 0 || confirmed.has(label)) return false;
+  const next = siteComparisonKey(rest.split(SEGMENT_SPLIT)[0] ?? '');
+  return next.length > 0 && confirmed.has(next);
+}
+
+function stripWebsitePrefix(name: string, sites: readonly string[]): string {
   for (const pattern of WEBSITE_PREFIXES) {
     const stripped = name.replace(pattern, '');
     if (stripped.length > 0 && stripped !== name) return stripped.trim();
   }
-  // A bracketed bare domain is a tracker stamp only when the name is not a
-  // delimited listing; in a listing the leading bracket is the studio field.
-  if (!SEGMENT_SPLIT.test(name)) {
-    const stripped = name.replace(BRACKETED_BARE_DOMAIN, '');
-    if (stripped.length > 0 && stripped !== name) return stripped.trim();
+  // A bracketed bare domain is a tracker stamp when the name is not a
+  // delimited listing — in a listing the leading bracket is normally the
+  // studio field — or when the listing itself confirms it is one.
+  const bracketed = BRACKETED_BARE_DOMAIN.exec(name);
+  if (bracketed !== null) {
+    const rest = name.slice(bracketed[0].length);
+    const host = bracketed[1] ?? '';
+    if (rest.length > 0 && (!SEGMENT_SPLIT.test(name) || isTrackerStamp(host, rest, sites))) {
+      return rest.trim();
+    }
+  }
+  // An unbracketed bare domain carries no marker at all, so nothing but the
+  // release's own fields can say whether it is a stamp or the studio.
+  const lead = BARE_DOMAIN_LEAD.exec(name);
+  if (lead !== null) {
+    const rest = name.slice(lead[0].length);
+    if (rest.length > 0 && isTrackerStamp(lead[1] ?? '', rest, sites)) return rest.trim();
   }
   return name;
 }
@@ -2340,10 +2399,17 @@ function parseDelimitedForm(name: string, options: SceneParseOptions): ParsedRel
 
 export interface SceneParseOptions {
   /**
-   * Known site names, used only by the date-at-end shape, where nothing in the
-   * name separates the site from the title. Spelling is free: matching is on
-   * slugs, so case and separators do not have to agree with the release.
-   * Unmatched names fall back to treating the first token as the site.
+   * Known site names — configured plus discovered. Spelling is free: matching
+   * is on `siteComparisonKey`, so case and separators do not have to agree
+   * with the release.
+   *
+   * Two shapes need the list to find the site at all: the date-at-end one,
+   * where nothing in the name separates site from title (unmatched, it falls
+   * back to the first token), and the dateless one, which is refused without
+   * it. `stripWebsitePrefix` reads it for a third purpose — deciding whether a
+   * leading bare domain is a tracker's stamp or the studio's own name — and
+   * that decision is *only* made when the list settles it, so an empty list
+   * leaves every name reading exactly as it did before the list existed.
    */
   readonly sites?: readonly string[];
 }
@@ -2392,7 +2458,9 @@ export function sceneSiteCandidates(
   const trimmed = releaseName.trim();
   if (trimmed.length === 0) return null;
 
-  const name = stripFileExtension(stripWebsitePrefix(stripPosterSignature(stripRuntimeStamp(trimmed)))).trim();
+  const name = stripFileExtension(
+    stripWebsitePrefix(stripPosterSignature(stripRuntimeStamp(trimmed)), options.sites ?? []),
+  ).trim();
   if (name.length === 0) return null;
   // The delimited form has explicit boundaries, so it never needs a lookup.
   if (parseDelimitedForm(name, options) !== null) return null;
@@ -2450,7 +2518,9 @@ export function parseSceneRelease(
   const trimmed = releaseName.trim();
   if (trimmed.length === 0) return refuse('empty name');
 
-  const name = stripFileExtension(stripWebsitePrefix(stripPosterSignature(stripRuntimeStamp(trimmed)))).trim();
+  const name = stripFileExtension(
+    stripWebsitePrefix(stripPosterSignature(stripRuntimeStamp(trimmed)), options.sites ?? []),
+  ).trim();
   if (name.length === 0) return refuse('nothing left after stripping prefix/extension');
 
   if (NOT_VIDEO_TOKEN.test(name)) return refuse('not a video release (image or photo set)');

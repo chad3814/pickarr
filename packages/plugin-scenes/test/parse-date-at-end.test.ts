@@ -1051,6 +1051,17 @@ test('a configured spelling reaches every shape, not just the ones that look sit
   assert.equal(keys[0], 'jacquieetmicheltv');
 });
 
+test('a bare-domain-led listing still asks for no site lookup', () => {
+  // `sceneSiteCandidates` declines on anything `parseDelimitedForm` accepts,
+  // and stripping the stamp leaves a listing, so the answer is `null` with the
+  // site list and without it. It has to be: the candidate list is generated
+  // from the same stripped name the parser reads, and a list built from a
+  // differently-stripped name would ask for prefixes the parser can never use.
+  const name = 'pornsite.net - Vixen - Alex Coal - Deep - 2023-07-19';
+  assert.equal(sceneSiteCandidates(name), null);
+  assert.equal(sceneSiteCandidates(name, { sites: ['Vixen'] }), null);
+});
+
 test('the delimited form canonicalises its site too', () => {
   assert.equal(
     parsed('[Vixen] Alex Coal - Beautiful Episode - 2023-07-19', ['VIXEN']).display.subtitle,

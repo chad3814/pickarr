@@ -963,7 +963,10 @@ const CORPUS: Entry[] = [
   // `Bang.com - Alex Coal - ...` is shaped exactly like a website prefix, so
   // stripping on a bare domain promoted the *performer* into the site slot and
   // collapsed every `.com` studio onto one key (and filed all their scenes
-  // under `Alex Coal/`). A prefix now needs `www.` or a scheme.
+  // under `Alex Coal/`). A prefix needs `www.` or a scheme, or — for a bare
+  // domain — a site list that confirms the field behind it and not the domain
+  // itself. These rows pass no list, so nothing here is confirmed and the
+  // second reading never fires; the test below runs them again with one.
   {
     name: 'Bang.com - Alex Coal - Deep - 2023-01-01 - 1080p',
     scene: 'bang-com/alex-coal-deep',
@@ -1537,6 +1540,25 @@ test('a studio named after its domain keeps the studio as the site', () => {
     // domain is deleted rather than turned into a `-`. The studio's real
     // spelling is on `display.subtitle`, asserted above.
     assert.equal(release.identityKey.split(':')[0], studio.toLowerCase().replace('.', ''), studio);
+    keys.add(release.identityKey);
+  }
+  assert.equal(keys.size, studios.length, `${JSON.stringify([...keys])}`);
+});
+
+test('a studio named after its domain survives a site list that names it', () => {
+  // The corpus runs with no site list at all, so the confirmation-driven
+  // bare-domain strip never fires anywhere in the table above and cannot see
+  // this feature. Run the same five a second time *with* their own labels
+  // confirmed: that is the arm which recognises the domain as the studio's,
+  // and dropping it merges all five onto the performer.
+  const sites = ['Bang', 'Deeper', 'Private', 'Nubiles', 'Tushy'];
+  const studios = ['Bang.com', 'Deeper.com', 'Tushy.com', 'Private.com', 'Nubiles.net'];
+  const keys = new Set<string>();
+  for (const studio of studios) {
+    const name = `${studio} - Alex Coal - Deep - 2023-01-01 - 1080p`;
+    const release = parseSceneRelease(name, { sites });
+    assert.ok(release !== null, `expected ${name} to parse`);
+    assert.equal(release.display.subtitle, studio, studio);
     keys.add(release.identityKey);
   }
   assert.equal(keys.size, studios.length, `${JSON.stringify([...keys])}`);
