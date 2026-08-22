@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tempDir } from '../temp-dir.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
@@ -11,7 +12,7 @@ import { getDownload } from '../../src/db/downloads.ts';
 import { liveFilesForGroup } from '../../src/db/imported-files.ts';
 import type { PluginRegistry } from '../../src/plugins/registry.ts';
 
-async function tempDir(): Promise<string> {
+async function tempImportRoot(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'pickarr-import-'));
 }
 
@@ -60,7 +61,7 @@ function deps(
 }
 
 test('imports the planned file and records it', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete', 'Release');
     await mkdir(downloadDir, { recursive: true });
@@ -94,7 +95,7 @@ test('a storage path naming one file is a listing of one file', async () => {
   // SABnzbd reports `storage` as the video itself when a job unpacked to a
   // single file, and readdir on that is ENOTDIR — a filesystem error naming a
   // path that plainly exists, raised before planImport ever runs.
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete', 'Release [pickarr-1]');
     await mkdir(downloadDir, { recursive: true });
@@ -132,7 +133,7 @@ test('a storage path naming one file is a listing of one file', async () => {
 
 test('move removes the source, copy leaves it', async () => {
   for (const mode of ['move', 'copy'] as const) {
-    const root = await tempDir();
+    const root = await tempImportRoot();
     try {
       const downloadDir = join(root, 'complete');
       await mkdir(downloadDir, { recursive: true });
@@ -165,7 +166,7 @@ test('move removes the source, copy leaves it', async () => {
 });
 
 test('a cross-device rename falls back to copy-then-unlink', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -206,7 +207,7 @@ test('a cross-device rename falls back to copy-then-unlink', async () => {
 });
 
 test('a destination escaping the library root is rejected', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -231,7 +232,7 @@ test('a destination escaping the library root is rejected', async () => {
 });
 
 test('a planned source outside the download listing is refused, naming the path', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -275,7 +276,7 @@ test('a planned source outside the download listing is refused, naming the path'
 });
 
 test('no importable files fails with a named reason', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -294,7 +295,7 @@ test('no importable files fails with a named reason', async () => {
 });
 
 test('retry after a partial import skips files already in place', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -331,7 +332,7 @@ test('retry after a partial import skips files already in place', async () => {
 });
 
 test('the file listing reaches the plugin with sizes and relative paths', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(join(downloadDir, 'nested'), { recursive: true });
@@ -363,7 +364,7 @@ test('the file listing reaches the plugin with sizes and relative paths', async 
 
 test('a destination resolving to the library root itself is rejected, and the source survives', async () => {
   for (const destination of ['.', '']) {
-    const root = await tempDir();
+    const root = await tempImportRoot();
     try {
       const downloadDir = join(root, 'complete');
       await mkdir(downloadDir, { recursive: true });
@@ -399,7 +400,7 @@ test('a destination resolving to the library root itself is rejected, and the so
 });
 
 test('a foreign regular file already at the destination fails the import and leaves the source untouched', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -436,7 +437,7 @@ test('a foreign regular file already at the destination fails the import and lea
 });
 
 test('a symlink at the exact destination path is treated as a collision, not adopted', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -471,7 +472,7 @@ test('a symlink at the exact destination path is treated as a collision, not ado
 });
 
 test('a destination that already exists with no surviving source and no recorded row is adopted as crash recovery', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -508,7 +509,7 @@ test('a destination that already exists with no surviving source and no recorded
 });
 
 test('copy mode: a destination that already matches the source in size is adopted as crash recovery', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -548,7 +549,7 @@ test('copy mode: a destination that already matches the source in size is adopte
 });
 
 test('copy mode: a destination with different content than the source is a collision, not recovery', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -588,7 +589,7 @@ test('copy mode: a destination with different content than the source is a colli
 });
 
 test('a symlink at the destination with the source already gone is still a collision, not adopted', async () => {
-  const root = await tempDir();
+  const root = await tempImportRoot();
   try {
     const downloadDir = join(root, 'complete');
     await mkdir(downloadDir, { recursive: true });
@@ -626,8 +627,8 @@ test('a symlink at the destination with the source already gone is still a colli
   }
 });
 
-test('moveWithinLibrary moves a file and keeps it inside the library root', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pickarr-move-'));
+test('moveWithinLibrary moves a file and keeps it inside the library root', async (t) => {
+  const root = await tempDir(t, 'pickarr-move-');
   const libraryRoot = join(root, 'library');
   await mkdir(join(libraryRoot, 'Old'), { recursive: true });
   await writeFile(join(libraryRoot, 'Old', 'scene.mp4'), 'data');
@@ -643,8 +644,8 @@ test('moveWithinLibrary moves a file and keeps it inside the library root', asyn
   assert.equal(await lstatOrNull(join(libraryRoot, 'Old', 'scene.mp4')), null);
 });
 
-test('moveWithinLibrary falls back to copy when rename reports EXDEV', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pickarr-move-'));
+test('moveWithinLibrary falls back to copy when rename reports EXDEV', async (t) => {
+  const root = await tempDir(t, 'pickarr-move-');
   const libraryRoot = join(root, 'library');
   await mkdir(libraryRoot, { recursive: true });
   await writeFile(join(libraryRoot, 'a.mp4'), 'data');
@@ -661,8 +662,8 @@ test('moveWithinLibrary falls back to copy when rename reports EXDEV', async () 
   assert.equal(await lstatOrNull(join(libraryRoot, 'a.mp4')), null, 'the source is removed');
 });
 
-test('moveWithinLibrary refuses a destination outside the library root', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pickarr-move-'));
+test('moveWithinLibrary refuses a destination outside the library root', async (t) => {
+  const root = await tempDir(t, 'pickarr-move-');
   const libraryRoot = join(root, 'library');
   await mkdir(libraryRoot, { recursive: true });
   await writeFile(join(libraryRoot, 'a.mp4'), 'data');

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tempDir } from '../temp-dir.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImportPlan, MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../../src/db/open.ts';
@@ -535,9 +536,9 @@ function seedTwoImportedFiles(db: DatabaseSync, keepPath: string, goPath: string
   ).run(keepPath, goPath);
 }
 
-test('trashFiles moves exactly the rows it is given and marks them trashed', async () => {
+test('trashFiles moves exactly the rows it is given and marks them trashed', async (t) => {
   const db = openTestDatabase();
-  const root = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  const root = await tempDir(t, 'pickarr-trash-');
   const libraryRoot = join(root, 'library');
   const trashDir = join(root, 'trash');
   await mkdir(libraryRoot, { recursive: true });
@@ -558,9 +559,9 @@ test('trashFiles moves exactly the rows it is given and marks them trashed', asy
   assert.equal(rows.find((row) => row.destPath.endsWith('go.mp4'))?.trashedAt, 7000);
 });
 
-test('trashFiles given no rows creates no trash directory', async () => {
+test('trashFiles given no rows creates no trash directory', async (t) => {
   const db = openTestDatabase();
-  const root = await mkdtemp(join(tmpdir(), 'pickarr-trash-'));
+  const root = await tempDir(t, 'pickarr-trash-');
   const trashDir = join(root, 'trash');
 
   const destination = await trashFiles(db, [], root, trashDir, 1, 7000);
