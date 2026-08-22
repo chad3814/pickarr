@@ -1248,6 +1248,41 @@ test('corpus: no two distinct scenes ever share an identity key', () => {
   }
 });
 
+test('a title ending in a resolution word collides with the scene it is a resolution of, deliberately', () => {
+  // Deliberately not a CORPUS row: `corpus: no two distinct scenes ever share
+  // an identity key` would fail on this pair, and it would be failing on the
+  // right answer. These are two different scenes — "Party", released in 4K,
+  // and "Party 4K", released at 1080p — and they share one key. With no `XXX`
+  // marker in the name the cut lands at the earliest boundary anchor inside
+  // the trailing encode run, and `4K` is an anchor wherever it sits. Both
+  // readings account for every token present, so nothing local can tell them
+  // apart; cutting later would put `4K` into the title of every ordinary 4K
+  // release, which is wrong for a far larger class of names than this fixes.
+  // Accepted and pinned rather than repaired, so that a future change to the
+  // anchor rule has to move this test rather than move it silently. The
+  // argument is in the boundary-rule comment at the top of `parse.ts` and in
+  // `docs/known-issues.md`.
+  const in4k = parsed('Site.23.01.01.Party.4K.MP4-G');
+  const at1080 = parsed('Site.23.01.01.Party.4K.1080p.MP4-G');
+  assert.equal(in4k.identityKey, 'site:2023-01-01:party');
+  assert.equal(at1080.identityKey, in4k.identityKey);
+
+  // The consequence the collision alone does not show, and the issue title
+  // does not mention: `extractQuality` reads the tail from the same cut, so
+  // the 1080p release of "Party 4K" reports 2160. Two encodes ranked on that
+  // resolution are ranked on a token the name did not intend.
+  assert.equal(at1080.quality.resolution, 2160);
+
+  // What must not break while someone is trying to fix the two lines above. A
+  // marker pins the cut ahead of the run, so the same scene keys apart and
+  // reads its real resolution. Any weakening of the marker rule fails here
+  // and only here — the assertions above would keep passing.
+  const marked = parsed('Site.23.01.01.Party.4K.XXX.1080p.MP4-G');
+  assert.equal(marked.identityKey, 'site:2023-01-01:party-4k');
+  assert.equal(marked.display.title, 'Party 4K');
+  assert.equal(marked.quality.resolution, 1080);
+});
+
 test('corpus: no title is silently truncated', () => {
   for (const entry of CORPUS) {
     assert.equal(parsed(entry.name).display.title, entry.title, entry.name);

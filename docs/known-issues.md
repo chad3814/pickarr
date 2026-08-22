@@ -277,7 +277,6 @@ five before — a small share of the corpus, but complete coverage of the shape.
 
 - [A bare-domain prefix becomes the site, so a genuine bare-domain stamp files the scene under the wrong directory](https://github.com/chad3814/pickarr/issues/16) — Wrong path, never a wrong merge.
 - [The same scene in a dotted and a bracketed listing gets two groups](https://github.com/chad3814/pickarr/issues/17) — The dotted form carries no component boundaries. Under-collation, and probably irreducible.
-- [Residual over-collation, believed irreducible](https://github.com/chad3814/pickarr/issues/18) — Two distinct scenes can share an identity key when a release has no marker and its title ends in a word that looks like a resolution or source — a scene literally titled "Party 4K".
 - [In a listing, a hyphen-attached group inside the quality segment leaks into the identity and the quality is lost](https://github.com/chad3814/pickarr/issues/19) — `- 1080p-GRP`. One of the "Smaller, all pre-existing" defects.
 - [When a listing holds two dates the first wins and the second ends up in the title](https://github.com/chad3814/pickarr/issues/20) — One of the "Smaller, all pre-existing" defects.
 - [`4K60` matches no resolution because there is no word boundary before the `60`](https://github.com/chad3814/pickarr/issues/21) — One of the "Smaller, all pre-existing" defects.
@@ -315,6 +314,42 @@ same listing keeps both parts and stays distinct. It is pinned by a test (`packa
 `'two scenes differing only in dropped tokens share a key, deliberately'`) rather than
 guarded against in code, so a future change to what gets trimmed here shows up as a
 failing test instead of a silent, undiscovered merge.
+
+**A title that ends in a word shaped like a resolution collates with the scene that word
+is a resolution of.** That is the encode-suffix trim itself misfiring rather than a third
+trim. With no `XXX` marker in the name the cut lands at the earliest boundary anchor
+inside the trailing encode run, and a resolution is an anchor wherever it sits — so
+`Site.23.01.01.Party.4K.MP4-G`, the scene "Party" released in 4K, and
+`Site.23.01.01.Party.4K.1080p.MP4-G`, the scene "Party 4K" released at 1080p, both key as
+`site:2023-01-01:party`. The second carries a consequence the collision alone does not
+show: `extractQuality` reads the tail from the same cut, so a 1080p release reports 2160,
+and two encodes ranked on that resolution are ranked on a token the name never claimed.
+
+Both readings account for every token in the name, so nothing local can choose between
+them and there is no rule that improves this. Cutting later puts `4K` into the title of
+every ordinary 4K release; cutting earlier is exactly what the marker case already does
+when a marker is there to justify it. It is pinned by a test
+(`packages/plugin-scenes/test/parse-corpus.test.ts`, `'a title ending in a resolution word
+collides with the scene it is a resolution of, deliberately'`) for the same reason as the
+trim above, and it cannot be a corpus row because the no-over-collation invariant would
+fail on it by design. Detecting the collision was considered and dropped: the one
+observable trace is a release reporting two resolutions' worth of information, which
+catches `Party.4K.1080p` and cannot catch `Party.4K`, where the release genuinely is 4K
+and the name is indistinguishable from a correctly parsed one. A check that fires on half
+the class, on a shape the corpus has never produced, is not worth its false positives.
+
+Two things would make it fixable, neither of them inside the parser. **A marker in the
+name** pins the cut ahead of the run: `Site.23.01.01.Party.4K.XXX.1080p.MP4-G` keys as
+`site:2023-01-01:party-4k` and reads 1080 correctly. The parser was rewritten away from
+the marker as its primary anchor for the reasons at the top of this section, but the
+marker still wins where it is present, and nothing Pickarr does makes posters write it.
+**A per-scene identifier from the indexer or the metadata provider** would remove the
+need to reconstruct identity from the title at all. Metadata confirmation does not supply
+one today, and does not even notice the ambiguity: `matchScene`'s dated arm narrows on
+closest date and then on title key, the query's title is the already-truncated `Party`,
+so the candidate literally titled `Party` wins the tiebreak and the other is recorded as
+a lost tiebreak. The group is confirmed against one of the two scenes with nothing
+flagged.
 
 **Under-collation by design.** A name whose boundary is genuinely ambiguous returns
 `null` rather than guessing. That is the intended direction: a `parse_error` row is
