@@ -2,6 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { requeryOneGroup } from '../src/api/requeryMetadata.ts';
 import type { MetadataRequeryResponse } from '../src/api/client.ts';
+import { fetchStub } from './fetchStub.ts';
 
 // A `.ts` test rather than `.tsx`, so it runs in the server suite alongside
 // `format.test.ts`: there is no component and no DOM here, only the two-step
@@ -18,7 +19,7 @@ afterEach(() => {
  */
 function serve(counters: MetadataRequeryResponse): { bodies: number[][] } {
   const bodies: number[][] = [];
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname !== '/api/metadata/requery') throw new Error(`unexpected request to ${url.pathname}`);
     const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
@@ -26,7 +27,7 @@ function serve(counters: MetadataRequeryResponse): { bodies: number[][] } {
     return new Response(JSON.stringify(counters), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
   return { bodies };
 }
 
@@ -78,10 +79,10 @@ test('a refused requery rejects with the reason and re-arms nothing', async () =
 });
 
 test('a failed request rejects without re-arming, as it always did', async () => {
-  globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'Invalid request' }), {
+  globalThis.fetch = fetchStub(async () => new Response(JSON.stringify({ error: 'Invalid request' }), {
     status: 400,
     headers: { 'content-type': 'application/json' },
-  })) as unknown as typeof fetch;
+  }));
   const rearmed: number[] = [];
 
   await assert.rejects(requeryOneGroup(7, (groupId) => rearmed.push(groupId)), /Invalid request/);

@@ -5,6 +5,7 @@ import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/re
 import { useIdentityChange, type ApplyOutcome } from '../src/api/useIdentityChange.ts';
 import { IdentityChangeConfirm } from '../src/components/IdentityChangeConfirm.tsx';
 import type { IdentityPlanView } from '../src/api/client.ts';
+import { fetchStub } from './fetchStub.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its DOM behind and every later `getBy*` sees two
@@ -38,14 +39,14 @@ function plan(overrides: Partial<IdentityPlanView> = {}): IdentityPlanView {
  */
 function mockIdentityPlanFetch(plans: readonly IdentityPlanView[]): { calls: number } {
   const state = { calls: 0 };
-  globalThis.fetch = (async () => {
+  globalThis.fetch = fetchStub(async () => {
     const served = plans[state.calls];
     state.calls += 1;
     if (served === undefined) throw new Error(`no planned response for call ${state.calls}`);
     return new Response(JSON.stringify(served), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
   return state;
 }
 
@@ -287,7 +288,7 @@ test('the no-confirmation fast path going stale opens the confirmation with the 
 
 test('a failing re-plan after a stale fast-path apply reports via onError and resolves false', async () => {
   let fetchCalls = 0;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = fetchStub(async () => {
     fetchCalls += 1;
     if (fetchCalls === 1) {
       return new Response(JSON.stringify(plan({ kind: 'display-only' })), {
@@ -295,7 +296,7 @@ test('a failing re-plan after a stale fast-path apply reports via onError and re
       });
     }
     throw new Error('network down');
-  }) as unknown as typeof fetch;
+  });
 
   let applyCalls = 0;
   const apply: Apply = async () => {

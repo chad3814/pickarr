@@ -805,7 +805,7 @@ not filed as issues and stay here in full. The exceptions are the mechanically p
 ones, which have issues of their own:
 
 - [Add a lint rule or shared helper banning `assert.equal(screen.queryByText(x), null)` in web tests](https://github.com/chad3814/pickarr/issues/40).
-- [A typed fetch-stub helper would retire 28 uses of `as unknown as typeof fetch` in web tests](https://github.com/chad3814/pickarr/issues/58) — the global constraints ban `unknown`, and this one idiom is where every violation lives.
+- [A typed fetch-stub helper would retire 40 uses of `as unknown as typeof fetch` in web tests](https://github.com/chad3814/pickarr/issues/58) — the global constraints ban `unknown`, and this one idiom is where every violation lives. Fixed on `fix/58-a-typed-fetch-stub-helper-would-retire-28-uses-of` and unmerged: install a stub with `fetchStub()` from `packages/web/test/fetchStub.ts`, and `fetchStub.test.ts` fails if the idiom comes back. Drop this bullet on merge.
 - [Tests leave their `mkdtemp` directories behind — about 20 per full run](https://github.com/chad3814/pickarr/issues/63) — the real directories are deliberate; only the cleanup is missing.
 
 These are not product defects. They are ways this repo's tests have been green while

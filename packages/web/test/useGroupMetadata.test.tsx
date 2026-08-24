@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { useGroupMetadata } from '../src/api/useGroupMetadata.ts';
 import type { MetadataView } from '../src/api/client.ts';
+import { fetchStub, jsonResponse } from './fetchStub.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its DOM behind and every later `getBy*` sees two
@@ -70,10 +71,6 @@ function skewClock(): { advance: (ms: number) => void; restore: () => void } {
   };
 }
 
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
-}
-
 /**
  * Records every delay passed to the real `setTimeout`, without replacing its
  * behaviour — every call still runs for real, on the real clock.
@@ -111,7 +108,7 @@ function spyOnSetTimeoutDelays(): { delays: number[]; restore: () => void } {
 
 test('a page of ids is requested once, not once per card', async () => {
   const requestBodies: number[][] = [];
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
@@ -125,7 +122,7 @@ test('a page of ids is requested once, not once per card', async () => {
       return jsonResponse(response);
     }
     throw new Error(`unexpected request to ${url.pathname}`);
-  }) as unknown as typeof fetch;
+  });
 
   render(<Consumer ids={[1, 2, 3]} />);
   await waitFor(() => assert.ok(screen.getByText('1:none')));
@@ -143,14 +140,14 @@ test('a re-render with the same ids costs no request', async () => {
   // them — the same failure mode `useIdentityPreview`'s equivalent test
   // guards against.
   let requestCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       requestCalls += 1;
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
     }
     return jsonResponse({ 9: { state: 'none' } });
-  }) as unknown as typeof fetch;
+  });
 
   const { rerender } = render(<Consumer ids={[9]} />);
   await waitFor(() => assert.ok(screen.getByText('9:none')));
@@ -164,7 +161,7 @@ test('a re-render with the same ids costs no request', async () => {
 
 test('polling stops once nothing is pending', async () => {
   let getCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
@@ -185,7 +182,7 @@ test('polling stops once nothing is pending', async () => {
             hasPoster: false,
           };
     return jsonResponse({ 5: view });
-  }) as unknown as typeof fetch;
+  });
 
   render(<Consumer ids={[5]} />);
   await waitFor(() => assert.ok(screen.getByText('5:pending')));
@@ -208,14 +205,14 @@ test('a group deferred for hours schedules its next check at the cap, not the 8s
   // see `spyOnSetTimeoutDelays` for why fake timers cannot be used here.
   const CAP_MS = 5 * 60_000;
   const farFuture = Date.now() + 6 * 60 * 60_000; // deferred six hours out
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
     }
     const view: MetadataView = { state: 'pending', nextAttemptAt: farFuture };
     return jsonResponse({ 11: view });
-  }) as unknown as typeof fetch;
+  });
 
   const spy = spyOnSetTimeoutDelays();
   try {
@@ -243,14 +240,14 @@ test('a group merely waiting its turn schedules its next check at the floor, not
   // self-tuning property the cap test above proves.
   const FLOOR_MS = 5_000;
   const justBehind = Date.now() - 10_000; // waiting its turn, next_at already past
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
     }
     const view: MetadataView = { state: 'pending', nextAttemptAt: justBehind };
     return jsonResponse({ 12: view });
-  }) as unknown as typeof fetch;
+  });
 
   const spy = spyOnSetTimeoutDelays();
   try {
@@ -272,14 +269,14 @@ test('a pending id with no nextAttemptAt falls back to the escalating ladder', a
   // `nextAttemptAt` existed: doubling from the 500ms start, capped at 8s —
   // never left guessing at the server's clock when the server said nothing.
   let getCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
     }
     getCalls += 1;
     return jsonResponse({ 13: { state: 'pending' } });
-  }) as unknown as typeof fetch;
+  });
 
   const spy = spyOnSetTimeoutDelays();
   try {
@@ -309,7 +306,7 @@ test('unmounting cancels in-flight work rather than letting it land late', async
   });
   let aborted = false;
 
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     init?.signal?.addEventListener('abort', () => {
       aborted = true;
@@ -320,7 +317,7 @@ test('unmounting cancels in-flight work rather than letting it land late', async
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
     }
     return jsonResponse({ 3: { state: 'none' } });
-  }) as unknown as typeof fetch;
+  });
 
   const { unmount } = render(<Consumer ids={[3]} />);
   unmount();
@@ -358,7 +355,7 @@ test('rearm re-polls a settled id rather than leaving it unwatched, and never sh
   const answers: MetadataView[] = [original, { state: 'pending' }, fresher];
 
   let getCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
@@ -366,7 +363,7 @@ test('rearm re-polls a settled id rather than leaving it unwatched, and never sh
     getCalls += 1;
     const view = answers[Math.min(getCalls, answers.length) - 1]!;
     return jsonResponse({ [ID]: view });
-  }) as unknown as typeof fetch;
+  });
 
   render(<Consumer ids={[ID]} />);
   await waitFor(() => assert.ok(screen.getByText(`${ID}:confirmed`)));
@@ -422,14 +419,14 @@ test('a rearmed id polls through an unchanged answer and lands the fresher one �
   const answers: MetadataView[] = [ORIGINAL, ORIGINAL, FRESHER];
 
   let getCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 0, alreadyAnswered: 1, pending: 0, missing: 0, unavailable: 0 });
     }
     getCalls += 1;
     return jsonResponse({ [ID]: answers[Math.min(getCalls, answers.length) - 1]! });
-  }) as unknown as typeof fetch;
+  });
 
   render(<Consumer ids={[ID]} />);
   await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Original title`)));
@@ -464,14 +461,14 @@ test('a rearm gives up after its deadline instead of polling an unchanged answer
   const ID_ANSWER = { current: ORIGINAL };
 
   let getCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 0, alreadyAnswered: 1, pending: 0, missing: 0, unavailable: 0 });
     }
     getCalls += 1;
     return jsonResponse({ [ID]: ID_ANSWER.current });
-  }) as unknown as typeof fetch;
+  });
 
   const clock = skewClock();
   try {
@@ -517,7 +514,7 @@ test('rearming before the hook has any answer of its own still watches the id', 
   const answers: MetadataView[] = [ORIGINAL, FRESHER];
 
   let getCalls = 0;
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 0, alreadyAnswered: 1, pending: 0, missing: 0, unavailable: 0 });
@@ -533,7 +530,7 @@ test('rearming before the hook has any answer of its own still watches the id', 
       });
     }
     return jsonResponse({ [ID]: answers[Math.min(getCalls - 1, answers.length) - 1]! });
-  }) as unknown as typeof fetch;
+  });
 
   render(<Consumer ids={[ID]} />);
   // In flight and unanswered: the hook knows nothing about this id yet.
@@ -559,7 +556,7 @@ test('rearming before the hook has any answer of its own still watches the id', 
 test('an id the server reports as refreshed is watched again, with no button pressed', async () => {
   const ID = 4;
   let gets = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({
@@ -581,7 +578,7 @@ test('an id the server reports as refreshed is watched again, with no button pre
             hasPoster: false,
           };
     return jsonResponse({ [ID]: view });
-  }) as unknown as typeof fetch;
+  });
 
   render(<Consumer ids={[ID]} />);
 
@@ -608,14 +605,14 @@ test('a response with no refreshed field settles as before', async () => {
   // whole page, which is the property `unresolved` exists to protect.
   const ID = 5;
   let gets = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/request') {
       return jsonResponse({ queued: 1, alreadyAnswered: 0, pending: 0, missing: 0 });
     }
     gets += 1;
     return jsonResponse({ [ID]: { state: 'none' } satisfies MetadataView });
-  }) as unknown as typeof fetch;
+  });
 
   render(<Consumer ids={[ID]} />);
   await waitFor(() => assert.ok(screen.getByText(`${ID}:none`)));

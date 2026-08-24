@@ -5,6 +5,7 @@ import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/re
 import { MemoryRouter } from 'react-router';
 import { DownloadRow } from '../src/components/DownloadRow.tsx';
 import { Downloads } from '../src/routes/Downloads.tsx';
+import { fetchStub } from './fetchStub.ts';
 // `groupAnchorHref` is deliberately *not* imported: both hrefs below are
 // spelled out, because an expectation the code under test computes cannot
 // detect that code changing.
@@ -181,10 +182,10 @@ test('a bodyless request carries no json content-type', async () => {
   // 400 before the route ran, so the button never worked — and the click site
   // had no catch, so it failed in silence.
   const sent: RequestInit[] = [];
-  globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (_input, init) => {
     sent.push(init ?? {});
     return new Response('{}', { headers: { 'content-type': 'application/json' } });
-  }) as unknown as typeof fetch;
+  });
 
   await api.retry(7);
   assert.equal(sent[0]?.headers, undefined);
@@ -194,7 +195,7 @@ test('a bodyless request carries no json content-type', async () => {
 });
 
 test('a refused retry surfaces instead of vanishing', async () => {
-  globalThis.fetch = (async (_input: string, init?: RequestInit) =>
+  globalThis.fetch = fetchStub(async (_input, init) =>
     init?.method === 'POST'
       ? new Response(JSON.stringify({ error: 'Only a failed download can be retried' }), {
           status: 409,
@@ -219,7 +220,7 @@ test('a refused retry surfaces instead of vanishing', async () => {
             nextCursor: null,
           }),
           { headers: { 'content-type': 'application/json' } },
-        )) as unknown as typeof fetch;
+        ));
 
   render(routed(<Downloads />));
   await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
@@ -245,7 +246,7 @@ test('retry refreshes the row immediately, without waiting on the poll', async (
   t.mock.timers.enable({ apis: ['setInterval'] });
 
   let downloadsRequests = 0;
-  globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (_input, init) => {
     if (init?.method === 'POST') {
       // The row as the server left it. `/api/downloads/:id/retry` has always
       // answered with the updated `DownloadView`; the screen now uses it,
@@ -265,7 +266,7 @@ test('retry refreshes the row immediately, without waiting on the poll', async (
       } satisfies DownloadsResponse),
       { headers: { 'content-type': 'application/json' } },
     );
-  }) as unknown as typeof fetch;
+  });
 
   // `routed`, like every other render here. This test arrived from `main`,
   // where `DownloadRow` had no `<Link>` and needed no Router; this branch gave
@@ -288,10 +289,10 @@ test('untracked entries render inert and labelled', async () => {
     untracked: [{ clientId: 'sab', ref: 'x', name: 'Someone Elses', state: 'downloading', percentage: 40 }],
     nextCursor: null,
   };
-  globalThis.fetch = (async () =>
+  globalThis.fetch = fetchStub(async () =>
     new Response(JSON.stringify(body), {
       headers: { 'content-type': 'application/json' },
-    })) as typeof fetch;
+    }));
 
   render(routed(<Downloads />));
 
@@ -309,10 +310,10 @@ test('untracked entries render inert and labelled', async () => {
 
 /** Answers `/api/downloads` with one fixed body, and nothing else. */
 function serveDownloads(body: DownloadsResponse): void {
-  globalThis.fetch = (async () =>
+  globalThis.fetch = fetchStub(async () =>
     new Response(JSON.stringify(body), {
       headers: { 'content-type': 'application/json' },
-    })) as unknown as typeof fetch;
+    }));
 }
 
 test('typing a term leaves only the tracked rows that match it', async () => {
@@ -394,7 +395,7 @@ test('a poll landing does not clear the term or unfilter the list', async (t) =>
   );
 
   let polls = 0;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = fetchStub(async () => {
     polls += 1;
     // The second poll brings a new row, which is the case that matters: a filter
     // re-derived from fresh data must apply to what just arrived, not only to
@@ -412,7 +413,7 @@ test('a poll landing does not clear the term or unfilter the list', async (t) =>
       JSON.stringify({ tracked, untracked: [], nextCursor: null } satisfies DownloadsResponse),
       { headers: { 'content-type': 'application/json' } },
     );
-  }) as unknown as typeof fetch;
+  });
 
   render(routed(<Downloads />));
   await handedBack[0];
@@ -461,7 +462,7 @@ function servePagedDownloads(expected: number): {
   let calls = 0;
   let pageOne = 0;
 
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const cursor = new URL(input, 'http://test.invalid').searchParams.get('cursor');
     let body: DownloadsResponse;
     if (cursor === null) {
@@ -488,7 +489,7 @@ function servePagedDownloads(expected: number): {
     return new Response(JSON.stringify(body), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
 
   return { handedBack, pageOneFetches: () => pageOne };
 }

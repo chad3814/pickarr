@@ -14,6 +14,7 @@ import type {
   ManualFieldsResponse,
   ResolveResponse,
 } from '../src/api/client.ts';
+import { fetchStub } from './fetchStub.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its DOM behind and every later `getBy*` sees two
@@ -103,13 +104,13 @@ function respond(url: URL, init: RequestInit | undefined, joinedExisting: boolea
 
 function serve(joinedExisting = false): () => string[] {
   const calls: string[] = [];
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     calls.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
     return new Response(JSON.stringify(respond(url, init, joinedExisting)), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
   return () => calls;
 }
 
@@ -416,11 +417,11 @@ test('dismissing while dismissed items are shown keeps the row and flips it to t
 test('a refused request is reported rather than swallowed', async () => {
   serve();
   await loadFirstPage();
-  globalThis.fetch = (async () =>
+  globalThis.fetch = fetchStub(async () =>
     new Response(JSON.stringify({ error: 'Feed item 3 is already dismissed' }), {
       status: 409,
       headers: { 'content-type': 'application/json' },
-    })) as unknown as typeof fetch;
+    }));
 
   fireEvent.click(within(row('Gamma.RAW')).getByRole('button', { name: /dismiss/i }));
 
