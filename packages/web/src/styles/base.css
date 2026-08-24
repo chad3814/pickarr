@@ -54,9 +54,13 @@ a { color: var(--color-accent-text); }
  * broken, and `color-scheme: dark` alone only gets them to a grey slab.
  *
  * A bare `button` is the secondary treatment because that is what almost every
- * button in the app is — Edit, Cancel, Retry, Load more. The two that are
- * genuinely primary (Pick, and the confirm dialog's own confirm) get their fill
- * from their own files, by context, since no markup distinguishes them.
+ * button in the app is — Edit, Cancel, Retry, Load more. Pick is the one that
+ * is genuinely primary, and it is distinguished in markup: it carries
+ * `className="pick"` (see `ReleaseRow.tsx`), which `rows.css` targets with
+ * `.release-row button.pick` for its fill. The confirm dialog's own confirm
+ * gets no fill at all, and that is deliberate rather than an oversight:
+ * confirming an identity change moves files on disk, and an action with that
+ * consequence should not be the loudest thing in the dialog.
  */
 button {
   font: inherit;
