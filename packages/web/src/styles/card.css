@@ -94,3 +94,48 @@
 .metadata-performers li { display: flex; align-items: center; gap: 0.35rem; }
 .avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
 .metadata-pending { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }
+
+/*
+ * The scene panel had no rules at all — `.metadata`, `.metadata-title`,
+ * `.metadata-release-date`, `.metadata-duration` and `.metadata-synopsis` were
+ * rendered by `MediaCard` and inherited browser defaults. This is the first time
+ * any of them is styled.
+ *
+ * A top rule rather than a nested box: the panel is a second opinion about the
+ * card it sits in, not a separate object, and a border would make it read as one.
+ */
+.metadata {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-line);
+}
+
+/* Dim when it is plain text, accent when it is a link — `MediaCard` wraps this in
+   an `<a>` only when the provider gave a scene URL, and `base.css` colours the
+   anchor. An unlinked second opinion is not interactive and must not look it. */
+.metadata-title { margin: 0; color: var(--color-text-dim); font-size: var(--text-body); }
+
+.metadata-release-date,
+.metadata-duration {
+  display: inline;
+  margin: 0;
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+}
+
+/* They are two `<p>`s in the markup and read as one line, so the second gets a
+   separator rather than a line of its own. */
+.metadata-duration::before { content: ' · '; color: var(--color-text-faint); }
+
+/*
+ * The measure is the point. An unbounded synopsis across a 60rem card is the
+ * hardest thing on the screen to read, and 68ch is inside the 45–75 the
+ * typographic advice settles on.
+ */
+.metadata-synopsis {
+  max-width: 68ch;
+  margin: var(--space-2) 0 0;
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+  line-height: 1.55;
+}
