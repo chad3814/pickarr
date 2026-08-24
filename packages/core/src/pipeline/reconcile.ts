@@ -735,46 +735,52 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
       }),
   );
 
-  for (const entry of snapshot.history) {
-    // Ours, and finished with. A stranger's job in a shared category is never
-    // touched, and a failure is left where it is — deleting it would destroy
-    // the evidence for why it failed.
-    const job = importedJobs.get(entry.ref);
-    if (job === undefined) continue;
-    try {
-      // eslint-disable-next-line no-await-in-loop -- one call per finished job, and the list is short
-      await client.remove(entry.ref, true);
-      result.removed += 1;
-    } catch (error) {
-      // Never a download failure: the import already succeeded and the file is
-      // in place. The cost of giving up here is disk space, not data.
-      deps.log?.(`reconcile ${client.id}: could not remove ${entry.ref}: ${(error as Error).message}`);
-      continue;
-    }
+  // A client with no `remove` does not reclaim finished jobs — see the method's
+  // comment in clients/types.ts. Skipping the whole loop rather than each call
+  // keeps `result.removed` honest: nothing was attempted, so nothing is counted.
+  const remove = client.remove?.bind(client);
+  if (remove !== undefined) {
+    for (const entry of snapshot.history) {
+      // Ours, and finished with. A stranger's job in a shared category is never
+      // touched, and a failure is left where it is — deleting it would destroy
+      // the evidence for why it failed.
+      const job = importedJobs.get(entry.ref);
+      if (job === undefined) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop -- one call per finished job, and the list is short
+        await remove(entry.ref, true);
+        result.removed += 1;
+      } catch (error) {
+        // Never a download failure: the import already succeeded and the file is
+        // in place. The cost of giving up here is disk space, not data.
+        deps.log?.(`reconcile ${client.id}: could not remove ${entry.ref}: ${(error as Error).message}`);
+        continue;
+      }
 
-    // `del_files` reclaims the files; the folder itself is left standing, so
-    // this is what actually frees the job's directory. Recursive, because the
-    // point is to leave nothing behind — and safe to be recursive only because
-    // `jobDirectory` has already proved the folder is this download's own.
-    // `force`, so a directory a previous tick already removed is not an error.
-    if (job.directory === null) {
-      // Once per job, not once per tick: the entry is gone from history now,
-      // so this loop will not see it again.
-      deps.log?.(
-        `reconcile ${client.id}: removed ${entry.ref} but left its directory in place; ` +
-          `nothing at its storage path carries the ${downloadLabel(scheme.token, job.id)} label`,
-      );
-      continue;
-    }
-    try {
-      // eslint-disable-next-line no-await-in-loop -- paired with the removal above
-      await removeDir(job.directory, { recursive: true, force: true });
-    } catch (error) {
-      // Disk space again, not data: the import is done and the client's entry
-      // is already gone, so there is nothing to retry and nothing at risk.
-      deps.log?.(
-        `reconcile ${client.id}: could not remove ${job.directory}: ${(error as Error).message}`,
-      );
+      // `del_files` reclaims the files; the folder itself is left standing, so
+      // this is what actually frees the job's directory. Recursive, because the
+      // point is to leave nothing behind — and safe to be recursive only because
+      // `jobDirectory` has already proved the folder is this download's own.
+      // `force`, so a directory a previous tick already removed is not an error.
+      if (job.directory === null) {
+        // Once per job, not once per tick: the entry is gone from history now,
+        // so this loop will not see it again.
+        deps.log?.(
+          `reconcile ${client.id}: removed ${entry.ref} but left its directory in place; ` +
+            `nothing at its storage path carries the ${downloadLabel(scheme.token, job.id)} label`,
+        );
+        continue;
+      }
+      try {
+        // eslint-disable-next-line no-await-in-loop -- paired with the removal above
+        await removeDir(job.directory, { recursive: true, force: true });
+      } catch (error) {
+        // Disk space again, not data: the import is done and the client's entry
+        // is already gone, so there is nothing to retry and nothing at risk.
+        deps.log?.(
+          `reconcile ${client.id}: could not remove ${job.directory}: ${(error as Error).message}`,
+        );
+      }
     }
   }
 

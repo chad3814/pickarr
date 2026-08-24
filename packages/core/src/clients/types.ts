@@ -92,8 +92,17 @@ export interface DownloadClient {
    * paths are the client's own. Pickarr sees them only through `mapPath`, and
    * a recursive delete aimed through a path mapping is the wrong place to
    * discover the mapping is wrong.
+   *
+   * **Optional, because a torrent client must not have this called at all.**
+   * qBittorrent's `/torrents/delete` removes the job from the client whether or
+   * not `deleteFiles` is set, which stops the seed and abandons the ratio;
+   * there is no "forget this but keep seeding" operation, so the correct number
+   * of calls is zero. A client that declines to reclaim finished jobs omits the
+   * method, and `reconcileClient` skips cleanup for it. Optionality rather than
+   * a `reclaimsFinishedJobs` flag: a flag would leave a method on the interface
+   * that must never be called, which is the shape of a future bug.
    */
-  remove(ref: string, deleteFiles: boolean): Promise<void>;
+  remove?(ref: string, deleteFiles: boolean): Promise<void>;
 
   /** Translates a client-reported path into one Pickarr can open. */
   mapPath(clientPath: string): string;
