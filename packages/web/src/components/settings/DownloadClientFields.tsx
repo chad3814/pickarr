@@ -10,10 +10,10 @@ export interface DownloadClientFieldsProps {
   onChange(next: ClientDraft[]): void;
 }
 
-// Always sabnzbd-shaped: there is no control in this form for choosing a
-// download client's type, so a client added here has to start as one of the
-// two shapes and this is the one that already existed before qBittorrent did.
-const blankClient: ClientDraft = {
+// One blank per client type, and a button per blank. A `<select>` beside a
+// single Add button would scale better to a third type, but with two it costs a
+// piece of local state and a second click to say what two labels already say.
+const blankSabnzbdClient: ClientDraft = {
   id: '',
   type: 'sabnzbd',
   url: '',
@@ -22,6 +22,31 @@ const blankClient: ClientDraft = {
   apiKey: { kind: 'literal', value: '' },
   category: '',
   importMode: 'move',
+  pathMappings: [],
+};
+
+/**
+ * Two fields differ from the SABnzbd blank for reasons the server enforces, so
+ * getting either wrong means a new row is rejected on save over something the
+ * operator never chose.
+ *
+ * `importMode` is `copy` because `parseConfig` refuses `move` for a torrent
+ * client — moving the file out from under a torrent stops it seeding.
+ *
+ * Exactly one credential, because `parseConfig` refuses both-or-neither. The
+ * api key is the default rather than a login because it is one field instead of
+ * two; it needs qBittorrent v5.2.0, and the Authentication selector on the row
+ * switches to a username and password for anything older.
+ */
+const blankQbittorrentClient: ClientDraft = {
+  id: '',
+  type: 'qbittorrent',
+  url: '',
+  apiKey: { kind: 'literal', value: '' },
+  username: null,
+  password: null,
+  category: '',
+  importMode: 'copy',
   pathMappings: [],
 };
 
@@ -43,13 +68,13 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
     onChange(clients.filter((_, i) => i !== index));
   }
 
-  function addClient() {
-    // Not `blankClient` itself: pushing the module-level object means every
-    // added row shares the exact same `pathMappings` array reference, so
-    // adding a mapping to one added client would silently add it to every
-    // other added client too. `PluginFields` spreads its blank plugin and
-    // `FeedFields` builds a fresh literal for the same reason.
-    onChange([...clients, { ...blankClient, pathMappings: [] }]);
+  function addClient(blank: ClientDraft) {
+    // Not the blank itself: pushing the module-level object means every added
+    // row shares the exact same `pathMappings` array reference, so adding a
+    // mapping to one added client would silently add it to every other added
+    // client too. `PluginFields` spreads its blank plugin and `FeedFields`
+    // builds a fresh literal for the same reason.
+    onChange([...clients, { ...blank, pathMappings: [] }]);
   }
 
   return (
@@ -262,8 +287,11 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
         );
       })}
       <div className="settings-row-actions">
-        <button type="button" onClick={addClient}>
-          Add download client
+        <button type="button" onClick={() => addClient(blankSabnzbdClient)}>
+          Add SABnzbd client
+        </button>
+        <button type="button" onClick={() => addClient(blankQbittorrentClient)}>
+          Add qBittorrent client
         </button>
       </div>
     </fieldset>
