@@ -76,8 +76,8 @@ Out of scope, deliberately:
   as well as `urls`; only `urls` is implemented, because an indexer gives Pickarr
   a URL or a magnet and nothing in the pipeline holds torrent file bytes.
 - **A version probe at construction.** Rejected with reasons in §4.
-- **Web UI changes.** The Settings form already renders whatever the client
-  config schema describes; §9 says what that means in practice.
+- Nothing further. **The Settings form was originally scoped out here and that
+  was wrong**; see §9, amended.
 
 ## 4. Authentication, and why both methods are required
 
@@ -335,20 +335,55 @@ never be used to conclude absence. Queue is the reading that changes nothing;
 `failed` would destroy a download over a vocabulary gap, which is exactly what
 `historyOutcome`'s own comment records happening to SABnzbd's multi-part jobs.
 
-## 9. Wiring
+## 9. Config round trip and wiring
 
 `main.ts:211-212` constructs a client per config entry and today always calls
 `createSabnzbdClient`. It becomes a switch on `clientConfig.type`, exhaustive over
 the union so a third client is a type error rather than a silent SABnzbd.
 
-`config/editable.ts` and the Settings form already carry `type` through; the form
-renders the fields the schema describes. What it will *not* do without further
-work is show the right credential field per client type — an operator editing a
-qBittorrent client in Settings sees the union's fields. That is a follow-up, and
-`EditableFeed`'s own comment records the hazard it belongs to: a field the form
-does not model is dropped when the record is renamed. This design does not change
-the form, and a qBittorrent client should be configured in `config.json` until it
-does.
+### 9.1 Amended: the Settings round trip is not optional
+
+The first draft of this section said the form was out of scope and a qBittorrent
+client should live in `config.json` until someone followed up. **That was wrong,
+and the error was destructive rather than cosmetic.**
+
+`applyEdits` rebuilds the client list wholesale — `config/editable.ts:325` is
+`next['downloadClients'] = clients`, and `clients` is assembled only from
+`submitted.downloadClients`. `toEditableConfig` (`config/editable.ts:154-162`)
+maps every configured client into a hardcoded SABnzbd shape, including
+`apiKey: viewSecret(client.apiKey)`, against an `EditableDownloadClient` whose
+`type` is the literal `'sabnzbd'` (`config/editable.ts:26-34`).
+
+So the moment `downloadClientSchema` becomes a union, an ordinary Settings save
+either fails to typecheck or writes a qBittorrent client back in SABnzbd's shape
+— **destroying its username and password**. This is the hazard `EditableFeed`'s
+comment already records, at whole-credential scale: a thing the form does not
+model does not merely fail to be editable, it is deleted by an unrelated save.
+
+One half of the problem is already handled and should not be re-solved:
+`FeedFields.tsx:128-130` renders a feed's unknown client id as a disabled option,
+so a feed pointing at a qBittorrent client round-trips intact even before the
+client list does.
+
+### 9.2 What is therefore in scope
+
+- `EditableDownloadClient` becomes a union mirroring the config union, with the
+  qBittorrent member carrying `apiKey`, `username` and `password` as
+  `SecretView`s so no secret reaches the browser in the clear.
+- `toEditableConfig` and `applyEdits` handle both members. `applyEdits` keeps
+  using `mergeKnownFields` against the existing entry, so a field neither the
+  schema nor the form knows about still survives.
+- The HTTP submission schema (`http/server.ts:326-335`) becomes the matching
+  union.
+- The settings component renders the credential fields for the client's type,
+  and the exactly-one-credential rule from §6 is reported as a form error rather
+  than only as a parse failure on save.
+
+### 9.3 Construction
+
+`main.ts:211-212` constructs a client per config entry and today always calls
+`createSabnzbdClient`. It becomes a switch on `clientConfig.type`, exhaustive
+over the union so a third client is a type error rather than a silent SABnzbd.
 
 ## 10. Tests
 
