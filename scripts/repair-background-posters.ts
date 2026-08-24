@@ -15,7 +15,10 @@
  * worker, and both write the same files.
  *
  * Re-runnable: a repaired row stops matching, and a row whose download failed
- * keeps its old url and file for the next attempt.
+ * keeps its old url and file for the next attempt. Both are moot on any
+ * database this repository can currently produce — see the doc on
+ * `repairBackgroundPosters` in `@pickarr/core` for why this can no longer find
+ * a row to act on, and why it is kept anyway.
  *
  * This is a harness. Every judgement lives in `@pickarr/core`'s
  * `repairBackgroundPosters`, which has tests; the script only parses flags and

@@ -9,14 +9,24 @@ import { cacheImage, type ArtworkDeps } from './artwork.ts';
  * Replaces posters that are really 800x1200 crops of a scene's background
  * with the background itself.
  *
- * This exists because the fix in `readPosterUrl` only helps scenes looked up
- * *after* it shipped. Rows answered before that hold a crop URL and a cached
- * file to match, and nothing re-fetches them: the metadata worker skips
- * caching whenever `poster_path` is already set, precisely so a re-answer does
- * not re-download a byte-identical image. So the existing library needs a pass
- * of its own, and the crop URL is enough to run it — the original background
- * is encoded inside it, so this makes no provider API request and needs no
- * credentials, only the CDN.
+ * This existed because the fix in `readPosterUrl` only helped scenes looked
+ * up *after* it shipped. Rows answered before that held a crop URL and a
+ * cached file to match, and nothing re-fetched them: the metadata worker
+ * skips caching whenever `poster_path` is already set, precisely so a
+ * re-answer does not re-download a byte-identical image. The crop URL was
+ * enough to run the repair — the original background is encoded inside it,
+ * so this makes no provider API request and needs no credentials, only the
+ * CDN.
+ *
+ * Provably unreachable since migration 15, and kept only pending a decision
+ * to retire it rather than because it still has work to do. `openDatabase`
+ * runs every migration before any query does; migration 15 nulls
+ * `poster_url` for every row matching `%/800x1200/%` or `%/smart/%` (the same
+ * shape `BACKGROUND_CROP_MARKER` recognises); and `readPosterCandidate` can
+ * no longer store a new crop for `postersMatching` to find later. So by the
+ * time this function's own query runs, on every database it could ever be
+ * pointed at, it finds zero rows. Not deleted here: retiring it is the
+ * project owner's call, not a decision to fold into an unrelated fix.
  *
  * Lives here rather than in `scripts/` so it can be tested. The script is a
  * thin harness over this function, on the same terms `parse-corpus.ts` states:
@@ -25,7 +35,7 @@ import { cacheImage, type ArtworkDeps } from './artwork.ts';
  *
  * Safe to run twice. A repaired row no longer matches `BACKGROUND_CROP_MARKER`,
  * so a second pass does not see it; a row whose download failed keeps its old
- * url and file and is simply retried.
+ * url and file and is simply retried. (Both are moot while it finds nothing.)
  *
  * Predates the poster/background split and now writes the background pair:
  * what this recovers has always been a background image, mislabelled only
