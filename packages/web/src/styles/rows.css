@@ -1,0 +1,130 @@
+.releases, .downloads { list-style: none; margin: 0; padding: 0; }
+.download-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-body);
+}
+
+.download-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.download-kind { flex: none; color: var(--color-text-dim); font-size: var(--text-label); text-transform: uppercase; letter-spacing: 0.06em; }
+
+/*
+ * Six additive rules over a neutral base, not a `switch`. `DownloadView.status`
+ * is typed `string` on the wire — the closed union lives in core's
+ * `db/downloads.ts` and does not travel — so a status this list has not heard of
+ * has to render plainly rather than disappear.
+ *
+ * The ladder says how far along a job is, and it colours text that already names
+ * the status, so nothing here is conveyed by colour alone.
+ */
+.download-status { flex: none; min-width: 5.5rem; color: var(--color-text-dim); font-size: var(--text-meta); }
+
+.status-queued .download-status { color: var(--color-text-dim); }
+.status-downloading .download-status { color: var(--color-text); }
+.status-completed .download-status { color: var(--color-text-dim); }
+.status-importing .download-status { color: var(--color-accent-text); }
+.status-imported .download-status { color: var(--color-success); }
+.status-failed .download-status { color: var(--color-error); }
+
+.release-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-body);
+}
+
+/*
+ * First rules for these two. They are rendered ahead of the name by `ReleaseRow`,
+ * and `min-width` sets a floor, not a fixed column: it aligns the common case —
+ * short, similar-length quality strings — but it deliberately does not clip a
+ * longer one, so a mixed set of qualities (`parse.ts` can populate `source`,
+ * `videoCodec` and `releaseGroup` together, e.g. `format.test.ts`'s
+ * '1080p · web-dl · h265 · WRB') widens its box instead of lining up with its
+ * neighbours. `.release-size` only renders when `sizeBytes` is defined
+ * (`ReleaseRow.tsx`), so a sizeless row misaligns regardless of width. A real
+ * fix needs a table or grid layout, which is a later phase's job, not this
+ * rule's.
+ */
+.release-quality {
+  flex: none;
+  min-width: 3.5rem;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text-dim);
+  font-size: var(--text-label);
+  text-align: center;
+}
+
+.release-size {
+  flex: none;
+  min-width: 4.5rem;
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.release-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-dim); }
+/* Mono here is functional, not decorative. A column of
+   `Vixen.26.08.14.Deep.Focus.XXX.2160p.MP4-KTR` against the same name at 1080p is
+   only scannable when the characters that differ line up vertically, and that is
+   the entire task this screen exists for. */
+.release-name { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.release-current { font-weight: 600; color: var(--color-text); }
+/* `ReleaseRow.tsx` puts both classes on one element for a current release
+   that has failed. Both selectors are single-class and in the same layer, so
+   nothing but source order below decides that such a row reads as an error
+   rather than as current — the wanted outcome, but a silent one: swapping
+   these two adjacent lines would reverse it, and no test would catch that. */
+.release-failed { color: var(--color-error); }
+
+/* The one genuinely primary button in the app, and it is distinguished in
+   markup rather than by context: it carries `className="pick"`.
+   The `.pick` class exists because a bare `.release-row button` selector reaches
+   further than intended: the row also holds the quality-edit form's own Save
+   and Cancel, and `:first-of-type` cannot stand in for the class either, since
+   Pick is absent for a current release and "Edit quality" would become
+   first-of-type in its place. Naming Pick directly is what keeps the fill on
+   the one button that deserves it. */
+.release-row button.pick { background: var(--color-accent); color: var(--color-on-accent); border-color: transparent; font-weight: 600; }
+.release-row button.pick:hover:not(:disabled) { background: var(--color-accent); filter: brightness(1.08); }
+/* `base.css`'s `button:disabled` sits in the `base` layer, so the accent fill
+   above would beat it and render a disabled control as a live call to action.
+   Nothing in a release row is disabled today; this is here so that the first
+   thing that is does not have to discover the interaction. */
+.release-row button.pick:disabled {
+  background: transparent;
+  border-color: var(--color-line);
+  color: var(--color-text-faint);
+}
+.download-error { color: var(--color-error); font-size: var(--text-meta); }
+
+/* Amber, not red: absence is not yet a failure, only a client that has gone
+   quiet. It shares the accent hue — see the badge in `card.css` on why that is
+   accepted, and how form rather than hue separates a warning from an action. */
+.download-absent { color: var(--color-accent-text); font-size: var(--text-meta); }
+
+.download-row.untracked { color: var(--color-text-dim); font-style: italic; }
+
+.failed { list-style: none; margin: 0; padding: 0; }
+
+.failed-row {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.failed-row h2 { margin: 0; font-size: var(--text-body); font-weight: 600; overflow-wrap: anywhere; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+
+.failed-reason, .failed-feed { margin: 0.1rem 0; color: var(--color-text-dim); font-size: var(--text-meta); }
+.failed-actions { display: flex; gap: var(--space-2); align-items: center; margin-top: var(--space-2); }

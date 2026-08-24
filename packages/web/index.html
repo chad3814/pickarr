@@ -13,6 +13,34 @@
     <link rel="icon" type="image/png" sizes="512x512" href="/pickarr-512x512.png" />
     <link rel="apple-touch-icon" sizes="256x256" href="/pickarr-256x256.png" />
     <title>Pickarr</title>
+    <!--
+      Inline and synchronous because it has to beat first paint. The module
+      script below is deferred by definition, so leaving this to React means
+      painting the wrong theme and then correcting it, in view.
+
+      It duplicates three lines of `src/theme.ts` deliberately: importing the
+      module here would make this a second module graph fetched before paint,
+      which is the very thing it exists to avoid. `pickarr.theme` and
+      `(prefers-color-scheme: light)` are the contract, and `theme.ts` exports
+      both so they are stated in one place and copied here knowingly.
+    -->
+    <script>
+      try {
+        var stored = localStorage.getItem('pickarr.theme');
+        document.documentElement.setAttribute(
+          'data-theme',
+          stored === 'light' || stored === 'dark'
+            ? stored
+            : matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark',
+        );
+      } catch (cause) {
+        // localStorage throws on access outright in some privacy
+        // configurations. Dark is the default identity, so fall to it.
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

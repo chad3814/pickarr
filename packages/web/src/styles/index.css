@@ -1,0 +1,23 @@
+/*
+ * The only stylesheet `main.tsx` imports. Everything else arrives through here,
+ * in a declared layer.
+ *
+ * The layer order is what lets component rules stop being written defensively.
+ * Before layers, `.card-head-main .fields { margin-bottom: 0 }` had to out-specify
+ * `.fields { margin: 0.5rem 0 }` with a second class, and every such rule was a bet
+ * that no future selector outranked it. A rule in `components` now beats a rule in
+ * `base` whatever its specificity, so the bet is off the table.
+ */
+@layer tokens, base, components;
+
+/* Unlayered: `@font-face` is not affected by cascade layers, and putting it in
+   one would only invite the question of which. */
+@import './fonts.css';
+
+@import './tokens.css' layer(tokens);
+@import './base.css' layer(base);
+@import './nav.css' layer(components);
+@import './card.css' layer(components);
+@import './rows.css' layer(components);
+@import './forms.css' layer(components);
+@import './dialog.css' layer(components);

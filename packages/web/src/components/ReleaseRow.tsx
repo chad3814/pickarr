@@ -71,7 +71,7 @@ export function ReleaseRow({ release, isCurrent, hasFailed, onPick, fields, onEd
       {isCurrent ? (
         hasFailed !== true && <span className="release-current">Current</span>
       ) : (
-        <button type="button" onClick={() => onPick(release.id)}>
+        <button type="button" className="pick" onClick={() => onPick(release.id)}>
           Pick
         </button>
       )}

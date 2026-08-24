@@ -1,0 +1,140 @@
+/* `accent-color` inherits, so one declaration here covers every native
+   checkbox and radio in the app — including the theme toggle's own radios in
+   `nav.css`, which is why that file's `.theme-toggle input` declaration is now
+   redundant but left in place. */
+:root { font-family: 'IBM Plex Sans', system-ui, sans-serif; accent-color: var(--color-accent); }
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+/* Nav beside the content rather than above it, both inside the one centred
+   column: the tabs stay next to what they navigate instead of drifting to a far
+   window edge on a wide screen. */
+.app { display: flex; gap: var(--space-5); max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
+/* `min-width: 0` for the reason `.card-head-main` gives: a flex item refuses to
+   shrink below its content by default, so one long unbroken release name would
+   push the nav off the screen instead of wrapping. */
+main { flex: 1; min-width: 0; }
+
+/* Unstyled until now, so it rendered at the UA's 2em. */
+h1 { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.015em; margin: 0 0 var(--space-4); }
+
+/*
+ * A bare `h2` is a section heading beneath a route's `h1` and has to read as
+ * subordinate to it, not louder than it: unstyled, it renders at the UA's
+ * 1.5em/700, which is bigger than `h1`'s own `--text-page` at 600. This rule
+ * sits in the `base` layer, so `.media-card h2`, `.failed-row h2` and
+ * `.confirm h2` in `components` still win wherever a card, a failed row or
+ * the dialog gives its `h2` a different treatment — that is the layering
+ * working as intended, not a gap in this rule.
+ */
+h2 { font-size: var(--text-title); font-weight: 600; margin: 0 0 var(--space-4); }
+
+/*
+ * One decision for every link in the app. Nav links are the exception and are
+ * coloured by `nav.css`: five accent-coloured links stacked in a column read as
+ * five calls to action.
+ */
+a { color: var(--color-accent-text); }
+
+/* The standard clip, so a legend can name a group for a screen reader without
+   taking space in a nav that is already only as wide as its longest label.
+
+   This lives in the `base` layer, so a `components`-layer rule beats it
+   regardless of specificity — layer order decides, not selector weight. It
+   holds today only because nothing in `components` overlaps it on the
+   properties that do the clipping: `forms.css`'s `legend` sets only
+   font-weight, size and colour. The theme toggle's group name depends on
+   this clip; whoever later adds a `legend` or `fieldset` declaration in
+   `components` that touches `position`, `width`, `height`, `margin`,
+   `padding`, `border`, `overflow`, `clip-path` or `white-space` should know
+   this utility does not automatically outrank it. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.error { color: var(--color-error); }
+.notice { color: var(--color-success); }
+/* Told apart from silence by italics as well as by colour — a lookup in flight is
+   the one metadata state that resolves into something else on its own. */
+.loading { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }
+
+/*
+ * Native controls on a #121110 ground do not read as unstyled, they read as
+ * broken, and `color-scheme: dark` alone only gets them to a grey slab.
+ *
+ * A bare `button` is the secondary treatment because that is what almost every
+ * button in the app is — Edit, Cancel, Retry, Load more. Pick is the one that
+ * is genuinely primary, and it is distinguished in markup: it carries
+ * `className="pick"` (see `ReleaseRow.tsx`), which `rows.css` targets with
+ * `.release-row button.pick` for its fill. The confirm dialog's own confirm
+ * gets no fill at all, and that is deliberate rather than an oversight:
+ * confirming an identity change moves files on disk, and an action with that
+ * consequence should not be the loudest thing in the dialog.
+ */
+button {
+  font: inherit;
+  font-size: var(--text-body);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: var(--color-surface-2); }
+button:disabled { color: var(--color-text-faint); border-color: var(--color-line); cursor: default; }
+
+/* Narrowed to exclude checkboxes and radios: a checkbox is not a text field,
+   and giving it a surface background and a strong border fights its native
+   rendering rather than styling it. Left unstyled, they pick up the palette
+   through `accent-color` on `:root` instead. */
+input:not([type='checkbox']):not([type='radio']), select, textarea {
+  font: inherit;
+  font-size: var(--text-body);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+/* `--color-line-strong` rather than `--color-line` on every control above: WCAG
+   1.4.11 wants 3:1 against the adjacent background for the visual boundary of
+   something the user operates, and the decorative hairline is ~1.3:1. */
+
+/* The one legitimate use of `--color-text-faint` with no restriction attached:
+   placeholder text is not content, it disappears the moment the user types
+   anything, so the token's sub-4.5:1 contrast — barred everywhere else in
+   essential text — is fine here. */
+::placeholder { color: var(--color-text-faint); }
+
+/*
+ * The app defined no focus style at all and relied on the UA default, which
+ * against custom dark surfaces is frequently invisible. This is a correctness
+ * fix rather than polish, and it is `:focus-visible` rather than `:focus` so a
+ * mouse click on a button does not leave a ring behind.
+ *
+ * The ring uses `--color-accent-text` rather than `--color-accent` because a
+ * focus ring is read as a thin line against the background behind the element,
+ * not as a fill with text placed on top of it. `--color-accent` fails WCAG 3:1
+ * contrast in the light theme (2.0–2.3:1 against the three background colours),
+ * while `--color-accent-text` meets 3:1 in light (5.0–5.8:1) and exceeds it in
+ * dark (7.1–8.3:1). The tokens are the same colour value in dark, so this
+ * change has no visual effect there.
+ */
+:focus-visible {
+  outline: 2px solid var(--color-accent-text);
+  outline-offset: 2px;
+}
