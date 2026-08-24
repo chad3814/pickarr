@@ -40,7 +40,7 @@ test('an existing client offers to keep its key; an added one cannot', () => {
   );
   assert.equal(screen.getAllByText(/set/i).length, 1);
 
-  fireEvent.click(screen.getByRole('button', { name: /add download client/i }));
+  fireEvent.click(screen.getByRole('button', { name: /add sabnzbd client/i }));
   rerender(
     <DownloadClientFields clients={next} onDisk={ON_DISK} onChange={(value) => { next = value; }} />,
   );
@@ -62,9 +62,9 @@ test('two added download clients do not share a pathMappings array', () => {
   const { rerender } = render(
     <DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />,
   );
-  fireEvent.click(screen.getByRole('button', { name: /add download client/i }));
+  fireEvent.click(screen.getByRole('button', { name: /add sabnzbd client/i }));
   rerender(<DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />);
-  fireEvent.click(screen.getByRole('button', { name: /add download client/i }));
+  fireEvent.click(screen.getByRole('button', { name: /add sabnzbd client/i }));
   rerender(<DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />);
 
   assert.equal(next.length, 2);
@@ -121,4 +121,56 @@ test('a path mapping is named by its own from/to, so several on one client are n
   // test - if the mapping's own from/to were not carried in its aria-label.
   fireEvent.click(screen.getByRole('button', { name: /remove path mapping \/incomplete/i }));
   assert.deepEqual(next[0]?.pathMappings, [{ from: '/downloads', to: '/data/downloads' }]);
+});
+
+// --- Adding a client of either type ------------------------------------------
+//
+// Until this existed, `blankClient` was hardcoded to sabnzbd and the only way
+// to get a qBittorrent client was to hand-edit config.json and restart — an odd
+// seam in a form that configures everything else.
+
+test('a qBittorrent client can be added, and starts in copy mode', () => {
+  let next: ClientDraft[] = [];
+  render(
+    <DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: /add qbittorrent client/i }));
+
+  assert.equal(next.length, 1);
+  const added = next[0]!;
+  assert.equal(added.type, 'qbittorrent');
+  // `copy`, not the sabnzbd default of `move`: parseConfig refuses `move` for a
+  // torrent client, so a blank that defaulted to it would be born invalid on a
+  // field the operator never chose.
+  assert.equal(added.importMode, 'copy');
+});
+
+test('adding a sabnzbd client still yields a sabnzbd client', () => {
+  let next: ClientDraft[] = [];
+  render(
+    <DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: /add sabnzbd client/i }));
+
+  assert.equal(next[0]?.type, 'sabnzbd');
+  assert.equal(next[0]?.importMode, 'move');
+});
+
+test('an added qBittorrent client carries exactly one credential', () => {
+  let next: ClientDraft[] = [];
+  render(
+    <DownloadClientFields clients={next} onDisk={[]} onChange={(value) => { next = value; }} />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: /add qbittorrent client/i }));
+
+  const added = next[0]!;
+  assert.equal(added.type, 'qbittorrent');
+  // parseConfig refuses both-or-neither, so a blank carrying an apiKey *and* a
+  // login would be rejected on save with nothing the operator did wrong.
+  assert.deepEqual(added.apiKey, { kind: 'literal', value: '' });
+  assert.equal(added.username, null);
+  assert.equal(added.password, null);
 });

@@ -139,12 +139,16 @@ reached when seeders disappeared and then holding there for as long as it's stal
 and nothing in Pickarr gives up on it automatically. Deciding a stalled torrent isn't
 coming and removing it is a human decision, made in qBittorrent or in Pickarr's own UI.
 
-**Adding a qBittorrent client is a `config.json` edit today, not a Settings-tab
-action.** The Settings form can edit an existing qBittorrent client's fields (including
-its credentials) once one is configured, but it cannot create one or change an existing
-client's type — there's no "add qBittorrent client" button. Add the client to
-`config/config.json` by hand, the way every download client was configured before the
-Settings tab existed, then it becomes editable there.
+**A qBittorrent client can be added from the Settings tab.** "Add qBittorrent client"
+sits beside "Add SABnzbd client" under Download clients, and the new row starts in `copy`
+mode with an API key field, because `move` and a missing-or-doubled credential are both
+refused on save and neither is a choice worth making a new client fail over. Switch the
+row's Authentication control to a username and password if your qBittorrent predates
+v5.2.0.
+
+What Settings still cannot do is **change an existing client's type**. Converting a
+SABnzbd client into a qBittorrent one, or the reverse, means editing
+`config/config.json` — the server accepts it, but nothing in the form offers it.
 
 ### Backfilling a feed's history
 
