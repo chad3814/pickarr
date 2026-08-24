@@ -19,18 +19,39 @@ nav {
   max-height: calc(100vh - 2rem);
   overflow-y: auto;
 }
-nav a { text-decoration: none; }
-nav a.active { font-weight: 600; text-decoration: underline; }
+nav a {
+  text-decoration: none;
+  /* `dim`, not `faint`. An inactive tab is essential text and `--color-text-faint`
+     is ~3.8:1, below the 4.5:1 floor — it is for labels and placeholders. */
+  color: var(--color-text-dim);
+  font-size: var(--text-body);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+}
+
+nav a:hover { color: var(--color-text); background: var(--color-surface-2); }
+
+/*
+ * The underline goes. It was carrying the whole burden of "you are here" on its
+ * own; a filled surface plus an accent rule on the leading edge says it without
+ * competing with the link text.
+ */
+nav a.active {
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
 /* A rule, not a glyph — see `App.tsx`. `border-top` alone because a default
    `<hr>` renders as an inset 3D groove that reads as a seam in the page rather
    than a divider between two groups of links. `user-select: none` went with the
    em dash: there is no text here to accidentally select. */
 .nav-separator {
   width: 100%;
-  margin: 0.25rem 0;
+  margin: var(--space-1) 0;
   border: 0;
-  border-top: 1px solid currentColor;
-  opacity: 0.4;
+  border-top: 1px solid var(--color-line);
 }
 
 /*
