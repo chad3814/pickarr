@@ -1,4 +1,4 @@
-import { SECRET_REFERENCE_PREFIX, type PickarrConfig } from './schema.ts';
+import { SECRET_REFERENCE_PREFIX, type DownloadClientConfig, type PickarrConfig } from './schema.ts';
 import { asJsonArray, asJsonObject, type JsonObject, type JsonValue } from '../json.ts';
 
 /**
@@ -22,15 +22,54 @@ export interface EditablePathMapping {
   to: string;
 }
 
-export interface EditableDownloadClient {
+/** Everything a download client carries whatever its type, and nothing else. */
+interface EditableClientCommon {
   id: string;
-  type: 'sabnzbd';
   url: string;
-  apiKey: SecretView;
   category: string;
   importMode: 'move' | 'copy';
   pathMappings: EditablePathMapping[];
 }
+
+export interface EditableSabnzbdClient extends EditableClientCommon {
+  type: 'sabnzbd';
+  /** Required, because `sabnzbdClientSchema` has no other way to authenticate. */
+  apiKey: SecretView;
+}
+
+export interface EditableQbittorrentClient extends EditableClientCommon {
+  type: 'qbittorrent';
+  /**
+   * `null` for absent rather than a missing key, the way `siteLookup` and
+   * `artworkDir` say absent: exactly one of `apiKey`, or `username` and
+   * `password` together, is configured, and the form has to render both
+   * possibilities from one shape. `applyEdits` turns the `null` back into a
+   * *deleted* key, because `qbittorrentClientSchema` marks these `.optional()`
+   * and would refuse a literal null.
+   */
+  apiKey: SecretView | null;
+  /**
+   * In the clear, unlike the two beside it, and that is a decision rather than
+   * an oversight.
+   *
+   * `SecretView`/`SecretEdit` is not a redaction mechanism in the abstract — it
+   * is the browser-facing half of the `file:` indirection, and `resolveSecrets`
+   * (config/load.ts) resolves a qBittorrent client's `apiKey` and `password`
+   * and deliberately not its `username`. Projecting a username as a `SecretView`
+   * would therefore report a username that genuinely begins `file:` as a path
+   * to a file, and would let the form write a `file:` reference back that
+   * nothing ever resolves — qBittorrent would be handed the literal string
+   * `file:/run/secrets/...` as a login and answer 403.
+   *
+   * That it is also not confidential (qBittorrent's default is `admin`, and a
+   * login is only as good as the password half) is the lesser argument; the
+   * `file:` asymmetry is the one that would be a bug.
+   */
+  username: string | null;
+  password: SecretView | null;
+}
+
+export type EditableDownloadClient = EditableSabnzbdClient | EditableQbittorrentClient;
 
 /**
  * A feed's backfill settings as the form holds them, with `null` for "not
@@ -132,6 +171,48 @@ function copyPluginSettings(
 }
 
 /**
+ * Projects one configured client into the member of the editable union that
+ * matches its type.
+ *
+ * A `switch` with a `never` default rather than a chain of `if`s, for the same
+ * reason `resolveSecrets` and the client construction in `main.ts` are: a third
+ * client type that fell through here would be projected as nothing at all, and
+ * `applyEdits` rebuilds the list from what the form submits — so the first sign
+ * of the omission would be the client having been deleted from `config.json`
+ * by an unrelated save.
+ */
+function toEditableClient(client: DownloadClientConfig): EditableDownloadClient {
+  const common: EditableClientCommon = {
+    id: client.id,
+    url: client.url,
+    category: client.category,
+    importMode: client.importMode,
+    pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
+  };
+  switch (client.type) {
+    case 'sabnzbd':
+      return { ...common, type: 'sabnzbd', apiKey: viewSecret(client.apiKey) };
+    case 'qbittorrent':
+      return {
+        ...common,
+        type: 'qbittorrent',
+        apiKey: client.apiKey === undefined ? null : viewSecret(client.apiKey),
+        username: client.username ?? null,
+        password: client.password === undefined ? null : viewSecret(client.password),
+      };
+    default: {
+      const unhandled: never = client;
+      // The discriminant alone, never the object, for the reason spelled out
+      // at the same arm in `resolveSecrets`: an unhandled client config holds
+      // an apiKey or a password, and serialising it would print one into an
+      // error message.
+      const { type } = unhandled as { type: string };
+      throw new Error(`Unhandled download client type: ${type}`);
+    }
+  }
+}
+
+/**
  * Projects a *parsed* config — so the form shows effective values, defaults
  * included — into the shape `GET /api/config` returns.
  *
@@ -151,29 +232,7 @@ export function toEditableConfig(config: PickarrConfig): EditableConfig {
     database: { path: config.database.path },
     trashDir: config.trashDir,
     plugins: copyPluginSettings(config.plugins),
-    downloadClients: config.downloadClients.map((client) => {
-      // EditableDownloadClient has no 'qbittorrent' member yet — that is
-      // Task 10's job, which also decides how its username/password reach
-      // the browser as SecretViews. Throwing names the gap rather than
-      // silently dropping the client's real fields, and it cannot fire
-      // today: parseConfig (config/load.ts) is the only source of a
-      // 'qbittorrent' client, landing in this same commit, so nothing has
-      // configured one yet.
-      if (client.type !== 'sabnzbd') {
-        throw new Error(
-          `Download client ${client.id} is a qbittorrent client, and Settings cannot edit one yet`,
-        );
-      }
-      return {
-        id: client.id,
-        type: client.type,
-        url: client.url,
-        apiKey: viewSecret(client.apiKey),
-        category: client.category,
-        importMode: client.importMode,
-        pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
-      };
-    }),
+    downloadClients: config.downloadClients.map(toEditableClient),
     feeds: config.feeds.map((feed) => ({
       id: feed.id,
       url: feed.url,
@@ -201,15 +260,36 @@ export function toEditableConfig(config: PickarrConfig): EditableConfig {
   };
 }
 
-export interface SubmittedDownloadClient {
+/** The way back, member for member with `EditableDownloadClient` above. */
+interface SubmittedClientCommon {
   id: string;
-  type: 'sabnzbd';
   url: string;
-  apiKey: SecretEdit;
   category: string;
   importMode: 'move' | 'copy';
   pathMappings: EditablePathMapping[];
 }
+
+export interface SubmittedSabnzbdClient extends SubmittedClientCommon {
+  type: 'sabnzbd';
+  apiKey: SecretEdit;
+}
+
+export interface SubmittedQbittorrentClient extends SubmittedClientCommon {
+  type: 'qbittorrent';
+  /**
+   * `null` says "this client does not use this credential", and it has to be
+   * sayable: switching a client from a login to an api key is a save that must
+   * *remove* the username and password, not merely stop mentioning them. A
+   * patch that only ever added keys would leave all three on disk and
+   * `parseConfig`'s exactly-one rule would refuse the file the save just wrote.
+   */
+  apiKey: SecretEdit | null;
+  /** Plain text on the way back too — see `EditableQbittorrentClient.username`. */
+  username: string | null;
+  password: SecretEdit | null;
+}
+
+export type SubmittedDownloadClient = SubmittedSabnzbdClient | SubmittedQbittorrentClient;
 
 export interface SubmittedSiteLookup {
   type: 'theporndb';
@@ -237,13 +317,22 @@ export interface SubmittedConfig {
  * an empty string, or to the nearest entry — turns "I renamed a client" into
  * "my download client silently lost its api key", which surfaces later as 401s
  * that look like an outage.
+ *
+ * `noun` is what to call the value in that refusal. `field` is the machine path,
+ * which says *where* but not *what*, and a qBittorrent password refused with
+ * "enter the key" sends the user to a control that client does not even have.
  */
-function editedSecret(edit: SecretEdit, existing: string | undefined, field: string): string | { error: string } {
+function editedSecret(
+  edit: SecretEdit,
+  existing: string | undefined,
+  field: string,
+  noun: string,
+): string | { error: string } {
   if (edit.kind === 'literal') return edit.value;
   if (edit.kind === 'file') return `${SECRET_REFERENCE_PREFIX}${edit.path}`;
   if (existing === undefined) {
     return {
-      error: `${field}: asked to keep the existing api key, but there is none on disk to keep. Enter the key.`,
+      error: `${field}: asked to keep the existing ${noun}, but there is none on disk to keep. Enter the ${noun}.`,
     };
   }
   return existing;
@@ -261,6 +350,98 @@ function editedSecret(edit: SecretEdit, existing: string | undefined, field: str
 function mergeKnownFields(existing: JsonValue | undefined, patch: JsonObject): JsonObject {
   const base = asJsonObject(existing);
   return base === null ? patch : { ...structuredClone(base), ...patch };
+}
+
+/** The previous value of a secret-bearing key, for `editedSecret` to keep. */
+function previousSecret(existing: JsonObject | undefined, key: string): string | undefined {
+  const value = existing?.[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Folds one submitted client over its on-disk entry, or names what could not be
+ * kept.
+ *
+ * Both members go through `mergeKnownFields`, which is what lets a key neither
+ * the schema nor the form models survive inside a client — and which the
+ * qBittorrent member would silently not have if it were built as a fresh
+ * object beside the SABnzbd one.
+ *
+ * The patch is assembled in the schema's own field order, credentials in the
+ * middle, so a *newly added* client is written out reading the way a
+ * hand-written one does. An existing client's key order is already preserved by
+ * the merge, whatever order the patch is in.
+ */
+function applyClientEdits(
+  client: SubmittedDownloadClient,
+  existing: JsonObject | undefined,
+): { client: JsonObject } | { error: string } {
+  const identity: JsonObject = { id: client.id, type: client.type, url: client.url };
+  const settings: JsonObject = {
+    category: client.category,
+    importMode: client.importMode,
+    pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
+  };
+
+  switch (client.type) {
+    case 'sabnzbd': {
+      const apiKey = editedSecret(
+        client.apiKey,
+        previousSecret(existing, 'apiKey'),
+        `downloadClients.${client.id}.apiKey`,
+        'api key',
+      );
+      if (typeof apiKey !== 'string') return apiKey;
+      return { client: mergeKnownFields(existing, { ...identity, apiKey, ...settings }) };
+    }
+    case 'qbittorrent': {
+      const patch: JsonObject = { ...identity };
+      if (client.apiKey !== null) {
+        const apiKey = editedSecret(
+          client.apiKey,
+          previousSecret(existing, 'apiKey'),
+          `downloadClients.${client.id}.apiKey`,
+          'api key',
+        );
+        if (typeof apiKey !== 'string') return apiKey;
+        patch['apiKey'] = apiKey;
+      }
+      // Not a secret, so it is carried as itself rather than resolved — see
+      // `EditableQbittorrentClient.username` for why that asymmetry is right.
+      if (client.username !== null) patch['username'] = client.username;
+      if (client.password !== null) {
+        const password = editedSecret(
+          client.password,
+          previousSecret(existing, 'password'),
+          `downloadClients.${client.id}.password`,
+          'password',
+        );
+        if (typeof password !== 'string') return password;
+        patch['password'] = password;
+      }
+      Object.assign(patch, settings);
+
+      const merged = mergeKnownFields(existing, patch);
+      // The `artworkDir` rule, applied to a credential: absence is a *deleted*
+      // key, both because `qbittorrentClientSchema` marks these `.optional()`
+      // and would refuse a null, and because deleting after the merge rather
+      // than omitting from the patch is the only way the merge cannot resurrect
+      // what the submission removed. Without this, swapping a login for an api
+      // key would leave all three on disk and `parseConfig`'s exactly-one rule
+      // would refuse the file this save just wrote.
+      if (client.apiKey === null) delete merged['apiKey'];
+      if (client.username === null) delete merged['username'];
+      if (client.password === null) delete merged['password'];
+      return { client: merged };
+    }
+    default: {
+      const unhandled: never = client;
+      // The discriminant alone, never the object: it holds an api key or a
+      // password, and serialising it would print one into an error message.
+      const { type } = unhandled as { type: string };
+      throw new Error(`Unhandled download client type: ${type}`);
+    }
+  }
 }
 
 /**
@@ -312,24 +493,9 @@ export function applyEdits(
   const clients: JsonValue[] = [];
   for (const client of submitted.downloadClients) {
     const existingClient = existingClientsById.get(client.id);
-    const previousApiKey = existingClient?.['apiKey'];
-    const apiKey = editedSecret(
-      client.apiKey,
-      typeof previousApiKey === 'string' ? previousApiKey : undefined,
-      `downloadClients.${client.id}.apiKey`,
-    );
-    if (typeof apiKey !== 'string') return apiKey;
-    clients.push(
-      mergeKnownFields(existingClient, {
-        id: client.id,
-        type: client.type,
-        url: client.url,
-        apiKey,
-        category: client.category,
-        importMode: client.importMode,
-        pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
-      }),
-    );
+    const merged = applyClientEdits(client, existingClient);
+    if ('error' in merged) return merged;
+    clients.push(merged.client);
   }
 
   next['server'] = mergeKnownFields(existing['server'], { port: submitted.server.port });
@@ -387,6 +553,7 @@ export function applyEdits(
       submitted.siteLookup.apiKey,
       typeof previous === 'string' ? previous : undefined,
       'siteLookup.apiKey',
+      'api key',
     );
     if (typeof apiKey !== 'string') return apiKey;
     next['siteLookup'] = mergeKnownFields(existingSiteLookup, {

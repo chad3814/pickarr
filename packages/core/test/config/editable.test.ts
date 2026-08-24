@@ -1,7 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseConfig } from '../../src/config/load.ts';
-import { toEditableConfig, applyEdits, type SubmittedConfig } from '../../src/config/editable.ts';
+import {
+  toEditableConfig,
+  applyEdits,
+  type EditableConfig,
+  type SecretEdit,
+  type SecretView,
+  type SubmittedConfig,
+} from '../../src/config/editable.ts';
 import { asJsonArray, asJsonObject, type JsonObject, type JsonValue } from '../../src/json.ts';
 
 const VALID = {
@@ -372,4 +379,226 @@ test('a renamed feed keeps its download client', () => {
   const savedFeed = asJsonObject(asJsonArray(saved['feeds'])[0]);
   assert.equal(savedFeed?.['id'], 'renamed');
   assert.equal(savedFeed?.['downloadClient'], 'sab-b');
+});
+
+// A qBittorrent client configured the way most installations can be: cookie
+// login, because the api key needs v5.2.0. `importMode` is 'copy' because
+// parseConfig refuses 'move' for this type — a move would take the file out
+// from under the torrent and stop the seed.
+const QBITTORRENT = {
+  id: 'qb',
+  type: 'qbittorrent',
+  url: 'http://qbittorrent:8080',
+  username: 'admin',
+  password: 'hunter2-not-a-real-password',
+  category: 'pickarr',
+  importMode: 'copy',
+  pathMappings: [],
+};
+
+function withQbittorrent(): JsonObject {
+  const document = structuredClone(VALID) as unknown as JsonObject;
+  asJsonArray(document['downloadClients']).push(structuredClone(QBITTORRENT) as unknown as JsonValue);
+  return document;
+}
+
+/**
+ * What the Settings form submits when the user changed nothing about a client:
+ * a `file:` path comes back as itself because it is editable text, and anything
+ * else comes back as `keep`. This is `keepOrPath` from `ConfigForm.tsx`, which
+ * lives in the web package and cannot be imported here — restating it is what
+ * makes these round-trip tests exercise the actual save the form performs
+ * rather than a submission invented to suit the assertion.
+ */
+function keepOrPath(view: SecretView): SecretEdit {
+  return view.kind === 'file' ? { kind: 'file', path: view.path } : { kind: 'keep' };
+}
+
+function resubmit(editable: EditableConfig): SubmittedConfig {
+  return {
+    server: { port: editable.server.port },
+    database: { path: editable.database.path },
+    trashDir: editable.trashDir,
+    plugins: editable.plugins,
+    downloadClients: editable.downloadClients.map((client) =>
+      client.type === 'sabnzbd'
+        ? { ...client, apiKey: keepOrPath(client.apiKey) }
+        : {
+            ...client,
+            apiKey: client.apiKey === null ? null : keepOrPath(client.apiKey),
+            password: client.password === null ? null : keepOrPath(client.password),
+          },
+    ),
+    feeds: editable.feeds,
+    siteLookup:
+      editable.siteLookup === null
+        ? null
+        : { ...editable.siteLookup, apiKey: keepOrPath(editable.siteLookup.apiKey) },
+    metadata: editable.metadata,
+  };
+}
+
+test('a qbittorrent password is redacted, and its username is not', () => {
+  const editable = toEditableConfig(parseConfig(withQbittorrent() as unknown as JsonValue, 'test'));
+  const client = editable.downloadClients[1];
+  assert.ok(client?.type === 'qbittorrent');
+  assert.deepEqual(client.password, { kind: 'set' });
+  assert.doesNotMatch(JSON.stringify(editable), /hunter2-not-a-real-password/);
+  // Shown in the clear on purpose — see the comment on `EditableQbittorrentClient.username`.
+  assert.equal(client.username, 'admin');
+  // Absent, not an empty view: this client authenticates by login.
+  assert.equal(client.apiKey, null);
+});
+
+// The test this whole task exists for. `applyEdits` rebuilds the client list
+// from the submission alone, so a client the form could not represent used to
+// be rewritten in SABnzbd's shape — losing both halves of its login to a save
+// that changed something else entirely.
+test('a qbittorrent client survives a Settings save that changed something else', () => {
+  const onDisk = withQbittorrent();
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const submitted = { ...resubmit(editable), trashDir: '/new/trash' };
+
+  const result = applyEdits(onDisk, submitted);
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+  const saved = result.document;
+
+  assert.equal(saved['trashDir'], '/new/trash');
+  const client = asJsonObject(asJsonArray(saved['downloadClients'])[1]);
+  assert.equal(client?.['type'], 'qbittorrent');
+  assert.equal(client?.['username'], 'admin');
+  assert.equal(client?.['password'], 'hunter2-not-a-real-password', 'the password must survive');
+  assert.equal('apiKey' in (client ?? {}), false, 'and no empty apiKey is invented');
+  // The strongest form of the same question, and the one a subtly wrong
+  // implementation fails: a password written back as `''`, dropped entirely,
+  // or joined by an invented `apiKey` all produce a document the very
+  // `parseConfig` this save is about to be handed refuses.
+  assert.doesNotThrow(() => parseConfig(saved, 'test'));
+});
+
+test('a qbittorrent api key survives the same save, and no login is invented', () => {
+  const onDisk = withQbittorrent();
+  const qb = asJsonObject(asJsonArray(onDisk['downloadClients'])[1]);
+  assert.ok(qb !== null);
+  delete qb['username'];
+  delete qb['password'];
+  qb['apiKey'] = 'qbt_abcdefghijklmnopqrstuvwxyz01';
+
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const result = applyEdits(onDisk, resubmit(editable));
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+
+  const client = asJsonObject(asJsonArray(result.document['downloadClients'])[1]);
+  assert.equal(client?.['apiKey'], 'qbt_abcdefghijklmnopqrstuvwxyz01');
+  assert.equal('username' in (client ?? {}), false);
+  assert.equal('password' in (client ?? {}), false);
+  assert.doesNotThrow(() => parseConfig(result.document, 'test'));
+});
+
+test('a qbittorrent password held in a file is projected as its path and written back with the prefix', () => {
+  const onDisk = withQbittorrent();
+  const qb = asJsonObject(asJsonArray(onDisk['downloadClients'])[1]);
+  assert.ok(qb !== null);
+  qb['password'] = 'file:/run/secrets/qbittorrent_password';
+
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const client = editable.downloadClients[1];
+  assert.ok(client?.type === 'qbittorrent');
+  assert.deepEqual(client.password, { kind: 'file', path: '/run/secrets/qbittorrent_password' });
+
+  const result = applyEdits(onDisk, resubmit(editable));
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+  const saved = asJsonObject(asJsonArray(result.document['downloadClients'])[1]);
+  assert.equal(saved?.['password'], 'file:/run/secrets/qbittorrent_password');
+});
+
+// The same guarantee `mergeKnownFields` already gives the SABnzbd member, which
+// a second member written as a freshly built object would quietly not have.
+test('a key the form does not model survives inside a qbittorrent client', () => {
+  const onDisk = withQbittorrent();
+  asJsonObject(asJsonArray(onDisk['downloadClients'])[1])!['futureOption'] = 'kept';
+
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const result = applyEdits(onDisk, resubmit(editable));
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+  assert.equal(asJsonObject(asJsonArray(result.document['downloadClients'])[1])?.['futureOption'], 'kept');
+});
+
+// Swapping a login for an api key has to *remove* what it replaced. A patch
+// that only ever adds keys would leave the username and password beside the new
+// key, and `parseConfig`'s exactly-one rule would refuse the file the save just
+// wrote — the `artworkDir` rule, applied to a credential.
+test('switching a qbittorrent client to an api key deletes the login it replaced', () => {
+  const onDisk = withQbittorrent();
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const submitted = resubmit(editable);
+  const client = submitted.downloadClients[1];
+  assert.ok(client?.type === 'qbittorrent');
+  client.apiKey = { kind: 'literal', value: 'qbt_abcdefghijklmnopqrstuvwxyz01' };
+  client.username = null;
+  client.password = null;
+
+  const result = applyEdits(onDisk, submitted);
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+  const saved = asJsonObject(asJsonArray(result.document['downloadClients'])[1]);
+  assert.equal(saved?.['apiKey'], 'qbt_abcdefghijklmnopqrstuvwxyz01');
+  assert.equal('username' in (saved ?? {}), false);
+  assert.equal('password' in (saved ?? {}), false);
+  assert.doesNotThrow(() => parseConfig(result.document, 'test'));
+});
+
+// `editedSecret`'s refusal names the field it could not keep, and a password
+// refused with "enter the key" would send the user to the wrong control.
+test('keeping a password for a renamed qbittorrent client is refused, and says so as a password', () => {
+  const onDisk = withQbittorrent();
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const submitted = resubmit(editable);
+  submitted.downloadClients[1]!.id = 'qb-renamed';
+
+  const result = applyEdits(onDisk, submitted);
+  assert.ok('error' in result);
+  assert.match(result.error, /qb-renamed/);
+  assert.match(result.error, /password/i);
+  assert.doesNotMatch(result.error, /api key/i);
+});
+
+// `username` has to be *modelled*, not left to the merge. The merge would
+// happily resurrect the on-disk one and hide the omission for as long as
+// nobody edited it — right up until someone did.
+test('changing a qbittorrent username saves the new one', () => {
+  const onDisk = withQbittorrent();
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const submitted = resubmit(editable);
+  const client = submitted.downloadClients[1];
+  assert.ok(client?.type === 'qbittorrent');
+  client.username = 'operator';
+
+  const result = applyEdits(onDisk, submitted);
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+  assert.equal(asJsonObject(asJsonArray(result.document['downloadClients'])[1])?.['username'], 'operator');
+});
+
+// The rename hazard `EditableFeed`'s comment records, at credential scale:
+// `applyEdits` matches clients by id, so a renamed client has no on-disk entry
+// to merge with and every field it keeps must have come through the form. The
+// password is the one thing a rename cannot carry — `editedSecret` refuses a
+// `keep` it cannot match — so the user re-enters it, and the username must
+// still arrive on its own.
+test('a renamed qbittorrent client keeps its login', () => {
+  const onDisk = withQbittorrent();
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const submitted = resubmit(editable);
+  const client = submitted.downloadClients[1];
+  assert.ok(client?.type === 'qbittorrent');
+  client.id = 'qb-renamed';
+  client.password = { kind: 'literal', value: 'hunter2-not-a-real-password' };
+
+  const result = applyEdits(onDisk, submitted);
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+  const saved = asJsonObject(asJsonArray(result.document['downloadClients'])[1]);
+  assert.equal(saved?.['id'], 'qb-renamed');
+  assert.equal(saved?.['username'], 'admin');
+  assert.equal(saved?.['password'], 'hunter2-not-a-real-password');
+  assert.equal('apiKey' in (saved ?? {}), false);
+  assert.doesNotThrow(() => parseConfig(result.document, 'test'));
 });
