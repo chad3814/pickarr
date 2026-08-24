@@ -88,8 +88,16 @@ input, select, textarea {
  * against custom dark surfaces is frequently invisible. This is a correctness
  * fix rather than polish, and it is `:focus-visible` rather than `:focus` so a
  * mouse click on a button does not leave a ring behind.
+ *
+ * The ring uses `--color-accent-text` rather than `--color-accent` because a
+ * focus ring is read as a thin line against the background behind the element,
+ * not as a fill with text placed on top of it. `--color-accent` fails WCAG 3:1
+ * contrast in the light theme (2.0–2.3:1 against the three background colours),
+ * while `--color-accent-text` meets 3:1 in light (5.0–5.8:1) and exceeds it in
+ * dark (7.1–8.3:1). The tokens are the same colour value in dark, so this
+ * change has no visual effect there.
  */
 :focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--color-accent-text);
   outline-offset: 2px;
 }
