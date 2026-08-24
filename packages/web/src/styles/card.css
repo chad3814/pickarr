@@ -1,5 +1,16 @@
-.media-card { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; opacity: 0.95; }
-.media-card h2 { margin: 0; font-size: 1.1rem; }
+/*
+ * `opacity: 0.95` came off this rule. It dimmed the poster along with the text,
+ * which is exactly backwards for a card whose job is judging artwork.
+ */
+.media-card {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.media-card h2 { margin: 0; font-size: var(--text-title); font-weight: 600; letter-spacing: -0.012em; }
 /* The title block beside the poster, as tall as the taller of the two. The
    card carried `position: relative` for as long as the poster was absolute;
    nothing else in the card is positioned, so it went with it. */
@@ -25,10 +36,38 @@
    at least one of the two buttons is going in it, precisely so this margin
    never shows up as a gap under a card with no actions. */
 .card-actions { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
-.subtitle, .date { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
-.badge { display: inline-block; margin-top: 0.4rem; padding: 0.1rem 0.5rem; border-radius: 0.25rem; background: #b45309; color: white; font-size: 0.8rem; }
-.fields { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; font-size: 0.85rem; }
-.fields li { opacity: 0.8; }
+.subtitle, .date { margin: 0.1rem 0; color: var(--color-text-dim); font-size: var(--text-meta); }
+
+/* The accent as a fill, with `--color-on-accent` on it — ~7.6:1, and the same
+   pair in both themes. Amber is also the warning colour (`.download-absent`,
+   `.confirm .warning`); actions and warnings are told apart by form, a filled
+   pill against plain text, rather than by hue. */
+.badge {
+  display: inline-block;
+  margin-top: var(--space-1);
+  padding: 0.1rem var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: var(--text-label);
+  font-weight: 600;
+}
+/*
+ * The display fields become chips. No markup changed: the `<li>` already exists,
+ * and it already holds label and value in a single text node (see `MediaCard`
+ * on why). A chip is what turns four floating "Label: Value" strings into four
+ * things you can count at a glance.
+ */
+.fields { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-2) 0; padding: 0; list-style: none; }
+
+.fields li {
+  padding: 0.05rem var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text-dim);
+  font-size: var(--text-label);
+}
 /* Only the interactive thumbnails get the pointer cursor: `button.avatar-thumb`
    (has a full image behind it) rather than `.avatar-thumb` by class alone,
    which would also match the plain `<img class="avatar-thumb">` shown for a
@@ -50,8 +89,8 @@
    button that is supposed to contain it.
    No fixed aspect ratio: the provider's images are frequently landscape (a
    documented example is 1279x719), not portrait. */
-.poster-thumb img { display: block; max-width: 6rem; max-height: 8rem; }
+.poster-thumb img { display: block; max-width: 6rem; max-height: 8rem; border: 1px solid var(--color-line); border-radius: var(--radius-sm); }
 .metadata-performers { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; align-items: center; }
 .metadata-performers li { display: flex; align-items: center; gap: 0.35rem; }
 .avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
-.metadata-pending { opacity: 0.6; font-style: italic; }
+.metadata-pending { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }
