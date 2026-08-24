@@ -8,7 +8,9 @@
  * that no future selector outranked it. A rule in `components` now beats a rule in
  * `base` whatever its specificity, so the bet is off the table.
  */
-@layer tokens, base, components;
+/* Unlayered: `@font-face` is not affected by cascade layers, and putting it in
+   one would only invite the question of which. */
+@import './fonts.css';
 
 @import './base.css' layer(base);
 @import './nav.css' layer(components);
@@ -16,3 +18,5 @@
 @import './rows.css' layer(components);
 @import './forms.css' layer(components);
 @import './dialog.css' layer(components);
+
+@layer tokens, base, components;

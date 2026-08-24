@@ -1,6 +1,11 @@
 .releases, .downloads { list-style: none; margin: 0; padding: 0; }
 .release-row, .download-row { display: flex; gap: 0.75rem; align-items: center; padding: 0.35rem 0; border-top: 1px solid rgb(from currentColor r g b / 20%); font-size: 0.9rem; }
 .release-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.6; }
+/* Mono here is functional, not decorative. A column of
+   `Vixen.26.08.14.Deep.Focus.XXX.2160p.MP4-KTR` against the same name at 1080p is
+   only scannable when the characters that differ line up vertically, and that is
+   the entire task this screen exists for. */
+.release-name { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 .release-current { font-weight: 600; }
 .download-row.untracked { opacity: 0.5; font-style: italic; }
 .download-error, .release-failed { color: #b91c1c; }
