@@ -42,14 +42,17 @@
   cursor: pointer;
 }
 .image-modal img { display: block; max-width: 100vw; max-height: 100vh; object-fit: contain; }
-/*
- * `background: Canvas; color: CanvasText` came off this rule, and that is a
- * repair rather than a restyle. Those keywords were chosen precisely *because*
- * `color-scheme: light dark` on the root made them track the app. Now that the
- * app's theme is the user's to set and can disagree with the operating system,
- * the same keywords track the OS instead — so a dark app would raise a light
- * confirmation dialog. Tokens follow `data-theme`, which is the app.
- */
+/* The identity-change confirmation. It had no rule here at all until
+   2026-08-17, which is the whole of the defect that got it one: an unstyled
+   block of text, rendered inline just below each page's own error banner, reads
+   as a failure rather than as a question, and the first person to meet it did
+   not press Confirm and reported the merge as silently broken.
+   `background: Canvas; color: CanvasText` came off this rule, and that is a
+   repair rather than a restyle. Those keywords were chosen precisely *because*
+   `color-scheme: light dark` on the root made them track the app. Now that the
+   app's theme is the user's to set and can disagree with the operating system,
+   the same keywords track the OS instead — so a dark app would raise a light
+   confirmation dialog. Tokens follow `data-theme`, which is the app. */
 .confirm {
   max-width: 40rem;
   border: 1px solid var(--color-line);
@@ -64,10 +67,14 @@
 .confirm h2 { margin: 0 0 var(--space-3); font-size: var(--text-title); font-weight: 600; }
 .confirm h3 { margin: var(--space-3) 0 var(--space-1); font-size: var(--text-body); color: var(--color-text-dim); }
 .confirm ul { margin: 0; padding-left: var(--space-5); font-size: var(--text-meta); }
-/* Mono and wrapping: these are destination paths, and the end of one is the part
-   that says where the file is actually going. */
+/* The paths are the point of the file lists, so they wrap rather than being
+   clipped — `.release-name` ellipsises because a release title is
+   recognisable from its start, but a destination you cannot see the end of
+   tells you nothing about where the file is going. Mono and wrapping: these
+   are destination paths, and the end of one is the part that says where the
+   file is actually going. */
 .confirm li { overflow-wrap: anywhere; font-family: 'IBM Plex Mono', ui-monospace, monospace; color: var(--color-text-dim); }
 .confirm button { margin: var(--space-4) var(--space-2) 0 0; }
-/* Amber, and distinct from the error red: something to read before confirming,
-   not something that has already gone wrong. */
+/* Amber like `.badge`, and distinct from `.error`'s red: something to read
+   before confirming, not something that has already gone wrong. */
 .confirm .warning { color: var(--color-accent-text); }
