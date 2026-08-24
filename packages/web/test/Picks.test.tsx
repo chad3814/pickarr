@@ -582,6 +582,7 @@ test('polling stops once nothing is pending', async () => {
               durationSeconds: null,
               synopsis: null,
               hasPoster: false,
+              hasBackground: false,
             };
       return new Response(JSON.stringify({ 5: view }), {
         headers: { 'content-type': 'application/json' },

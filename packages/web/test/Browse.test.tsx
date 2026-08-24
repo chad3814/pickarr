@@ -680,6 +680,7 @@ const REQUERY_ORIGINAL: MetadataView = {
   durationSeconds: null,
   synopsis: 'The original synopsis.',
   hasPoster: false,
+  hasBackground: false,
 };
 const REQUERY_FRESHER: MetadataView = { ...REQUERY_ORIGINAL, synopsis: 'The fresher synopsis.' };
 

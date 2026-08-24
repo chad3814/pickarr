@@ -64,6 +64,7 @@ const CONFIRMED: MetadataView = {
   durationSeconds: 1800,
   synopsis: 'A synopsis from the provider.',
   hasPoster: true,
+  hasBackground: false,
 };
 
 function withMetadata(over: Partial<Extract<MetadataView, { state: 'confirmed' }>>): GroupView {
@@ -402,6 +403,40 @@ test('the poster is a button that opens the modal, and the modal closes', () => 
   assert.ok(screen.getByRole('dialog'));
   fireEvent.click(screen.getByRole('button', { name: /close/i }));
   assert.ok(!screen.queryByRole('dialog'));
+});
+
+test('a group with only a background still shows an image, from the background route', () => {
+  render(
+    <MediaCard
+      group={withMetadata({ hasPoster: false, hasBackground: true })}
+      onPick={() => {}}
+    />,
+  );
+  const image = screen.getByRole('img', { name: /poster for/i });
+  assert.equal(image.getAttribute('src'), '/api/groups/1/background');
+});
+
+test('a poster wins when both exist', () => {
+  render(
+    <MediaCard
+      group={withMetadata({ hasPoster: true, hasBackground: true })}
+      onPick={() => {}}
+    />,
+  );
+  assert.equal(
+    screen.getByRole('img', { name: /poster for/i }).getAttribute('src'),
+    '/api/groups/1/poster',
+  );
+});
+
+test('neither image means no thumbnail at all, as before', () => {
+  render(
+    <MediaCard
+      group={withMetadata({ hasPoster: false, hasBackground: false })}
+      onPick={() => {}}
+    />,
+  );
+  assert.equal(screen.queryByRole('img', { name: /poster for/i }), null);
 });
 
 test('a performer shows an avatar, and their name links to their page', () => {
