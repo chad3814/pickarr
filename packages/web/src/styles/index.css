@@ -14,6 +14,7 @@
    one would only invite the question of which. */
 @import './fonts.css';
 
+@import './tokens.css' layer(tokens);
 @import './base.css' layer(base);
 @import './nav.css' layer(components);
 @import './card.css' layer(components);

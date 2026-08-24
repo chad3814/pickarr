@@ -1,5 +1,11 @@
-:root { color-scheme: light dark; font-family: 'IBM Plex Sans', system-ui, sans-serif; }
-body { margin: 0; }
+:root { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
 /* Nav beside the content rather than above it, both inside the one centred
    column: the tabs stay next to what they navigate instead of drifting to a far
    window edge on a wide screen. */
@@ -8,5 +14,19 @@ body { margin: 0; }
    shrink below its content by default, so one long unbroken release name would
    push the nav off the screen instead of wrapping. */
 main { flex: 1; min-width: 0; }
-.notice { color: #15803d; }
-.error { color: #b91c1c; }
+
+/* Unstyled until now, so it rendered at the UA's 2em. */
+h1 { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.015em; margin: 0 0 var(--space-4); }
+
+/*
+ * One decision for every link in the app. Nav links are the exception and are
+ * coloured by `nav.css`: five accent-coloured links stacked in a column read as
+ * five calls to action.
+ */
+a { color: var(--color-accent-text); }
+
+.error { color: var(--color-error); }
+.notice { color: var(--color-success); }
+/* Told apart from silence by italics as well as by colour — a lookup in flight is
+   the one metadata state that resolves into something else on its own. */
+.loading { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }

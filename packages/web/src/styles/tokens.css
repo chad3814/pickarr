@@ -1,0 +1,87 @@
+/*
+ * Every colour, size, space and radius in the app. Past this file, no rule in
+ * `styles/` declares a raw value.
+ *
+ * Both palettes are keyed on `[data-theme]` and nothing resolves in CSS. The
+ * alternative — `@media (prefers-color-scheme: light)` for the automatic case and
+ * `:root[data-theme="light"]` for the manual one — needs the whole light palette
+ * written twice, which is two places to edit every colour and a defect waiting for
+ * whoever edits one of them. `theme.ts` and the inline script in `index.html`
+ * resolve instead, and this file only ever sees a concrete answer.
+ */
+:root {
+  /* 4px base. Every margin and gap already in the stylesheet lands on one of
+     these, so this codifies practice rather than changing it. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  /* Named by role, not by size, so a rule says what a thing is. The root stays
+     16px: changing it would silently rescale every rem already written. */
+  --text-label: 0.6875rem;
+  --text-meta: 0.75rem;
+  --text-body: 0.8125rem;
+  --text-title: 1rem;
+  --text-page: 1.5rem;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* One elevation, for dialogs. Cards are separated by surface and hairline, so a
+     second shadow token would be speculative. */
+  --shadow-dialog: 0 0.5rem 1.5rem rgb(0 0 0 / 30%);
+}
+
+/*
+ * The dark palette on `:root` as well as on the attribute. This is the fallback
+ * for a document whose `data-theme` never got set — the inline script is wrapped
+ * in try/catch and the app is a React SPA that renders nothing without JS, but a
+ * stylesheet that paints unstyled black-on-black when the attribute is missing is
+ * a trap for whoever is debugging that.
+ */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-bg: #121110;
+  --color-surface: #1b1a18;
+  --color-surface-2: #232120;
+  --color-line: #322f2c;
+  --color-line-strong: #6b665e;
+  --color-text: #ece8e1;
+  --color-text-dim: #a09a90;
+  --color-text-faint: #756f66;
+  --color-accent: #e0a02a;
+  --color-accent-text: #e0a02a;
+  --color-on-accent: #241a00;
+  --color-error: #ef6a5c;
+  --color-success: #5cbf7a;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --color-bg: #faf8f4;
+  --color-surface: #ffffff;
+  --color-surface-2: #f2efe9;
+  --color-line: #ddd8cf;
+  --color-line-strong: #9a917f;
+  --color-text: #1f1d1a;
+  --color-text-dim: #6b6459;
+  --color-text-faint: #8f887c;
+  --color-accent: #e0a02a;
+  /*
+   * The accent is two tokens because one cannot do both jobs. `#e0a02a` as a fill
+   * with `--color-on-accent` on top is ~7.6:1 in either theme; as text on this
+   * theme's `#faf8f4` it is ~2:1, which is unreadable and not fixable by moving
+   * the background. So `--color-accent` is a fill only and this is the foreground.
+   */
+  --color-accent-text: #8a5d0a;
+  --color-on-accent: #241a00;
+  --color-error: #b3271a;
+  --color-success: #1d7a3c;
+}
