@@ -10,7 +10,7 @@
 
 .download-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.download-kind { flex: none; color: var(--color-text-faint); font-size: var(--text-label); text-transform: uppercase; letter-spacing: 0.06em; }
+.download-kind { flex: none; color: var(--color-text-dim); font-size: var(--text-label); text-transform: uppercase; letter-spacing: 0.06em; }
 
 /*
  * Six additive rules over a neutral base, not a `switch`. `DownloadView.status`
@@ -75,15 +75,20 @@
 .release-current { font-weight: 600; color: var(--color-text); }
 .release-failed { color: var(--color-error); }
 
-/* The one genuinely primary button in the app, and it gets its fill by context
-   because no markup distinguishes it. Pick is the whole purpose of the screen. */
-.release-row button { background: var(--color-accent); color: var(--color-on-accent); border-color: transparent; font-weight: 600; }
-.release-row button:hover:not(:disabled) { background: var(--color-accent); filter: brightness(1.08); }
+/* The one genuinely primary button in the app, and it gets its fill by context.
+   The `.pick` class exists because a bare `.release-row button` selector reaches
+   further than intended: the row also holds the quality-edit form's own Save
+   and Cancel, and `:first-of-type` cannot stand in for the class either, since
+   Pick is absent for a current release and "Edit quality" would become
+   first-of-type in its place. Naming Pick directly is what keeps the fill on
+   the one button that deserves it. */
+.release-row button.pick { background: var(--color-accent); color: var(--color-on-accent); border-color: transparent; font-weight: 600; }
+.release-row button.pick:hover:not(:disabled) { background: var(--color-accent); filter: brightness(1.08); }
 /* `base.css`'s `button:disabled` sits in the `base` layer, so the accent fill
    above would beat it and render a disabled control as a live call to action.
    Nothing in a release row is disabled today; this is here so that the first
    thing that is does not have to discover the interaction. */
-.release-row button:disabled {
+.release-row button.pick:disabled {
   background: transparent;
   border-color: var(--color-line);
   color: var(--color-text-faint);
@@ -95,7 +100,7 @@
    accepted, and how form rather than hue separates a warning from an action. */
 .download-absent { color: var(--color-accent-text); font-size: var(--text-meta); }
 
-.download-row.untracked { color: var(--color-text-faint); font-style: italic; }
+.download-row.untracked { color: var(--color-text-dim); font-style: italic; }
 
 .failed { list-style: none; margin: 0; padding: 0; }
 
