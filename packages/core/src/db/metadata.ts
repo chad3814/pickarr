@@ -13,8 +13,13 @@ export interface GroupMetadata {
   releaseDate: string | null;
   durationSeconds: number | null;
   synopsis: string | null;
+  /** Portrait artwork, ~2:3. See `classifyArtwork`: the column is decided by
+   *  measured aspect, never by the provider's field name. */
   posterUrl: string | null;
   posterPath: string | null;
+  /** Landscape artwork, ~16:9. Same rule. */
+  backgroundUrl: string | null;
+  backgroundPath: string | null;
   sceneSlug: string | null;
   fetchedAt: number;
 }
@@ -70,13 +75,16 @@ function toMetadata(row: SqlRow): GroupMetadata {
     synopsis: maybeStr(row, 'synopsis'),
     posterUrl: maybeStr(row, 'poster_url'),
     posterPath: maybeStr(row, 'poster_path'),
+    backgroundUrl: maybeStr(row, 'background_url'),
+    backgroundPath: maybeStr(row, 'background_path'),
     sceneSlug: maybeStr(row, 'scene_slug'),
     fetchedAt: num(row, 'fetched_at'),
   };
 }
 
 const COLUMNS = `group_id, state, source, source_uuid, title, performers, release_date,
-                 duration_s, synopsis, poster_url, poster_path, scene_slug, fetched_at`;
+                 duration_s, synopsis, poster_url, poster_path, background_url,
+                 background_path, scene_slug, fetched_at`;
 
 export function getGroupMetadata(db: DatabaseSync, groupId: number): GroupMetadata | undefined {
   const row = db.prepare(`SELECT ${COLUMNS} FROM group_metadata WHERE group_id = ?`).get(groupId);
@@ -355,6 +363,12 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // blank a cached poster on every refetch — which migration 7 is about to
     // run for every already-confirmed group in the database.
     //
+    // background_path is absent for the same reason, and just as literally:
+    // it too names a file already fetched to disk rather than anything a
+    // provider answer carries, only setBackgroundPath ever fills it in, and
+    // updating it from excluded would blank a cached background on every
+    // refetch precisely as it would a poster.
+    //
     // The WHERE on the upsert generalises that same protection to the whole
     // row, and the asymmetry is worth recording: blanking a cached *poster*
     // was judged unacceptable and given a regression test, while losing the
@@ -378,14 +392,15 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // row that is not currently confirmed can be rewritten by anything,
     // including another 'none' that only refreshes `fetched_at`.
     const written = db.prepare(
-      `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      `INSERT INTO group_metadata (${COLUMNS})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
        ON CONFLICT (group_id) DO UPDATE SET
          state = excluded.state, source = excluded.source,
          source_uuid = excluded.source_uuid, title = excluded.title,
          performers = excluded.performers, release_date = excluded.release_date,
          duration_s = excluded.duration_s, synopsis = excluded.synopsis,
-         poster_url = excluded.poster_url, scene_slug = excluded.scene_slug,
-         fetched_at = excluded.fetched_at
+         poster_url = excluded.poster_url, background_url = excluded.background_url,
+         scene_slug = excluded.scene_slug, fetched_at = excluded.fetched_at
        WHERE excluded.state = 'confirmed' OR group_metadata.state <> 'confirmed'`,
     ).run(
       input.groupId,
@@ -401,6 +416,7 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
       confirmed?.durationSeconds ?? null,
       confirmed?.synopsis ?? null,
       confirmed?.posterUrl ?? null,
+      confirmed?.backgroundUrl ?? null,
       confirmed?.slug ?? null,
       input.now,
     );
@@ -559,6 +575,13 @@ export function clearGroupMetadata(db: DatabaseSync, groupId: number): void {
 export function setPosterPath(db: DatabaseSync, groupId: number, posterPath: string): void {
   db.prepare('UPDATE group_metadata SET poster_path = ? WHERE group_id = ?').run(
     posterPath,
+    groupId,
+  );
+}
+
+export function setBackgroundPath(db: DatabaseSync, groupId: number, backgroundPath: string): void {
+  db.prepare('UPDATE group_metadata SET background_path = ? WHERE group_id = ?').run(
+    backgroundPath,
     groupId,
   );
 }

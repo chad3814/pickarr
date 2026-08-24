@@ -6,6 +6,7 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import {
   dueMetadataQueue, enqueueMetadata, getGroupMetadata, metadataForGroups,
   queuedMetadataNextAt, recordMetadataAnswer, deferMetadata, requeueMetadata, setPosterPath,
+  setBackgroundPath,
 } from '../../src/db/metadata.ts';
 import { performersForGroups } from '../../src/db/performers.ts';
 
@@ -423,4 +424,43 @@ test('a refetch keeps the poster already cached for the group', () => {
   const row = getGroupMetadata(db, 1)!;
   assert.equal(row.posterPath, '1.jpg');
   assert.equal(row.title, 'Second', 'the rest of the answer did update');
+});
+
+test('a background url round-trips through the upsert, and its path is not blanked by a refetch', () => {
+  const db = openTestDatabase();
+  seedGroup(db, 1);
+  recordMetadataAnswer(db, {
+    groupId: 1,
+    source: 'theporndb',
+    nearMisses: [],
+    confirmed: {
+      sourceUuid: 'u1', title: 'T', siteUuid: null, siteId: null, siteName: 'S',
+      date: null, performers: [], durationSeconds: null, synopsis: null,
+      posterUrl: 'https://cdn/poster.jpg', backgroundUrl: 'https://cdn/bg.jpg', slug: null,
+    },
+    now: 1_000,
+  });
+  setBackgroundPath(db, 1, 'group-background-1.jpg');
+  setPosterPath(db, 1, 'group-poster-1.jpg');
+
+  // A refetch must not blank either cached file — the same guarantee the
+  // existing poster_path regression test asserts, now for both.
+  recordMetadataAnswer(db, {
+    groupId: 1,
+    source: 'theporndb',
+    nearMisses: [],
+    confirmed: {
+      sourceUuid: 'u1', title: 'T2', siteUuid: null, siteId: null, siteName: 'S',
+      date: null, performers: [], durationSeconds: null, synopsis: null,
+      posterUrl: 'https://cdn/poster2.jpg', backgroundUrl: 'https://cdn/bg2.jpg', slug: null,
+    },
+    now: 2_000,
+  });
+
+  const row = getGroupMetadata(db, 1);
+  assert.equal(row?.title, 'T2');
+  assert.equal(row?.posterUrl, 'https://cdn/poster2.jpg');
+  assert.equal(row?.backgroundUrl, 'https://cdn/bg2.jpg');
+  assert.equal(row?.posterPath, 'group-poster-1.jpg');
+  assert.equal(row?.backgroundPath, 'group-background-1.jpg');
 });

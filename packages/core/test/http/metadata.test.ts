@@ -155,6 +155,8 @@ function confirmedMetadata(overrides: Partial<GroupMetadata> = {}): GroupMetadat
     synopsis: 'A synopsis',
     posterUrl: null,
     posterPath: null,
+    backgroundUrl: null,
+    backgroundPath: null,
     sceneSlug: null,
     fetchedAt: NOW,
     ...overrides,
