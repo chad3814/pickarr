@@ -3,6 +3,7 @@ import type { JsonValue } from '../json.ts';
 import {
   configSchema,
   MIN_API_KEY_LENGTH,
+  QBITTORRENT_API_KEY,
   SECRET_REFERENCE_PREFIX as SECRET_PREFIX,
   type PickarrConfig,
 } from './schema.ts';
@@ -162,6 +163,34 @@ export function parseConfig(json: JsonValue, source: string): PickarrConfig {
     }
   }
 
+  for (const client of config.downloadClients) {
+    if (client.type !== 'qbittorrent') continue;
+
+    // Exactly one credential. Both is ambiguous about which the client would
+    // use; neither cannot authenticate at all. Settled here rather than at
+    // the first request, where it would surface as a 403 an hour into a run.
+    const hasKey = client.apiKey !== undefined;
+    const hasLogin = client.username !== undefined && client.password !== undefined;
+    const halfLogin = (client.username === undefined) !== (client.password === undefined);
+    if (halfLogin || hasKey === hasLogin) {
+      throw new Error(
+        `Download client ${client.id} needs exactly one of apiKey, or username and password together`,
+      );
+    }
+
+    // Move would take the file out from under the torrent and stop the seed.
+    // A literal 'copy' in the schema would say this more strongly, but it
+    // would also force config/editable.ts and the Settings form's importMode
+    // control to become conditional on client type — a UI change in service
+    // of a validation. Cross-field rules already live here.
+    if (client.importMode === 'move') {
+      throw new Error(
+        `Download client ${client.id} uses importMode "move", which would stop a qbittorrent ` +
+          `client's torrent from seeding — set importMode to "copy" instead`,
+      );
+    }
+  }
+
   return config;
 }
 
@@ -175,15 +204,71 @@ export function parseConfig(json: JsonValue, source: string): PickarrConfig {
  */
 export async function resolveSecrets(config: PickarrConfig): Promise<void> {
   for (const client of config.downloadClients) {
-    const field = `downloadClients.${client.id}.apiKey`;
-    client.apiKey = await resolveSecret(client.apiKey, field);
-    // The schema's length rule saw a `file:` path, not the key behind it, so
-    // this is the check that actually binds the value the client is handed.
-    // The message states the rule and never the value.
-    if (client.apiKey.length < MIN_API_KEY_LENGTH) {
-      throw new Error(
-        `${field} resolves to fewer than ${MIN_API_KEY_LENGTH} characters; SABnzbd api keys are 32 hex characters`,
-      );
+    // A `switch` with a `never` default rather than a chain of `if`s, for the
+    // same reason `main.ts`'s client construction is one: a third client type
+    // that quietly fell through this loop would be handed its `file:` reference
+    // verbatim as a credential, and the first sign of it would be an
+    // authentication failure that looks like a wrong password.
+    switch (client.type) {
+      case 'sabnzbd': {
+        const field = `downloadClients.${client.id}.apiKey`;
+        client.apiKey = await resolveSecret(client.apiKey, field);
+        // The schema's length rule saw a `file:` path, not the key behind it, so
+        // this is the check that actually binds the value the client is handed.
+        // The message states the rule and never the value.
+        if (client.apiKey.length < MIN_API_KEY_LENGTH) {
+          throw new Error(
+            `${field} resolves to fewer than ${MIN_API_KEY_LENGTH} characters; SABnzbd api keys are 32 hex characters`,
+          );
+        }
+        break;
+      }
+      case 'qbittorrent': {
+        // Both credentials are optional here in a way SABnzbd's is not —
+        // `parseConfig` has already settled that exactly one of them is present
+        // — so each is resolved only when the config actually carries it.
+        if (client.apiKey !== undefined) {
+          const field = `downloadClients.${client.id}.apiKey`;
+          client.apiKey = await resolveSecret(client.apiKey, field);
+          // Same reasoning as the SABnzbd arm above, against the shape rule
+          // rather than a length: the schema exempted the `file:` reference, so
+          // without this nothing ever checks the key itself. The message states
+          // the rule and never the value.
+          if (!QBITTORRENT_API_KEY.test(client.apiKey)) {
+            throw new Error(
+              `${field} does not resolve to a qBittorrent api key; it must be "qbt_" followed by 28 alphanumerics`,
+            );
+          }
+        }
+        if (client.password !== undefined) {
+          const field = `downloadClients.${client.id}.password`;
+          client.password = await resolveSecret(client.password, field);
+          // No shape check: a qBittorrent password is whatever the operator set
+          // and there is no rule to check one against. Emptiness is the one
+          // exception, and it is not a shape rule but the schema's own
+          // `.min(1)` re-applied to the value that rule never saw — the same
+          // move the api key above makes, and the same one `siteLookup.apiKey`
+          // below makes. Without it an empty secret file reaches the client and
+          // produces a 403 that reads as a wrong password rather than a missing
+          // one.
+          if (client.password.length === 0) {
+            throw new Error(`${field} resolves to an empty value`);
+          }
+        }
+        break;
+      }
+      default: {
+        const unhandled: never = client;
+        // The discriminant alone, never the object. `unhandled` is a download
+        // client config, so serialising it would print an apiKey or a password
+        // into an error message — and the moment a third client type is added
+        // is exactly when this arm stops being unreachable. The `never`
+        // assignment above is the compile-time guarantee and stays; the cast
+        // here is the runtime read it makes impossible, since a `never` has no
+        // properties to reach for.
+        const { type } = unhandled as { type: string };
+        throw new Error(`Unhandled download client type: ${type}`);
+      }
     }
   }
 

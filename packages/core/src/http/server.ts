@@ -323,16 +323,45 @@ const configSubmissionSchema = z.object({
     z.string(),
     z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string())])),
   ),
+  // A discriminated union, member for member with `SubmittedDownloadClient`
+  // (config/editable.ts) — a mismatch there is a form that submits a shape
+  // `applyEdits` cannot read. `importMode` stays `z.enum(['move', 'copy'])` on
+  // both members rather than narrowing qbittorrent's to `'copy'`: the "move
+  // would stop a torrent seeding" rule is cross-field the way the exactly-one-
+  // credential rule below is, and `parseConfig` is where both are enforced,
+  // against the merged document rather than the submission alone.
   downloadClients: z.array(
-    z.object({
-      id: z.string(),
-      type: z.literal('sabnzbd'),
-      url: z.string(),
-      apiKey: secretEditSchema,
-      category: z.string(),
-      importMode: z.enum(['move', 'copy']),
-      pathMappings: z.array(z.object({ from: z.string(), to: z.string() })),
-    }),
+    z.discriminatedUnion('type', [
+      z.object({
+        id: z.string(),
+        type: z.literal('sabnzbd'),
+        url: z.string(),
+        apiKey: secretEditSchema,
+        category: z.string(),
+        importMode: z.enum(['move', 'copy']),
+        pathMappings: z.array(z.object({ from: z.string(), to: z.string() })),
+      }),
+      z.object({
+        id: z.string(),
+        type: z.literal('qbittorrent'),
+        url: z.string(),
+        // `null` means "this client does not use this credential" — see
+        // `SubmittedQbittorrentClient`. Whether exactly one of apiKey, or
+        // username and password together, is present is `parseConfig`'s
+        // question, asked of the merged document; shape only here.
+        apiKey: secretEditSchema.nullable(),
+        // Plain text, not `secretEditSchema`: `resolveSecrets` resolves a
+        // qBittorrent client's apiKey and password and deliberately not its
+        // username, so wrapping this in `secretEditSchema` would let the form
+        // write back a `file:` reference nothing ever resolves. See
+        // `EditableQbittorrentClient.username`.
+        username: z.string().nullable(),
+        password: secretEditSchema.nullable(),
+        category: z.string(),
+        importMode: z.enum(['move', 'copy']),
+        pathMappings: z.array(z.object({ from: z.string(), to: z.string() })),
+      }),
+    ]),
   ),
   feeds: z.array(
     z.object({

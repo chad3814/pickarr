@@ -1,10 +1,11 @@
-import type { DownloadClientConfig } from '../config/schema.ts';
+import type { SabnzbdClientConfig } from '../config/schema.ts';
 import {
   asJsonArray as asArray,
   asJsonObject as asRecord,
   asText as text,
   type JsonValue,
 } from '../json.ts';
+import { applyPathMappings } from './path-mappings.ts';
 import type {
   ClientHistoryEntry,
   ClientQueueEntry,
@@ -223,7 +224,7 @@ function decodings(value: string): Set<string> {
 }
 
 export function createSabnzbdClient(
-  config: DownloadClientConfig,
+  config: SabnzbdClientConfig,
   fetchImpl: FetchLike = (url) => fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) }),
 ): DownloadClient {
   const base = config.url.replace(/\/+$/, '');
@@ -348,15 +349,15 @@ export function createSabnzbdClient(
     }
   }
 
-  // Longest prefix first, so a nested mapping wins over its parent.
-  const mappings = [...config.pathMappings].sort((a, b) => b.from.length - a.from.length);
-
   return {
     id: config.id,
     importMode: config.importMode,
     category: config.category,
 
-    async addUrl(url, name) {
+    // `label` is deliberately unused: SABnzbd carries the marker inside `name`,
+    // which it echoes back as `nzbname`. Named rather than dropped from the
+    // signature so the interface's third parameter is visibly accounted for.
+    async addUrl(url, name, _label) {
       const body = asRecord(
         await call('addurl', { name: url, cat: config.category, nzbname: name }),
       );
@@ -569,12 +570,7 @@ export function createSabnzbdClient(
     },
 
     mapPath(clientPath) {
-      for (const mapping of mappings) {
-        if (clientPath === mapping.from || clientPath.startsWith(`${mapping.from}/`)) {
-          return mapping.to + clientPath.slice(mapping.from.length);
-        }
-      }
-      return clientPath;
+      return applyPathMappings(config.pathMappings, clientPath);
     },
   };
 }

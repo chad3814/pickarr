@@ -8,7 +8,9 @@ import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { openTestDatabase } from '../src/db/open.ts';
 import type { PluginRegistry } from '../src/plugins/registry.ts';
 import type { RekeyDeps } from '../src/pipeline/rekey.ts';
+import type { PickarrConfig } from '../src/config/schema.ts';
 import {
+  buildDownloadClients,
   composeMetadataTick,
   entryFromArgv,
   pluginById,
@@ -219,4 +221,71 @@ test('runRekeyAtBoot: a pass that throws outright is logged and does not stop st
 
   assert.equal(messages.length, 1);
   assert.ok(messages[0]?.includes('registry exploded'), 'the caught error must be visible in the boot log');
+});
+
+// ---------------------------------------------------------------------------
+// Task 9: buildDownloadClients — the switch that turns each downloadClients
+// entry into a real client. Neither test below could have existed before
+// this task's extraction: the loop previously ran inline inside `main()`,
+// with no exported seam onto the clients it built, so there was nothing here
+// to call. This is not a case of a test discriminating a pre-existing bug
+// from a fix; it is new coverage for code that was already correct once
+// Task 6 wired in `createQbittorrentClient` for real.
+// ---------------------------------------------------------------------------
+
+function fixtureConfig(): PickarrConfig {
+  return {
+    server: { port: 8080 },
+    database: { path: '/tmp/pickarr-test.db' },
+    trashDir: '/tmp/pickarr-test-trash',
+    plugins: {},
+    downloadClients: [
+      {
+        id: 'sab-1',
+        type: 'sabnzbd',
+        url: 'http://localhost:8090',
+        apiKey: 'a'.repeat(32),
+        category: 'pickarr',
+        importMode: 'move',
+        pathMappings: [],
+      },
+      {
+        id: 'qbit-1',
+        type: 'qbittorrent',
+        url: 'http://localhost:8091',
+        apiKey: `qbt_${'A'.repeat(28)}`,
+        category: 'pickarr',
+        importMode: 'move',
+        pathMappings: [],
+      },
+    ],
+    feeds: [
+      { id: 'feed-1', url: 'http://example.com/feed', plugin: 'scenes-v1', intervalSeconds: 900 },
+    ],
+    metadata: { enabled: true, intervalSeconds: 5, perTick: 5 },
+  };
+}
+
+test('buildDownloadClients builds one client per configured entry, keyed by id', () => {
+  const clients = buildDownloadClients(fixtureConfig());
+
+  assert.equal(clients.size, 2);
+  assert.ok(clients.has('sab-1'));
+  assert.ok(clients.has('qbit-1'));
+});
+
+// The one assertion that actually proves the switch dispatched on
+// `clientConfig.type` rather than defaulting every entry to SABnzbd:
+// `DownloadClient.remove` is optional, sabnzbd.ts implements it and
+// qbittorrent.ts deliberately does not (see `DownloadClient.remove`'s own
+// doc comment for why). A constructor-identity check would pass even if
+// both branches called `createSabnzbdClient`; this would not.
+test('buildDownloadClients: the qBittorrent client has no remove, the SABnzbd one does', () => {
+  const clients = buildDownloadClients(fixtureConfig());
+
+  const sabnzbdClient = clients.get('sab-1');
+  const qbittorrentClient = clients.get('qbit-1');
+
+  assert.notEqual(sabnzbdClient?.remove, undefined);
+  assert.equal(qbittorrentClient?.remove, undefined);
 });

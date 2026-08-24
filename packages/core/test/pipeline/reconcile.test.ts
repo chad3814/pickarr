@@ -1212,7 +1212,10 @@ test('a download older than the token still recovers from its unsalted marker', 
 
 // --- Cleanup after a successful import ---------------------------------------
 
-function removalTracking(): { removed: { ref: string; deleteFiles: boolean }[]; remove: DownloadClient['remove'] } {
+function removalTracking(): {
+  removed: { ref: string; deleteFiles: boolean }[];
+  remove: NonNullable<DownloadClient['remove']>;
+} {
   const removed: { ref: string; deleteFiles: boolean }[] = [];
   return {
     removed,
@@ -1323,6 +1326,38 @@ test('a download imported during this same tick is cleaned up in it', async () =
     },
   });
   assert.deepEqual(removed, [{ ref: 'nzo-now', deleteFiles: true }]);
+});
+
+test('a client with no remove keeps its finished job, and reports none removed', async () => {
+  const db = openTestDatabase();
+  // Seeded exactly as "a download imported during this same tick is cleaned up
+  // in it" above, but the method is stripped from the client rather than
+  // stubbed, so the assertion is about absence and not about a stub that was
+  // never called.
+  seedDownload(db, { id: 1, status: 'downloading', clientRef: 'nzo-now' });
+  const client = fakeClient({
+    queue: [],
+    history: [finished('nzo-now', '/sab/x', 'Scene [pickarr-7e57ab1e-1]')],
+    complete: true,
+  });
+  const withoutRemove: DownloadClient = { ...client };
+  delete withoutRemove.remove;
+  const lines: string[] = [];
+
+  const result = await reconcileClient({
+    db,
+    client: withoutRemove,
+    now: () => 2000,
+    log: (message) => lines.push(message),
+    importDownload: async (download) => {
+      setStatus(db, download.id, 'imported', 2000);
+    },
+  });
+
+  assert.equal(result.removed, 0);
+  assert.equal(result.imported, 1, 'the rest of the pass still runs');
+  assert.deepEqual(lines, [], 'skipped, not attempted and swallowed');
+  db.close();
 });
 
 /** Records what the cleanup pass asked the filesystem to delete. */

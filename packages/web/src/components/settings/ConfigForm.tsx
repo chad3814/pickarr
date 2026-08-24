@@ -27,14 +27,36 @@ export interface ConfigDraft {
   plugins: PluginDraft[];
 }
 
-export interface ClientDraft {
+export interface ClientDraftCommon {
   id: string;
   url: string;
-  apiKey: SecretEdit;
   category: string;
   importMode: 'move' | 'copy';
   pathMappings: EditablePathMapping[];
 }
+
+export interface SabnzbdClientDraft extends ClientDraftCommon {
+  type: 'sabnzbd';
+  apiKey: SecretEdit;
+}
+
+export interface QbittorrentClientDraft extends ClientDraftCommon {
+  type: 'qbittorrent';
+  /** `null` for "this client does not use this credential" — mirrors `EditableQbittorrentClient`. */
+  apiKey: SecretEdit | null;
+  /** Plain text, not a `SecretEdit` — see `EditableQbittorrentClient.username`. */
+  username: string | null;
+  password: SecretEdit | null;
+}
+
+/**
+ * The form's working copy of one download client. A discriminated union,
+ * member for member with `EditableDownloadClient`/`SubmittedDownloadClient`,
+ * so `type` travels with the row from load to submit without ever being
+ * reconstructed from a lookup — see `toSubmission`'s comment on why that
+ * lookup was the bug.
+ */
+export type ClientDraft = SabnzbdClientDraft | QbittorrentClientDraft;
 
 /**
  * `'off'` sits in the same control as the two styles, so enabling backfill and
@@ -100,14 +122,24 @@ export function toDraft(config: EditableConfig): ConfigDraft {
             apiKey: keepOrPath(config.siteLookup.apiKey),
             baseUrl: config.siteLookup.baseUrl,
           },
-    downloadClients: config.downloadClients.map((client) => ({
-      id: client.id,
-      url: client.url,
-      apiKey: keepOrPath(client.apiKey),
-      category: client.category,
-      importMode: client.importMode,
-      pathMappings: client.pathMappings.map((mapping) => ({ ...mapping })),
-    })),
+    downloadClients: config.downloadClients.map((client): ClientDraft => {
+      const common = {
+        id: client.id,
+        url: client.url,
+        category: client.category,
+        importMode: client.importMode,
+        pathMappings: client.pathMappings.map((mapping) => ({ ...mapping })),
+      };
+      return client.type === 'sabnzbd'
+        ? { ...common, type: 'sabnzbd', apiKey: keepOrPath(client.apiKey) }
+        : {
+            ...common,
+            type: 'qbittorrent',
+            apiKey: client.apiKey === null ? null : keepOrPath(client.apiKey),
+            username: client.username,
+            password: client.password === null ? null : keepOrPath(client.password),
+          };
+    }),
     feeds: config.feeds.map((feed) => ({
       id: feed.id,
       url: feed.url,
@@ -195,9 +227,15 @@ function fromDraftValue(
  * Converts the draft into what `PUT /api/config` expects, or the first
  * validation error the draft contains.
  *
- * `config` supplies the `type` literals (`'sabnzbd'`, `'theporndb'`), which the
- * draft never carries, and is matched by id since that is what a `keep`
- * secret edit resolves against on the server.
+ * `config` is consulted for exactly one thing: `siteLookup.type`, which the
+ * draft has no field for because only one site-lookup provider exists to
+ * choose. Every download client's `type`, by contrast, comes from the draft
+ * itself (`client.type` below) — never re-derived by looking the client's id
+ * up in `config`. A lookup keyed on id is what this form used to do, and it
+ * is why a qBittorrent client could be rewritten in SABnzbd's shape and lose
+ * its username and password: the id survives an edit, but a lookup keyed on
+ * it does not know the type changed. Reintroducing an id lookup here would
+ * bring that bug back.
  */
 export function toSubmission(draft: ConfigDraft, config: EditableConfig): SubmittedConfig | { error: string } {
   const port = asCount(draft.port, 'server.port');
@@ -252,17 +290,28 @@ export function toSubmission(draft: ConfigDraft, config: EditableConfig): Submit
     });
   }
 
-  const downloadClients: SubmittedDownloadClient[] = draft.downloadClients.map((client) => {
-    const original = config.downloadClients.find((entry) => entry.id === client.id);
-    return {
+  // `client.type` is read from the draft itself, never re-derived by looking
+  // an id up in `config`: a lookup keyed on id goes stale the moment an id is
+  // renamed in this same edit, and a client whose type came from a fallback
+  // rather than its own draft is exactly how a qBittorrent client gets
+  // rewritten in SABnzbd's shape — the failure this form exists to prevent.
+  const downloadClients: SubmittedDownloadClient[] = draft.downloadClients.map((client): SubmittedDownloadClient => {
+    const common = {
       id: client.id,
-      type: original?.type ?? 'sabnzbd',
       url: client.url,
-      apiKey: client.apiKey,
       category: client.category,
       importMode: client.importMode,
       pathMappings: client.pathMappings.map((mapping) => ({ ...mapping })),
     };
+    return client.type === 'sabnzbd'
+      ? { ...common, type: 'sabnzbd', apiKey: client.apiKey }
+      : {
+          ...common,
+          type: 'qbittorrent',
+          apiKey: client.apiKey,
+          username: client.username,
+          password: client.password,
+        };
   });
 
   const plugins: Record<string, Record<string, PluginSettingValue>> = {};

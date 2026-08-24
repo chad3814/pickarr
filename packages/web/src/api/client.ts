@@ -479,16 +479,38 @@ export interface EditablePathMapping {
   to: string;
 }
 
-/** Mirrors `EditableDownloadClient` in `packages/core/src/config/editable.ts`. */
-export interface EditableDownloadClient {
+/** Mirrors `EditableClientCommon` in `packages/core/src/config/editable.ts`. */
+export interface EditableClientCommon {
   id: string;
-  type: 'sabnzbd';
   url: string;
-  apiKey: SecretView;
   category: string;
   importMode: 'move' | 'copy';
   pathMappings: EditablePathMapping[];
 }
+
+/** Mirrors `EditableSabnzbdClient` in `packages/core/src/config/editable.ts`. */
+export interface EditableSabnzbdClient extends EditableClientCommon {
+  type: 'sabnzbd';
+  apiKey: SecretView;
+}
+
+/** Mirrors `EditableQbittorrentClient` in `packages/core/src/config/editable.ts`. */
+export interface EditableQbittorrentClient extends EditableClientCommon {
+  type: 'qbittorrent';
+  /** `null` for "this client does not use this credential" — exactly one of this and `username`+`password` holds. */
+  apiKey: SecretView | null;
+  /**
+   * Plain text, not a `SecretView`: `resolveSecrets` never resolves a `file:`
+   * reference for a username, so projecting it as a secret would let the form
+   * write back a reference nothing ever reads. See `EditableQbittorrentClient`
+   * in the core type this mirrors.
+   */
+  username: string | null;
+  password: SecretView | null;
+}
+
+/** Mirrors `EditableDownloadClient` in `packages/core/src/config/editable.ts`. */
+export type EditableDownloadClient = EditableSabnzbdClient | EditableQbittorrentClient;
 
 /** Mirrors `EditableFeedBackfill` in `packages/core/src/config/editable.ts`. */
 export interface EditableFeedBackfill {
@@ -543,16 +565,33 @@ export interface EditableConfig {
   metadata: EditableMetadata;
 }
 
-/** Mirrors `SubmittedDownloadClient` in `packages/core/src/config/editable.ts`. */
-export interface SubmittedDownloadClient {
+/** Mirrors `SubmittedClientCommon` in `packages/core/src/config/editable.ts`. */
+export interface SubmittedClientCommon {
   id: string;
-  type: 'sabnzbd';
   url: string;
-  apiKey: SecretEdit;
   category: string;
   importMode: 'move' | 'copy';
   pathMappings: EditablePathMapping[];
 }
+
+/** Mirrors `SubmittedSabnzbdClient` in `packages/core/src/config/editable.ts`. */
+export interface SubmittedSabnzbdClient extends SubmittedClientCommon {
+  type: 'sabnzbd';
+  apiKey: SecretEdit;
+}
+
+/** Mirrors `SubmittedQbittorrentClient` in `packages/core/src/config/editable.ts`. */
+export interface SubmittedQbittorrentClient extends SubmittedClientCommon {
+  type: 'qbittorrent';
+  /** `null` says "this client does not use this credential" — see the core type this mirrors. */
+  apiKey: SecretEdit | null;
+  /** Plain text on the way back too — see `EditableQbittorrentClient.username`. */
+  username: string | null;
+  password: SecretEdit | null;
+}
+
+/** Mirrors `SubmittedDownloadClient` in `packages/core/src/config/editable.ts`. */
+export type SubmittedDownloadClient = SubmittedSabnzbdClient | SubmittedQbittorrentClient;
 
 /** Mirrors `SubmittedSiteLookup` in `packages/core/src/config/editable.ts`. */
 export interface SubmittedSiteLookup {

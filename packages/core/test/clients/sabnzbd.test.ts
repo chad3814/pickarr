@@ -1,13 +1,13 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { inspect } from 'node:util';
 import {
   createSabnzbdClient,
   resetDroppedSlotWarningForTests,
   resetUnrecognizedHistoryStatusWarningForTests,
 } from '../../src/clients/sabnzbd.ts';
-import type { DownloadClientConfig } from '../../src/config/schema.ts';
+import type { SabnzbdClientConfig } from '../../src/config/schema.ts';
 import type { JsonValue } from '../../src/json.ts';
+import { assertNoLeak, assertNoSecret } from './no-leak.ts';
 
 // Shaped like a real SABnzbd key: 32 hex characters. Kept realistic because
 // the config schema now refuses anything shorter than MIN_API_KEY_LENGTH, so
@@ -21,7 +21,7 @@ const HEX_KEY = '0f1e2d3c4b5a69788796a5b4c3d2e1f0';
 // understands encodings from one that got lucky.
 const BASE64_KEY = 'dXNlcjpwYXNzd29yZDEyMw==';
 
-const CONFIG: DownloadClientConfig = {
+const CONFIG: SabnzbdClientConfig = {
   id: 'sab',
   type: 'sabnzbd',
   url: 'http://sab.invalid:8080',
@@ -39,69 +39,6 @@ function jsonResponse(body: JsonValue): Response {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
-}
-
-/**
- * Every reading of `surface` a consumer could arrive at with routine
- * decoding: repeated percent-decoding, `+`-for-space form decoding, and any
- * interleaving of the two. Asserting only literal absence is what let the
- * percent-encoding bypass through an earlier round — `apikey=dXNlcjpwYXNz%3D%3D`
- * contains no literal match yet gives the key up to one decodeURIComponent.
- *
- * Written out here rather than imported from the client on purpose: if the
- * test reused the client's own decoder, a blind spot in that decoder would be
- * a blind spot in the check that is supposed to catch it. Percent runs are
- * decoded individually so a single stray `%` (common in stack traces) cannot
- * switch the whole check off, which a bare decodeURIComponent would allow.
- */
-function readings(surface: string): string[] {
-  const seen = new Set<string>([surface]);
-  let frontier = [surface];
-  for (let round = 0; round < 3 && frontier.length > 0; round += 1) {
-    const next: string[] = [];
-    for (const view of frontier) {
-      const percentDecoded = view.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
-        try {
-          return decodeURIComponent(run);
-        } catch {
-          return run;
-        }
-      });
-      for (const candidate of [percentDecoded, view.replaceAll('+', ' ')]) {
-        if (!seen.has(candidate)) {
-          seen.add(candidate);
-          next.push(candidate);
-        }
-      }
-    }
-    frontier = next;
-  }
-  return [...seen];
-}
-
-/** Asserts the secret is unrecoverable from a single string. */
-function assertNoSecret(surface: string, secret: string): void {
-  for (const reading of readings(surface)) {
-    assert.ok(
-      !reading.includes(secret),
-      `api key is recoverable from this text: ${reading.slice(0, 300)}`,
-    );
-  }
-}
-
-/**
- * Checks the whole error surface a caller might log or inspect — not just
- * `.message`. A fix that only cleaned `.message` while leaving the secret
- * reachable through `.cause`, `.name`, or `util.inspect` would pass a
- * narrower check but still leak in practice.
- */
-function assertNoLeak(error: Error, secret: string): void {
-  const surfaces = [error.message, String(error), inspect(error, { depth: 6 })];
-  const cause = error.cause;
-  if (cause instanceof Error) {
-    surfaces.push(cause.message, cause.name, String(cause));
-  }
-  for (const surface of surfaces) assertNoSecret(surface, secret);
 }
 
 function recordingFetch(bodyFor: (url: string) => JsonValue): {
@@ -122,7 +59,7 @@ test('addUrl sends the category and returns the nzo id', async () => {
   const recorder = recordingFetch(() => ({ status: true, nzo_ids: ['SABnzbd_nzo_abc'] }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
 
-  const ref = await client.addUrl('https://indexer.invalid/x.nzb', 'label');
+  const ref = await client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored');
 
   assert.equal(ref, 'SABnzbd_nzo_abc');
   assert.match(recorder.urls[0] ?? '', /mode=addurl/);
@@ -138,7 +75,7 @@ test('addUrl sends the caller-provided label as nzbname', async () => {
   const recorder = recordingFetch(() => ({ status: true, nzo_ids: ['SABnzbd_nzo_abc'] }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
 
-  await client.addUrl('https://indexer.invalid/x.nzb', 'pickarr-42');
+  await client.addUrl('https://indexer.invalid/x.nzb', 'pickarr-42', 'ignored');
 
   assert.match(recorder.urls[0] ?? '', /nzbname=pickarr-42/);
 });
@@ -146,18 +83,18 @@ test('addUrl sends the caller-provided label as nzbname', async () => {
 test('addUrl throws when sabnzbd reports failure', async () => {
   const recorder = recordingFetch(() => ({ status: false, error: 'nope' }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), /nope/);
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), /nope/);
 });
 
 test('addUrl throws when no nzo id comes back', async () => {
   const recorder = recordingFetch(() => ({ status: true, nzo_ids: [] }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), /no nzo/i);
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), /no nzo/i);
 });
 
 test('an error never contains the api key', async () => {
   const client = createSabnzbdClient(CONFIG, async () => new Response('nope', { status: 500 }));
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -167,7 +104,7 @@ test('an error thrown by fetchImpl itself never leaks the api key', async () => 
   const client = createSabnzbdClient(CONFIG, async (url) => {
     throw new Error(`network failure while fetching ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -182,29 +119,29 @@ test('a JSON-parse failure from response.json() never leaks the api key', async 
     }
     return new ThrowingJsonResponse('not json', { status: 200 });
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
 });
 
 test('a base64-style api key with +, /, = never leaks, even decoded', async () => {
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
 });
 
 test('an api key containing +, /, =, and a space never leaks, even decoded', async () => {
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: 'sec/ret+key=1 2 long enough' };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: 'sec/ret+key=1 2 long enough' };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
@@ -216,7 +153,7 @@ test('an api key embedded in the thrown error\'s name is also redacted', async (
     error.name = `FetchError(apikey=${CONFIG.apiKey})`;
     throw error;
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -226,7 +163,7 @@ test('a non-Error throw from fetchImpl produces the wrapper, not a crash', async
   const client = createSabnzbdClient(CONFIG, async () => {
     throw `raw string failure with apikey=${CONFIG.apiKey}`;
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assert.equal(error.message, 'SABnzbd addurl request failed');
     assert.ok(error.cause instanceof Error);
     assertNoLeak(error, CONFIG.apiKey);
@@ -244,7 +181,7 @@ test('redaction leaves the rest of an error message legible', async () => {
   const client = createSabnzbdClient(CONFIG, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     const cause = error.cause;
     assert.ok(cause instanceof Error);
     assert.match(cause.message, /^fetch failed for http:\/\/sab\.invalid:8080\/api\?mode=addurl&/);
@@ -260,7 +197,7 @@ test("the server's own error field never leaks the api key", async () => {
   const client = createSabnzbdClient(CONFIG, async (url) =>
     jsonResponse({ status: false, error: `bad request: ${url}` }),
   );
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -271,22 +208,22 @@ test('a percent-encoded request url outside query shape does not leak the key', 
   // so there is no `?`/`&` delimiter for the structural rule to key off, and
   // the key itself is encoded so a literal-value pass cannot see it either.
   // One decodeURIComponent recovers everything.
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`request failed: ${encodeURIComponent(url)}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
 });
 
 test('a doubly percent-encoded request url does not leak the key', async () => {
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`request failed: ${encodeURIComponent(encodeURIComponent(url))}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
@@ -340,7 +277,7 @@ test('an nzo id echoing the request url is not returned verbatim', async () => {
   const client = createSabnzbdClient(CONFIG, async (url) =>
     jsonResponse({ status: true, nzo_ids: [`SABnzbd_nzo_for_${url}`] }),
   );
-  assertNoSecret(await client.addUrl('https://indexer.invalid/x.nzb', 'label'), CONFIG.apiKey);
+  assertNoSecret(await client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), CONFIG.apiKey);
 });
 
 test('snapshot reads queue and history, unfiltered, and reports complete', async () => {

@@ -6,6 +6,7 @@ import { liveFilesForGroup } from '../db/imported-files.ts';
 import { feedIdForRelease, getRelease, linkForRelease, titleForRelease } from '../db/releases.ts';
 import {
   clientJobName,
+  downloadLabel,
   getDownload,
   inFlightForRelease,
   insertDownload,
@@ -165,11 +166,14 @@ export async function pickRelease(
   // marker instead of submitting the nzb a second time. The token is this
   // installation's own salt, minted here on first use: without it the marker
   // names nothing but a rowid, which a second installation sharing the
-  // category mints too (#28).
+  // category mints too (#28). The same label is also passed to addUrl on its
+  // own, computed once here rather than twice, so a client that wants the
+  // marker outside the name (qBittorrent's tag) does not need to re-derive it.
   const scheme = installLabelToken(db, now);
+  const label = downloadLabel(scheme.token, downloadId);
   let clientRef: string;
   try {
-    clientRef = await client.addUrl(link, clientJobName(scheme.token, title, downloadId));
+    clientRef = await client.addUrl(link, clientJobName(scheme.token, title, downloadId), label);
   } catch (error) {
     recordError(db, downloadId, (error as Error).message, now);
     return mustGetDownload(db, downloadId);

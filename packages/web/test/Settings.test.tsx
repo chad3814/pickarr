@@ -1,10 +1,15 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { App } from '../src/App.tsx';
 import { Settings } from '../src/routes/Settings.tsx';
-import type { ConfigResponse } from '../src/api/client.ts';
+import type {
+  ConfigResponse,
+  EditableDownloadClient,
+  EditableQbittorrentClient,
+  SubmittedDownloadClient,
+} from '../src/api/client.ts';
 import { fetchStub, jsonResponse, type FetchHandler } from './fetchStub.ts';
 
 // happy-dom has no download plumbing; a test that stubs these restores them
@@ -50,6 +55,56 @@ function configResponse(over: Partial<ConfigResponse> = {}): ConfigResponse {
 
 function stubFetch(handler: FetchHandler): void {
   globalThis.fetch = fetchStub(handler);
+}
+
+// Comparing a live DOM element against `null` via `assert.equal` is what
+// `docs/known-issues.md` warns builds an AssertionError message by deep-
+// inspecting the element on failure, OOM-killing the run; computing the
+// boolean first and asserting that keeps a failure's message a plain
+// `false`. Named for a label rather than arbitrary text, unlike `Browse.test
+// .tsx`'s `gone`: a download client's "API key" text also lives, unremovable,
+// inside the Authentication `<option>` this file's tests exercise, and only
+// `getByLabelText` — which resolves through a real label association, not a
+// select option's text content — tells "the field is not rendered" apart
+// from "the option naming it still is".
+function noField(text: string | RegExp): boolean {
+  return screen.queryByLabelText(text) === null;
+}
+
+/** A single qBittorrent client, in the login-or-key shape a test asks for. */
+function qbittorrentClient(over: Partial<EditableQbittorrentClient> = {}): EditableQbittorrentClient {
+  return {
+    id: 'qbt',
+    type: 'qbittorrent',
+    url: 'http://qbittorrent:8080',
+    apiKey: null,
+    username: null,
+    password: null,
+    category: 'pickarr',
+    importMode: 'copy',
+    pathMappings: [],
+    ...over,
+  };
+}
+
+/** `configResponse`, but with a single qBittorrent client in place of the SABnzbd one. */
+function qbittorrentConfigResponse(client: EditableDownloadClient, over: Partial<ConfigResponse> = {}): ConfigResponse {
+  const base = configResponse();
+  return configResponse({
+    config: {
+      ...base.config,
+      downloadClients: [client],
+      feeds: base.config.feeds.map((feed) => ({
+        id: feed.id,
+        url: feed.url,
+        plugin: feed.plugin,
+        intervalSeconds: feed.intervalSeconds,
+        downloadClient: client.id,
+        backfill: feed.backfill,
+      })),
+    },
+    ...over,
+  });
 }
 
 test('the page loads the config and shows the config path fields', async () => {
@@ -379,4 +434,114 @@ test('a save that lands but whose confirmation re-read fails still reports the s
   await waitFor(() => assert.ok(screen.getByText(/^Saved,/)));
   assert.ok(screen.getByText(/reload/i));
   assert.ok(screen.getByRole('button', { name: /restart now/i }));
+});
+
+// Before this fix, `EditableDownloadClient` was hardcoded to the SABnzbd
+// shape (`config/editable.ts`'s union hadn't reached the web mirror yet), so
+// a qBittorrent client's `username`/`password` had no field in the type at
+// all and `DownloadClientFields` had exactly one branch: an `apiKey`
+// `SecretField`, always rendered. Loading a login-based client would have
+// shown an API key control (bound to `undefined`) and no username or
+// password at all — the opposite of what this test asks for.
+test('a qBittorrent client with a login renders username and password fields and no apiKey field', async () => {
+  const client = qbittorrentClient({ username: 'admin', password: { kind: 'set' } });
+  stubFetch(async () => jsonResponse(qbittorrentConfigResponse(client)));
+
+  render(<Settings />);
+  await waitFor(() => assert.ok(screen.getByLabelText(/^username$/i)));
+
+  assert.equal((screen.getByLabelText(/^username$/i) as HTMLInputElement).value, 'admin');
+  assert.ok(screen.getByRole('button', { name: /^replace password$/i }));
+  // Not "no apiKey text" — the Authentication `<select>` always carries an
+  // "API key" option — but no *field* for it: no label a real input answers
+  // to, and no Replace/Keep existing button naming it.
+  assert.ok(noField(/^api key$/i));
+  assert.equal(screen.queryAllByRole('button', { name: /api key/i }).length, 0);
+});
+
+// The mirror image of the test above, and just as load-bearing: a version of
+// the fix that rendered *both* credential groups whenever the client was
+// qBittorrent (rather than switching on which of `apiKey`/`username` the
+// client actually carries) would pass the login test above and fail only
+// this one.
+test('a qBittorrent client with a key renders the apiKey field and no username or password fields', async () => {
+  const client = qbittorrentClient({ apiKey: { kind: 'set' } });
+  stubFetch(async () => jsonResponse(qbittorrentConfigResponse(client)));
+
+  render(<Settings />);
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /^replace api key$/i })));
+
+  assert.ok(noField(/^username$/i));
+  assert.equal(screen.queryAllByRole('button', { name: /password/i }).length, 0);
+});
+
+test('saving a qBittorrent client round-trips its login unchanged', async () => {
+  const client = qbittorrentClient({ username: 'admin', password: { kind: 'set' } });
+  const sent: string[] = [];
+  stubFetch(async (_url, init) => {
+    if (init?.method === 'PUT') {
+      sent.push(String(init.body));
+      return jsonResponse({ savedAt: 1, restartRequired: false });
+    }
+    return jsonResponse(qbittorrentConfigResponse(client));
+  });
+
+  render(<Settings />);
+  await waitFor(() => assert.ok(screen.getByLabelText(/^username$/i)));
+  // Untouched apart from a field elsewhere in the form, so Save is offered —
+  // the client itself is exactly what was loaded.
+  fireEvent.change(screen.getByLabelText(/trash directory/i), { target: { value: '/data/bin' } });
+  fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+  await waitFor(() => assert.equal(sent.length, 1));
+  const body = JSON.parse(sent[0] ?? '{}') as { downloadClients: SubmittedDownloadClient[] };
+  assert.deepEqual(body.downloadClients, [
+    {
+      id: 'qbt',
+      type: 'qbittorrent',
+      url: 'http://qbittorrent:8080',
+      apiKey: null,
+      username: 'admin',
+      // `{ kind: 'set' }` on disk starts the form at `keep`, and an untouched
+      // field submits exactly that — never the password itself, which the
+      // browser was never sent.
+      password: { kind: 'keep' },
+      category: 'pickarr',
+      importMode: 'copy',
+      pathMappings: [],
+    },
+  ]);
+});
+
+// The plausible wrong fix this guards against: deriving `type` for the
+// submission by looking the client's *id* up in the loaded config, rather
+// than reading it off the draft row itself. That lookup gives the right
+// answer for every id that did not change in this edit — including an
+// ordinary unchanged save — so it would pass every test above. Renaming the
+// id in the same edit that saves is what tells the two apart: a lookup by
+// the *old* id finds nothing for the new one and falls back to `'sabnzbd'`,
+// silently rewriting a qBittorrent client in SABnzbd's shape — the exact
+// failure the controller's ruling calls out.
+test('renaming a qBittorrent client in the same save still submits its real type', async () => {
+  const client = qbittorrentClient({ apiKey: { kind: 'set' } });
+  const sent: string[] = [];
+  stubFetch(async (_url, init) => {
+    if (init?.method === 'PUT') {
+      sent.push(String(init.body));
+      return jsonResponse({ savedAt: 1, restartRequired: false });
+    }
+    return jsonResponse(qbittorrentConfigResponse(client));
+  });
+
+  render(<Settings />);
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /^replace api key$/i })));
+
+  const clientsGroup = screen.getByRole('group', { name: /download clients/i });
+  fireEvent.change(within(clientsGroup).getByLabelText(/^id$/i), { target: { value: 'qbt-renamed' } });
+  fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+  await waitFor(() => assert.equal(sent.length, 1));
+  const body = JSON.parse(sent[0] ?? '{}') as { downloadClients: { id: string; type: string }[] };
+  assert.equal(body.downloadClients[0]?.id, 'qbt-renamed');
+  assert.equal(body.downloadClients[0]?.type, 'qbittorrent');
 });

@@ -1198,6 +1198,100 @@ test('a PUT keeping a secret for a renamed client is refused with a usable messa
   });
 });
 
+// A syntactically valid qBittorrent api key — "qbt_" plus 28 alphanumerics —
+// so a submission that carries one clears `qbittorrentClientSchema`'s shape
+// check and reaches the cross-field rules in `parseConfig` the tests below are
+// actually about.
+const QBT_API_KEY = 'qbt_A1B2C3D4E5F6G7H8I9J0K1L2M3N4';
+
+test('PUT /api/config round-trips a qBittorrent client with its credentials intact', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    const clients = asJsonArray(body['downloadClients']);
+    clients.push({
+      id: 'qbt',
+      type: 'qbittorrent',
+      url: 'http://qbittorrent:8080',
+      apiKey: null,
+      username: 'admin',
+      password: { kind: 'literal', value: 'hunter2' },
+      category: 'pickarr',
+      importMode: 'copy',
+      pathMappings: [],
+    });
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 200);
+
+    const written = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, JsonValue>;
+    const writtenClients = asJsonArray(written['downloadClients']).map((client) => asJsonObject(client));
+    const qbt = writtenClients.find((client) => client?.['id'] === 'qbt');
+    assert.ok(qbt !== undefined);
+    // A schema that accepted the qbittorrent member but silently dropped one
+    // of its fields on the way through would still round-trip *a* client with
+    // this id — asserting the credentials specifically is what would catch it.
+    assert.equal(qbt?.['username'], 'admin');
+    assert.equal(qbt?.['password'], 'hunter2');
+    assert.equal(qbt?.['apiKey'], undefined);
+    await server.close();
+  });
+});
+
+test('PUT /api/config refuses a qBittorrent client with both an apiKey and a login', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const before = await readFile(configPath, 'utf8');
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    const clients = asJsonArray(body['downloadClients']);
+    clients.push({
+      id: 'qbt',
+      type: 'qbittorrent',
+      url: 'http://qbittorrent:8080',
+      apiKey: { kind: 'literal', value: QBT_API_KEY },
+      username: 'admin',
+      password: { kind: 'literal', value: 'hunter2' },
+      category: 'pickarr',
+      importMode: 'copy',
+      pathMappings: [],
+    });
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.json()['error'], /qbt/);
+    assert.match(response.json()['error'], /exactly one/);
+    assert.equal(await readFile(configPath, 'utf8'), before);
+    await server.close();
+  });
+});
+
+test('PUT /api/config refuses a qBittorrent client with importMode "move"', async () => {
+  await withConfigDir(async ({ configPath, deps: configDeps }) => {
+    const before = await readFile(configPath, 'utf8');
+    const server = buildServer(configDeps);
+    const body = configSubmission();
+    const clients = asJsonArray(body['downloadClients']);
+    clients.push({
+      id: 'qbt',
+      type: 'qbittorrent',
+      url: 'http://qbittorrent:8080',
+      apiKey: { kind: 'literal', value: QBT_API_KEY },
+      username: null,
+      password: null,
+      category: 'pickarr',
+      importMode: 'move',
+      pathMappings: [],
+    });
+
+    const response = await server.inject({ method: 'PUT', url: '/api/config', payload: body });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.json()['error'], /qbt/);
+    assert.match(response.json()['error'], /move/);
+    assert.equal(await readFile(configPath, 'utf8'), before);
+    await server.close();
+  });
+});
+
 // The PUT and GET routes compute `restartRequired` the same way — against
 // `bootConfigDocument` — so they must never contradict each other on the same
 // disk state. Fix 3: `restartRequired` used to be hardcoded `true` on every

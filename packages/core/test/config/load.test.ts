@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, parseConfig, readConfigDocument, resolveSecrets } from '../../src/config/load.ts';
-import type { JsonValue } from '../../src/json.ts';
+import type { JsonObject, JsonValue } from '../../src/json.ts';
 
 const VALID = {
   server: { port: 8080 },
@@ -39,6 +39,30 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+// Every field a qbittorrent client needs except credentials, which each test
+// adds itself — the whole point of these tests is which combination of
+// credentials is or isn't accepted.
+const QB_BASE: Record<string, JsonValue> = {
+  id: 'qb',
+  type: 'qbittorrent',
+  url: 'http://localhost:8080',
+  category: 'pickarr',
+  importMode: 'copy',
+};
+
+/**
+ * `VALID` with its one download client replaced, so a test can hand
+ * `parseConfig` a document that is valid everywhere except the client under
+ * test. Returns `JsonObject` rather than `JsonValue` cast through `unknown`
+ * (the pattern the rest of this file uses) because a fresh object literal is
+ * checked against an index-signature type property-by-property, so the cast
+ * is unnecessary here — every property of `VALID` and of `clients` already is
+ * a `JsonValue`.
+ */
+function withClients(clients: Array<Record<string, JsonValue>>): JsonObject {
+  return { ...VALID, downloadClients: clients };
 }
 
 test('loads a valid config', async () => {
@@ -349,5 +373,162 @@ test('resolveSecrets rejects a short resolved key without printing it', async ()
       assert.doesNotMatch(error.message, /tinykey/);
       return true;
     });
+  });
+});
+
+test('a qbittorrent client with an api key parses', () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, apiKey: `qbt_${'a'.repeat(28)}` }]),
+    'test',
+  );
+  assert.equal(config.downloadClients[0]?.type, 'qbittorrent');
+});
+
+test('a qbittorrent client with a username and password parses', () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, username: 'admin', password: 'hunter2' }]),
+    'test',
+  );
+  assert.equal(config.downloadClients[0]?.type, 'qbittorrent');
+});
+
+test('both credentials at once is refused, naming the client', () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        withClients([
+          { ...QB_BASE, apiKey: `qbt_${'a'.repeat(28)}`, username: 'admin', password: 'x' },
+        ]),
+        'test',
+      ),
+    /qb.*exactly one/i,
+  );
+});
+
+test('neither credential is refused, naming the client', () => {
+  assert.throws(() => parseConfig(withClients([QB_BASE]), 'test'), /qb.*exactly one/i);
+});
+
+test('a username with no password is refused, naming the client', () => {
+  assert.throws(
+    () => parseConfig(withClients([{ ...QB_BASE, username: 'admin' }]), 'test'),
+    /qb.*exactly one/i,
+  );
+});
+
+test('move mode on a torrent client is refused, naming the client', () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        withClients([{ ...QB_BASE, importMode: 'move', apiKey: `qbt_${'a'.repeat(28)}` }]),
+        'test',
+      ),
+    /qb.*move.*seed/i,
+  );
+});
+
+test('a malformed api key is refused', () => {
+  assert.throws(
+    () => parseConfig(withClients([{ ...QB_BASE, apiKey: 'not-a-key' }]), 'test'),
+    /apiKey/,
+  );
+});
+
+test('a file: reference is exempt from the api key shape check', () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, apiKey: 'file:/run/secrets/qb' }]),
+    'test',
+  );
+  assert.equal(config.downloadClients[0]?.type, 'qbittorrent');
+});
+
+test('resolveSecrets resolves a qbittorrent file: api key', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_key');
+    const key = `qbt_${'b'.repeat(28)}`;
+    await writeFile(secretPath, `${key}\n`);
+    const config = parseConfig(withClients([{ ...QB_BASE, apiKey: `file:${secretPath}` }]), 'test');
+
+    await resolveSecrets(config);
+    assert.equal(config.downloadClients[0]?.apiKey, key);
+  });
+});
+
+// The same reason the SABnzbd arm re-checks length: the schema was shown a
+// `file:` path, not the key behind it, so this is the check that binds the
+// value the client is actually handed.
+test('resolveSecrets refuses a malformed resolved qbittorrent key without printing it', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_key');
+    await writeFile(secretPath, 'not-a-qbittorrent-key\n');
+    const config = parseConfig(withClients([{ ...QB_BASE, apiKey: `file:${secretPath}` }]), 'test');
+
+    await assert.rejects(resolveSecrets(config), (error: Error) => {
+      assert.match(error.message, /downloadClients\.qb\.apiKey/);
+      assert.match(error.message, /qbt_/, 'the message states the rule');
+      assert.doesNotMatch(error.message, /not-a-qbittorrent-key/);
+      return true;
+    });
+  });
+});
+
+test('resolveSecrets resolves a qbittorrent file: password', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_password');
+    await writeFile(secretPath, 'hunter2\n');
+    const config = parseConfig(
+      withClients([{ ...QB_BASE, username: 'admin', password: `file:${secretPath}` }]),
+      'test',
+    );
+
+    await resolveSecrets(config);
+    const client = config.downloadClients[0];
+    assert.ok(client?.type === 'qbittorrent');
+    assert.equal(client.password, 'hunter2');
+  });
+});
+
+// Not a shape check — a qBittorrent password has no shape — but the schema's
+// `.min(1)` is a rule, and it only ever saw the `file:` path. An empty secret
+// file would otherwise reach the client and produce a 403 that reads as a
+// wrong password rather than as a missing one.
+test('resolveSecrets refuses a qbittorrent password file that resolves to nothing', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_password');
+    await writeFile(secretPath, '\n');
+    const config = parseConfig(
+      withClients([{ ...QB_BASE, username: 'admin', password: `file:${secretPath}` }]),
+      'test',
+    );
+
+    await assert.rejects(resolveSecrets(config), /downloadClients\.qb\.password/);
+  });
+});
+
+// The `default` arm of `resolveSecrets`' switch is unreachable through
+// `parseConfig` — the discriminated union has no third member — so this test
+// manufactures the state the way a future edit would actually produce it: by
+// adding a client type the loop does not handle. `Object.assign` rather than a
+// cast, because the point is a real runtime object with a real unhandled
+// discriminant, not a type-level fiction.
+//
+// What it pins is not the wording. It is that the message names the type and
+// nothing else: the client object it came from carries an apiKey, and an arm
+// that serialised the whole thing would print it.
+test('an unhandled client type is reported by type alone, never by serialising the client', async () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, apiKey: `qbt_${'c'.repeat(28)}` }]),
+    'test',
+  );
+  const client = config.downloadClients[0];
+  assert.ok(client?.type === 'qbittorrent');
+  const secret = client.apiKey;
+  assert.ok(secret !== undefined);
+  Object.assign(client, { type: 'teleporter' });
+
+  await assert.rejects(resolveSecrets(config), (error: Error) => {
+    assert.match(error.message, /teleporter/);
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    return true;
   });
 });
