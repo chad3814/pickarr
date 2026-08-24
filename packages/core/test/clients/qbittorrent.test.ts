@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createQbittorrentClient } from '../../src/clients/qbittorrent.ts';
+import {
+  createQbittorrentClient,
+  resetQbittorrentWarningsForTests,
+} from '../../src/clients/qbittorrent.ts';
 import type { FetchLike } from '../../src/clients/types.ts';
 import type { QbittorrentClientConfig } from '../../src/config/schema.ts';
 import { assertNoLeak } from './no-leak.ts';
@@ -215,4 +218,89 @@ test('addUrl throws rather than choosing when the lookup finds two', async () =>
   const client = createQbittorrentClient(config({ apiKey: KEY }), fetchImpl);
 
   await assert.rejects(client.addUrl('magnet:?xt=1', 'n', 'pickarr-abc12345-7'), /pickarr-abc12345-7/);
+});
+
+const QUEUE_STATES = ['downloading', 'metaDL', 'stalledDL', 'queuedDL', 'forcedDL',
+  'allocating', 'checkingDL', 'checkingResumeData', 'moving', 'pausedDL', 'stoppedDL'];
+const DONE_STATES = ['uploading', 'stalledUP', 'queuedUP', 'forcedUP', 'checkingUP',
+  'pausedUP', 'stoppedUP'];
+const FAILED_STATES = ['error', 'missingFiles'];
+
+function torrent(state: string) {
+  return {
+    hash: 'H', name: 'N', category: 'pickarr', state,
+    progress: 0.5, content_path: '/downloads/N',
+  };
+}
+
+test('every documented state lands where the table says', async () => {
+  for (const state of QUEUE_STATES) {
+    const { fetchImpl } = recorder(() => new Response(JSON.stringify([torrent(state)])));
+    const snap = await createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).snapshot();
+    assert.equal(snap.queue.length, 1, state);
+    assert.equal(snap.history.length, 0, state);
+  }
+  for (const state of DONE_STATES) {
+    const { fetchImpl } = recorder(() => new Response(JSON.stringify([torrent(state)])));
+    const snap = await createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).snapshot();
+    assert.equal(snap.history[0]?.outcome, 'completed', state);
+  }
+  for (const state of FAILED_STATES) {
+    const { fetchImpl } = recorder(() => new Response(JSON.stringify([torrent(state)])));
+    const snap = await createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).snapshot();
+    assert.equal(snap.history[0]?.outcome, 'failed', state);
+  }
+});
+
+test('an unrecognised state reads as queue and warns once', async () => {
+  resetQbittorrentWarningsForTests();
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: string[]) => { warnings.push(args.join(' ')); };
+  try {
+    const { fetchImpl } = recorder(() => new Response(JSON.stringify([torrent('teleporting')])));
+    const client = createQbittorrentClient(config({ apiKey: KEY }), fetchImpl);
+    const first = await client.snapshot();
+    await client.snapshot();
+    assert.equal(first.queue.length, 1, 'unrecognised is queue, never failed');
+    assert.equal(warnings.filter((w) => w.includes('teleporting')).length, 1);
+  } finally {
+    console.warn = original;
+  }
+});
+
+test('progress becomes a whole percentage, and content_path is mapped', async () => {
+  const { fetchImpl } = recorder(() =>
+    new Response(JSON.stringify([{ ...torrent('downloading'), progress: 0.5 }])));
+  const client = createQbittorrentClient(
+    config({ apiKey: KEY, pathMappings: [{ from: '/downloads', to: '/mnt/dl' }] }),
+    fetchImpl,
+  );
+
+  const snap = await client.snapshot();
+
+  // 0.5, not 0 — the interface wants 0-100 (sabnzbd.ts parses an int, and
+  // Downloads.tsx renders `{percentage}%`), and qBittorrent reports 0-1.
+  assert.equal(snap.queue[0]?.percentage, 50);
+  assert.equal(client.mapPath('/downloads/N'), '/mnt/dl/N');
+});
+
+test('an empty category is normalised to null, a real one passes through', async () => {
+  const { fetchImpl } = recorder(() =>
+    new Response(JSON.stringify([{ ...torrent('downloading'), category: '' }])));
+  const snap = await createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).snapshot();
+  assert.equal(snap.queue[0]?.category, null);
+
+  // Without this, a stub that maps every category to null (rather than only
+  // the empty one) would pass the assertion above and silently drop every
+  // real category the server ever reports.
+  const { fetchImpl: withCategory } = recorder(() =>
+    new Response(JSON.stringify([torrent('downloading')])));
+  const withReal = await createQbittorrentClient(config({ apiKey: KEY }), withCategory).snapshot();
+  assert.equal(withReal.queue[0]?.category, 'pickarr');
+});
+
+test('remove is not implemented', () => {
+  const { fetchImpl } = recorder(() => new Response('[]'));
+  assert.equal(createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).remove, undefined);
 });

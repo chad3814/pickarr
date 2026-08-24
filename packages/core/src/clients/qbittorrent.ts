@@ -1,7 +1,13 @@
 import type { QbittorrentClientConfig } from '../config/schema.ts';
 import { asJsonArray, asJsonObject, asText, type JsonValue } from '../json.ts';
 import { applyPathMappings } from './path-mappings.ts';
-import type { ClientSnapshot, DownloadClient, FetchLike } from './types.ts';
+import type {
+  ClientHistoryEntry,
+  ClientQueueEntry,
+  ClientSnapshot,
+  DownloadClient,
+  FetchLike,
+} from './types.ts';
 
 const TIMEOUT_MS = 20_000;
 
@@ -11,6 +17,101 @@ const API_KEY_MIN_VERSION = '5.2.0';
 const LOGIN_PATH = '/api/v2/auth/login';
 const TORRENTS_INFO_PATH = '/api/v2/torrents/info';
 const TORRENTS_ADD_PATH = '/api/v2/torrents/add';
+
+/**
+ * Where each qBittorrent state lands. An explicit table with a warning for
+ * anything outside it, the same discipline `historyOutcome` in sabnzbd.ts
+ * follows and for the same reason: reading an unknown state as a failure is
+ * what marked ordinary multi-part downloads failed while SABnzbd was still
+ * unpacking them.
+ *
+ * Both `paused*` and `stopped*` are here, and the documentation did not settle
+ * which is right. The WebUI API 5.0 wiki lists `pausedUP`/`pausedDL` and does
+ * not mention `stopped*`; qBittorrent 5.0 renamed the concept to Stop in its
+ * user interface and the docs do not say whether the API followed. Two extra
+ * rows against a completed torrent reading as unrecognised is not a close call.
+ * Trim this once a real server has answered — the warning below is what tells
+ * you which it emits.
+ *
+ * A seeding torrent is `completed`: from Pickarr's side the download finished
+ * when the data arrived, and that the client goes on uploading is the client's
+ * business. Reading `uploading` as queue would leave the row downloading
+ * forever.
+ */
+const STATE_READING: Record<string, 'queue' | 'completed' | 'failed'> = {
+  downloading: 'queue', metaDL: 'queue', stalledDL: 'queue', queuedDL: 'queue',
+  forcedDL: 'queue', allocating: 'queue', checkingDL: 'queue',
+  checkingResumeData: 'queue', moving: 'queue', pausedDL: 'queue', stoppedDL: 'queue',
+  uploading: 'completed', stalledUP: 'completed', queuedUP: 'completed',
+  forcedUP: 'completed', checkingUP: 'completed', pausedUP: 'completed',
+  stoppedUP: 'completed',
+  error: 'failed', missingFiles: 'failed',
+};
+
+/**
+ * States `STATE_READING` has not seen before. A `Set` rather than one
+ * `resetReconcileWarningsForTests`-style boolean: the table above is
+ * deliberately uncertain about two spellings at once (`paused*` vs
+ * `stopped*`), so more than one unrecognised state could plausibly turn up in
+ * one run, and each deserves its own first mention rather than the first one
+ * ever silencing the rest.
+ */
+const warnedStates = new Set<string>();
+
+/**
+ * Test-only escape hatch, mirroring `resetReconcileWarningsForTests` in
+ * `pipeline/reconcile.ts`: node:test runs every test in one file inside a
+ * single process/module instance, so the "already warned" set above persists
+ * across tests unless a test resets it first.
+ */
+export function resetQbittorrentWarningsForTests(): void {
+  warnedStates.clear();
+}
+
+/**
+ * The reading for `state`, warning once per process (per unrecognised state,
+ * not globally) when it is not in `STATE_READING`. `queue` is the reading
+ * that changes nothing about a row Pickarr already has: `ClientSnapshot` is
+ * explicit that a snapshot may never be used to conclude absence, and `queue`
+ * is the one reading that cannot be mistaken for either kind of conclusion —
+ * unlike `failed`, which is exactly the wrong guess that turned ordinary
+ * SABnzbd downloads into false failures while they were still unpacking.
+ */
+function readState(state: string): 'queue' | 'completed' | 'failed' {
+  const reading = STATE_READING[state];
+  if (reading !== undefined) return reading;
+  if (!warnedStates.has(state)) {
+    warnedStates.add(state);
+    console.warn(
+      `pickarr: qbittorrent reported torrent state '${state}', which is not in STATE_READING ` +
+        '(clients/qbittorrent.ts); reading it as queue rather than risking a false failure. If ' +
+        'this is a real qBittorrent state — most plausibly whichever of paused*/stopped* the ' +
+        'table above turns out not to need — add it to STATE_READING.',
+    );
+  }
+  return 'queue';
+}
+
+/**
+ * `category` arrives as the empty string when a torrent carries none — never
+ * an absent field. See `ClientQueueEntry.category` for why every client
+ * normalises its own spelling of "no category" to `null` here rather than
+ * leaving it to whoever compares against a real category name later.
+ */
+function readCategory(category: string): string | null {
+  return category === '' ? null : category;
+}
+
+/**
+ * `progress` arrives as a fraction (0-1), not a whole percentage: unlike
+ * `content_path` and `category`, there is no sentinel to normalise, only a
+ * shape a malformed response could fail to have. Unreadable reads as 0 rather
+ * than throwing — a torrent this shape does not describe is not a reason to
+ * fail the whole snapshot.
+ */
+function readProgress(value: JsonValue | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
 
 /**
  * One request against the server, already carrying whichever credential the
@@ -271,19 +372,56 @@ export function createQbittorrentClient(
     async snapshot(): Promise<ClientSnapshot> {
       // One unfiltered GET, matching the contract that a snapshot is everything
       // the server holds so `complete` can mean something.
-      const response = await request(TORRENTS_INFO_PATH);
+      const torrents = asJsonArray(await json(TORRENTS_INFO_PATH));
 
-      // Draining is not optional even though nothing reads the body yet: an
-      // unconsumed `Response` body keeps its socket checked out of undici's
-      // connection pool for the lifetime of the process.
-      await response.text();
+      const queue: ClientQueueEntry[] = [];
+      const history: ClientHistoryEntry[] = [];
 
-      // Reading those torrents into queue and history entries — the state
-      // table — is the change that follows this one. Until it lands the
-      // snapshot reports itself incomplete, which is the safe half of the
-      // contract: an incomplete snapshot may advance rows it contains, and may
-      // never be read as an absence.
-      return { queue: [], history: [], complete: false };
+      for (const raw of torrents) {
+        const torrent = asJsonObject(raw);
+        if (torrent === null) continue;
+
+        const ref = asText(torrent['hash']);
+        if (ref === '') continue;
+
+        const name = asText(torrent['name']);
+        const category = readCategory(asText(torrent['category']));
+        const state = asText(torrent['state']);
+        const reading = readState(state);
+
+        if (reading === 'queue') {
+          queue.push({
+            ref,
+            name,
+            // 0-1 from the wire, 0-100 on the interface — see readProgress and
+            // ClientQueueEntry.percentage's consumers (sabnzbd.ts parses an
+            // int; Downloads.tsx renders `{percentage}%`).
+            percentage: Math.round(readProgress(torrent['progress']) * 100),
+            category,
+          });
+          continue;
+        }
+
+        history.push({
+          ref,
+          name,
+          category,
+          outcome: reading,
+          // `content_path`, not `save_path`: `save_path` is the containing
+          // directory qBittorrent downloads into, `content_path` is this
+          // torrent's own file or folder within it — what the importer needs
+          // to list. Only set for a completed entry, matching sabnzbd.ts's
+          // `storagePath`: a failed job has nothing worth pointing an import at.
+          storagePath: reading === 'completed' ? asText(torrent['content_path']) || null : null,
+          failMessage: reading === 'failed' ? `qbittorrent reports state '${state}'` : null,
+        });
+      }
+
+      // Unlike SABnzbd's history, there is no paging here and no reported
+      // total to compare the returned count against: `/torrents/info` with no
+      // filter answers with everything in one response, so a successful
+      // request is, by construction, complete.
+      return { queue, history, complete: true };
     },
 
     mapPath(clientPath) {
