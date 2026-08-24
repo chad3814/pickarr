@@ -151,15 +151,29 @@ export function toEditableConfig(config: PickarrConfig): EditableConfig {
     database: { path: config.database.path },
     trashDir: config.trashDir,
     plugins: copyPluginSettings(config.plugins),
-    downloadClients: config.downloadClients.map((client) => ({
-      id: client.id,
-      type: client.type,
-      url: client.url,
-      apiKey: viewSecret(client.apiKey),
-      category: client.category,
-      importMode: client.importMode,
-      pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
-    })),
+    downloadClients: config.downloadClients.map((client) => {
+      // EditableDownloadClient has no 'qbittorrent' member yet — that is
+      // Task 10's job, which also decides how its username/password reach
+      // the browser as SecretViews. Throwing names the gap rather than
+      // silently dropping the client's real fields, and it cannot fire
+      // today: parseConfig (config/load.ts) is the only source of a
+      // 'qbittorrent' client, landing in this same commit, so nothing has
+      // configured one yet.
+      if (client.type !== 'sabnzbd') {
+        throw new Error(
+          `Download client ${client.id} is a qbittorrent client, and Settings cannot edit one yet`,
+        );
+      }
+      return {
+        id: client.id,
+        type: client.type,
+        url: client.url,
+        apiKey: viewSecret(client.apiKey),
+        category: client.category,
+        importMode: client.importMode,
+        pathMappings: client.pathMappings.map((mapping) => ({ from: mapping.from, to: mapping.to })),
+      };
+    }),
     feeds: config.feeds.map((feed) => ({
       id: feed.id,
       url: feed.url,

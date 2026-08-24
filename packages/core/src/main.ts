@@ -209,7 +209,22 @@ async function main(): Promise<void> {
 
   const clients = new Map<string, DownloadClient>();
   for (const clientConfig of config.downloadClients) {
-    clients.set(clientConfig.id, createSabnzbdClient(clientConfig));
+    // Exhaustive over the union, so a third client type is a type error here
+    // rather than a silent SABnzbd.
+    switch (clientConfig.type) {
+      case 'sabnzbd':
+        clients.set(clientConfig.id, createSabnzbdClient(clientConfig));
+        break;
+      case 'qbittorrent':
+        // Task 9 replaces this throw with createQbittorrentClient(clientConfig)
+        // once Task 6 has built that factory. Unreachable today: parseConfig
+        // (config/load.ts) is the only place a 'qbittorrent' client can come
+        // from, and it lands in the same commit as this switch, so nothing
+        // has configured one yet.
+        throw new Error(
+          `Download client ${clientConfig.id} is a qbittorrent client, which is not implemented yet`,
+        );
+    }
   }
 
   // The default a feed naming no client falls back to, and what makes that

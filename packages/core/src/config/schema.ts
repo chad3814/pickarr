@@ -27,7 +27,15 @@ export const pathMappingSchema = z.object({
   to: z.string().min(1),
 });
 
-export const downloadClientSchema = z.object({
+/**
+ * The documented shape of a qBittorrent WebAPI key: `qbt_` followed by 28
+ * alphanumerics. Requires qBittorrent v5.2.0 or WebAPI v2.14.1 — older
+ * supported versions have no api key at all, which is why username/password
+ * remains a full alternative below rather than being deprecated in its favour.
+ */
+const QBITTORRENT_API_KEY = /^qbt_[A-Za-z0-9]{28}$/;
+
+export const sabnzbdClientSchema = z.object({
   id: z.string().min(1),
   type: z.literal('sabnzbd'),
   url: z.string().url(),
@@ -61,6 +69,35 @@ export const downloadClientSchema = z.object({
   importMode: z.enum(['move', 'copy']),
   pathMappings: z.array(pathMappingSchema).default([]),
 });
+
+export const qbittorrentClientSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal('qbittorrent'),
+  url: z.string().url(),
+  // Both credential fields are optional here, and deliberately not typed as
+  // `string | undefined` with a default: exactly one of apiKey, or username
+  // and password together, is required, and that is a cross-field rule
+  // `parseConfig` enforces once it can see the whole client — this schema can
+  // only describe each field's own shape.
+  apiKey: z
+    .string()
+    .min(1)
+    .refine(
+      (value) => value.startsWith(SECRET_REFERENCE_PREFIX) || QBITTORRENT_API_KEY.test(value),
+      `apiKey must look like "qbt_" followed by 28 alphanumerics, or be a "${SECRET_REFERENCE_PREFIX}" reference to a file containing such a key`,
+    )
+    .optional(),
+  username: z.string().min(1).optional(),
+  password: z.string().min(1).optional(),
+  category: z.string().min(1),
+  importMode: z.enum(['move', 'copy']),
+  pathMappings: z.array(pathMappingSchema).default([]),
+});
+
+export const downloadClientSchema = z.discriminatedUnion('type', [
+  sabnzbdClientSchema,
+  qbittorrentClientSchema,
+]);
 
 /**
  * How to walk a feed backwards through its own pagination, and absent by default
@@ -174,6 +211,8 @@ export const configSchema = z.object({
 });
 
 export type PickarrConfig = z.infer<typeof configSchema>;
+export type SabnzbdClientConfig = z.infer<typeof sabnzbdClientSchema>;
+export type QbittorrentClientConfig = z.infer<typeof qbittorrentClientSchema>;
 export type DownloadClientConfig = z.infer<typeof downloadClientSchema>;
 export type FeedConfig = z.infer<typeof feedSchema>;
 export type FeedBackfillConfig = z.infer<typeof feedBackfillSchema>;

@@ -6,7 +6,7 @@ import {
   resetDroppedSlotWarningForTests,
   resetUnrecognizedHistoryStatusWarningForTests,
 } from '../../src/clients/sabnzbd.ts';
-import type { DownloadClientConfig } from '../../src/config/schema.ts';
+import type { SabnzbdClientConfig } from '../../src/config/schema.ts';
 import type { JsonValue } from '../../src/json.ts';
 
 // Shaped like a real SABnzbd key: 32 hex characters. Kept realistic because
@@ -21,7 +21,7 @@ const HEX_KEY = '0f1e2d3c4b5a69788796a5b4c3d2e1f0';
 // understands encodings from one that got lucky.
 const BASE64_KEY = 'dXNlcjpwYXNzd29yZDEyMw==';
 
-const CONFIG: DownloadClientConfig = {
+const CONFIG: SabnzbdClientConfig = {
   id: 'sab',
   type: 'sabnzbd',
   url: 'http://sab.invalid:8080',
@@ -189,7 +189,7 @@ test('a JSON-parse failure from response.json() never leaks the api key', async 
 });
 
 test('a base64-style api key with +, /, = never leaks, even decoded', async () => {
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
@@ -200,7 +200,7 @@ test('a base64-style api key with +, /, = never leaks, even decoded', async () =
 });
 
 test('an api key containing +, /, =, and a space never leaks, even decoded', async () => {
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: 'sec/ret+key=1 2 long enough' };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: 'sec/ret+key=1 2 long enough' };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
@@ -271,7 +271,7 @@ test('a percent-encoded request url outside query shape does not leak the key', 
   // so there is no `?`/`&` delimiter for the structural rule to key off, and
   // the key itself is encoded so a literal-value pass cannot see it either.
   // One decodeURIComponent recovers everything.
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`request failed: ${encodeURIComponent(url)}`);
   });
@@ -282,7 +282,7 @@ test('a percent-encoded request url outside query shape does not leak the key', 
 });
 
 test('a doubly percent-encoded request url does not leak the key', async () => {
-  const config: DownloadClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
+  const config: SabnzbdClientConfig = { ...CONFIG, apiKey: BASE64_KEY };
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`request failed: ${encodeURIComponent(encodeURIComponent(url))}`);
   });

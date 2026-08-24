@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, parseConfig, readConfigDocument, resolveSecrets } from '../../src/config/load.ts';
-import type { JsonValue } from '../../src/json.ts';
+import type { JsonObject, JsonValue } from '../../src/json.ts';
 
 const VALID = {
   server: { port: 8080 },
@@ -39,6 +39,30 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+// Every field a qbittorrent client needs except credentials, which each test
+// adds itself — the whole point of these tests is which combination of
+// credentials is or isn't accepted.
+const QB_BASE: Record<string, JsonValue> = {
+  id: 'qb',
+  type: 'qbittorrent',
+  url: 'http://localhost:8080',
+  category: 'pickarr',
+  importMode: 'copy',
+};
+
+/**
+ * `VALID` with its one download client replaced, so a test can hand
+ * `parseConfig` a document that is valid everywhere except the client under
+ * test. Returns `JsonObject` rather than `JsonValue` cast through `unknown`
+ * (the pattern the rest of this file uses) because a fresh object literal is
+ * checked against an index-signature type property-by-property, so the cast
+ * is unnecessary here — every property of `VALID` and of `clients` already is
+ * a `JsonValue`.
+ */
+function withClients(clients: Array<Record<string, JsonValue>>): JsonObject {
+  return { ...VALID, downloadClients: clients };
 }
 
 test('loads a valid config', async () => {
@@ -350,4 +374,70 @@ test('resolveSecrets rejects a short resolved key without printing it', async ()
       return true;
     });
   });
+});
+
+test('a qbittorrent client with an api key parses', () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, apiKey: `qbt_${'a'.repeat(28)}` }]),
+    'test',
+  );
+  assert.equal(config.downloadClients[0]?.type, 'qbittorrent');
+});
+
+test('a qbittorrent client with a username and password parses', () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, username: 'admin', password: 'hunter2' }]),
+    'test',
+  );
+  assert.equal(config.downloadClients[0]?.type, 'qbittorrent');
+});
+
+test('both credentials at once is refused, naming the client', () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        withClients([
+          { ...QB_BASE, apiKey: `qbt_${'a'.repeat(28)}`, username: 'admin', password: 'x' },
+        ]),
+        'test',
+      ),
+    /qb.*exactly one/i,
+  );
+});
+
+test('neither credential is refused, naming the client', () => {
+  assert.throws(() => parseConfig(withClients([QB_BASE]), 'test'), /qb.*exactly one/i);
+});
+
+test('a username with no password is refused, naming the client', () => {
+  assert.throws(
+    () => parseConfig(withClients([{ ...QB_BASE, username: 'admin' }]), 'test'),
+    /qb.*exactly one/i,
+  );
+});
+
+test('move mode on a torrent client is refused, naming the client', () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        withClients([{ ...QB_BASE, importMode: 'move', apiKey: `qbt_${'a'.repeat(28)}` }]),
+        'test',
+      ),
+    /qb.*move.*seed/i,
+  );
+});
+
+test('a malformed api key is refused', () => {
+  assert.throws(
+    () => parseConfig(withClients([{ ...QB_BASE, apiKey: 'not-a-key' }]), 'test'),
+    /apiKey/,
+  );
+});
+
+test('a file: reference is exempt from the api key shape check', () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, apiKey: 'file:/run/secrets/qb' }]),
+    'test',
+  );
+  assert.equal(config.downloadClients[0]?.type, 'qbittorrent');
 });

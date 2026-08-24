@@ -162,6 +162,34 @@ export function parseConfig(json: JsonValue, source: string): PickarrConfig {
     }
   }
 
+  for (const client of config.downloadClients) {
+    if (client.type !== 'qbittorrent') continue;
+
+    // Exactly one credential. Both is ambiguous about which the client would
+    // use; neither cannot authenticate at all. Settled here rather than at
+    // the first request, where it would surface as a 403 an hour into a run.
+    const hasKey = client.apiKey !== undefined;
+    const hasLogin = client.username !== undefined && client.password !== undefined;
+    const halfLogin = (client.username === undefined) !== (client.password === undefined);
+    if (halfLogin || hasKey === hasLogin) {
+      throw new Error(
+        `Download client ${client.id} needs exactly one of apiKey, or username and password together`,
+      );
+    }
+
+    // Move would take the file out from under the torrent and stop the seed.
+    // A literal 'copy' in the schema would say this more strongly, but it
+    // would also force config/editable.ts and the Settings form's importMode
+    // control to become conditional on client type — a UI change in service
+    // of a validation. Cross-field rules already live here.
+    if (client.importMode === 'move') {
+      throw new Error(
+        `Download client ${client.id} uses importMode "move", which would stop a qbittorrent ` +
+          `client's torrent from seeding — set importMode to "copy" instead`,
+      );
+    }
+  }
+
   return config;
 }
 
@@ -175,6 +203,11 @@ export function parseConfig(json: JsonValue, source: string): PickarrConfig {
  */
 export async function resolveSecrets(config: PickarrConfig): Promise<void> {
   for (const client of config.downloadClients) {
+    // qBittorrent's apiKey is optional and, unlike SABnzbd's, not the only way
+    // to authenticate — resolving its `file:` reference is qBittorrent-client
+    // work, not this loop's. Left to the task that adds that client.
+    if (client.type !== 'sabnzbd') continue;
+
     const field = `downloadClients.${client.id}.apiKey`;
     client.apiKey = await resolveSecret(client.apiKey, field);
     // The schema's length rule saw a `file:` path, not the key behind it, so

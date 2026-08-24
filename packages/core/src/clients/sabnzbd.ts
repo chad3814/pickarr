@@ -1,4 +1,4 @@
-import type { DownloadClientConfig } from '../config/schema.ts';
+import type { SabnzbdClientConfig } from '../config/schema.ts';
 import {
   asJsonArray as asArray,
   asJsonObject as asRecord,
@@ -224,7 +224,7 @@ function decodings(value: string): Set<string> {
 }
 
 export function createSabnzbdClient(
-  config: DownloadClientConfig,
+  config: SabnzbdClientConfig,
   fetchImpl: FetchLike = (url) => fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) }),
 ): DownloadClient {
   const base = config.url.replace(/\/+$/, '');
