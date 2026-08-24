@@ -209,8 +209,12 @@ async function main(): Promise<void> {
 
   const clients = new Map<string, DownloadClient>();
   for (const clientConfig of config.downloadClients) {
-    // Exhaustive over the union, so a third client type is a type error here
-    // rather than a silent SABnzbd.
+    // A `case` per member is not exhaustive on its own — a `switch` with no
+    // `default` and no arm that reads as `never` compiles cleanly even after
+    // a third member is added to the union; it would just fall through this
+    // loop having registered nothing, and the config that named it would
+    // boot anyway. The `default` arm below is what actually makes an
+    // unhandled type a compile error, via the assignment to `never`.
     switch (clientConfig.type) {
       case 'sabnzbd':
         clients.set(clientConfig.id, createSabnzbdClient(clientConfig));
@@ -224,6 +228,10 @@ async function main(): Promise<void> {
         throw new Error(
           `Download client ${clientConfig.id} is a qbittorrent client, which is not implemented yet`,
         );
+      default: {
+        const unhandled: never = clientConfig;
+        throw new Error(`Unhandled download client type: ${JSON.stringify(unhandled)}`);
+      }
     }
   }
 
