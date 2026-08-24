@@ -22,6 +22,15 @@
   display: grid;
   place-items: center;
 }
+/* Raw alpha-black rather than a token, and deliberately so: a backdrop is a
+   scrim laid over whatever the page behind the dialog happens to be showing
+   — an image of unknown colour here, arbitrary page content for `.confirm`'s
+   own backdrop below — not a themed surface. Neither palette has a token for
+   "translucent black regardless of theme" because nothing else in the app
+   needs one. The close button's `background` and `color: white` below are
+   the same call: a control drawn over that same unknown image, not over
+   `--color-surface`. This is the one place in `styles/` that declares raw
+   colour values; `tokens.css` notes the exception. */
 .image-modal::backdrop { background: rgb(0 0 0 / 70%); }
 /* Out of flow, and that is the load-bearing part rather than the styling. As
    an in-flow sibling above the image, the close button spent its own height
@@ -66,6 +75,8 @@
   box-shadow: var(--shadow-dialog);
 }
 
+/* Same raw-value reasoning as `.image-modal::backdrop` above: a scrim over
+   whatever page is behind the dialog, not a themed surface. */
 .confirm::backdrop { background: rgb(0 0 0 / 60%); }
 .confirm h2 { margin: 0 0 var(--space-3); font-size: var(--text-title); font-weight: 600; }
 .confirm h3 { margin: var(--space-3) 0 var(--space-1); font-size: var(--text-body); color: var(--color-text-dim); }
@@ -73,9 +84,7 @@
 /* The paths are the point of the file lists, so they wrap rather than being
    clipped — `.release-name` ellipsises because a release title is
    recognisable from its start, but a destination you cannot see the end of
-   tells you nothing about where the file is going. Mono and wrapping: these
-   are destination paths, and the end of one is the part that says where the
-   file is actually going. */
+   tells you nothing about where the file is going. Mono and wrapping. */
 .confirm li { overflow-wrap: anywhere; font-family: 'IBM Plex Mono', ui-monospace, monospace; color: var(--color-text-dim); }
 .confirm button { margin: var(--space-4) var(--space-2) 0 0; }
 /* Amber like `.badge`, and distinct from `.error`'s red: something to read

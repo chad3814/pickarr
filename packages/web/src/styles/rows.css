@@ -41,9 +41,15 @@
 
 /*
  * First rules for these two. They are rendered ahead of the name by `ReleaseRow`,
- * and the fixed widths are what make the comparison possible: the numbers you are
- * choosing between line up in a column rather than starting wherever the title
- * beside them happens to end.
+ * and `min-width` sets a floor, not a fixed column: it aligns the common case —
+ * short, similar-length quality strings — but it deliberately does not clip a
+ * longer one, so a mixed set of qualities (`parse.ts` can populate `source`,
+ * `videoCodec` and `releaseGroup` together, e.g. `format.test.ts`'s
+ * '1080p · web-dl · h265 · WRB') widens its box instead of lining up with its
+ * neighbours. `.release-size` only renders when `sizeBytes` is defined
+ * (`ReleaseRow.tsx`), so a sizeless row misaligns regardless of width. A real
+ * fix needs a table or grid layout, which is a later phase's job, not this
+ * rule's.
  */
 .release-quality {
   flex: none;
@@ -73,9 +79,15 @@
    the entire task this screen exists for. */
 .release-name { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 .release-current { font-weight: 600; color: var(--color-text); }
+/* `ReleaseRow.tsx` puts both classes on one element for a current release
+   that has failed. Both selectors are single-class and in the same layer, so
+   nothing but source order below decides that such a row reads as an error
+   rather than as current — the wanted outcome, but a silent one: swapping
+   these two adjacent lines would reverse it, and no test would catch that. */
 .release-failed { color: var(--color-error); }
 
-/* The one genuinely primary button in the app, and it gets its fill by context.
+/* The one genuinely primary button in the app, and it is distinguished in
+   markup rather than by context: it carries `className="pick"`.
    The `.pick` class exists because a bare `.release-row button` selector reaches
    further than intended: the row also holds the quality-edit form's own Save
    and Cancel, and `:first-of-type` cannot stand in for the class either, since

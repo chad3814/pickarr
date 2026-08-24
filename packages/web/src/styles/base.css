@@ -41,7 +41,17 @@ h2 { font-size: var(--text-title); font-weight: 600; margin: 0 0 var(--space-4);
 a { color: var(--color-accent-text); }
 
 /* The standard clip, so a legend can name a group for a screen reader without
-   taking space in a nav that is already only as wide as its longest label. */
+   taking space in a nav that is already only as wide as its longest label.
+
+   This lives in the `base` layer, so a `components`-layer rule beats it
+   regardless of specificity — layer order decides, not selector weight. It
+   holds today only because nothing in `components` overlaps it on the
+   properties that do the clipping: `forms.css`'s `legend` sets only
+   font-weight, size and colour. The theme toggle's group name depends on
+   this clip; whoever later adds a `legend` or `fieldset` declaration in
+   `components` that touches `position`, `width`, `height`, `margin`,
+   `padding`, `border`, `overflow`, `clip-path` or `white-space` should know
+   this utility does not automatically outrank it. */
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -100,10 +110,14 @@ input:not([type='checkbox']):not([type='radio']), select, textarea {
   background: var(--color-surface);
   color: var(--color-text);
 }
-
 /* `--color-line-strong` rather than `--color-line` on every control above: WCAG
    1.4.11 wants 3:1 against the adjacent background for the visual boundary of
    something the user operates, and the decorative hairline is ~1.3:1. */
+
+/* The one legitimate use of `--color-text-faint` with no restriction attached:
+   placeholder text is not content, it disappears the moment the user types
+   anything, so the token's sub-4.5:1 contrast — barred everywhere else in
+   essential text — is fine here. */
 ::placeholder { color: var(--color-text-faint); }
 
 /*
