@@ -5,6 +5,7 @@ import {
   asText as text,
   type JsonValue,
 } from '../json.ts';
+import { applyPathMappings } from './path-mappings.ts';
 import type {
   ClientHistoryEntry,
   ClientQueueEntry,
@@ -348,9 +349,6 @@ export function createSabnzbdClient(
     }
   }
 
-  // Longest prefix first, so a nested mapping wins over its parent.
-  const mappings = [...config.pathMappings].sort((a, b) => b.from.length - a.from.length);
-
   return {
     id: config.id,
     importMode: config.importMode,
@@ -572,12 +570,7 @@ export function createSabnzbdClient(
     },
 
     mapPath(clientPath) {
-      for (const mapping of mappings) {
-        if (clientPath === mapping.from || clientPath.startsWith(`${mapping.from}/`)) {
-          return mapping.to + clientPath.slice(mapping.from.length);
-        }
-      }
-      return clientPath;
+      return applyPathMappings(config.pathMappings, clientPath);
     },
   };
 }
