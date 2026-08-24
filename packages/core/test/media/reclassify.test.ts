@@ -96,7 +96,7 @@ async function seed(options: SeedOptions): Promise<{ db: DatabaseSync; dir: stri
 test('a poster column holding a landscape image is moved to the background column', async () => {
   const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: landscapeJpeg(1279, 719) });
   const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
-  assert.deepEqual(report, { examined: 1, moved: 1, unreadable: 0 });
+  assert.deepEqual(report, { examined: 1, moved: 1, cleared: 0, unreadable: 0 });
   const row = getGroupMetadata(db, 1);
   assert.equal(row?.posterPath, null);
   assert.equal(row?.backgroundPath, '1.jpg');
@@ -109,7 +109,7 @@ test('a correctly-filed image is left alone, so the script is a no-op once clean
   const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: portraitJpeg(800, 1200) });
   assert.deepEqual(
     await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} }),
-    { examined: 1, moved: 0, unreadable: 0 },
+    { examined: 1, moved: 0, cleared: 0, unreadable: 0 },
   );
   const row = getGroupMetadata(db, 1);
   assert.equal(row?.posterPath, '1.jpg');
@@ -120,7 +120,7 @@ test('dry-run reports what it would move and changes nothing', async () => {
   const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: landscapeJpeg(1279, 719) });
   assert.deepEqual(
     await reclassifyArtwork({ db, dir, dryRun: true, log: () => {} }),
-    { examined: 1, moved: 1, unreadable: 0 },
+    { examined: 1, moved: 1, cleared: 0, unreadable: 0 },
   );
   const row = getGroupMetadata(db, 1);
   assert.equal(row?.posterPath, '1.jpg');
@@ -132,7 +132,7 @@ test('a row whose file is missing is counted, not crashed on', async () => {
   const { db, dir } = await seed({ groupId: 1, posterPath: 'gone.jpg', bytes: null });
   assert.deepEqual(
     await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} }),
-    { examined: 1, moved: 0, unreadable: 1 },
+    { examined: 1, moved: 0, cleared: 0, unreadable: 1 },
   );
   assert.equal(getGroupMetadata(db, 1)?.posterPath, 'gone.jpg');
 });
@@ -154,7 +154,7 @@ test('bytes that are not a readable image are counted as unreadable, not crashed
 
     assert.deepEqual(
       await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} }),
-      { examined: 1, moved: 0, unreadable: 1 },
+      { examined: 1, moved: 0, cleared: 0, unreadable: 1 },
     );
     assert.equal(getGroupMetadata(db, 1)?.posterPath, '1.jpg');
   });
@@ -163,12 +163,109 @@ test('bytes that are not a readable image are counted as unreadable, not crashed
 test('a background column holding a portrait image is moved to the poster column', async () => {
   const { db, dir } = await seed({ groupId: 1, backgroundPath: '1.jpg', bytes: portraitJpeg(800, 1200) });
   const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
-  assert.deepEqual(report, { examined: 1, moved: 1, unreadable: 0 });
+  assert.deepEqual(report, { examined: 1, moved: 1, cleared: 0, unreadable: 0 });
   const row = getGroupMetadata(db, 1);
   assert.equal(row?.backgroundPath, null);
   assert.equal(row?.backgroundUrl, null);
   assert.equal(row?.posterPath, '1.jpg');
   assert.equal(row?.posterUrl, 'https://cdn.example/background/1.jpg');
+});
+
+test('a mismatching poster is cleared, not moved, when the background slot already holds a correct image', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/wide.jpg', 'wide.jpg',
+               'https://cdn.example/bg.jpg', 'bg.jpg', 1000)`,
+    ).run();
+    // The poster slot holds a landscape image (a mismatch); the background
+    // slot already holds a correct, distinct landscape image of its own.
+    await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
+    await writeFile(join(dir, 'bg.jpg'), landscapeJpeg(1920, 1080));
+
+    const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
+    assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 0 });
+
+    const row = getGroupMetadata(db, 1);
+    assert.equal(row?.posterPath, null);
+    assert.equal(row?.posterUrl, null);
+    // The background that was already correct must be untouched, byte for byte.
+    assert.equal(row?.backgroundPath, 'bg.jpg');
+    assert.equal(row?.backgroundUrl, 'https://cdn.example/bg.jpg');
+  });
+});
+
+test('a mismatching background is cleared, not moved, when the poster slot already holds a correct image', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/p.jpg', 'p.jpg',
+               'https://cdn.example/tall.jpg', 'tall.jpg', 1000)`,
+    ).run();
+    // The background slot holds a portrait image (a mismatch); the poster
+    // slot already holds a correct, distinct portrait image of its own.
+    await writeFile(join(dir, 'p.jpg'), portraitJpeg(600, 900));
+    await writeFile(join(dir, 'tall.jpg'), portraitJpeg(800, 1200));
+
+    const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
+    assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 0 });
+
+    const row = getGroupMetadata(db, 1);
+    assert.equal(row?.backgroundPath, null);
+    assert.equal(row?.backgroundUrl, null);
+    // The poster that was already correct must be untouched, byte for byte.
+    assert.equal(row?.posterPath, 'p.jpg');
+    assert.equal(row?.posterUrl, 'https://cdn.example/p.jpg');
+  });
+});
+
+test('a mismatching poster is cleared, not moved, when the background slot holds only a url and no cached file', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/wide.jpg', 'wide.jpg',
+               'https://cdn.example/known-but-uncached.jpg', NULL, 1000)`,
+    ).run();
+    await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
+
+    // background_path is NULL, so nothing under it is measured — but
+    // background_url is not, which is enough to count the slot as occupied.
+    const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
+    assert.deepEqual(report, { examined: 1, moved: 0, cleared: 1, unreadable: 0 });
+
+    const row = getGroupMetadata(db, 1);
+    assert.equal(row?.posterPath, null);
+    assert.equal(row?.posterUrl, null);
+    assert.equal(row?.backgroundPath, null);
+    assert.equal(row?.backgroundUrl, 'https://cdn.example/known-but-uncached.jpg');
+  });
 });
 
 test('a poster and a background swapped with each other are each moved to the right slot', async () => {
@@ -191,7 +288,7 @@ test('a poster and a background swapped with each other are each moved to the ri
     await writeFile(join(dir, 'tall.jpg'), portraitJpeg(800, 1200));
 
     const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
-    assert.deepEqual(report, { examined: 2, moved: 2, unreadable: 0 });
+    assert.deepEqual(report, { examined: 2, moved: 2, cleared: 0, unreadable: 0 });
 
     const row = getGroupMetadata(db, 1);
     assert.equal(row?.posterPath, 'tall.jpg');
@@ -204,10 +301,10 @@ test('a poster and a background swapped with each other are each moved to the ri
 test('running twice moves a row once and leaves the second run a no-op', async () => {
   const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: landscapeJpeg(1279, 719) });
   const first = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
-  assert.deepEqual(first, { examined: 1, moved: 1, unreadable: 0 });
+  assert.deepEqual(first, { examined: 1, moved: 1, cleared: 0, unreadable: 0 });
 
   const second = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
-  assert.deepEqual(second, { examined: 1, moved: 0, unreadable: 0 }, 'safe to run twice');
+  assert.deepEqual(second, { examined: 1, moved: 0, cleared: 0, unreadable: 0 }, 'safe to run twice');
 });
 
 test('multiple rows are examined and reported together', async () => {
@@ -233,7 +330,7 @@ test('multiple rows are examined and reported together', async () => {
 
     assert.deepEqual(
       await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} }),
-      { examined: 3, moved: 1, unreadable: 1 },
+      { examined: 3, moved: 1, cleared: 0, unreadable: 1 },
     );
   });
 });

@@ -75,11 +75,14 @@ async function main(): Promise<void> {
   db.close();
 
   console.log(
-    `\n${result.moved} moved, ${result.unreadable} unreadable, of ${result.examined} examined ` +
-      `in ${Math.round((Date.now() - started) / 1000)}s`,
+    `\n${result.moved} moved, ${result.cleared} cleared, ${result.unreadable} unreadable, ` +
+      `of ${result.examined} examined in ${Math.round((Date.now() - started) / 1000)}s`,
   );
-  if (options.dryRun && result.moved > 0) {
+  if (options.dryRun && (result.moved > 0 || result.cleared > 0)) {
     console.log('Dry run: nothing was written. Re-run without --dry-run to apply.');
+  }
+  if (result.cleared > 0) {
+    console.log('Cleared rows had a mismatching image discarded because the correct slot was already filled.');
   }
   if (result.unreadable > 0) {
     console.log('Unreadable rows were left as they were; re-run to try them again.');
