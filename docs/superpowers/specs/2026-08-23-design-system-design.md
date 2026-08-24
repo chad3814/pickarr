@@ -102,6 +102,14 @@ already lands on one of these values, so this codifies practice rather than chan
 --space-4: 1rem;     --space-5: 1.5rem;   --space-6: 2rem;
 ```
 
+> **Correction (post-implementation, whole-branch review):** not every existing value
+> landed on the scale exactly. Five did not and were snapped to the nearest step during
+> implementation, each plan-specified, reviewed and visually approved: `.release-row` and
+> `.download-row` padding `0.35rem` → `--space-1`, `.badge` margin-top `0.4rem` →
+> `--space-1`, `.confirm` padding `1rem 1.25rem` → `--space-4 --space-5`, and `.confirm ul`
+> padding-left `1.25rem` → `--space-5`. The scale mostly codifies practice, as above, but it
+> also snapped a handful of sub-8px values that practice had left off-grid.
+
 **Type size** — named by role, not by size, so a rule says what a thing *is*:
 
 ```css
@@ -196,6 +204,17 @@ placeholder text. It is specifically **not** for inactive nav links, which are e
 text — those take `--color-text-dim`. Implementation re-verifies every row above with a
 contrast checker rather than trusting this table.
 
+> **Correction (post-implementation, whole-branch review):** the table above checks every
+> pair only against `--color-bg`. Implementation went further and verified each pair
+> against the surface it actually sits on — `--color-surface` and `--color-surface-2` as
+> well as `--color-bg` — which is stricter, since a token used on a card or a chip is
+> never actually painted against the bare page background. That stricter check is what
+> caught the three real defects the whole-branch review found and this fix wave corrected:
+> `--color-accent` used as focus-ring and active-tab foreground (§8.6, `nav.css`), and
+> `--color-text-faint` on `.manual-help` and `.secret-set` in `forms.css`. The per-surface
+> figures live as comments next to the rules they justify (`base.css`'s `:focus-visible`,
+> `nav.css`'s `nav a.active`) rather than in a second table here.
+
 ### 5.4 One consequence, recorded
 
 Amber is both the primary action and the warning colour — `.download-absent` and
@@ -217,6 +236,9 @@ subset, on the order of 120 KB total. Static sidesteps having to confirm at buil
 which axes a given release of the family ships, and 400/600 is every weight the current
 stylesheet uses (`font-weight: 600` appears three times; nothing else is set).
 
+> **Correction (recorded as a deviation at implementation, folded in here):** the actual
+> total is 61.5 KB, not ~120 KB — this estimate ran high.
+
 Both faces are OFL 1.1. The licence text ships in the repo beside the fonts, as the
 licence requires.
 
@@ -225,6 +247,13 @@ The files live in `packages/web/src/fonts/` and are referenced by relative `url(
 serves that directory (`server.ts:1396`) and resolves `woff2` content types itself, so
 no server change is needed. `font-display: swap`, and each `@font-face` carries a
 `unicode-range` for the latin subset.
+
+> **Correction (recorded as a deviation at implementation, folded in here):** the
+> implementation deliberately omits `unicode-range`. The three files *are* the latin
+> subset and there is no second subset to fall back to, so a `unicode-range` would only
+> suppress the download for a page containing no latin text — which never happens here.
+> Per-glyph fallback for non-latin performer names and scene titles works identically
+> without it.
 
 Nothing loads from a CDN. Pickarr runs on home networks with no guarantee of egress, and
 a webfont that fails to load is a layout that shifts on every page load.
@@ -277,6 +306,13 @@ deferred by definition and would paint the wrong theme and then correct it. The 
 is not defensive habit — `localStorage` throws on access outright in some privacy
 configurations, and the degradation there has to be a themed app rather than an unstyled
 one.
+
+This script duplicates three lines of `src/theme.ts` (the `pickarr.theme` key and the
+`(prefers-color-scheme: light)` query) deliberately, rather than importing the module,
+because importing it here would make this a second module graph fetched before paint —
+the very thing the inline script exists to avoid. `packages/e2e/tests/theme.spec.ts` is
+that duplication's only coverage: its `setTheme` helper reloads the page, which is the one
+thing that actually exercises this script rather than `theme.ts`'s own logic.
 
 ### 7.3 `color-scheme` moves per theme
 
@@ -416,6 +452,15 @@ action.
 `base.css` to every focusable element. The app defines no focus style at all today and
 relies on the UA default, which against custom dark surfaces is frequently invisible.
 This is a correctness fix.
+
+> **Correction (post-implementation, whole-branch review):** the ring uses
+> `--color-accent-text`, not `--color-accent`. `--color-accent` is 2.14:1 / 2.27:1 /
+> 1.98:1 against the light theme's three backgrounds — under the 3:1 floor a focus
+> indicator needs — while `--color-accent-text` reaches 5.42 / 5.75 / 5.01:1 in light and
+> the identical value in dark. This is exactly the mistake §5.1 warns against — using the
+> fill-only `--color-accent` as a foreground — and the same correction applies to the nav's
+> active-tab inset rule (`nav a.active`'s `box-shadow` in `nav.css`), which also moved to
+> `--color-accent-text` for the same reason and carries its own contrast note.
 
 Route `h1` takes `--text-page`; it is unstyled today and renders at the UA's `2em`.
 
