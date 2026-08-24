@@ -207,6 +207,20 @@ export async function writeImage(
   bytes: Uint8Array,
   extension: string,
 ): Promise<string | null> {
+  // A filesystem path, not a network one — but from the moment this is
+  // called directly (rather than only through cacheImage's fetch-then-write,
+  // once callers start classifying before choosing a key), it is the only
+  // operation in this file with no stated guard. A stalled mkdir, write, or
+  // rename holds the metadata worker's `tryRun` mutex exactly as a stalled
+  // socket would (see IMAGE_TIMEOUT_MS), and the artwork directory can be a
+  // network mount, so "it's local disk" is not a reason to leave it
+  // unbounded. Reuses IMAGE_TIMEOUT_MS rather than a second constant: one
+  // budget with one rationale beats two, and a write should finish well
+  // inside it. Started before the first `await` so nothing this function
+  // does can push the deadline later than the moment `writeImage` was
+  // called.
+  const signal = AbortSignal.timeout(IMAGE_TIMEOUT_MS);
+  const timedOut = abortRejection(signal);
   // Unique per call, not just per key: this pipeline will process groups in
   // a loop, and two overlapping downloads for the same key (a retry racing
   // the original, say) must not share one temp path. A shared path lets the
@@ -215,7 +229,7 @@ export async function writeImage(
   // from under it — silently mixing two images' content.
   const temp = join(deps.dir, `.${key}.${randomUUID()}.part`);
   try {
-    await mkdir(deps.dir, { recursive: true });
+    await Promise.race([mkdir(deps.dir, { recursive: true }), timedOut]);
 
     // Temp then rename: both are on the same filesystem, and POSIX/NTFS
     // rename is atomic, so a reader can never observe a partially-written
@@ -225,8 +239,10 @@ export async function writeImage(
     // power loss immediately after a successful rename can still lose the
     // write and later show a missing or zero-length file.
     const name = `${key}.${extension}`;
-    await writeFile(temp, bytes);
-    await rename(temp, join(deps.dir, name));
+    // mkdir and rename take no signal, so they are raced against the same
+    // rejection instead; writeFile accepts one natively.
+    await writeFile(temp, bytes, { signal });
+    await Promise.race([rename(temp, join(deps.dir, name)), timedOut]);
     return name;
   } catch (error) {
     // Clean up before logging: a logger that itself throws (or a caller

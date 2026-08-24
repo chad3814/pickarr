@@ -445,3 +445,45 @@ test('cacheImage still behaves as before, so existing callers are unaffected', a
   }));
   assert.equal(await cacheImage(deps, 'performer-face-3', 'https://example/x'), 'performer-face-3.webp');
 });
+
+test(
+  'writeImage gives up on a stalled write, rather than hanging forever',
+  { timeout: 2_000 },
+  async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'artwork-'));
+    const timeout = stubAbortTimeout(t);
+    const logged: string[] = [];
+
+    // writeImage has no injectable filesystem — mkdir/writeFile/rename are
+    // real node:fs/promises calls, so unlike fetchImage there is no `deps`
+    // hook to hand it a write that "never settles". Firing the stubbed
+    // deadline in the same synchronous tick that calls writeImage stands in
+    // for that: mkdir has already been kicked off by the time `fire()` runs,
+    // but a real disk operation cannot have settled yet — it always needs at
+    // least one round trip through libuv's threadpool, which is strictly
+    // more event-loop turns than the synchronous `abort` dispatch a fired
+    // AbortSignal rejects on. That makes the deadline the guaranteed winner
+    // of the race without needing an operation that is actually stuck.
+    const pending = writeImage(
+      { dir, fetchImpl: () => Promise.reject(new Error('unused')), log: (m) => logged.push(m) },
+      '7',
+      new Uint8Array([1, 2, 3]),
+      'jpg',
+    );
+    assert.deepEqual(
+      timeout.requested,
+      [IMAGE_TIMEOUT_MS],
+      'writeImage takes its own deadline, covering mkdir, the write and the rename',
+    );
+    timeout.fire();
+    const name = await pending;
+
+    assert.equal(
+      name,
+      null,
+      'a stalled write must not hang the metadata pass; it is a write failure like any other',
+    );
+    assert.equal(logged.length, 1);
+    assert.deepEqual(await readdir(dir), [], 'no temp file survives the abort');
+  },
+);
