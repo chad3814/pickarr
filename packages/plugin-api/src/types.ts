@@ -154,9 +154,10 @@ export interface MetadataCandidate {
    *
    * Optional rather than required: this is a published contract that
    * third-party plugins implement, and `posterUrl` has some thirty
-   * construction sites. The same reasoning `MetadataView.performers` and
-   * `ReleaseRow`'s `hasFailed` record — a new key must not break every caller
-   * written before it existed.
+   * construction sites. The same reasoning `MetadataView.performers`, the web
+   * `ReleaseRow` component's `hasFailed` prop, and `ReleaseView.downloadFailed`
+   * record — a new key must not break every caller written before it
+   * existed.
    *
    * Which column either URL ends up in is decided by measuring the downloaded
    * image, not by which field it arrived in. See `classifyArtwork`.

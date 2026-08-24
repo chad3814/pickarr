@@ -77,4 +77,31 @@ test('migration 15 leaves a real poster alone', () => {
   assert.equal(row?.posterUrl, 'https://cdn.theporndb.net/scene/aa/bb/poster/p.jpg');
   assert.equal(row?.posterPath, '3.jpg');
   assert.equal(row?.backgroundUrl, null);
+  assert.equal(row?.backgroundPath, null);
+});
+
+test('migration 15 files a background that also carries a crop marker as a background, not a discard', () => {
+  // This pins the *order* of the two UPDATEs, not merely their outcome. Both
+  // markers appear in this one URL, so the statements disagree about what to
+  // do with it: the background move would file it, the crop discard would
+  // null it out. The migration runs the move first for exactly this case, and
+  // a reordering that swapped the two statements would still pass every other
+  // test here — only this row would go from filed to discarded. Do not delete
+  // this as a duplicate of the plain background case above; it is the only
+  // test that would notice that swap.
+  const db = openAtVersion(14);
+  seedGroup(db, 4);
+  db.exec(`INSERT INTO group_metadata (group_id, state, source, poster_url, poster_path, fetched_at)
+           VALUES (4, 'confirmed', 'theporndb',
+                   'https://cdn.theporndb.net/scene/aa/bb/background/abc=/800x1200/smart/bg-y.jpg',
+                   '4.jpg', 1)`);
+  migrate(db);
+  const row = getGroupMetadata(db, 4);
+  assert.equal(row?.posterUrl, null);
+  assert.equal(row?.posterPath, null);
+  assert.equal(
+    row?.backgroundUrl,
+    'https://cdn.theporndb.net/scene/aa/bb/background/abc=/800x1200/smart/bg-y.jpg',
+  );
+  assert.equal(row?.backgroundPath, '4.jpg');
 });
