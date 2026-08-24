@@ -134,10 +134,10 @@ stays in qBittorrent's list indefinitely. Pruning that list — the same way `tr
 is never emptied — is a decision left to you; see "Trash is never emptied" below.
 
 **A stalled torrent (no seeders) stays visible on the Downloads tab rather than being
-failed.** It shows its state and its progress, sitting at 0% for as long as it's
-stalled, and nothing in Pickarr gives up on it automatically. Deciding a stalled torrent
-isn't coming and removing it is a human decision, made in qBittorrent or in Pickarr's
-own UI.
+failed.** It shows its state and its progress, reporting whatever progress it had
+reached when seeders disappeared and then holding there for as long as it's stalled,
+and nothing in Pickarr gives up on it automatically. Deciding a stalled torrent isn't
+coming and removing it is a human decision, made in qBittorrent or in Pickarr's own UI.
 
 **Adding a qBittorrent client is a `config.json` edit today, not a Settings-tab
 action.** The Settings form can edit an existing qBittorrent client's fields (including

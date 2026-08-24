@@ -602,3 +602,25 @@ test('a renamed qbittorrent client keeps its login', () => {
   assert.equal('apiKey' in (saved ?? {}), false);
   assert.doesNotThrow(() => parseConfig(result.document, 'test'));
 });
+
+// The `password` counterpart to "a literal secret replaces what was on disk":
+// same id, so `previousSecret` finds a value on disk to prefer, and a literal
+// change must still win over it. Nothing above exercises this for `password`
+// specifically — the rename test above makes `previousSecret` undefined, and
+// the file: test changes the value to something that happens to equal what
+// gets written either way, so a mutant that preferred the previous secret over
+// the literal would survive both.
+test('a literal password replaces what was on disk for an existing qbittorrent client', () => {
+  const onDisk = withQbittorrent();
+  const editable = toEditableConfig(parseConfig(onDisk as unknown as JsonValue, 'test'));
+  const submitted = resubmit(editable);
+  const client = submitted.downloadClients[1];
+  assert.ok(client?.type === 'qbittorrent');
+  client.password = { kind: 'literal', value: 'a-different-password' };
+
+  const result = applyEdits(onDisk, submitted);
+  assert.ok('document' in result, 'error' in result ? result.error : 'expected a document');
+  const saved = asJsonObject(asJsonArray(result.document['downloadClients'])[1]);
+  assert.equal(saved?.['id'], 'qb');
+  assert.equal(saved?.['password'], 'a-different-password');
+});

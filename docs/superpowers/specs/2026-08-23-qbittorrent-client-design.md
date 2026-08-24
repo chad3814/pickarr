@@ -44,10 +44,10 @@ list stays a human decision, exactly as emptying `trashDir`
 (`docs/known-issues.md`, [#36](https://github.com/chad3814/pickarr/issues/36))
 and the artwork cache already are.
 
-**A stalled torrent stays pending and visible.** A torrent with no seeders sits at
-0% indefinitely and is *present* in every poll. Nothing is added to fail it. It shows
-on the Downloads tab with its state and its progress, and giving up is a human
-decision.
+**A stalled torrent stays pending and visible.** A torrent with no seeders reports
+whatever progress it had reached and stops advancing, and is *present* in every
+poll. Nothing is added to fail it. It shows on the Downloads tab with its state
+and its progress, and giving up is a human decision.
 
 **Corrected: this section originally justified that by a "missing-poll counter that
 fails an absent usenet job," and no such counter exists.** `reconcile.ts` treats a
@@ -379,17 +379,29 @@ client list does.
 
 ### 9.2 What is therefore in scope
 
+**Corrected: `username` does not ship as a `SecretView`.** This section
+originally said the qBittorrent member would carry `apiKey`, `username` and
+`password` all as `SecretView`s. `username` ships as plain text instead —
+`resolveSecrets` (`config/load.ts`) resolves a `file:` reference for `apiKey`
+and `password` only, and deliberately not for `username`, since a username is
+not a secret. Projecting it as a `SecretView` anyway would report a username
+that genuinely begins `file:` as already resolved, when nothing had resolved
+it.
+
 - `EditableDownloadClient` becomes a union mirroring the config union, with the
-  qBittorrent member carrying `apiKey`, `username` and `password` as
-  `SecretView`s so no secret reaches the browser in the clear.
+  qBittorrent member carrying `apiKey` and `password` as `SecretView`s and
+  `username` as plain text, so no secret reaches the browser in the clear.
 - `toEditableConfig` and `applyEdits` handle both members. `applyEdits` keeps
   using `mergeKnownFields` against the existing entry, so a field neither the
   schema nor the form knows about still survives.
 - The HTTP submission schema (`http/server.ts:326-335`) becomes the matching
   union.
-- The settings component renders the credential fields for the client's type,
-  and the exactly-one-credential rule from §6 is reported as a form error rather
-  than only as a parse failure on save.
+- The settings component renders the credential fields for the client's type.
+  **Corrected: the exactly-one-credential rule is not merely reported as a
+  form error — it is unreachable by construction.** The Authentication
+  selector (`DownloadClientFields.tsx`) switches between the two credential
+  shapes rather than showing both at once, so a submission with both or
+  neither cannot be built in the form to begin with.
 
 ### 9.3 Construction
 

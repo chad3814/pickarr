@@ -227,9 +227,15 @@ function fromDraftValue(
  * Converts the draft into what `PUT /api/config` expects, or the first
  * validation error the draft contains.
  *
- * `config` supplies the `type` literals (`'sabnzbd'`, `'theporndb'`), which the
- * draft never carries, and is matched by id since that is what a `keep`
- * secret edit resolves against on the server.
+ * `config` is consulted for exactly one thing: `siteLookup.type`, which the
+ * draft has no field for because only one site-lookup provider exists to
+ * choose. Every download client's `type`, by contrast, comes from the draft
+ * itself (`client.type` below) — never re-derived by looking the client's id
+ * up in `config`. A lookup keyed on id is what this form used to do, and it
+ * is why a qBittorrent client could be rewritten in SABnzbd's shape and lose
+ * its username and password: the id survives an edit, but a lookup keyed on
+ * it does not know the type changed. Reintroducing an id lookup here would
+ * bring that bug back.
  */
 export function toSubmission(draft: ConfigDraft, config: EditableConfig): SubmittedConfig | { error: string } {
   const port = asCount(draft.port, 'server.port');

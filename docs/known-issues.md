@@ -610,10 +610,11 @@ fails a download for it; the row keeps its real status and is looked for again o
 tick. That rule exists because it used to be otherwise: SABnzbd once silently truncated
 its history to ten entries, and 35 healthy downloads were failed for being absent from a
 list that was never the whole list. A stalled torrent does not even reach that path — it
-sits at 0% with no seeders but is *present* in every poll, so it simply keeps its
-`downloading` status until qBittorrent reports something else. It shows on the Downloads
-tab with its state and its progress, and deciding it isn't coming is left to a human to
-make, in qBittorrent or in Pickarr.
+has no seeders but is *present* in every poll, so it simply keeps its `downloading`
+status until qBittorrent reports something else, reporting whatever progress it had
+reached when it stalled rather than resetting to 0%. It shows on the Downloads tab with
+its state and its progress, and deciding it isn't coming is left to a human to make, in
+qBittorrent or in Pickarr.
 
 ## Web and API
 
