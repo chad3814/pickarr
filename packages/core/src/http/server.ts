@@ -1078,6 +1078,32 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
   });
 
+  // The poster route above explains why this is a route rather than a
+  // `@fastify/static` mount, and that reasoning is unchanged here — nothing
+  // about this handler differs from it except which column it reads.
+  server.get('/api/groups/:id/background', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid id' });
+
+    const metadata = getGroupMetadata(db, params.data.id);
+    if (metadata === undefined || metadata.backgroundPath === null) {
+      return reply.code(404).send({ error: 'No background' });
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(join(deps.artworkDir, metadata.backgroundPath));
+    } catch {
+      // The row can outlive the file on disk — a volume wipe, a manual
+      // cleanup of the artwork directory — and that is a 404 like any other
+      // missing background, not a 500.
+      return reply.code(404).send({ error: 'No background' });
+    }
+
+    const contentType = POSTER_CONTENT_TYPES[extname(metadata.backgroundPath)] ?? 'application/octet-stream';
+    return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
+  });
+
   // The same shape as the poster route above, mirrored deliberately: the same
   // id validation (so a traversal attempt in the id segment is rejected by
   // zod before it ever reaches `getPerformer`), the same whole-file buffering

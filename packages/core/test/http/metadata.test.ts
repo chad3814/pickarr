@@ -12,6 +12,7 @@ import {
   enqueueMetadata,
   getGroupMetadata,
   recordMetadataAnswer,
+  setBackgroundPath,
   setPosterPath,
   type GroupMetadata,
 } from '../../src/db/metadata.ts';
@@ -201,6 +202,16 @@ test('a scene slug becomes a scene url, and its absence a null', () => {
   const withoutScene = metadataViewOf(confirmedMetadata({ sceneSlug: null }), []);
   assert.ok(withoutScene.state === 'confirmed');
   assert.equal(withoutScene.sceneUrl, null);
+});
+
+test('the view reports each image independently', () => {
+  // `hasPoster` and `hasBackground` derive from separate columns, so a
+  // group can carry one, the other, both, or neither without the two
+  // fields ever moving together.
+  const view = metadataViewOf(confirmedMetadata({ posterPath: null, backgroundPath: 'group-background-1.jpg' }), []);
+  assert.ok(view.state === 'confirmed');
+  assert.equal(view.hasPoster, false);
+  assert.equal(view.hasBackground, true);
 });
 
 test('a group with no performer rows falls back to the stored names', () => {
@@ -593,6 +604,7 @@ test('metadata reads report pending, none and confirmed distinctly', async () =>
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     hasPoster: false,
+    hasBackground: false,
     sceneUrl: null,
   });
   // The cast rides beside every state now (see `CastView`), so a castless
@@ -787,6 +799,7 @@ test('browse carries metadata and reads it in one query', async () => {
     durationSeconds: 1200,
     synopsis: 'A synopsis',
     hasPoster: false,
+    hasBackground: false,
     sceneUrl: null,
   });
   assert.deepEqual(byId.get(g2), { state: 'none', performers: [], performerNames: [] });
@@ -911,6 +924,84 @@ test('the poster route cannot escape the artwork directory', async () => {
   const response = await server.inject({
     method: 'GET',
     url: '/api/groups/..%2f..%2fetc%2fpasswd/poster',
+  });
+  assert.equal(response.statusCode, 400, 'the id param is an integer schema, so this never reaches the filesystem');
+
+  await server.close();
+  db.close();
+});
+
+test('a background route serves the cached file and 404s when absent', async () => {
+  // …mirroring the poster route's tests above, including the cache-control
+  // header: same shape, different column.
+  const db = openTestDatabase();
+  const artworkDir = await mkdtemp(join(tmpdir(), 'pickarr-background-'));
+  try {
+    const withBackground = group(db, 'askable', 'Has Background');
+    const noAnswer = group(db, 'askable', 'No Answer');
+    const answeredNoBackground = group(db, 'askable', 'Answered No Background');
+    const missingFile = group(db, 'askable', 'Missing File');
+
+    const bytes = Buffer.from('not-really-a-jpeg');
+    await writeFile(join(artworkDir, `group-background-${withBackground}.jpg`), bytes);
+
+    recordMetadataAnswer(db, {
+      groupId: withBackground,
+      source: 'theporndb',
+      confirmed: candidate(),
+      nearMisses: [],
+      now: NOW,
+    });
+    setBackgroundPath(db, withBackground, `group-background-${withBackground}.jpg`);
+
+    recordMetadataAnswer(db, {
+      groupId: answeredNoBackground,
+      source: 'theporndb',
+      confirmed: candidate({ backgroundUrl: null }),
+      nearMisses: [],
+      now: NOW,
+    });
+
+    recordMetadataAnswer(db, {
+      groupId: missingFile,
+      source: 'theporndb',
+      confirmed: candidate(),
+      nearMisses: [],
+      now: NOW,
+    });
+    setBackgroundPath(db, missingFile, `group-background-${missingFile}.jpg`); // never written to disk
+
+    const server = buildServer(deps(db, { artworkDir }));
+
+    const ok = await server.inject({ method: 'GET', url: `/api/groups/${withBackground}/background` });
+    assert.equal(ok.statusCode, 200);
+    assert.equal(ok.headers['content-type'], 'image/jpeg');
+    assert.equal(ok.headers['cache-control'], 'public, max-age=86400');
+    assert.deepEqual(ok.rawPayload, bytes);
+
+    const neverAnswered = await server.inject({ method: 'GET', url: `/api/groups/${noAnswer}/background` });
+    assert.equal(neverAnswered.statusCode, 404);
+
+    const noBackground = await server.inject({ method: 'GET', url: `/api/groups/${answeredNoBackground}/background` });
+    assert.equal(noBackground.statusCode, 404);
+
+    const gone = await server.inject({ method: 'GET', url: `/api/groups/${missingFile}/background` });
+    assert.equal(gone.statusCode, 404);
+
+    await server.close();
+  } finally {
+    db.close();
+    await rm(artworkDir, { recursive: true, force: true });
+  }
+});
+
+test('the background route cannot escape the artwork directory', async () => {
+  const db = openTestDatabase();
+  const server = buildServer(deps(db));
+
+  const response = await server.inject({
+    method: 'GET',
+    url: '/api/groups/..%2f..%2fetc%2fpasswd/background',
   });
   assert.equal(response.statusCode, 400, 'the id param is an integer schema, so this never reaches the filesystem');
 
