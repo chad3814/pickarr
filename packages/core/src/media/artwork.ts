@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { abortRejection } from '../abort.ts';
 import type { FetchImpl } from '../clients/theporndb.ts';
+import type { ArtworkKind } from './classify.ts';
 
 /**
  * The largest image that will be written.
@@ -66,13 +67,13 @@ export interface ArtworkDeps {
  */
 async function readBodyWithinCap(
   response: Response,
-  key: string,
+  url: string,
   log: (message: string) => void,
   timedOut: Promise<never>,
 ): Promise<Uint8Array | null> {
   const body = response.body;
   if (body === null) {
-    log(`image ${key}: response had no body`);
+    log(`image ${url}: response had no body`);
     return null;
   }
 
@@ -99,7 +100,7 @@ async function readBodyWithinCap(
       if (total > MAX_IMAGE_BYTES) {
         // eslint-disable-next-line no-await-in-loop -- one cancellation, ending the loop; nothing to batch it with
         await reader.cancel();
-        log(`image ${key}: exceeded ${MAX_IMAGE_BYTES} bytes, aborted`);
+        log(`image ${url}: exceeded ${MAX_IMAGE_BYTES} bytes, aborted`);
         return null;
       }
     }
@@ -121,41 +122,37 @@ async function readBodyWithinCap(
   return bytes;
 }
 
+/** The validated bytes of a downloaded image and the extension its content type maps to. */
+export interface FetchedImage {
+  readonly bytes: Uint8Array;
+  readonly extension: string;
+}
+
 /**
- * Downloads one image, returning the filename stored or `null`.
+ * Downloads one image and validates it, returning its bytes and extension
+ * without writing anything to disk.
  *
  * Never throws: an image is decoration, and a group's metadata answer must be
  * written whether or not its image could be fetched.
  *
- * The filename is `<key>.<ext>`. The key is composed by the caller from
- * integers of our own — a group id, or a performer id via
- * `performerArtworkKey` — which cannot contain a path separator. That is
- * safer than sanitising a provider-supplied string and needs no argument
- * about whether the sanitising is exhaustive.
+ * There is no key here to log by — the key depends on classifying these
+ * bytes (poster or background), which only happens once the caller has them
+ * — so failures are logged against the URL instead.
  */
-export async function cacheImage(deps: ArtworkDeps, key: string, url: string): Promise<string | null> {
-  // Unique per call, not just per key: this pipeline will process groups in
-  // a loop, and two overlapping downloads for the same key (a retry racing
-  // the original, say) must not share one temp path. A shared path lets the
-  // second writer's bytes land under the first writer's rename, or the
-  // second rename fail ENOENT because the first already moved the file out
-  // from under it — silently mixing two images' content.
-  const temp = join(deps.dir, `.${key}.${randomUUID()}.part`);
+export async function fetchImage(deps: ArtworkDeps, url: string): Promise<FetchedImage | null> {
   // One deadline for the fetch and everything read from its body below — see
   // the comment on IMAGE_TIMEOUT_MS for why that must be a single
   // total-operation budget rather than a per-chunk one. Started before the
   // first `await` in this function (rather than immediately before the fetch
-  // call) so nothing this function does — including the `mkdir` below — can
-  // push the deadline later than the moment `cacheImage` was called.
+  // call) so nothing this function does can push the deadline later than the
+  // moment `fetchImage` was called.
   const signal = AbortSignal.timeout(IMAGE_TIMEOUT_MS);
   const timedOut = abortRejection(signal);
   try {
-    await mkdir(deps.dir, { recursive: true });
-
     const response = await Promise.race([deps.fetchImpl(url, { signal }), timedOut]);
     if (!response.ok) {
       await response.body?.cancel();
-      deps.log(`image ${key}: HTTP ${response.status}`);
+      deps.log(`image ${url}: HTTP ${response.status}`);
       return null;
     }
 
@@ -166,7 +163,7 @@ export async function cacheImage(deps: ArtworkDeps, key: string, url: string): P
     const extension = IMAGE_EXTENSIONS.get(contentType);
     if (extension === undefined) {
       await response.body?.cancel();
-      deps.log(`image ${key}: refused content type ${contentType || 'none'}`);
+      deps.log(`image ${url}: refused content type ${contentType || 'none'}`);
       return null;
     }
 
@@ -179,12 +176,46 @@ export async function cacheImage(deps: ArtworkDeps, key: string, url: string): P
     const declaredLength = declaredLengthHeader === null ? null : Number(declaredLengthHeader);
     if (declaredLength !== null && Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_BYTES) {
       await response.body?.cancel();
-      deps.log(`image ${key}: declared ${declaredLength} bytes exceeds the cap`);
+      deps.log(`image ${url}: declared ${declaredLength} bytes exceeds the cap`);
       return null;
     }
 
-    const bytes = await readBodyWithinCap(response, key, deps.log, timedOut);
+    const bytes = await readBodyWithinCap(response, url, deps.log, timedOut);
     if (bytes === null) return null;
+
+    return { bytes, extension };
+  } catch (error) {
+    // `error` is not necessarily an Error — a rejected promise can carry
+    // anything, and this function must never throw regardless of what it
+    // carries.
+    const message = error instanceof Error ? error.message : String(error);
+    deps.log(`image ${url} failed: ${message}`);
+    return null;
+  }
+}
+
+/**
+ * Writes already-downloaded image bytes to `<key>.<extension>`, returning the
+ * filename stored or `null`.
+ *
+ * Never throws: an image is decoration, and a group's metadata answer must be
+ * written whether or not its image could be stored.
+ */
+export async function writeImage(
+  deps: ArtworkDeps,
+  key: string,
+  bytes: Uint8Array,
+  extension: string,
+): Promise<string | null> {
+  // Unique per call, not just per key: this pipeline will process groups in
+  // a loop, and two overlapping downloads for the same key (a retry racing
+  // the original, say) must not share one temp path. A shared path lets the
+  // second writer's bytes land under the first writer's rename, or the
+  // second rename fail ENOENT because the first already moved the file out
+  // from under it — silently mixing two images' content.
+  const temp = join(deps.dir, `.${key}.${randomUUID()}.part`);
+  try {
+    await mkdir(deps.dir, { recursive: true });
 
     // Temp then rename: both are on the same filesystem, and POSIX/NTFS
     // rename is atomic, so a reader can never observe a partially-written
@@ -210,7 +241,37 @@ export async function cacheImage(deps: ArtworkDeps, key: string, url: string): P
   }
 }
 
+/**
+ * Downloads one image and writes it under `key`, returning the filename
+ * stored or `null`. The composition of `fetchImage` and `writeImage`, kept
+ * for callers that already know their key before the bytes arrive.
+ *
+ * The filename is `<key>.<ext>`. The key is composed by the caller from
+ * integers of our own — a group id, or a performer id via
+ * `performerArtworkKey` — which cannot contain a path separator. That is
+ * safer than sanitising a provider-supplied string and needs no argument
+ * about whether the sanitising is exhaustive.
+ */
+export async function cacheImage(deps: ArtworkDeps, key: string, url: string): Promise<string | null> {
+  const fetched = await fetchImage(deps, url);
+  if (fetched === null) return null;
+  return writeImage(deps, key, fetched.bytes, fetched.extension);
+}
+
 /** Keys for a performer's two cached images. Integers only, by construction. */
 export function performerArtworkKey(performerId: number, kind: 'face' | 'image'): string {
   return `performer-${kind}-${performerId}`;
+}
+
+/**
+ * Keys for a group's two cached images.
+ *
+ * New group artwork stops using the bare group id, and that is load-bearing.
+ * A background cached before migration 15 sits on disk at `<id>.jpg` and the
+ * migration deliberately leaves it there. If a newly-fetched poster for that
+ * group were also written to `<id>.jpg` it would overwrite the background —
+ * so nothing writes the bare name again.
+ */
+export function groupArtworkKey(groupId: number, kind: ArtworkKind): string {
+  return `group-${kind}-${groupId}`;
 }
