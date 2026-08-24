@@ -229,27 +229,40 @@ const FAILED_STATES = ['error', 'missingFiles'];
 function torrent(state: string) {
   return {
     hash: 'H', name: 'N', category: 'pickarr', state,
-    progress: 0.5, content_path: '/downloads/N',
+    // Distinct from content_path on purpose: a mutation that reads
+    // save_path instead of content_path is only observable if the two
+    // fields disagree — with the same string in both, swapping them would
+    // prove nothing.
+    progress: 0.5, content_path: '/downloads/N', save_path: '/downloads',
   };
 }
 
 test('every documented state lands where the table says', async () => {
-  for (const state of QUEUE_STATES) {
+  // Each iteration builds its own recorder, fetch double, and client, with
+  // no state shared across iterations, so the three groups run as
+  // Promise.all rather than a sequential for-await — same assertions, no
+  // no-await-in-loop warning.
+  await Promise.all(QUEUE_STATES.map(async (state) => {
     const { fetchImpl } = recorder(() => new Response(JSON.stringify([torrent(state)])));
     const snap = await createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).snapshot();
     assert.equal(snap.queue.length, 1, state);
     assert.equal(snap.history.length, 0, state);
-  }
-  for (const state of DONE_STATES) {
+  }));
+  await Promise.all(DONE_STATES.map(async (state) => {
     const { fetchImpl } = recorder(() => new Response(JSON.stringify([torrent(state)])));
     const snap = await createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).snapshot();
     assert.equal(snap.history[0]?.outcome, 'completed', state);
-  }
-  for (const state of FAILED_STATES) {
+    // content_path, not save_path: save_path is the containing directory,
+    // content_path is this torrent's own file or folder within it — see
+    // torrent()'s save_path for why the two must differ for this to prove
+    // anything.
+    assert.equal(snap.history[0]?.storagePath, '/downloads/N', state);
+  }));
+  await Promise.all(FAILED_STATES.map(async (state) => {
     const { fetchImpl } = recorder(() => new Response(JSON.stringify([torrent(state)])));
     const snap = await createQbittorrentClient(config({ apiKey: KEY }), fetchImpl).snapshot();
     assert.equal(snap.history[0]?.outcome, 'failed', state);
-  }
+  }));
 });
 
 test('an unrecognised state reads as queue and warns once', async () => {
