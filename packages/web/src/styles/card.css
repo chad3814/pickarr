@@ -22,7 +22,7 @@
    shorter column and contributes nothing, leaving the poster flush against
    the first release row's rule. Zeroing it there and spacing the row itself
    makes the gap the same whichever side wins. */
-.card-head { display: flex; align-items: flex-start; gap: 1rem; margin-bottom: 0.5rem; }
+.card-head { display: flex; align-items: flex-start; gap: var(--space-4); margin-bottom: var(--space-2); }
 /* `min-width: 0` because a flex item's default `min-width: auto` refuses to
    shrink below its content, and a long unbroken release title would otherwise
    push the poster off the card rather than wrap. */
@@ -35,7 +35,7 @@
    is not this rule's problem to solve: `MediaCard` renders the div only when
    at least one of the two buttons is going in it, precisely so this margin
    never shows up as a gap under a card with no actions. */
-.card-actions { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
+.card-actions { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-2) 0; }
 .subtitle, .date { margin: 0.1rem 0; color: var(--color-text-dim); font-size: var(--text-meta); }
 
 /* The accent as a fill, with `--color-on-accent` on it — ~7.6:1, and the same
@@ -90,7 +90,7 @@
    No fixed aspect ratio: the provider's images are frequently landscape (a
    documented example is 1279x719), not portrait. */
 .poster-thumb img { display: block; max-width: 6rem; max-height: 8rem; border: 1px solid var(--color-line); border-radius: var(--radius-sm); }
-.metadata-performers { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; align-items: center; }
+.metadata-performers { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-2) 0; padding: 0; list-style: none; align-items: center; }
 /* The rest of the panel runs 12-13px (`.metadata-title` at `--text-body`,
    `.metadata-synopsis` at `--text-meta`); an unsized `<li>` inherits the 16px
    root instead, so without this a cast name — already an amber, underlined
