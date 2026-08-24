@@ -1,14 +1,65 @@
 .releases, .downloads { list-style: none; margin: 0; padding: 0; }
-.release-row, .download-row { display: flex; gap: 0.75rem; align-items: center; padding: 0.35rem 0; border-top: 1px solid rgb(from currentColor r g b / 20%); font-size: 0.9rem; }
-.release-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.6; }
+.download-row { display: flex; gap: 0.75rem; align-items: center; padding: 0.35rem 0; border-top: 1px solid rgb(from currentColor r g b / 20%); font-size: 0.9rem; }
+.release-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-body);
+}
+
+/*
+ * First rules for these two. They are rendered ahead of the name by `ReleaseRow`,
+ * and the fixed widths are what make the comparison possible: the numbers you are
+ * choosing between line up in a column rather than starting wherever the title
+ * beside them happens to end.
+ */
+.release-quality {
+  flex: none;
+  min-width: 3.5rem;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text-dim);
+  font-size: var(--text-label);
+  text-align: center;
+}
+
+.release-size {
+  flex: none;
+  min-width: 4.5rem;
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.release-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-dim); }
 /* Mono here is functional, not decorative. A column of
    `Vixen.26.08.14.Deep.Focus.XXX.2160p.MP4-KTR` against the same name at 1080p is
    only scannable when the characters that differ line up vertically, and that is
    the entire task this screen exists for. */
 .release-name { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
-.release-current { font-weight: 600; }
+.release-current { font-weight: 600; color: var(--color-text); }
+.release-failed { color: var(--color-error); }
+
+/* The one genuinely primary button in the app, and it gets its fill by context
+   because no markup distinguishes it. Pick is the whole purpose of the screen. */
+.release-row button { background: var(--color-accent); color: var(--color-on-accent); border-color: transparent; font-weight: 600; }
+.release-row button:hover:not(:disabled) { background: var(--color-accent); filter: brightness(1.08); }
+/* `base.css`'s `button:disabled` sits in the `base` layer, so the accent fill
+   above would beat it and render a disabled control as a live call to action.
+   Nothing in a release row is disabled today; this is here so that the first
+   thing that is does not have to discover the interaction. */
+.release-row button:disabled {
+  background: transparent;
+  border-color: var(--color-line);
+  color: var(--color-text-faint);
+}
 .download-row.untracked { opacity: 0.5; font-style: italic; }
-.download-error, .release-failed { color: #b91c1c; }
+.download-error { color: #b91c1c; }
 /* Amber, not red: absence is not yet a failure, only a client that has gone quiet. */
 .download-absent { color: #b45309; }
 .failed { list-style: none; margin: 0; padding: 0; }
