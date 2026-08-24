@@ -10,8 +10,12 @@ export interface DownloadClientFieldsProps {
   onChange(next: ClientDraft[]): void;
 }
 
+// Always sabnzbd-shaped: there is no control in this form for choosing a
+// download client's type, so a client added here has to start as one of the
+// two shapes and this is the one that already existed before qBittorrent did.
 const blankClient: ClientDraft = {
   id: '',
+  type: 'sabnzbd',
   url: '',
   // An empty literal, not `keep`: there is no key on disk for a client that
   // does not exist there yet, and the server refuses a `keep` it cannot match.
@@ -54,8 +58,15 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
       {clients.map((client, index) => {
         // No entry means this row is new: there is no key on disk, so
         // nothing to keep, and the fallback correctly suppresses the "Keep
-        // existing" button in SecretField.
-        const view = onDisk.find((entry) => entry.id === client.id)?.apiKey;
+        // existing" button in SecretField. Matched on type as well as id: a
+        // client whose on-disk entry is the other type (an in-place type
+        // change made earlier in this same edit) has nothing of this shape on
+        // disk to keep either.
+        const onDiskEntry = onDisk.find((entry) => entry.id === client.id);
+        const sabnzbdApiKeyView =
+          client.type === 'sabnzbd' && onDiskEntry?.type === 'sabnzbd' ? onDiskEntry.apiKey : undefined;
+        const qbittorrentOnDisk =
+          client.type === 'qbittorrent' && onDiskEntry?.type === 'qbittorrent' ? onDiskEntry : undefined;
 
         function updatePathMapping(mappingIndex: number, next: EditablePathMapping) {
           updateClient(index, {
@@ -95,12 +106,61 @@ export function DownloadClientFields({ clients, onDisk, onChange }: DownloadClie
                 onChange={(event) => updateClient(index, { ...client, url: event.target.value })}
               />
             </div>
-            <SecretField
-              label="API key"
-              view={view ?? { kind: 'file', path: '' }}
-              value={client.apiKey}
-              onChange={(apiKey) => updateClient(index, { ...client, apiKey })}
-            />
+            {client.type === 'sabnzbd' ? (
+              <SecretField
+                label="API key"
+                view={sabnzbdApiKeyView ?? { kind: 'file', path: '' }}
+                value={client.apiKey}
+                onChange={(apiKey) => updateClient(index, { ...client, apiKey })}
+              />
+            ) : (
+              <>
+                <div className="manual-field">
+                  <label htmlFor={`${formId}-auth-mode-${index}`}>Authentication</label>
+                  <select
+                    id={`${formId}-auth-mode-${index}`}
+                    value={client.apiKey !== null ? 'apiKey' : 'login'}
+                    onChange={(event) =>
+                      updateClient(
+                        index,
+                        event.target.value === 'apiKey'
+                          ? { ...client, apiKey: { kind: 'literal', value: '' }, username: null, password: null }
+                          : { ...client, apiKey: null, username: '', password: { kind: 'literal', value: '' } },
+                      )
+                    }
+                  >
+                    <option value="apiKey">API key</option>
+                    <option value="login">Username &amp; password</option>
+                  </select>
+                </div>
+                {client.apiKey !== null ? (
+                  <SecretField
+                    label="API key"
+                    view={qbittorrentOnDisk?.apiKey ?? { kind: 'file', path: '' }}
+                    value={client.apiKey}
+                    onChange={(apiKey) => updateClient(index, { ...client, apiKey })}
+                  />
+                ) : (
+                  <>
+                    <div className="manual-field">
+                      <label htmlFor={`${formId}-username-${index}`}>Username</label>
+                      <input
+                        id={`${formId}-username-${index}`}
+                        type="text"
+                        value={client.username ?? ''}
+                        onChange={(event) => updateClient(index, { ...client, username: event.target.value })}
+                      />
+                    </div>
+                    <SecretField
+                      label="Password"
+                      view={qbittorrentOnDisk?.password ?? { kind: 'file', path: '' }}
+                      value={client.password ?? { kind: 'literal', value: '' }}
+                      onChange={(password) => updateClient(index, { ...client, password })}
+                    />
+                  </>
+                )}
+              </>
+            )}
             <div className="manual-field">
               <label htmlFor={`${formId}-category-${index}`}>Category</label>
               <input

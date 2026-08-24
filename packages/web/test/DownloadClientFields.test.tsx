@@ -23,6 +23,7 @@ function draft(): ClientDraft[] {
   return [
     {
       id: 'sab',
+      type: 'sabnzbd',
       url: 'http://sabnzbd:8080',
       apiKey: { kind: 'keep' },
       category: 'pickarr',
