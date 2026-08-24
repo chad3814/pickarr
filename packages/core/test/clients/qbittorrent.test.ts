@@ -176,3 +176,43 @@ test('a fetch that quotes the request it failed on still cannot leak the credent
     assertNoLeak(error, secret);
   }
 });
+
+test('addUrl posts the four fields and resolves the hash from the tag lookup', async () => {
+  const { calls, fetchImpl } = recorder((url) =>
+    url.includes('torrents/info')
+      ? new Response(JSON.stringify([{ hash: 'HASH1' }]), { status: 200 })
+      : new Response('Ok.', { status: 200 }));
+  const client = createQbittorrentClient(config({ apiKey: KEY }), fetchImpl);
+
+  const ref = await client.addUrl('magnet:?xt=1', 'Scene [pickarr-abc12345-7]', 'pickarr-abc12345-7');
+
+  assert.equal(ref, 'HASH1');
+  const body = new URLSearchParams(String(calls[0]!.init?.body));
+  assert.equal(body.get('urls'), 'magnet:?xt=1');
+  assert.equal(body.get('category'), 'pickarr');
+  // These two are asserted separately and by name: swapping them would still
+  // return a hash and still pass a test that only checked the answer.
+  assert.equal(body.get('rename'), 'Scene [pickarr-abc12345-7]');
+  assert.equal(body.get('tags'), 'pickarr-abc12345-7');
+  assert.ok(calls[1]!.url.includes('tag=pickarr-abc12345-7'));
+});
+
+test('addUrl throws naming the label when the lookup finds nothing', async () => {
+  const { fetchImpl } = recorder((url) =>
+    url.includes('torrents/info')
+      ? new Response('[]', { status: 200 })
+      : new Response('Ok.', { status: 200 }));
+  const client = createQbittorrentClient(config({ apiKey: KEY }), fetchImpl);
+
+  await assert.rejects(client.addUrl('magnet:?xt=1', 'n', 'pickarr-abc12345-7'), /pickarr-abc12345-7/);
+});
+
+test('addUrl throws rather than choosing when the lookup finds two', async () => {
+  const { fetchImpl } = recorder((url) =>
+    url.includes('torrents/info')
+      ? new Response(JSON.stringify([{ hash: 'A' }, { hash: 'B' }]), { status: 200 })
+      : new Response('Ok.', { status: 200 }));
+  const client = createQbittorrentClient(config({ apiKey: KEY }), fetchImpl);
+
+  await assert.rejects(client.addUrl('magnet:?xt=1', 'n', 'pickarr-abc12345-7'), /pickarr-abc12345-7/);
+});

@@ -1,4 +1,5 @@
 import type { QbittorrentClientConfig } from '../config/schema.ts';
+import { asJsonArray, asJsonObject, asText, type JsonValue } from '../json.ts';
 import { applyPathMappings } from './path-mappings.ts';
 import type { ClientSnapshot, DownloadClient, FetchLike } from './types.ts';
 
@@ -9,6 +10,7 @@ const API_KEY_MIN_VERSION = '5.2.0';
 
 const LOGIN_PATH = '/api/v2/auth/login';
 const TORRENTS_INFO_PATH = '/api/v2/torrents/info';
+const TORRENTS_ADD_PATH = '/api/v2/torrents/add';
 
 /**
  * One request against the server, already carrying whichever credential the
@@ -217,6 +219,15 @@ export function createQbittorrentClient(
     );
   }
 
+  /**
+   * GETs `path` through `request` — so it carries the same credential and
+   * 403-retry handling as every other call — and parses the body as JSON.
+   */
+  async function json(path: string): Promise<JsonValue> {
+    const response = await request(path);
+    return (await response.json()) as JsonValue;
+  }
+
   return {
     id: config.id,
     importMode: config.importMode,
@@ -227,8 +238,34 @@ export function createQbittorrentClient(
     // `DownloadClient.remove` for why the method is absent rather than present
     // and refusing.
 
-    addUrl(): Promise<string> {
-      throw new Error('qbittorrent: submitting a download is not wired up yet');
+    async addUrl(url: string, name: string, label: string): Promise<string> {
+      await request(TORRENTS_ADD_PATH, new URLSearchParams({
+        urls: url,
+        category: config.category,
+        rename: name,
+        tags: label,
+      }));
+
+      // The tag identifies the job, not the name, and the reason is magnets:
+      // qBittorrent has no metadata at add time and reports the infohash as the
+      // name until it arrives (the `metaDL` state), so a lookup keyed on the
+      // name we sent would miss intermittently depending on swarm speed. A tag
+      // is set at add time and does not depend on metadata.
+      //
+      // The marker is per-installation salted (#28), so two Pickarr instances
+      // against one qBittorrent do not read each other's torrents.
+      const found = asJsonArray(await json(`${TORRENTS_INFO_PATH}?tag=${encodeURIComponent(label)}`));
+      const first = asJsonObject(found[0]);
+      if (found.length !== 1 || first === null) {
+        // Zero means the add has not registered yet — recoverable, because the
+        // next reconcile finds the job by its marker and adopts it. Two means
+        // two downloads share a marker, which is a bug elsewhere and must not
+        // be resolved by picking arbitrarily.
+        throw new Error(
+          `qbittorrent: expected exactly one torrent tagged ${label}, found ${found.length}`,
+        );
+      }
+      return asText(first['hash']);
     },
 
     async snapshot(): Promise<ClientSnapshot> {
