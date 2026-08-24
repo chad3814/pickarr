@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin } from '@pickarr/plugin-api';
 import { loadConfig, readConfigDocument } from './config/load.ts';
-import type { FeedConfig } from './config/schema.ts';
+import type { FeedConfig, PickarrConfig } from './config/schema.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins, type PluginRegistry } from './plugins/registry.ts';
 import { createQbittorrentClient } from './clients/qbittorrent.ts';
@@ -159,6 +159,47 @@ export async function runRekeyAtBoot(
   }
 }
 
+/**
+ * Builds one `DownloadClient` per configured entry, keyed by its id. Pulled
+ * out of `main()` — rather than left as an inline loop — for the same reason
+ * `pluginById` and `composeMetadataTick` above are: it is the only way to
+ * assert that a `qbittorrent` entry actually reaches `createQbittorrentClient`
+ * (and a `sabnzbd` one `createSabnzbdClient`) without booting the whole
+ * server. See `main.test.ts` for that assertion.
+ */
+export function buildDownloadClients(config: PickarrConfig): Map<string, DownloadClient> {
+  const clients = new Map<string, DownloadClient>();
+  for (const clientConfig of config.downloadClients) {
+    // A `case` per member is not exhaustive on its own — a `switch` with no
+    // `default` and no arm that reads as `never` compiles cleanly even after
+    // a third member is added to the union; it would just fall through this
+    // loop having registered nothing, and the config that named it would
+    // boot anyway. The `default` arm below is what actually makes an
+    // unhandled type a compile error, via the assignment to `never`.
+    switch (clientConfig.type) {
+      case 'sabnzbd':
+        clients.set(clientConfig.id, createSabnzbdClient(clientConfig));
+        break;
+      case 'qbittorrent':
+        clients.set(clientConfig.id, createQbittorrentClient(clientConfig));
+        break;
+      default: {
+        const unhandled: never = clientConfig;
+        // The discriminant alone, never the object. `unhandled` is a download
+        // client config, so serialising it would print an apiKey or a password
+        // into an error message — and the moment a third client type is added
+        // is exactly when this arm stops being unreachable. The `never`
+        // assignment above is the compile-time guarantee and stays; the cast
+        // here is the runtime read it makes impossible, since a `never` has no
+        // properties to reach for.
+        const { type } = unhandled as { type: string };
+        throw new Error(`Unhandled download client type: ${type}`);
+      }
+    }
+  }
+  return clients;
+}
+
 async function main(): Promise<void> {
   const config = await loadConfig(CONFIG_PATH);
   // Captured before the server can rewrite the file, and parsed rather than
@@ -208,35 +249,7 @@ async function main(): Promise<void> {
     log,
   );
 
-  const clients = new Map<string, DownloadClient>();
-  for (const clientConfig of config.downloadClients) {
-    // A `case` per member is not exhaustive on its own — a `switch` with no
-    // `default` and no arm that reads as `never` compiles cleanly even after
-    // a third member is added to the union; it would just fall through this
-    // loop having registered nothing, and the config that named it would
-    // boot anyway. The `default` arm below is what actually makes an
-    // unhandled type a compile error, via the assignment to `never`.
-    switch (clientConfig.type) {
-      case 'sabnzbd':
-        clients.set(clientConfig.id, createSabnzbdClient(clientConfig));
-        break;
-      case 'qbittorrent':
-        clients.set(clientConfig.id, createQbittorrentClient(clientConfig));
-        break;
-      default: {
-        const unhandled: never = clientConfig;
-        // The discriminant alone, never the object. `unhandled` is a download
-        // client config, so serialising it would print an apiKey or a password
-        // into an error message — and the moment a third client type is added
-        // is exactly when this arm stops being unreachable. The `never`
-        // assignment above is the compile-time guarantee and stays; the cast
-        // here is the runtime read it makes impossible, since a `never` has no
-        // properties to reach for.
-        const { type } = unhandled as { type: string };
-        throw new Error(`Unhandled download client type: ${type}`);
-      }
-    }
-  }
+  const clients = buildDownloadClients(config);
 
   // The default a feed naming no client falls back to, and what makes that
   // fallback total: `configSchema` puts `.min(1)` on the array, so this is
