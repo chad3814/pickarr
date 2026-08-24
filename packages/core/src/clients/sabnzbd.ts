@@ -356,7 +356,10 @@ export function createSabnzbdClient(
     importMode: config.importMode,
     category: config.category,
 
-    async addUrl(url, name) {
+    // `label` is deliberately unused: SABnzbd carries the marker inside `name`,
+    // which it echoes back as `nzbname`. Named rather than dropped from the
+    // signature so the interface's third parameter is visibly accounted for.
+    async addUrl(url, name, _label) {
       const body = asRecord(
         await call('addurl', { name: url, cat: config.category, nzbname: name }),
       );

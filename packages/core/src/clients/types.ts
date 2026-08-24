@@ -71,8 +71,16 @@ export interface DownloadClient {
    * recognize a job it already accepted by extracting the marker back out of
    * whatever name the client reports (`extractLabel`), rather than depending
    * on free-text matching against the release title.
+   *
+   * `label` is that same marker on its own — `downloadLabel` rather than
+   * `clientJobName`. The caller holds both and builds one from the other, so
+   * passing both is strictly less lossy than making a client re-derive it. A
+   * client that needs the marker in a field of its own gets it here instead of
+   * carrying a second copy of `LABEL_MARKER_PATTERN`; a marker vocabulary in two
+   * places is how #30 happened. SABnzbd ignores it — its marker travels inside
+   * the name, as `nzbname`.
    */
-  addUrl(url: string, name: string): Promise<string>;
+  addUrl(url: string, name: string, label: string): Promise<string>;
   /**
    * One poll of everything the client knows about — queue and history,
    * unfiltered by category. See `ClientSnapshot.complete` for why: asking

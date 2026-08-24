@@ -117,6 +117,30 @@ test('addUrl is sent a name carrying the release title, with the label recoverab
   db.close();
 });
 
+// The marker also travels to addUrl as its own argument, not only embedded in
+// the name — a client that wants the marker in a field of its own (the
+// qBittorrent tag, task 7) gets it here instead of re-deriving it with its own
+// copy of the marker pattern. `label` must be exactly `downloadLabel`, and
+// `name` must still carry that same label as its bracketed marker.
+test('the marker reaches addUrl separately from the name it is embedded in', async () => {
+  const db = openTestDatabase();
+  const { groupId, releaseId } = seed(db);
+  const calls: { name: string; label: string }[] = [];
+  const client = fakeClient({
+    addUrl: async (_url: string, name: string, label: string) => {
+      calls.push({ name, label });
+      return 'nzo_1';
+    },
+  });
+
+  const download = await pickRelease(db, () => client, { groupId, releaseId }, 500);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.label, downloadLabel(TEST_LABEL_TOKEN, download.id));
+  assert.ok(calls[0]!.name.endsWith(`[${calls[0]!.label}]`));
+  db.close();
+});
+
 test('picking sets picked_release_id immediately, before any download finishes', async () => {
   const db = openTestDatabase();
   const { groupId, releaseId } = seed(db);

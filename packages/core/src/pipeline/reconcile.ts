@@ -437,8 +437,9 @@ export async function reconcileClient(deps: ReconcileDeps): Promise<ReconcileRes
     const title = titleForRelease(db, download.releaseId) ?? link;
 
     try {
+      const label = downloadLabel(scheme.token, download.id);
       // eslint-disable-next-line no-await-in-loop -- one submission at a time, deliberately
-      const ref = await client.addUrl(link, clientJobName(scheme.token, title, download.id));
+      const ref = await client.addUrl(link, clientJobName(scheme.token, title, download.id), label);
       setClientRef(db, download.id, ref, now);
       result.advanced += 1;
     } catch (error) {

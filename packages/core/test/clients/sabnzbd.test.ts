@@ -122,7 +122,7 @@ test('addUrl sends the category and returns the nzo id', async () => {
   const recorder = recordingFetch(() => ({ status: true, nzo_ids: ['SABnzbd_nzo_abc'] }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
 
-  const ref = await client.addUrl('https://indexer.invalid/x.nzb', 'label');
+  const ref = await client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored');
 
   assert.equal(ref, 'SABnzbd_nzo_abc');
   assert.match(recorder.urls[0] ?? '', /mode=addurl/);
@@ -138,7 +138,7 @@ test('addUrl sends the caller-provided label as nzbname', async () => {
   const recorder = recordingFetch(() => ({ status: true, nzo_ids: ['SABnzbd_nzo_abc'] }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
 
-  await client.addUrl('https://indexer.invalid/x.nzb', 'pickarr-42');
+  await client.addUrl('https://indexer.invalid/x.nzb', 'pickarr-42', 'ignored');
 
   assert.match(recorder.urls[0] ?? '', /nzbname=pickarr-42/);
 });
@@ -146,18 +146,18 @@ test('addUrl sends the caller-provided label as nzbname', async () => {
 test('addUrl throws when sabnzbd reports failure', async () => {
   const recorder = recordingFetch(() => ({ status: false, error: 'nope' }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), /nope/);
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), /nope/);
 });
 
 test('addUrl throws when no nzo id comes back', async () => {
   const recorder = recordingFetch(() => ({ status: true, nzo_ids: [] }));
   const client = createSabnzbdClient(CONFIG, recorder.fetch);
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), /no nzo/i);
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), /no nzo/i);
 });
 
 test('an error never contains the api key', async () => {
   const client = createSabnzbdClient(CONFIG, async () => new Response('nope', { status: 500 }));
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -167,7 +167,7 @@ test('an error thrown by fetchImpl itself never leaks the api key', async () => 
   const client = createSabnzbdClient(CONFIG, async (url) => {
     throw new Error(`network failure while fetching ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -182,7 +182,7 @@ test('a JSON-parse failure from response.json() never leaks the api key', async 
     }
     return new ThrowingJsonResponse('not json', { status: 200 });
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -193,7 +193,7 @@ test('a base64-style api key with +, /, = never leaks, even decoded', async () =
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
@@ -204,7 +204,7 @@ test('an api key containing +, /, =, and a space never leaks, even decoded', asy
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
@@ -216,7 +216,7 @@ test('an api key embedded in the thrown error\'s name is also redacted', async (
     error.name = `FetchError(apikey=${CONFIG.apiKey})`;
     throw error;
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -226,7 +226,7 @@ test('a non-Error throw from fetchImpl produces the wrapper, not a crash', async
   const client = createSabnzbdClient(CONFIG, async () => {
     throw `raw string failure with apikey=${CONFIG.apiKey}`;
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assert.equal(error.message, 'SABnzbd addurl request failed');
     assert.ok(error.cause instanceof Error);
     assertNoLeak(error, CONFIG.apiKey);
@@ -244,7 +244,7 @@ test('redaction leaves the rest of an error message legible', async () => {
   const client = createSabnzbdClient(CONFIG, async (url) => {
     throw new Error(`fetch failed for ${url}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     const cause = error.cause;
     assert.ok(cause instanceof Error);
     assert.match(cause.message, /^fetch failed for http:\/\/sab\.invalid:8080\/api\?mode=addurl&/);
@@ -260,7 +260,7 @@ test("the server's own error field never leaks the api key", async () => {
   const client = createSabnzbdClient(CONFIG, async (url) =>
     jsonResponse({ status: false, error: `bad request: ${url}` }),
   );
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, CONFIG.apiKey);
     return true;
   });
@@ -275,7 +275,7 @@ test('a percent-encoded request url outside query shape does not leak the key', 
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`request failed: ${encodeURIComponent(url)}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
@@ -286,7 +286,7 @@ test('a doubly percent-encoded request url does not leak the key', async () => {
   const client = createSabnzbdClient(config, async (url) => {
     throw new Error(`request failed: ${encodeURIComponent(encodeURIComponent(url))}`);
   });
-  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label'), (error: Error) => {
+  await assert.rejects(client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), (error: Error) => {
     assertNoLeak(error, config.apiKey);
     return true;
   });
@@ -340,7 +340,7 @@ test('an nzo id echoing the request url is not returned verbatim', async () => {
   const client = createSabnzbdClient(CONFIG, async (url) =>
     jsonResponse({ status: true, nzo_ids: [`SABnzbd_nzo_for_${url}`] }),
   );
-  assertNoSecret(await client.addUrl('https://indexer.invalid/x.nzb', 'label'), CONFIG.apiKey);
+  assertNoSecret(await client.addUrl('https://indexer.invalid/x.nzb', 'label', 'ignored'), CONFIG.apiKey);
 });
 
 test('snapshot reads queue and history, unfiltered, and reports complete', async () => {
