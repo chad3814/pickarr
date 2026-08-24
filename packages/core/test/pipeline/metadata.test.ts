@@ -1180,3 +1180,90 @@ test('a background url identical to the poster url costs one fetch, not two', as
 
   assert.deepEqual(fetched, [sameUrl], 'one url fetched once, even though both fields named it');
 });
+
+test(
+  'a column already holding an image is never overwritten by a same-shaped candidate arriving for the other field',
+  async () => {
+    // Reproduces the hazard a per-field fetch gate cannot see on its own:
+    // gating `wanted` on `existing` stops a column's *own* URL from being
+    // refetched once cached, but says nothing about a *different*
+    // candidate -- fetched because some other column was still empty --
+    // whose measurement happens to match the already-filled column and
+    // would otherwise be picked for it by the write loop's shape-only
+    // fallback. Because the write lands under the same `groupArtworkKey`
+    // name, `posterPath` does not change either way -- only a byte
+    // comparison of the stored file, not a path assertion, can catch this.
+    await withTempDir(async (dir) => {
+      const db = openTestDatabase();
+      const groupId = makeGroup(db, 'A Scene', 'Some Site');
+      enqueueMetadata(db, [groupId], 1_000);
+
+      // Pass 1 offers only a poster. It measures portrait and is cached.
+      const posterOnly = candidate({
+        title: 'A Scene',
+        siteName: 'Some Site',
+        posterUrl: 'https://example.test/poster.png',
+      });
+      const originalPoster = portraitPng(800, 1200);
+      await runMetadataPass(
+        deps({
+          db,
+          client: fakeSceneClient(() => [posterOnly]),
+          now: () => 1_000,
+          artwork: { dir, fetchImpl: fetchPng(originalPoster), log: () => undefined },
+        }),
+      );
+      assert.equal(getGroupMetadata(db, groupId)?.posterPath, `group-poster-${groupId}.png`);
+
+      // Re-queued the way migration 7's backfill does it, straight past
+      // `enqueueMetadata`'s already-answered guard.
+      db.prepare(
+        `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at) VALUES (?, ?, 0, ?)`,
+      ).run(groupId, 2_000, 2_000);
+
+      // Pass 2: the provider now also offers a background -- but its bytes
+      // measure portrait too. The poster column is already cached, so its
+      // own url must never be refetched (the fetchImpl below throws if it
+      // is); the hazard under test is whether the background candidate's
+      // measurement is allowed to satisfy the poster column by fallback.
+      const both = candidate({
+        title: 'A Scene',
+        siteName: 'Some Site',
+        posterUrl: 'https://example.test/poster.png',
+        backgroundUrl: 'https://example.test/background.png',
+      });
+      const wrongShapedBackground = portraitPng(600, 900);
+      const fetchImpl: FetchImpl = (url) => {
+        if (url === 'https://example.test/background.png') {
+          return Promise.resolve(
+            new Response(wrongShapedBackground, { status: 200, headers: { 'content-type': 'image/png' } }),
+          );
+        }
+        throw new Error(`unexpected fetch of ${url}: the poster column is already cached and must not be refetched`);
+      };
+
+      await runMetadataPass(
+        deps({
+          db,
+          client: fakeSceneClient(() => [both]),
+          now: () => 2_000,
+          artwork: { dir, fetchImpl, log: () => undefined },
+        }),
+      );
+
+      const row = getGroupMetadata(db, groupId);
+      // The path alone proves nothing: it names the same file before and
+      // after, whether or not that file's bytes were overwritten.
+      assert.equal(row?.posterPath, `group-poster-${groupId}.png`);
+      const posterFilePath = row?.posterPath;
+      assert.ok(posterFilePath !== undefined && posterFilePath !== null);
+      const posterBytes = new Uint8Array(await readFile(join(dir, posterFilePath)));
+      assert.deepEqual(
+        posterBytes,
+        originalPoster,
+        'the cached poster must not be silently overwritten by a same-shaped candidate fetched for the background field',
+      );
+      assert.equal(row?.backgroundPath, null, 'the background field\'s image was never a background, so it fills nothing');
+    });
+  },
+);

@@ -466,6 +466,22 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   // this guard exists to avoid in the first place. The row's
   // `poster_url`/`background_url` are kept current either way, so a future
   // pass has what it needs if the provider ever does move an image.
+  //
+  // There are two distinct things worth guarding here, and each guard below
+  // covers only one of them. The `wanted` gate just above stops a column's
+  // own URL from being fetched again once that column is cached — a
+  // fetch-cost concern. It does nothing to stop a *different* candidate,
+  // fetched because some other column was still empty, from measuring the
+  // same shape as an already-filled column and being picked for it by the
+  // fallback `find` in the write loop below. Left unguarded, that write is
+  // silent: it lands under the same `groupArtworkKey` name, so
+  // `posterPath`/`backgroundPath` never change, and only the file's bytes
+  // do — a path-only assertion cannot tell "untouched" from "overwritten
+  // with different content under the same name". The write loop repeats the
+  // already-cached check for exactly that reason: a column already holding
+  // a path is never rewritten within this pass, whichever candidate's
+  // measurement would have matched it. That is what keeps a cached image
+  // stable rather than merely unfetched.
   const existing = getGroupMetadata(deps.db, row.groupId);
   const posterUrl = confirmed?.posterUrl ?? null;
   const backgroundUrl = confirmed?.backgroundUrl ?? null;
@@ -493,6 +509,12 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
   }
 
   for (const kind of ['poster', 'background'] as const) {
+    // A column already holding a path is never rewritten within this pass —
+    // see the comment above: this is not the same guard as the `wanted`
+    // gate, which only stops a redundant fetch of the column's own URL and
+    // says nothing about a fallback candidate fetched for the other column.
+    const alreadyCached = kind === 'poster' ? cachedPoster : cachedBackground;
+    if (alreadyCached !== null) continue;
     // Prefer the candidate that came from the matching reader, then any
     // other measured image that happens to share this shape.
     const pick = measured.find((m) => m.kind === kind && m.from === kind) ?? measured.find((m) => m.kind === kind);
