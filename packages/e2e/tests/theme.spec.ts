@@ -100,3 +100,108 @@ test('the confirmation dialog follows the app theme, not the OS scheme', async (
       .click();
   }
 });
+
+/**
+ * The regression this pins: `Downloads.tsx`'s "Not managed by Pickarr" `<h2>`
+ * matched no CSS rule at all, so it rendered at the UA's 1.5em/700 while `h1`
+ * was `--text-page`/600. Both resolve to 24px against a 16px root, so the
+ * two headings were *tied* on `font-size` and told apart only by weight — a
+ * subsection heading reading louder than the page title above it despite
+ * computing no larger. That is why this asserts `h1` is strictly the
+ * biggest heading rather than merely "no heading exceeds it": a `<=`
+ * comparison would have let the actual regression through unnoticed.
+ * `base.css` now gives every bare `h2` a size beneath `h1`'s, but nothing
+ * before this test would notice the same mistake on a different heading:
+ * happy-dom has no layout or cascade engine, so `getComputedStyle` there
+ * only ever echoes an inline style, never a value resolved through
+ * `styles/`. Only a real browser actually computes what a heading's
+ * `font-size` resolves to.
+ *
+ * The check is scoped to headings, not every element: the image modal's
+ * close button is deliberately sized to match `h1` (see `dialog.css`), and a
+ * rule that swept in every element would flag that as a false positive.
+ *
+ * Browse and Picks each get a `.media-card h2` from one picked release;
+ * Failed gets a `.failed-row h2` from one name the parser refuses (per
+ * `manual.spec.ts`). Downloads' own `<h2>` only renders once the client
+ * reports a job Pickarr's database has no row for, so one is seeded through
+ * the same `setSnapshot` + `reconcile()` path `retry.spec.ts` and
+ * `identity-change.spec.ts` use — the state the regression actually lived
+ * in, not a substitute for it. Settings renders no heading below `h1` at
+ * all; the loop below still runs on it; it simply has one heading to compare
+ * against itself.
+ */
+test("h1 is strictly the largest heading on every route", async ({
+  page,
+  harness,
+}) => {
+  harness.ingest(['Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR']);
+  // The one name in `manual.spec.ts` the parser genuinely refuses, so Failed
+  // has a `.failed-row h2` to check.
+  harness.ingest(['agmx.084.4k']);
+
+  await page.goto('/');
+  await page
+    .locator('article.media-card')
+    .filter({ has: page.getByRole('heading', { name: 'Alex Coal' }) })
+    .getByRole('button', { name: 'Pick' })
+    .click();
+  await expect.poll(() => harness.client.added.length).toBe(1);
+  const added = harness.client.added[0];
+  if (added === undefined) throw new Error('the pick never reached the download client');
+
+  harness.client.setSnapshot({
+    queue: [],
+    history: [
+      {
+        ref: added.ref,
+        name: added.name,
+        outcome: 'in-progress',
+        storagePath: null,
+        failMessage: null,
+        category: null,
+      },
+      // A job the client reports under Pickarr's own category, on a ref
+      // Pickarr never issued via `addUrl` and a name carrying none of its
+      // labels — the shape `reconcile()` reports back as untracked, which is
+      // the only way Downloads' "Not managed by Pickarr" heading renders.
+      {
+        ref: 'external-job-1',
+        name: 'Something Pickarr Never Added',
+        outcome: 'in-progress',
+        storagePath: null,
+        failMessage: null,
+        category: 'pickarr-e2e',
+      },
+    ],
+    complete: true,
+  });
+  await harness.reconcile();
+
+  for (const route of ['/', '/picks', '/downloads', '/failed', '/settings']) {
+    await page.goto(route);
+    const headings = await page.locator('h1, h2, h3, h4, h5, h6').evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        tag: node.tagName,
+        text: node.textContent ?? '',
+        fontSize: parseFloat(getComputedStyle(node).fontSize),
+      })),
+    );
+
+    const h1 = headings.find((heading) => heading.tag === 'H1');
+    if (h1 === undefined) throw new Error(`${route} rendered no h1`);
+
+    // Strictly smaller, not merely no-larger: the regression this pins had a
+    // bare `h2` land at the *same* 24px as `h1` (1.5em of a 16px root versus
+    // `h1`'s own `--text-page`), told apart only by weight, and a `<=` check
+    // would wave that through. `h1` has to be the one heading that is
+    // unambiguously biggest.
+    for (const heading of headings) {
+      if (heading === h1) continue;
+      expect(
+        heading.fontSize,
+        `${route}: <${heading.tag.toLowerCase()}> "${heading.text}" is ${String(heading.fontSize)}px, not smaller than h1's ${String(h1.fontSize)}px`,
+      ).toBeLessThan(h1.fontSize);
+    }
+  }
+});
