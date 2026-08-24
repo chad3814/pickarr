@@ -259,7 +259,15 @@ export async function resolveSecrets(config: PickarrConfig): Promise<void> {
       }
       default: {
         const unhandled: never = client;
-        throw new Error(`Unhandled download client type: ${JSON.stringify(unhandled)}`);
+        // The discriminant alone, never the object. `unhandled` is a download
+        // client config, so serialising it would print an apiKey or a password
+        // into an error message — and the moment a third client type is added
+        // is exactly when this arm stops being unreachable. The `never`
+        // assignment above is the compile-time guarantee and stays; the cast
+        // here is the runtime read it makes impossible, since a `never` has no
+        // properties to reach for.
+        const { type } = unhandled as { type: string };
+        throw new Error(`Unhandled download client type: ${type}`);
       }
     }
   }

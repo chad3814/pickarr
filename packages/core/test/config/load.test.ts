@@ -504,3 +504,31 @@ test('resolveSecrets refuses a qbittorrent password file that resolves to nothin
     await assert.rejects(resolveSecrets(config), /downloadClients\.qb\.password/);
   });
 });
+
+// The `default` arm of `resolveSecrets`' switch is unreachable through
+// `parseConfig` — the discriminated union has no third member — so this test
+// manufactures the state the way a future edit would actually produce it: by
+// adding a client type the loop does not handle. `Object.assign` rather than a
+// cast, because the point is a real runtime object with a real unhandled
+// discriminant, not a type-level fiction.
+//
+// What it pins is not the wording. It is that the message names the type and
+// nothing else: the client object it came from carries an apiKey, and an arm
+// that serialised the whole thing would print it.
+test('an unhandled client type is reported by type alone, never by serialising the client', async () => {
+  const config = parseConfig(
+    withClients([{ ...QB_BASE, apiKey: `qbt_${'c'.repeat(28)}` }]),
+    'test',
+  );
+  const client = config.downloadClients[0];
+  assert.ok(client?.type === 'qbittorrent');
+  const secret = client.apiKey;
+  assert.ok(secret !== undefined);
+  Object.assign(client, { type: 'teleporter' });
+
+  await assert.rejects(resolveSecrets(config), (error: Error) => {
+    assert.match(error.message, /teleporter/);
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    return true;
+  });
+});

@@ -60,18 +60,20 @@ function httpFailed(path: string, status: number): Error {
 /**
  * The `SID=...` pair to send back, or null when the response carried none.
  *
- * `getSetCookie()` is the correct reader — `Headers.get('set-cookie')` folds
- * multiple cookies into one comma-joined string — with `get` kept as a
- * fallback for a hand-rolled `Response`-alike that only implements the older
- * shape. Only the `name=value` pair is kept: the attributes (`path`,
- * `HttpOnly`) describe how a browser should store it and are not part of what
- * a `Cookie` request header carries.
+ * `getSetCookie()` is the only reader, and the only correct one:
+ * `Headers.get('set-cookie')` folds every cookie in the response into one
+ * comma-joined string, which cannot be split back apart safely because cookie
+ * values may themselves contain commas. There is no `get` fallback — `FetchLike`
+ * is typed to return a real `Response`, so a reader that only exists for a
+ * hypothetical `Response`-alike would be dead code that the line above it would
+ * have thrown before reaching anyway.
+ *
+ * Only the `name=value` pair is kept: the attributes (`path`, `HttpOnly`)
+ * describe how a browser should store the cookie and are not part of what a
+ * `Cookie` request header carries.
  */
 function readSidCookie(response: Response): string | null {
-  const single = response.headers.get('set-cookie');
-  const emitted = response.headers.getSetCookie();
-  const candidates = emitted.length > 0 ? emitted : single === null ? [] : [single];
-  for (const candidate of candidates) {
+  for (const candidate of response.headers.getSetCookie()) {
     const pair = (candidate.split(';', 1)[0] ?? '').trim();
     if (pair.startsWith('SID=') && pair.length > 'SID='.length) return pair;
   }
