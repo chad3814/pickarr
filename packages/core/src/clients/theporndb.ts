@@ -291,53 +291,54 @@ function readSizedImage(value: unknown, sizes: readonly string[]): string | null
 }
 
 /**
- * Poster sources in preference order.
+ * Poster candidates, in preference order — and only candidates.
+ *
+ * This no longer reaches for the background when the offered poster turns out
+ * to be a synthesised crop of one. That substitution is what filed landscape
+ * images under a portrait's name for this library's whole history; the
+ * background now has its own reader and its own column.
  *
  * TPDB's own CDN first: the studio CDN fields (`image`, `poster_image`) point
  * at the site's own hosting, which is likelier to rotate paths or refuse a
- * foreign referrer. The documented `image` is 1279x719, so nothing downstream
- * may assume a portrait aspect ratio.
+ * foreign referrer.
+ *
+ * The studio `image` field has moved to `readBackgroundCandidate`. That is not
+ * a new judgement — it was already documented here as 1279x719, and the
+ * warning that nothing downstream may assume a portrait aspect ratio is just
+ * being applied rather than stated.
+ *
+ * Nothing here decides a shape. `classifyArtwork` does that, from the image.
  */
-function readOfferedPoster(record: Record<string, unknown>): string | null {
+function readPosterCandidate(record: Record<string, unknown>): string | null {
   const fromSet = readSizedImage(record['posters'], ['large', 'full']);
-  if (fromSet !== null) return fromSet;
-  for (const key of ['poster', 'image'] as const) {
-    const url = record[key];
-    if (typeof url === 'string' && url.length > 0) return url;
-  }
-  return null;
+  const offered = fromSet ?? str(record, 'poster');
+  if (offered === null || isBackgroundCrop(offered)) return null;
+  return offered;
 }
 
 /**
- * The poster to store, preferring a real background over a crop of one.
+ * Background candidates, in preference order.
  *
- * When the offered poster is synthesised (see `BACKGROUND_CROP_MARKER`), the
- * payload's own `background` is the better image by every measure available:
- * it is the full frame rather than a centre slice of it, at its native size
- * rather than upscaled, and without the logo the thumbnailer stamps on.
- * Nothing downstream assumes portrait — `readOfferedPoster` above already
- * documents that the plain `image` field is 1279x719 — so a landscape
- * background is a legitimate answer here, not a shape violation.
+ * `full` before `large`, the opposite of the poster preference and for the
+ * opposite reason: this reader exists partly to undo a downscaled, re-cropped
+ * rendition, so it asks for the original.
  *
- * `full` before `large`, the opposite of the poster preference above and for
- * the opposite reason: this branch is reached precisely because a downscaled,
- * re-cropped rendition was what went wrong, so it asks for the original.
- *
- * The two fallbacks matter for different failures. `backgroundFromCrop`
- * covers a payload with no `background` object at all, recovering the source
- * from the crop URL itself. Keeping the crop covers the case where even that
- * fails: a synthesised poster is poor artwork, but it is better than a card
- * with no image, and it stays recognisable to the repair script for a later
- * attempt.
+ * `backgroundFromCrop` is the second source because a crop URL carries its own
+ * source encoded whole, so the original needs no request to discover. The crop
+ * itself is never returned — see the design's §4.1: it is portrait, so it would
+ * be filed as a poster and would outrank a real performer portrait on the card.
  */
-function readPosterUrl(record: Record<string, unknown>): string | null {
-  const offered = readOfferedPoster(record);
-  if (offered === null || !isBackgroundCrop(offered)) return offered;
+function readBackgroundCandidate(record: Record<string, unknown>): string | null {
+  const fromObject = readSizedImage(record['background'], ['full', 'large']);
+  if (fromObject !== null && !isBackgroundCrop(fromObject)) return fromObject;
 
-  const background = readSizedImage(record['background'], ['full', 'large']);
-  if (background !== null && !isBackgroundCrop(background)) return background;
+  const offered = readSizedImage(record['posters'], ['large', 'full']) ?? str(record, 'poster');
+  if (offered !== null && isBackgroundCrop(offered)) {
+    const recovered = backgroundFromCrop(offered);
+    if (recovered !== null) return recovered;
+  }
 
-  return backgroundFromCrop(offered) ?? offered;
+  return str(record, 'image');
 }
 
 function str(record: Record<string, unknown>, key: string): string | null {
@@ -426,7 +427,7 @@ function readPerformers(value: unknown): MetadataPerformer[] {
  * mistake to correct: on a **scene**, `id` is the uuid string and `_id` is the
  * integer; on the nested **site**, `uuid` is the uuid and `id` is the integer.
  */
-function readScenes(body: unknown): MetadataCandidate[] {
+export function readScenes(body: unknown): MetadataCandidate[] {
   if (body === null || typeof body !== 'object') return [];
   const data = (body as { data?: unknown }).data;
   if (!Array.isArray(data)) return [];
@@ -462,7 +463,8 @@ function readScenes(body: unknown): MetadataCandidate[] {
       durationSeconds:
         typeof duration === 'number' && Number.isFinite(duration) ? duration : null,
       synopsis: typeof synopsis === 'string' && synopsis.length > 0 ? synopsis : null,
-      posterUrl: readPosterUrl(record),
+      posterUrl: readPosterCandidate(record),
+      backgroundUrl: readBackgroundCandidate(record),
       slug: str(record, 'slug'),
     });
   }
