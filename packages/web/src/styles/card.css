@@ -123,9 +123,16 @@
   font-size: var(--text-meta);
 }
 
-/* They are two `<p>`s in the markup and read as one line, so the second gets a
-   separator rather than a line of its own. */
-.metadata-duration::before { content: ' · '; color: var(--color-text-faint); }
+/* The release date and duration render on independent conditions in MediaCard:
+   `metadata.releaseDate !== null` and `metadata.durationSeconds !== null` are
+   each evaluated separately, and the component's comment notes that the provider
+   "populates poster, synopsis, performers, release date and running time
+   unevenly… one being missing says nothing about the others." A card with a
+   running time but no release date is documented as ordinary, not rare. The
+   adjacent-sibling selector is therefore load-bearing: it draws the separator
+   only when a release date precedes the duration, so a card with duration alone
+   does not open with a stray dot. */
+.metadata-release-date + .metadata-duration::before { content: ' · '; color: var(--color-text-faint); }
 
 /*
  * The measure is the point. An unbounded synopsis across a 60rem card is the
