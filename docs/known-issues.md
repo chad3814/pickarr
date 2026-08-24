@@ -592,6 +592,24 @@ offset the issue named.
 Names already at the client that carry a decoy keep it: there is no way to rename a job at
 SABnzbd, and the affected population is downloads whose title contained `[pickarr-N]`.
 
+**qBittorrent's own torrent list is never pruned, for the same reason `trashDir` is
+never emptied.** Pickarr marks a torrent's download imported in its own database and
+never calls qBittorrent's delete endpoint — there is no "forget this job but keep
+seeding" operation on offer, and the one qBittorrent does have stops the seed along with
+removing the entry. So a finished torrent stays in qBittorrent's list, still seeding,
+for as long as it's left there, and the list only grows. Reclaiming that is the same
+manual decision as clearing `trashDir` ([#36](https://github.com/chad3814/pickarr/issues/36))
+or the artwork cache: disk usage and swarm participation a human should choose to give
+back, not something Pickarr silently prunes out from under an active seed.
+
+**A stalled qBittorrent torrent stays pending rather than being failed.** A torrent with
+no seeders sits at 0% indefinitely and is present in every poll, so it never trips the
+missing-poll counter that fails an absent usenet job — nothing analogous was added on
+the torrent side either. It shows on the Downloads tab with its state and its progress,
+and deciding it isn't coming is left to a human to make, in qBittorrent or in Pickarr.
+This is the same asymmetry the parser is already built around: an error you can see
+beats a guess you cannot.
+
 ## Web and API
 
 - [`/api/downloads` returns every download row unpaginated, one query per row, and the SPA polls it every three seconds](https://github.com/chad3814/pickarr/issues/31) — Fine for a few hundred rows; not for a few thousand.

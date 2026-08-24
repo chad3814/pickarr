@@ -44,12 +44,14 @@ immediately rather than starting in a broken state.
 | `plugins.<package>` | plugin | Per-plugin settings, keyed by package name. The bundled scenes plugin takes `libraryRoot`, the destination directory imports land in. |
 | `plugins.<package>.pathTemplate` | plugin (scenes) | Where imports land under `libraryRoot`. Defaults to scene naming — see "Naming your files" below. |
 | `plugins.<package>.sites` | plugin (scenes) | Optional list of site names. Used only for releases that put the date at the *end* of the name, where nothing separates the site from the title — see "Naming your sites" below. |
-| `downloadClients[]` | top level | One or more download clients. The MVP supports `type: "sabnzbd"` only. Configure more than one and use `feeds[].downloadClient` to say which feed's picks go where. |
-| `downloadClients[].url` | download client | Base URL of the SABnzbd instance. |
-| `downloadClients[].apiKey` | download client | The SABnzbd API key, or a `file:/run/secrets/<name>` reference to read it from a Docker secret instead of embedding it in the config file. |
-| `downloadClients[].category` | download client | The SABnzbd category Pickarr uses for its own jobs. **Must be unique to this Pickarr instance** — see below. |
-| `downloadClients[].importMode` | download client | `"move"` or `"copy"` — what happens to a completed download when it's imported into the library. |
-| `downloadClients[].pathMappings[]` | download client | `{ from, to }` pairs translating SABnzbd's view of a completed download's path into the path Pickarr sees on its own filesystem. |
+| `downloadClients[]` | top level | One or more download clients: `type: "sabnzbd"` or `type: "qbittorrent"`. Configure more than one and use `feeds[].downloadClient` to say which feed's picks go where. A qBittorrent client can only be added by editing this file — see "Using qBittorrent" below. |
+| `downloadClients[].url` | download client | Base URL of the client's web UI/API. |
+| `downloadClients[].apiKey` | download client | SABnzbd: the API key, required. qBittorrent: an API key generated in Preferences → WebUI → API Key, used instead of `username`/`password` — see "Using qBittorrent" below. Either form accepts a `file:/run/secrets/<name>` reference to read it from a Docker secret instead of embedding it in the config file. |
+| `downloadClients[].username` | download client | qBittorrent only. Paired with `password` as the alternative to `apiKey`. Plain text: unlike `apiKey` and `password`, it does not accept a `file:` reference. |
+| `downloadClients[].password` | download client | qBittorrent only, paired with `username`. Accepts a `file:/run/secrets/<name>` reference the same way `apiKey` does. |
+| `downloadClients[].category` | download client | The category (SABnzbd) or category/tag (qBittorrent) Pickarr uses for its own jobs. **Must be unique to this Pickarr instance** — see below. |
+| `downloadClients[].importMode` | download client | `"move"` or `"copy"` — what happens to a completed download when it's imported into the library. **A qBittorrent client requires `"copy"`**; `"move"` is refused when the config is loaded or saved — see "Using qBittorrent" below. |
+| `downloadClients[].pathMappings[]` | download client | `{ from, to }` pairs translating the client's view of a completed download's path into the path Pickarr sees on its own filesystem. |
 | `siteLookup` | top level | Optional. A metadata service used to confirm site names for releases that put the date at the end. Omit it and those releases file under their first word. |
 | `siteLookup.type` | site lookup | `"theporndb"` is the only supported value. |
 | `siteLookup.apiKey` | site lookup | The service's API key, or a `file:/run/secrets/<name>` reference. Sent as a bearer token, never in a URL. |
@@ -69,6 +71,80 @@ immediately rather than starting in a broken state.
 | `feeds[].backfill.pageSize` | backfill | Items the indexer returns per page. Defaults to 100. Must match reality: too large silently skips items, too small merely re-reads them. |
 | `feeds[].backfill.pagesPerPass` | backfill | Pages fetched per pass. Defaults to 2, minimum 2. This is also the rate limit. |
 | `feeds[].backfill.maxPages` | backfill | Total pages ever walked for this feed before it stops. Defaults to 100. |
+
+### Using qBittorrent
+
+A qBittorrent client needs **qBittorrent 5.x** — that is the supported floor. Within
+5.x, which credential you configure depends on the version:
+
+- **Cookie login** (`username` and `password`) works on every 5.x release. Pickarr
+  logs in once and carries the session cookie on later requests, re-logging in once if
+  the session expires.
+- **API key** (`apiKey`) needs **qBittorrent v5.2.0 or WebAPI v2.14.1**, not 5.x
+  generally. An installation on 5.0 or 5.1 has no key to configure yet — use
+  `username`/`password` there instead. If you configure an `apiKey` against a server
+  too old to have one, authentication fails and the error names v5.2.0 rather than
+  leaving you to guess why a valid-looking key doesn't work.
+
+Configure **exactly one** of `apiKey`, or `username` together with `password` — never
+both, and never a half-filled pair. Both `apiKey` and `password` accept a
+`file:/run/secrets/<name>` reference; `username` does not, since it isn't a secret.
+For example, an API-key client:
+
+```json
+{
+  "id": "qbt",
+  "type": "qbittorrent",
+  "url": "http://qbittorrent:8080",
+  "apiKey": "file:/run/secrets/qbittorrent_api_key",
+  "category": "pickarr",
+  "importMode": "copy",
+  "pathMappings": [{ "from": "/downloads", "to": "/data/downloads" }]
+}
+```
+
+or the same client with cookie login instead of `apiKey`:
+
+```json
+{
+  "id": "qbt",
+  "type": "qbittorrent",
+  "url": "http://qbittorrent:8080",
+  "username": "pickarr",
+  "password": "file:/run/secrets/qbittorrent_password",
+  "category": "pickarr",
+  "importMode": "copy",
+  "pathMappings": [{ "from": "/downloads", "to": "/data/downloads" }]
+}
+```
+
+`config.example.json` shows the API-key form; JSON can't carry a comment showing both
+side by side, so the alternative is here instead.
+
+**`importMode` must be `"copy"`, and that means the data exists twice for as long as
+the torrent seeds.** A torrent's data has to stay in place for qBittorrent to go on
+seeding it, so unlike SABnzbd, Pickarr cannot move the file into the library — it copies
+it in and leaves the original where qBittorrent put it. Budget download-directory space
+for whatever you intend to keep seeding, on top of the library copy. `"move"` is refused
+at startup or on save, naming the client, rather than silently stopping a seed.
+
+**Pickarr never removes a finished torrent from qBittorrent.** It marks the download
+imported in its own database and leaves the torrent alone, so the job keeps seeding and
+stays in qBittorrent's list indefinitely. Pruning that list — the same way `trashDir`
+is never emptied — is a decision left to you; see "Trash is never emptied" below.
+
+**A stalled torrent (no seeders) stays visible on the Downloads tab rather than being
+failed.** It shows its state and its progress, sitting at 0% for as long as it's
+stalled, and nothing in Pickarr gives up on it automatically. Deciding a stalled torrent
+isn't coming and removing it is a human decision, made in qBittorrent or in Pickarr's
+own UI.
+
+**Adding a qBittorrent client is a `config.json` edit today, not a Settings-tab
+action.** The Settings form can edit an existing qBittorrent client's fields (including
+its credentials) once one is configured, but it cannot create one or change an existing
+client's type — there's no "add qBittorrent client" button. Add the client to
+`config/config.json` by hand, the way every download client was configured before the
+Settings tab existed, then it becomes editable there.
 
 ### Backfilling a feed's history
 
