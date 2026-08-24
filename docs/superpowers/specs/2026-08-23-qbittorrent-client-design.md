@@ -45,11 +45,23 @@ list stays a human decision, exactly as emptying `trashDir`
 and the artwork cache already are.
 
 **A stalled torrent stays pending and visible.** A torrent with no seeders sits at
-0% indefinitely and is *present* in every poll, so the missing-poll counter that
-fails an absent usenet job never fires. Nothing is added to fail it. It shows on
-the Downloads tab with its state and its progress, and giving up is a human
-decision. This is the same asymmetry the parser and the site lookup are already
-built around: an error you can see beats a guess you cannot.
+0% indefinitely and is *present* in every poll. Nothing is added to fail it. It shows
+on the Downloads tab with its state and its progress, and giving up is a human
+decision.
+
+**Corrected: this section originally justified that by a "missing-poll counter that
+fails an absent usenet job," and no such counter exists.** `reconcile.ts` treats a
+job's absence from a client's snapshot as an observation, never a verdict —
+`markAbsent` records when absence began and leaves an existing mark alone, and
+nothing anywhere fails a download for it; the row keeps its real status and is
+looked for again on every tick. That rule reads the way it does because a counter
+shaped like the one this section invented used to exist and caused exactly this
+damage: SABnzbd once silently truncated its history to ten entries, and 35 healthy
+downloads were failed for being absent from a list that was never the whole list.
+So the stalled-torrent decision above is not a new restraint departing from
+existing behaviour — it is consistent with how an absent job is already treated,
+which is also why nothing had to be built to reach it. The false claim originated
+in issue #49's own description and was repeated here unchecked.
 
 **qBittorrent 5.x is the minimum supported version.** With one wrinkle, in §4.
 

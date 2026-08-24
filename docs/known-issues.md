@@ -602,13 +602,18 @@ manual decision as clearing `trashDir` ([#36](https://github.com/chad3814/pickar
 or the artwork cache: disk usage and swarm participation a human should choose to give
 back, not something Pickarr silently prunes out from under an active seed.
 
-**A stalled qBittorrent torrent stays pending rather than being failed.** A torrent with
-no seeders sits at 0% indefinitely and is present in every poll, so it never trips the
-missing-poll counter that fails an absent usenet job — nothing analogous was added on
-the torrent side either. It shows on the Downloads tab with its state and its progress,
-and deciding it isn't coming is left to a human to make, in qBittorrent or in Pickarr.
-This is the same asymmetry the parser is already built around: an error you can see
-beats a guess you cannot.
+**A stalled qBittorrent torrent stays pending rather than being failed, and that needed
+no new restraint to build.** Reconcile already treats a job's absence from a client's
+snapshot as an observation, never a verdict — `markAbsent` (`pipeline/reconcile.ts`)
+records when absence began and leaves an existing mark alone, and nothing anywhere
+fails a download for it; the row keeps its real status and is looked for again on every
+tick. That rule exists because it used to be otherwise: SABnzbd once silently truncated
+its history to ten entries, and 35 healthy downloads were failed for being absent from a
+list that was never the whole list. A stalled torrent does not even reach that path — it
+sits at 0% with no seeders but is *present* in every poll, so it simply keeps its
+`downloading` status until qBittorrent reports something else. It shows on the Downloads
+tab with its state and its progress, and deciding it isn't coming is left to a human to
+make, in qBittorrent or in Pickarr.
 
 ## Web and API
 
