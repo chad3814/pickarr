@@ -34,14 +34,19 @@ nav a:hover { color: var(--color-text); background: var(--color-surface-2); }
 /*
  * The underline goes. It was carrying the whole burden of "you are here" on its
  * own; a filled surface plus an accent rule on the leading edge says it without
- * competing with the link text.
+ * competing with the link text. The rule is a thin line read against the tab's
+ * own fill — not a fill with text on top. In light, --color-accent measures
+ * 1.98:1 against --color-surface-2, below the 3:1 floor for visual information
+ * (WCAG 1.4.11); --color-accent-text is 5.01:1, which passes. The surface fill
+ * itself (1.15:1) and the label-colour shift (2.88:1) are too weak to carry the
+ * state on their own, making the rule's visibility load-bearing.
  */
 nav a.active {
   font-weight: 600;
   text-decoration: none;
   color: var(--color-text);
   background: var(--color-surface-2);
-  box-shadow: inset 2px 0 0 var(--color-accent);
+  box-shadow: inset 2px 0 0 var(--color-accent-text);
 }
 /* A rule, not a glyph — see `App.tsx`. `border-top` alone because a default
    `<hr>` renders as an inset 3D groove that reads as a seam in the page rather
