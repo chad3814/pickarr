@@ -99,4 +99,14 @@ export interface DownloadClient {
   mapPath(clientPath: string): string;
 }
 
-export type FetchLike = (url: string) => Promise<Response>;
+/**
+ * The injectable HTTP seam every client is built with.
+ *
+ * `init` is optional because SABnzbd never needs it — every parameter it sends,
+ * including the api key, rides in the query string (`endpoint` below). It exists
+ * for qBittorrent, which POSTs a form body to `auth/login` and `torrents/add`
+ * and sends a bearer header. One seam rather than two: a second `HttpLike` used
+ * only by torrent clients would mean two kinds of test double, and the third
+ * client would pick one by coin flip.
+ */
+export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
