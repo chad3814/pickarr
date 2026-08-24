@@ -21,12 +21,21 @@ import { expect, test, type Harness } from '../src/harness.ts';
 const RELEASE = 'Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR';
 
 /**
- * Bytes good enough for `cacheImage`: never decoded, only checked for a
- * recognised content type and a byte length under its cap. A `data:` URL
- * gets both of those from Node's own `fetch` — confirmed directly against
- * this Node build before writing this file — without this suite reaching an
- * actual network, the way every other fake client in `harness.ts` avoids one
- * too.
+ * Bytes good enough for `cacheImage`'s own fetch: never decoded there, only
+ * checked for a recognised content type and a byte length under its cap. A
+ * `data:` URL gets both of those from Node's own `fetch` — confirmed directly
+ * against this Node build before writing this file — without this suite
+ * reaching an actual network, the way every other fake client in
+ * `harness.ts` avoids one too.
+ *
+ * That is the whole story for a performer's face and image, which is what
+ * this suite uses it for below: `cachePerformerArtwork` never classifies what
+ * it fetches, so undecodable bytes are stored exactly the same as real ones.
+ * It is not the whole story for a group's poster or background —
+ * `classifyArtwork` has to measure the image before `cacheImage` files it
+ * under either column, and bytes it cannot decode are filed under neither.
+ * `TALL_PNG` below is what a test needs when a poster or background has to
+ * actually be stored, not merely fetched.
  */
 function dataUrl(bytes: string): string {
   return `data:image/jpeg;base64,${Buffer.from(bytes).toString('base64')}`;
@@ -34,15 +43,28 @@ function dataUrl(bytes: string): string {
 
 /**
  * A poster the browser can actually decode, and a deliberately extreme shape:
- * 8 x 2000, 1-bit greyscale, all black, 84 bytes on the wire.
+ * 8 x 2000, 1-bit greyscale, all black, 84 bytes on the wire. Portrait, on
+ * purpose: `classifyArtwork` measures width against height and files a
+ * portrait image as the poster, a landscape one as the background, so a
+ * landscape fixture here would be filed as a background instead and no
+ * poster button would ever render — the same failure this file exists to
+ * avoid, for a different reason.
  *
- * Every other image in this suite is `dataUrl('...')` — arbitrary bytes under
- * a `image/jpeg` label, which is all `cacheImage` inspects. That is enough for
- * every assertion above, which only asks *which* url an element points at. It
- * is not enough here: a browser handed undecodable bytes renders a broken
- * image with no intrinsic size, and an image with no intrinsic size fits
- * inside any window at all. Measuring the layout means the browser has to have
- * something real to lay out.
+ * `dataUrl('...')` bytes are enough for a performer's face and image (see
+ * that function's own comment) but not for a group's poster or background:
+ * `classifyArtwork` has to measure an image before `cacheImage` files it
+ * under either column, and bytes it cannot decode are stored under neither
+ * name — a plausible `image/jpeg` label is not enough on its own. That is why
+ * `confirmedCandidateWithArtwork` below defaults its poster to this image
+ * rather than to `dataUrl(...)`, and why any test added here that needs a
+ * poster or background actually *stored* has to do the same.
+ *
+ * The extreme aspect ratio is what the scaling test below needs, and it is
+ * also why undecodable bytes could never substitute for it even before
+ * `classifyArtwork` existed: a browser handed undecodable bytes renders a
+ * broken image with no intrinsic size, and an image with no intrinsic size
+ * fits inside any window at all. Measuring the layout means the browser has
+ * to have something real to lay out.
  *
  * Regenerate with the four PNG chunks by hand if it ever needs to change — a
  * signature, IHDR (width, height, bit depth 1, colour type 0), one deflated
@@ -63,7 +85,7 @@ const TALL_PNG =
  * and using a different name for each is what proves this suite is reading
  * the performer's own name rather than coincidentally matching the group's.
  */
-function confirmedCandidateWithArtwork(posterUrl = dataUrl('e2e-poster')): MetadataCandidate {
+function confirmedCandidateWithArtwork(posterUrl = TALL_PNG): MetadataCandidate {
   return {
     sourceUuid: 'e2e-scene-modal',
     title: 'Alex Coal',
