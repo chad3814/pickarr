@@ -4,6 +4,7 @@ import { Picks } from './routes/Picks.tsx';
 import { Downloads } from './routes/Downloads.tsx';
 import { Failed } from './routes/Failed.tsx';
 import { Settings } from './routes/Settings.tsx';
+import { ThemeToggle } from './components/ThemeToggle.tsx';
 
 export function App() {
   return (
@@ -29,6 +30,12 @@ export function App() {
         */}
         <hr className="nav-separator" />
         <NavLink to="/settings">Settings</NavLink>
+        {/*
+          Below the rule that separates the library from the installation,
+          because it is neither: it is a per-browser preference, and the foot of
+          the chrome is where a reader looks for one.
+        */}
+        <ThemeToggle />
       </nav>
       <main>
         <Routes>

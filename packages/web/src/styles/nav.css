@@ -32,3 +32,32 @@ nav a.active { font-weight: 600; text-decoration: underline; }
   border-top: 1px solid currentColor;
   opacity: 0.4;
 }
+
+/*
+ * The nav is content-width — about as wide as "Downloads" — and three labelled
+ * segments roughly doubles that. This is the one layout change this phase makes,
+ * and it is accepted rather than worked around: a Settings section would be the
+ * only control on that page with no Save button, and an icon-only control needs
+ * an icon set this phase does not add.
+ *
+ * The `fieldset` reset is not tidiness. The UA gives it a border, padding and
+ * margin that would draw a second box inside a nav that already has none.
+ */
+.theme-toggle {
+  display: flex;
+  gap: var(--space-1);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  border: 0;
+  font-size: var(--text-label);
+}
+
+.theme-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  color: var(--color-text-dim);
+  white-space: nowrap;
+}
+
+.theme-toggle input { margin: 0; accent-color: var(--color-accent); }

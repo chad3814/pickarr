@@ -25,6 +25,20 @@ h1 { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.015em; ma
  */
 a { color: var(--color-accent-text); }
 
+/* The standard clip, so a legend can name a group for a screen reader without
+   taking space in a nav that is already only as wide as its longest label. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .error { color: var(--color-error); }
 .notice { color: var(--color-success); }
 /* Told apart from silence by italics as well as by colour — a lookup in flight is
