@@ -473,7 +473,7 @@ test(
     assert.deepEqual(
       timeout.requested,
       [IMAGE_TIMEOUT_MS],
-      'writeImage takes its own deadline, covering mkdir, the write and the rename',
+      'writeImage requests exactly one AbortSignal.timeout, at IMAGE_TIMEOUT_MS',
     );
     timeout.fire();
     const name = await pending;

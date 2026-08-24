@@ -1033,10 +1033,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // `posterPath` is not the only thing in that directory forever (a `.part`
   // temp file mid-write, say). This route reads exactly one column and joins
   // it onto the directory itself — nothing caller-supplied ever reaches the
-  // filesystem, since `posterPath` is always `<group_id>.<ext>` written by
-  // `cacheImage`, and the id in the URL is validated as a positive integer by
-  // `idParamsSchema` *before* it is used for anything, so a traversal attempt
-  // in the id segment is rejected by zod and never reaches `getGroupMetadata`.
+  // filesystem, since `posterPath` is always `group-poster-<group_id>.<ext>`
+  // written by `writeImage`, and the id in the URL is validated as a positive
+  // integer by `idParamsSchema` *before* it is used for anything, so a
+  // traversal attempt in the id segment is rejected by zod and never reaches
+  // `getGroupMetadata`.
   //
   // Spec §11.1 says `sendFile`, and this reads the whole file into memory
   // instead — a deliberate deviation, not an oversight. `reply.sendFile`

@@ -27,11 +27,15 @@ function jpeg(width: number, height: number): Uint8Array {
   return new Uint8Array(bytes);
 }
 
-/** Named for what the test is asserting, not what it is: both are just `jpeg`. */
+/** A `jpeg` a test intends to measure as landscape — guarded so a mislabelled call fails loudly rather than silently testing the wrong shape. */
 function landscapeJpeg(width: number, height: number): Uint8Array {
+  if (width <= height) throw new Error(`landscapeJpeg(${width}, ${height}) is not landscape`);
   return jpeg(width, height);
 }
+
+/** A `jpeg` a test intends to measure as portrait (or square). Same guard as `landscapeJpeg`, mirrored. */
 function portraitJpeg(width: number, height: number): Uint8Array {
+  if (width > height) throw new Error(`portraitJpeg(${width}, ${height}) is not portrait`);
   return jpeg(width, height);
 }
 

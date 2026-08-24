@@ -286,7 +286,11 @@ export function performerArtworkKey(performerId: number, kind: 'face' | 'image')
  * A background cached before migration 15 sits on disk at `<id>.jpg` and the
  * migration deliberately leaves it there. If a newly-fetched poster for that
  * group were also written to `<id>.jpg` it would overwrite the background —
- * so nothing writes the bare name again.
+ * so the pipeline never writes the bare name again. `repair-posters.ts` still
+ * does — it calls `cacheImage` with the bare group id, because it predates
+ * this split and repoints an already-known `<id>.<ext>` file rather than
+ * caching a new one (see that file's own doc for why that script, in turn,
+ * cannot currently be reached at all).
  */
 export function groupArtworkKey(groupId: number, kind: ArtworkKind): string {
   return `group-${kind}-${groupId}`;

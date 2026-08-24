@@ -359,15 +359,16 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // poster_path is deliberately absent from the DO UPDATE SET list below:
     // it names a file already fetched to disk, not something a provider
     // answer carries (the INSERT writes it as a literal NULL), and only
-    // setPosterPath ever fills it in. Updating it here from excluded would
-    // blank a cached poster on every refetch — which migration 7 is about to
-    // run for every already-confirmed group in the database.
+    // setPosterPath, setBackgroundImage and setArtworkPair ever write it.
+    // Updating it here from excluded would blank a cached poster on every
+    // refetch — which migration 7 is about to run for every already-confirmed
+    // group in the database.
     //
     // background_path is absent for the same reason, and just as literally:
     // it too names a file already fetched to disk rather than anything a
-    // provider answer carries, only setBackgroundPath ever fills it in, and
-    // updating it from excluded would blank a cached background on every
-    // refetch precisely as it would a poster.
+    // provider answer carries, only setBackgroundPath, setBackgroundImage and
+    // setArtworkPair ever write it, and updating it from excluded would blank
+    // a cached background on every refetch precisely as it would a poster.
     //
     // The WHERE on the upsert generalises that same protection to the whole
     // row, and the asymmetry is worth recording: blanking a cached *poster*

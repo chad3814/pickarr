@@ -298,14 +298,8 @@ function readSizedImage(value: unknown, sizes: readonly string[]): string | null
  * images under a portrait's name for this library's whole history; the
  * background now has its own reader and its own column.
  *
- * TPDB's own CDN first: the studio CDN fields (`image`, `poster_image`) point
- * at the site's own hosting, which is likelier to rotate paths or refuse a
- * foreign referrer.
- *
- * The studio `image` field has moved to `readBackgroundCandidate`. That is not
- * a new judgement — it was already documented here as 1279x719, and the
- * warning that nothing downstream may assume a portrait aspect ratio is just
- * being applied rather than stated.
+ * The studio `image` field has moved to `readBackgroundCandidate`, along with
+ * the rationale for where it sits in that reader's own preference order.
  *
  * Nothing here decides a shape. `classifyArtwork` does that, from the image.
  */
@@ -327,6 +321,14 @@ function readPosterCandidate(record: Record<string, unknown>): string | null {
  * source encoded whole, so the original needs no request to discover. The crop
  * itself is never returned — see the design's §4.1: it is portrait, so it would
  * be filed as a poster and would outrank a real performer portrait on the card.
+ *
+ * The studio `image` field is last, not first: TPDB's own CDN — the
+ * `background` object, and the original a crop URL decodes to — is preferred
+ * ahead of it, because the studio CDN points at the site's own hosting, which
+ * is likelier to rotate paths or refuse a foreign referrer. It was already
+ * documented here as 1279x719 before this reader existed; the warning that
+ * nothing downstream may assume a portrait aspect ratio is just being applied
+ * rather than stated.
  */
 function readBackgroundCandidate(record: Record<string, unknown>): string | null {
   const fromObject = readSizedImage(record['background'], ['full', 'large']);

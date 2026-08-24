@@ -819,9 +819,9 @@ export const migrations: Migration[] = [
   // no `artworkDir`, which main.ts resolves.
   //
   // A crop is discarded under both names. Its old justification — better than
-  // no image at all — expired when the card gained a performer-portrait
-  // fallback: an upscaled, logo-stamped centre-slice would otherwise outrank a
-  // real headshot, because the card prefers the poster.
+  // no image at all — will expire once phase 2b gives the card a
+  // performer-portrait fallback: an upscaled, logo-stamped centre-slice would
+  // otherwise outrank a real headshot, because the card prefers the poster.
   {
     version: 15,
     up(db) {
