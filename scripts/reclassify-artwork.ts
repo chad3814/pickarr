@@ -1,0 +1,92 @@
+/**
+ * Corrects rows migration 15 could not, by measuring the cached file already
+ * on disk.
+ *
+ * A migration gets a database and nothing else, so migration 15 classifies
+ * existing poster/background rows by URL shape and deliberately leaves the
+ * ambiguous remainder — studio-CDN images whose shape nothing in the payload
+ * records — filed as posters rather than guessed at. This measures each
+ * cached file with `classifyArtwork` and moves a row, url and path together,
+ * whenever the measurement disagrees with the column it is in.
+ *
+ * Offline in the fullest sense: no network request, no API key, nothing but
+ * local bytes already on disk. It does write to the database.
+ *
+ *   npm run reclassify-artwork -- --database=/config/pickarr.db --dry-run
+ *   npm run reclassify-artwork -- --database=/config/pickarr.db
+ *
+ * Stop Pickarr first. Nothing here coordinates with the running metadata
+ * worker, and both could touch the same row.
+ *
+ * Re-runnable: a row already agreeing with its own column is left alone, so a
+ * second pass over a clean library moves nothing.
+ *
+ * This is a harness. Every judgement lives in `@pickarr/core`'s
+ * `reclassifyArtwork`, which has tests; the script only parses flags and
+ * prints — see `parse-corpus.ts` for the same argument stated at length.
+ */
+// Reached by path rather than by package name, exactly as parse-corpus.ts is:
+// @pickarr/core exports only its application entrypoint, and widening that for
+// repo-local tooling would add production surface nothing ships against.
+import { openDatabase } from '../packages/core/src/db/open.ts';
+import { resolveArtworkDir } from '../packages/core/src/main.ts';
+import { reclassifyArtwork } from '../packages/core/src/media/reclassify.ts';
+
+interface Options {
+  databasePath: string;
+  /** Defaults to `artwork/` beside the database, as the application's own does. */
+  artworkDir: string | null;
+  /** Report what would move and write nothing. */
+  dryRun: boolean;
+}
+
+function parseArgs(argv: string[]): Options {
+  const options: Options = { databasePath: '', artworkDir: null, dryRun: false };
+  for (const arg of argv) {
+    if (arg.startsWith('--database=')) options.databasePath = arg.slice('--database='.length);
+    else if (arg.startsWith('--artwork=')) options.artworkDir = arg.slice('--artwork='.length);
+    else if (arg === '--dry-run') options.dryRun = true;
+    else throw new Error(`Unknown argument: ${arg}`);
+  }
+  if (options.databasePath.length === 0) {
+    throw new Error(
+      'Usage: npm run reclassify-artwork -- --database=<path> [--artwork=<dir>] [--dry-run]',
+    );
+  }
+  return options;
+}
+
+async function main(): Promise<void> {
+  const options = parseArgs(process.argv.slice(2));
+  const db = openDatabase(options.databasePath);
+  const artworkDir = resolveArtworkDir(options.databasePath, options.artworkDir ?? undefined);
+
+  console.log(`database : ${options.databasePath}`);
+  console.log(`artwork  : ${artworkDir}`);
+  if (options.dryRun) console.log('dry run  : nothing will be written');
+
+  const started = Date.now();
+  const result = await reclassifyArtwork({
+    db,
+    dir: artworkDir,
+    dryRun: options.dryRun,
+    log: (message) => console.log(`  ${message}`),
+  });
+  db.close();
+
+  console.log(
+    `\n${result.moved} moved, ${result.unreadable} unreadable, of ${result.examined} examined ` +
+      `in ${Math.round((Date.now() - started) / 1000)}s`,
+  );
+  if (options.dryRun && result.moved > 0) {
+    console.log('Dry run: nothing was written. Re-run without --dry-run to apply.');
+  }
+  if (result.unreadable > 0) {
+    console.log('Unreadable rows were left as they were; re-run to try them again.');
+  }
+}
+
+main().catch((error: Error) => {
+  console.error(`reclassify-artwork: ${error.message}`);
+  process.exit(1);
+});

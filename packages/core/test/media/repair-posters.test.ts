@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { getGroupMetadata, postersMatching, setPosterImage } from '../../src/db/metadata.ts';
+import { getGroupMetadata, postersMatching, setBackgroundImage } from '../../src/db/metadata.ts';
 import { BACKGROUND_CROP_MARKER } from '../../src/clients/theporndb.ts';
 import {
   postersNeedingRepair,
@@ -81,12 +81,16 @@ test('a cached crop is replaced by its background, file and url together', async
     assert.deepEqual(fetchImpl.urls, [BACKGROUND], 'the background, decoded from the crop url');
 
     const metadata = getGroupMetadata(db, 7);
-    assert.equal(metadata?.posterUrl, BACKGROUND);
-    assert.equal(metadata?.posterPath, '7.jpg');
+    assert.equal(metadata?.backgroundUrl, BACKGROUND);
+    assert.equal(metadata?.backgroundPath, '7.jpg');
+    // The crop this replaces was never a real poster, so nothing is left behind
+    // under the poster columns once the recovered background takes its place.
+    assert.equal(metadata?.posterUrl, null);
+    assert.equal(metadata?.posterPath, null);
     assert.equal(
       await readFile(join(dir, '7.jpg'), 'utf8'),
       'new-background-bytes',
-      'the existing file is overwritten in place, so the poster route never 404s',
+      'the existing file is overwritten in place, so the background route never 404s',
     );
   });
 });
@@ -104,7 +108,9 @@ test('a background of a different type replaces the stale file rather than orpha
     });
 
     assert.equal(result.repaired, 1);
-    assert.equal(getGroupMetadata(db, 7)?.posterPath, '7.webp');
+    const metadata = getGroupMetadata(db, 7);
+    assert.equal(metadata?.backgroundPath, '7.webp');
+    assert.equal(metadata?.posterPath, null);
     assert.deepEqual(await readdir(dir), ['7.webp'], 'the superseded 7.jpg is gone');
   });
 });
@@ -171,7 +177,10 @@ test('genuine posters are not touched, and a second run finds nothing left to do
 
     const first = await repairBackgroundPosters(deps);
     assert.deepEqual(first, { looked: 1, repaired: 1, failed: 0 });
-    assert.equal(getGroupMetadata(db, 1)?.posterUrl, REAL_POSTER);
+    assert.equal(getGroupMetadata(db, 1)?.posterUrl, REAL_POSTER, 'a genuine poster is left as a poster');
+    const repaired = getGroupMetadata(db, 2);
+    assert.equal(repaired?.backgroundUrl, BACKGROUND);
+    assert.equal(repaired?.posterUrl, null);
 
     const second = await repairBackgroundPosters(deps);
     assert.deepEqual(second, { looked: 0, repaired: 0, failed: 0 }, 'safe to run twice');
@@ -190,7 +199,9 @@ test('a row whose image was never cached is still repaired', async () => {
     });
 
     assert.equal(result.repaired, 1);
-    assert.equal(getGroupMetadata(db, 7)?.posterPath, '7.jpg');
+    const metadata = getGroupMetadata(db, 7);
+    assert.equal(metadata?.backgroundPath, '7.jpg');
+    assert.equal(metadata?.posterPath, null);
   });
 });
 
@@ -209,14 +220,16 @@ test('postersMatching finds only rows containing the fragment, in id order', () 
   assert.deepEqual(postersMatching(db, 'nothing-matches-this'), []);
 });
 
-test('setPosterImage moves the url and the path as one', () => {
+test('setBackgroundImage moves the url and the path together, and clears the poster pair', () => {
   const db = openTestDatabase();
   seedPoster(db, 7, CROP, '7.jpg');
 
-  setPosterImage(db, 7, BACKGROUND, '7.webp');
+  setBackgroundImage(db, 7, BACKGROUND, '7.webp');
 
   const metadata = getGroupMetadata(db, 7);
-  assert.equal(metadata?.posterUrl, BACKGROUND);
-  assert.equal(metadata?.posterPath, '7.webp');
+  assert.equal(metadata?.backgroundUrl, BACKGROUND);
+  assert.equal(metadata?.backgroundPath, '7.webp');
+  assert.equal(metadata?.posterUrl, null);
+  assert.equal(metadata?.posterPath, null);
   assert.deepEqual(postersMatching(db, BACKGROUND_CROP_MARKER), [], 'no longer needs repair');
 });

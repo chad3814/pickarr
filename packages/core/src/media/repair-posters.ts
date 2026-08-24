@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { BACKGROUND_CROP_MARKER, backgroundFromCrop } from '../clients/theporndb.ts';
-import { postersMatching, setPosterImage, type StoredPoster } from '../db/metadata.ts';
+import { postersMatching, setBackgroundImage, type StoredPoster } from '../db/metadata.ts';
 import { cacheImage, type ArtworkDeps } from './artwork.ts';
 
 /**
@@ -26,6 +26,11 @@ import { cacheImage, type ArtworkDeps } from './artwork.ts';
  * Safe to run twice. A repaired row no longer matches `BACKGROUND_CROP_MARKER`,
  * so a second pass does not see it; a row whose download failed keeps its old
  * url and file and is simply retried.
+ *
+ * Predates the poster/background split and now writes the background pair:
+ * what this recovers has always been a background image, mislabelled only
+ * because `poster_path` was the only slot that existed when the crop was
+ * first cached.
  */
 export interface RepairPostersDeps {
   db: DatabaseSync;
@@ -78,9 +83,15 @@ export async function repairBackgroundPosters(
     // Database first, stale file second. A crash between the two leaves an
     // orphaned image file, which costs disk and nothing else; doing it the
     // other way round would leave a row naming a file that no longer exists,
-    // and the poster route would 404 for a group that has a perfectly good
-    // image sitting next to it.
-    setPosterImage(deps.db, row.groupId, background, stored);
+    // and the background route would 404 for a group that has a perfectly
+    // good image sitting next to it.
+    //
+    // Writes the background pair, not the poster one: this row's poster_path
+    // named a synthesised crop, never a real poster, so `setBackgroundImage`
+    // clears poster_url/poster_path along with filling background_url/
+    // background_path — there is nothing left under the poster columns worth
+    // keeping once the crop it described is gone.
+    setBackgroundImage(deps.db, row.groupId, background, stored);
 
     // Only when the extension changed — a JPEG crop whose background is a
     // WebP, say. `cacheImage` derives the extension from the validated

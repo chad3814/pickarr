@@ -624,22 +624,90 @@ export function postersMatching(db: DatabaseSync, fragment: string): StoredPoste
 }
 
 /**
- * Repoints a row at a different image, url and file together.
+ * Repoints a row at a different background image, url and file together, and
+ * clears whatever the poster pair held.
  *
- * Distinct from `setPosterPath`, which fills in a path for a url the provider
- * just supplied. This one *replaces* the url as well, and the pair has to move
- * as one: a row naming the old url beside the new file (or the reverse) would
- * be re-selected by `postersMatching` on the next run and refetched forever.
+ * `repairBackgroundPosters` is the only caller: the row it repairs held a
+ * synthesised poster crop, not a real poster, so once the actual background is
+ * recovered there is nothing left under `poster_url`/`poster_path` worth
+ * keeping — the crop *was* that column's only content. The url and the path
+ * move as one for the reason `setArtworkPair` below states at more length: a
+ * row naming the old url beside the new file (or the reverse) would be
+ * re-selected by `postersMatching` on the next run and refetched forever.
  */
-export function setPosterImage(
+export function setBackgroundImage(
   db: DatabaseSync,
   groupId: number,
-  posterUrl: string,
-  posterPath: string,
+  backgroundUrl: string,
+  backgroundPath: string,
 ): void {
-  db.prepare('UPDATE group_metadata SET poster_url = ?, poster_path = ? WHERE group_id = ?').run(
-    posterUrl,
-    posterPath,
-    groupId,
-  );
+  db.prepare(
+    `UPDATE group_metadata
+        SET poster_url = NULL, poster_path = NULL,
+            background_url = ?, background_path = ?
+      WHERE group_id = ?`,
+  ).run(backgroundUrl, backgroundPath, groupId);
+}
+
+/** Whichever of the poster/background pair a row currently holds, for `reclassifyArtwork`. */
+export interface ArtworkRow {
+  groupId: number;
+  posterUrl: string | null;
+  posterPath: string | null;
+  backgroundUrl: string | null;
+  backgroundPath: string | null;
+}
+
+/**
+ * Every row holding at least one cached image — a migration 15 leftover with
+ * only one side filled, as much as a fully-split row with both — in id order.
+ *
+ * `reclassifyArtwork` is the only caller: it measures whatever file each path
+ * names and decides whether the column it is in still matches.
+ */
+export function rowsWithArtwork(db: DatabaseSync): ArtworkRow[] {
+  const rows = db
+    .prepare(
+      `SELECT group_id, poster_url, poster_path, background_url, background_path
+         FROM group_metadata
+        WHERE poster_path IS NOT NULL OR background_path IS NOT NULL
+        ORDER BY group_id`,
+    )
+    .all();
+  return rows.map((row) => {
+    const sqlRow = row as SqlRow;
+    return {
+      groupId: num(sqlRow, 'group_id'),
+      posterUrl: maybeStr(sqlRow, 'poster_url'),
+      posterPath: maybeStr(sqlRow, 'poster_path'),
+      backgroundUrl: maybeStr(sqlRow, 'background_url'),
+      backgroundPath: maybeStr(sqlRow, 'background_path'),
+    };
+  });
+}
+
+/** The poster/background pair `setArtworkPair` should write for one row. */
+export interface ArtworkPair {
+  posterUrl: string | null;
+  posterPath: string | null;
+  backgroundUrl: string | null;
+  backgroundPath: string | null;
+}
+
+/**
+ * Writes both slots of the poster/background pair at once.
+ *
+ * `reclassifyArtwork`'s only write. A mismatch always moves an image from one
+ * slot to the other, which changes both sides of the pair — the slot being
+ * vacated and the one being filled — in the same instant; a setter that
+ * touched one side at a time could be read from in between, or crash between
+ * the two, and leave a row with a url on one side and a path on the other
+ * that no longer name the same image.
+ */
+export function setArtworkPair(db: DatabaseSync, groupId: number, pair: ArtworkPair): void {
+  db.prepare(
+    `UPDATE group_metadata
+        SET poster_url = ?, poster_path = ?, background_url = ?, background_path = ?
+      WHERE group_id = ?`,
+  ).run(pair.posterUrl, pair.posterPath, pair.backgroundUrl, pair.backgroundPath, groupId);
 }
