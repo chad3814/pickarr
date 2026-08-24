@@ -44,3 +44,52 @@ a { color: var(--color-accent-text); }
 /* Told apart from silence by italics as well as by colour — a lookup in flight is
    the one metadata state that resolves into something else on its own. */
 .loading { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }
+
+/*
+ * Native controls on a #121110 ground do not read as unstyled, they read as
+ * broken, and `color-scheme: dark` alone only gets them to a grey slab.
+ *
+ * A bare `button` is the secondary treatment because that is what almost every
+ * button in the app is — Edit, Cancel, Retry, Load more. The two that are
+ * genuinely primary (Pick, and the confirm dialog's own confirm) get their fill
+ * from their own files, by context, since no markup distinguishes them.
+ */
+button {
+  font: inherit;
+  font-size: var(--text-body);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: var(--color-surface-2); }
+button:disabled { color: var(--color-text-faint); border-color: var(--color-line); cursor: default; }
+
+input, select, textarea {
+  font: inherit;
+  font-size: var(--text-body);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+/* `--color-line-strong` rather than `--color-line` on every control above: WCAG
+   1.4.11 wants 3:1 against the adjacent background for the visual boundary of
+   something the user operates, and the decorative hairline is ~1.3:1. */
+::placeholder { color: var(--color-text-faint); }
+
+/*
+ * The app defined no focus style at all and relied on the UA default, which
+ * against custom dark surfaces is frequently invisible. This is a correctness
+ * fix rather than polish, and it is `:focus-visible` rather than `:focus` so a
+ * mouse click on a button does not leave a ring behind.
+ */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
