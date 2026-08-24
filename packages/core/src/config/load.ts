@@ -3,6 +3,7 @@ import type { JsonValue } from '../json.ts';
 import {
   configSchema,
   MIN_API_KEY_LENGTH,
+  QBITTORRENT_API_KEY,
   SECRET_REFERENCE_PREFIX as SECRET_PREFIX,
   type PickarrConfig,
 } from './schema.ts';
@@ -203,20 +204,63 @@ export function parseConfig(json: JsonValue, source: string): PickarrConfig {
  */
 export async function resolveSecrets(config: PickarrConfig): Promise<void> {
   for (const client of config.downloadClients) {
-    // qBittorrent's apiKey is optional and, unlike SABnzbd's, not the only way
-    // to authenticate — resolving its `file:` reference is qBittorrent-client
-    // work, not this loop's. Left to the task that adds that client.
-    if (client.type !== 'sabnzbd') continue;
-
-    const field = `downloadClients.${client.id}.apiKey`;
-    client.apiKey = await resolveSecret(client.apiKey, field);
-    // The schema's length rule saw a `file:` path, not the key behind it, so
-    // this is the check that actually binds the value the client is handed.
-    // The message states the rule and never the value.
-    if (client.apiKey.length < MIN_API_KEY_LENGTH) {
-      throw new Error(
-        `${field} resolves to fewer than ${MIN_API_KEY_LENGTH} characters; SABnzbd api keys are 32 hex characters`,
-      );
+    // A `switch` with a `never` default rather than a chain of `if`s, for the
+    // same reason `main.ts`'s client construction is one: a third client type
+    // that quietly fell through this loop would be handed its `file:` reference
+    // verbatim as a credential, and the first sign of it would be an
+    // authentication failure that looks like a wrong password.
+    switch (client.type) {
+      case 'sabnzbd': {
+        const field = `downloadClients.${client.id}.apiKey`;
+        client.apiKey = await resolveSecret(client.apiKey, field);
+        // The schema's length rule saw a `file:` path, not the key behind it, so
+        // this is the check that actually binds the value the client is handed.
+        // The message states the rule and never the value.
+        if (client.apiKey.length < MIN_API_KEY_LENGTH) {
+          throw new Error(
+            `${field} resolves to fewer than ${MIN_API_KEY_LENGTH} characters; SABnzbd api keys are 32 hex characters`,
+          );
+        }
+        break;
+      }
+      case 'qbittorrent': {
+        // Both credentials are optional here in a way SABnzbd's is not —
+        // `parseConfig` has already settled that exactly one of them is present
+        // — so each is resolved only when the config actually carries it.
+        if (client.apiKey !== undefined) {
+          const field = `downloadClients.${client.id}.apiKey`;
+          client.apiKey = await resolveSecret(client.apiKey, field);
+          // Same reasoning as the SABnzbd arm above, against the shape rule
+          // rather than a length: the schema exempted the `file:` reference, so
+          // without this nothing ever checks the key itself. The message states
+          // the rule and never the value.
+          if (!QBITTORRENT_API_KEY.test(client.apiKey)) {
+            throw new Error(
+              `${field} does not resolve to a qBittorrent api key; it must be "qbt_" followed by 28 alphanumerics`,
+            );
+          }
+        }
+        if (client.password !== undefined) {
+          const field = `downloadClients.${client.id}.password`;
+          client.password = await resolveSecret(client.password, field);
+          // No shape check: a qBittorrent password is whatever the operator set
+          // and there is no rule to check one against. Emptiness is the one
+          // exception, and it is not a shape rule but the schema's own
+          // `.min(1)` re-applied to the value that rule never saw — the same
+          // move the api key above makes, and the same one `siteLookup.apiKey`
+          // below makes. Without it an empty secret file reaches the client and
+          // produces a 403 that reads as a wrong password rather than a missing
+          // one.
+          if (client.password.length === 0) {
+            throw new Error(`${field} resolves to an empty value`);
+          }
+        }
+        break;
+      }
+      default: {
+        const unhandled: never = client;
+        throw new Error(`Unhandled download client type: ${JSON.stringify(unhandled)}`);
+      }
     }
   }
 

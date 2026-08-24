@@ -441,3 +441,66 @@ test('a file: reference is exempt from the api key shape check', () => {
   );
   assert.equal(config.downloadClients[0]?.type, 'qbittorrent');
 });
+
+test('resolveSecrets resolves a qbittorrent file: api key', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_key');
+    const key = `qbt_${'b'.repeat(28)}`;
+    await writeFile(secretPath, `${key}\n`);
+    const config = parseConfig(withClients([{ ...QB_BASE, apiKey: `file:${secretPath}` }]), 'test');
+
+    await resolveSecrets(config);
+    assert.equal(config.downloadClients[0]?.apiKey, key);
+  });
+});
+
+// The same reason the SABnzbd arm re-checks length: the schema was shown a
+// `file:` path, not the key behind it, so this is the check that binds the
+// value the client is actually handed.
+test('resolveSecrets refuses a malformed resolved qbittorrent key without printing it', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_key');
+    await writeFile(secretPath, 'not-a-qbittorrent-key\n');
+    const config = parseConfig(withClients([{ ...QB_BASE, apiKey: `file:${secretPath}` }]), 'test');
+
+    await assert.rejects(resolveSecrets(config), (error: Error) => {
+      assert.match(error.message, /downloadClients\.qb\.apiKey/);
+      assert.match(error.message, /qbt_/, 'the message states the rule');
+      assert.doesNotMatch(error.message, /not-a-qbittorrent-key/);
+      return true;
+    });
+  });
+});
+
+test('resolveSecrets resolves a qbittorrent file: password', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_password');
+    await writeFile(secretPath, 'hunter2\n');
+    const config = parseConfig(
+      withClients([{ ...QB_BASE, username: 'admin', password: `file:${secretPath}` }]),
+      'test',
+    );
+
+    await resolveSecrets(config);
+    const client = config.downloadClients[0];
+    assert.ok(client?.type === 'qbittorrent');
+    assert.equal(client.password, 'hunter2');
+  });
+});
+
+// Not a shape check — a qBittorrent password has no shape — but the schema's
+// `.min(1)` is a rule, and it only ever saw the `file:` path. An empty secret
+// file would otherwise reach the client and produce a 403 that reads as a
+// wrong password rather than as a missing one.
+test('resolveSecrets refuses a qbittorrent password file that resolves to nothing', async () => {
+  await withTempDir(async (dir) => {
+    const secretPath = join(dir, 'qb_password');
+    await writeFile(secretPath, '\n');
+    const config = parseConfig(
+      withClients([{ ...QB_BASE, username: 'admin', password: `file:${secretPath}` }]),
+      'test',
+    );
+
+    await assert.rejects(resolveSecrets(config), /downloadClients\.qb\.password/);
+  });
+});

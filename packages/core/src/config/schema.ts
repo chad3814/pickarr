@@ -32,8 +32,13 @@ export const pathMappingSchema = z.object({
  * alphanumerics. Requires qBittorrent v5.2.0 or WebAPI v2.14.1 — older
  * supported versions have no api key at all, which is why username/password
  * remains a full alternative below rather than being deprecated in its favour.
+ *
+ * Exported because `resolveSecrets` has to re-apply it to a key that arrived as
+ * a `file:` reference, and the schema only ever saw the path. Two copies of the
+ * rule would be free to drift, and the copy that drifted would be the one
+ * guarding the value the client is actually handed.
  */
-const QBITTORRENT_API_KEY = /^qbt_[A-Za-z0-9]{28}$/;
+export const QBITTORRENT_API_KEY = /^qbt_[A-Za-z0-9]{28}$/;
 
 export const sabnzbdClientSchema = z.object({
   id: z.string().min(1),

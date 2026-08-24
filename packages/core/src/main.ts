@@ -8,6 +8,7 @@ import { loadConfig, readConfigDocument } from './config/load.ts';
 import type { FeedConfig } from './config/schema.ts';
 import { openDatabase } from './db/open.ts';
 import { loadPlugins, type PluginRegistry } from './plugins/registry.ts';
+import { createQbittorrentClient } from './clients/qbittorrent.ts';
 import { createSabnzbdClient } from './clients/sabnzbd.ts';
 import {
   createTpdbClient,
@@ -220,14 +221,8 @@ async function main(): Promise<void> {
         clients.set(clientConfig.id, createSabnzbdClient(clientConfig));
         break;
       case 'qbittorrent':
-        // Task 9 replaces this throw with createQbittorrentClient(clientConfig)
-        // once Task 6 has built that factory. Unreachable today: parseConfig
-        // (config/load.ts) is the only place a 'qbittorrent' client can come
-        // from, and it lands in the same commit as this switch, so nothing
-        // has configured one yet.
-        throw new Error(
-          `Download client ${clientConfig.id} is a qbittorrent client, which is not implemented yet`,
-        );
+        clients.set(clientConfig.id, createQbittorrentClient(clientConfig));
+        break;
       default: {
         const unhandled: never = clientConfig;
         throw new Error(`Unhandled download client type: ${JSON.stringify(unhandled)}`);
