@@ -1,5 +1,35 @@
 .releases, .downloads { list-style: none; margin: 0; padding: 0; }
-.download-row { display: flex; gap: 0.75rem; align-items: center; padding: 0.35rem 0; border-top: 1px solid rgb(from currentColor r g b / 20%); font-size: 0.9rem; }
+.download-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-body);
+}
+
+.download-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.download-kind { flex: none; color: var(--color-text-faint); font-size: var(--text-label); text-transform: uppercase; letter-spacing: 0.06em; }
+
+/*
+ * Six additive rules over a neutral base, not a `switch`. `DownloadView.status`
+ * is typed `string` on the wire — the closed union lives in core's
+ * `db/downloads.ts` and does not travel — so a status this list has not heard of
+ * has to render plainly rather than disappear.
+ *
+ * The ladder says how far along a job is, and it colours text that already names
+ * the status, so nothing here is conveyed by colour alone.
+ */
+.download-status { flex: none; min-width: 5.5rem; color: var(--color-text-dim); font-size: var(--text-meta); }
+
+.status-queued .download-status { color: var(--color-text-dim); }
+.status-downloading .download-status { color: var(--color-text); }
+.status-completed .download-status { color: var(--color-text-dim); }
+.status-importing .download-status { color: var(--color-accent-text); }
+.status-imported .download-status { color: var(--color-success); }
+.status-failed .download-status { color: var(--color-error); }
+
 .release-row {
   display: flex;
   gap: var(--space-3);
@@ -58,12 +88,26 @@
   border-color: var(--color-line);
   color: var(--color-text-faint);
 }
-.download-row.untracked { opacity: 0.5; font-style: italic; }
-.download-error { color: #b91c1c; }
-/* Amber, not red: absence is not yet a failure, only a client that has gone quiet. */
-.download-absent { color: #b45309; }
+.download-error { color: var(--color-error); font-size: var(--text-meta); }
+
+/* Amber, not red: absence is not yet a failure, only a client that has gone
+   quiet. It shares the accent hue — see the badge in `card.css` on why that is
+   accepted, and how form rather than hue separates a warning from an action. */
+.download-absent { color: var(--color-accent-text); font-size: var(--text-meta); }
+
+.download-row.untracked { color: var(--color-text-faint); font-style: italic; }
+
 .failed { list-style: none; margin: 0; padding: 0; }
-.failed-row { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
-.failed-row h2 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
-.failed-reason, .failed-feed { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
+
+.failed-row {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.failed-row h2 { margin: 0; font-size: var(--text-body); font-weight: 600; overflow-wrap: anywhere; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+
+.failed-reason, .failed-feed { margin: 0.1rem 0; color: var(--color-text-dim); font-size: var(--text-meta); }
 .failed-actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
