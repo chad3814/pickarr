@@ -91,7 +91,12 @@
    documented example is 1279x719), not portrait. */
 .poster-thumb img { display: block; max-width: 6rem; max-height: 8rem; border: 1px solid var(--color-line); border-radius: var(--radius-sm); }
 .metadata-performers { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; align-items: center; }
-.metadata-performers li { display: flex; align-items: center; gap: 0.35rem; }
+/* The rest of the panel runs 12-13px (`.metadata-title` at `--text-body`,
+   `.metadata-synopsis` at `--text-meta`); an unsized `<li>` inherits the 16px
+   root instead, so without this a cast name — already an amber, underlined
+   anchor — is the loudest text in a panel that is meant to read as a second
+   opinion, not the headline. */
+.metadata-performers li { display: flex; align-items: center; gap: 0.35rem; font-size: var(--text-meta); }
 .avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
 .metadata-pending { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }
 

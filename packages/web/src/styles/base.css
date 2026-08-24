@@ -1,4 +1,8 @@
-:root { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+/* `accent-color` inherits, so one declaration here covers every native
+   checkbox and radio in the app — including the theme toggle's own radios in
+   `nav.css`, which is why that file's `.theme-toggle input` declaration is now
+   redundant but left in place. */
+:root { font-family: 'IBM Plex Sans', system-ui, sans-serif; accent-color: var(--color-accent); }
 
 body {
   margin: 0;
@@ -68,7 +72,11 @@ button {
 button:hover:not(:disabled) { background: var(--color-surface-2); }
 button:disabled { color: var(--color-text-faint); border-color: var(--color-line); cursor: default; }
 
-input, select, textarea {
+/* Narrowed to exclude checkboxes and radios: a checkbox is not a text field,
+   and giving it a surface background and a strong border fights its native
+   rendering rather than styling it. Left unstyled, they pick up the palette
+   through `accent-color` on `:root` instead. */
+input:not([type='checkbox']):not([type='radio']), select, textarea {
   font: inherit;
   font-size: var(--text-body);
   padding: var(--space-1) var(--space-2);
