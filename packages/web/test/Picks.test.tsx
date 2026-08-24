@@ -868,13 +868,16 @@ test('each card\'s Requery button reaches POST /api/metadata/requery with that c
   );
 
   // The button appears only once the metadata answer has landed, which is what
-  // makes the group settled.
-  const beta = await waitFor(() => {
+  // makes the group settled — so the button lookup itself must be inside the
+  // retry, not just the article it lives in. Guarding only the article and
+  // then querying for the button on the next, unretried line let this pass or
+  // fail depending on how far act's async flush had drained the fetch chain.
+  const requeryButton = await waitFor(() => {
     const element = screen.getByText('Beta').closest('article');
     assert.ok(element !== null);
-    return element;
+    return within(element).getByRole('button', { name: 'Requery metadata' });
   });
-  fireEvent.click(within(beta).getByRole('button', { name: 'Requery metadata' }));
+  fireEvent.click(requeryButton);
 
   await waitFor(() => assert.deepEqual(requeried, [[2]]));
 });
