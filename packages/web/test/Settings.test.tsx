@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router';
 import { App } from '../src/App.tsx';
 import { Settings } from '../src/routes/Settings.tsx';
 import type { ConfigResponse } from '../src/api/client.ts';
+import { fetchStub, jsonResponse, type FetchHandler } from './fetchStub.ts';
 
 // happy-dom has no download plumbing; a test that stubs these restores them
 // so a later test never inherits a stub it did not ask for.
@@ -47,26 +48,18 @@ function configResponse(over: Partial<ConfigResponse> = {}): ConfigResponse {
   };
 }
 
-function stubFetch(handler: (url: string, init?: RequestInit) => Promise<Response>): void {
-  globalThis.fetch = ((input: string, init?: RequestInit) =>
-    handler(String(input), init)) as unknown as typeof fetch;
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
+function stubFetch(handler: FetchHandler): void {
+  globalThis.fetch = fetchStub(handler);
 }
 
 test('the page loads the config and shows the config path fields', async () => {
-  stubFetch(async () => json(configResponse()));
+  stubFetch(async () => jsonResponse(configResponse()));
   render(<Settings />);
   await waitFor(() => assert.ok(screen.getByDisplayValue('/data/trash')));
 });
 
 test('a config that cannot be read is reported instead of rendering an empty form', async () => {
-  stubFetch(async () => json({ error: 'Config at /config/config.json is not valid JSON: bad' }, 500));
+  stubFetch(async () => jsonResponse({ error: 'Config at /config/config.json is not valid JSON: bad' }, 500));
   render(<Settings />);
   await waitFor(() => assert.ok(screen.getByText(/not valid JSON/)));
   assert.equal(screen.queryByRole('button', { name: /^save$/i }), null);
@@ -76,7 +69,7 @@ test('the nav separates Settings from the library tabs with a rule', () => {
   // Settings is a view of the installation, not of the library, and the rule is
   // what says so. It was an em dash until the nav went vertical, where a dash
   // between two stacked links reads as a stray character rather than a divider.
-  stubFetch(async () => json({ groups: [], nextCursor: null }));
+  stubFetch(async () => jsonResponse({ groups: [], nextCursor: null }));
   render(
     <MemoryRouter>
       <App />
@@ -114,7 +107,7 @@ test('the nav separates Settings from the library tabs with a rule', () => {
 });
 
 test('Save is offered only once the draft differs from what was loaded', async () => {
-  stubFetch(async () => json(configResponse()));
+  stubFetch(async () => jsonResponse(configResponse()));
   render(<Settings />);
   await waitFor(() => assert.ok(screen.getByLabelText(/trash directory/i)));
 
@@ -131,12 +124,12 @@ test('saving sends keep for an untouched secret and reports the pending restart'
   stubFetch(async (url, init) => {
     if (init?.method === 'PUT') {
       sent.push(String(init.body));
-      return json({ savedAt: 1, restartRequired: true });
+      return jsonResponse({ savedAt: 1, restartRequired: true });
     }
     configCalls += 1;
     // The initial load precedes any save (nothing pending yet); the re-read
     // that follows a successful save reports the restart it just caused.
-    return json(configResponse({ restartRequired: configCalls > 1 }));
+    return jsonResponse(configResponse({ restartRequired: configCalls > 1 }));
   });
 
   render(<Settings />);
@@ -163,12 +156,12 @@ test('clicking Save twice before the first request resolves issues only one PUT'
       await new Promise<void>((resolve) => {
         resolvePut = resolve;
       });
-      return json({ savedAt: 1, restartRequired: true });
+      return jsonResponse({ savedAt: 1, restartRequired: true });
     }
     configCalls += 1;
     // The initial load precedes any save (nothing pending yet); the re-read
     // that follows a successful save reports the restart it just caused.
-    return json(configResponse({ restartRequired: configCalls > 1 }));
+    return jsonResponse(configResponse({ restartRequired: configCalls > 1 }));
   });
 
   render(<Settings />);
@@ -189,7 +182,7 @@ test('a non-numeric port is reported without ever reaching the server', async ()
   let putRequests = 0;
   stubFetch(async (_url, init) => {
     if (init?.method === 'PUT') putRequests += 1;
-    return json(configResponse());
+    return jsonResponse(configResponse());
   });
 
   render(<Settings />);
@@ -206,8 +199,8 @@ test('a non-numeric port is reported without ever reaching the server', async ()
 test('a refused save shows the reason and keeps the edit on screen', async () => {
   stubFetch(async (_url, init) =>
     init?.method === 'PUT'
-      ? json({ error: 'Config at /config/config.json is invalid — trashDir: String must contain at least 1 character(s)' }, 400)
-      : json(configResponse()),
+      ? jsonResponse({ error: 'Config at /config/config.json is invalid — trashDir: String must contain at least 1 character(s)' }, 400)
+      : jsonResponse(configResponse()),
   );
 
   render(<Settings />);
@@ -223,7 +216,7 @@ test('a refused save shows the reason and keeps the edit on screen', async () =>
 // The notice has to survive a reload, or a saved-but-unapplied config sits
 // there with nothing on screen saying so.
 test('a restart pending from an earlier save is reported on load', async () => {
-  stubFetch(async () => json(configResponse({ restartRequired: true })));
+  stubFetch(async () => jsonResponse(configResponse({ restartRequired: true })));
   render(<Settings />);
   await waitFor(() => assert.ok(screen.getByRole('button', { name: /restart now/i })));
 });
@@ -233,9 +226,9 @@ test('Restart now posts and says what it is doing', async () => {
   stubFetch(async (url, init) => {
     if (url.endsWith('/api/restart') && init?.method === 'POST') {
       restarts += 1;
-      return json({ restarting: true }, 202);
+      return jsonResponse({ restarting: true }, 202);
     }
-    return json(configResponse({ restartRequired: true }));
+    return jsonResponse(configResponse({ restartRequired: true }));
   });
 
   render(<Settings />);
@@ -248,8 +241,8 @@ test('Restart now posts and says what it is doing', async () => {
 test('a failed backup is reported rather than failing silently', async () => {
   stubFetch(async (url) =>
     url.endsWith('/api/database/backup')
-      ? json({ error: 'Backup failed: ENOSPC' }, 500)
-      : json(configResponse()),
+      ? jsonResponse({ error: 'Backup failed: ENOSPC' }, 500)
+      : jsonResponse(configResponse()),
   );
 
   render(<Settings />);
@@ -267,7 +260,7 @@ test('a successful backup names the file it saved', async () => {
             'content-disposition': 'attachment; filename="pickarr-2026-08-13.db"',
           },
         })
-      : json(configResponse()),
+      : jsonResponse(configResponse()),
   );
 
   // happy-dom has no download plumbing; these two are what the click uses.
@@ -300,7 +293,7 @@ test('the download anchor is attached to the document during click, and its obje
             'content-disposition': 'attachment; filename="pickarr-2026-08-13.db"',
           },
         })
-      : json(configResponse()),
+      : jsonResponse(configResponse()),
   );
 
   // Ordering, not wall-clock timing: the old code never appended or removed
@@ -344,13 +337,13 @@ test('the download anchor is attached to the document during click, and its obje
 test('a failed restart clears the notice a successful save left behind', async () => {
   let configCalls = 0;
   stubFetch(async (url, init) => {
-    if (init?.method === 'PUT') return json({ savedAt: 1, restartRequired: true });
+    if (init?.method === 'PUT') return jsonResponse({ savedAt: 1, restartRequired: true });
     if (url.endsWith('/api/restart') && init?.method === 'POST') {
-      return json({ error: 'restart refused: another restart is already in progress' }, 409);
+      return jsonResponse({ error: 'restart refused: another restart is already in progress' }, 409);
     }
     configCalls += 1;
     // The re-read after the save is what reports the restart it caused.
-    return json(configResponse({ restartRequired: configCalls > 1 }));
+    return jsonResponse(configResponse({ restartRequired: configCalls > 1 }));
   });
 
   render(<Settings />);
@@ -369,10 +362,10 @@ test('a failed restart clears the notice a successful save left behind', async (
 test('a save that lands but whose confirmation re-read fails still reports the save, not a failure', async () => {
   let configCalls = 0;
   stubFetch(async (_url, init) => {
-    if (init?.method === 'PUT') return json({ savedAt: 1, restartRequired: true });
+    if (init?.method === 'PUT') return jsonResponse({ savedAt: 1, restartRequired: true });
     configCalls += 1;
     // First GET is the initial load; the second is save()'s post-write re-read.
-    return configCalls === 1 ? json(configResponse()) : json({ error: 'ECONNRESET' }, 500);
+    return configCalls === 1 ? jsonResponse(configResponse()) : jsonResponse({ error: 'ECONNRESET' }, 500);
   });
 
   render(<Settings />);

@@ -4,6 +4,7 @@ import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/re
 import { ManualForm } from '../src/components/ManualForm.tsx';
 import { useIdentityPreview } from '../src/api/useIdentityPreview.ts';
 import { api, type ManualField } from '../src/api/client.ts';
+import { fetchStub } from './fetchStub.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its DOM behind and every later `getBy*` sees two
@@ -219,12 +220,12 @@ test('cancel does not submit', () => {
 
 test('the failed list asks for dismissed items only when told to', async () => {
   const urls: string[] = [];
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     urls.push(input);
     return new Response(JSON.stringify({ items: [], nextCursor: null }), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
 
   await api.failed(null, false);
   await api.failed('1700:42', true);
@@ -239,10 +240,10 @@ test('a rejected preview is an answer, not a failure', async () => {
   // `/api/manual-preview` answers 200 with `{ error }` while the form is still
   // half-typed. Treating that as a thrown request would make every keystroke
   // before the last one an error.
-  globalThis.fetch = (async () =>
+  globalThis.fetch = fetchStub(async () =>
     new Response(JSON.stringify({ error: 'date must be YYYY-MM-DD' }), {
       headers: { 'content-type': 'application/json' },
-    })) as unknown as typeof fetch;
+    }));
 
   const result = await api.manualPreview('scenes', { date: '2026-0' });
   assert.deepEqual(result, { error: 'date must be YYYY-MM-DD' });
@@ -254,7 +255,7 @@ function Preview({ values }: { values: Record<string, string> }) {
 
 test('the preview hook debounces and shows the key, or the plugin complaint', async () => {
   const bodies: Record<string, string>[] = [];
-  globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as { values: Record<string, string> };
     bodies.push(body.values);
     return new Response(
@@ -265,7 +266,7 @@ test('the preview hook debounces and shows the key, or the plugin complaint', as
       ),
       { headers: { 'content-type': 'application/json' } },
     );
-  }) as unknown as typeof fetch;
+  });
 
   const { rerender } = render(<Preview values={{ title: 'do' }} />);
   rerender(<Preview values={{ title: 'don' }} />);
@@ -292,12 +293,12 @@ test('a re-render that changed no value costs no request', async () => {
   // sibling row updating. Keyed on the object rather than on its contents, the
   // hook would re-ask the server the same question on every one of them.
   let calls = 0;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = fetchStub(async () => {
     calls += 1;
     return new Response(JSON.stringify({ identityKey: 'scenes:brazzers:--:done' }), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
 
   const { rerender } = render(<Preview values={{ title: 'done' }} />);
   await waitFor(() => assert.ok(screen.getByText('scenes:brazzers:--:done')));
@@ -317,7 +318,7 @@ test('a slow earlier preview never overwrites a newer one', async () => {
     gate.open = resolve;
   });
   let calls = 0;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = fetchStub(async () => {
     calls += 1;
     // Captured before the await: by the time the held request resumes, `calls`
     // has moved on, and reading it there would answer both requests alike.
@@ -326,7 +327,7 @@ test('a slow earlier preview never overwrites a newer one', async () => {
     return new Response(JSON.stringify({ identityKey: mine === 1 ? 'stale' : 'fresh' }), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
 
   const { rerender } = render(<Preview values={{ title: 'a' }} />);
   await waitFor(() => assert.equal(calls, 1));
@@ -339,11 +340,11 @@ test('a slow earlier preview never overwrites a newer one', async () => {
 });
 
 test('a preview request that actually fails shows why', async () => {
-  globalThis.fetch = (async () =>
+  globalThis.fetch = fetchStub(async () =>
     new Response(JSON.stringify({ error: 'No plugin loaded for id scenes' }), {
       status: 404,
       headers: { 'content-type': 'application/json' },
-    })) as unknown as typeof fetch;
+    }));
 
   render(<Preview values={{ title: 'x' }} />);
   await waitFor(() => assert.ok(screen.getByText('No plugin loaded for id scenes')));

@@ -17,6 +17,7 @@ import type {
   MetadataView,
   PicksResponse,
 } from '../src/api/client.ts';
+import { fetchStub } from './fetchStub.ts';
 
 afterEach(cleanup);
 
@@ -167,7 +168,7 @@ interface Patched {
 function stubApi(options: StubOptions): { patched: Patched[]; pickCalls: number } {
   const state = { patched: [] as Patched[], pickCalls: 0 };
 
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
 
     if (url.pathname === '/api/metadata/request') {
@@ -240,7 +241,7 @@ function stubApi(options: StubOptions): { patched: Patched[]; pickCalls: number 
       });
     }
     throw new Error(`unexpected request to ${url.pathname}`);
-  }) as unknown as typeof fetch;
+  });
 
   return state;
 }
@@ -267,7 +268,7 @@ const metadataRequestBodies: number[][] = [];
 function serve(first: GroupView[], reloaded?: GroupView[]): void {
   let loads = 0;
   metadataRequestBodies.length = 0;
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
 
     if (url.pathname === '/api/metadata/request') {
@@ -311,7 +312,7 @@ function serve(first: GroupView[], reloaded?: GroupView[]): void {
     return new Response(JSON.stringify(body), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
 }
 
 /**
@@ -430,7 +431,7 @@ test('a failed download on Downloads reaches its group on Picks', async () => {
   const picks: PicksResponse = {
     groups: [failedPick(group(2, 'Beta')), group(1, 'Alpha')],
   };
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/downloads') {
       return new Response(JSON.stringify(downloads), {
@@ -469,7 +470,7 @@ test('a failed download on Downloads reaches its group on Picks', async () => {
       });
     }
     return new Response(JSON.stringify(picks), { headers: { 'content-type': 'application/json' } });
-  }) as unknown as typeof fetch;
+  });
 
   render(
     <MemoryRouter initialEntries={['/downloads']}>
@@ -546,7 +547,7 @@ test('a reload that keeps the same groups costs no extra metadata request', asyn
 
 test('polling stops once nothing is pending', async () => {
   let getCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/picks') {
       const body: PicksResponse = { groups: [group(5, 'Echo')] };
@@ -594,7 +595,7 @@ test('polling stops once nothing is pending', async () => {
       });
     }
     throw new Error(`unexpected request to ${url.pathname}`);
-  }) as unknown as typeof fetch;
+  });
 
   render(
     <MemoryRouter initialEntries={['/picks']}>
@@ -620,7 +621,7 @@ test('does not poll forever when metadata is unavailable server-wide', async () 
   // `absent` — settled, not `pending` — which is what stops the poll rather
   // than any special case in the hook for `unavailable` itself.
   let getCalls = 0;
-  globalThis.fetch = (async (input: string) => {
+  globalThis.fetch = fetchStub(async (input) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/picks') {
       const body: PicksResponse = { groups: [group(9, 'Nine')] };
@@ -654,7 +655,7 @@ test('does not poll forever when metadata is unavailable server-wide', async () 
       });
     }
     throw new Error(`unexpected request to ${url.pathname}`);
-  }) as unknown as typeof fetch;
+  });
 
   render(
     <MemoryRouter initialEntries={['/picks']}>
@@ -842,7 +843,7 @@ test('each card\'s Requery button reaches POST /api/metadata/requery with that c
   serve([group(1, 'Alpha'), group(2, 'Beta')]);
   const base = globalThis.fetch;
   const requeried: number[][] = [];
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/metadata/requery') {
       requeried.push((JSON.parse(String(init?.body)) as { groupIds: number[] }).groupIds);
@@ -857,7 +858,7 @@ test('each card\'s Requery button reaches POST /api/metadata/requery with that c
       );
     }
     return base(input, init);
-  }) as unknown as typeof fetch;
+  });
 
   render(
     <MemoryRouter initialEntries={['/picks']}>

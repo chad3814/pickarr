@@ -17,6 +17,7 @@ import type {
   ReleaseEditResponse,
   ReleaseView,
 } from '../src/api/client.ts';
+import { fetchStub } from './fetchStub.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its DOM behind and every later `getBy*` sees two
@@ -224,7 +225,7 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
     return picked;
   }
 
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     calls.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
 
@@ -242,7 +243,7 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
     return new Response(JSON.stringify(respond(url, init)), {
       headers: { 'content-type': 'application/json' },
     });
-  }) as unknown as typeof fetch;
+  });
 
   return () => calls;
 }
@@ -706,7 +707,7 @@ function serveSettledGroup(answers: readonly MetadataView[]): () => number {
   };
 
   let metadataCalls = 0;
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+  globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/browse') {
       return new Response(
@@ -751,7 +752,7 @@ function serveSettledGroup(answers: readonly MetadataView[]): () => number {
       });
     }
     throw new Error(`unexpected request to ${url.pathname}`);
-  }) as unknown as typeof fetch;
+  });
 
   return () => metadataCalls;
 }
