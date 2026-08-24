@@ -1,0 +1,13 @@
+.releases, .downloads { list-style: none; margin: 0; padding: 0; }
+.release-row, .download-row { display: flex; gap: 0.75rem; align-items: center; padding: 0.35rem 0; border-top: 1px solid rgb(from currentColor r g b / 20%); font-size: 0.9rem; }
+.release-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.6; }
+.release-current { font-weight: 600; }
+.download-row.untracked { opacity: 0.5; font-style: italic; }
+.download-error, .release-failed { color: #b91c1c; }
+/* Amber, not red: absence is not yet a failure, only a client that has gone quiet. */
+.download-absent { color: #b45309; }
+.failed { list-style: none; margin: 0; padding: 0; }
+.failed-row { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+.failed-row h2 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.failed-reason, .failed-feed { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
+.failed-actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }

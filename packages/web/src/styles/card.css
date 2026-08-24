@@ -1,0 +1,57 @@
+.media-card { border: 1px solid currentColor; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; opacity: 0.95; }
+.media-card h2 { margin: 0; font-size: 1.1rem; }
+/* The title block beside the poster, as tall as the taller of the two. The
+   card carried `position: relative` for as long as the poster was absolute;
+   nothing else in the card is positioned, so it went with it. */
+/* The gap before the releases belongs to the row, not to the fields list
+   inside it. It used to come from `.fields`' own bottom margin, which works
+   only while the left column is the taller of the two: when the poster is
+   taller — a 8rem image against a title, an Edit button and one line of
+   fields, which is the ordinary case — that margin is interior to the
+   shorter column and contributes nothing, leaving the poster flush against
+   the first release row's rule. Zeroing it there and spacing the row itself
+   makes the gap the same whichever side wins. */
+.card-head { display: flex; align-items: flex-start; gap: 1rem; margin-bottom: 0.5rem; }
+/* `min-width: 0` because a flex item's default `min-width: auto` refuses to
+   shrink below its content, and a long unbroken release title would otherwise
+   push the poster off the card rather than wrap. */
+.card-head-main { flex: 1; min-width: 0; }
+.card-head-main .fields { margin-bottom: 0; }
+/* Same row-of-buttons shape as `.failed-actions`/`.manual-actions`: a small
+   gap, no wrapping system of its own. Edit and Requery are independent
+   conditions (see `MediaCard`'s `canEdit`/`settled`), so this rule has to
+   look right with either button alone as well as with both. The empty case
+   is not this rule's problem to solve: `MediaCard` renders the div only when
+   at least one of the two buttons is going in it, precisely so this margin
+   never shows up as a gap under a card with no actions. */
+.card-actions { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
+.subtitle, .date { margin: 0.1rem 0; opacity: 0.7; font-size: 0.9rem; }
+.badge { display: inline-block; margin-top: 0.4rem; padding: 0.1rem 0.5rem; border-radius: 0.25rem; background: #b45309; color: white; font-size: 0.8rem; }
+.fields { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; font-size: 0.85rem; }
+.fields li { opacity: 0.8; }
+/* Only the interactive thumbnails get the pointer cursor: `button.avatar-thumb`
+   (has a full image behind it) rather than `.avatar-thumb` by class alone,
+   which would also match the plain `<img class="avatar-thumb">` shown for a
+   performer with no full image — that one is deliberately not clickable, and
+   a pointer cursor is exactly the affordance that promises a click it can't
+   answer. */
+.poster-thumb, button.avatar-thumb { padding: 0; border: none; background: none; cursor: pointer; }
+/* `flex: none` so the poster keeps its own size rather than being stretched
+   or squeezed by the row: it is the fixed side, and the title block is what
+   takes up the slack. The button carries no size of its own — it shrink-wraps
+   the image, which is what the bounds below are on. */
+.poster-thumb { flex: none; }
+/* The bounds live on the image, not on the button. They were on the button,
+   with `max-width: 100%; max-height: 100%` here — and a percentage max-height
+   against an auto-height parent computes to `none`, so the image ignored it
+   and rendered at its intrinsic height while the button's box stayed at 8rem.
+   The overflow was visible (nothing clips it) and it is not exotic: a
+   portrait 1000x1500 poster capped to 6rem wide is 9rem tall, an rem past the
+   button that is supposed to contain it.
+   No fixed aspect ratio: the provider's images are frequently landscape (a
+   documented example is 1279x719), not portrait. */
+.poster-thumb img { display: block; max-width: 6rem; max-height: 8rem; }
+.metadata-performers { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; padding: 0; list-style: none; align-items: center; }
+.metadata-performers li { display: flex; align-items: center; gap: 0.35rem; }
+.avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
+.metadata-pending { opacity: 0.6; font-style: italic; }

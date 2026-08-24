@@ -1,0 +1,12 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; }
+/* Nav beside the content rather than above it, both inside the one centred
+   column: the tabs stay next to what they navigate instead of drifting to a far
+   window edge on a wide screen. */
+.app { display: flex; gap: 1.5rem; max-width: 60rem; margin: 0 auto; padding: 1rem; }
+/* `min-width: 0` for the reason `.card-head-main` gives: a flex item refuses to
+   shrink below its content by default, so one long unbroken release name would
+   push the nav off the screen instead of wrapping. */
+main { flex: 1; min-width: 0; }
+.notice { color: #15803d; }
+.error { color: #b91c1c; }

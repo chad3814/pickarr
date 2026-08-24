@@ -1,0 +1,34 @@
+/* `align-self: flex-start` is load-bearing, not tidiness. A flex child stretches
+   to the container's height by default, and a nav as tall as the whole page has
+   nowhere to stick to — `position: sticky` would silently do nothing. Shrinking
+   it to its content is what gives it room to move.
+
+   `top` matches `.app`'s padding so the pinned nav lines up with the first card,
+   and `max-height` leaves the same gap at the bottom. The overflow only engages
+   once the nav is taller than the window: with five tabs there is nothing to
+   scroll, and with enough of them the last one is still reachable rather than
+   stranded below the fold. */
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  position: sticky;
+  top: 1rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+nav a { text-decoration: none; }
+nav a.active { font-weight: 600; text-decoration: underline; }
+/* A rule, not a glyph — see `App.tsx`. `border-top` alone because a default
+   `<hr>` renders as an inset 3D groove that reads as a seam in the page rather
+   than a divider between two groups of links. `user-select: none` went with the
+   em dash: there is no text here to accidentally select. */
+.nav-separator {
+  width: 100%;
+  margin: 0.25rem 0;
+  border: 0;
+  border-top: 1px solid currentColor;
+  opacity: 0.4;
+}
