@@ -1,18 +1,25 @@
 input.search { margin-bottom: var(--space-4); width: 100%; max-width: 24rem; }
 
-/* First rules for these two. Neither had any: both were containers whose children
-   happened to be styled. A little separation is all they need. */
+/* First rule for this one. It had none: it was a container whose children
+   happened to be styled. A little separation is all it needs. */
 .manual-form { margin: var(--space-2) 0; }
-.config-form { margin: 0; }
 
 .manual-field { display: flex; gap: var(--space-2); align-items: baseline; margin-top: var(--space-2); }
 .manual-field label { min-width: 8rem; color: var(--color-text-dim); font-size: var(--text-meta); }
 
-.manual-help { color: var(--color-text-faint); font-size: var(--text-label); }
+/* `--color-text-dim`, not `--color-text-faint`: this renders `field.help`,
+   which `ManualForm.tsx` wires to the input's `aria-describedby`, so it is
+   the field's description, not decoration. `--color-text-faint` is barred
+   from essential text by the contrast constraint (§5.3) — applying the
+   token correctly here, not a stylistic preference. */
+.manual-help { color: var(--color-text-dim); font-size: var(--text-label); }
 .manual-preview { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: var(--text-meta); color: var(--color-text-dim); }
 .manual-actions { display: flex; gap: var(--space-2); margin-top: var(--space-3); }
 
-.secret-set { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: var(--text-meta); color: var(--color-text-faint); }
+/* `--color-text-dim`: the string is "A key is set." — whether a credential is
+   configured is essential text, not decoration, so `--color-text-faint`
+   would violate the same contrast constraint as `.manual-help` above. */
+.secret-set { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: var(--text-meta); color: var(--color-text-dim); }
 
 .settings-row {
   border: 1px solid var(--color-line);
