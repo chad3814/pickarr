@@ -30,6 +30,8 @@ interface Props {
  */
 export function ImageModal({ images, startIndex, onClose }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const previousButton = useRef<HTMLButtonElement>(null);
+  const nextButton = useRef<HTMLButtonElement>(null);
   const [index, setIndex] = useState(startIndex);
   // Reset per image, not per modal: a frame that failed must not keep saying so
   // once the user has paged to a different image that loads perfectly well.
@@ -41,17 +43,17 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
     element.showModal();
   }, []);
 
+  const image = images[index];
+  const hasPrevious = index > 0;
+  const hasNext = index < images.length - 1;
+
   // A step that lands on an end disables the button that caused it (`hasNext`
   // or `hasPrevious` just went false) — and a focused control that becomes
   // disabled is blurred by the browser itself, per the HTML spec, to nothing
   // inside this dialog at all. `<body>` sits outside this `<dialog>`'s own
   // subtree, so the very next arrow-key press has nothing here for it to
-  // bubble through and `onKeyDown` above never sees it: a mouse click that
-  // reaches an end silently disables the keyboard from then on. Reclaiming
-  // focus for the dialog itself whenever it has drifted outside keeps the
-  // keyboard working exactly as far as a mouse does, which `step`'s clamping
-  // promises but cannot deliver once focus has left the subtree it depends
-  // on.
+  // bubble through and `onKeyDown` below never sees it: a mouse click that
+  // reaches an end silently disables the keyboard from then on.
   //
   // Confirmed directly rather than assumed: happy-dom 16.8.1 does not blur a
   // focused element when it becomes `disabled` — `document.activeElement`
@@ -60,17 +62,25 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
   // observed this bug either way. A real browser's blur-on-disable is what
   // makes it real, and only a real browser (this Playwright spec) can catch
   // it.
+  //
+  // The reclaim target is the *other* button, not the dialog itself, when
+  // there is one to give it to: a keyboard user who just walked to an end
+  // still has one button meaningfully left to reach (the one that steps back
+  // the way they came), and parking focus on the dialog instead would cost
+  // them an extra Tab to get there. Only a one-image list — which renders no
+  // browse chrome at all and so has neither button — falls back to the
+  // dialog; that list cannot step either way, so there is nothing to reach
+  // regardless of where focus lands. `preventScroll` is inert today
+  // (`.image-modal` is `position: fixed; inset: 0; overflow: hidden`, so
+  // nothing here can scroll), kept so this does not start depending on that
+  // staying true.
   useEffect(() => {
     const element = dialog.current;
     if (element === null) return;
-    if (document.activeElement === null || !element.contains(document.activeElement)) {
-      element.focus();
-    }
-  }, [index]);
-
-  const image = images[index];
-  const hasPrevious = index > 0;
-  const hasNext = index < images.length - 1;
+    if (document.activeElement !== null && element.contains(document.activeElement)) return;
+    const target = !hasNext ? previousButton.current : !hasPrevious ? nextButton.current : null;
+    (target ?? element).focus({ preventScroll: true });
+  }, [index, hasNext, hasPrevious]);
 
   function step(by: number): void {
     // Clamped rather than wrapped, and clamped here rather than only in the
@@ -85,9 +95,16 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
   return (
     <dialog
       ref={dialog}
-      // Not in the tab order (a user tabs into its buttons, never the dialog
-      // chrome itself) but a valid target for the `element.focus()` call
-      // above, which needs the dialog to be focusable at all.
+      // An open modal `<dialog>` is already programmatically focusable with no
+      // `tabindex` at all in Chromium (measured directly against this repo's
+      // own Playwright browser: a plain `div`/`p` were not focusable, a closed
+      // dialog was not, an open modal one was) — so this attribute changes
+      // nothing there. It stays anyway as insurance for whatever else this
+      // ships on: `element.focus()` on a non-focusable element is a no-op per
+      // spec, `tabIndex={-1}` is what guarantees the dialog counts as
+      // focusable everywhere rather than only where one engine happens to
+      // already treat it that way, and no engine besides Chromium was
+      // measured here.
       tabIndex={-1}
       className="image-modal"
       onCancel={(event) => { event.preventDefault(); onClose(); }}
@@ -125,13 +142,25 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
         */}
       {images.length > 1 && image !== undefined && (
         <div className="image-modal-browse">
-          <button type="button" onClick={() => step(-1)} disabled={!hasPrevious} aria-label="Previous image">
+          <button
+            type="button"
+            ref={previousButton}
+            onClick={() => step(-1)}
+            disabled={!hasPrevious}
+            aria-label="Previous image"
+          >
             ‹
           </button>
           <p className="image-modal-caption">
             {image.label} · {index + 1} of {images.length}
           </p>
-          <button type="button" onClick={() => step(1)} disabled={!hasNext} aria-label="Next image">
+          <button
+            type="button"
+            ref={nextButton}
+            onClick={() => step(1)}
+            disabled={!hasNext}
+            aria-label="Next image"
+          >
             ›
           </button>
         </div>

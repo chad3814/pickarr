@@ -87,9 +87,10 @@ const TALL_PNG =
  *
  * Nothing below measures this image's own layout the way the scaling test
  * measures `TALL_PNG`, so its aspect ratio only has to clear the width >
- * height bar `classifyArtwork` checks — it does not need to be as extreme.
- *
- * Regenerate the same way as `TALL_PNG`, with width and height swapped.
+ * height bar `classifyArtwork` checks — it does not need to be as extreme. It
+ * is exactly that extreme anyway only because it is generated the same way as
+ * `TALL_PNG`, with width and height swapped: regenerate it the same way if it
+ * ever needs to change.
  */
 const WIDE_PNG =
   'data:image/png;base64,' +
@@ -328,9 +329,24 @@ test('the modal walks a group\'s images and clamps at the ends', async ({ page, 
   await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
   await expect(dialog.getByRole('button', { name: /next/i })).toBeDisabled();
 
-  // The keyboard reaches the same clamp a mouse does.
+  // The keyboard reaches the same clamp a mouse does, right after that same
+  // click disabled the very button the click had just focused.
   await page.keyboard.press('ArrowRight');
   await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
+  await page.keyboard.press('ArrowLeft');
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+
+  // The mirror image: land on the first entry via a mouse click on Previous
+  // rather than the keyboard, so Previous is what disables itself and steals
+  // focus this time, in the other direction.
+  await dialog.getByRole('button', { name: /next/i }).click();
+  await dialog.getByRole('button', { name: /previous/i }).click();
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /previous/i })).toBeDisabled();
+
+  // The low end gets the same keyboard check the high end already had above:
+  // a clamped ArrowLeft here has to be a real no-op, not just a disabled
+  // button nothing ever pressed against.
   await page.keyboard.press('ArrowLeft');
   await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
 

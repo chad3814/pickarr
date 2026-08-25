@@ -116,17 +116,20 @@ test('paging away from a broken image and back shows the failure again, not a st
   assert.ok(!screen.queryByText(/could not be loaded/i), 'a new image starts unbroken');
 });
 
-test('the dialog can take focus, which the disabled-button focus fix depends on', () => {
+test('the dialog carries tabIndex={-1}, kept as cross-browser insurance for the focus fix', () => {
   render(<ImageModal images={THREE} startIndex={0} onClose={() => {}} />);
-  // Not a behavioural test: happy-dom does not blur a focused element when it
-  // becomes `disabled` (confirmed directly, see `ImageModal.tsx`'s own
-  // comment on the effect this guards), so the failure this fixes cannot be
-  // reproduced here at all — only in `metadata-modal.spec.ts`, in a real
-  // browser. What this pins is the one precondition the fix depends on:
-  // `element.focus()` in the dialog's own effect only does anything because
-  // the dialog is `tabIndex={-1}`. A refactor that dropped the attribute
-  // while leaving the effect in place would silently reopen the bug with
-  // nothing here to catch it.
+  // Not a test of the bug itself: happy-dom does not blur a focused element
+  // when it becomes `disabled` (confirmed directly — see `ImageModal.tsx`'s
+  // own comment on the effect this attribute backs), so the failure the fix
+  // addresses cannot be reproduced here at all, in either direction — only in
+  // `metadata-modal.spec.ts`, in a real browser. An open modal `<dialog>`
+  // measures as already focusable with no `tabindex` in this repo's own
+  // Playwright Chromium, so this attribute is not what makes the fix work
+  // there; a refactor that dropped it would not visibly break anything this
+  // suite or that spec can see. What this pins is narrower: the attribute
+  // itself stays present, on the reasoning (spec, not measurement) that it is
+  // what guarantees `element.focus()` a target on engines nobody has measured
+  // — Chromium is the only one either suite runs against.
   assert.equal(screen.getByRole('dialog').getAttribute('tabindex'), '-1');
 });
 
