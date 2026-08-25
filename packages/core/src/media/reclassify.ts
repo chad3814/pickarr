@@ -69,8 +69,8 @@ export interface ReclassifyResult {
    * Usually, not always: a clear whose surviving slot has no usable image of
    * its own keeps the file, because deleting it would leave the row with no
    * readable image at all. See `planRow`. So this is a count of clears, not a
-   * count of deletions, and the two can differ — the per-row log line says
-   * which of the two that row got.
+   * count of deletions, and the two can differ — `clearedFileFateLine` reports
+   * per row which of the three fates that row got.
    *
    * Reported separately from `moved` so an operator can tell "a misfiling was
    * corrected" from "an image was discarded" — the two are very different
@@ -104,12 +104,21 @@ async function measure(dir: string, path: string): Promise<ArtworkKind | null> {
   return bytes === null ? null : classifyArtwork(bytes);
 }
 
+/** The slot a clear emptied, and what that leaves of the file it named. */
+interface ClearedSlot {
+  /** Which column was nulled. */
+  slot: ArtworkKind;
+  /** The cached file that column named, left unreferenced by `next`. */
+  path: string | null;
+  fate: ClearedFileFate;
+}
+
 /**
- * One row's examination: the tally, the pair to write, and the cached file that
- * write orphans.
+ * One row's examination: the tally, the pair to write, and the clear — if any —
+ * that write leaves a file behind from.
  *
- * `deletePath` is carried back out rather than unlinked where it is decided,
- * which is the whole reason this shape exists. It keeps `planRow` a planner that
+ * `cleared` is carried back out rather than acted on where it is decided, which
+ * is the whole reason this shape exists. It keeps `planRow` a planner that
  * touches no state, and it keeps every effect — the database row and the file
  * alike — inside `reclassifyArtwork`, behind the single `--dry-run` gate that
  * function's own comment claims for itself. Unlinking inside `planRow` would put
@@ -120,23 +129,21 @@ async function measure(dir: string, path: string): Promise<ArtworkKind | null> {
 interface RowPlan {
   result: ReclassifyResult;
   next: ArtworkRow;
-  /**
-   * The cleared slot's own cached file, left unreferenced by `next` and safe to
-   * delete, or `null` when the row orphans nothing — and also when it does
-   * orphan a file that must nevertheless be kept, because it is the only
-   * readable image the row has left. See `clearedFileFate`.
-   */
-  deletePath: string | null;
+  /** The clear this row reached, or `null` when it reached none. */
+  cleared: ClearedSlot | null;
 }
 
 /**
  * What becomes of the file a cleared slot leaves behind.
  *
  * `'kept-shared'` — the surviving slot names that same file, so it is not an
- * orphan at all and is still being served. `'kept-sole-image'` — the surviving
- * slot holds no image this run could measure, so the cleared file is the only
- * readable image the row has left and deleting it would take the row's last
- * one. `'deleted'` — everything else, which is the ordinary case.
+ * orphan at all and is still being served. Defence against a future writer or a
+ * hand-edited database rather than a state this library produces: see `planRow`
+ * for why nothing in it can currently write a row that way.
+ * `'kept-sole-image'` — the surviving slot holds no image this run could
+ * measure, so the cleared file is the only readable image the row has left and
+ * deleting it would take the row's last one. `'deleted'` — everything else,
+ * which is the ordinary case.
  *
  * Three cases and not two because an operator has to be able to tell the two
  * keeps apart: one leaves a file a row still names, the other leaves a genuine
@@ -162,20 +169,36 @@ function clearedFileFate(
 }
 
 /**
- * How a clear's log line should describe that fate.
+ * The line reporting what a clear did to the row and to the file underneath it.
  *
- * Which of the three happened has to be in the line, or an operator reading
+ * Which of the three fates happened has to be in it, or an operator reading
  * "deleted" goes looking for a file that is still there — and one that is still
  * being served reads very differently from one nothing names any more.
+ *
+ * `planRow` cannot write this line, which is why it is a line and not a phrase
+ * appended to one. That function runs before the `--dry-run` gate and before the
+ * unlink, so at that point neither the clear nor the deletion has happened: the
+ * same wording would be a false claim in a dry run and a premature one in a real
+ * run, contradicted two lines later by the failure path. Called from
+ * `reclassifyArtwork` instead, where the row has already been written and — for
+ * `'deleted'` — the unlink has already returned.
+ *
+ * Only `'deleted'` needs the `dryRun` distinction. Both keeps are true in either
+ * mode for the same reason: nothing was going to be deleted, so the file is
+ * still there whether or not the run was allowed to touch anything. They are
+ * deliberately unconditional, and should not be "fixed" into a conditional they
+ * do not need.
  */
-function clearedFileFatePhrase(fate: ClearedFileFate): string {
-  switch (fate) {
+function clearedFileFateLine(groupId: number, cleared: ClearedSlot, dryRun: boolean): string {
+  const slot = `the ${cleared.slot} slot ${dryRun ? 'would be cleared' : 'is cleared'}`;
+  const file = cleared.path ?? '';
+  switch (cleared.fate) {
     case 'kept-shared':
-      return 'and its file kept, because the surviving slot names that file too';
+      return `reclassify: group ${groupId}: ${slot}, and ${file} kept, because the surviving slot names that file too`;
     case 'kept-sole-image':
-      return 'and its file kept, because the surviving slot has no usable image of its own';
+      return `reclassify: group ${groupId}: ${slot}, and ${file} kept, because the surviving slot has no usable image of its own`;
     case 'deleted':
-      return 'and its file deleted';
+      return `reclassify: group ${groupId}: ${slot} and ${file} ${dryRun ? 'would be deleted' : 'deleted'}`;
   }
 }
 
@@ -206,7 +229,7 @@ function clearedFileFatePhrase(fate: ClearedFileFate): string {
  * the synthesised crop: an image that cannot be correctly placed is not
  * stored under a name that misdescribes it.
  *
- * A cleared slot's file is usually deleted too, which is why `deletePath` comes
+ * A cleared slot's file is usually deleted too, which is why `cleared` comes
  * back out of here. Nothing references that file once the column is nulled, and
  * the one thing worse than discarding an image is discarding it halfway —
  * leaving bytes in the artwork directory that no row names, indistinguishable
@@ -271,7 +294,7 @@ async function planRow(
   const backgroundMismatch = backgroundKind !== null && backgroundKind !== 'background';
 
   let next: ArtworkRow = row;
-  let deletePath: string | null = null;
+  let cleared: ClearedSlot | null = null;
   if (posterMismatch && backgroundMismatch) {
     next = {
       groupId: row.groupId,
@@ -287,12 +310,17 @@ async function planRow(
     if (backgroundOccupied) {
       next = { ...row, posterUrl: null, posterPath: null };
       result.cleared += 1;
-      const fate = clearedFileFate(row.posterPath, row.backgroundPath, backgroundKind === 'background');
-      deletePath = fate === 'deleted' ? row.posterPath : null;
+      cleared = {
+        slot: 'poster',
+        path: row.posterPath,
+        fate: clearedFileFate(row.posterPath, row.backgroundPath, backgroundKind === 'background'),
+      };
+      // The finding only. What becomes of the row and of the file is reported
+      // from `reclassifyArtwork`, once it has happened — see
+      // `clearedFileFateLine`.
       deps.log(
         `reclassify: group ${row.groupId}: poster ${row.posterPath ?? ''} measures as a background ` +
-          'but the background slot is already filled, so the poster slot is cleared ' +
-          clearedFileFatePhrase(fate),
+          'but the background slot is already filled, so it cannot be moved there',
       );
     } else {
       next = {
@@ -310,12 +338,14 @@ async function planRow(
     if (posterOccupied) {
       next = { ...row, backgroundUrl: null, backgroundPath: null };
       result.cleared += 1;
-      const fate = clearedFileFate(row.backgroundPath, row.posterPath, posterKind === 'poster');
-      deletePath = fate === 'deleted' ? row.backgroundPath : null;
+      cleared = {
+        slot: 'background',
+        path: row.backgroundPath,
+        fate: clearedFileFate(row.backgroundPath, row.posterPath, posterKind === 'poster'),
+      };
       deps.log(
         `reclassify: group ${row.groupId}: background ${row.backgroundPath ?? ''} measures as a poster ` +
-          'but the poster slot is already filled, so the background slot is cleared ' +
-          clearedFileFatePhrase(fate),
+          'but the poster slot is already filled, so it cannot be moved there',
       );
     } else {
       next = {
@@ -330,7 +360,7 @@ async function planRow(
     }
   }
 
-  return { result, next, deletePath };
+  return { result, next, cleared };
 }
 
 export async function reclassifyArtwork(deps: ReclassifyDeps): Promise<ReclassifyResult> {
@@ -340,7 +370,7 @@ export async function reclassifyArtwork(deps: ReclassifyDeps): Promise<Reclassif
 
   for (const row of rows) {
     // eslint-disable-next-line no-await-in-loop -- one cached file at a time; a one-shot backfill, not a hot path
-    const { result, next, deletePath } = await planRow(deps, row);
+    const { result, next, cleared } = await planRow(deps, row);
     totals.examined += result.examined;
     totals.moved += result.moved;
     totals.cleared += result.cleared;
@@ -353,7 +383,12 @@ export async function reclassifyArtwork(deps: ReclassifyDeps): Promise<Reclassif
     // A clear writes just as a move does — both change the row from what `rows`
     // already read — so both gate the same write, and the unlink is inside the
     // same condition rather than beside it.
-    if (!deps.dryRun && (result.moved > 0 || result.cleared > 0)) {
+    if (deps.dryRun) {
+      // Reporting is not an effect, so a dry run still says what it would have
+      // done to a cleared row — in the conditional wording the summary uses, and
+      // from here rather than from `planRow`, which cannot know the mode.
+      if (cleared !== null) deps.log(clearedFileFateLine(row.groupId, cleared, true));
+    } else if (result.moved > 0 || result.cleared > 0) {
       setArtworkPair(deps.db, row.groupId, next);
 
       // Database first, orphaned file second, and only once the write has
@@ -362,20 +397,42 @@ export async function reclassifyArtwork(deps: ReclassifyDeps): Promise<Reclassif
       // the job. Deleting first and writing second would leave a row naming a
       // file that is gone — nothing here can recover from that, and the poster
       // route would 404 for a group whose image was fine an instant earlier.
-      if (deletePath !== null) {
-        // eslint-disable-next-line no-await-in-loop -- this row's own file, in a loop that is sequential by design
-        await removeFile(join(deps.dir, deletePath), { force: true }).catch((error: Error) => {
-          // `force` already tolerates a file that is simply not there, so
-          // reaching here means something else — a permission problem, most
-          // likely. The row is correctly reclassified either way, so the run
-          // continues: this is a leaked file, not a failed reclassification,
-          // and the line says so in those terms rather than letting one
-          // unwritable file abort a backfill over thousands of rows.
-          deps.log(
-            `reclassify: group ${row.groupId}: reclassified, but ${deletePath} could not be ` +
-              `deleted and is now unreferenced: ${error.message}`,
+      if (cleared !== null) {
+        const doomed = cleared.fate === 'deleted' ? cleared.path : null;
+        if (doomed === null) {
+          deps.log(clearedFileFateLine(row.groupId, cleared, false));
+        } else {
+          // `join` unlinks on the strength of a `group_metadata` column, so the
+          // safety of this line rests on where those values come from, not on a
+          // check here: every artwork path is written by `writeImage` under a
+          // key this repo composes from integers of its own (`groupArtworkKey`),
+          // never from provider text — the argument `artwork.ts`'s `cacheImage`
+          // states for the write side, restated here because this is the module
+          // that deletes. A `../`-bearing column value would escape `dir`, and
+          // that is the reason nothing is allowed to put one there.
+          // eslint-disable-next-line no-await-in-loop -- this row's own file, in a loop that is sequential by design
+          const failure = await removeFile(join(deps.dir, doomed), { force: true }).then(
+            () => null,
+            (error: Error) => error.message,
           );
-        });
+          // Said only now, and only on the branch where it is true: the fate was
+          // decided in `planRow`, but this is where it either happened or did
+          // not.
+          if (failure === null) {
+            deps.log(clearedFileFateLine(row.groupId, cleared, false));
+          } else {
+            // `force` already tolerates a file that is simply not there, so
+            // reaching here means something else — a permission problem, most
+            // likely. The row is correctly reclassified either way, so the run
+            // continues: this is a leaked file, not a failed reclassification,
+            // and the line says so in those terms rather than letting one
+            // unwritable file abort a backfill over thousands of rows.
+            deps.log(
+              `reclassify: group ${row.groupId}: reclassified, but ${doomed} could not be ` +
+                `deleted and is now unreferenced: ${failure}`,
+            );
+          }
+        }
       }
     }
   }

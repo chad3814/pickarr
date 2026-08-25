@@ -402,7 +402,7 @@ test('a poster failure still writes the metadata row', async () => {
 test('a group already holding a poster is not made to download it again', async () => {
   // The poster half of 'a performer already holding artwork is not
   // refetched'. Migration 7 queues every confirmed group in the library, and
-  // `cacheImage` keys the poster on the group id, so without the cached-path
+  // the poster is written under a key fixed by the group id, so without the cached-path
   // guard the backfill spends one full image download per group to overwrite
   // a byte-identical file — the whole library's worth, on first boot after
   // the upgrade, and no test would have noticed.

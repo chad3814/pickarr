@@ -213,15 +213,28 @@ function retryAfterMs(header: string | null): number {
  * `/background/` path, while the 2 that do not are plain
  * `cdn.theporndb.net/.../poster/...` URLs.
  *
- * Exported for the test suite, which builds its crop fixtures out of this
- * constant rather than out of a second copy of the substring, so a fixture and
- * the rule cannot drift apart. No `src` file outside this one reads it:
- * `isBackgroundCrop` just below is the only caller.
+ * Exported because the test suite imports it, for two things: to assert that the
+ * shared `CROP` fixture — a verbatim row from the real database — still carries
+ * the marker, and to compose hostile fixtures out of it (the foreign-origin and
+ * undecodable-segment cases build their urls by interpolating this constant).
+ * No `src` file outside this one reads it: `isBackgroundCrop` just below is the
+ * only caller.
  *
- * One duplicate exists and cannot be removed. Migration 15 restates both halves
- * as `poster_url LIKE '%/800x1200/%' OR poster_url LIKE '%/smart/%'`, because a
- * migration gets a database and SQL and cannot import. That copy is what has to
- * be re-checked by hand if this string ever changes.
+ * Importing it does not make the fixtures drift-proof, and it is worth being
+ * exact about that, because the reassuring version of this paragraph would
+ * hide six hand-written copies. Change this string and re-check all of them:
+ *
+ * - `db/migrations.ts`, migration 15, which restates both halves as
+ *   `poster_url LIKE '%/800x1200/%' OR poster_url LIKE '%/smart/%'`. A
+ *   migration gets a database and SQL and cannot import, so this copy cannot
+ *   be removed at all.
+ * - `test/clients/theporndb.test.ts`'s `CROP`, kept verbatim as the database
+ *   served it. The one copy that is guarded: the
+ *   `assert.ok(CROP.includes(BACKGROUND_CROP_MARKER))` beside it is what
+ *   actually catches drift here, not the fact that the constant is exported.
+ * - a second, shorter crop url in the same file's scene-reader test, with no
+ *   guard at all.
+ * - three thumbnailer urls in `test/db/migrations.test.ts`, likewise unguarded.
  */
 export const BACKGROUND_CROP_MARKER = '/800x1200/smart/';
 

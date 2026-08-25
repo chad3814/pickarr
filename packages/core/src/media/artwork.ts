@@ -262,11 +262,18 @@ export async function writeImage(
  * stored or `null`. The composition of `fetchImage` and `writeImage`, kept
  * for callers that already know their key before the bytes arrive.
  *
- * The filename is `<key>.<ext>`. The key is composed by the caller from
- * integers of our own — a group id, or a performer id via
- * `performerArtworkKey` — which cannot contain a path separator. That is
- * safer than sanitising a provider-supplied string and needs no argument
+ * The filename is `<key>.<ext>`, so what keeps a provider from naming a file
+ * outside `dir` is a rule about the key rather than a check here: every key is
+ * composed from integers of our own, through `performerArtworkKey` or
+ * `groupArtworkKey`, neither of which can produce a path separator. Never from
+ * provider text. That is safer than sanitising such text and needs no argument
  * about whether the sanitising is exhaustive.
+ *
+ * Stated as the contract, not as a description of the callers, because it has to
+ * hold for the next one as much as for today's: `pipeline/performer-artwork.ts`
+ * is currently the only one, and it passes `performerArtworkKey`. Group artwork
+ * reaches `writeImage` directly with a `groupArtworkKey`, and
+ * `media/reclassify.ts` relies on this same argument when it deletes.
  */
 export async function cacheImage(deps: ArtworkDeps, key: string, url: string): Promise<string | null> {
   const fetched = await fetchImage(deps, url);

@@ -206,7 +206,13 @@ test('a mismatching poster is cleared, not moved, when the background slot alrea
     await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
     await writeFile(join(dir, 'bg.jpg'), landscapeJpeg(1920, 1080));
 
-    const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
+    const lines: string[] = [];
+    const report = await reclassifyArtwork({
+      db,
+      dir,
+      dryRun: false,
+      log: (message) => lines.push(message),
+    });
     assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 0 });
 
     const row = getGroupMetadata(db, 1);
@@ -215,6 +221,11 @@ test('a mismatching poster is cleared, not moved, when the background slot alrea
     // The background that was already correct must be untouched, byte for byte.
     assert.equal(row?.backgroundPath, 'bg.jpg');
     assert.equal(row?.backgroundUrl, 'https://cdn.example/bg.jpg');
+
+    // The past tense, and only in a real run: this is the line the dry-run test
+    // asserts the absence of, so the pair is only worth anything if this one is
+    // pinned too.
+    assert.match(lines.join('\n'), /group 1: the poster slot is cleared and wide\.jpg deleted/);
 
     // Nulling the column is only half of discarding the image. Leaving the
     // bytes behind would put a file in the artwork directory that no row names
@@ -279,7 +290,13 @@ test('a mismatching slot cleared under --dry-run keeps its file, as it keeps its
     await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
     await writeFile(join(dir, 'bg.jpg'), landscapeJpeg(1920, 1080));
 
-    const report = await reclassifyArtwork({ db, dir, dryRun: true, log: () => {} });
+    const lines: string[] = [];
+    const report = await reclassifyArtwork({
+      db,
+      dir,
+      dryRun: true,
+      log: (message) => lines.push(message),
+    });
     assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 0 });
 
     // The row is the easy half. The file is the half a dry run could quietly
@@ -287,6 +304,15 @@ test('a mismatching slot cleared under --dry-run keeps its file, as it keeps its
     assert.equal(getGroupMetadata(db, 1)?.posterPath, 'wide.jpg');
     assert.equal(await exists(dir, 'wide.jpg'), true, 'dry-run deletes nothing');
     assert.equal(await exists(dir, 'bg.jpg'), true);
+
+    // And the log must not say otherwise. A dry run that prints a deletion in
+    // the past tense while its own summary says "would be deleted" teaches an
+    // operator to distrust one of the two, and the wrong lesson is cheap to
+    // learn: they stop reading the summary.
+    const joined = lines.join('\n');
+    assert.match(joined, /the poster slot would be cleared and wide\.jpg would be deleted/);
+    assert.doesNotMatch(joined, /wide\.jpg deleted/, 'a dry run never states a deletion happened');
+    assert.doesNotMatch(joined, /slot is cleared/, 'nor a clear');
   });
 });
 
@@ -333,10 +359,19 @@ test('a cleared file that will not delete is reported as a leak, and the next ro
     // delete is a lesser, separate problem, and the log says which it is.
     assert.equal(getGroupMetadata(db, 1)?.posterPath, null);
     assert.equal(getGroupMetadata(db, 1)?.backgroundPath, 'bg.jpg');
-    assert.equal(await exists(dir, 'wide.jpg'), true, 'the failed unlink really did leave the file');
+    // No filesystem assertion here on purpose. The injected `rm` never reaches
+    // the disk, so `wide.jpg` is still there because of the stub, not because of
+    // anything this module decided — an assertion on it would pass under every
+    // mutation of the delete logic and pin only the arrangement. The log line is
+    // the test's real claim, and it is the one thing the failure path produces.
     assert.match(
       lines.join('\n'),
       /group 1: reclassified, but wide\.jpg could not be deleted and is now unreferenced: EACCES/,
+    );
+    assert.doesNotMatch(
+      lines.join('\n'),
+      /wide\.jpg deleted/,
+      'a failed unlink must not also have been reported as a deletion',
     );
 
     // The whole point: one unwritable file must not abort a backfill.
@@ -395,6 +430,13 @@ test('a slot cleared while the surviving slot names the same file keeps that fil
     // Both columns name one file. Clearing the poster column is exactly what
     // protects the image the background column is serving, so deleting it
     // would be the clear destroying what it set out to save.
+    //
+    // No current writer produces this row: `pipeline/metadata.ts` writes through
+    // `groupArtworkKey`, so a group's two files are always `group-poster-N.ext`
+    // and `group-background-N.ext`, and neither migration 15 nor
+    // `setArtworkPair` can make the two columns agree. It is seeded by hand
+    // because the guard is defence against a future writer or a hand-edited
+    // database, and the loss it prevents is not recoverable.
     db.prepare(
       `INSERT INTO group_metadata
          (group_id, state, source, title, poster_url, poster_path,
@@ -418,7 +460,10 @@ test('a slot cleared while the surviving slot names the same file keeps that fil
     assert.equal(row?.posterPath, null);
     assert.equal(row?.backgroundPath, 'shared.jpg');
     assert.equal(await exists(dir, 'shared.jpg'), true, 'the surviving slot is still serving it');
-    assert.match(lines.join('\n'), /its file kept, because the surviving slot names that file too/);
+    assert.match(
+      lines.join('\n'),
+      /group 1: the poster slot is cleared, and shared\.jpg kept, because the surviving slot names that file too/,
+    );
   });
 });
 
@@ -478,7 +523,10 @@ test('a mismatching poster is cleared, not moved, when the background slot holds
       true,
       'the cleared file is kept when the destination has no image of its own',
     );
-    assert.match(lines.join('\n'), /its file kept, because the surviving slot has no usable image of its own/);
+    assert.match(
+      lines.join('\n'),
+      /group 1: the poster slot is cleared, and wide\.jpg kept, because the surviving slot has no usable image of its own/,
+    );
   });
 });
 
