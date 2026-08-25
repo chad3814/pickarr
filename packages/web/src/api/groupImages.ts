@@ -74,7 +74,10 @@ export function groupImages(group: GroupView): GroupImage[] {
  * of this phase. The slot is a fixed 2:3 frame that crops what it is given, so a
  * landscape background in it is the exact outcome the poster/background split
  * was made to end. The modal has no such constraint and lists the background
- * second, so an image the slot refuses is still one click away.
+ * second — reachable by clicking the slot or a performer avatar, whichever the
+ * card has. Neither exists for a group whose only artwork is a background with
+ * no cast portrait, so for that group the background is unreachable, not merely
+ * one click further away.
  *
  * A group with a background and no performer therefore draws no slot even though
  * `groupImages` returns one image. That is not an oversight to tidy up later.

@@ -13,12 +13,17 @@ import { expect, test } from '../src/harness.ts';
 const RELEASE = 'Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR';
 
 /**
- * 8 x 2000, 1-bit greyscale, 84 bytes — the same deliberately extreme shape
- * `metadata-modal.spec.ts` uses, and for the same reason: a browser handed
- * undecodable bytes renders a broken image with no intrinsic size, and an
- * image with no size cannot overlap anything. The tallest plausible poster is
- * also the one most likely to reach the rows below it, which is exactly the
- * case under test.
+ * 8 x 2000, 1-bit greyscale, 84 bytes — the same fixture `metadata-modal.spec.ts`
+ * uses, kept from before the slot had a fixed frame: an image's rendered size
+ * used to come from its own dimensions, and this extreme shape was the one most
+ * likely to reach the rows below it.
+ *
+ * The shape itself no longer drives what this test checks: `.card-artwork`
+ * (`card.css`) now gives the slot a fixed `width: 6rem; aspect-ratio: 2 / 3`
+ * frame that crops whatever it is given, so the rendered box is the same
+ * whether the source is this shape or square. What still matters is that the
+ * bytes decode — a browser handed undecodable bytes renders a broken image,
+ * and this suite needs a real image box to measure, not that the box is tall.
  */
 const TALL_PNG =
   'data:image/png;base64,' +
@@ -41,7 +46,7 @@ function candidateWithPoster(): MetadataCandidate {
   };
 }
 
-test('a tall poster grows the card head instead of covering the releases', async ({
+test("the slot's artwork flows beside the identity block, spanning it, without covering the releases", async ({
   page,
   harness,
 }) => {

@@ -99,8 +99,10 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
 
   // Two rules, deliberately different, and both stated in `groupImages.ts`:
   // the slot is a fixed 2:3 frame that crops, so it refuses a landscape
-  // background; the modal has no such constraint and lists it. An image the
-  // slot will not show is one click away rather than gone.
+  // background; the modal has no such constraint and lists it. That only
+  // reaches a user when the card has an opener at all — a group whose only
+  // artwork is a background with no cast portrait has neither a slot nor an
+  // avatar, so that image is unreachable, not one click away.
   const slot = slotImage(group);
   const images = groupImages(group);
 
@@ -239,13 +241,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
     // a time — there is no arrangement in which two cards claim it.
     <article className="media-card" id={groupAnchor(group.id)}>
       {/*
-       * Everything identifying the group goes in the left column, the poster
-       * in the right, and the row is as tall as whichever is taller. The
-       * poster was positioned absolutely once, which reserved no height at
-       * all and left it hanging over the release rows; giving it a column
-       * beside the whole identity block — title, Edit, fields — rather than
-       * beside the title alone is what keeps that column tall enough to sit
-       * next to a poster without leaving a band of empty space under it.
+       * Everything identifying the group goes in the left column, the card's
+       * slot — a poster or a performer portrait — in the right, and the row
+       * is as tall as whichever is taller. The slot's image was positioned
+       * absolutely once, which reserved no height at all and left it hanging
+       * over the release rows; giving it a column beside the whole identity
+       * block — title, Edit, fields — rather than beside the title alone is
+       * what keeps that column tall enough to sit next to the slot without
+       * leaving a band of empty space under it.
        */}
       <div className="card-head">
         <div className="card-head-main">
@@ -369,9 +372,10 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
        * came back with nothing, which is likewise nothing to show. The
        * provider populates poster, synopsis, performers, release date and
        * running time unevenly, so each is checked and rendered on its own —
-       * one being missing says nothing about the others. The poster itself
-       * is rendered above, out of this section: it is absolutely positioned
-       * and out of flow, so it does not compete with anything here.
+       * one being missing says nothing about the others. The card's slot —
+       * a poster or a performer portrait — is rendered above, out of this
+       * section: it lives in `.card-head`, in normal flow beside the
+       * identity column, so it does not compete with anything here.
        */}
       {metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">

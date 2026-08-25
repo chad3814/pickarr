@@ -424,8 +424,10 @@ test('a background alone draws no slot, because a 2:3 frame would crop it', () =
     <MediaCard group={withMetadata({ hasPoster: false, hasBackground: true, performers: [] })}
                onPick={() => {}} />,
   );
-  // The background is not gone — it is in the modal's list (see
-  // groupImages.test.ts). It is only refused *this* frame.
+  // The background is still in `groupImages`' list (see groupImages.test.ts)
+  // — only this frame refuses it. With no cast portrait, though, this
+  // fixture has no slot and no avatar either, so nothing on the card opens
+  // the modal: here the background is unreachable, not one click away.
   // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('img', { name: /for Alex Coal/i }));
 });
@@ -497,7 +499,8 @@ test('the slot opens the modal on the whole list, starting at the scene image', 
   // Maze" also matches her cast-list avatar below, and throws on the
   // ambiguity. `.card-head` holds the slot and nothing else named for a
   // performer.
-  const head = card('Alex Coal').querySelector('.card-head') as HTMLElement;
+  const head = card('Alex Coal').querySelector<HTMLElement>('.card-head');
+  assert.ok(head !== null, 'no .card-head in the card');
   fireEvent.click(within(head).getByRole('button', { name: 'Alice Maze' }));
   const dialog = screen.getByRole('dialog');
   // Index 0 is the background, which is not what was clicked. Deliberate: the
