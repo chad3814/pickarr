@@ -9,8 +9,14 @@
  * cached file with `classifyArtwork` and moves a row, url and path together,
  * whenever the measurement disagrees with the column it is in.
  *
+ * Where the correct slot is already filled the mismatching image cannot be
+ * moved anywhere, so the row's column is cleared and the image's file deleted —
+ * an image that cannot be correctly placed is not kept under a name that
+ * misdescribes it, and is not left on disk unreferenced either.
+ *
  * Offline in the fullest sense: no network request, no API key, nothing but
- * local bytes already on disk. It does write to the database.
+ * local bytes already on disk. It does write to the database, and it deletes an
+ * artwork file for every row it clears.
  *
  *   npm run reclassify-artwork -- --database=/config/pickarr.db --dry-run
  *   npm run reclassify-artwork -- --database=/config/pickarr.db
@@ -36,7 +42,7 @@ interface Options {
   databasePath: string;
   /** Defaults to `artwork/` beside the database, as the application's own does. */
   artworkDir: string | null;
-  /** Report what would move and write nothing. */
+  /** Report what would move and change nothing, in the database or on disk. */
   dryRun: boolean;
 }
 
@@ -63,7 +69,7 @@ async function main(): Promise<void> {
 
   console.log(`database : ${options.databasePath}`);
   console.log(`artwork  : ${artworkDir}`);
-  if (options.dryRun) console.log('dry run  : nothing will be written');
+  if (options.dryRun) console.log('dry run  : nothing will be written or deleted');
 
   const started = Date.now();
   const result = await reclassifyArtwork({
@@ -74,15 +80,24 @@ async function main(): Promise<void> {
   });
   db.close();
 
+  // `cleared` is reported as a deletion rather than by its internal name: an
+  // operator reading one summary line should not have to already know that
+  // clearing a column also removes the file underneath it. Under --dry-run the
+  // same number is an intention, and reads as one.
+  const clearedLabel = options.dryRun ? 'would be deleted' : 'deleted';
   console.log(
-    `\n${result.moved} moved, ${result.cleared} cleared, ${result.unreadable} unreadable, ` +
+    `\n${result.moved} moved, ${result.cleared} ${clearedLabel}, ${result.unreadable} unreadable, ` +
       `of ${result.examined} examined in ${Math.round((Date.now() - started) / 1000)}s`,
   );
   if (options.dryRun && (result.moved > 0 || result.cleared > 0)) {
-    console.log('Dry run: nothing was written. Re-run without --dry-run to apply.');
+    console.log('Dry run: nothing was written or deleted. Re-run without --dry-run to apply.');
   }
   if (result.cleared > 0) {
-    console.log('Cleared rows had a mismatching image discarded because the correct slot was already filled.');
+    console.log(
+      options.dryRun
+        ? 'Those rows hold an image the correct slot is already filled with, so it would be dropped from the row and deleted from the artwork directory.'
+        : 'Those rows held an image the correct slot was already filled with, so it was dropped from the row and deleted from the artwork directory.',
+    );
   }
   if (result.unreadable > 0) {
     console.log('Unreadable rows were left as they were; re-run to try them again.');

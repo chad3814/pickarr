@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -37,6 +37,16 @@ function landscapeJpeg(width: number, height: number): Uint8Array {
 function portraitJpeg(width: number, height: number): Uint8Array {
   if (width > height) throw new Error(`portraitJpeg(${width}, ${height}) is not portrait`);
   return jpeg(width, height);
+}
+
+/** Whether a cached file is still on disk — the only way to see the unlink from outside. */
+async function exists(dir: string, name: string): Promise<boolean> {
+  try {
+    await access(join(dir, name));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Every test gets its own temp artwork directory and removes it on the way out. */
@@ -205,6 +215,12 @@ test('a mismatching poster is cleared, not moved, when the background slot alrea
     // The background that was already correct must be untouched, byte for byte.
     assert.equal(row?.backgroundPath, 'bg.jpg');
     assert.equal(row?.backgroundUrl, 'https://cdn.example/bg.jpg');
+
+    // Nulling the column is only half of discarding the image. Leaving the
+    // bytes behind would put a file in the artwork directory that no row names
+    // and nothing can tell from a live one.
+    assert.equal(await exists(dir, 'wide.jpg'), false, 'the cleared image is deleted, not orphaned');
+    assert.equal(await exists(dir, 'bg.jpg'), true, "the destination's own file is left alone");
   });
 });
 
@@ -238,7 +254,182 @@ test('a mismatching background is cleared, not moved, when the poster slot alrea
     // The poster that was already correct must be untouched, byte for byte.
     assert.equal(row?.posterPath, 'p.jpg');
     assert.equal(row?.posterUrl, 'https://cdn.example/p.jpg');
+
+    assert.equal(await exists(dir, 'tall.jpg'), false, 'the cleared image is deleted, not orphaned');
+    assert.equal(await exists(dir, 'p.jpg'), true, "the destination's own file is left alone");
   });
+});
+
+test('a mismatching slot cleared under --dry-run keeps its file, as it keeps its row', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/wide.jpg', 'wide.jpg',
+               'https://cdn.example/bg.jpg', 'bg.jpg', 1000)`,
+    ).run();
+    await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
+    await writeFile(join(dir, 'bg.jpg'), landscapeJpeg(1920, 1080));
+
+    const report = await reclassifyArtwork({ db, dir, dryRun: true, log: () => {} });
+    assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 0 });
+
+    // The row is the easy half. The file is the half a dry run could quietly
+    // get wrong, since a deleted image is the one thing a re-run cannot undo.
+    assert.equal(getGroupMetadata(db, 1)?.posterPath, 'wide.jpg');
+    assert.equal(await exists(dir, 'wide.jpg'), true, 'dry-run deletes nothing');
+    assert.equal(await exists(dir, 'bg.jpg'), true);
+  });
+});
+
+test('a cleared file that will not delete is reported as a leak, and the next row is still processed', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    for (const groupId of [1, 2]) {
+      db.prepare(
+        `INSERT INTO media_groups
+           (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+         VALUES (?, '@pickarr/plugin-scenes', ?, '{}', '', 0, 0)`,
+      ).run(groupId, `key-${groupId}`);
+    }
+    // Group 1 clears (its background slot is filled); group 2, examined after
+    // it, is an ordinary move that must not be lost to group 1's failure.
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/wide.jpg', 'wide.jpg',
+               'https://cdn.example/bg.jpg', 'bg.jpg', 1000)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path, fetched_at)
+       VALUES (2, 'confirmed', 'theporndb', 'B Scene', 'https://cdn.example/2.jpg', '2.jpg', 1000)`,
+    ).run();
+    await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
+    await writeFile(join(dir, 'bg.jpg'), landscapeJpeg(1920, 1080));
+    await writeFile(join(dir, '2.jpg'), landscapeJpeg(1279, 719));
+
+    const lines: string[] = [];
+    const report = await reclassifyArtwork({
+      db,
+      dir,
+      dryRun: false,
+      log: (message) => lines.push(message),
+      rm: () => Promise.reject(new Error('EACCES')),
+    });
+
+    assert.deepEqual(report, { examined: 3, moved: 1, cleared: 1, unreadable: 0 });
+    // The row was reclassified correctly regardless: a file that would not
+    // delete is a lesser, separate problem, and the log says which it is.
+    assert.equal(getGroupMetadata(db, 1)?.posterPath, null);
+    assert.equal(getGroupMetadata(db, 1)?.backgroundPath, 'bg.jpg');
+    assert.equal(await exists(dir, 'wide.jpg'), true, 'the failed unlink really did leave the file');
+    assert.match(
+      lines.join('\n'),
+      /group 1: reclassified, but wide\.jpg could not be deleted and is now unreferenced: EACCES/,
+    );
+
+    // The whole point: one unwritable file must not abort a backfill.
+    assert.equal(getGroupMetadata(db, 2)?.posterPath, null);
+    assert.equal(getGroupMetadata(db, 2)?.backgroundPath, '2.jpg');
+  });
+});
+
+test('a database write that fails leaves the file it would have orphaned in place', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/wide.jpg', 'wide.jpg',
+               'https://cdn.example/bg.jpg', 'bg.jpg', 1000)`,
+    ).run();
+    await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
+    await writeFile(join(dir, 'bg.jpg'), landscapeJpeg(1920, 1080));
+    // Refuses the one UPDATE `setArtworkPair` is about to attempt, which is the
+    // only way to reach the ordering from outside: a trigger, rather than a
+    // stubbed writer, so the failure is a real failure of the real statement.
+    db.exec(
+      `CREATE TRIGGER refuse_writes BEFORE UPDATE ON group_metadata
+       BEGIN SELECT RAISE(ABORT, 'no writes'); END`,
+    );
+
+    await assert.rejects(
+      reclassifyArtwork({ db, dir, dryRun: false, log: () => {} }),
+      /no writes/,
+    );
+
+    // This is the asymmetry the order is chosen for. A file with no row is
+    // recoverable — re-run and it is deleted properly. A row naming a file that
+    // is gone is not recoverable by anything.
+    assert.equal(await exists(dir, 'wide.jpg'), true, 'nothing is deleted until the row is written');
+    assert.equal(getGroupMetadata(db, 1)?.posterPath, 'wide.jpg');
+  });
+});
+
+test('a slot cleared while the surviving slot names the same file keeps that file', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    // Both columns name one file. Clearing the poster column is exactly what
+    // protects the image the background column is serving, so deleting it
+    // would be the clear destroying what it set out to save.
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/poster/shared.jpg', 'shared.jpg',
+               'https://cdn.example/background/shared.jpg', 'shared.jpg', 1000)`,
+    ).run();
+    await writeFile(join(dir, 'shared.jpg'), landscapeJpeg(1279, 719));
+
+    const lines: string[] = [];
+    const report = await reclassifyArtwork({
+      db,
+      dir,
+      dryRun: false,
+      log: (message) => lines.push(message),
+    });
+    assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 0 });
+
+    const row = getGroupMetadata(db, 1);
+    assert.equal(row?.posterPath, null);
+    assert.equal(row?.backgroundPath, 'shared.jpg');
+    assert.equal(await exists(dir, 'shared.jpg'), true, 'the surviving slot is still serving it');
+    assert.match(lines.join('\n'), /its file kept, because the surviving slot names that file too/);
+  });
+});
+
+test('a move leaves the file it relocates on disk, since the row still names it', async () => {
+  const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: landscapeJpeg(1279, 719) });
+  assert.deepEqual(
+    await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} }),
+    { examined: 1, moved: 1, cleared: 0, unreadable: 0 },
+  );
+  assert.equal(getGroupMetadata(db, 1)?.backgroundPath, '1.jpg');
+  assert.equal(await exists(dir, '1.jpg'), true, 'a move deletes nothing — the path just changed column');
 });
 
 test('a mismatching poster is cleared, not moved, when the background slot holds only a url and no cached file', async () => {
@@ -299,6 +490,11 @@ test('a poster and a background swapped with each other are each moved to the ri
     assert.equal(row?.posterUrl, 'https://cdn.example/tall.jpg');
     assert.equal(row?.backgroundPath, 'wide.jpg');
     assert.equal(row?.backgroundUrl, 'https://cdn.example/wide.jpg');
+
+    // A swap exchanges two paths, so both are still referenced afterwards and
+    // neither is an orphan.
+    assert.equal(await exists(dir, 'wide.jpg'), true, 'a swap deletes nothing');
+    assert.equal(await exists(dir, 'tall.jpg'), true, 'a swap deletes nothing');
   });
 });
 
