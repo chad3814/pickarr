@@ -1,9 +1,9 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { MediaCard } from '../src/components/MediaCard.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
-import type { GroupView, ManualField, MetadataView } from '../src/api/client.ts';
+import type { GroupView, ManualField, MetadataView, PerformerView } from '../src/api/client.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its card behind, and every later query sees two.
@@ -72,6 +72,10 @@ function withMetadata(over: Partial<Extract<MetadataView, { state: 'confirmed' }
     ...GROUP,
     metadata: { ...(CONFIRMED as Extract<MetadataView, { state: 'confirmed' }>), ...over },
   };
+}
+
+function performer(over: Partial<PerformerView>): PerformerView {
+  return { id: 4, name: 'Alice Maze', url: 'https://example/alice', hasAvatar: true, hasImage: true, ...over };
 }
 
 test('renders the display fields', () => {
@@ -394,49 +398,112 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
   assert.ok(screen.getByText('A synopsis from the provider.'));
 });
 
-test('the poster is a button that opens the modal, and the modal closes', () => {
+test('the slot is a button that opens the modal, and the modal closes', () => {
   render(<MediaCard group={withMetadata({ hasPoster: true })} onPick={() => {}} />);
   // #40: never `assert.equal(screen.queryByRole(x), null)` — same deep-inspect
   // hazard as `queryByText`, on a live element instead of text.
   assert.ok(!screen.queryByRole('dialog'));
-  fireEvent.click(screen.getByRole('button', { name: /poster/i }));
+  fireEvent.click(screen.getByRole('button', { name: /poster for/i }));
   assert.ok(screen.getByRole('dialog'));
   fireEvent.click(screen.getByRole('button', { name: /close/i }));
   assert.ok(!screen.queryByRole('dialog'));
 });
 
-test('a group with only a background still shows an image, from the background route', () => {
+test('the slot shows the poster when there is one', () => {
   render(
-    <MediaCard
-      group={withMetadata({ hasPoster: false, hasBackground: true })}
-      onPick={() => {}}
-    />,
-  );
-  const image = screen.getByRole('img', { name: /poster for/i });
-  assert.equal(image.getAttribute('src'), '/api/groups/1/background');
-});
-
-test('a poster wins when both exist', () => {
-  render(
-    <MediaCard
-      group={withMetadata({ hasPoster: true, hasBackground: true })}
-      onPick={() => {}}
-    />,
+    <MediaCard group={withMetadata({ hasPoster: true, hasBackground: true })} onPick={() => {}} />,
   );
   assert.equal(
-    screen.getByRole('img', { name: /poster for/i }).getAttribute('src'),
+    screen.getByRole('img', { name: 'Poster for Alex Coal' }).getAttribute('src'),
     '/api/groups/1/poster',
   );
 });
 
-test('neither image means no thumbnail at all, as before', () => {
+test('a background alone draws no slot, because a 2:3 frame would crop it', () => {
+  render(
+    <MediaCard group={withMetadata({ hasPoster: false, hasBackground: true, performers: [] })}
+               onPick={() => {}} />,
+  );
+  // The background is not gone — it is in the modal's list (see
+  // groupImages.test.ts). It is only refused *this* frame.
+  // #40: never `assert.equal(screen.queryByRole(x), null)`.
+  assert.ok(!screen.queryByRole('img', { name: /for Alex Coal/i }));
+});
+
+test('with no poster the slot falls to the first performer portrait', () => {
   render(
     <MediaCard
-      group={withMetadata({ hasPoster: false, hasBackground: false })}
+      group={withMetadata({
+        hasPoster: false,
+        hasBackground: true,
+        performers: [performer({ id: 4, name: 'Alice Maze' }), performer({ id: 5, name: 'Bea Vale' })],
+      })}
       onPick={() => {}}
     />,
   );
-  assert.equal(screen.queryByRole('img', { name: /poster for/i }), null);
+  const slot = card('Alex Coal').querySelector('.card-artwork img');
+  assert.equal(slot?.getAttribute('src'), '/api/performers/4/image');
+  // Announced as the performer, never as the scene's poster.
+  assert.equal(slot?.getAttribute('alt'), 'Alice Maze');
+});
+
+test('neither image means no slot at all, as before', () => {
+  // `performerNames: []` is load-bearing, not tidying. `CONFIRMED` carries
+  // `performerNames: ['Alex Coal', 'Jane Doe']`, and 'Alex Coal' is also the
+  // group's title — so with an empty `performers` the legacy names list renders
+  // an `<li>Alex Coal</li>`, and `card()`'s `getByText` then matches both it and
+  // the `<h2>` and throws on the ambiguity. Emptying both lists renders no cast
+  // at all, which is what this test is about anyway.
+  render(
+    <MediaCard
+      group={withMetadata({ hasPoster: false, hasBackground: false, performers: [], performerNames: [] })}
+      onPick={() => {}}
+    />,
+  );
+  // #40 again: this assertion used to be `assert.equal(screen.queryByRole(...), null)`,
+  // which is the exact deep-inspect hazard the comments in this file forbid.
+  assert.ok(!card('Alex Coal').querySelector('.card-artwork'));
+});
+
+test('the slot renders for a group whose scene lookup returned nothing', () => {
+  // The slot follows the images, not the scene answer. The cast list already
+  // renders at any state; gating the slot produced cards that named a
+  // performer they would not show.
+  render(
+    <MediaCard
+      group={{ ...GROUP, metadata: { state: 'none', performers: [performer({ id: 4 })] } }}
+      onPick={() => {}}
+    />,
+  );
+  assert.equal(
+    card('Alex Coal').querySelector('.card-artwork img')?.getAttribute('src'),
+    '/api/performers/4/image',
+  );
+});
+
+test('the slot opens the modal on the whole list, starting at the scene image', () => {
+  render(
+    <MediaCard
+      group={withMetadata({
+        hasPoster: false,
+        hasBackground: true,
+        performers: [performer({ id: 4, name: 'Alice Maze' })],
+      })}
+      onPick={() => {}}
+    />,
+  );
+  // Scoped to `.card-head`: with no poster the slot itself shows this
+  // performer's portrait, so an unscoped query for a button named "Alice
+  // Maze" also matches her cast-list avatar below, and throws on the
+  // ambiguity. `.card-head` holds the slot and nothing else named for a
+  // performer.
+  const head = card('Alex Coal').querySelector('.card-head') as HTMLElement;
+  fireEvent.click(within(head).getByRole('button', { name: 'Alice Maze' }));
+  const dialog = screen.getByRole('dialog');
+  // Index 0 is the background, which is not what was clicked. Deliberate: the
+  // browse runs from the scene's own images outward.
+  assert.equal(dialog.querySelector('img')?.getAttribute('src'), '/api/groups/1/background');
+  assert.ok(screen.getByText('Background · 1 of 2'));
 });
 
 test('a performer shows an avatar, and their name links to their page', () => {
@@ -464,17 +531,24 @@ test('a performer with no cached avatar renders a name and no image', () => {
   assert.ok(!screen.queryByRole('img', { name: /alice maze/i }));
 });
 
-test('a performer avatar opens the full image, not the face', () => {
-  // Two sizes exist for a reason: the thumbnail is a 500x500 crop, the modal
-  // wants the poster.
-  render(<MediaCard group={withMetadata({ performers: [
-    { id: 4, name: 'Alice Maze', url: 'https://theporndb.net/performers/alice-maze',
-      hasAvatar: true, hasImage: true },
-  ] })} onPick={() => {}} />);
-
-  fireEvent.click(screen.getByRole('button', { name: /alice maze/i }));
-  assert.equal(screen.getByRole('dialog').querySelector('img')?.getAttribute('src'),
-    '/api/performers/4/image');
+test('a performer avatar opens the same list at that performer', () => {
+  render(
+    <MediaCard
+      group={withMetadata({
+        hasPoster: true,
+        performers: [performer({ id: 4, name: 'Alice Maze' }), performer({ id: 5, name: 'Bea Vale' })],
+      })}
+      onPick={() => {}}
+    />,
+  );
+  // Two sizes exist for a reason: the avatar is a face crop, the modal wants
+  // the full image.
+  fireEvent.click(screen.getAllByRole('button', { name: 'Bea Vale' })[0]!);
+  assert.equal(
+    screen.getByRole('dialog').querySelector('img')?.getAttribute('src'),
+    '/api/performers/5/image',
+  );
+  assert.ok(screen.getByText('Bea Vale · 3 of 3'));
 });
 
 test('a performer with an avatar but no full image is not clickable', () => {

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { GroupView, ManualField } from '../api/client.ts';
 import type { GroupImage } from '../api/groupImages.ts';
 import { groupAnchor } from '../api/anchors.ts';
+import { groupImages, slotImage } from '../api/groupImages.ts';
 import { formatDuration } from '../api/format.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
 import { ImageModal } from './ImageModal.tsx';
@@ -96,27 +97,12 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // not the other.
   const { metadata } = group;
 
-  /**
-   * TEMPORARY, and phase 2b deletes it deliberately.
-   *
-   * Before the poster/background split, 1,494 of this library's 1,508 stored
-   * "posters" were landscape backgrounds. The moment `hasPoster` started telling
-   * the truth those cards would have gone blank, so this reproduces the old
-   * rendering exactly: whichever image the group has, preferring the poster.
-   *
-   * Phase 2b replaces it with poster, then the first performer portrait, then a
-   * placeholder — and moves the background to the image gallery, where a
-   * landscape image is not cropped into a 2:3 slot. Do not mistake this for the
-   * intended design.
-   */
-  const thumbnail =
-    metadata.state !== 'confirmed'
-      ? null
-      : metadata.hasPoster
-        ? `/api/groups/${group.id}/poster`
-        : metadata.hasBackground
-          ? `/api/groups/${group.id}/background`
-          : null;
+  // Two rules, deliberately different, and both stated in `groupImages.ts`:
+  // the slot is a fixed 2:3 frame that crops, so it refuses a landscape
+  // background; the modal has no such constraint and lists it. An image the
+  // slot will not show is one click away rather than gone.
+  const slot = slotImage(group);
+  const images = groupImages(group);
 
   // A requery's error message describes one attempt, and a fresher answer
   // outlives it: leaving it up would caption a card that has since updated
@@ -183,12 +169,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
                   type="button"
                   className="avatar-thumb"
                   onClick={() => setModal({
-                    images: [{
-                      src: `/api/performers/${performer.id}/image`,
-                      alt: performer.name,
-                      label: performer.name,
-                    }],
-                    startIndex: 0,
+                    images,
+                    // Cannot be -1 here: this button only renders under
+                    // `performer.hasImage`, which is the same condition
+                    // `groupImages` includes the entry under, so its src is
+                    // always present in `images`.
+                    startIndex: images.findIndex(
+                      (image) => image.src === `/api/performers/${performer.id}/image`,
+                    ),
                   })}
                 >
                   <img src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
@@ -326,16 +314,13 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
           </ul>
         </div>
 
-        {thumbnail !== null && (
+        {slot !== null && (
           <button
             type="button"
-            className="poster-thumb"
-            onClick={() => setModal({
-              images: [{ src: thumbnail, alt: `Poster for ${display.title}`, label: 'Poster' }],
-              startIndex: 0,
-            })}
+            className="card-artwork"
+            onClick={() => setModal({ images, startIndex: 0 })}
           >
-            <img src={thumbnail} alt={`Poster for ${display.title}`} />
+            <img src={slot.src} alt={slot.alt} />
           </button>
         )}
       </div>
