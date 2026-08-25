@@ -83,10 +83,17 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
   // there is one to give it to: a keyboard user who just walked to an end
   // still has one button meaningfully left to reach (the one that steps back
   // the way they came), and parking focus elsewhere would cost them an extra
-  // Tab to get there. Only a one-image list — which renders no browse chrome
-  // at all and so has neither button — reaches the fallback, and that list
-  // cannot step either way, so there is nothing to reach regardless of where
-  // focus lands.
+  // Tab to get there.
+  //
+  // Two list shapes leave `target` null, and only one of them can arrive at
+  // the fallback. A one-image list renders no browse chrome at all, so both
+  // refs are null; a middle index of a longer list has both buttons enabled,
+  // so neither end test selects one. The middle index cannot get here: with
+  // both buttons live nothing has just been disabled, so nothing was blurred,
+  // so the guard above has already returned on focus still being inside the
+  // dialog. The one-image list is the shape that actually falls through, and
+  // it cannot step either way, so there is nothing to reach regardless of
+  // where focus lands.
   //
   // The fallback is the close button rather than the dialog, and that choice
   // is what keeps this effect from needing anything of the `<dialog>` element

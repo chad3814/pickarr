@@ -122,7 +122,32 @@ test('paging away from a broken image and back shows the failure again, not a st
 // `.image-modal-close`, which is always rendered and focusable everywhere with
 // no `tabindex` at all, so there is nothing left for the attribute to insure.
 
-test('the failure is announced, and stays attached to the image whose alt still claims it loaded', () => {
+test('a one-image list hands reclaimed focus to the close button', () => {
+  render(<ImageModal images={ONE} startIndex={0} onClose={() => {}} />);
+  // The shape that actually reaches the reclaim effect's fallback, and the only
+  // one that can (see `ImageModal.tsx`): no browse chrome means neither browse
+  // ref is set. Observable here only because happy-dom's `showModal()` leaves
+  // focus outside the dialog, which is what sends this render through the
+  // fallback at all — in a real browser `showModal()` has already put focus on
+  // this same button before the effect runs.
+  //
+  // This is what keeps the fallback from failing silently. The effect focuses
+  // `closeButton.current` with optional chaining, so a refactor that dropped
+  // `ref={closeButton}` from the button would reclaim nothing at all and throw
+  // nothing either — and the e2e reclaim test walks a two-image list, where
+  // `target` is a real browse button and the fallback never engages. Without
+  // this test that regression has nowhere to show up.
+  // #40 again, in its identity form: `assert.equal` on two live elements hands
+  // both to the deep-diff printer, which on DOM nodes turns one failure into a
+  // ~50s hang and an unreadable message. Compared as a boolean instead, with
+  // the explanation in the assertion rather than in the diff.
+  assert.ok(
+    document.activeElement === screen.getByRole('button', { name: /close/i }),
+    'a one-image list must reclaim focus to the close button',
+  );
+});
+
+test('the failure text carries a status role and describes the image whose alt still claims it loaded', () => {
   render(<ImageModal images={THREE} startIndex={1} onClose={() => {}} />);
   // Nothing to point at while the image is fine: a description referring to an
   // element that is not rendered describes nothing.
@@ -130,9 +155,18 @@ test('the failure is announced, and stays attached to the image whose alt still 
 
   fireEvent.error(screen.getByRole('img'));
   const failure = screen.getByText(/could not be loaded/i);
-  // `role="status"` because this text appears on `onError` — no user action
-  // prompts a re-read, so without it the failure reaches nobody who cannot see
-  // it.
+  // `role="status"` because this text appears on `onError`, with no user action
+  // to prompt a re-read.
+  //
+  // Titled for what this pins rather than for the outcome, because the two are
+  // not the same here. The `<p>` enters the DOM *with* its text already in it,
+  // and a live region created and populated in one go is the case NVDA and
+  // JAWS handle unreliably; the pattern they honour is a region already in the
+  // tree whose contents then change, which is what `.image-modal-caption` is
+  // and this is not. Rendering this `<p>` unconditionally — present and empty
+  // until `failed` — would make the announcement reliable, and is deliberately
+  // not done in this wave. `aria-describedby` below is the half that works
+  // regardless.
   assert.equal(failure.getAttribute('role'), 'status');
   // And attached to the image, because the image's `alt` cannot be emptied to
   // tell the truth on its own: an empty alt drops the element out of the

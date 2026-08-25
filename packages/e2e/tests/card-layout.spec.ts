@@ -143,6 +143,19 @@ test("the slot's artwork flows beside the identity block, spanning it, without c
   // library in this repo's dependencies and this is not a reason to add one —
   // the same call `metadata-modal.spec.ts` makes about generating the fixture
   // by hand.
+  // The one thing in this repo that depends on the bytes having actually
+  // landed, and nothing above waits for them. `toBeVisible()` is satisfied by
+  // the 98 x 146 frame the moment it is laid out — the frame's size comes from
+  // the stylesheet, not from the image — and Playwright's element screenshot
+  // waits for visibility and a stable box, both of which an empty frame
+  // already has. Without this the sample could read card surface simply
+  // because the decode had not finished, and `playwright.config.ts` sets
+  // `retries: 0`, so that is a red build rather than a flake anyone gets to
+  // ignore. `complete` is also true for an image that failed to decode, which
+  // is fine here: this fixture decodes, and one that did not would fail the
+  // sample below rather than pass it.
+  await expect(poster).toHaveJSProperty('complete', true);
+
   const encoded = (await poster.screenshot()).toString('base64');
   const sample = await page.evaluate(async (png) => {
     const blob = await (await fetch(`data:image/png;base64,${png}`)).blob();
