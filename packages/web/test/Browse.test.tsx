@@ -249,14 +249,16 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
 }
 
 /**
- * Absence, as a boolean.
+ * Absence, as a boolean. Full rule and both hazard shapes — this one
+ * (`assert.equal(screen.queryByText(x), null)`) and the live-node-identity
+ * one — are documented once, on `gone()` in `MediaCard.test.tsx`; point
+ * questions there rather than here.
  *
- * `assert.equal(screen.queryByText(x), null)` is the obvious spelling and it
- * kills the test run: inside `waitFor` the first check normally fails (the
- * card is still there), and building that AssertionError's message means
- * node:assert deep-inspecting a live DOM element. Retry it a few hundred times
- * and the process is OOM-killed with no output naming a test — a
- * SIGKILL where a one-second timeout was expected.
+ * The concrete cost of getting this wrong, here: inside `waitFor` the first
+ * check normally fails (the card is still there), and node:assert
+ * deep-inspecting that live element a few hundred retries in a row is what
+ * gets the process OOM-killed — a SIGKILL where a one-second timeout was
+ * expected, and no output naming which test was running.
  */
 function gone(text: string | RegExp): boolean {
   return screen.queryByText(text) === null;

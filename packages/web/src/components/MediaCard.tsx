@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { GroupView, ManualField } from '../api/client.ts';
+import type { GroupImage } from '../api/groupImages.ts';
 import { groupAnchor } from '../api/anchors.ts';
+import { groupImages, slotImage } from '../api/groupImages.ts';
 import { formatDuration } from '../api/format.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
 import { ImageModal } from './ImageModal.tsx';
@@ -79,9 +81,10 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, onRequeryMetadata }: Props) {
   const { display } = group;
   const [editing, setEditing] = useState(false);
-  // One piece of state, so the poster and a performer's full image can never
-  // both be open at once.
-  const [modal, setModal] = useState<{ src: string; alt: string } | null>(null);
+  // One piece of state, so the card slot's image and a performer's full image
+  // can never both be open at once. Both now open the *same* list, differing
+  // only in where they start.
+  const [modal, setModal] = useState<{ images: GroupImage[]; startIndex: number } | null>(null);
   const [requerying, setRequerying] = useState(false);
   const [requeryError, setRequeryError] = useState<string | null>(null);
   // No local override of `group.metadata` any more: the route re-arms
@@ -94,27 +97,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // not the other.
   const { metadata } = group;
 
-  /**
-   * TEMPORARY, and phase 2b deletes it deliberately.
-   *
-   * Before the poster/background split, 1,494 of this library's 1,508 stored
-   * "posters" were landscape backgrounds. The moment `hasPoster` started telling
-   * the truth those cards would have gone blank, so this reproduces the old
-   * rendering exactly: whichever image the group has, preferring the poster.
-   *
-   * Phase 2b replaces it with poster, then the first performer portrait, then a
-   * placeholder — and moves the background to the image gallery, where a
-   * landscape image is not cropped into a 2:3 slot. Do not mistake this for the
-   * intended design.
-   */
-  const thumbnail =
-    metadata.state !== 'confirmed'
-      ? null
-      : metadata.hasPoster
-        ? `/api/groups/${group.id}/poster`
-        : metadata.hasBackground
-          ? `/api/groups/${group.id}/background`
-          : null;
+  // Two rules, deliberately different, and both stated in `groupImages.ts`:
+  // the slot is a fixed 2:3 frame that crops, so it refuses a landscape
+  // background; the modal has no such constraint and lists it. That only
+  // reaches a user when the card has an opener at all — a group whose only
+  // artwork is a background with no cast portrait has neither a slot nor an
+  // avatar, so that image is unreachable, not one click away.
+  const slot = slotImage(group);
+  const images = groupImages(group);
 
   // A requery's error message describes one attempt, and a fresher answer
   // outlives it: leaving it up would caption a card that has since updated
@@ -180,8 +170,16 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
                 <button
                   type="button"
                   className="avatar-thumb"
-                  onClick={() => setModal({ src: `/api/performers/${performer.id}/image`,
-                                            alt: performer.name })}
+                  onClick={() => setModal({
+                    images,
+                    // Cannot be -1 here: this button only renders under
+                    // `performer.hasImage`, which is the same condition
+                    // `groupImages` includes the entry under, so its src is
+                    // always present in `images`.
+                    startIndex: images.findIndex(
+                      (image) => image.src === `/api/performers/${performer.id}/image`,
+                    ),
+                  })}
                 >
                   <img src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
                 </button>
@@ -243,13 +241,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
     // a time — there is no arrangement in which two cards claim it.
     <article className="media-card" id={groupAnchor(group.id)}>
       {/*
-       * Everything identifying the group goes in the left column, the poster
-       * in the right, and the row is as tall as whichever is taller. The
-       * poster was positioned absolutely once, which reserved no height at
-       * all and left it hanging over the release rows; giving it a column
-       * beside the whole identity block — title, Edit, fields — rather than
-       * beside the title alone is what keeps that column tall enough to sit
-       * next to a poster without leaving a band of empty space under it.
+       * Everything identifying the group goes in the left column, the card's
+       * slot — a poster or a performer portrait — in the right, and the row
+       * is as tall as whichever is taller. The slot's image was positioned
+       * absolutely once, which reserved no height at all and left it hanging
+       * over the release rows; giving it a column beside the whole identity
+       * block — title, Edit, fields — rather than beside the title alone is
+       * what keeps that column tall enough to sit next to the slot without
+       * leaving a band of empty space under it.
        */}
       <div className="card-head">
         <div className="card-head-main">
@@ -318,13 +317,22 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
           </ul>
         </div>
 
-        {thumbnail !== null && (
+        {slot !== null && (
           <button
             type="button"
-            className="poster-thumb"
-            onClick={() => setModal({ src: thumbnail, alt: `Poster for ${display.title}` })}
+            className="card-artwork"
+            // Named for what pressing it does, rather than taking its name from
+            // the `alt` of the image inside it. That `alt` stays per-image, as
+            // §3.1 requires — but with no poster the slot shows the first cast
+            // portrait, which is the shape ~1,494 of this library's groups have,
+            // and an `alt`-derived name made this button and that same
+            // performer's avatar button in the cast list below two controls in
+            // one tab order with one accessible name and two different actions
+            // (index 0 versus that performer's own entry).
+            aria-label={`Browse images for ${display.title}`}
+            onClick={() => setModal({ images, startIndex: 0 })}
           >
-            <img src={thumbnail} alt={`Poster for ${display.title}`} />
+            <img src={slot.src} alt={slot.alt} />
           </button>
         )}
       </div>
@@ -373,9 +381,10 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
        * came back with nothing, which is likewise nothing to show. The
        * provider populates poster, synopsis, performers, release date and
        * running time unevenly, so each is checked and rendered on its own —
-       * one being missing says nothing about the others. The poster itself
-       * is rendered above, out of this section: it is absolutely positioned
-       * and out of flow, so it does not compete with anything here.
+       * one being missing says nothing about the others. The card's slot —
+       * a poster or a performer portrait — is rendered above, out of this
+       * section: it lives in `.card-head`, in normal flow beside the
+       * identity column, so it does not compete with anything here.
        */}
       {metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">

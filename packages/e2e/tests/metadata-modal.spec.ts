@@ -3,18 +3,28 @@ import type { MetadataCandidate } from '@pickarr/plugin-api';
 import { expect, test, type Harness } from '../src/harness.ts';
 
 /**
- * The seam this suite exists to prove: `ImageModal`'s Escape handling, in a
- * real browser.
+ * The seams this suite exists to prove: the parts of `ImageModal` a real
+ * browser is the only honest place to ask about.
  *
- * happy-dom implements `<dialog>.showModal()` but not Escape-to-close: an
- * open dialog given a bubbling, cancelable `keydown` with `key: 'Escape'`
- * stays `open` and fires neither `cancel` nor `close`. A unit test asserting
- * the modal closes on Escape would fail against correct code, and one
- * asserting it stays open would pass against broken code — the question
- * cannot be asked honestly outside a real browser, which is what this file
- * is for. `ImageModal.test.tsx` covers everything else about the component
- * (the X, the backdrop, focus) with happy-dom, deliberately leaving Escape
- * out with a comment pointing here.
+ * Escape is the original one, and no longer the only one. happy-dom implements
+ * `<dialog>.showModal()` but not Escape-to-close: an open dialog given a
+ * bubbling, cancelable `keydown` with `key: 'Escape'` stays `open` and fires
+ * neither `cancel` nor `close`. A unit test asserting the modal closes on
+ * Escape would fail against correct code, and one asserting it stays open
+ * would pass against broken code.
+ *
+ * The rest of this file proves the browse flow end to end, the clamp at each
+ * end of the list, the focus reclaim when a browse button disables itself
+ * under the pointer, and where focus lands after a dismissal. The reclaim is
+ * the one that most needs saying: happy-dom does not blur a focused element
+ * when it becomes `disabled` (measured — see `ImageModal.tsx`), so the bug it
+ * fixes cannot be reproduced there in either direction. The scaling test needs
+ * a browser for the neighbouring reason that happy-dom lays nothing out.
+ *
+ * `ImageModal.test.tsx` covers the rest with happy-dom: the X, the backdrop,
+ * the browse and its clamps as state changes, the caption, and the failure
+ * text with its announcement. It covers nothing about focus, deliberately and
+ * of necessity — it cannot observe the event that moves it.
  */
 
 /** A one-tick, on-site, in-window release: enough for `confirmMetadata` to settle. */
@@ -34,8 +44,10 @@ const RELEASE = 'Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR';
  * It is not the whole story for a group's poster or background —
  * `classifyArtwork` has to measure the image before `cacheImage` files it
  * under either column, and bytes it cannot decode are filed under neither.
- * `TALL_PNG` below is what a test needs when a poster or background has to
- * actually be stored, not merely fetched.
+ * A test that needs one of those actually stored, rather than merely fetched,
+ * needs a decodable fixture of the right *shape*: `TALL_PNG` below for a
+ * poster, `WIDE_PNG` for a background. Neither can stand in for the other,
+ * because the shape is what decides the column.
  */
 function dataUrl(bytes: string): string {
   return `data:image/jpeg;base64,${Buffer.from(bytes).toString('base64')}`;
@@ -57,7 +69,12 @@ function dataUrl(bytes: string): string {
  * name — a plausible `image/jpeg` label is not enough on its own. That is why
  * `confirmedCandidateWithArtwork` below defaults its poster to this image
  * rather than to `dataUrl(...)`, and why any test added here that needs a
- * poster or background actually *stored* has to do the same.
+ * *poster* stored has to do the same.
+ *
+ * A test needing a *background* stored cannot reach for this fixture. Being
+ * portrait is what files it under `poster`, so `TALL_PNG` can only ever be a
+ * poster, whatever column a caller passes it for. `WIDE_PNG` below is the
+ * background's equivalent, and that is the whole reason it had to be added.
  *
  * The extreme aspect ratio is what the scaling test below needs, and it is
  * also why undecodable bytes could never substitute for it even before
@@ -77,15 +94,42 @@ const TALL_PNG =
   'oAAAAIC3AQ+gAAFUpTheAAAAAElFTkSuQmCC';
 
 /**
- * A confirmed candidate carrying a poster and one performer with both a face
- * (for the avatar) and a full image (for the modal a click on it opens) —
- * the shape this suite needs to reach every button `ImageModal` can be
- * opened from. `performers[0].name` is `'Alice Maze'`, unrelated to the
- * release's own parsed title ('Alex Coal'): the two are independent fields,
- * and using a different name for each is what proves this suite is reading
- * the performer's own name rather than coincidentally matching the group's.
+ * A background the browser can actually decode: 2000 x 8, 1-bit greyscale,
+ * all black, landscape on purpose. `classifyArtwork` files width > height
+ * under `background` (the opposite test to `TALL_PNG`'s), so this is what a
+ * test needs when a group's background — rather than its poster — has to
+ * actually be stored: undecodable bytes are filed under neither column (see
+ * `TALL_PNG`'s own comment), and a plausible `image/png` label is not enough
+ * on its own.
+ *
+ * Nothing below measures this image's own layout the way the scaling test
+ * measures `TALL_PNG`, so its aspect ratio only has to clear the width >
+ * height bar `classifyArtwork` checks — it does not need to be as extreme. It
+ * is exactly that extreme anyway only because it is generated the same way as
+ * `TALL_PNG`, with width and height swapped: regenerate it the same way if it
+ * ever needs to change.
  */
-function confirmedCandidateWithArtwork(posterUrl = TALL_PNG): MetadataCandidate {
+const WIDE_PNG =
+  'data:image/png;base64,' +
+  'iVBORw0KGgoAAAANSUhEUgAAB9AAAAAIAQAAAACJiVkYAAAAF0lEQVR4nGNgGAWjYBSMglEwCkbB' +
+  'cAEAB9gAAYyOQlYAAAAASUVORK5CYII=';
+
+/**
+ * A confirmed candidate carrying a face and a full image for one performer —
+ * the shape this suite needs to reach the avatar button `ImageModal` can be
+ * opened from — plus, independently, a poster and a background. `posterUrl`
+ * defaults to `TALL_PNG`, matching what most tests in this file need; a spec
+ * needing the opposite shape (no poster, a background instead — the shape
+ * almost every real group has) passes `null` and `WIDE_PNG` explicitly.
+ * `performers[0].name` is `'Alice Maze'`, unrelated to the release's own
+ * parsed title ('Alex Coal'): the two are independent fields, and using a
+ * different name for each is what proves this suite is reading the
+ * performer's own name rather than coincidentally matching the group's.
+ */
+function confirmedCandidateWithArtwork(
+  posterUrl: string | null = TALL_PNG,
+  backgroundUrl: string | null = null,
+): MetadataCandidate {
   return {
     sourceUuid: 'e2e-scene-modal',
     title: 'Alex Coal',
@@ -106,6 +150,7 @@ function confirmedCandidateWithArtwork(posterUrl = TALL_PNG): MetadataCandidate 
     durationSeconds: null,
     synopsis: 'A modal test synopsis.',
     posterUrl,
+    backgroundUrl,
     slug: null,
   };
 }
@@ -129,9 +174,14 @@ function confirmedCandidateWithArtwork(posterUrl = TALL_PNG): MetadataCandidate 
  * ever loads means the SPA's first read is already the finished answer, with
  * no window for it to land in.
  */
-async function seedConfirmedGroup(page: Page, harness: Harness, posterUrl?: string): Promise<void> {
+async function seedConfirmedGroup(
+  page: Page,
+  harness: Harness,
+  posterUrl?: string | null,
+  backgroundUrl?: string | null,
+): Promise<void> {
   harness.ingest([RELEASE]);
-  harness.metadataClient.setCandidates([confirmedCandidateWithArtwork(posterUrl)]);
+  harness.metadataClient.setCandidates([confirmedCandidateWithArtwork(posterUrl, backgroundUrl)]);
 
   const group = harness.db
     .prepare('SELECT id FROM media_groups ORDER BY id DESC LIMIT 1')
@@ -156,11 +206,11 @@ test('the poster modal closes on Escape, on a click outside, and on the X', asyn
 }) => {
   await seedConfirmedGroup(page, harness);
 
-  const posterButton = page.getByRole('button', { name: /poster/i });
+  const slotButton = page.getByRole('button', { name: /browse images/i });
   const dialog = page.getByRole('dialog');
-  await expect(posterButton).toBeVisible({ timeout: 10_000 });
+  await expect(slotButton).toBeVisible({ timeout: 10_000 });
 
-  await posterButton.click();
+  await slotButton.click();
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
   // The property no unit test in this repo can check: happy-dom implements
@@ -183,20 +233,37 @@ test('the poster modal closes on Escape, on a click outside, and on the X', asyn
   // Escape's default action closes it, so the two handlers are redundant for
   // this one path. Removing *both* `onCancel` and `onClose` is what actually
   // reproduces the desync this reopen check exists to catch, and it does:
-  // the second `posterButton.click()` finds no dialog, because the state
+  // the second `slotButton.click()` finds no dialog, because the state
   // `onClose` would have cleared never clears, and the already-mounted
   // (native-closed) `<dialog>` element never runs `showModal()` again.
-  await posterButton.click();
+  await slotButton.click();
   await expect(dialog).toBeVisible();
 
   // Top-left corner: outside the centred image, inside the backdrop.
   await page.mouse.click(5, 5);
   await expect(dialog).toBeHidden();
 
-  await posterButton.click();
+  await slotButton.click();
   await expect(dialog).toBeVisible();
   await page.getByRole('button', { name: /close/i }).click();
   await expect(dialog).toBeHidden();
+
+  // Focus is *not* restored to the button that opened the modal: it lands on
+  // `<body>`, so the next Tab starts the page over from the top. Measured
+  // here, not reasoned about — and the reason is that no dismissal path
+  // reaches the close algorithm, which is the only thing that restores focus.
+  // The X and the backdrop call `onClose` directly and React unmounts the
+  // `<dialog>`; Escape's `onCancel` calls `preventDefault()` before it.
+  // Removing a dialog from the document is not closing it.
+  //
+  // Pinned as the defect it is rather than left unasked. It predates this
+  // branch — every dismissal path has always unmounted rather than closed —
+  // and fixing it means calling `close()` and letting the native `close`
+  // event drive `onClose`, which is a change to dismissal behaviour and so
+  // out of scope here. Whoever makes it will fail this line, which is the
+  // point: `ImageModal`'s own doc is written to match this measurement, and
+  // both have to move together.
+  await expect(page.locator('body')).toBeFocused();
 });
 
 test('a tall poster is scaled to fit inside the window rather than scrolled', async ({
@@ -217,9 +284,9 @@ test('a tall poster is scaled to fit inside the window rather than scrolled', as
   // overflow, not a rounding error.
   await seedConfirmedGroup(page, harness, TALL_PNG);
 
-  const posterButton = page.getByRole('button', { name: /poster/i });
-  await expect(posterButton).toBeVisible({ timeout: 10_000 });
-  await posterButton.click();
+  const slotButton = page.getByRole('button', { name: /browse images/i });
+  await expect(slotButton).toBeVisible({ timeout: 10_000 });
+  await slotButton.click();
 
   const dialog = page.getByRole('dialog');
   const image = dialog.getByRole('img');
@@ -270,4 +337,65 @@ test('a performer avatar opens the full image', async ({ page, harness }) => {
     'src',
     /\/api\/performers\/\d+\/image$/,
   );
+});
+
+test('the modal walks a group\'s images and clamps at the ends', async ({ page, harness }) => {
+  // Seeded with no poster, a background, and one performer portrait — the
+  // shape almost every real group has, and the reason the browse exists.
+  await seedConfirmedGroup(page, harness, null, WIDE_PNG);
+
+  // The card's slot, which falls back to the performer's portrait because
+  // there is no poster. Named for what it does rather than for the image it is
+  // showing, so it no longer collides with that same performer's cast-list
+  // avatar the way it did while both took their name from one `alt` — and this
+  // query needs no `.first()` to tell them apart. Clicking the slot is the
+  // point of the assertion right below: it opens on the background, not on the
+  // portrait its own button is showing.
+  const slotButton = page.getByRole('button', { name: /browse images/i });
+  await expect(slotButton).toBeVisible({ timeout: 10_000 });
+  await slotButton.click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  // Opens on the scene's own image, not on the portrait that was clicked.
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /previous/i })).toBeDisabled();
+
+  await dialog.getByRole('button', { name: /next/i }).click();
+  await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /next/i })).toBeDisabled();
+
+  // The keyboard reaches the same clamp a mouse does, right after that same
+  // click disabled the very button the click had just focused.
+  await page.keyboard.press('ArrowRight');
+  await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
+  await page.keyboard.press('ArrowLeft');
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+
+  // The mirror image: land on the first entry via a mouse click on Previous
+  // rather than the keyboard, so Previous is what disables itself and steals
+  // focus this time, in the other direction.
+  await dialog.getByRole('button', { name: /next/i }).click();
+  await dialog.getByRole('button', { name: /previous/i }).click();
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /previous/i })).toBeDisabled();
+
+  // The low end gets the same keyboard check the high end already had above:
+  // a clamped ArrowLeft here has to be a real no-op, not just a disabled
+  // button nothing ever pressed against. On its own this is ambiguous — the
+  // caption reads the same whether the clamp ran or the keydown never
+  // reached the dialog at all — so it is not the proof by itself, exactly as
+  // the lone `ArrowRight` above the first `ArrowLeft` was not. The following
+  // `ArrowRight`, a real move, is what tells the two apart: it only lands on
+  // `Alice Maze · 2 of 2` if the dialog is actually receiving arrow keys at
+  // this point, which a regression scoped to just the low-end reclaim would
+  // break silently if this line were missing.
+  await page.keyboard.press('ArrowLeft');
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+  await page.keyboard.press('ArrowRight');
+  await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
+
+  // Escape still closes, which is the thing the unit suite cannot check.
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
 });

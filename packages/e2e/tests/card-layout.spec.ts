@@ -2,23 +2,36 @@ import type { MetadataCandidate } from '@pickarr/plugin-api';
 import { expect, test } from '../src/harness.ts';
 
 /**
- * The card's own geometry, in a real browser.
+ * The card's own geometry, plus the one thing about the slot that geometry
+ * cannot answer — whether it crops or letterboxes — in a real browser.
  *
- * Nothing in the unit suite can answer this. happy-dom parses the CSS but
+ * Nothing in the unit suite can answer either. happy-dom parses the CSS but
  * lays nothing out, so every box it reports is zero-sized — an overlap test
- * against it would pass whatever the stylesheet said. The question is only
- * askable where boxes have positions, which is here.
+ * against it would pass whatever the stylesheet said — and it paints nothing
+ * at all. Both questions are only askable where boxes have positions and
+ * pixels have colours, which is here.
  */
 
 const RELEASE = 'Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR';
 
 /**
- * 8 x 2000, 1-bit greyscale, 84 bytes — the same deliberately extreme shape
- * `metadata-modal.spec.ts` uses, and for the same reason: a browser handed
- * undecodable bytes renders a broken image with no intrinsic size, and an
- * image with no size cannot overlap anything. The tallest plausible poster is
- * also the one most likely to reach the rows below it, which is exactly the
- * case under test.
+ * 8 x 2000, 1-bit greyscale, all black, 84 bytes — the same fixture
+ * `metadata-modal.spec.ts` uses. It arrived here from before the slot had a
+ * fixed frame, when an image's rendered size came from its own dimensions and
+ * this extreme shape was the one most likely to reach the rows below it.
+ *
+ * Still load-bearing, for a different reason now. `.card-artwork` (`card.css`)
+ * gives the slot a fixed `width: 6rem; aspect-ratio: 2 / 3` frame, so the
+ * *box* is the same whatever the source shape — but the crop assertion below
+ * reads the pixels inside that box, and only a source far off 2:3 leaves a
+ * visible gap when it is fitted instead of cropped. A square source contained
+ * in this frame still fills it across the middle, so the same assertion would
+ * pass against `object-fit: contain` and prove nothing.
+ *
+ * Two properties are needed and both are this fixture's: the shape, and that
+ * the bytes decode at all — a browser handed undecodable bytes renders a
+ * broken image with no intrinsic size and nothing here has a box to measure.
+ * The colour matters too: all black against a card that is not.
  */
 const TALL_PNG =
   'data:image/png;base64,' +
@@ -41,7 +54,7 @@ function candidateWithPoster(): MetadataCandidate {
   };
 }
 
-test('a tall poster grows the card head instead of covering the releases', async ({
+test("the slot's artwork flows beside the identity block, spanning it, without covering the releases", async ({
   page,
   harness,
 }) => {
@@ -79,7 +92,7 @@ test('a tall poster grows the card head instead of covering the releases', async
   // ignored a percentage max-height against an auto-height parent and
   // rendered at full size, overflowing a container whose measurements looked
   // perfectly correct. What overlaps the releases is the thing you can see.
-  const poster = page.getByRole('button', { name: /poster for/i }).locator('img');
+  const poster = page.getByRole('button', { name: /browse images for/i }).locator('img');
   await expect(poster).toBeVisible();
 
   const posterBox = await poster.boundingBox();
@@ -87,6 +100,78 @@ test('a tall poster grows the card head instead of covering the releases', async
   await expect(firstRelease).toBeVisible();
   const releaseBox = await firstRelease.boundingBox();
   if (posterBox === null || releaseBox === null) throw new Error('no layout boxes');
+
+  // Spec §9: "Tests can pin that the slot crops rather than letterboxes."
+  // Until the two checks below were written nothing in this repo did, and
+  // every assertion in this test was satisfied by the splinter of a box an
+  // 8 x 2000 image renders when it is fitted rather than cropped.
+  //
+  // The frame first. `.card-artwork img` is `width: 6rem; aspect-ratio: 2 / 3`
+  // inside a 1px border, and the root font size is the browser's 16px default
+  // (`tokens.css` sets no other), so the frame measures 98 x 146 CSS px
+  // whatever shape the source is. Put this fixture back inside the
+  // `max-width: 6rem; max-height: 8rem` bound the branch replaced and the same
+  // box measures 2.5 x 130 — measured, not computed. A width near 6rem and a
+  // 2:3 box are two facts that hold only while the fixed frame does, and the
+  // gap between 98 and 2.5 is not a rounding call.
+  expect(posterBox.width).toBeGreaterThan(80);
+  expect(posterBox.height / posterBox.width).toBeCloseTo(1.5, 1);
+
+  // Then the paint, which the geometry above cannot see, and which is the half
+  // of this that needs a second measurement rather than a second reading of
+  // the same numbers. Verified by mutation: with `object-fit: contain` and the
+  // frame left alone, both assertions above still pass, because `aspect-ratio`
+  // fixes the box whatever is done with the image inside it. Losing the frame
+  // and losing the fit are two independent ways to lose the crop and neither
+  // check catches the other's failure.
+  //
+  // `TALL_PNG` is all black and the card behind it is not. Cropped, the source
+  // scales by 12 and fills the frame edge to edge, so every pixel in the frame
+  // is image and this sample reads 0,0,0. Fitted, it scales by 0.072 into a
+  // half-pixel-wide column down the middle of the frame and the rest is card
+  // surface, which is what the sample then reads — measured at 255,255,255,
+  // Playwright's default light `prefers-color-scheme` resolving
+  // `--color-surface` to #ffffff. The dark palette's #1b1a18 would clear this
+  // threshold too, so the assertion does not depend on which theme the run
+  // lands in.
+  //
+  // Decoded a fifth of the way across and halfway down: far from the column a
+  // fitted image leaves, and far enough inside the border that
+  // `border-radius` cannot reach it.
+  //
+  // The screenshot goes back into the page to be read: there is no image
+  // library in this repo's dependencies and this is not a reason to add one —
+  // the same call `metadata-modal.spec.ts` makes about generating the fixture
+  // by hand.
+  // The one thing in this repo that depends on the bytes having actually
+  // landed, and nothing above waits for them. `toBeVisible()` is satisfied by
+  // the 98 x 146 frame the moment it is laid out — the frame's size comes from
+  // the stylesheet, not from the image — and Playwright's element screenshot
+  // waits for visibility and a stable box, both of which an empty frame
+  // already has. Without this the sample could read card surface simply
+  // because the decode had not finished, and `playwright.config.ts` sets
+  // `retries: 0`, so that is a red build rather than a flake anyone gets to
+  // ignore. `complete` is also true for an image that failed to decode, which
+  // is fine here: this fixture decodes, and one that did not would fail the
+  // sample below rather than pass it.
+  await expect(poster).toHaveJSProperty('complete', true);
+
+  const encoded = (await poster.screenshot()).toString('base64');
+  const sample = await page.evaluate(async (png) => {
+    const blob = await (await fetch(`data:image/png;base64,${png}`)).blob();
+    const bitmap = await createImageBitmap(blob);
+    const context = new OffscreenCanvas(bitmap.width, bitmap.height).getContext('2d');
+    if (context === null) throw new Error('no 2d context to sample the slot from');
+    context.drawImage(bitmap, 0, 0);
+    const pixel = context.getImageData(
+      Math.round(bitmap.width * 0.2),
+      Math.round(bitmap.height * 0.5),
+      1,
+      1,
+    );
+    return Array.from(pixel.data.slice(0, 3));
+  }, encoded);
+  expect(Math.max(...sample)).toBeLessThan(16);
 
   // The whole assertion. Absolutely positioned, the poster's bottom ran well
   // past the first release row's top; in flow, the row it shares with the

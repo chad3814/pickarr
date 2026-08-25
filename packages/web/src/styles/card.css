@@ -1,6 +1,6 @@
 /*
- * `opacity: 0.95` came off this rule. It dimmed the poster along with the text,
- * which is exactly backwards for a card whose job is judging artwork.
+ * `opacity: 0.95` came off this rule. It dimmed the slot's image along with the
+ * text, which is exactly backwards for a card whose job is judging artwork.
  */
 .media-card {
   border: 1px solid var(--color-line);
@@ -11,21 +11,21 @@
 }
 
 .media-card h2 { margin: 0; font-size: var(--text-title); font-weight: 600; letter-spacing: -0.012em; }
-/* The title block beside the poster, as tall as the taller of the two. The
-   card carried `position: relative` for as long as the poster was absolute;
+/* The title block beside the slot, as tall as the taller of the two. The
+   card carried `position: relative` for as long as the slot was absolute;
    nothing else in the card is positioned, so it went with it. */
 /* The gap before the releases belongs to the row, not to the fields list
    inside it. It used to come from `.fields`' own bottom margin, which works
-   only while the left column is the taller of the two: when the poster is
-   taller — a 8rem image against a title, an Edit button and one line of
+   only while the left column is the taller of the two: when the slot is
+   taller — a 9rem image against a title, an Edit button and one line of
    fields, which is the ordinary case — that margin is interior to the
-   shorter column and contributes nothing, leaving the poster flush against
+   shorter column and contributes nothing, leaving the slot flush against
    the first release row's rule. Zeroing it there and spacing the row itself
    makes the gap the same whichever side wins. */
 .card-head { display: flex; align-items: flex-start; gap: var(--space-4); margin-bottom: var(--space-2); }
 /* `min-width: 0` because a flex item's default `min-width: auto` refuses to
    shrink below its content, and a long unbroken release title would otherwise
-   push the poster off the card rather than wrap. */
+   push the slot off the card rather than wrap. */
 .card-head-main { flex: 1; min-width: 0; }
 .card-head-main .fields { margin-bottom: 0; }
 /* Same row-of-buttons shape as `.failed-actions`/`.manual-actions`: a small
@@ -71,25 +71,24 @@
 /* Only the interactive thumbnails get the pointer cursor: `button.avatar-thumb`
    (has a full image behind it) rather than `.avatar-thumb` by class alone,
    which would also match the plain `<img class="avatar-thumb">` shown for a
-   performer with no full image — that one is deliberately not clickable, and
-   a pointer cursor is exactly the affordance that promises a click it can't
-   answer. */
-.poster-thumb, button.avatar-thumb { padding: 0; border: none; background: none; cursor: pointer; }
-/* `flex: none` so the poster keeps its own size rather than being stretched
-   or squeezed by the row: it is the fixed side, and the title block is what
-   takes up the slack. The button carries no size of its own — it shrink-wraps
-   the image, which is what the bounds below are on. */
-.poster-thumb { flex: none; }
-/* The bounds live on the image, not on the button. They were on the button,
-   with `max-width: 100%; max-height: 100%` here — and a percentage max-height
-   against an auto-height parent computes to `none`, so the image ignored it
-   and rendered at its intrinsic height while the button's box stayed at 8rem.
-   The overflow was visible (nothing clips it) and it is not exotic: a
-   portrait 1000x1500 poster capped to 6rem wide is 9rem tall, an rem past the
-   button that is supposed to contain it.
-   No fixed aspect ratio: the provider's images are frequently landscape (a
-   documented example is 1279x719), not portrait. */
-.poster-thumb img { display: block; max-width: 6rem; max-height: 8rem; border: 1px solid var(--color-line); border-radius: var(--radius-sm); }
+   performer with a face and no full image. */
+.card-artwork, button.avatar-thumb { padding: 0; border: none; background: none; cursor: pointer; }
+.card-artwork { flex: none; }
+/* A fixed 2:3 frame that crops, not a box that bounds. Bounded by
+   `max-width`/`max-height`, a landscape image rendered 6rem wide and about
+   3.4rem tall — a wide, short band in a column sized for a portrait. The slot
+   only ever receives a poster or a performer portrait now (see
+   `groupImages.ts`), so cropping is what makes every card's frame the same
+   shape. 9rem is 1rem taller than the old bound; this is the card's only
+   image. */
+.card-artwork img {
+  display: block;
+  width: 6rem;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+}
 .metadata-performers { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-2) 0; padding: 0; list-style: none; align-items: center; }
 /* The rest of the panel runs 12-13px (`.metadata-title` at `--text-body`,
    `.metadata-synopsis` at `--text-meta`); an unsized `<li>` inherits the 16px
