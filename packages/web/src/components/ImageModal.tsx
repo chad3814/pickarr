@@ -14,8 +14,20 @@ interface Props {
  *
  * Built on a native `<dialog>` opened with `showModal()` rather than a
  * positioned div: that is what makes the rest of the page inert, traps focus
- * inside, restores it on close, and paints a backdrop — four things worth
- * having and none worth hand-rolling.
+ * inside, and paints a backdrop — three things worth having and none worth
+ * hand-rolling.
+ *
+ * Focus restoration is the one it does *not* deliver here, and this doc claimed
+ * it did until somebody checked. Handing focus back to whatever opened the
+ * dialog is a step of the close algorithm, and no dismissal below reaches that
+ * algorithm: the X and the backdrop call `onClose` and React unmounts the
+ * element, and Escape's `onCancel` calls `preventDefault()` before the default
+ * close can run. Removing a dialog from the document is not closing it, so
+ * focus is left on `<body>` — measured, and pinned by
+ * `metadata-modal.spec.ts`. Fixing it means dismissing through `close()` and
+ * letting the native `close` event drive `onClose`, which is a change to
+ * dismissal behaviour rather than a comment fix; the assertion there fails
+ * when someone makes it.
  *
  * Escape is the browser's, surfaced through `cancel` so the React state that
  * owns "which image is open" is updated rather than left describing a dialog

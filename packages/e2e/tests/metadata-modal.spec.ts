@@ -3,18 +3,28 @@ import type { MetadataCandidate } from '@pickarr/plugin-api';
 import { expect, test, type Harness } from '../src/harness.ts';
 
 /**
- * The seam this suite exists to prove: `ImageModal`'s Escape handling, in a
- * real browser.
+ * The seams this suite exists to prove: the parts of `ImageModal` a real
+ * browser is the only honest place to ask about.
  *
- * happy-dom implements `<dialog>.showModal()` but not Escape-to-close: an
- * open dialog given a bubbling, cancelable `keydown` with `key: 'Escape'`
- * stays `open` and fires neither `cancel` nor `close`. A unit test asserting
- * the modal closes on Escape would fail against correct code, and one
- * asserting it stays open would pass against broken code — the question
- * cannot be asked honestly outside a real browser, which is what this file
- * is for. `ImageModal.test.tsx` covers everything else about the component
- * (the X, the backdrop, focus) with happy-dom, deliberately leaving Escape
- * out with a comment pointing here.
+ * Escape is the original one, and no longer the only one. happy-dom implements
+ * `<dialog>.showModal()` but not Escape-to-close: an open dialog given a
+ * bubbling, cancelable `keydown` with `key: 'Escape'` stays `open` and fires
+ * neither `cancel` nor `close`. A unit test asserting the modal closes on
+ * Escape would fail against correct code, and one asserting it stays open
+ * would pass against broken code.
+ *
+ * The rest of this file proves the browse flow end to end, the clamp at each
+ * end of the list, the focus reclaim when a browse button disables itself
+ * under the pointer, and where focus lands after a dismissal. The reclaim is
+ * the one that most needs saying: happy-dom does not blur a focused element
+ * when it becomes `disabled` (measured — see `ImageModal.tsx`), so the bug it
+ * fixes cannot be reproduced there in either direction. The scaling test needs
+ * a browser for the neighbouring reason that happy-dom lays nothing out.
+ *
+ * `ImageModal.test.tsx` covers the rest with happy-dom: the X, the backdrop,
+ * the browse and its clamps as state changes, the caption, and the failure
+ * text with its announcement. It covers nothing about focus, deliberately and
+ * of necessity — it cannot observe the event that moves it.
  */
 
 /** A one-tick, on-site, in-window release: enough for `confirmMetadata` to settle. */
@@ -34,8 +44,10 @@ const RELEASE = 'Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR';
  * It is not the whole story for a group's poster or background —
  * `classifyArtwork` has to measure the image before `cacheImage` files it
  * under either column, and bytes it cannot decode are filed under neither.
- * `TALL_PNG` below is what a test needs when a poster or background has to
- * actually be stored, not merely fetched.
+ * A test that needs one of those actually stored, rather than merely fetched,
+ * needs a decodable fixture of the right *shape*: `TALL_PNG` below for a
+ * poster, `WIDE_PNG` for a background. Neither can stand in for the other,
+ * because the shape is what decides the column.
  */
 function dataUrl(bytes: string): string {
   return `data:image/jpeg;base64,${Buffer.from(bytes).toString('base64')}`;
@@ -57,7 +69,12 @@ function dataUrl(bytes: string): string {
  * name — a plausible `image/jpeg` label is not enough on its own. That is why
  * `confirmedCandidateWithArtwork` below defaults its poster to this image
  * rather than to `dataUrl(...)`, and why any test added here that needs a
- * poster or background actually *stored* has to do the same.
+ * *poster* stored has to do the same.
+ *
+ * A test needing a *background* stored cannot reach for this fixture. Being
+ * portrait is what files it under `poster`, so `TALL_PNG` can only ever be a
+ * poster, whatever column a caller passes it for. `WIDE_PNG` below is the
+ * background's equivalent, and that is the whole reason it had to be added.
  *
  * The extreme aspect ratio is what the scaling test below needs, and it is
  * also why undecodable bytes could never substitute for it even before
@@ -230,6 +247,23 @@ test('the poster modal closes on Escape, on a click outside, and on the X', asyn
   await expect(dialog).toBeVisible();
   await page.getByRole('button', { name: /close/i }).click();
   await expect(dialog).toBeHidden();
+
+  // Focus is *not* restored to the button that opened the modal: it lands on
+  // `<body>`, so the next Tab starts the page over from the top. Measured
+  // here, not reasoned about — and the reason is that no dismissal path
+  // reaches the close algorithm, which is the only thing that restores focus.
+  // The X and the backdrop call `onClose` directly and React unmounts the
+  // `<dialog>`; Escape's `onCancel` calls `preventDefault()` before it.
+  // Removing a dialog from the document is not closing it.
+  //
+  // Pinned as the defect it is rather than left unasked. It predates this
+  // branch — every dismissal path has always unmounted rather than closed —
+  // and fixing it means calling `close()` and letting the native `close`
+  // event drive `onClose`, which is a change to dismissal behaviour and so
+  // out of scope here. Whoever makes it will fail this line, which is the
+  // point: `ImageModal`'s own doc is written to match this measurement, and
+  // both have to move together.
+  await expect(page.locator('body')).toBeFocused();
 });
 
 test('a tall poster is scaled to fit inside the window rather than scrolled', async ({

@@ -1,6 +1,6 @@
 /*
- * `opacity: 0.95` came off this rule. It dimmed the poster along with the text,
- * which is exactly backwards for a card whose job is judging artwork.
+ * `opacity: 0.95` came off this rule. It dimmed the slot's image along with the
+ * text, which is exactly backwards for a card whose job is judging artwork.
  */
 .media-card {
   border: 1px solid var(--color-line);
@@ -11,21 +11,21 @@
 }
 
 .media-card h2 { margin: 0; font-size: var(--text-title); font-weight: 600; letter-spacing: -0.012em; }
-/* The title block beside the poster, as tall as the taller of the two. The
-   card carried `position: relative` for as long as the poster was absolute;
+/* The title block beside the slot, as tall as the taller of the two. The
+   card carried `position: relative` for as long as the slot was absolute;
    nothing else in the card is positioned, so it went with it. */
 /* The gap before the releases belongs to the row, not to the fields list
    inside it. It used to come from `.fields`' own bottom margin, which works
-   only while the left column is the taller of the two: when the poster is
-   taller — a 8rem image against a title, an Edit button and one line of
+   only while the left column is the taller of the two: when the slot is
+   taller — a 9rem image against a title, an Edit button and one line of
    fields, which is the ordinary case — that margin is interior to the
-   shorter column and contributes nothing, leaving the poster flush against
+   shorter column and contributes nothing, leaving the slot flush against
    the first release row's rule. Zeroing it there and spacing the row itself
    makes the gap the same whichever side wins. */
 .card-head { display: flex; align-items: flex-start; gap: var(--space-4); margin-bottom: var(--space-2); }
 /* `min-width: 0` because a flex item's default `min-width: auto` refuses to
    shrink below its content, and a long unbroken release title would otherwise
-   push the poster off the card rather than wrap. */
+   push the slot off the card rather than wrap. */
 .card-head-main { flex: 1; min-width: 0; }
 .card-head-main .fields { margin-bottom: 0; }
 /* Same row-of-buttons shape as `.failed-actions`/`.manual-actions`: a small
