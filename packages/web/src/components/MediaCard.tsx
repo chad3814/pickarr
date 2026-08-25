@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { GroupView, ManualField } from '../api/client.ts';
+import type { GroupImage } from '../api/groupImages.ts';
 import { groupAnchor } from '../api/anchors.ts';
 import { formatDuration } from '../api/format.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
@@ -79,9 +80,10 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, onRequeryMetadata }: Props) {
   const { display } = group;
   const [editing, setEditing] = useState(false);
-  // One piece of state, so the poster and a performer's full image can never
-  // both be open at once.
-  const [modal, setModal] = useState<{ src: string; alt: string } | null>(null);
+  // One piece of state, so the card slot's image and a performer's full image
+  // can never both be open at once. Both now open the *same* list, differing
+  // only in where they start.
+  const [modal, setModal] = useState<{ images: GroupImage[]; startIndex: number } | null>(null);
   const [requerying, setRequerying] = useState(false);
   const [requeryError, setRequeryError] = useState<string | null>(null);
   // No local override of `group.metadata` any more: the route re-arms
@@ -180,8 +182,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
                 <button
                   type="button"
                   className="avatar-thumb"
-                  onClick={() => setModal({ src: `/api/performers/${performer.id}/image`,
-                                            alt: performer.name })}
+                  onClick={() => setModal({
+                    images: [{
+                      src: `/api/performers/${performer.id}/image`,
+                      alt: performer.name,
+                      label: performer.name,
+                    }],
+                    startIndex: 0,
+                  })}
                 >
                   <img src={`/api/performers/${performer.id}/avatar`} alt={performer.name} />
                 </button>
@@ -322,7 +330,10 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
           <button
             type="button"
             className="poster-thumb"
-            onClick={() => setModal({ src: thumbnail, alt: `Poster for ${display.title}` })}
+            onClick={() => setModal({
+              images: [{ src: thumbnail, alt: `Poster for ${display.title}`, label: 'Poster' }],
+              startIndex: 0,
+            })}
           >
             <img src={thumbnail} alt={`Poster for ${display.title}`} />
           </button>
