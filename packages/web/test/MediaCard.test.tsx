@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MediaCard } from '../src/components/MediaCard.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
 import type { GroupView, ManualField, MetadataView, PerformerView } from '../src/api/client.ts';
@@ -403,7 +403,7 @@ test('the slot is a button that opens the modal, and the modal closes', () => {
   // #40: never `assert.equal(screen.queryByRole(x), null)` — same deep-inspect
   // hazard as `queryByText`, on a live element instead of text.
   assert.ok(!screen.queryByRole('dialog'));
-  fireEvent.click(screen.getByRole('button', { name: /poster for/i }));
+  fireEvent.click(screen.getByRole('button', { name: /browse images for/i }));
   assert.ok(screen.getByRole('dialog'));
   fireEvent.click(screen.getByRole('button', { name: /close/i }));
   assert.ok(!screen.queryByRole('dialog'));
@@ -494,14 +494,13 @@ test('the slot opens the modal on the whole list, starting at the scene image', 
       onPick={() => {}}
     />,
   );
-  // Scoped to `.card-head`: with no poster the slot itself shows this
-  // performer's portrait, so an unscoped query for a button named "Alice
-  // Maze" also matches her cast-list avatar below, and throws on the
-  // ambiguity. `.card-head` holds the slot and nothing else named for a
-  // performer.
-  const head = card('Alex Coal').querySelector<HTMLElement>('.card-head');
-  assert.ok(head !== null, 'no .card-head in the card');
-  fireEvent.click(within(head).getByRole('button', { name: 'Alice Maze' }));
+  // Unscoped, and it has to stay that way: with no poster the slot shows this
+  // performer's portrait, so the slot and her cast-list avatar below would
+  // collide on one name if the slot took its own from the image's `alt`. It
+  // does not — the button is named for what it does — so this query reaches
+  // exactly one control, and it is the one whose whole point is that it opens
+  // somewhere other than the image it is showing.
+  fireEvent.click(screen.getByRole('button', { name: 'Browse images for Alex Coal' }));
   const dialog = screen.getByRole('dialog');
   // Index 0 is the background, which is not what was clicked. Deliberate: the
   // browse runs from the scene's own images outward.

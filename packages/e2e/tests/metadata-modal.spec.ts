@@ -189,11 +189,11 @@ test('the poster modal closes on Escape, on a click outside, and on the X', asyn
 }) => {
   await seedConfirmedGroup(page, harness);
 
-  const posterButton = page.getByRole('button', { name: /poster/i });
+  const slotButton = page.getByRole('button', { name: /browse images/i });
   const dialog = page.getByRole('dialog');
-  await expect(posterButton).toBeVisible({ timeout: 10_000 });
+  await expect(slotButton).toBeVisible({ timeout: 10_000 });
 
-  await posterButton.click();
+  await slotButton.click();
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
   // The property no unit test in this repo can check: happy-dom implements
@@ -216,17 +216,17 @@ test('the poster modal closes on Escape, on a click outside, and on the X', asyn
   // Escape's default action closes it, so the two handlers are redundant for
   // this one path. Removing *both* `onCancel` and `onClose` is what actually
   // reproduces the desync this reopen check exists to catch, and it does:
-  // the second `posterButton.click()` finds no dialog, because the state
+  // the second `slotButton.click()` finds no dialog, because the state
   // `onClose` would have cleared never clears, and the already-mounted
   // (native-closed) `<dialog>` element never runs `showModal()` again.
-  await posterButton.click();
+  await slotButton.click();
   await expect(dialog).toBeVisible();
 
   // Top-left corner: outside the centred image, inside the backdrop.
   await page.mouse.click(5, 5);
   await expect(dialog).toBeHidden();
 
-  await posterButton.click();
+  await slotButton.click();
   await expect(dialog).toBeVisible();
   await page.getByRole('button', { name: /close/i }).click();
   await expect(dialog).toBeHidden();
@@ -250,9 +250,9 @@ test('a tall poster is scaled to fit inside the window rather than scrolled', as
   // overflow, not a rounding error.
   await seedConfirmedGroup(page, harness, TALL_PNG);
 
-  const posterButton = page.getByRole('button', { name: /poster/i });
-  await expect(posterButton).toBeVisible({ timeout: 10_000 });
-  await posterButton.click();
+  const slotButton = page.getByRole('button', { name: /browse images/i });
+  await expect(slotButton).toBeVisible({ timeout: 10_000 });
+  await slotButton.click();
 
   const dialog = page.getByRole('dialog');
   const image = dialog.getByRole('img');
@@ -310,14 +310,16 @@ test('the modal walks a group\'s images and clamps at the ends', async ({ page, 
   // shape almost every real group has, and the reason the browse exists.
   await seedConfirmedGroup(page, harness, null, WIDE_PNG);
 
-  // Two buttons answer to this name here: the card's slot, which falls back
-  // to the performer's portrait because there is no poster, and the cast
-  // list's own avatar. The slot renders first, and clicking it is the point
-  // of the assertion right below — it opens on the background, not on the
+  // The card's slot, which falls back to the performer's portrait because
+  // there is no poster. Named for what it does rather than for the image it is
+  // showing, so it no longer collides with that same performer's cast-list
+  // avatar the way it did while both took their name from one `alt` — and this
+  // query needs no `.first()` to tell them apart. Clicking the slot is the
+  // point of the assertion right below: it opens on the background, not on the
   // portrait its own button is showing.
-  const avatarButton = page.getByRole('button', { name: /alice maze/i }).first();
-  await expect(avatarButton).toBeVisible({ timeout: 10_000 });
-  await avatarButton.click();
+  const slotButton = page.getByRole('button', { name: /browse images/i });
+  await expect(slotButton).toBeVisible({ timeout: 10_000 });
+  await slotButton.click();
 
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();

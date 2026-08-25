@@ -116,21 +116,40 @@ test('paging away from a broken image and back shows the failure again, not a st
   assert.ok(!screen.queryByText(/could not be loaded/i), 'a new image starts unbroken');
 });
 
-test('the dialog carries tabIndex={-1}, kept as cross-browser insurance for the focus fix', () => {
+// No test that the dialog carries `tabIndex={-1}`, because it does not carry
+// one any more. The attribute existed to guarantee `element.focus()` a target
+// when the reclaim effect fell back to the dialog; the fallback is now
+// `.image-modal-close`, which is always rendered and focusable everywhere with
+// no `tabindex` at all, so there is nothing left for the attribute to insure.
+
+test('the failure is announced, and stays attached to the image whose alt still claims it loaded', () => {
+  render(<ImageModal images={THREE} startIndex={1} onClose={() => {}} />);
+  // Nothing to point at while the image is fine: a description referring to an
+  // element that is not rendered describes nothing.
+  assert.ok(!screen.getByRole('img').hasAttribute('aria-describedby'));
+
+  fireEvent.error(screen.getByRole('img'));
+  const failure = screen.getByText(/could not be loaded/i);
+  // `role="status"` because this text appears on `onError` — no user action
+  // prompts a re-read, so without it the failure reaches nobody who cannot see
+  // it.
+  assert.equal(failure.getAttribute('role'), 'status');
+  // And attached to the image, because the image's `alt` cannot be emptied to
+  // tell the truth on its own: an empty alt drops the element out of the
+  // accessibility tree as an `img`, which is the role `shown()` above and
+  // `metadata-modal.spec.ts` both find it by.
+  assert.ok(failure.id !== '', 'the failure text needs an id to be referenced by');
+  assert.equal(screen.getByRole('img').getAttribute('aria-describedby'), failure.id);
+});
+
+test('the caption is announced, not merely rendered, when the browse moves', () => {
   render(<ImageModal images={THREE} startIndex={0} onClose={() => {}} />);
-  // Not a test of the bug itself: happy-dom does not blur a focused element
-  // when it becomes `disabled` (confirmed directly — see `ImageModal.tsx`'s
-  // own comment on the effect this attribute backs), so the failure the fix
-  // addresses cannot be reproduced here at all, in either direction — only in
-  // `metadata-modal.spec.ts`, in a real browser. An open modal `<dialog>`
-  // measures as already focusable with no `tabindex` in this repo's own
-  // Playwright Chromium, so this attribute is not what makes the fix work
-  // there; a refactor that dropped it would not visibly break anything this
-  // suite or that spec can see. What this pins is narrower: the attribute
-  // itself stays present, on the reasoning (spec, not measurement) that it is
-  // what guarantees `element.focus()` a target on engines nobody has measured
-  // — Chromium is the only one either suite runs against.
-  assert.equal(screen.getByRole('dialog').getAttribute('tabindex'), '-1');
+  // A step that lands on an end reclaims focus to the opposite button, so a
+  // screen-reader user can be nowhere near this text when it changes — and it
+  // is the only thing that says which image is now shown.
+  assert.equal(screen.getByText('Poster · 1 of 3').getAttribute('role'), 'status');
+  fireEvent.click(screen.getByRole('button', { name: /next/i }));
+  assert.equal(screen.getByText('Background · 2 of 3').getAttribute('role'), 'status');
 });
 
 // No Escape test here. happy-dom implements `showModal()` but not

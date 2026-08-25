@@ -321,6 +321,15 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
           <button
             type="button"
             className="card-artwork"
+            // Named for what pressing it does, rather than taking its name from
+            // the `alt` of the image inside it. That `alt` stays per-image, as
+            // §3.1 requires — but with no poster the slot shows the first cast
+            // portrait, which is the shape ~1,494 of this library's groups have,
+            // and an `alt`-derived name made this button and that same
+            // performer's avatar button in the cast list below two controls in
+            // one tab order with one accessible name and two different actions
+            // (index 0 versus that performer's own entry).
+            aria-label={`Browse images for ${display.title}`}
             onClick={() => setModal({ images, startIndex: 0 })}
           >
             <img src={slot.src} alt={slot.alt} />

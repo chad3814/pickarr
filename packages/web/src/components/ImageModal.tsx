@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { GroupImage } from '../api/groupImages.ts';
 
 interface Props {
@@ -30,8 +30,12 @@ interface Props {
  */
 export function ImageModal({ images, startIndex, onClose }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   const previousButton = useRef<HTMLButtonElement>(null);
   const nextButton = useRef<HTMLButtonElement>(null);
+  // Generated rather than a literal: `aria-describedby` needs a document-unique
+  // id, and nothing stops two cards from each holding modal state.
+  const failureId = useId();
   const [index, setIndex] = useState(startIndex);
   // Reset per image, not per modal: a frame that failed must not keep saying so
   // once the user has paged to a different image that loads perfectly well.
@@ -66,20 +70,28 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
   // The reclaim target is the *other* button, not the dialog itself, when
   // there is one to give it to: a keyboard user who just walked to an end
   // still has one button meaningfully left to reach (the one that steps back
-  // the way they came), and parking focus on the dialog instead would cost
-  // them an extra Tab to get there. Only a one-image list — which renders no
-  // browse chrome at all and so has neither button — falls back to the
-  // dialog; that list cannot step either way, so there is nothing to reach
-  // regardless of where focus lands. `preventScroll` is inert today
-  // (`.image-modal` is `position: fixed; inset: 0; overflow: hidden`, so
-  // nothing here can scroll), kept so this does not start depending on that
-  // staying true.
+  // the way they came), and parking focus elsewhere would cost them an extra
+  // Tab to get there. Only a one-image list — which renders no browse chrome
+  // at all and so has neither button — reaches the fallback, and that list
+  // cannot step either way, so there is nothing to reach regardless of where
+  // focus lands.
+  //
+  // The fallback is the close button rather than the dialog, and that choice
+  // is what keeps this effect from needing anything of the `<dialog>` element
+  // at all. `.image-modal-close` is always rendered and is focusable in every
+  // engine with no `tabindex` on it, where a `<dialog>` is only reliably
+  // focusable where an engine chooses to treat an open modal one that way —
+  // which was previously papered over with `tabIndex={-1}` on the element and
+  // a comment conceding no engine but Chromium had been measured.
+  // `preventScroll` is inert today (`.image-modal` is `position: fixed;
+  // inset: 0; overflow: hidden`, so nothing here can scroll), kept so this
+  // does not start depending on that staying true.
   useEffect(() => {
     const element = dialog.current;
     if (element === null) return;
     if (document.activeElement !== null && element.contains(document.activeElement)) return;
     const target = !hasNext ? previousButton.current : !hasPrevious ? nextButton.current : null;
-    (target ?? element).focus({ preventScroll: true });
+    (target ?? closeButton.current)?.focus({ preventScroll: true });
   }, [index, hasNext, hasPrevious]);
 
   function step(by: number): void {
@@ -95,17 +107,6 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
   return (
     <dialog
       ref={dialog}
-      // An open modal `<dialog>` is already programmatically focusable with no
-      // `tabindex` at all in Chromium (measured directly against this repo's
-      // own Playwright browser: a plain `div`/`p` were not focusable, a closed
-      // dialog was not, an open modal one was) — so this attribute changes
-      // nothing there. It stays anyway as insurance for whatever else this
-      // ships on: `element.focus()` on a non-focusable element is a no-op per
-      // spec, `tabIndex={-1}` is what guarantees the dialog counts as
-      // focusable everywhere rather than only where one engine happens to
-      // already treat it that way, and no engine besides Chromium was
-      // measured here.
-      tabIndex={-1}
       className="image-modal"
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClose={onClose}
@@ -118,21 +119,49 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
         if (event.key === 'ArrowLeft') step(-1);
       }}
     >
-      <button type="button" className="image-modal-close" onClick={onClose} aria-label="Close">
+      <button
+        type="button"
+        ref={closeButton}
+        className="image-modal-close"
+        onClick={onClose}
+        aria-label="Close"
+      >
         ×
       </button>
 
       {/*
         * An image is always rendered, even when it failed, so that the dialog
         * keeps exactly one `img` for a caller to find and the failure is a
-        * caption over it rather than a different tree. `alt` still describes
-        * what was meant to be there, which is what a screen reader needs when
-        * the bytes never arrived.
+        * caption over it rather than a different tree.
+        *
+        * `alt` keeps describing what was meant to be there, and emptying it
+        * while failed is not on offer: an `<img>` with an empty alt is not
+        * exposed as an `img` at all, and finding this element by that role is
+        * how both suites reach it (`dialog.getByRole('img')` in
+        * `metadata-modal.spec.ts`, `shown()` in `ImageModal.test.tsx`).
+        *
+        * Which leaves an `alt` that, on its own, reads to a screen reader as a
+        * positive claim the picture arrived. The failure text is what corrects
+        * it, and it needs both attributes below to do so: `role="status"`
+        * because it appears on `onError` with no user action to prompt a
+        * re-read, so nothing else would ever announce it, and
+        * `aria-describedby` because an announcement is gone the moment it is
+        * made — the description is what is still there for anyone who arrives
+        * at, or comes back to, the image afterwards.
         */}
       {image !== undefined && (
-        <img src={image.src} alt={image.alt} onError={() => setFailed(true)} />
+        <img
+          src={image.src}
+          alt={image.alt}
+          aria-describedby={failed ? failureId : undefined}
+          onError={() => setFailed(true)}
+        />
       )}
-      {failed && <p className="image-modal-failed">This image could not be loaded</p>}
+      {failed && (
+        <p className="image-modal-failed" id={failureId} role="status">
+          This image could not be loaded
+        </p>
+      )}
 
       {/*
         * Chrome renders only for a list worth walking. One image means no
@@ -151,7 +180,15 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
           >
             ‹
           </button>
-          <p className="image-modal-caption">
+          {/*
+            * `role="status"` for the same reason the failure text above has
+            * one, arrived at from the other direction: a step that lands on an
+            * end reclaims focus to the opposite button (see the effect above),
+            * so a screen-reader user is not necessarily anywhere near this
+            * text at the moment it changes — and it is the only thing on
+            * screen that says which image is now shown.
+            */}
+          <p className="image-modal-caption" role="status">
             {image.label} · {index + 1} of {images.length}
           </p>
           <button
