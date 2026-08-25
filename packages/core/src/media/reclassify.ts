@@ -126,11 +126,44 @@ interface ClearedSlot {
  * and not doing, and a reader auditing "what does --dry-run skip" would have two
  * places to check instead of one.
  */
+/**
+ * Which relocation a row needs, named rather than described, so the line that
+ * reports it can be written once the write has actually happened.
+ *
+ * Same reasoning as `ClearedSlot`: `planRow` decides, `reclassifyArtwork`
+ * reports. A move has no filesystem effect, but it does have a database one,
+ * and `setArtworkPair` can throw — so a line printed from `planRow` would claim
+ * a move that a failed write never made, and would claim it in the past tense
+ * during a `--dry-run` that made no move at all.
+ */
+type Movement = 'swapped' | 'poster-to-background' | 'background-to-poster';
+
+/**
+ * How a move reads once it has happened, or would happen.
+ *
+ * Every movement takes the `dryRun` distinction, unlike `clearedFileFateLine`
+ * where only the deletion does: a move's whole content is the change to the
+ * row, so there is no part of it that is true either way.
+ */
+function movementLine(groupId: number, movement: Movement, dryRun: boolean): string {
+  const prefix = `reclassify: group ${groupId}:`;
+  switch (movement) {
+    case 'swapped':
+      return `${prefix} the two slots ${dryRun ? 'would be swapped' : 'are swapped'}`;
+    case 'poster-to-background':
+      return `${prefix} the poster ${dryRun ? 'would be moved' : 'is moved'} to the background slot`;
+    case 'background-to-poster':
+      return `${prefix} the background ${dryRun ? 'would be moved' : 'is moved'} to the poster slot`;
+  }
+}
+
 interface RowPlan {
   result: ReclassifyResult;
   next: ArtworkRow;
   /** The clear this row reached, or `null` when it reached none. */
   cleared: ClearedSlot | null;
+  /** The relocation this row reached, or `null` when it reached none. */
+  movement: Movement | null;
 }
 
 /**
@@ -295,6 +328,7 @@ async function planRow(
 
   let next: ArtworkRow = row;
   let cleared: ClearedSlot | null = null;
+  let movement: Movement | null = null;
   if (posterMismatch && backgroundMismatch) {
     next = {
       groupId: row.groupId,
@@ -304,7 +338,11 @@ async function planRow(
       backgroundPath: row.posterPath,
     };
     result.moved += 2;
-    deps.log(`reclassify: group ${row.groupId}: poster and background were swapped, corrected`);
+    movement = 'swapped';
+    deps.log(
+      `reclassify: group ${row.groupId}: the poster measures as a background and the background ` +
+        'measures as a poster, so the two are each in the other\'s slot',
+    );
   } else if (posterMismatch) {
     const backgroundOccupied = row.backgroundUrl !== null || row.backgroundPath !== null;
     if (backgroundOccupied) {
@@ -331,7 +369,8 @@ async function planRow(
         backgroundPath: row.posterPath,
       };
       result.moved += 1;
-      deps.log(`reclassify: group ${row.groupId}: poster ${row.posterPath ?? ''} measures as a background, moved`);
+      movement = 'poster-to-background';
+      deps.log(`reclassify: group ${row.groupId}: poster ${row.posterPath ?? ''} measures as a background`);
     }
   } else if (backgroundMismatch) {
     const posterOccupied = row.posterUrl !== null || row.posterPath !== null;
@@ -356,11 +395,12 @@ async function planRow(
         backgroundPath: null,
       };
       result.moved += 1;
-      deps.log(`reclassify: group ${row.groupId}: background ${row.backgroundPath ?? ''} measures as a poster, moved`);
+      movement = 'background-to-poster';
+      deps.log(`reclassify: group ${row.groupId}: background ${row.backgroundPath ?? ''} measures as a poster`);
     }
   }
 
-  return { result, next, cleared };
+  return { result, next, cleared, movement };
 }
 
 export async function reclassifyArtwork(deps: ReclassifyDeps): Promise<ReclassifyResult> {
@@ -370,7 +410,7 @@ export async function reclassifyArtwork(deps: ReclassifyDeps): Promise<Reclassif
 
   for (const row of rows) {
     // eslint-disable-next-line no-await-in-loop -- one cached file at a time; a one-shot backfill, not a hot path
-    const { result, next, cleared } = await planRow(deps, row);
+    const { result, next, cleared, movement } = await planRow(deps, row);
     totals.examined += result.examined;
     totals.moved += result.moved;
     totals.cleared += result.cleared;
@@ -387,9 +427,13 @@ export async function reclassifyArtwork(deps: ReclassifyDeps): Promise<Reclassif
       // Reporting is not an effect, so a dry run still says what it would have
       // done to a cleared row — in the conditional wording the summary uses, and
       // from here rather than from `planRow`, which cannot know the mode.
+      if (movement !== null) deps.log(movementLine(row.groupId, movement, true));
       if (cleared !== null) deps.log(clearedFileFateLine(row.groupId, cleared, true));
     } else if (result.moved > 0 || result.cleared > 0) {
       setArtworkPair(deps.db, row.groupId, next);
+      // After the write, for the reason `Movement` gives: a throw from
+      // `setArtworkPair` must not leave a line behind saying the row moved.
+      if (movement !== null) deps.log(movementLine(row.groupId, movement, false));
 
       // Database first, orphaned file second, and only once the write has
       // returned. If `setArtworkPair` throws, the file is still there and the

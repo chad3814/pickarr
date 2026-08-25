@@ -142,6 +142,42 @@ test('dry-run reports what it would move and changes nothing', async () => {
   assert.equal(row?.backgroundPath, null);
 });
 
+test('a dry run never says a move happened, only that it would', async () => {
+  const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: landscapeJpeg(1279, 719) });
+  const lines: string[] = [];
+  await reclassifyArtwork({ db, dir, dryRun: true, log: (line) => lines.push(line) });
+  const log = lines.join('\n');
+  assert.match(log, /group 1: the poster would be moved to the background slot/);
+  // The defect this guards is a past-tense line in a run that moved nothing: an
+  // operator reading "is moved" has been told the library changed when it did not.
+  assert.doesNotMatch(log, /is moved/, 'a dry run must not claim the move happened');
+});
+
+test('a real move is reported in the past tense, and only after the write', async () => {
+  const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: landscapeJpeg(1279, 719) });
+  const lines: string[] = [];
+  await reclassifyArtwork({ db, dir, dryRun: false, log: (line) => lines.push(line) });
+  const log = lines.join('\n');
+  assert.match(log, /group 1: the poster is moved to the background slot/);
+  assert.doesNotMatch(log, /would be moved/);
+});
+
+test('a move whose database write fails is never reported as a move', async () => {
+  const { db, dir } = await seed({ groupId: 1, posterPath: '1.jpg', bytes: landscapeJpeg(1279, 719) });
+  // A real trigger on the real statement, so the failure is the genuine UPDATE
+  // failing rather than a stubbed writer standing in for it.
+  db.prepare(
+    `CREATE TRIGGER refuse_artwork_write BEFORE UPDATE ON group_metadata
+       BEGIN SELECT RAISE(ABORT, 'no writes'); END`,
+  ).run();
+  const lines: string[] = [];
+  await assert.rejects(
+    () => reclassifyArtwork({ db, dir, dryRun: false, log: (line) => lines.push(line) }),
+    /no writes/,
+  );
+  assert.doesNotMatch(lines.join('\n'), /is moved/, 'a failed write must leave no claim that the row moved');
+});
+
 test('a row whose file is missing is counted, not crashed on', async () => {
   const { db, dir } = await seed({ groupId: 1, posterPath: 'gone.jpg', bytes: null });
   assert.deepEqual(
