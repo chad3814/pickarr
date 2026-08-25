@@ -120,8 +120,9 @@ function serve(joinedExisting = false): () => string[] {
  * `assert.equal(screen.queryByText(x), null)` is the obvious spelling and it
  * kills the test run: inside `waitFor` the first check normally fails, and
  * building that AssertionError's message means node:assert deep-inspecting a
- * live DOM element, several hundred times over. See `gone()` in
- * `Browse.test.tsx`.
+ * live DOM element, several hundred times over. This is one of two shapes of
+ * the same hazard — the full rule, and the other shape (comparing two live
+ * nodes by identity), are documented once on `gone()` in `MediaCard.test.tsx`.
  */
 function gone(text: string): boolean {
   return screen.queryByText(text) === null;

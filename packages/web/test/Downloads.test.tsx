@@ -28,10 +28,10 @@ function routed(node: ReactNode) {
 }
 
 /**
- * Never `assert.equal(screen.queryByText(x), null)` — a failed match there
- * formats the whole live DOM to explain itself, which burns real time and
- * reports no test name. Compare the boolean instead, as `Browse.test.tsx`
- * does.
+ * Never `assert.equal(screen.queryByText(x), null)` — one of two shapes of
+ * `#40`, documented in full on `gone()` in `MediaCard.test.tsx`: node:assert
+ * formats a live DOM element to explain a failed equality, which burns real
+ * time and reports no test name. Compare the boolean instead, as here.
  */
 function gone(text: string | RegExp): boolean {
   return screen.queryByText(text) === null;

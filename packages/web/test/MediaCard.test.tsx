@@ -20,10 +20,36 @@ async function refuseRequery(): Promise<void> {
 /**
  * Absence, as a boolean.
  *
- * `assert.equal(screen.queryByText(x), null)` is the obvious spelling and it
- * kills the run: node:assert deep-inspects a live DOM element to build the
- * failure message, which burns ~75s and takes the whole file down without
- * naming a test. See the same helper in `Browse.test.tsx`.
+ * This is the canonical statement of `#40`, the warning repeated in short
+ * form throughout this file and in full or in part in `Browse.test.tsx`,
+ * `Downloads.test.tsx`, `Failed.test.tsx`, `useGroupMetadata.test.tsx`,
+ * `usePagedList.test.tsx`, and `ImageModal.test.tsx`. Change the rule, change
+ * it here — the others should point back rather than carry their own copy of
+ * the reasoning, or they will eventually disagree with it.
+ *
+ * The rule: never hand a live DOM element to `node:assert` as a value it
+ * might have to print. `assert.equal`/`deepEqual`/`notEqual` all format both
+ * operands into the failure message, and formatting a live element means
+ * node:assert deep-inspecting it — slow enough to take the whole file down
+ * before it finishes, and it never gets far enough to name the test that
+ * failed.
+ *
+ * Two shapes of this have actually cost time here, not just in theory:
+ *
+ * - `assert.equal(screen.queryByText(x), null)` — absence spelled as an
+ *   equality with `null`. Inside a `waitFor` retry loop this burned enough
+ *   time to OOM-kill the process, with no test named in the output.
+ * - `assert.equal(document.activeElement, screen.getByRole(...))` — an
+ *   identity comparison between two live nodes, with no `null` and no
+ *   `queryBy*` anywhere in sight, so it is easy to miss as the same hazard.
+ *   This one failed in 52 seconds, printed the single line `'test failed'`,
+ *   and took the whole file down instead of naming the one test that broke.
+ *   Rewritten as `assert.ok(a === b, 'message')`, the identical failure
+ *   surfaced in 0.7 seconds, as one named test, with the reason stated in the
+ *   message rather than guessed at. See that rewrite in `ImageModal.test.tsx`.
+ *
+ * The fix is the same for both: compare with a boolean and give `assert.ok` a
+ * message of your own. There is then nothing left for node:assert to print.
  */
 function gone(text: string | RegExp): boolean {
   return screen.queryByText(text) === null;

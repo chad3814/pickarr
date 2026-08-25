@@ -137,10 +137,15 @@ test('a one-image list hands reclaimed focus to the close button', () => {
   // nothing either — and the e2e reclaim test walks a two-image list, where
   // `target` is a real browse button and the fallback never engages. Without
   // this test that regression has nowhere to show up.
-  // #40 again, in its identity form: `assert.equal` on two live elements hands
-  // both to the deep-diff printer, which on DOM nodes turns one failure into a
-  // ~50s hang and an unreadable message. Compared as a boolean instead, with
-  // the explanation in the assertion rather than in the diff.
+  // #40's identity shape: this used to be
+  // `assert.equal(document.activeElement, screen.getByRole('button', ...))`,
+  // an identity comparison between two live nodes with no `null` and no
+  // `queryBy*` anywhere — easy to miss as the same hazard `gone()` in
+  // `MediaCard.test.tsx` documents. It failed in 52 seconds, printed the
+  // single line `'test failed'`, and took the whole file down instead of
+  // naming this test. Written as a boolean with its own message instead, the
+  // same failure surfaces in 0.7 seconds, as one named test, with a reason.
+  // See `MediaCard.test.tsx` for the rule this is one shape of.
   assert.ok(
     document.activeElement === screen.getByRole('button', { name: /close/i }),
     'a one-image list must reclaim focus to the close button',

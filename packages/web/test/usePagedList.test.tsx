@@ -96,11 +96,13 @@ function Filtered({
 }
 
 /**
- * Absence, as a boolean — the same helper `Browse.test.tsx` carries, for the
- * same reason. `assert.equal(screen.queryByText(x), null)` is the obvious
- * spelling and it makes a *failing* run pathological: node:assert deep-inspects
- * the live DOM element to build the message, which took 40+ seconds here before
- * the run was killed with nothing naming the test.
+ * Absence, as a boolean — the same helper `MediaCard.test.tsx` carries `#40`'s
+ * canonical rule for. `assert.equal(screen.queryByText(x), null)` is the
+ * obvious spelling and it makes a *failing* run pathological: node:assert
+ * deep-inspects the live DOM element to build the message, which took 40+
+ * seconds here before the run was killed with nothing naming the test. See
+ * `gone()` in `MediaCard.test.tsx` for this shape's sibling — comparing two
+ * live nodes by identity — and the remedy common to both.
  */
 function gone(text: string): boolean {
   return screen.queryByText(text) === null;
