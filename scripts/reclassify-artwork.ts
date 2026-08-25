@@ -10,13 +10,15 @@
  * whenever the measurement disagrees with the column it is in.
  *
  * Where the correct slot is already filled the mismatching image cannot be
- * moved anywhere, so the row's column is cleared and the image's file deleted —
- * an image that cannot be correctly placed is not kept under a name that
- * misdescribes it, and is not left on disk unreferenced either.
+ * moved anywhere, so the row's column is cleared and the image's file usually
+ * deleted with it — an image that cannot be correctly placed is not kept under a
+ * name that misdescribes it, and is not left on disk unreferenced either. The
+ * exception is a cleared image the row has nothing readable to replace it with,
+ * which is kept on disk rather than lost; the per-row line says which happened.
  *
  * Offline in the fullest sense: no network request, no API key, nothing but
  * local bytes already on disk. It does write to the database, and it deletes an
- * artwork file for every row it clears.
+ * artwork file for most rows it clears.
  *
  *   npm run reclassify-artwork -- --database=/config/pickarr.db --dry-run
  *   npm run reclassify-artwork -- --database=/config/pickarr.db
@@ -80,11 +82,13 @@ async function main(): Promise<void> {
   });
   db.close();
 
-  // `cleared` is reported as a deletion rather than by its internal name: an
-  // operator reading one summary line should not have to already know that
-  // clearing a column also removes the file underneath it. Under --dry-run the
-  // same number is an intention, and reads as one.
-  const clearedLabel = options.dryRun ? 'would be deleted' : 'deleted';
+  // `cleared` counts rows, not deletions, and the two can differ: a clear whose
+  // surviving slot has no usable image keeps the file (see
+  // `ReclassifyResult.cleared`). So the summary says "cleared" and the sentence
+  // below spells out what that did to the artwork directory, rather than this
+  // line claiming a deletion count it does not have. Under --dry-run the same
+  // number is an intention, and reads as one.
+  const clearedLabel = options.dryRun ? 'would be cleared' : 'cleared';
   console.log(
     `\n${result.moved} moved, ${result.cleared} ${clearedLabel}, ${result.unreadable} unreadable, ` +
       `of ${result.examined} examined in ${Math.round((Date.now() - started) / 1000)}s`,
@@ -95,8 +99,8 @@ async function main(): Promise<void> {
   if (result.cleared > 0) {
     console.log(
       options.dryRun
-        ? 'Those rows hold an image the correct slot is already filled with, so it would be dropped from the row and deleted from the artwork directory.'
-        : 'Those rows held an image the correct slot was already filled with, so it was dropped from the row and deleted from the artwork directory.',
+        ? 'Those rows hold an image the correct slot is already filled with, so it would be dropped from the row, and its file deleted from the artwork directory unless it is the only readable image the row has.'
+        : 'Those rows held an image the correct slot was already filled with, so it was dropped from the row, and its file deleted from the artwork directory unless it was the only readable image the row had.',
     );
   }
   if (result.unreadable > 0) {

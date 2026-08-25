@@ -452,7 +452,13 @@ test('a mismatching poster is cleared, not moved, when the background slot holds
 
     // background_path is NULL, so nothing under it is measured — but
     // background_url is not, which is enough to count the slot as occupied.
-    const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
+    const lines: string[] = [];
+    const report = await reclassifyArtwork({
+      db,
+      dir,
+      dryRun: false,
+      log: (message) => lines.push(message),
+    });
     assert.deepEqual(report, { examined: 1, moved: 0, cleared: 1, unreadable: 0 });
 
     const row = getGroupMetadata(db, 1);
@@ -460,6 +466,90 @@ test('a mismatching poster is cleared, not moved, when the background slot holds
     assert.equal(row?.posterUrl, null);
     assert.equal(row?.backgroundPath, null);
     assert.equal(row?.backgroundUrl, 'https://cdn.example/known-but-uncached.jpg');
+
+    // Occupied is `url OR path`, so this row is cleared — but the destination
+    // holds no cached bytes at all, which makes the cleared file the only
+    // readable image the group has. A url whose fetch failed once and is never
+    // retried (`worthReasking` re-asks only `state = 'none'`) is an ordinary way
+    // to arrive here, so deleting would throw away the last usable image over a
+    // transient download failure.
+    assert.equal(
+      await exists(dir, 'wide.jpg'),
+      true,
+      'the cleared file is kept when the destination has no image of its own',
+    );
+    assert.match(lines.join('\n'), /its file kept, because the surviving slot has no usable image of its own/);
+  });
+});
+
+test('a cleared file is kept when the destination names a file that is missing from disk', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/wide.jpg', 'wide.jpg',
+               'https://cdn.example/gone.jpg', 'gone.jpg', 1000)`,
+    ).run();
+    // The destination names a file, so the slot is occupied and the row is
+    // cleared — but the file is not there to be measured, so the destination
+    // serves nothing and the cleared image is all the row has.
+    await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
+
+    const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
+    assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 1 });
+
+    const row = getGroupMetadata(db, 1);
+    assert.equal(row?.posterPath, null);
+    assert.equal(row?.backgroundPath, 'gone.jpg');
+    assert.equal(
+      await exists(dir, 'wide.jpg'),
+      true,
+      "the cleared file is kept when the destination's own file is missing",
+    );
+  });
+});
+
+test('a cleared file is kept when the destination names a file that cannot be measured', async () => {
+  await withTempDir(async (dir) => {
+    const db = openTestDatabase();
+    db.prepare(
+      `INSERT INTO media_groups
+         (id, plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES (1, '@pickarr/plugin-scenes', 'key-1', '{}', '', 0, 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO group_metadata
+         (group_id, state, source, title, poster_url, poster_path,
+          background_url, background_path, fetched_at)
+       VALUES (1, 'confirmed', 'theporndb', 'A Scene',
+               'https://cdn.example/wide.jpg', 'wide.jpg',
+               'https://cdn.example/broken.jpg', 'broken.jpg', 1000)`,
+    ).run();
+    await writeFile(join(dir, 'wide.jpg'), landscapeJpeg(1279, 719));
+    // Bytes `classifyArtwork` cannot measure: the destination file exists but is
+    // no more usable than a missing one, and this module's own rule is that a
+    // failed measurement is never grounds to act.
+    await writeFile(join(dir, 'broken.jpg'), 'not an image');
+
+    const report = await reclassifyArtwork({ db, dir, dryRun: false, log: () => {} });
+    assert.deepEqual(report, { examined: 2, moved: 0, cleared: 1, unreadable: 1 });
+
+    const row = getGroupMetadata(db, 1);
+    assert.equal(row?.posterPath, null);
+    assert.equal(row?.backgroundPath, 'broken.jpg');
+    assert.equal(
+      await exists(dir, 'wide.jpg'),
+      true,
+      "the cleared file is kept when the destination's own file cannot be measured",
+    );
   });
 });
 

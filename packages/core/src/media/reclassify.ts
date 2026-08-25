@@ -22,8 +22,10 @@ import { classifyArtwork, type ArtworkKind } from './classify.ts';
  * is left untouched, so a second pass over a clean library moves nothing.
  *
  * Not read-only, though. It writes rows, and on the one path that discards an
- * image rather than relocating it (see `ReclassifyResult.cleared`) it deletes
- * that image's file from `dir`. Nothing else on disk is touched.
+ * image rather than relocating it (see `ReclassifyResult.cleared`) it usually
+ * deletes that image's file from `dir` — not always, because a discarded image
+ * that is the row's only readable one is kept instead. Nothing else on disk is
+ * touched.
  *
  * Async throughout, on purpose, even though a one-shot CLI would tolerate a
  * synchronous read: this lives in `@pickarr/core` rather than `scripts/`
@@ -58,13 +60,20 @@ export interface ReclassifyResult {
   moved: number;
   /**
    * A mismatching slot discarded rather than moved, because its destination
-   * already held an image. The column is nulled *and* its cached file is
-   * deleted from `dir`, so the image is thrown away rather than merely
-   * dereferenced — an artwork directory that silently accumulates files no row
-   * names is one nobody can afterwards tell from a directory of live images.
+   * was already occupied. The column is always nulled; the cached file
+   * underneath it is *usually* deleted from `dir` too, so the image is thrown
+   * away rather than merely dereferenced — an artwork directory that silently
+   * accumulates files no row names is one nobody can afterwards tell from a
+   * directory of live images.
+   *
+   * Usually, not always: a clear whose surviving slot has no usable image of
+   * its own keeps the file, because deleting it would leave the row with no
+   * readable image at all. See `planRow`. So this is a count of clears, not a
+   * count of deletions, and the two can differ — the per-row log line says
+   * which of the two that row got.
    *
    * Reported separately from `moved` so an operator can tell "a misfiling was
-   * corrected" from "an image was deleted" — the two are very different
+   * corrected" from "an image was discarded" — the two are very different
    * outcomes to have applied to a library.
    */
   cleared: number;
@@ -112,24 +121,62 @@ interface RowPlan {
   result: ReclassifyResult;
   next: ArtworkRow;
   /**
-   * The cleared slot's own cached file, left unreferenced by `next` and so due
-   * for deletion, or `null` when the row orphans nothing.
+   * The cleared slot's own cached file, left unreferenced by `next` and safe to
+   * delete, or `null` when the row orphans nothing — and also when it does
+   * orphan a file that must nevertheless be kept, because it is the only
+   * readable image the row has left. See `clearedFileFate`.
    */
   deletePath: string | null;
 }
 
 /**
- * How a clear's log line should describe the cleared file's fate.
+ * What becomes of the file a cleared slot leaves behind.
  *
- * Normally the file is deleted, but not when the surviving slot names the same
- * file — see `planRow`. Which of the two happened has to be in the line, or an
- * operator reading "deleted" goes looking for a file that is still there and
- * still being served.
+ * `'kept-shared'` — the surviving slot names that same file, so it is not an
+ * orphan at all and is still being served. `'kept-sole-image'` — the surviving
+ * slot holds no image this run could measure, so the cleared file is the only
+ * readable image the row has left and deleting it would take the row's last
+ * one. `'deleted'` — everything else, which is the ordinary case.
+ *
+ * Three cases and not two because an operator has to be able to tell the two
+ * keeps apart: one leaves a file a row still names, the other leaves a genuine
+ * orphan that wants looking at.
  */
-function clearedFileFate(deletePath: string | null): string {
-  return deletePath === null
-    ? 'and its file kept, because the surviving slot names that file too'
-    : 'and its file deleted';
+type ClearedFileFate = 'deleted' | 'kept-shared' | 'kept-sole-image';
+
+/**
+ * Which of the three a clear reaches.
+ *
+ * `survivingUsable` is "the surviving slot holds an image that was successfully
+ * measured as its own kind" — see `planRow` for why a slot can be occupied
+ * without being usable, and for why a slot measured to the *wrong* kind cannot
+ * reach here.
+ */
+function clearedFileFate(
+  clearedPath: string | null,
+  survivingPath: string | null,
+  survivingUsable: boolean,
+): ClearedFileFate {
+  if (clearedPath === survivingPath) return 'kept-shared';
+  return survivingUsable ? 'deleted' : 'kept-sole-image';
+}
+
+/**
+ * How a clear's log line should describe that fate.
+ *
+ * Which of the three happened has to be in the line, or an operator reading
+ * "deleted" goes looking for a file that is still there — and one that is still
+ * being served reads very differently from one nothing names any more.
+ */
+function clearedFileFatePhrase(fate: ClearedFileFate): string {
+  switch (fate) {
+    case 'kept-shared':
+      return 'and its file kept, because the surviving slot names that file too';
+    case 'kept-sole-image':
+      return 'and its file kept, because the surviving slot has no usable image of its own';
+    case 'deleted':
+      return 'and its file deleted';
+  }
 }
 
 /**
@@ -159,19 +206,44 @@ function clearedFileFate(deletePath: string | null): string {
  * the synthesised crop: an image that cannot be correctly placed is not
  * stored under a name that misdescribes it.
  *
- * A cleared slot's file is then deleted, which is why `deletePath` comes back
- * out of here. Nothing references that file once the column is nulled, and the
- * one thing worse than discarding an image is discarding it halfway — leaving
- * bytes in the artwork directory that no row names, indistinguishable from the
- * live ones, for a later reader to guess about. Nulling the column is the
- * decision; deleting the file is that decision carried out. The move and swap
- * branches orphan nothing, because every path they touch is still named by one
- * column or the other afterwards, so they return `null`.
+ * A cleared slot's file is usually deleted too, which is why `deletePath` comes
+ * back out of here. Nothing references that file once the column is nulled, and
+ * the one thing worse than discarding an image is discarding it halfway —
+ * leaving bytes in the artwork directory that no row names, indistinguishable
+ * from the live ones, for a later reader to guess about. Nulling the column is
+ * the decision; deleting the file is that decision carried out. The move and
+ * swap branches orphan nothing, because every path they touch is still named by
+ * one column or the other afterwards, so they return `null`.
  *
- * The single exception is a row whose two columns name the *same* file. The
- * surviving slot keeps serving it, so it is not an orphan and must not be
- * deleted — clearing the mismatching column is precisely what protects that
- * image, and deleting it would be the clear destroying what it set out to save.
+ * Usually, because "occupied" is deliberately wider than "holds a usable
+ * image" — it is `url OR path`, since a row can hold a url with no cached file
+ * yet — and the three states inside that gap are precisely the ones where the
+ * destination has nothing readable: a url with `path` still NULL, a path whose
+ * file is missing, a path whose file is unreadable or an unmeasurable format.
+ * Clear the mismatching slot in any of those and its file is the only readable
+ * image the row has, so it is kept as an orphan instead. That asymmetry is
+ * deliberate: an orphan wastes disk and can be swept up later, a deleted sole
+ * image is gone. It is also what this function's own rule above — an unreadable
+ * file is never grounds to act on a failed measurement — already says about the
+ * mismatching slot, applied to the destination as well.
+ *
+ * "Holds a usable image" is exactly `backgroundKind === 'background'` in the
+ * poster branch and `posterKind === 'poster'` in the background branch, with no
+ * third possibility to worry about: a destination that measured to the *wrong*
+ * kind makes its own mismatch flag true, and a row with both flags true takes
+ * the swap branch above and never reaches a clear at all. So inside a clear the
+ * destination has either measured to its own kind or not measured at all.
+ *
+ * A row whose two columns name the *same* file is kept for a different reason:
+ * the surviving slot goes on serving it, so it is not an orphan — clearing the
+ * mismatching column is precisely what protects that image, and deleting it
+ * would be the clear destroying what it set out to save. This is defence
+ * against a future writer or a hand-edited database rather than a state the
+ * library produces: `pipeline/metadata.ts` writes through `groupArtworkKey`, so
+ * a group's two files are always `group-poster-N.ext` and
+ * `group-background-N.ext`; migration 15 moves `poster_path` and nulls the
+ * source; `setArtworkPair` only swaps or nulls. Cheap insurance against a loss
+ * nothing could undo.
  */
 async function planRow(
   deps: Pick<ReclassifyDeps, 'dir' | 'log'>,
@@ -215,11 +287,12 @@ async function planRow(
     if (backgroundOccupied) {
       next = { ...row, posterUrl: null, posterPath: null };
       result.cleared += 1;
-      deletePath = row.posterPath === row.backgroundPath ? null : row.posterPath;
+      const fate = clearedFileFate(row.posterPath, row.backgroundPath, backgroundKind === 'background');
+      deletePath = fate === 'deleted' ? row.posterPath : null;
       deps.log(
         `reclassify: group ${row.groupId}: poster ${row.posterPath ?? ''} measures as a background ` +
           'but the background slot is already filled, so the poster slot is cleared ' +
-          clearedFileFate(deletePath),
+          clearedFileFatePhrase(fate),
       );
     } else {
       next = {
@@ -237,11 +310,12 @@ async function planRow(
     if (posterOccupied) {
       next = { ...row, backgroundUrl: null, backgroundPath: null };
       result.cleared += 1;
-      deletePath = row.backgroundPath === row.posterPath ? null : row.backgroundPath;
+      const fate = clearedFileFate(row.backgroundPath, row.posterPath, posterKind === 'poster');
+      deletePath = fate === 'deleted' ? row.backgroundPath : null;
       deps.log(
         `reclassify: group ${row.groupId}: background ${row.backgroundPath ?? ''} measures as a poster ` +
           'but the poster slot is already filled, so the background slot is cleared ' +
-          clearedFileFate(deletePath),
+          clearedFileFatePhrase(fate),
       );
     } else {
       next = {
