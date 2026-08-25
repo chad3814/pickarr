@@ -346,9 +346,18 @@ test('the modal walks a group\'s images and clamps at the ends', async ({ page, 
 
   // The low end gets the same keyboard check the high end already had above:
   // a clamped ArrowLeft here has to be a real no-op, not just a disabled
-  // button nothing ever pressed against.
+  // button nothing ever pressed against. On its own this is ambiguous — the
+  // caption reads the same whether the clamp ran or the keydown never
+  // reached the dialog at all — so it is not the proof by itself, exactly as
+  // the lone `ArrowRight` above the first `ArrowLeft` was not. The following
+  // `ArrowRight`, a real move, is what tells the two apart: it only lands on
+  // `Alice Maze · 2 of 2` if the dialog is actually receiving arrow keys at
+  // this point, which a regression scoped to just the low-end reclaim would
+  // break silently if this line were missing.
   await page.keyboard.press('ArrowLeft');
   await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+  await page.keyboard.press('ArrowRight');
+  await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
 
   // Escape still closes, which is the thing the unit suite cannot check.
   await page.keyboard.press('Escape');
