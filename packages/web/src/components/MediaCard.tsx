@@ -94,6 +94,28 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // not the other.
   const { metadata } = group;
 
+  /**
+   * TEMPORARY, and phase 2b deletes it deliberately.
+   *
+   * Before the poster/background split, 1,494 of this library's 1,508 stored
+   * "posters" were landscape backgrounds. The moment `hasPoster` started telling
+   * the truth those cards would have gone blank, so this reproduces the old
+   * rendering exactly: whichever image the group has, preferring the poster.
+   *
+   * Phase 2b replaces it with poster, then the first performer portrait, then a
+   * placeholder — and moves the background to the image gallery, where a
+   * landscape image is not cropped into a 2:3 slot. Do not mistake this for the
+   * intended design.
+   */
+  const thumbnail =
+    metadata.state !== 'confirmed'
+      ? null
+      : metadata.hasPoster
+        ? `/api/groups/${group.id}/poster`
+        : metadata.hasBackground
+          ? `/api/groups/${group.id}/background`
+          : null;
+
   // A requery's error message describes one attempt, and a fresher answer
   // outlives it: leaving it up would caption a card that has since updated
   // with the reason an earlier attempt failed. The dependency is the view
@@ -296,14 +318,13 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
           </ul>
         </div>
 
-        {metadata.state === 'confirmed' && metadata.hasPoster && (
+        {thumbnail !== null && (
           <button
             type="button"
             className="poster-thumb"
-            onClick={() => setModal({ src: `/api/groups/${group.id}/poster`,
-                                      alt: `Poster for ${display.title}` })}
+            onClick={() => setModal({ src: thumbnail, alt: `Poster for ${display.title}` })}
           >
-            <img src={`/api/groups/${group.id}/poster`} alt={`Poster for ${display.title}`} />
+            <img src={thumbnail} alt={`Poster for ${display.title}`} />
           </button>
         )}
       </div>

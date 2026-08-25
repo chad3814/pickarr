@@ -3,8 +3,23 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cacheImage, MAX_IMAGE_BYTES, IMAGE_TIMEOUT_MS, performerArtworkKey } from '../../src/media/artwork.ts';
+import {
+  cacheImage,
+  fetchImage,
+  writeImage,
+  groupArtworkKey,
+  MAX_IMAGE_BYTES,
+  IMAGE_TIMEOUT_MS,
+  performerArtworkKey,
+  type ArtworkDeps,
+} from '../../src/media/artwork.ts';
+import type { FetchImpl } from '../../src/clients/theporndb.ts';
 import { stubAbortTimeout } from '../abort-timeout.ts';
+
+/** Minimal `ArtworkDeps` for tests that don't care about logging. */
+function testDeps(dir: string, fetchImpl: FetchImpl = () => Promise.reject(new Error('unexpected fetch'))): ArtworkDeps {
+  return { dir, fetchImpl, log() {} };
+}
 
 /**
  * Every test gets its own `mkdtemp` directory and removes it on the way out,
@@ -393,5 +408,82 @@ test(
       assert.equal(logged.length, 1);
       assert.deepEqual(await readdir(dir), []);
     });
+  },
+);
+
+test('fetchImage returns the bytes and the extension without writing anything', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'artwork-'));
+  const bytes = new Uint8Array([1, 2, 3]);
+  const deps = testDeps(dir, async () => new Response(bytes, {
+    headers: { 'content-type': 'image/png' },
+  }));
+
+  const got = await fetchImage(deps, 'https://example/x');
+  assert.deepEqual(got?.bytes, bytes);
+  assert.equal(got?.extension, 'png');
+  // Nothing on disk yet: the destination is not known until the caller has
+  // classified these bytes.
+  assert.deepEqual(await readdir(dir), []);
+});
+
+test('writeImage names the file from the key and leaves no temp behind', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'artwork-'));
+  const name = await writeImage(testDeps(dir), 'group-poster-7', new Uint8Array([1]), 'jpg');
+  assert.equal(name, 'group-poster-7.jpg');
+  assert.deepEqual(await readdir(dir), ['group-poster-7.jpg']);
+});
+
+test('groupArtworkKey mirrors the performer convention', () => {
+  assert.equal(groupArtworkKey(7, 'poster'), 'group-poster-7');
+  assert.equal(groupArtworkKey(7, 'background'), 'group-background-7');
+});
+
+test('cacheImage still behaves as before, so existing callers are unaffected', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'artwork-'));
+  const deps = testDeps(dir, async () => new Response(new Uint8Array([1]), {
+    headers: { 'content-type': 'image/webp' },
+  }));
+  assert.equal(await cacheImage(deps, 'performer-face-3', 'https://example/x'), 'performer-face-3.webp');
+});
+
+test(
+  'writeImage gives up on a stalled write, rather than hanging forever',
+  { timeout: 2_000 },
+  async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'artwork-'));
+    const timeout = stubAbortTimeout(t);
+    const logged: string[] = [];
+
+    // writeImage has no injectable filesystem — mkdir/writeFile/rename are
+    // real node:fs/promises calls, so unlike fetchImage there is no `deps`
+    // hook to hand it a write that "never settles". Firing the stubbed
+    // deadline in the same synchronous tick that calls writeImage stands in
+    // for that: mkdir has already been kicked off by the time `fire()` runs,
+    // but a real disk operation cannot have settled yet — it always needs at
+    // least one round trip through libuv's threadpool, which is strictly
+    // more event-loop turns than the synchronous `abort` dispatch a fired
+    // AbortSignal rejects on. That makes the deadline the guaranteed winner
+    // of the race without needing an operation that is actually stuck.
+    const pending = writeImage(
+      { dir, fetchImpl: () => Promise.reject(new Error('unused')), log: (m) => logged.push(m) },
+      '7',
+      new Uint8Array([1, 2, 3]),
+      'jpg',
+    );
+    assert.deepEqual(
+      timeout.requested,
+      [IMAGE_TIMEOUT_MS],
+      'writeImage requests exactly one AbortSignal.timeout, at IMAGE_TIMEOUT_MS',
+    );
+    timeout.fire();
+    const name = await pending;
+
+    assert.equal(
+      name,
+      null,
+      'a stalled write must not hang the metadata pass; it is a write failure like any other',
+    );
+    assert.equal(logged.length, 1);
+    assert.deepEqual(await readdir(dir), [], 'no temp file survives the abort');
   },
 );

@@ -180,6 +180,7 @@ test('polling stops once nothing is pending', async () => {
             durationSeconds: null,
             synopsis: null,
             hasPoster: false,
+            hasBackground: false,
           };
     return jsonResponse({ 5: view });
   });
@@ -345,6 +346,7 @@ test('rearm re-polls a settled id rather than leaving it unwatched, and never sh
     durationSeconds: null,
     synopsis: null,
     hasPoster: false,
+    hasBackground: false,
   };
   const fresher: MetadataView = { ...original, title: 'Fresher title' };
   // Three answers in sequence: the settled answer this hook resolves to
@@ -408,6 +410,7 @@ const ORIGINAL: MetadataView = {
   durationSeconds: null,
   synopsis: null,
   hasPoster: false,
+  hasBackground: false,
 };
 const FRESHER: MetadataView = { ...ORIGINAL, title: 'Fresher title' };
 
@@ -576,6 +579,7 @@ test('an id the server reports as refreshed is watched again, with no button pre
             durationSeconds: null,
             synopsis: null,
             hasPoster: false,
+            hasBackground: false,
           };
     return jsonResponse({ [ID]: view });
   });

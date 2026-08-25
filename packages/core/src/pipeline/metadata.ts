@@ -7,13 +7,15 @@ import type {
   MetadataVerdict,
 } from '@pickarr/plugin-api';
 import { RateLimited, type SceneLookupClient } from '../clients/theporndb.ts';
-import { cacheImage, type ArtworkDeps } from '../media/artwork.ts';
+import { fetchImage, groupArtworkKey, writeImage, type ArtworkDeps } from '../media/artwork.ts';
+import { classifyArtwork, type ArtworkKind } from '../media/classify.ts';
 import { getGroup } from '../db/groups.ts';
 import {
   deferMetadata,
   dueMetadataQueue,
   getGroupMetadata,
   recordMetadataAnswer,
+  setBackgroundPath,
   setPosterPath,
   type MetadataQueueRow,
 } from '../db/metadata.ts';
@@ -420,29 +422,108 @@ async function lookUpOne(deps: MetadataPassDeps, row: MetadataQueueRow, now: num
 
   recordMetadataAnswer(deps.db, { groupId: row.groupId, source: client.source, confirmed, nearMisses, now });
 
-  // A poster failure is not a metadata failure: the answer above is already
-  // written, and `cacheImage` never throws, so nothing here can undo it.
+  // An artwork failure is not a metadata failure: the answer above is
+  // already written, and nothing below here can throw, so nothing here can
+  // undo it.
   //
-  // Skipped when a path is already stored, which is the same rule
-  // `cachePerformerArtwork` applies to avatars just below, for the same reason.
-  // Without it, migration 7's
-  // backfill spends one full image download per confirmed group in the
-  // library to overwrite a byte-identical file: `cacheImage` keys the poster
-  // on the group id alone, so a refetch of the same scene writes the same
-  // bytes to the same name.
+  // Each column prefers the reader named for it and falls back to the
+  // other, so the rule is total: two candidates that both measure landscape
+  // yield a background and no poster, rather than an arbitrary winner. The
+  // provider's field names are a hint about where to look, never the answer
+  // — see `classifyArtwork`.
   //
-  // The cost of the rule is that a poster the provider *moved* is not
+  // A column already holding a path is skipped before it is ever fetched —
+  // read once, here, rather than inside the write loop below, so that
+  // writing the poster within this same pass cannot change what the
+  // background branch sees. Without that guard, migration 7's backfill (and
+  // any later requery of an already-confirmed group) would spend one full
+  // image download per group per column to overwrite a byte-identical file:
+  // both `groupArtworkKey`s are stable per group, so a refetch of the same
+  // scene writes the same bytes to the same name.
+  //
+  // The cost of the rule is that an image the provider *moved* is not
   // re-fetched — the stored path still names the old file, which is stale
   // decoration rather than a wrong answer. Telling the two apart would mean
-  // reading the previous `poster_url` before the upsert overwrites it, and
-  // the same argument then applies to `face_url` and `image_url`; it is worth
-  // doing for all three or none, and this branch is not the place to widen
-  // it. The row's `poster_url` is kept current either way, so a future pass
-  // has what it needs.
-  const cachedPoster = getGroupMetadata(deps.db, row.groupId)?.posterPath ?? null;
-  if (confirmed !== null && confirmed.posterUrl !== null && cachedPoster === null) {
-    const posterPath = await cacheImage(deps.artwork, String(row.groupId), confirmed.posterUrl);
-    if (posterPath !== null) setPosterPath(deps.db, row.groupId, posterPath);
+  // reading the previous `poster_url`/`background_url` before the upsert
+  // overwrites them, and the same argument then applies to `face_url` and
+  // `image_url`; it is worth doing for all four or none, and this branch is
+  // not the place to widen it.
+  //
+  // That cost also reaches across columns, and it is worth being precise
+  // about how far: a column already holding a path is never fetched at all,
+  // so it can never serve as a fallback for the *other*, still-empty
+  // column — even though the fetch loop below would otherwise let a
+  // wrongly-shaped candidate do exactly that. This is narrower than it
+  // sounds. A cached poster path exists only because some earlier pass
+  // measured that URL's bytes as portrait; if it had measured landscape it
+  // would already be the background. So the only way this ever costs a real
+  // fallback is the provider swapping the poster URL for one of the
+  // opposite shape between passes — the same moved-image case the paragraph
+  // above already accepts, for the same reason. The alternative — fetching
+  // a cached column's URL whenever the other column is still empty, on the
+  // chance it now measures the other way — would spend a download whose
+  // result is already known in almost every case, which is the same waste
+  // this guard exists to avoid in the first place. The row's
+  // `poster_url`/`background_url` are kept current either way, so a future
+  // pass has what it needs if the provider ever does move an image.
+  //
+  // There are two distinct things worth guarding here, and each guard below
+  // covers only one of them. The `wanted` gate just above stops a column's
+  // own URL from being fetched again once that column is cached — a
+  // fetch-cost concern. It does nothing to stop a *different* candidate,
+  // fetched because some other column was still empty, from measuring the
+  // same shape as an already-filled column and being picked for it by the
+  // fallback `find` in the write loop below. Left unguarded, that write is
+  // silent: it lands under the same `groupArtworkKey` name, so
+  // `posterPath`/`backgroundPath` never change, and only the file's bytes
+  // do — a path-only assertion cannot tell "untouched" from "overwritten
+  // with different content under the same name". The write loop repeats the
+  // already-cached check for exactly that reason: a column already holding
+  // a path is never rewritten within this pass, whichever candidate's
+  // measurement would have matched it. That is what keeps a cached image
+  // stable rather than merely unfetched.
+  const existing = getGroupMetadata(deps.db, row.groupId);
+  const posterUrl = confirmed?.posterUrl ?? null;
+  const backgroundUrl = confirmed?.backgroundUrl ?? null;
+  const cachedPoster = existing?.posterPath ?? null;
+  const cachedBackground = existing?.backgroundPath ?? null;
+  const wanted: ReadonlyArray<{ url: string; from: ArtworkKind }> = [
+    ...(posterUrl === null || cachedPoster !== null ? [] : [{ url: posterUrl, from: 'poster' as const }]),
+    ...(backgroundUrl === null || cachedBackground !== null
+      ? []
+      : [{ url: backgroundUrl, from: 'background' as const }]),
+  ];
+
+  // One fetch per distinct url: a provider that repeats the same image
+  // across both fields must not cost two downloads of the same bytes.
+  const seen = new Set<string>();
+  const measured: Array<{ kind: ArtworkKind; bytes: Uint8Array; extension: string; from: ArtworkKind }> = [];
+  for (const want of wanted) {
+    if (seen.has(want.url)) continue;
+    seen.add(want.url);
+    // eslint-disable-next-line no-await-in-loop -- at most two urls, fetched sequentially like every other request in this function
+    const fetched = await fetchImage(deps.artwork, want.url);
+    if (fetched === null) continue;
+    const kind = classifyArtwork(fetched.bytes);
+    if (kind !== null) measured.push({ kind, ...fetched, from: want.from });
+  }
+
+  for (const kind of ['poster', 'background'] as const) {
+    // A column already holding a path is never rewritten within this pass —
+    // see the comment above: this is not the same guard as the `wanted`
+    // gate, which only stops a redundant fetch of the column's own URL and
+    // says nothing about a fallback candidate fetched for the other column.
+    const alreadyCached = kind === 'poster' ? cachedPoster : cachedBackground;
+    if (alreadyCached !== null) continue;
+    // Prefer the candidate that came from the matching reader, then any
+    // other measured image that happens to share this shape.
+    const pick = measured.find((m) => m.kind === kind && m.from === kind) ?? measured.find((m) => m.kind === kind);
+    if (pick === undefined) continue;
+    // eslint-disable-next-line no-await-in-loop -- at most two images, written sequentially like every other request in this function
+    const name = await writeImage(deps.artwork, groupArtworkKey(row.groupId, kind), pick.bytes, pick.extension);
+    if (name === null) continue;
+    if (kind === 'poster') setPosterPath(deps.db, row.groupId, name);
+    else setBackgroundPath(deps.db, row.groupId, name);
   }
 
   // Performer artwork, on the same terms as the poster above: the answer is

@@ -100,6 +100,7 @@ export type MetadataView = CastView &
         durationSeconds: number | null;
         synopsis: string | null;
         hasPoster: boolean;
+        hasBackground: boolean;
         sceneUrl: string | null;
       }
     | { state: 'none' }
@@ -234,6 +235,7 @@ export function metadataViewOf(
     durationSeconds: metadata.durationSeconds,
     synopsis: metadata.synopsis,
     hasPoster: metadata.posterPath !== null,
+    hasBackground: metadata.backgroundPath !== null,
     // Escaped for the reason `performerUrl` gives: same provider, same kind
     // of string, same way of quietly building the wrong link.
     sceneUrl:

@@ -213,8 +213,28 @@ function retryAfterMs(header: string | null): number {
  * `/background/` path, while the 2 that do not are plain
  * `cdn.theporndb.net/.../poster/...` URLs.
  *
- * Exported because the offline repair script matches stored `poster_url`s
- * against it — the rule for recognising one of these has to be stated once.
+ * Exported because the test suite imports it, for two things: to assert that the
+ * shared `CROP` fixture — a verbatim row from the real database — still carries
+ * the marker, and to compose hostile fixtures out of it (the foreign-origin and
+ * undecodable-segment cases build their urls by interpolating this constant).
+ * No `src` file outside this one reads it: `isBackgroundCrop` just below is the
+ * only caller.
+ *
+ * Importing it does not make the fixtures drift-proof, and it is worth being
+ * exact about that, because the reassuring version of this paragraph would
+ * hide six hand-written copies. Change this string and re-check all of them:
+ *
+ * - `db/migrations.ts`, migration 15, which restates both halves as
+ *   `poster_url LIKE '%/800x1200/%' OR poster_url LIKE '%/smart/%'`. A
+ *   migration gets a database and SQL and cannot import, so this copy cannot
+ *   be removed at all.
+ * - `test/clients/theporndb.test.ts`'s `CROP`, kept verbatim as the database
+ *   served it. The one copy that is guarded: the
+ *   `assert.ok(CROP.includes(BACKGROUND_CROP_MARKER))` beside it is what
+ *   actually catches drift here, not the fact that the constant is exported.
+ * - a second, shorter crop url in the same file's scene-reader test, with no
+ *   guard at all.
+ * - three thumbnailer urls in `test/db/migrations.test.ts`, likewise unguarded.
  */
 export const BACKGROUND_CROP_MARKER = '/800x1200/smart/';
 
@@ -237,10 +257,11 @@ export function isBackgroundCrop(url: string): boolean {
  * own encoded path, so counting segments from the left finds the site's logo
  * instead of the scene's background.
  *
- * Used two ways, and deliberately the same code for both: as the fallback
- * when a scene payload carries no `background` object, and as the *only*
- * source for the repair script, which has a stored URL and no payload left to
- * consult. Both must land on the same image.
+ * `readBackgroundCandidate` is the only caller. It reaches here when a scene
+ * payload's `background` object is missing or is itself a crop, so the crop URL
+ * is the only remaining evidence of where the original lives — and decoding it
+ * costs no request, which is why it is preferred over asking the provider
+ * again.
  *
  * Returns null rather than a guess for anything that does not decode to a URL
  * on TPDB's own CDN. The decoded text steers a `fetch` and the filename bytes
@@ -291,53 +312,56 @@ function readSizedImage(value: unknown, sizes: readonly string[]): string | null
 }
 
 /**
- * Poster sources in preference order.
+ * Poster candidates, in preference order — and only candidates.
  *
- * TPDB's own CDN first: the studio CDN fields (`image`, `poster_image`) point
- * at the site's own hosting, which is likelier to rotate paths or refuse a
- * foreign referrer. The documented `image` is 1279x719, so nothing downstream
- * may assume a portrait aspect ratio.
+ * This no longer reaches for the background when the offered poster turns out
+ * to be a synthesised crop of one. That substitution is what filed landscape
+ * images under a portrait's name for this library's whole history; the
+ * background now has its own reader and its own column.
+ *
+ * The studio `image` field has moved to `readBackgroundCandidate`, along with
+ * the rationale for where it sits in that reader's own preference order.
+ *
+ * Nothing here decides a shape. `classifyArtwork` does that, from the image.
  */
-function readOfferedPoster(record: Record<string, unknown>): string | null {
+function readPosterCandidate(record: Record<string, unknown>): string | null {
   const fromSet = readSizedImage(record['posters'], ['large', 'full']);
-  if (fromSet !== null) return fromSet;
-  for (const key of ['poster', 'image'] as const) {
-    const url = record[key];
-    if (typeof url === 'string' && url.length > 0) return url;
-  }
-  return null;
+  const offered = fromSet ?? str(record, 'poster');
+  if (offered === null || isBackgroundCrop(offered)) return null;
+  return offered;
 }
 
 /**
- * The poster to store, preferring a real background over a crop of one.
+ * Background candidates, in preference order.
  *
- * When the offered poster is synthesised (see `BACKGROUND_CROP_MARKER`), the
- * payload's own `background` is the better image by every measure available:
- * it is the full frame rather than a centre slice of it, at its native size
- * rather than upscaled, and without the logo the thumbnailer stamps on.
- * Nothing downstream assumes portrait — `readOfferedPoster` above already
- * documents that the plain `image` field is 1279x719 — so a landscape
- * background is a legitimate answer here, not a shape violation.
+ * `full` before `large`, the opposite of the poster preference and for the
+ * opposite reason: this reader exists partly to undo a downscaled, re-cropped
+ * rendition, so it asks for the original.
  *
- * `full` before `large`, the opposite of the poster preference above and for
- * the opposite reason: this branch is reached precisely because a downscaled,
- * re-cropped rendition was what went wrong, so it asks for the original.
+ * `backgroundFromCrop` is the second source because a crop URL carries its own
+ * source encoded whole, so the original needs no request to discover. The crop
+ * itself is never returned — see the design's §4.1: it is portrait, so it would
+ * be filed as a poster and would outrank a real performer portrait on the card.
  *
- * The two fallbacks matter for different failures. `backgroundFromCrop`
- * covers a payload with no `background` object at all, recovering the source
- * from the crop URL itself. Keeping the crop covers the case where even that
- * fails: a synthesised poster is poor artwork, but it is better than a card
- * with no image, and it stays recognisable to the repair script for a later
- * attempt.
+ * The studio `image` field is last, not first: TPDB's own CDN — the
+ * `background` object, and the original a crop URL decodes to — is preferred
+ * ahead of it, because the studio CDN points at the site's own hosting, which
+ * is likelier to rotate paths or refuse a foreign referrer. It was already
+ * documented here as 1279x719 before this reader existed; the warning that
+ * nothing downstream may assume a portrait aspect ratio is just being applied
+ * rather than stated.
  */
-function readPosterUrl(record: Record<string, unknown>): string | null {
-  const offered = readOfferedPoster(record);
-  if (offered === null || !isBackgroundCrop(offered)) return offered;
+function readBackgroundCandidate(record: Record<string, unknown>): string | null {
+  const fromObject = readSizedImage(record['background'], ['full', 'large']);
+  if (fromObject !== null && !isBackgroundCrop(fromObject)) return fromObject;
 
-  const background = readSizedImage(record['background'], ['full', 'large']);
-  if (background !== null && !isBackgroundCrop(background)) return background;
+  const offered = readSizedImage(record['posters'], ['large', 'full']) ?? str(record, 'poster');
+  if (offered !== null && isBackgroundCrop(offered)) {
+    const recovered = backgroundFromCrop(offered);
+    if (recovered !== null) return recovered;
+  }
 
-  return backgroundFromCrop(offered) ?? offered;
+  return str(record, 'image');
 }
 
 function str(record: Record<string, unknown>, key: string): string | null {
@@ -426,7 +450,7 @@ function readPerformers(value: unknown): MetadataPerformer[] {
  * mistake to correct: on a **scene**, `id` is the uuid string and `_id` is the
  * integer; on the nested **site**, `uuid` is the uuid and `id` is the integer.
  */
-function readScenes(body: unknown): MetadataCandidate[] {
+export function readScenes(body: unknown): MetadataCandidate[] {
   if (body === null || typeof body !== 'object') return [];
   const data = (body as { data?: unknown }).data;
   if (!Array.isArray(data)) return [];
@@ -462,7 +486,8 @@ function readScenes(body: unknown): MetadataCandidate[] {
       durationSeconds:
         typeof duration === 'number' && Number.isFinite(duration) ? duration : null,
       synopsis: typeof synopsis === 'string' && synopsis.length > 0 ? synopsis : null,
-      posterUrl: readPosterUrl(record),
+      posterUrl: readPosterCandidate(record),
+      backgroundUrl: readBackgroundCandidate(record),
       slug: str(record, 'slug'),
     });
   }

@@ -1,6 +1,7 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -131,15 +132,57 @@ function fakeSceneClient(
   };
 }
 
-const fetchJpeg: FetchImpl = () =>
-  Promise.resolve(
-    new Response(new Uint8Array([1, 2, 3]), {
-      status: 200,
-      headers: { 'content-type': 'image/jpeg' },
-    }),
-  );
-
 const fetchNotFound: FetchImpl = () => Promise.resolve(new Response(null, { status: 404 }));
+
+/**
+ * A minimal but valid PNG carrying the given dimensions in its IHDR, for
+ * tests that must exercise `classifyArtwork`'s measurement rather than a
+ * provider's field name. Mirrors `classify.test.ts`'s fixture of the same
+ * shape; duplicated rather than imported because that file has no exports.
+ */
+function png(width: number, height: number): Uint8Array {
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const ihdrType = [0x49, 0x48, 0x44, 0x52];
+  const ihdrData = new Uint8Array(13);
+  const ihdrView = new DataView(ihdrData.buffer);
+  ihdrView.setUint32(0, width, false);
+  ihdrView.setUint32(4, height, false);
+  ihdrData[8] = 8; // bit depth
+  ihdrData[9] = 6; // color type: truecolor with alpha
+  ihdrData[10] = 0; // compression
+  ihdrData[11] = 0; // filter
+  ihdrData[12] = 0; // interlace
+  const lengthBytes = new Uint8Array(4);
+  new DataView(lengthBytes.buffer).setUint32(0, ihdrData.length, false);
+  // image-size never checks the CRC, so a zeroed trailer is fine here.
+  const crc = new Uint8Array(4);
+  return new Uint8Array([...signature, ...lengthBytes, ...ihdrType, ...ihdrData, ...crc]);
+}
+
+/** A `png` a test intends to measure as landscape — guarded so a mislabelled call fails loudly rather than silently testing the wrong shape. */
+function landscapePng(width: number, height: number): Uint8Array {
+  if (width <= height) throw new Error(`landscapePng(${width}, ${height}) is not landscape`);
+  return png(width, height);
+}
+
+/** A `png` a test intends to measure as portrait (or square). Same guard as `landscapePng`, mirrored. */
+function portraitPng(width: number, height: number): Uint8Array {
+  if (width > height) throw new Error(`portraitPng(${width}, ${height}) is not portrait`);
+  return png(width, height);
+}
+
+/** Serves a pre-built image's bytes under `image/png` for every request. */
+function fetchPng(bytes: Uint8Array): FetchImpl {
+  return () => Promise.resolve(new Response(bytes, { status: 200, headers: { 'content-type': 'image/png' } }));
+}
+
+/** `fetchPng`, but recording every url asked for. */
+function trackingFetchPng(fetched: string[], bytes: Uint8Array): FetchImpl {
+  return (url) => {
+    fetched.push(url);
+    return Promise.resolve(new Response(bytes, { status: 200, headers: { 'content-type': 'image/png' } }));
+  };
+}
 
 /** Serves `image/jpeg` for every request, recording the url each call asked for. */
 function trackingFetchJpeg(fetched: string[]): FetchImpl {
@@ -190,13 +233,18 @@ test('a confirmation is stored with its poster and clears the queue row', async 
     const client = fakeSceneClient(() => [scene]);
 
     const result = await runMetadataPass(
-      deps({ db, client, now: () => 1_000, artwork: { dir, fetchImpl: fetchJpeg, log: () => undefined } }),
+      deps({
+        db,
+        client,
+        now: () => 1_000,
+        artwork: { dir, fetchImpl: fetchPng(portraitPng(800, 1200)), log: () => undefined },
+      }),
     );
 
     assert.equal(result.confirmed, 1);
     const stored = getGroupMetadata(db, groupId);
     assert.equal(stored?.state, 'confirmed');
-    assert.equal(stored?.posterPath, `${groupId}.jpg`);
+    assert.equal(stored?.posterPath, `group-poster-${groupId}.png`);
     assert.equal(dueMetadataQueue(db, 999_999, 10).length, 0, 'the queue row must be gone');
   });
 });
@@ -354,7 +402,7 @@ test('a poster failure still writes the metadata row', async () => {
 test('a group already holding a poster is not made to download it again', async () => {
   // The poster half of 'a performer already holding artwork is not
   // refetched'. Migration 7 queues every confirmed group in the library, and
-  // `cacheImage` keys the poster on the group id, so without the cached-path
+  // the poster is written under a key fixed by the group id, so without the cached-path
   // guard the backfill spends one full image download per group to overwrite
   // a byte-identical file — the whole library's worth, on first boot after
   // the upgrade, and no test would have noticed.
@@ -369,13 +417,15 @@ test('a group already holding a poster is not made to download it again', async 
       posterUrl: 'https://example.test/poster.jpg',
     });
 
+    const portrait = portraitPng(800, 1200);
+
     const firstPassFetches: string[] = [];
     await runMetadataPass(
       deps({
         db,
         client: fakeSceneClient(() => [scene]),
         now: () => 1_000,
-        artwork: { dir, fetchImpl: trackingFetchJpeg(firstPassFetches), log: () => undefined },
+        artwork: { dir, fetchImpl: trackingFetchPng(firstPassFetches, portrait), log: () => undefined },
       }),
     );
     assert.deepEqual(firstPassFetches, ['https://example.test/poster.jpg']);
@@ -393,13 +443,13 @@ test('a group already holding a poster is not made to download it again', async 
         db,
         client: fakeSceneClient(() => [scene]),
         now: () => 2_000,
-        artwork: { dir, fetchImpl: trackingFetchJpeg(secondPassFetches), log: () => undefined },
+        artwork: { dir, fetchImpl: trackingFetchPng(secondPassFetches, portrait), log: () => undefined },
       }),
     );
 
     assert.equal(result.confirmed, 1);
     assert.deepEqual(secondPassFetches, [], 'the poster is already on disk under this group id');
-    assert.equal(getGroupMetadata(db, groupId)?.posterPath, `${groupId}.jpg`);
+    assert.equal(getGroupMetadata(db, groupId)?.posterPath, `group-poster-${groupId}.png`);
   });
 });
 
@@ -957,3 +1007,263 @@ test('a requery re-confirmed with an empty cast replaces the cast, through the p
   // the settle path's enqueue runs after the answer is written.
   assert.deepEqual(duePerformerQueue(db, 1_000, 10).map((row) => row.groupId), [groupId]);
 });
+
+// ---------------------------------------------------------------------------
+// Task 5: each column is decided by the downloaded image's measured shape,
+// never by which field of the candidate it arrived in.
+// ---------------------------------------------------------------------------
+
+/** Directories `metadataHarness` has handed out, removed once per file rather than once per test. */
+const harnessDirs: string[] = [];
+after(async () => {
+  await Promise.all(harnessDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+/** What a harness-served url answers with: real bytes, or a 404. */
+type HarnessImage = Uint8Array | 404;
+
+function harnessResponse(image: HarnessImage | undefined): Promise<Response> {
+  if (image === undefined) {
+    throw new Error('metadataHarness: fetched a url it was never configured to serve');
+  }
+  if (image === 404) return Promise.resolve(new Response(null, { status: 404 }));
+  return Promise.resolve(new Response(image, { status: 200, headers: { 'content-type': 'image/png' } }));
+}
+
+interface MetadataHarness {
+  readonly db: DatabaseSync;
+  readonly fetchCount: number;
+  run(): Promise<void>;
+  fileFor(name: string): Promise<Uint8Array>;
+}
+
+/**
+ * One group, one scripted candidate, and a fetch layer that serves whichever
+ * of `poster`/`background` a test supplies (or 404s if given the literal
+ * `404`) — omitted entirely if the key is left out, matching a provider that
+ * never offered that field at all.
+ *
+ * Synchronous, so a test can write `metadataHarness({...})` with no
+ * `await`: the artwork directory does not need to exist yet, because
+ * `writeImage` creates it with `mkdir(..., { recursive: true })` the first
+ * time anything is written there.
+ *
+ * `run()` re-queues the group the way migration 7's backfill does — straight
+ * into `metadata_queue`, past `enqueueMetadata`'s already-answered guard —
+ * so a second `run()` genuinely re-asks a confirmed group instead of finding
+ * an empty queue and passing any "not re-fetched" assertion vacuously.
+ */
+function metadataHarness(images: { poster?: HarnessImage; background?: HarnessImage }): MetadataHarness {
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  const dir = join(tmpdir(), `pickarr-metadata-harness-${randomUUID()}`);
+  harnessDirs.push(dir);
+
+  const posterUrl = 'https://example.test/poster.png';
+  const backgroundUrl = 'https://example.test/background.png';
+
+  const scene = candidate({
+    title: 'A Scene',
+    siteName: 'Some Site',
+    posterUrl: images.poster === undefined ? null : posterUrl,
+    ...(images.background === undefined ? {} : { backgroundUrl }),
+  });
+
+  const state = { fetchCount: 0 };
+  const fetchImpl: FetchImpl = (url) => {
+    state.fetchCount += 1;
+    if (url === posterUrl) return harnessResponse(images.poster);
+    if (url === backgroundUrl) return harnessResponse(images.background);
+    throw new Error(`metadataHarness: unexpected fetch of ${url}`);
+  };
+
+  let calls = 0;
+
+  return {
+    db,
+    get fetchCount() {
+      return state.fetchCount;
+    },
+    async run() {
+      calls += 1;
+      const now = 1_000 * calls;
+      requeueMetadata(db, [groupId], now);
+      await runMetadataPass(
+        deps({
+          db,
+          client: fakeSceneClient(() => [scene]),
+          now: () => now,
+          artwork: { dir, fetchImpl, log: () => undefined },
+        }),
+      );
+    },
+    async fileFor(name: string) {
+      // `readFile` resolves a `Buffer`, and `assert.deepEqual` in strict mode
+      // treats that as distinct from a plain `Uint8Array` even when every
+      // byte matches — so the comparison is normalised to the same type the
+      // fixtures (`landscapePng`/`portraitPng`) already are.
+      const buffer = await readFile(join(dir, name));
+      return new Uint8Array(buffer);
+    },
+  };
+}
+
+test('each image is stored in the column its measurement dictates, not its field name', async () => {
+  // The provider offers them the wrong way round: a landscape image in the
+  // poster field and a portrait one in the background field.
+  const harness = metadataHarness({
+    poster: landscapePng(1279, 719),
+    background: portraitPng(800, 1200),
+  });
+  await harness.run();
+  const row = getGroupMetadata(harness.db, 1);
+  assert.equal(row?.posterPath, 'group-poster-1.png');
+  assert.equal(row?.backgroundPath, 'group-background-1.png');
+  // And the bytes prove which went where, not just the filenames.
+  assert.deepEqual(await harness.fileFor('group-poster-1.png'), portraitPng(800, 1200));
+  assert.deepEqual(await harness.fileFor('group-background-1.png'), landscapePng(1279, 719));
+});
+
+test('a poster that downloads and a background that 404s leaves one column set', async () => {
+  const harness = metadataHarness({ poster: portraitPng(800, 1200), background: 404 });
+  await harness.run();
+  const row = getGroupMetadata(harness.db, 1);
+  assert.equal(row?.posterPath, 'group-poster-1.png');
+  assert.equal(row?.backgroundPath, null);
+});
+
+test('two candidates measuring the same shape yield that column and leave the other null', async () => {
+  const harness = metadataHarness({
+    poster: landscapePng(1279, 719),
+    background: landscapePng(1920, 1080),
+  });
+  await harness.run();
+  const row = getGroupMetadata(harness.db, 1);
+  assert.equal(row?.posterPath, null);
+  assert.notEqual(row?.backgroundPath, null);
+});
+
+test('an already-cached image is not re-fetched', async () => {
+  // The existing rule and its long comment apply to both columns now.
+  const harness = metadataHarness({ poster: portraitPng(800, 1200) });
+  await harness.run();
+  const before = harness.fetchCount;
+  await harness.run();
+  assert.equal(harness.fetchCount, before);
+});
+
+test('a background url identical to the poster url costs one fetch, not two', async () => {
+  const db = openTestDatabase();
+  const groupId = makeGroup(db, 'A Scene', 'Some Site');
+  enqueueMetadata(db, [groupId], 1_000);
+
+  const sameUrl = 'https://example.test/shared.png';
+  const scene = candidate({
+    title: 'A Scene',
+    siteName: 'Some Site',
+    posterUrl: sameUrl,
+    backgroundUrl: sameUrl,
+  });
+  const client = fakeSceneClient(() => [scene]);
+
+  const fetched: string[] = [];
+  await withTempDir(async (dir) => {
+    await runMetadataPass(
+      deps({
+        db,
+        client,
+        now: () => 1_000,
+        artwork: { dir, fetchImpl: trackingFetchPng(fetched, portraitPng(800, 1200)), log: () => undefined },
+      }),
+    );
+  });
+
+  assert.deepEqual(fetched, [sameUrl], 'one url fetched once, even though both fields named it');
+});
+
+test(
+  'a column already holding an image is never overwritten by a same-shaped candidate arriving for the other field',
+  async () => {
+    // Reproduces the hazard a per-field fetch gate cannot see on its own:
+    // gating `wanted` on `existing` stops a column's *own* URL from being
+    // refetched once cached, but says nothing about a *different*
+    // candidate -- fetched because some other column was still empty --
+    // whose measurement happens to match the already-filled column and
+    // would otherwise be picked for it by the write loop's shape-only
+    // fallback. Because the write lands under the same `groupArtworkKey`
+    // name, `posterPath` does not change either way -- only a byte
+    // comparison of the stored file, not a path assertion, can catch this.
+    await withTempDir(async (dir) => {
+      const db = openTestDatabase();
+      const groupId = makeGroup(db, 'A Scene', 'Some Site');
+      enqueueMetadata(db, [groupId], 1_000);
+
+      // Pass 1 offers only a poster. It measures portrait and is cached.
+      const posterOnly = candidate({
+        title: 'A Scene',
+        siteName: 'Some Site',
+        posterUrl: 'https://example.test/poster.png',
+      });
+      const originalPoster = portraitPng(800, 1200);
+      await runMetadataPass(
+        deps({
+          db,
+          client: fakeSceneClient(() => [posterOnly]),
+          now: () => 1_000,
+          artwork: { dir, fetchImpl: fetchPng(originalPoster), log: () => undefined },
+        }),
+      );
+      assert.equal(getGroupMetadata(db, groupId)?.posterPath, `group-poster-${groupId}.png`);
+
+      // Re-queued the way migration 7's backfill does it, straight past
+      // `enqueueMetadata`'s already-answered guard.
+      db.prepare(
+        `INSERT INTO metadata_queue (group_id, requested_at, attempts, next_at) VALUES (?, ?, 0, ?)`,
+      ).run(groupId, 2_000, 2_000);
+
+      // Pass 2: the provider now also offers a background -- but its bytes
+      // measure portrait too. The poster column is already cached, so its
+      // own url must never be refetched (the fetchImpl below throws if it
+      // is); the hazard under test is whether the background candidate's
+      // measurement is allowed to satisfy the poster column by fallback.
+      const both = candidate({
+        title: 'A Scene',
+        siteName: 'Some Site',
+        posterUrl: 'https://example.test/poster.png',
+        backgroundUrl: 'https://example.test/background.png',
+      });
+      const wrongShapedBackground = portraitPng(600, 900);
+      const fetchImpl: FetchImpl = (url) => {
+        if (url === 'https://example.test/background.png') {
+          return Promise.resolve(
+            new Response(wrongShapedBackground, { status: 200, headers: { 'content-type': 'image/png' } }),
+          );
+        }
+        throw new Error(`unexpected fetch of ${url}: the poster column is already cached and must not be refetched`);
+      };
+
+      await runMetadataPass(
+        deps({
+          db,
+          client: fakeSceneClient(() => [both]),
+          now: () => 2_000,
+          artwork: { dir, fetchImpl, log: () => undefined },
+        }),
+      );
+
+      const row = getGroupMetadata(db, groupId);
+      // The path alone proves nothing: it names the same file before and
+      // after, whether or not that file's bytes were overwritten.
+      assert.equal(row?.posterPath, `group-poster-${groupId}.png`);
+      const posterFilePath = row?.posterPath;
+      assert.ok(posterFilePath !== undefined && posterFilePath !== null);
+      const posterBytes = new Uint8Array(await readFile(join(dir, posterFilePath)));
+      assert.deepEqual(
+        posterBytes,
+        originalPoster,
+        'the cached poster must not be silently overwritten by a same-shaped candidate fetched for the background field',
+      );
+      assert.equal(row?.backgroundPath, null, 'the background field\'s image was never a background, so it fills nothing');
+    });
+  },
+);

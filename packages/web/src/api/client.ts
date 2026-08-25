@@ -129,6 +129,7 @@ export type MetadataView = CastView &
       durationSeconds: number | null;
       synopsis: string | null;
       hasPoster: boolean;
+      hasBackground: boolean;
       /**
        * Optional for the same "new key, older server" reason `performerNames`
        * is; `?? null` at the use site is what keeps its absence from being a

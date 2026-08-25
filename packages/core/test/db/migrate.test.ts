@@ -979,7 +979,7 @@ test('migration 6 is idempotent across a second run', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   db.close();
 });
 
@@ -1085,7 +1085,7 @@ test('app_state arrives at version 10 and takes no other version', () => {
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => Number(row['version']));
-  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 });
 
 // --- Migration 11: the feed backfill position -------------------------------

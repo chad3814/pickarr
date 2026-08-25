@@ -13,8 +13,13 @@ export interface GroupMetadata {
   releaseDate: string | null;
   durationSeconds: number | null;
   synopsis: string | null;
+  /** Portrait artwork, ~2:3. See `classifyArtwork`: the column is decided by
+   *  measured aspect, never by the provider's field name. */
   posterUrl: string | null;
   posterPath: string | null;
+  /** Landscape artwork, ~16:9. Same rule. */
+  backgroundUrl: string | null;
+  backgroundPath: string | null;
   sceneSlug: string | null;
   fetchedAt: number;
 }
@@ -70,13 +75,16 @@ function toMetadata(row: SqlRow): GroupMetadata {
     synopsis: maybeStr(row, 'synopsis'),
     posterUrl: maybeStr(row, 'poster_url'),
     posterPath: maybeStr(row, 'poster_path'),
+    backgroundUrl: maybeStr(row, 'background_url'),
+    backgroundPath: maybeStr(row, 'background_path'),
     sceneSlug: maybeStr(row, 'scene_slug'),
     fetchedAt: num(row, 'fetched_at'),
   };
 }
 
 const COLUMNS = `group_id, state, source, source_uuid, title, performers, release_date,
-                 duration_s, synopsis, poster_url, poster_path, scene_slug, fetched_at`;
+                 duration_s, synopsis, poster_url, poster_path, background_url,
+                 background_path, scene_slug, fetched_at`;
 
 export function getGroupMetadata(db: DatabaseSync, groupId: number): GroupMetadata | undefined {
   const row = db.prepare(`SELECT ${COLUMNS} FROM group_metadata WHERE group_id = ?`).get(groupId);
@@ -351,9 +359,16 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // poster_path is deliberately absent from the DO UPDATE SET list below:
     // it names a file already fetched to disk, not something a provider
     // answer carries (the INSERT writes it as a literal NULL), and only
-    // setPosterPath ever fills it in. Updating it here from excluded would
-    // blank a cached poster on every refetch — which migration 7 is about to
-    // run for every already-confirmed group in the database.
+    // setPosterPath and setArtworkPair ever write it.
+    // Updating it here from excluded would blank a cached poster on every
+    // refetch — which migration 7 is about to run for every already-confirmed
+    // group in the database.
+    //
+    // background_path is absent for the same reason, and just as literally:
+    // it too names a file already fetched to disk rather than anything a
+    // provider answer carries, only setBackgroundPath and setArtworkPair ever
+    // write it, and updating it from excluded would blank a cached background
+    // on every refetch precisely as it would a poster.
     //
     // The WHERE on the upsert generalises that same protection to the whole
     // row, and the asymmetry is worth recording: blanking a cached *poster*
@@ -378,14 +393,15 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // row that is not currently confirmed can be rewritten by anything,
     // including another 'none' that only refreshes `fetched_at`.
     const written = db.prepare(
-      `INSERT INTO group_metadata (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      `INSERT INTO group_metadata (${COLUMNS})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
        ON CONFLICT (group_id) DO UPDATE SET
          state = excluded.state, source = excluded.source,
          source_uuid = excluded.source_uuid, title = excluded.title,
          performers = excluded.performers, release_date = excluded.release_date,
          duration_s = excluded.duration_s, synopsis = excluded.synopsis,
-         poster_url = excluded.poster_url, scene_slug = excluded.scene_slug,
-         fetched_at = excluded.fetched_at
+         poster_url = excluded.poster_url, background_url = excluded.background_url,
+         scene_slug = excluded.scene_slug, fetched_at = excluded.fetched_at
        WHERE excluded.state = 'confirmed' OR group_metadata.state <> 'confirmed'`,
     ).run(
       input.groupId,
@@ -401,6 +417,7 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
       confirmed?.durationSeconds ?? null,
       confirmed?.synopsis ?? null,
       confirmed?.posterUrl ?? null,
+      confirmed?.backgroundUrl ?? null,
       confirmed?.slug ?? null,
       input.now,
     );
@@ -563,60 +580,72 @@ export function setPosterPath(db: DatabaseSync, groupId: number, posterPath: str
   );
 }
 
-/** A stored poster, as the repair script needs to see it. */
-export interface StoredPoster {
-  groupId: number;
-  posterUrl: string;
-  /** Null for a row whose image was never successfully fetched to disk. */
-  posterPath: string | null;
-}
-
-/**
- * Every row whose `poster_url` contains `fragment`.
- *
- * The fragment is a caller-supplied literal — `BACKGROUND_CROP_MARKER`, the
- * only caller — and is matched with LIKE, so it must not contain `%` or `_`,
- * which that marker does not. Parameterised rather than interpolated all the
- * same: the string reaches SQLite as a bound value, so the shape of the
- * statement cannot depend on it.
- *
- * Deliberately takes the fragment rather than hard-coding it. What counts as
- * a synthesised poster is the client's knowledge, stated once beside the
- * reader that acts on it; a second copy of the substring down here is how the
- * two would eventually stop agreeing.
- */
-export function postersMatching(db: DatabaseSync, fragment: string): StoredPoster[] {
-  const rows = db
-    .prepare(
-      `SELECT group_id, poster_url, poster_path FROM group_metadata
-       WHERE poster_url LIKE '%' || ? || '%'
-       ORDER BY group_id`,
-    )
-    .all(fragment);
-  return rows.map((row) => ({
-    groupId: num(row as SqlRow, 'group_id'),
-    posterUrl: str(row as SqlRow, 'poster_url'),
-    posterPath: maybeStr(row as SqlRow, 'poster_path'),
-  }));
-}
-
-/**
- * Repoints a row at a different image, url and file together.
- *
- * Distinct from `setPosterPath`, which fills in a path for a url the provider
- * just supplied. This one *replaces* the url as well, and the pair has to move
- * as one: a row naming the old url beside the new file (or the reverse) would
- * be re-selected by `postersMatching` on the next run and refetched forever.
- */
-export function setPosterImage(
-  db: DatabaseSync,
-  groupId: number,
-  posterUrl: string,
-  posterPath: string,
-): void {
-  db.prepare('UPDATE group_metadata SET poster_url = ?, poster_path = ? WHERE group_id = ?').run(
-    posterUrl,
-    posterPath,
+export function setBackgroundPath(db: DatabaseSync, groupId: number, backgroundPath: string): void {
+  db.prepare('UPDATE group_metadata SET background_path = ? WHERE group_id = ?').run(
+    backgroundPath,
     groupId,
   );
+}
+
+/** Whichever of the poster/background pair a row currently holds, for `reclassifyArtwork`. */
+export interface ArtworkRow {
+  groupId: number;
+  posterUrl: string | null;
+  posterPath: string | null;
+  backgroundUrl: string | null;
+  backgroundPath: string | null;
+}
+
+/**
+ * Every row holding at least one cached image — a migration 15 leftover with
+ * only one side filled, as much as a fully-split row with both — in id order.
+ *
+ * `reclassifyArtwork` is the only caller: it measures whatever file each path
+ * names and decides whether the column it is in still matches.
+ */
+export function rowsWithArtwork(db: DatabaseSync): ArtworkRow[] {
+  const rows = db
+    .prepare(
+      `SELECT group_id, poster_url, poster_path, background_url, background_path
+         FROM group_metadata
+        WHERE poster_path IS NOT NULL OR background_path IS NOT NULL
+        ORDER BY group_id`,
+    )
+    .all();
+  return rows.map((row) => {
+    const sqlRow = row as SqlRow;
+    return {
+      groupId: num(sqlRow, 'group_id'),
+      posterUrl: maybeStr(sqlRow, 'poster_url'),
+      posterPath: maybeStr(sqlRow, 'poster_path'),
+      backgroundUrl: maybeStr(sqlRow, 'background_url'),
+      backgroundPath: maybeStr(sqlRow, 'background_path'),
+    };
+  });
+}
+
+/** The poster/background pair `setArtworkPair` should write for one row. */
+export interface ArtworkPair {
+  posterUrl: string | null;
+  posterPath: string | null;
+  backgroundUrl: string | null;
+  backgroundPath: string | null;
+}
+
+/**
+ * Writes both slots of the poster/background pair at once.
+ *
+ * `reclassifyArtwork`'s only write. A mismatch always moves an image from one
+ * slot to the other, which changes both sides of the pair — the slot being
+ * vacated and the one being filled — in the same instant; a setter that
+ * touched one side at a time could be read from in between, or crash between
+ * the two, and leave a row with a url on one side and a path on the other
+ * that no longer name the same image.
+ */
+export function setArtworkPair(db: DatabaseSync, groupId: number, pair: ArtworkPair): void {
+  db.prepare(
+    `UPDATE group_metadata
+        SET poster_url = ?, poster_path = ?, background_url = ?, background_path = ?
+      WHERE group_id = ?`,
+  ).run(pair.posterUrl, pair.posterPath, pair.backgroundUrl, pair.backgroundPath, groupId);
 }

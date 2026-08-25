@@ -1033,10 +1033,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // `posterPath` is not the only thing in that directory forever (a `.part`
   // temp file mid-write, say). This route reads exactly one column and joins
   // it onto the directory itself — nothing caller-supplied ever reaches the
-  // filesystem, since `posterPath` is always `<group_id>.<ext>` written by
-  // `cacheImage`, and the id in the URL is validated as a positive integer by
-  // `idParamsSchema` *before* it is used for anything, so a traversal attempt
-  // in the id segment is rejected by zod and never reaches `getGroupMetadata`.
+  // filesystem, since `posterPath` is always `group-poster-<group_id>.<ext>`
+  // written by `writeImage`, and the id in the URL is validated as a positive
+  // integer by `idParamsSchema` *before* it is used for anything, so a
+  // traversal attempt in the id segment is rejected by zod and never reaches
+  // `getGroupMetadata`.
   //
   // Spec §11.1 says `sendFile`, and this reads the whole file into memory
   // instead — a deliberate deviation, not an oversight. `reply.sendFile`
@@ -1075,6 +1076,32 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // it's wrong: the worst case is one stale poster for a day, on a scene
     // this feature never re-checks anyway (§2 of the design: metadata is
     // fetched once).
+    return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
+  });
+
+  // The poster route above explains why this is a route rather than a
+  // `@fastify/static` mount, and that reasoning is unchanged here — nothing
+  // about this handler differs from it except which column it reads.
+  server.get('/api/groups/:id/background', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid id' });
+
+    const metadata = getGroupMetadata(db, params.data.id);
+    if (metadata === undefined || metadata.backgroundPath === null) {
+      return reply.code(404).send({ error: 'No background' });
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(join(deps.artworkDir, metadata.backgroundPath));
+    } catch {
+      // The row can outlive the file on disk — a volume wipe, a manual
+      // cleanup of the artwork directory — and that is a 404 like any other
+      // missing background, not a 500.
+      return reply.code(404).send({ error: 'No background' });
+    }
+
+    const contentType = POSTER_CONTENT_TYPES[extname(metadata.backgroundPath)] ?? 'application/octet-stream';
     return reply.type(contentType).header('cache-control', 'public, max-age=86400').send(bytes);
   });
 

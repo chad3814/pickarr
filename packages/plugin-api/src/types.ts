@@ -148,6 +148,21 @@ export interface MetadataCandidate {
   readonly durationSeconds: number | null;
   readonly synopsis: string | null;
   readonly posterUrl: string | null;
+  /**
+   * Landscape artwork, where the provider offers it separately from the
+   * poster.
+   *
+   * Optional rather than required: this is a published contract that
+   * third-party plugins implement, and `posterUrl` has some thirty
+   * construction sites. The same reasoning `MetadataView.performers`, the web
+   * `ReleaseRow` component's `hasFailed` prop, and `ReleaseView.downloadFailed`
+   * record — a new key must not break every caller written before it
+   * existed.
+   *
+   * Which column either URL ends up in is decided by measuring the downloaded
+   * image, not by which field it arrived in. See `classifyArtwork`.
+   */
+  readonly backgroundUrl?: string | null;
   /** The service's own slug for this scene, from which its page URL is built. */
   readonly slug: string | null;
 }

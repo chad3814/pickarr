@@ -803,4 +803,45 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  // Poster and background are two different pictures of two different shapes,
+  // and until now the second was stored under the first's name: when TPDB
+  // offered a synthesised portrait crop, `readPosterUrl` substituted the
+  // landscape background and it was written to `poster_path`.
+  //
+  // Classification here is by URL because SQL is all a migration has. The
+  // ambiguous remainder — studio-CDN images whose shape nothing records — is
+  // deliberately left as a poster rather than guessed at, and corrected by
+  // `scripts/reclassify-artwork.ts`, which can measure the cached file.
+  //
+  // No file is renamed. `poster_path` holds a bare filename, so moving the
+  // value to `background_path` leaves it pointing at the same file, which
+  // keeps serving. A migration could not rename anyway: it gets a database and
+  // no `artworkDir`, which main.ts resolves.
+  //
+  // A crop is discarded under both names. Its old justification — better than
+  // no image at all — will expire once phase 2b gives the card a
+  // performer-portrait fallback: an upscaled, logo-stamped centre-slice would
+  // otherwise outrank a real headshot, because the card prefers the poster.
+  {
+    version: 15,
+    up(db) {
+      db.exec(`
+        ALTER TABLE group_metadata ADD COLUMN background_url  TEXT;
+        ALTER TABLE group_metadata ADD COLUMN background_path  TEXT;
+
+        UPDATE group_metadata
+           SET background_url = poster_url,
+               background_path = poster_path,
+               poster_url = NULL,
+               poster_path = NULL
+         WHERE poster_url LIKE '%/background/%';
+
+        UPDATE group_metadata
+           SET poster_url = NULL,
+               poster_path = NULL
+         WHERE poster_url LIKE '%/800x1200/%'
+            OR poster_url LIKE '%/smart/%';
+      `);
+    },
+  },
 ];

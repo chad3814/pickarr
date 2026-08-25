@@ -7,9 +7,11 @@ import {
   isBackgroundCrop,
   PROVIDER_REQUEST_TIMEOUT_MS,
   RateLimited,
+  readScenes,
   type FetchImpl,
 } from '../../src/clients/theporndb.ts';
 import type { SiteLookupConfig } from '../../src/config/schema.ts';
+import type { MetadataCandidate } from '@pickarr/plugin-api';
 import { stubAbortTimeout } from '../abort-timeout.ts';
 
 const API_KEY = 'tpdb-secret-key-0123456789abcdef';
@@ -410,6 +412,7 @@ test('further malformed shapes are tolerated: a bare number, and a site given as
     durationSeconds: null,
     synopsis: null,
     posterUrl: null,
+    backgroundUrl: null,
     slug: null,
   }]);
 });
@@ -438,9 +441,11 @@ function sceneWith(over: Record<string, unknown>): Record<string, unknown> {
   return { data: [{ id: 'scene-uuid', title: 'A Scene', ...over }] };
 }
 
-async function posterFrom(body: Record<string, unknown>): Promise<string | null | undefined> {
-  const [scene] = await createTpdbClient(CONFIG, respondWith(body)).searchScenes('x', null);
-  return scene?.posterUrl;
+/** Drives the scene reader directly, synchronously, from a partial record. */
+function parseScene(over: Record<string, unknown>): MetadataCandidate {
+  const [scene] = readScenes(sceneWith(over));
+  if (scene === undefined) throw new Error('sceneWith always yields exactly one entry');
+  return scene;
 }
 
 test('a crop url yields the background it was cut from, not the watermark logo', () => {
@@ -471,43 +476,88 @@ test('an undecodable or empty segment yields nothing rather than a guess', () =>
   assert.equal(backgroundFromCrop('not a url at all'), null);
 });
 
-test("the payload's own background is preferred over a crop of it", async () => {
+test('a synthesised crop yields no poster candidate, and its source as the background', () => {
+  const crop = `https://thumb.theporndb.net/abc=/800x1200/smart/filters:watermark(sites%2Fx%2Flogo.png,0,0,0)/scene%2Faa%2Fbb%2Fbackground%2Fbg-x.jpg`;
+  const scene = parseScene({ posters: { large: crop } });
+  assert.equal(scene.posterUrl, null);
+  assert.equal(scene.backgroundUrl, 'https://cdn.theporndb.net/scene/aa/bb/background/bg-x.jpg');
+});
+
+test('a real poster and a background are both read, independently', () => {
+  const scene = parseScene({
+    posters: { large: 'https://cdn.theporndb.net/scene/aa/poster/p.jpg' },
+    background: { full: 'https://cdn.theporndb.net/scene/aa/background/b.jpg' },
+  });
+  assert.equal(scene.posterUrl, 'https://cdn.theporndb.net/scene/aa/poster/p.jpg');
+  assert.equal(scene.backgroundUrl, 'https://cdn.theporndb.net/scene/aa/background/b.jpg');
+});
+
+test('the studio image field is a background candidate, not a poster one', () => {
+  // The client's own comment records this field as 1279x719, so it has never
+  // been safe to call it a poster.
+  const scene = parseScene({ image: 'https://studio.example/still.jpg' });
+  assert.equal(scene.posterUrl, null);
+  assert.equal(scene.backgroundUrl, 'https://studio.example/still.jpg');
+});
+
+test('the posters set prefers large over full, and falls through to the bare poster field', () => {
   assert.equal(
-    await posterFrom(sceneWith({
-      posters: { large: CROP, full: CROP },
-      background: {
-        full: BACKGROUND,
-        large: 'https://cdn.theporndb.net/scene/f9/84/16/large.jpg',
-      },
-    })),
+    parseScene({
+      posters: { large: 'https://cdn.theporndb.net/a/poster/l.jpg', full: 'https://cdn.theporndb.net/a/poster/f.jpg' },
+    }).posterUrl,
+    'https://cdn.theporndb.net/a/poster/l.jpg',
+  );
+  assert.equal(
+    parseScene({ poster: 'https://cdn.theporndb.net/a/poster/p.jpg' }).posterUrl,
+    'https://cdn.theporndb.net/a/poster/p.jpg',
+  );
+});
+
+test("the payload's own background is preferred over a crop of it", () => {
+  const scene = parseScene({
+    posters: { large: CROP, full: CROP },
+    background: {
+      full: BACKGROUND,
+      large: 'https://cdn.theporndb.net/scene/f9/84/16/large.jpg',
+    },
+  });
+  assert.equal(scene.posterUrl, null, 'a crop is never filed as a poster, no matter what else is offered');
+  assert.equal(
+    scene.backgroundUrl,
     BACKGROUND,
     'full, not large: this branch exists because a downscaled rendition was the problem',
   );
 });
 
-test('a crop with no background object falls back to decoding the crop url', async () => {
-  assert.equal(await posterFrom(sceneWith({ posters: { large: CROP } })), BACKGROUND);
+test('a crop with no background object falls back to decoding the crop url', () => {
+  const scene = parseScene({ posters: { large: CROP } });
+  assert.equal(scene.posterUrl, null);
+  assert.equal(scene.backgroundUrl, BACKGROUND);
 });
 
-test('a background that is itself a crop is not trusted', async () => {
-  assert.equal(
-    await posterFrom(sceneWith({ posters: { large: CROP }, background: { full: CROP } })),
-    BACKGROUND,
-  );
+test('a background that is itself a crop is not trusted', () => {
+  const scene = parseScene({ posters: { large: CROP }, background: { full: CROP } });
+  assert.equal(scene.posterUrl, null);
+  assert.equal(scene.backgroundUrl, BACKGROUND);
 });
 
-test('an unrecoverable crop is kept, so the card has an image and the repair can find it', async () => {
+test('an unrecoverable crop is stored as neither poster nor background', () => {
+  // Previously this was "kept" as the poster, so the card at least had an
+  // image to show. Neither reader returns a raw crop under either name now: a
+  // crop is never a poster, and a background recovered from nothing is not a
+  // background. Migration 15 applies the same judgement to the rows already
+  // stored that way, discarding the crop under both names.
   const undecodable = `https://thumb.theporndb.net/h=${BACKGROUND_CROP_MARKER}%zz.jpg`;
-  assert.equal(await posterFrom(sceneWith({ posters: { large: undecodable } })), undecodable);
+  const scene = parseScene({ posters: { large: undecodable } });
+  assert.equal(scene.posterUrl, null);
+  assert.equal(scene.backgroundUrl, null);
 });
 
-test('a genuine poster is never rewritten, background object or not', async () => {
+test('a genuine poster is never rewritten, background object or not', () => {
   const real = 'https://cdn.theporndb.net/scene/e2/b4/poster/c/poster-large.jpg';
-  assert.equal(
-    await posterFrom(sceneWith({ posters: { large: real }, background: { full: BACKGROUND } })),
-    real,
-    'the background only wins when what was offered was a crop of one',
-  );
+  const scene = parseScene({ posters: { large: real }, background: { full: BACKGROUND } });
+  assert.equal(scene.posterUrl, real, 'a real poster is never displaced by a background, offered or not');
+  assert.equal(scene.backgroundUrl, BACKGROUND, 'and the background is read independently, into its own column');
 });
 
 // Shapes taken from a live `GET /scenes?per_page=1`, trimmed to the fields
