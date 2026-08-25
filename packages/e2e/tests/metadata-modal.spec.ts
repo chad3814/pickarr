@@ -77,15 +77,41 @@ const TALL_PNG =
   'oAAAAIC3AQ+gAAFUpTheAAAAAElFTkSuQmCC';
 
 /**
- * A confirmed candidate carrying a poster and one performer with both a face
- * (for the avatar) and a full image (for the modal a click on it opens) —
- * the shape this suite needs to reach every button `ImageModal` can be
- * opened from. `performers[0].name` is `'Alice Maze'`, unrelated to the
- * release's own parsed title ('Alex Coal'): the two are independent fields,
- * and using a different name for each is what proves this suite is reading
- * the performer's own name rather than coincidentally matching the group's.
+ * A background the browser can actually decode: 2000 x 8, 1-bit greyscale,
+ * all black, landscape on purpose. `classifyArtwork` files width > height
+ * under `background` (the opposite test to `TALL_PNG`'s), so this is what a
+ * test needs when a group's background — rather than its poster — has to
+ * actually be stored: undecodable bytes are filed under neither column (see
+ * `TALL_PNG`'s own comment), and a plausible `image/png` label is not enough
+ * on its own.
+ *
+ * Nothing below measures this image's own layout the way the scaling test
+ * measures `TALL_PNG`, so its aspect ratio only has to clear the width >
+ * height bar `classifyArtwork` checks — it does not need to be as extreme.
+ *
+ * Regenerate the same way as `TALL_PNG`, with width and height swapped.
  */
-function confirmedCandidateWithArtwork(posterUrl = TALL_PNG): MetadataCandidate {
+const WIDE_PNG =
+  'data:image/png;base64,' +
+  'iVBORw0KGgoAAAANSUhEUgAAB9AAAAAIAQAAAACJiVkYAAAAF0lEQVR4nGNgGAWjYBSMglEwCkbB' +
+  'cAEAB9gAAYyOQlYAAAAASUVORK5CYII=';
+
+/**
+ * A confirmed candidate carrying a face and a full image for one performer —
+ * the shape this suite needs to reach the avatar button `ImageModal` can be
+ * opened from — plus, independently, a poster and a background. `posterUrl`
+ * defaults to `TALL_PNG`, matching what most tests in this file need; a spec
+ * needing the opposite shape (no poster, a background instead — the shape
+ * almost every real group has) passes `null` and `WIDE_PNG` explicitly.
+ * `performers[0].name` is `'Alice Maze'`, unrelated to the release's own
+ * parsed title ('Alex Coal'): the two are independent fields, and using a
+ * different name for each is what proves this suite is reading the
+ * performer's own name rather than coincidentally matching the group's.
+ */
+function confirmedCandidateWithArtwork(
+  posterUrl: string | null = TALL_PNG,
+  backgroundUrl: string | null = null,
+): MetadataCandidate {
   return {
     sourceUuid: 'e2e-scene-modal',
     title: 'Alex Coal',
@@ -106,6 +132,7 @@ function confirmedCandidateWithArtwork(posterUrl = TALL_PNG): MetadataCandidate 
     durationSeconds: null,
     synopsis: 'A modal test synopsis.',
     posterUrl,
+    backgroundUrl,
     slug: null,
   };
 }
@@ -129,9 +156,14 @@ function confirmedCandidateWithArtwork(posterUrl = TALL_PNG): MetadataCandidate 
  * ever loads means the SPA's first read is already the finished answer, with
  * no window for it to land in.
  */
-async function seedConfirmedGroup(page: Page, harness: Harness, posterUrl?: string): Promise<void> {
+async function seedConfirmedGroup(
+  page: Page,
+  harness: Harness,
+  posterUrl?: string | null,
+  backgroundUrl?: string | null,
+): Promise<void> {
   harness.ingest([RELEASE]);
-  harness.metadataClient.setCandidates([confirmedCandidateWithArtwork(posterUrl)]);
+  harness.metadataClient.setCandidates([confirmedCandidateWithArtwork(posterUrl, backgroundUrl)]);
 
   const group = harness.db
     .prepare('SELECT id FROM media_groups ORDER BY id DESC LIMIT 1')
@@ -270,4 +302,39 @@ test('a performer avatar opens the full image', async ({ page, harness }) => {
     'src',
     /\/api\/performers\/\d+\/image$/,
   );
+});
+
+test('the modal walks a group\'s images and clamps at the ends', async ({ page, harness }) => {
+  // Seeded with no poster, a background, and one performer portrait — the
+  // shape almost every real group has, and the reason the browse exists.
+  await seedConfirmedGroup(page, harness, null, WIDE_PNG);
+
+  // Two buttons answer to this name here: the card's slot, which falls back
+  // to the performer's portrait because there is no poster, and the cast
+  // list's own avatar. The slot renders first, and clicking it is the point
+  // of the assertion right below — it opens on the background, not on the
+  // portrait its own button is showing.
+  const avatarButton = page.getByRole('button', { name: /alice maze/i }).first();
+  await expect(avatarButton).toBeVisible({ timeout: 10_000 });
+  await avatarButton.click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  // Opens on the scene's own image, not on the portrait that was clicked.
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /previous/i })).toBeDisabled();
+
+  await dialog.getByRole('button', { name: /next/i }).click();
+  await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /next/i })).toBeDisabled();
+
+  // The keyboard reaches the same clamp a mouse does.
+  await page.keyboard.press('ArrowRight');
+  await expect(dialog.getByText('Alice Maze · 2 of 2')).toBeVisible();
+  await page.keyboard.press('ArrowLeft');
+  await expect(dialog.getByText('Background · 1 of 2')).toBeVisible();
+
+  // Escape still closes, which is the thing the unit suite cannot check.
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
 });

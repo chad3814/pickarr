@@ -41,6 +41,33 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
     element.showModal();
   }, []);
 
+  // A step that lands on an end disables the button that caused it (`hasNext`
+  // or `hasPrevious` just went false) — and a focused control that becomes
+  // disabled is blurred by the browser itself, per the HTML spec, to nothing
+  // inside this dialog at all. `<body>` sits outside this `<dialog>`'s own
+  // subtree, so the very next arrow-key press has nothing here for it to
+  // bubble through and `onKeyDown` above never sees it: a mouse click that
+  // reaches an end silently disables the keyboard from then on. Reclaiming
+  // focus for the dialog itself whenever it has drifted outside keeps the
+  // keyboard working exactly as far as a mouse does, which `step`'s clamping
+  // promises but cannot deliver once focus has left the subtree it depends
+  // on.
+  //
+  // Confirmed directly rather than assumed: happy-dom 16.8.1 does not blur a
+  // focused element when it becomes `disabled` — `document.activeElement`
+  // stays the button — so `ImageModal.test.tsx`'s `fireEvent.keyDown`, aimed
+  // at the dialog node regardless of what is focused, could never have
+  // observed this bug either way. A real browser's blur-on-disable is what
+  // makes it real, and only a real browser (this Playwright spec) can catch
+  // it.
+  useEffect(() => {
+    const element = dialog.current;
+    if (element === null) return;
+    if (document.activeElement === null || !element.contains(document.activeElement)) {
+      element.focus();
+    }
+  }, [index]);
+
   const image = images[index];
   const hasPrevious = index > 0;
   const hasNext = index < images.length - 1;
@@ -58,6 +85,10 @@ export function ImageModal({ images, startIndex, onClose }: Props) {
   return (
     <dialog
       ref={dialog}
+      // Not in the tab order (a user tabs into its buttons, never the dialog
+      // chrome itself) but a valid target for the `element.focus()` call
+      // above, which needs the dialog to be focusable at all.
+      tabIndex={-1}
       className="image-modal"
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClose={onClose}
