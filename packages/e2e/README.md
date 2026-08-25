@@ -30,6 +30,20 @@ CI.
 The run builds the SPA once (`npm run build -w @pickarr/web`) in
 `src/global-setup.ts`, then each test starts its own server.
 
+## Do not run `npx playwright test` from the repo root
+
+There is no real config at the repo root — just a `playwright.config.ts` that
+throws on load, on purpose. Running Playwright's CLI directly from the repo
+root would otherwise pick up its own default config, one with no
+`globalSetup`. Without `globalSetup`, `src/global-setup.ts` never runs, the SPA
+in `packages/web/dist` never gets rebuilt, and the suite serves whatever
+bundle happens to already be sitting on disk. A CSS or markup change tested
+that way can look caught when the browser never actually loaded it — this cost
+two mutation-testing runs during the review that added this note. Always run
+`npm run e2e` from the repo root instead; it delegates to
+`npm run e2e -w @pickarr/e2e`, which resolves this package's own
+`playwright.config.ts` and its `globalSetup`.
+
 ## In CI
 
 `.github/workflows/ci.yml` runs this suite as its own `e2e` job on every push
