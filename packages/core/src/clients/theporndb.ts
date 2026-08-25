@@ -213,8 +213,15 @@ function retryAfterMs(header: string | null): number {
  * `/background/` path, while the 2 that do not are plain
  * `cdn.theporndb.net/.../poster/...` URLs.
  *
- * Exported because the offline repair script matches stored `poster_url`s
- * against it — the rule for recognising one of these has to be stated once.
+ * Exported for the test suite, which builds its crop fixtures out of this
+ * constant rather than out of a second copy of the substring, so a fixture and
+ * the rule cannot drift apart. No `src` file outside this one reads it:
+ * `isBackgroundCrop` just below is the only caller.
+ *
+ * One duplicate exists and cannot be removed. Migration 15 restates both halves
+ * as `poster_url LIKE '%/800x1200/%' OR poster_url LIKE '%/smart/%'`, because a
+ * migration gets a database and SQL and cannot import. That copy is what has to
+ * be re-checked by hand if this string ever changes.
  */
 export const BACKGROUND_CROP_MARKER = '/800x1200/smart/';
 
@@ -237,10 +244,11 @@ export function isBackgroundCrop(url: string): boolean {
  * own encoded path, so counting segments from the left finds the site's logo
  * instead of the scene's background.
  *
- * Used two ways, and deliberately the same code for both: as the fallback
- * when a scene payload carries no `background` object, and as the *only*
- * source for the repair script, which has a stored URL and no payload left to
- * consult. Both must land on the same image.
+ * `readBackgroundCandidate` is the only caller. It reaches here when a scene
+ * payload's `background` object is missing or is itself a crop, so the crop URL
+ * is the only remaining evidence of where the original lives — and decoding it
+ * costs no request, which is why it is preferred over asking the provider
+ * again.
  *
  * Returns null rather than a guess for anything that does not decode to a URL
  * on TPDB's own CDN. The decoded text steers a `fetch` and the filename bytes

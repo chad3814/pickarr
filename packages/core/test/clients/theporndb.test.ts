@@ -543,9 +543,10 @@ test('a background that is itself a crop is not trusted', () => {
 
 test('an unrecoverable crop is stored as neither poster nor background', () => {
   // Previously this was "kept" as the poster, so the card at least had an
-  // image and the repair script could still find it by its marker. Neither
-  // reader returns a raw crop under either name now: a crop is never a
-  // poster, and a background recovered from nothing is not a background.
+  // image to show. Neither reader returns a raw crop under either name now: a
+  // crop is never a poster, and a background recovered from nothing is not a
+  // background. Migration 15 applies the same judgement to the rows already
+  // stored that way, discarding the crop under both names.
   const undecodable = `https://thumb.theporndb.net/h=${BACKGROUND_CROP_MARKER}%zz.jpg`;
   const scene = parseScene({ posters: { large: undecodable } });
   assert.equal(scene.posterUrl, null);

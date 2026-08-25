@@ -359,16 +359,16 @@ export function recordMetadataAnswer(db: DatabaseSync, input: MetadataAnswerInpu
     // poster_path is deliberately absent from the DO UPDATE SET list below:
     // it names a file already fetched to disk, not something a provider
     // answer carries (the INSERT writes it as a literal NULL), and only
-    // setPosterPath, setBackgroundImage and setArtworkPair ever write it.
+    // setPosterPath and setArtworkPair ever write it.
     // Updating it here from excluded would blank a cached poster on every
     // refetch — which migration 7 is about to run for every already-confirmed
     // group in the database.
     //
     // background_path is absent for the same reason, and just as literally:
     // it too names a file already fetched to disk rather than anything a
-    // provider answer carries, only setBackgroundPath, setBackgroundImage and
-    // setArtworkPair ever write it, and updating it from excluded would blank
-    // a cached background on every refetch precisely as it would a poster.
+    // provider answer carries, only setBackgroundPath and setArtworkPair ever
+    // write it, and updating it from excluded would blank a cached background
+    // on every refetch precisely as it would a poster.
     //
     // The WHERE on the upsert generalises that same protection to the whole
     // row, and the asymmetry is worth recording: blanking a cached *poster*
@@ -585,69 +585,6 @@ export function setBackgroundPath(db: DatabaseSync, groupId: number, backgroundP
     backgroundPath,
     groupId,
   );
-}
-
-/** A stored poster, as the repair script needs to see it. */
-export interface StoredPoster {
-  groupId: number;
-  posterUrl: string;
-  /** Null for a row whose image was never successfully fetched to disk. */
-  posterPath: string | null;
-}
-
-/**
- * Every row whose `poster_url` contains `fragment`.
- *
- * The fragment is a caller-supplied literal — `BACKGROUND_CROP_MARKER`, the
- * only caller — and is matched with LIKE, so it must not contain `%` or `_`,
- * which that marker does not. Parameterised rather than interpolated all the
- * same: the string reaches SQLite as a bound value, so the shape of the
- * statement cannot depend on it.
- *
- * Deliberately takes the fragment rather than hard-coding it. What counts as
- * a synthesised poster is the client's knowledge, stated once beside the
- * reader that acts on it; a second copy of the substring down here is how the
- * two would eventually stop agreeing.
- */
-export function postersMatching(db: DatabaseSync, fragment: string): StoredPoster[] {
-  const rows = db
-    .prepare(
-      `SELECT group_id, poster_url, poster_path FROM group_metadata
-       WHERE poster_url LIKE '%' || ? || '%'
-       ORDER BY group_id`,
-    )
-    .all(fragment);
-  return rows.map((row) => ({
-    groupId: num(row as SqlRow, 'group_id'),
-    posterUrl: str(row as SqlRow, 'poster_url'),
-    posterPath: maybeStr(row as SqlRow, 'poster_path'),
-  }));
-}
-
-/**
- * Repoints a row at a different background image, url and file together, and
- * clears whatever the poster pair held.
- *
- * `repairBackgroundPosters` is the only caller: the row it repairs held a
- * synthesised poster crop, not a real poster, so once the actual background is
- * recovered there is nothing left under `poster_url`/`poster_path` worth
- * keeping — the crop *was* that column's only content. The url and the path
- * move as one for the reason `setArtworkPair` below states at more length: a
- * row naming the old url beside the new file (or the reverse) would be
- * re-selected by `postersMatching` on the next run and refetched forever.
- */
-export function setBackgroundImage(
-  db: DatabaseSync,
-  groupId: number,
-  backgroundUrl: string,
-  backgroundPath: string,
-): void {
-  db.prepare(
-    `UPDATE group_metadata
-        SET poster_url = NULL, poster_path = NULL,
-            background_url = ?, background_path = ?
-      WHERE group_id = ?`,
-  ).run(backgroundUrl, backgroundPath, groupId);
 }
 
 /** Whichever of the poster/background pair a row currently holds, for `reclassifyArtwork`. */
