@@ -47,7 +47,8 @@ In scope:
 - Classification by **measured aspect ratio**, not by URL shape.
 - A migration that re-files the existing rows and discards synthesised crops.
 - `GET /api/groups/:id/background`, and `hasBackground` on the metadata view.
-- The repair script repointed at the background columns.
+- The repair script repointed at the background columns — and then retired, once it was
+  clear the migration left it nothing to find. See §5.3.
 
 Explicitly out of scope:
 
@@ -223,10 +224,47 @@ The last branch knowingly leaves the three unknown-shape studio images filed as 
 cannot measure them, and a guess is what §3.1 rejects. They are corrected by the backfill:
 
 `scripts/reclassify-artwork.ts` walks every row holding a poster or background path, measures
-the cached file, and moves the row when the measurement disagrees with the column. Offline —
+the cached file, and corrects the row when the measurement disagrees with the column. Offline —
 no network, no API key, reading only files already on disk. Re-runnable, and a no-op once
-clean. It is the same shape as `repair-background-posters.ts`, which already exists and does
-the same kind of one-shot correction.
+clean. It is the same shape as `repair-background-posters.ts`, which did the same kind of
+one-shot correction and has since been deprecated and removed — migration 15 nulls exactly the
+rows that script selected, so it can never find one again. It remains in git history for
+anyone tracing how this was corrected before the measurement existed.
+
+Correcting a row means one of two things, and which one depends on the destination column.
+
+**Move**, when the destination is empty: the url and the path relocate together, and the
+cached file keeps serving from its new column. This is the common case — a migration 15
+leftover has one slot filled and the other free. When *both* slots are filled and both
+disagree, the two are swapped directly rather than routed through a vacated slot, so the row
+never passes through a state where one side is momentarily empty.
+
+**Clear**, when the destination is already occupied: the mismatching slot is nulled and
+nothing relocates. A row can legitimately hold a correct background by the time the backfill
+runs — the table above leaves the unknown-shape studio images filed as posters, and the
+service may fetch a real background for one of them in the meantime. Moving the misfiled
+poster in regardless would overwrite that correct image, so the misfiling is discarded
+instead. This is the judgement §4.1 makes for the synthesised crop, applied here: an image
+that cannot be correctly placed is not stored under a name that misdescribes it. Occupancy is
+judged on either column being non-null, since a row can hold a url whose image was never
+cached.
+
+A cleared slot's file is then deleted. Nothing references it once the column is nulled, and
+an unreferenced file in the artwork directory is indistinguishable from a live one — nulling
+the column is the decision, deleting the file is that decision carried out.
+
+With one exception, and it is the reason this paragraph exists rather than being left to the
+reader. The file is *kept* when the surviving slot holds no image that was successfully
+measured: a url whose image was never cached, a path whose file is missing, or bytes that
+cannot be measured. Occupancy is deliberately generous, so all three count as occupied and
+reach the clear — but in each of them the cleared file is the only readable image the row
+has, and the destination it deferred to holds nothing. Deleting it would leave the group with
+no artwork at all, and nothing would refetch it, since a confirmed answer is not re-asked at
+any age. An orphaned file wastes disk and can be recovered by hand; a deleted sole image
+cannot. The asymmetry decides it.
+
+Both a move and a clear are database writes, so `--dry-run` performs neither, and deletes no
+file either.
 
 ## 6. What the user sees: nothing
 
