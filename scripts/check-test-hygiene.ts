@@ -143,15 +143,29 @@ export function findViolations(file: string, source: string): Violation[] {
   return violations;
 }
 
-/** Every `.ts`/`.tsx` file under `dir`, recursively. */
+/**
+ * Every `.ts`/`.tsx` file under `dir`, recursively, in a stable order.
+ *
+ * Subdirectories are walked concurrently rather than one at a time. There is
+ * nothing sequential about reading a directory listing — no shared cursor, no
+ * provider to be polite to — so awaiting each one in turn would only be slower.
+ * Order does not come from the traversal: it comes from `toSorted` below, so
+ * the report reads the same however the walk interleaves.
+ *
+ * `toSorted` rather than `sort` because `sort` would mutate the array it was
+ * handed; here that array is a local and it would not matter, but the habit is
+ * worth keeping where the cost is a method name.
+ */
 async function testFiles(dir: string): Promise<string[]> {
-  const found: string[] = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) found.push(...(await testFiles(path)));
-    else if (path.endsWith('.ts') || path.endsWith('.tsx')) found.push(path);
-  }
-  return found.sort();
+  const entries = await readdir(dir, { withFileTypes: true });
+  const nested = await Promise.all(
+    entries.map(async (entry): Promise<string[]> => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) return testFiles(path);
+      return path.endsWith('.ts') || path.endsWith('.tsx') ? [path] : [];
+    }),
+  );
+  return nested.flat().toSorted();
 }
 
 async function main(): Promise<void> {
