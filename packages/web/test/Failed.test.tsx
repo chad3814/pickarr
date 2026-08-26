@@ -15,6 +15,7 @@ import type {
   ResolveResponse,
 } from '../src/api/client.ts';
 import { fetchStub } from './fetchStub.ts';
+import { gone } from './dom.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its DOM behind and every later `getBy*` sees two
@@ -112,20 +113,6 @@ function serve(joinedExisting = false): () => string[] {
     });
   });
   return () => calls;
-}
-
-/**
- * Absence, as a boolean.
- *
- * `assert.equal(screen.queryByText(x), null)` is the obvious spelling and it
- * kills the test run: inside `waitFor` the first check normally fails, and
- * building that AssertionError's message means node:assert deep-inspecting a
- * live DOM element, several hundred times over. This is one of two shapes of
- * the same hazard — the full rule, and the other shape (comparing two live
- * nodes by identity), are documented once on `gone()` in `MediaCard.test.tsx`.
- */
-function gone(text: string): boolean {
-  return screen.queryByText(text) === null;
 }
 
 /** The row holding this raw title, for queries that must not see its siblings. */

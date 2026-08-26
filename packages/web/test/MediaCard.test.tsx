@@ -4,6 +4,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import { MediaCard } from '../src/components/MediaCard.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
 import type { GroupView, ManualField, MetadataView, PerformerView } from '../src/api/client.ts';
+import { gone } from './dom.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its card behind, and every later query sees two.
@@ -15,44 +16,6 @@ async function noop(): Promise<void> {}
 /** An `onRequeryMetadata` that always refuses, carrying a message a test can look for. */
 async function refuseRequery(): Promise<void> {
   throw new Error('Metadata lookups are unavailable.');
-}
-
-/**
- * Absence, as a boolean.
- *
- * This is the canonical statement of `#40`, the warning repeated in short
- * form throughout this file and in full or in part in `Browse.test.tsx`,
- * `Downloads.test.tsx`, `Failed.test.tsx`, `useGroupMetadata.test.tsx`,
- * `usePagedList.test.tsx`, and `ImageModal.test.tsx`. Change the rule, change
- * it here — the others should point back rather than carry their own copy of
- * the reasoning, or they will eventually disagree with it.
- *
- * The rule: never hand a live DOM element to `node:assert` as a value it
- * might have to print. `assert.equal`/`deepEqual`/`notEqual` all format both
- * operands into the failure message, and formatting a live element means
- * node:assert deep-inspecting it — slow enough to take the whole file down
- * before it finishes, and it never gets far enough to name the test that
- * failed.
- *
- * Two shapes of this have actually cost time here, not just in theory:
- *
- * - `assert.equal(screen.queryByText(x), null)` — absence spelled as an
- *   equality with `null`. Inside a `waitFor` retry loop this burned enough
- *   time to OOM-kill the process, with no test named in the output.
- * - `assert.equal(document.activeElement, screen.getByRole(...))` — an
- *   identity comparison between two live nodes, with no `null` and no
- *   `queryBy*` anywhere in sight, so it is easy to miss as the same hazard.
- *   This one failed in 52 seconds, printed the single line `'test failed'`,
- *   and took the whole file down instead of naming the one test that broke.
- *   Rewritten as `assert.ok(a === b, 'message')`, the identical failure
- *   surfaced in 0.7 seconds, as one named test, with the reason stated in the
- *   message rather than guessed at. See that rewrite in `ImageModal.test.tsx`.
- *
- * The fix is the same for both: compare with a boolean and give `assert.ok` a
- * message of your own. There is then nothing left for node:assert to print.
- */
-function gone(text: string | RegExp): boolean {
-  return screen.queryByText(text) === null;
 }
 
 /** The card element itself, which is where the anchor id lives. */
@@ -280,10 +243,6 @@ test('the metadata panel renders only once the answer is confirmed', () => {
   const unconfirmed: MetadataView[] = [{ state: 'absent' }, { state: 'pending' }, { state: 'none' }];
   for (const metadata of unconfirmed) {
     const { unmount } = render(<MediaCard group={{ ...GROUP, metadata }} onPick={() => {}} />);
-    // #40: never `assert.equal(screen.queryByText(x), null)` — it OOM-kills
-    // the web test run inside `waitFor`, and the same failure mode applies to
-    // any assertion node:assert would have to deep-inspect a live element to
-    // report on.
     assert.ok(!screen.queryByText('A synopsis from the provider.'));
     assert.ok(!screen.queryByRole('img'));
     unmount();
@@ -301,7 +260,6 @@ test('a pending lookup says so; none and absent stay silent', () => {
   unmount();
 
   render(<MediaCard group={{ ...GROUP, metadata: { state: 'none' } }} onPick={() => {}} />);
-  // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.equal(gone('pending'), true);
   cleanup();
 
@@ -341,7 +299,6 @@ test('a missing release date or running time is independently absent from the pa
       onPick={() => {}}
     />,
   );
-  // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText('1h 30m'));
   assert.ok(!screen.queryByText('30m'));
   // The rest of the panel still rendered — proof neither absence took the
@@ -379,7 +336,6 @@ test('no duration renders nothing; a duration of zero still renders 0m', () => {
       onPick={() => {}}
     />,
   );
-  // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.equal(gone('0m'), true);
   unmount();
 
@@ -426,8 +382,6 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
 
 test('the slot is a button that opens the modal, and the modal closes', () => {
   render(<MediaCard group={withMetadata({ hasPoster: true })} onPick={() => {}} />);
-  // #40: never `assert.equal(screen.queryByRole(x), null)` — same deep-inspect
-  // hazard as `queryByText`, on a live element instead of text.
   assert.ok(!screen.queryByRole('dialog'));
   fireEvent.click(screen.getByRole('button', { name: /browse images for/i }));
   assert.ok(screen.getByRole('dialog'));
@@ -454,7 +408,6 @@ test('a background alone draws no slot, because a 2:3 frame would crop it', () =
   // — only this frame refuses it. With no cast portrait, though, this
   // fixture has no slot and no avatar either, so nothing on the card opens
   // the modal: here the background is unreachable, not one click away.
-  // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('img', { name: /for Alex Coal/i }));
 });
 
@@ -488,8 +441,6 @@ test('neither image means no slot at all, as before', () => {
       onPick={() => {}}
     />,
   );
-  // #40 again: this assertion used to be `assert.equal(screen.queryByRole(...), null)`,
-  // which is the exact deep-inspect hazard the comments in this file forbid.
   assert.ok(!card('Alex Coal').querySelector('.card-artwork'));
 });
 
@@ -555,7 +506,6 @@ test('a performer with no cached avatar renders a name and no image', () => {
       hasAvatar: false, hasImage: false },
   ] })} onPick={() => {}} />);
   assert.ok(screen.getByRole('link', { name: 'Alice Maze' }));
-  // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('img', { name: /alice maze/i }));
 });
 
@@ -588,7 +538,6 @@ test('a performer with an avatar but no full image is not clickable', () => {
   ] })} onPick={() => {}} />);
 
   assert.ok(screen.getByRole('img', { name: /alice maze/i }));
-  // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('button', { name: /alice maze/i }));
 });
 
@@ -596,7 +545,6 @@ test('legacy metadata renders plain names with no links or avatars', () => {
   render(<MediaCard group={withMetadata({ performers: [], performerNames: ['Alice Maze'] })}
                     onPick={() => {}} />);
   assert.ok(screen.getByText('Alice Maze'));
-  // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('link', { name: 'Alice Maze' }));
 });
 
@@ -632,7 +580,6 @@ test('the metadata title links to the scene when a url is known', () => {
 test('the metadata title without a url is not a link', () => {
   render(<MediaCard group={withMetadata({ title: 'Scene', sceneUrl: null })} onPick={() => {}} />);
   assert.ok(screen.getByText('Scene'));
-  // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('link', { name: 'Scene' }));
 });
 
@@ -773,7 +720,6 @@ test('the card never overrides group.metadata itself — a fresher prop is what 
   rerender(<MediaCard group={{ ...GROUP, metadata: fresher }} onPick={() => {}} />);
 
   assert.ok(screen.getByText('A fresher synopsis.'));
-  // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText('A synopsis from the provider.'));
 });
 
@@ -796,8 +742,6 @@ test('an open identity form with no Requery button leaves no empty actions row b
 
   fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
 
-  // #40 again, in its DOM-node form: `assert.equal(node, null)` is what makes
-  // node:assert deep-inspect a live element to build a message.
   assert.equal(card('Alex Coal').querySelector('.card-actions') === null, true);
 });
 
@@ -878,7 +822,6 @@ test('a cast shows without scene data, and the scene panel still does not', () =
   );
 
   assert.ok(screen.getByRole('link', { name: 'Amalia Davis' }));
-  // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText('A synopsis from the provider.'));
   assert.ok(!screen.queryByText('A Different Title'));
   assert.equal(gone('pending'), true);

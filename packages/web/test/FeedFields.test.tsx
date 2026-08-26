@@ -87,8 +87,8 @@ test('a feed defaults to not backfilling, and its settings stay out of the way',
 
   const select = screen.getByLabelText(/backfill history/i) as HTMLSelectElement;
   assert.equal(select.value, 'off');
-  assert.equal(screen.queryByLabelText(/items per page/i), null);
-  assert.equal(screen.queryByLabelText(/pages per pass/i), null);
+  assert.ok(!screen.queryByLabelText(/items per page/i), 'no items-per-page field');
+  assert.ok(!screen.queryByLabelText(/pages per pass/i), 'no pages-per-pass field');
 });
 
 test('choosing a pagination style reveals the settings it needs', () => {
