@@ -880,12 +880,24 @@ could observe a row written by the parser before the fix — and the defect that
 into the final review lived exactly there. When behaviour changes and stored data does not,
 hand-build a fixture in the old shape.
 
-**`assert.equal(screen.queryByText(x), null)` OOM-kills the web test run.** When the node
-exists, node:assert deep-inspects a live DOM element to format the failure. Inside a
-`waitFor` that happens on every retry; even outside one it burns about 75 seconds and takes
-the file with it. Either way it presents as a bare SIGKILL naming no test, which costs an
-hour to trace. Compare booleans — `packages/web/test/Browse.test.tsx` has a `gone()` helper
-for exactly this.
+**Handing a live DOM element to `node:assert` kills the web test run — now enforced, not
+remembered.** `node:assert`'s equality helpers format *both* operands into the failure, and
+formatting a live element means deep-inspecting it. Inside a `waitFor` that happens on every
+retry; even outside one it burns about 75 seconds and takes the file with it. It presents as
+a bare SIGKILL, or a reasonless `'test failed'`, naming no test — which costs an hour to
+trace.
+
+Two shapes have cost time here, and the second is why this entry is no longer scoped to the
+first: `assert.equal(screen.queryByText(x), null)`, and `assert.equal(document.activeElement,
+screen.getByRole(…))` — an identity comparison between two live nodes, with no `null` and no
+`queryBy*` anywhere. One instance of that second shape was sitting in `SecretField.test.tsx`
+and no pattern written for the first would have found it.
+
+`scripts/check-test-hygiene.ts` now fails `npm run check` on both, so this is a build error
+rather than something to remember. It parses rather than pattern-matches, because this suite
+*documents* the hazard by quoting it and a text match would flag the documentation. Compare
+booleans instead: `assert.ok(!screen.queryByText(x), '…')`, or the shared `gone()` helper in
+`packages/web/test/dom.ts` (issue #40).
 
 **`t.mock.timers` hangs the web test run, so a timing assertion there has to spy rather
 than mock.** Enabling fake timers in a `@testing-library/react` test stalls before the
