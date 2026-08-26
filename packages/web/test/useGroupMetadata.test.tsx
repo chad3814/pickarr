@@ -378,7 +378,6 @@ test('rearm re-polls a settled id rather than leaving it unwatched, and never sh
   await waitFor(() => assert.ok(getCalls > callsBeforeRearm), { timeout: 3_000 });
   // That second answer was `pending`, and it must never reach the screen.
   assert.ok(screen.getByText(`${ID}:confirmed`));
-  // #40 (rule and remedy on gone() in MediaCard.test.tsx): never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText(`${ID}:pending`));
 
   // The third answer differs from the pre-rearm snapshot, so the poll stops
@@ -445,7 +444,6 @@ test('a rearmed id polls through an unchanged answer and lands the fresher one â
   assert.ok(screen.getByText(`title-${ID}:Original title`));
 
   await waitFor(() => assert.ok(screen.getByText(`title-${ID}:Fresher title`)), { timeout: 3_000 });
-  // #40 (rule and remedy on gone() in MediaCard.test.tsx): never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText(`title-${ID}:Original title`));
 
   // And it stops there rather than carrying on against an answer it has

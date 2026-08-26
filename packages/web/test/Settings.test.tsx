@@ -117,7 +117,7 @@ test('a config that cannot be read is reported instead of rendering an empty for
   stubFetch(async () => jsonResponse({ error: 'Config at /config/config.json is not valid JSON: bad' }, 500));
   render(<Settings />);
   await waitFor(() => assert.ok(screen.getByText(/not valid JSON/)));
-  assert.equal(screen.queryByRole('button', { name: /^save$/i }), null);
+  assert.ok(!screen.queryByRole('button', { name: /^save$/i }), 'no save button');
 });
 
 test('the nav separates Settings from the library tabs with a rule', () => {
@@ -411,7 +411,7 @@ test('a failed restart clears the notice a successful save left behind', async (
   await waitFor(() => assert.ok(screen.getByText(/restart refused/i)));
   // The stale green "Saved" notice must not linger next to the new error —
   // restart()'s catch clears it the same way save()'s and backUp()'s already do.
-  assert.equal(screen.queryByText(/^Saved\./), null);
+  assert.ok(!screen.queryByText(/^Saved\./), 'no saved notice');
 });
 
 test('a save that lands but whose confirmation re-read fails still reports the save, not a failure', async () => {

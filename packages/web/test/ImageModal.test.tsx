@@ -90,7 +90,6 @@ test('a one-image list offers no controls that cannot act', () => {
   render(<ImageModal images={ONE} startIndex={0} onClose={() => {}} />);
   // The judgement the card already makes for a performer with no full image:
   // a control that cannot do anything is worse than no control.
-  // #40: never `assert.equal(screen.queryByRole(x), null)`.
   assert.ok(!screen.queryByRole('button', { name: /next/i }));
   assert.ok(!screen.queryByRole('button', { name: /previous/i }));
   assert.ok(!screen.queryByText(/1 of 1/));
@@ -137,15 +136,9 @@ test('a one-image list hands reclaimed focus to the close button', () => {
   // nothing either — and the e2e reclaim test walks a two-image list, where
   // `target` is a real browse button and the fallback never engages. Without
   // this test that regression has nowhere to show up.
-  // #40's identity shape: this used to be
-  // `assert.equal(document.activeElement, screen.getByRole('button', ...))`,
-  // an identity comparison between two live nodes with no `null` and no
-  // `queryBy*` anywhere — easy to miss as the same hazard `gone()` in
-  // `MediaCard.test.tsx` documents. It failed in 52 seconds, printed the
-  // single line `'test failed'`, and took the whole file down instead of
-  // naming this test. Written as a boolean with its own message instead, the
-  // same failure surfaces in 0.7 seconds, as one named test, with a reason.
-  // See `MediaCard.test.tsx` for the rule this is one shape of.
+  // A boolean with its own message, not `assert.equal` on the two nodes: see
+  // `gone()` in `./dom.ts` for why, and `scripts/check-test-hygiene.ts` for
+  // what now stops it coming back.
   assert.ok(
     document.activeElement === screen.getByRole('button', { name: /close/i }),
     'a one-image list must reclaim focus to the close button',

@@ -18,6 +18,7 @@ import type {
   ReleaseView,
 } from '../src/api/client.ts';
 import { fetchStub } from './fetchStub.ts';
+import { gone } from './dom.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its DOM behind and every later `getBy*` sees two
@@ -246,22 +247,6 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
   });
 
   return () => calls;
-}
-
-/**
- * Absence, as a boolean. Full rule and both hazard shapes — this one
- * (`assert.equal(screen.queryByText(x), null)`) and the live-node-identity
- * one — are documented once, on `gone()` in `MediaCard.test.tsx`; point
- * questions there rather than here.
- *
- * The concrete cost of getting this wrong, here: inside `waitFor` the first
- * check normally fails (the card is still there), and node:assert
- * deep-inspecting that live element a few hundred retries in a row is what
- * gets the process OOM-killed — a SIGKILL where a one-second timeout was
- * expected, and no output naming which test was running.
- */
-function gone(text: string | RegExp): boolean {
-  return screen.queryByText(text) === null;
 }
 
 /** The card with this title, for queries that must not see its neighbours. */
@@ -791,7 +776,6 @@ test('clicking Requery re-arms the poll end to end: no blanking on a pending ans
   // actually being watched again — but must never reach the card.
   await waitFor(() => assert.ok(metadataCalls() > callsBeforeClick), { timeout: 3_000 });
   assert.ok(screen.getByText('The original synopsis.'));
-  // #40: never `assert.equal(screen.queryByText(x), null)`.
   assert.ok(!screen.queryByText('pending'));
 
   // The third answer is genuinely different, and it is what finally shows

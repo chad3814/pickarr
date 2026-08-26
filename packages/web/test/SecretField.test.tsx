@@ -13,7 +13,7 @@ test('a key held on disk shows as set and offers no value to read', () => {
   assert.ok(screen.getByText(/set/i));
   assert.ok(screen.getByRole('button', { name: /replace/i }));
   // Nothing on screen can be read back as the key.
-  assert.equal(screen.queryByRole('textbox'), null);
+  assert.ok(!screen.queryByRole('textbox'), 'a stored secret offers no textbox');
 });
 
 test('Replace switches to an empty literal the user types into', () => {
@@ -53,7 +53,7 @@ test('a file: reference is editable as a path, because a path is not a secret', 
   );
   const input = screen.getByRole('textbox');
   assert.equal(input.getAttribute('value'), '/run/secrets/key');
-  assert.equal(screen.getByLabelText('API key'), input);
+  assert.ok(screen.getByLabelText('API key') === input, 'the label points at the textbox');
   fireEvent.change(input, { target: { value: '/run/secrets/other' } });
   assert.deepEqual(edits[0], { kind: 'file', path: '/run/secrets/other' });
 });
@@ -81,7 +81,7 @@ test('a download client added in this form has nothing on disk to keep, so no ke
       onChange={() => {}}
     />,
   );
-  assert.equal(screen.queryByRole('button', { name: /keep existing/i }), null);
+  assert.ok(!screen.queryByRole('button', { name: /keep existing/i }), 'no keep-existing button');
 });
 
 test('Replace is named per field, so a page with several secret fields does not read as several identical buttons', () => {

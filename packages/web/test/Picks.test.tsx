@@ -18,6 +18,7 @@ import type {
   PicksResponse,
 } from '../src/api/client.ts';
 import { fetchStub } from './fetchStub.ts';
+import { gone } from './dom.ts';
 
 afterEach(cleanup);
 
@@ -709,7 +710,7 @@ test('a display-only edit saves without a confirmation', async () => {
 
   await waitFor(() => assert.equal(stub.patched.length, 1));
   assert.equal(stub.patched[0]?.planDigest, undefined);
-  assert.equal(screen.queryByRole('dialog'), null);
+  assert.ok(!screen.queryByRole('dialog'), 'the dialog is closed');
 });
 
 test('a merge shows the confirmation and only saves once confirmed', async () => {
@@ -902,8 +903,8 @@ test('typing a term leaves only the cards that match it', async () => {
   });
 
   assert.ok(screen.getByText('Beta'));
-  assert.equal(screen.queryByText('Alpha'), null);
-  assert.equal(screen.queryByText('Gamma'), null);
+  assert.ok(gone('Alpha'), 'Alpha is filtered out');
+  assert.ok(gone('Gamma'), 'Gamma is filtered out');
 });
 
 test('the term reaches the same parts of a display the server matches on', async () => {
@@ -935,7 +936,7 @@ test('the term reaches the same parts of a display the server matches on', async
   for (const term of ['casting', '2026-02', 'bangbros']) {
     fireEvent.change(box, { target: { value: term } });
     assert.ok(screen.getByText('Alpha'), `"${term}" must reach the card`);
-    assert.equal(screen.queryByText('Beta'), null, `"${term}" must not reach the other card`);
+    assert.ok(gone('Beta'), `"${term}" must not reach the other card`);
   }
 });
 
@@ -951,7 +952,7 @@ test('clearing the term restores the whole list', async () => {
   const box = screen.getByRole('searchbox', { name: 'Search picks' });
 
   fireEvent.change(box, { target: { value: 'alpha' } });
-  assert.equal(screen.queryByText('Beta'), null);
+  assert.ok(gone('Beta'), 'Beta is filtered out');
 
   // Whitespace, not '': a term deleted with the keyboard often leaves a space
   // behind, and a lone space is not a query.
@@ -979,7 +980,7 @@ test('a filtered-out card keeps its metadata polled', async () => {
   fireEvent.change(screen.getByRole('searchbox', { name: 'Search picks' }), {
     target: { value: 'alpha' },
   });
-  await waitFor(() => assert.equal(screen.queryByText('Gamma'), null));
+  await waitFor(() => assert.ok(gone('Gamma'), 'Gamma is gone'));
 
   // Long enough that a hook handed a narrowed list would have asked again.
   await new Promise((resolve) => setTimeout(resolve, 200));

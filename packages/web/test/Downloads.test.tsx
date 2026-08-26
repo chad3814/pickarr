@@ -10,6 +10,7 @@ import { fetchStub } from './fetchStub.ts';
 // spelled out, because an expectation the code under test computes cannot
 // detect that code changing.
 import { api, type DownloadView, type DownloadsResponse } from '../src/api/client.ts';
+import { gone } from './dom.ts';
 
 /**
  * Unmount between tests rather than at the end of each one. `<Downloads />`
@@ -25,16 +26,6 @@ afterEach(cleanup);
  */
 function routed(node: ReactNode) {
   return <MemoryRouter>{node}</MemoryRouter>;
-}
-
-/**
- * Never `assert.equal(screen.queryByText(x), null)` — one of two shapes of
- * `#40`, documented in full on `gone()` in `MediaCard.test.tsx`: node:assert
- * formats a live DOM element to explain a failed equality, which burns real
- * time and reports no test name. Compare the boolean instead, as here.
- */
-function gone(text: string | RegExp): boolean {
-  return screen.queryByText(text) === null;
 }
 
 /**
@@ -75,7 +66,7 @@ afterEach(cleanup);
 
 test('a tracked row shows status and offers retry only when failed', () => {
   const { rerender } = render(routed(<DownloadRow download={download()} onRetry={() => {}} />));
-  assert.equal(screen.queryByRole('button', { name: /retry/i }), null);
+  assert.ok(!screen.queryByRole('button', { name: /retry/i }), 'no retry button on this row');
 
   rerender(
     routed(
@@ -99,7 +90,7 @@ test('an absent row warns and offers retry, a healthy row offers neither', () =>
 
   rerender(routed(<DownloadRow download={download()} onRetry={() => {}} />));
   assert.ok(gone(/missing from client/i));
-  assert.equal(screen.queryByRole('button', { name: /retry/i }), null);
+  assert.ok(!screen.queryByRole('button', { name: /retry/i }), 'no retry button on this row');
 });
 
 test('a failed row keeps its error and retry button, and no absence warning', () => {
@@ -298,7 +289,7 @@ test('untracked entries render inert and labelled', async () => {
 
   await waitFor(() => assert.ok(screen.getByText('Someone Elses')));
   assert.ok(screen.getByText(/not managed by pickarr/i));
-  assert.equal(screen.queryByRole('button', { name: /retry/i }), null);
+  assert.ok(!screen.queryByRole('button', { name: /retry/i }), 'no retry button on this row');
 });
 
 // The search box. It filters the rows the screen already holds rather than

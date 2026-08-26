@@ -103,7 +103,7 @@ test('a plan that moves nothing applies immediately, with no dialog and no diges
 
   await waitFor(() => assert.ok(screen.getByText('result:true')));
   assert.deepEqual(digests, [undefined]);
-  assert.equal(screen.queryByRole('dialog'), null);
+  assert.ok(!screen.queryByRole('dialog'), 'the dialog is closed');
 });
 
 test('a merge shows the confirmation, calls apply not at all until confirmed, then with the plan digest', async () => {
@@ -229,7 +229,7 @@ test('a stale re-plan says why, not just what', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Begin' }));
   await waitFor(() => assert.ok(screen.getByRole('dialog')));
 
-  assert.equal(screen.queryByText(/changed since you opened it/), null);
+  assert.ok(!screen.queryByText(/changed since you opened it/), 'no staleness notice');
   fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
 
   await waitFor(() => assert.ok(screen.getByText(/changed since you opened it/)));
@@ -248,7 +248,7 @@ test('a non-stale failure resolves false and closes the dialog rather than re-pl
   fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
 
   await waitFor(() => assert.ok(screen.getByText('result:false')));
-  assert.equal(screen.queryByRole('dialog'), null);
+  assert.ok(!screen.queryByRole('dialog'), 'the dialog is closed');
   // Only the one plan fetch happened — the failure did not trigger a re-plan.
   assert.equal(fetchState.calls, 1);
 });
@@ -310,7 +310,7 @@ test('a failing re-plan after a stale fast-path apply reports via onError and re
 
   await waitFor(() => assert.ok(screen.getByText('result:false')));
   assert.deepEqual(errors, ['network down']);
-  assert.equal(screen.queryByRole('dialog'), null);
+  assert.ok(!screen.queryByRole('dialog'), 'the dialog is closed');
   assert.equal(applyCalls, 1);
   assert.equal(fetchCalls, 2);
 });
@@ -335,7 +335,7 @@ test('a re-plan that still needs no confirmation, then goes stale again, surface
 
   await waitFor(() => assert.ok(screen.getByText('result:false')));
   assert.equal(errors.length, 1);
-  assert.equal(screen.queryByRole('dialog'), null);
+  assert.ok(!screen.queryByRole('dialog'), 'the dialog is closed');
   // Exactly one retry: two plan fetches, two applies, not a third of either.
   assert.equal(fetchState.calls, 2);
   assert.equal(applyCalls, 2);
