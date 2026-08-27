@@ -36,7 +36,13 @@
    at least one of the two buttons is going in it, precisely so this margin
    never shows up as a gap under a card with no actions. */
 .card-actions { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-2) 0; }
-.subtitle, .date { margin: 0.1rem 0; color: var(--color-text-dim); font-size: var(--text-meta); }
+/* One line of context under the title, from parts that render on independent
+   conditions. The separator is drawn between adjacent spans rather than joined
+   in the component, so an absent part leaves no orphan ` · ` — the same reason
+   `.metadata-release-date + .metadata-duration::before` used to exist, applied
+   once to any number of parts instead of once per pair. */
+.card-context { margin: 0.1rem 0; color: var(--color-text-dim); font-size: var(--text-meta); }
+.card-context > span + span::before { content: ' · '; color: var(--color-text-faint); }
 
 /* The accent as a fill, with `--color-on-accent` on it — ~7.6:1, and the same
    pair in both themes. Amber is also the warning colour (`.download-absent`,
@@ -90,20 +96,18 @@
   border-radius: var(--radius-sm);
 }
 .metadata-performers { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-2) 0; padding: 0; list-style: none; align-items: center; }
-/* The rest of the panel runs 12-13px (`.metadata-title` at `--text-body`,
-   `.metadata-synopsis` at `--text-meta`); an unsized `<li>` inherits the 16px
-   root instead, so without this a cast name — already an amber, underlined
-   anchor — is the loudest text in a panel that is meant to read as a second
-   opinion, not the headline. */
+/* The rest of the panel runs at `--text-meta` (`.metadata-synopsis`); an
+   unsized `<li>` inherits the 16px root instead, so without this a cast name —
+   already an amber, underlined anchor — is the loudest text in a panel that is
+   meant to read as a second opinion, not the headline. */
 .metadata-performers li { display: flex; align-items: center; gap: 0.35rem; font-size: var(--text-meta); }
 .avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
 .metadata-pending { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }
 
 /*
- * The scene panel had no rules at all — `.metadata`, `.metadata-title`,
- * `.metadata-release-date`, `.metadata-duration` and `.metadata-synopsis` were
- * rendered by `MediaCard` and inherited browser defaults. This is the first time
- * any of them is styled.
+ * The scene panel had no rules at all — `.metadata` and `.metadata-synopsis`
+ * were rendered by `MediaCard` and inherited browser defaults. This is the
+ * first time either is styled.
  *
  * A top rule rather than a nested box: the panel is a second opinion about the
  * card it sits in, not a separate object, and a border would make it read as one.
@@ -113,30 +117,6 @@
   padding-top: var(--space-3);
   border-top: 1px solid var(--color-line);
 }
-
-/* Dim when it is plain text, accent when it is a link — `MediaCard` wraps this in
-   an `<a>` only when the provider gave a scene URL, and `base.css` colours the
-   anchor. An unlinked second opinion is not interactive and must not look it. */
-.metadata-title { margin: 0; color: var(--color-text-dim); font-size: var(--text-body); }
-
-.metadata-release-date,
-.metadata-duration {
-  display: inline;
-  margin: 0;
-  color: var(--color-text-dim);
-  font-size: var(--text-meta);
-}
-
-/* The release date and duration render on independent conditions in MediaCard:
-   `metadata.releaseDate !== null` and `metadata.durationSeconds !== null` are
-   each evaluated separately, and the component's comment notes that the provider
-   "populates poster, synopsis, performers, release date and running time
-   unevenly… one being missing says nothing about the others." A card with a
-   running time but no release date is documented as ordinary, not rare. The
-   adjacent-sibling selector is therefore load-bearing: it draws the separator
-   only when a release date precedes the duration, so a card with duration alone
-   does not open with a stray dot. */
-.metadata-release-date + .metadata-duration::before { content: ' · '; color: var(--color-text-faint); }
 
 /*
  * The measure is the point. An unbounded synopsis across a 60rem card is the

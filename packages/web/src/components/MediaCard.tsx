@@ -130,6 +130,22 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // old-server response can omit it, so absence is folded into `null` rather
   // than trusted to mean anything on its own.
   const sceneUrl = metadata.state === 'confirmed' ? metadata.sceneUrl ?? null : null;
+  // The provider's answer is what the card shows, with the plugin's display as
+  // the fallback — spec §4. This reverses the rule the old panel comment stated
+  // ("a second opinion, never a replacement"): a collapsed header has room for
+  // one title, and the provider's is the scene's actual title where the parsed
+  // one is usually performer-name-led. All three are inside the `'confirmed'`
+  // member of the union, so they narrow together.
+  const answered = metadata.state === 'confirmed' ? metadata : null;
+  const title = answered?.title ?? display.title;
+  const runtime = answered?.durationSeconds ?? null;
+  // The date has no fallback on purpose: `display.date` is the parse of a
+  // release name, and this phase stops presenting that as the scene's date.
+  const releaseDate = answered?.releaseDate ?? null;
+  const context: string[] = [];
+  if (display.subtitle !== undefined) context.push(display.subtitle);
+  if (releaseDate !== null) context.push(releaseDate);
+  if (runtime !== null) context.push(formatDuration(runtime));
   // The lazy trigger (`useGroupMetadata`) already owns every group that has
   // never been asked or is still waiting on an answer; a button here for
   // either would be a second path to the one thing that hook already does.
@@ -253,9 +269,30 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
       <div className="card-head">
         <div className="card-head-main">
           <header>
-            <h2>{display.title}</h2>
-            {display.subtitle !== undefined && <p className="subtitle">{display.subtitle}</p>}
-            {display.date !== undefined && <p className="date">{display.date}</p>}
+            <h2>
+              {sceneUrl === null ? (
+                title
+              ) : (
+                <a href={sceneUrl} target="_blank" rel="noopener noreferrer">
+                  {title}
+                </a>
+              )}
+            </h2>
+            {/*
+              * One span per part, with the separator drawn by CSS between
+              * adjacent siblings rather than joined here. The provider populates
+              * these unevenly — the panel this replaces documented a running
+              * time without a release date as ordinary — so a JS join would need
+              * to know which parts are present, which is exactly what the
+              * sibling selector already knows.
+              */}
+            {context.length > 0 && (
+              <p className="card-context">
+                {context.map((part) => (
+                  <span key={part}>{part}</span>
+                ))}
+              </p>
+            )}
             {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
           </header>
 
@@ -372,39 +409,24 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
       {metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
 
       {/*
-       * A second opinion, never a replacement: `display.title` above stays
-       * the card's title even when the provider disagrees with it — adopting
-       * a provider value is later work (this phase is deliberately
-       * non-destructive). Rendered only once the answer is `confirmed`: a
-       * `pending` or `absent` group has nothing to show yet (`pending` gets
-       * its own note above), and `none` means the provider was asked and
-       * came back with nothing, which is likewise nothing to show. The
-       * provider populates poster, synopsis, performers, release date and
-       * running time unevenly, so each is checked and rendered on its own —
-       * one being missing says nothing about the others. The card's slot —
-       * a poster or a performer portrait — is rendered above, out of this
-       * section: it lives in `.card-head`, in normal flow beside the
-       * identity column, so it does not compete with anything here.
+       * What the provider added beyond the title, date and runtime already
+       * promoted into the collapsed header above: synopsis and cast, the two
+       * fields with nowhere to go in one line of context. Those three left
+       * because a header has room for one title and one context line, and
+       * the provider's title and date are what that line now shows directly
+       * — this section is no longer where they're read. Rendered only once
+       * the answer is `confirmed`: a `pending` or `absent` group has nothing
+       * to show yet (`pending` gets its own note above), and `none` means
+       * the provider was asked and came back with nothing, which is
+       * likewise nothing to show. Synopsis and cast are still checked and
+       * rendered independently — one being missing says nothing about the
+       * other. The card's slot — a poster or a performer portrait — is
+       * rendered above, out of this section: it lives in `.card-head`, in
+       * normal flow beside the identity column, so it does not compete with
+       * anything here.
        */}
       {metadata.state === 'confirmed' && (
         <section className="metadata" aria-label="Scene metadata">
-          {metadata.title !== null && (
-            <p className="metadata-title">
-              {sceneUrl === null ? (
-                metadata.title
-              ) : (
-                <a href={sceneUrl} target="_blank" rel="noopener noreferrer">
-                  {metadata.title}
-                </a>
-              )}
-            </p>
-          )}
-          {metadata.releaseDate !== null && (
-            <p className="metadata-release-date">{metadata.releaseDate}</p>
-          )}
-          {metadata.durationSeconds !== null && (
-            <p className="metadata-duration">{formatDuration(metadata.durationSeconds)}</p>
-          )}
           {metadata.synopsis !== null && (
             <p className="metadata-synopsis">{metadata.synopsis}</p>
           )}

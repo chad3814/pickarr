@@ -87,7 +87,10 @@ test('adding a date to a picked group merges it into the dated one', async ({ pa
   const browseCards = page.locator('article.media-card');
   await expect(browseCards).toHaveCount(1);
   await expect(browseCards.getByRole('heading', { name: 'Title Of Scene' })).toHaveCount(1);
-  await expect(browseCards.locator('p.date')).toHaveText('2026-08-14');
+  // No metadata provider is configured in this harness, so the card has no
+  // confirmed answer to draw a date from — the parsed date (`display.date`)
+  // left the card in this phase, so the context line shows only the site.
+  await expect(browseCards.locator('p.card-context')).toHaveText('SomeSite');
   await expect(browseCards.locator('li.release-row').filter({ hasText: DATED })).toHaveCount(1);
 
   await page.goto('/picks');
@@ -140,7 +143,9 @@ test('adding a date to a picked group merges it into the dated one', async ({ pa
   await expect(page.locator('article.media-card')).toHaveCount(1);
   const merged = page.locator('article.media-card');
   await expect(merged.getByRole('heading', { name: 'Title Of Scene' })).toHaveCount(1);
-  await expect(merged.locator('p.date')).toHaveText('2026-08-14');
+  // Same as above: still no provider answer post-merge, so still no date on
+  // the card — only the site the context line does have.
+  await expect(merged.locator('p.card-context')).toHaveText('SomeSite');
   await expect(merged.locator('span.badge')).toHaveText('Upgrade available');
 
   const releases = merged.locator('li.release-row');

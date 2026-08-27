@@ -71,7 +71,9 @@ test('renders the display fields', () => {
   render(<MediaCard group={GROUP} onPick={() => {}} />);
   assert.ok(screen.getByText('Alex Coal'));
   assert.ok(screen.getByText('Brazzers'));
-  assert.ok(screen.getByText('2023-04-15'));
+  // `display.date` is no longer rendered: this group has no provider answer
+  // (`metadata: { state: 'absent' }`), and the parsed date has no fallback
+  // role left on the card now that the header shows only the provider's.
 });
 
 test('shows one pick control per release, best first', () => {
@@ -267,18 +269,91 @@ test('a pending lookup says so; none and absent stay silent', () => {
   assert.equal(gone('pending'), true);
 });
 
-test('the parsed title stays the card title when metadata disagrees', () => {
-  // Phase 1 is deliberately non-destructive: the panel is a second opinion,
-  // never a replacement. `display.title` is what the parser produced, and
-  // `CONFIRMED.title` is a deliberately different string from the provider.
-  render(<MediaCard group={{ ...GROUP, metadata: CONFIRMED }} onPick={() => {}} />);
-
-  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'Alex Coal');
-  // The provider's disagreeing title is still shown — just not as *the* title.
-  assert.ok(screen.getByText('A Different Title'));
+test('the card shows the provider title, not the parsed one', () => {
+  render(<MediaCard group={withMetadata({})} onPick={() => {}} />);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'A Different Title' }));
+  // The parsed title is performer-name-led; adopting the provider's is the point
+  // of this phase, so the parsed one must not also be on screen as a heading.
+  assert.ok(!screen.queryByRole('heading', { level: 2, name: 'Alex Coal' }));
 });
 
-test('the panel renders the provider release date and a human-formatted running time', () => {
+test('the parsed title is the fallback when the provider has no title', () => {
+  render(<MediaCard group={withMetadata({ title: null })} onPick={() => {}} />);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Alex Coal' }));
+});
+
+test('a group with no confirmed answer falls back too', () => {
+  render(<MediaCard group={{ ...GROUP, metadata: { state: 'none' } }} onPick={() => {}} />);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Alex Coal' }));
+});
+
+test('the context line joins studio, provider date and runtime', () => {
+  render(<MediaCard group={withMetadata({})} onPick={() => {}} />);
+  const context = card('A Different Title').querySelector('.card-context');
+  assert.ok(context !== null, 'no context line');
+  // Asserted as one string because the separators are the thing under test:
+  // they are drawn by CSS between adjacent spans, so what matters is which
+  // parts are present and in what order.
+  // `formatDuration(1800)` is '30m' — verified against packages/web/src/api/format.ts,
+  // not assumed. The separators are CSS `::before` content, which `textContent`
+  // does not include, so the parts run together here.
+  assert.equal(context.textContent, 'Brazzers2023-04-1530m');
+});
+
+test('an absent part leaves no separator behind', () => {
+  // The provider populates these unevenly — the existing panel comment says a
+  // running time without a release date is ordinary, not rare — so each part
+  // renders on its own condition and the separator is CSS between siblings.
+  render(<MediaCard group={withMetadata({ releaseDate: null, durationSeconds: null })} onPick={() => {}} />);
+  const context = card('A Different Title').querySelector('.card-context');
+  assert.equal(context?.textContent, 'Brazzers', 'no orphan separator');
+  assert.equal(context?.querySelectorAll('span').length, 1, 'one part means one span');
+});
+
+test('the parsed date is not shown when the provider has no date', () => {
+  // Spec §4: the date falls back to nothing, not to display.date.
+  render(<MediaCard group={withMetadata({ releaseDate: null })} onPick={() => {}} />);
+  const context = card('A Different Title').querySelector('.card-context');
+  assert.ok(context !== null, 'no context line');
+  assert.ok(!context.textContent?.includes('2023-04-15'), 'display.date must not stand in');
+});
+
+test('a group with no studio, date or runtime renders no context line at all', () => {
+  const bare: GroupView = {
+    ...GROUP,
+    display: { title: 'Alex Coal', fields: [] },
+    metadata: { state: 'none' },
+  };
+  render(<MediaCard group={bare} onPick={() => {}} />);
+  // #40: never `assert.equal(screen.queryBy*(...), null)`.
+  assert.ok(!card('Alex Coal').querySelector('.card-context'));
+});
+
+test('the scene link wraps whichever title renders', () => {
+  const url = 'https://theporndb.net/scenes/s';
+  render(<MediaCard group={withMetadata({ sceneUrl: url })} onPick={() => {}} />);
+  const link = screen.getByRole('link', { name: 'A Different Title' });
+  // A literal, not the fixture value: both ends agreeing on a wrong string is
+  // the failure this style of assertion exists to catch.
+  assert.equal(link.getAttribute('href'), 'https://theporndb.net/scenes/s');
+  assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
+
+  cleanup();
+  render(<MediaCard group={withMetadata({ title: null, sceneUrl: url })} onPick={() => {}} />);
+  assert.ok(screen.getByRole('link', { name: 'Alex Coal' }), 'the fallback title links too');
+});
+
+test('the scene panel no longer carries a second title, date or duration', () => {
+  render(<MediaCard group={withMetadata({})} onPick={() => {}} />);
+  const cardEl = card('A Different Title');
+  for (const cls of ['.metadata-title', '.metadata-release-date', '.metadata-duration']) {
+    assert.ok(!cardEl.querySelector(cls), `${cls} moved into the header`);
+  }
+  // The synopsis and cast are untouched by this task.
+  assert.ok(cardEl.querySelector('.metadata-synopsis'));
+});
+
+test('the card shows the provider release date and a human-formatted running time', () => {
   render(
     <MediaCard
       group={{
@@ -292,7 +367,7 @@ test('the panel renders the provider release date and a human-formatted running 
   assert.ok(screen.getByText('1h 30m'));
 });
 
-test('a missing release date or running time is independently absent from the panel', () => {
+test('a missing release date or running time is independently absent from the context line', () => {
   render(
     <MediaCard
       group={{ ...GROUP, metadata: { ...CONFIRMED, releaseDate: null, durationSeconds: null } }}
@@ -301,8 +376,8 @@ test('a missing release date or running time is independently absent from the pa
   );
   assert.ok(!screen.queryByText('1h 30m'));
   assert.ok(!screen.queryByText('30m'));
-  // The rest of the panel still rendered — proof neither absence took the
-  // whole panel down with it.
+  // The title still renders regardless — proof neither absence took the
+  // rest of the header down with it.
   assert.ok(screen.getByText('A Different Title'));
 
   const { unmount } = render(
@@ -360,10 +435,11 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
   );
   assert.ok(!screen.queryByRole('img'));
   assert.ok(!screen.queryByText('A synopsis from the provider.'));
-  // The title, which the same record still carries, proves the panel itself
-  // rendered — the three tolerances above are independent absences, not one
-  // that took the whole panel down with it.
-  assert.ok(screen.getByText('A Different Title'));
+  // The panel itself still rendered — checked directly, since the title that
+  // used to prove this indirectly now lives in the header instead — the three
+  // tolerances above are independent absences, not one that took the whole
+  // panel down with it.
+  assert.ok(screen.getByRole('region', { name: 'Scene metadata' }));
 
   const { unmount } = render(
     <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, synopsis: null } }} onPick={() => {}} />,
@@ -422,26 +498,24 @@ test('with no poster the slot falls to the first performer portrait', () => {
       onPick={() => {}}
     />,
   );
-  const slot = card('Alex Coal').querySelector('.card-artwork img');
+  const slot = card('A Different Title').querySelector('.card-artwork img');
   assert.equal(slot?.getAttribute('src'), '/api/performers/4/image');
   // Announced as the performer, never as the scene's poster.
   assert.equal(slot?.getAttribute('alt'), 'Alice Maze');
 });
 
 test('neither image means no slot at all, as before', () => {
-  // `performerNames: []` is load-bearing, not tidying. `CONFIRMED` carries
-  // `performerNames: ['Alex Coal', 'Jane Doe']`, and 'Alex Coal' is also the
-  // group's title — so with an empty `performers` the legacy names list renders
-  // an `<li>Alex Coal</li>`, and `card()`'s `getByText` then matches both it and
-  // the `<h2>` and throws on the ambiguity. Emptying both lists renders no cast
-  // at all, which is what this test is about anyway.
+  // `performerNames: []` empties the cast, which is what this test is about
+  // anyway — the header's h2 now reads 'A Different Title' (the provider's),
+  // so 'Alex Coal' surviving only as a cast `<li>` (see `CONFIRMED`) is no
+  // longer ambiguous with `card()`'s lookup the way it was before this task.
   render(
     <MediaCard
       group={withMetadata({ hasPoster: false, hasBackground: false, performers: [], performerNames: [] })}
       onPick={() => {}}
     />,
   );
-  assert.ok(!card('Alex Coal').querySelector('.card-artwork'));
+  assert.ok(!card('A Different Title').querySelector('.card-artwork'));
 });
 
 test('the slot renders for a group whose scene lookup returned nothing', () => {
@@ -673,7 +747,7 @@ test('the card keeps its title and cast on screen while a requery is in flight',
   // metadata state of its own to blank in the first place — it only ever
   // reads `group.metadata` — but the behaviour this guards is exactly the
   // one the brief requires, so it stays asserted directly.
-  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'Alex Coal');
+  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'A Different Title');
   assert.ok(screen.getByText('Alex Coal', { selector: 'li' }));
   assert.ok(screen.getByText('A synopsis from the provider.'));
 
@@ -700,7 +774,7 @@ test('a rejected requery re-enables the button, shows the error, and keeps the e
   assert.equal((button as HTMLButtonElement).disabled, false);
 
   // The existing metadata — untouched by the failure — is still on screen.
-  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'Alex Coal');
+  assert.equal(screen.getByRole('heading', { level: 2 }).textContent, 'A Different Title');
   assert.ok(screen.getByText('A synopsis from the provider.'));
 });
 
