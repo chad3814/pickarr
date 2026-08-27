@@ -186,11 +186,13 @@ one pointing the wrong way, and this file has been weakened by accident before.
   alone, and `groupSearchText` in `packages/web/src/api/search.ts` mirrors it, so for the
   1,957 groups now showing a provider title the string on the card matches nothing typed
   into the search box — on Browse through `search_text`, on Picks through
-  `groupSearchText`. Before this phase every displayed title was searchable, and that
-  stops being true here. §2 scopes the fix out and gives the reason (it is a data change,
-  not a change to one pure function); the consequence is recorded because it is not
-  discoverable from that scope note, only by typing a title off a card and getting nothing
-  back.
+  `groupSearchText`. The provider's title was never in `search_text` — the panel this
+  phase deletes already displayed it, so an unsearchable displayed title is not new. What
+  is new is the other half: the searchable title is no longer displayed anywhere, so a
+  reader has nothing on screen to type. §2 scopes the fix out and gives the reason (it is
+  a data change, not a change to one pure function); the consequence is recorded because
+  it is not discoverable from that scope note, only by typing a title off a card and
+  getting nothing back.
 - **Every other surface still names a group by its parsed title.**
   `IdentityChangeConfirm` renders `plan.mergeInto.title`, which `titleOf` in
   `manual/identity-plan.ts` reads from `display`, so it says "This will merge into Alex

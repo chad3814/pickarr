@@ -120,13 +120,23 @@
  * on. Still the binding constraint on a desktop window, not a dead letter now
  * that the synopsis sits in `.card-head-main` rather than spanning the whole
  * card: 68ch resolves to 489.6px at `--text-meta` (0.75rem) in IBM Plex Sans,
- * and the identity column runs 777.3px wherever `.app`'s own 60rem cap is
- * reached — every viewport at or above 960px — so this rule is what keeps the
- * line length in range rather than the column. It stops being true on a window
- * narrow enough for the column itself to fall under 490px, somewhere near a
- * 705px viewport (measured: 750px gives a 535px column, 700px a 485px one).
- * `card-layout.spec.ts` asserts both halves, so phase 3's master/detail Browse
- * cannot quietly invalidate this note.
+ * and the identity column is wider than that on either card shape. Every
+ * figure below is measured in Chromium.
+ *
+ * `.app` (`base.css`) is `max-width: 60rem` with `var(--space-4)` of padding a
+ * side, and nothing in this directory resets `box-sizing`, so its border box
+ * measures 992px: the layout stops changing at a 992px viewport, not at 960,
+ * where the window is still the constraint.
+ *
+ * On a card with no slot the column takes the full inner width, 777.3px, and
+ * the cap stops binding near a 705px viewport (750px → 535px column, 700px →
+ * 485px). On a card with a slot — 71% of the library, per §6 of the phase-2
+ * spec — the column loses the 98px frame and a 16px gap and runs 663.3px, so
+ * the cap stops binding nearer 818px (820px → 491.3px column, still capped;
+ * 818px → 489.3px, no longer). The conclusion holds for both shapes; only the
+ * figures are per shape. `card-layout.spec.ts` asserts the cap and its
+ * bindingness on the no-slot shape, so phase 3's master/detail Browse cannot
+ * quietly invalidate this note.
  */
 .metadata-synopsis {
   max-width: 68ch;

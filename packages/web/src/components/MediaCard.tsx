@@ -80,10 +80,13 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
  * arrive as `''` rather than as an absent value, and `??` accepts `''`.
  * `maybeStr` in `db/row.ts` folds only `NULL` and `undefined` into `null`, so an
  * empty column reaches the view as an empty string and nothing upstream
- * normalises it. Two of those would show: an empty provider title renders an
- * empty `<h2>`, a card with no heading and nothing on it naming the group; an
+ * normalises it. Three of those would show. An empty provider title renders an
+ * empty `<h2>`, a card with no heading and nothing on it naming the group. An
  * empty context part renders a span that `card.css`'s sibling separator then
- * decorates, so the line reads ` · 2023-04-15`. `commit.ts`'s `isText` guards
+ * decorates, so the line reads ` · 2023-04-15`. And an empty synopsis passes
+ * `!== null` and renders an empty `<p class="metadata-synopsis">`, whose
+ * `margin: var(--space-2) 0 0` is the same 8px of blank space the `cast`
+ * variable below returns `null` to avoid. `commit.ts`'s `isText` guards
  * the same class of value for `display`'s own optional strings, though only
  * against `undefined` — there is no shared helper to reuse here.
  */
@@ -160,6 +163,9 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // The date has no fallback on purpose: `display.date` is the parse of a
   // release name, and this phase stops presenting that as the scene's date.
   const releaseDate = text(answered?.releaseDate);
+  // Through `answered`, so this is `null` for every state but `'confirmed'` as
+  // well as for a confirmed answer carrying nothing to say.
+  const synopsis = text(answered?.synopsis);
   // Every part of the line is tested for emptiness the same way, because the
   // separator between them is drawn by CSS on whichever spans exist: a part
   // that renders as an empty span is invisible and still gets a ` · `. The two
@@ -313,9 +319,11 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
             // actions (index 0 versus that performer's own entry).
             //
             // The group is named by `title` — the value the `<h2>` above
-            // actually renders — and not by `display.title`, which on the 45%
-            // of groups carrying a provider title is a name appearing nowhere
-            // on the card. The announced string and the visible one cannot
+            // actually renders — and not by `display.title`, which on 1,715 of
+            // the library's 4,313 groups (39%, §6) is a name appearing nowhere
+            // on the card. Not all 1,957 with a provider title: on 242 of them
+            // the two agree, so the parsed title is on the card as the
+            // heading. The announced string and the visible one cannot
             // drift apart if there is only one of them (`docs/known-issues.md`,
             // "Test-suite blind spots", on `IdentityChangeConfirm`).
             aria-label={`Browse images for ${title}`}
@@ -445,14 +453,13 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
            *
            * The synopsis renders only once the answer is `confirmed`, checked
            * independently of the cast — one being missing says nothing about
-           * the other. `cast` needs no guard of its own: it is already `null`
-           * when there is nobody to list, which is what lets one call site
-           * serve both a confirmed group and one the provider had nothing
-           * for, where the old two-panel layout needed a call site each.
+           * the other. Both are already `null` when there is nothing to draw
+           * (`synopsis` and `cast` above), so neither needs a guard here: that
+           * is what lets one call site serve both a confirmed group and one the
+           * provider had nothing for, where the old two-panel layout needed a
+           * call site each.
            */}
-          {metadata.state === 'confirmed' && metadata.synopsis !== null && (
-            <p className="metadata-synopsis">{metadata.synopsis}</p>
-          )}
+          {synopsis !== null && <p className="metadata-synopsis">{synopsis}</p>}
           {cast}
         </div>
       </div>

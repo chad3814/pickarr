@@ -275,6 +275,16 @@ test('the context separator is generated content, and the synopsis keeps its mea
   const synopsis = page.locator('p.metadata-synopsis');
   await expect(synopsis).toBeVisible();
 
+  // `68ch` is the advance of `0` in the face that actually loaded, and
+  // `fonts.css` ships `font-display: swap` — so until the woff2 lands the
+  // measure below is a fallback's. Helvetica-class metrics resolve it to about
+  // 453.8px, which fails the floor asserted at the end of this test, and
+  // DejaVu's about 519.1px, which squeaks under the ceiling. Both are the
+  // wrong direction to leave to a race.
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+  });
+
   const measured = await page.evaluate(() => {
     const line = document.querySelector('p.card-context');
     if (line === null) throw new Error('no context line');
@@ -319,7 +329,8 @@ test('the context separator is generated content, and the synopsis keeps its mea
 
   // The synopsis's measure. `card.css` caps it at `68ch`, which at
   // `--text-meta` (0.75rem = 12px) in self-hosted IBM Plex Sans resolves to
-  // 489.6px — measured here, not computed. The band is wide enough to survive
+  // 489.6px — measured here, not computed, and only trustworthy because the
+  // face is loaded by the time this runs. The band is wide enough to survive
   // a font revision and narrow enough that changing 68ch to anything a
   // typographer would argue about fails it; deleting the cap makes
   // `max-width` compute to `none`, `parseFloat` return `NaN`, and both
@@ -332,11 +343,21 @@ test('the context separator is generated content, and the synopsis keeps its mea
   // a dead letter the column already satisfies — the claim `card.css` makes in
   // prose beside the rule, unguarded until now and due to be invalidated by
   // phase 3's master/detail Browse, the next thing to change this column.
-  // Measured at this project's 1280px viewport: the identity column runs
-  // 777.3px against the cap's 489.6. `.app` caps itself at 60rem, so every
-  // viewport at or above 960px gives the same two numbers; the cap stops
-  // binding somewhere near 705px, where the column itself falls under 490
-  // (750px → 535px column, 700px → 485px, both measured).
-  expect(measured.viewport).toBeGreaterThanOrEqual(960);
+  //
+  // This fixture leaves `posterUrl` null and `performers` empty, so it draws no
+  // slot and its identity column is the card's full inner width: 777.3px
+  // against the cap's 489.6, at this project's 1280px viewport. `.app` is
+  // `max-width: 60rem` plus `var(--space-4)` of padding a side and nothing in
+  // `src/styles` resets `box-sizing`, so its border box measures 992px and the
+  // layout stops changing at a 992px viewport, not at 960 — measured. Below
+  // that the column tracks the window and the cap stops binding near 705px
+  // (750px → 535px column, 700px → 485px).
+  //
+  // With a slot — 71% of the library, per spec §6 — the column loses the 98px
+  // frame and a 16px gap and runs 663.3px, so the cap binds there too but
+  // stops nearer an 818px viewport (820px → 491.3px column, still capped;
+  // 818px → 489.3px, no longer). Both shapes clear it on any desktop window;
+  // it is the figures that do not generalise, not the conclusion.
+  expect(measured.viewport).toBeGreaterThanOrEqual(992);
   expect(measured.columnWidth).toBeGreaterThan(measured.measure);
 });

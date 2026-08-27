@@ -241,7 +241,12 @@ test('only the release that failed is marked', () => {
   assert.equal(screen.getAllByText('Failed').length, 1);
 });
 
-test('the synopsis and the slot render only once the answer is confirmed', () => {
+test('the provider synopsis renders only once the answer is confirmed', () => {
+  // Only the synopsis. The `img` check below is not about the state at all —
+  // this fixture is bare `GROUP`, with no poster and no performers, so there
+  // is no image to draw whatever the answer says. The slot follows the images
+  // rather than the scene answer, which the test named for that further down
+  // this file is the one that pins.
   const unconfirmed: MetadataView[] = [{ state: 'absent' }, { state: 'pending' }, { state: 'none' }];
   for (const metadata of unconfirmed) {
     const { unmount } = render(<MediaCard group={{ ...GROUP, metadata }} onPick={() => {}} />);
@@ -306,6 +311,14 @@ test('an empty studio leaves no orphan separator either', () => {
   assert.ok(context !== null, 'no context line');
   assert.equal(context.querySelectorAll('span').length, 2, 'the empty studio drew no span');
   assert.equal(context.textContent, '2023-04-1530m');
+});
+
+test('an empty synopsis renders no paragraph at all', () => {
+  // `''` reaches `!== null` intact, and an empty `.metadata-synopsis` is not
+  // invisible: the rule carries `margin: var(--space-2) 0 0`, so it costs the
+  // same 8px band the cast list returns `null` to avoid.
+  render(<MediaCard group={withMetadata({ synopsis: '' })} onPick={() => {}} />);
+  assert.ok(!card('A Different Title').querySelector('.metadata-synopsis'));
 });
 
 test('a group with no confirmed answer falls back too', () => {

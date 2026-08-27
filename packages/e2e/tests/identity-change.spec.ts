@@ -94,13 +94,15 @@ test('adding a date to a picked group merges it into the dated one', async ({ pa
   // there is no provider date, and the parsed date (`display.date`) left the
   // card in this phase, so the line shows only the site.
   //
-  // The date is named in a negative rather than left to fall out of
-  // `toHaveText('SomeSite')`, which is what stood here. That form pins the
-  // whole composition of the line — it fails for any part added later — while
-  // never mentioning the string it is meant to be excluding. This pins the
-  // phase-2 rule itself, and the positive beside it stops the negative being
-  // satisfied by a line that disappeared.
-  await expect(browseCards.locator('p.card-context')).toContainText('SomeSite');
+  // Both assertions, not one. The first is exact, so it still fails when a
+  // part is added to this line — that is a property worth keeping and the
+  // second does not have it. The second is redundant against the first today
+  // (a line whose whole text is `SomeSite` plainly does not contain a date)
+  // and is here to name the rule under test: the parsed date does not appear.
+  // Without it, nothing in this file says which behaviour the exact text is
+  // evidence of, and the exact text is the kind of assertion a later phase
+  // relaxes without noticing what it was for.
+  await expect(browseCards.locator('p.card-context')).toHaveText('SomeSite');
   await expect(browseCards.locator('p.card-context')).not.toContainText('2026-08-14');
   await expect(browseCards.locator('li.release-row').filter({ hasText: DATED })).toHaveCount(1);
 
