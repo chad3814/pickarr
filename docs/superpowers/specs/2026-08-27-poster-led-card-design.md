@@ -38,8 +38,6 @@ In scope:
 - The header collapses to a title plus one `·`-joined line of context.
 - The card becomes **provider-led**: the provider's title and date are what it shows, with the
   plugin's display title as the fallback (§4).
-- `groupSearchText` gains the provider's title and date, so search keeps matching what is on
-  screen (§5).
 
 Explicitly out of scope:
 
@@ -49,6 +47,14 @@ Explicitly out of scope:
 - **Measuring performer artwork.** Unchanged since 1.8's §9 recorded it.
 - **Adopting any provider value other than title and date.** Synopsis, duration, cast and
   performers are already displayed from the provider; nothing else changes hands.
+- **Search.** `groupSearchText` mirrors `searchTextFor` in `packages/core/src/ingest/commit.ts`,
+  which fills the stored `search_text` column `/api/browse?q=` matches against, and
+  `search_text` is derived from `display` alone — `recordMetadataAnswer` never touches it.
+  Making the provider's title searchable is therefore a data change (a derivation that also
+  reads the answer, a rewrite when one lands or is cleared, a backfill, and the client mirror
+  in step), not a change to one pure function. Out of scope, and not filed as a gap: the parsed
+  title is performer-name-led, and a performer's name stays searchable through `display.title`
+  and the performer fields regardless.
 - **Responsive layout.** The app assumes a desktop window, as it did in phase 1.
 
 ## 3. The layout
@@ -137,19 +143,7 @@ use, and the result reads like the Failed tab's raw rows. A card that falls back
 `display.title` needs **no change at all** on that day. A card that reached for a release name
 itself would have to pick one, and would be deciding presentation the plugin owns.
 
-## 5. Search follows what is displayed
-
-`groupSearchText` builds its haystack from `display.title`, `display.subtitle`, `display.date`
-and the display fields. It does not read the metadata view at all. Left alone, this phase
-would make the visible title unsearchable and keep a hidden one matching.
-
-The provider's title and date join the haystack. The plugin's stay in it: a date that is no
-longer displayed is still a reasonable thing to search for, and dropping it would lose matches
-for no gain.
-
-This is the only reason this phase touches anything outside `MediaCard` and the stylesheet.
-
-## 6. Testing
+## 5. Testing
 
 `packages/web/test/MediaCard.test.tsx`:
 
@@ -163,9 +157,6 @@ This is the only reason this phase touches anything outside `MediaCard` and the 
   cast — the same exclusivity, now structural
 - the pending note renders in the head
 
-`packages/web/test/search.test.ts`: a term matching only the provider's title finds the group;
-a term matching only the plugin's still does.
-
 `packages/e2e/tests/card-layout.spec.ts` asserts the artwork's position, and two of its
 assertions are directional: one requires the artwork to start right of the heading's right
 edge, the other requires the fields to start left of the artwork. Both **invert** — the
@@ -173,14 +164,23 @@ artwork now starts left of the heading, and the fields start right of it. They a
 not relaxed: an assertion that stops constraining the axis it was written for is worse than
 one pointing the wrong way, and this file has been weakened by accident before.
 
-## 7. Risks
+## 6. Risks
 
-- **Almost every card in the current library will lead with a performer portrait**, because
-  the scenes plugin's artwork is 1,494 backgrounds to 14 posters and the slot refuses a
-  landscape image. That is a property of adult content, not of Pickarr: future content types
-  carry posters for the majority, and the card is deliberately content-agnostic. Designing
-  around the scenes ratio would optimise for the one plugin that is atypical. Recorded because
-  it is what the screen will actually look like today.
+- **Measured against `pickarr-2026-08-27.db`, 4,313 groups, this is what leads each card:** an
+  actual poster on **18** (0.4%), a performer portrait on **3,046** (71%), and **nothing at all
+  on 1,249** (29%). Of those 1,249, **131** hold a background nothing in the UI can reach
+  (#75). A poster-led layout therefore leads with a poster on one card in 240, and with an
+  empty column on nearly a third. That is a property of adult content, not of Pickarr — future
+  content types carry posters for the majority and the card is deliberately content-agnostic,
+  so designing around the scenes ratio would optimise for the one plugin that is atypical. The
+  empty-column decision stands as taken in 1.8: no slot, no placeholder.
+- **The title changes on most confirmed cards.** 1,957 groups (45%) have a provider title and
+  all of them have a provider date; 2,356 (55%) fall back to `display.title` and show no date.
+  Of the 1,957, **1,715 differ from the parsed title and 1,677 differ substantively.** That is
+  expected rather than alarming: the parsed title is performer-name-led — scene release names
+  usually open with a performer and only sometimes carry the scene title — while the provider
+  returns the scene's actual title. Adoption is what puts the real title on the card. Recorded
+  because it means this phase visibly renames most of the library.
 - **The synopsis has never been rendered at this width.** It moves from the card's full width
   into a column narrowed by the poster and by phase 1's nav change. §1 states why that is not
   assumable; the mitigation is looking at a real synopsis in the built app early, not at the
