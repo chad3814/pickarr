@@ -87,10 +87,21 @@ test('adding a date to a picked group merges it into the dated one', async ({ pa
   const browseCards = page.locator('article.media-card');
   await expect(browseCards).toHaveCount(1);
   await expect(browseCards.getByRole('heading', { name: 'Title Of Scene' })).toHaveCount(1);
-  // No metadata provider is configured in this harness, so the card has no
-  // confirmed answer to draw a date from — the parsed date (`display.date`)
-  // left the card in this phase, so the context line shows only the site.
-  await expect(browseCards.locator('p.card-context')).toHaveText('SomeSite');
+  // A provider *is* configured — `harness.ts` sets `metadataAvailable: true`
+  // and wires `createFakeMetadataClient()` for every test — but this spec never
+  // calls `setCandidates` or `runMetadataPass`, so nothing ever drains the
+  // queue and no answer is recorded for this group. With no confirmed answer
+  // there is no provider date, and the parsed date (`display.date`) left the
+  // card in this phase, so the line shows only the site.
+  //
+  // The date is named in a negative rather than left to fall out of
+  // `toHaveText('SomeSite')`, which is what stood here. That form pins the
+  // whole composition of the line — it fails for any part added later — while
+  // never mentioning the string it is meant to be excluding. This pins the
+  // phase-2 rule itself, and the positive beside it stops the negative being
+  // satisfied by a line that disappeared.
+  await expect(browseCards.locator('p.card-context')).toContainText('SomeSite');
+  await expect(browseCards.locator('p.card-context')).not.toContainText('2026-08-14');
   await expect(browseCards.locator('li.release-row').filter({ hasText: DATED })).toHaveCount(1);
 
   await page.goto('/picks');

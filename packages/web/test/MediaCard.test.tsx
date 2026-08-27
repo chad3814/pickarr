@@ -241,7 +241,7 @@ test('only the release that failed is marked', () => {
   assert.equal(screen.getAllByText('Failed').length, 1);
 });
 
-test('the metadata panel renders only once the answer is confirmed', () => {
+test('the synopsis and the slot render only once the answer is confirmed', () => {
   const unconfirmed: MetadataView[] = [{ state: 'absent' }, { state: 'pending' }, { state: 'none' }];
   for (const metadata of unconfirmed) {
     const { unmount } = render(<MediaCard group={{ ...GROUP, metadata }} onPick={() => {}} />);
@@ -329,9 +329,11 @@ test('the context line joins studio, provider date and runtime', () => {
 });
 
 test('an absent part leaves no separator behind', () => {
-  // The provider populates these unevenly — the existing panel comment says a
-  // running time without a release date is ordinary, not rare — so each part
-  // renders on its own condition and the separator is CSS between siblings.
+  // The provider populates these unevenly — a running time with no release
+  // date was recorded as ordinary rather than rare by the scene panel this
+  // branch deleted, and `MediaCard`'s context-line comment carries that
+  // forward in the past tense — so each part renders on its own condition and
+  // the separator is CSS between siblings.
   render(<MediaCard group={withMetadata({ releaseDate: null, durationSeconds: null })} onPick={() => {}} />);
   const context = card('A Different Title').querySelector('.card-context');
   assert.equal(context?.textContent, 'Brazzers', 'no orphan separator');
@@ -1044,8 +1046,8 @@ test('a group with no scene data still shows the cast the performer search found
   assert.equal(link.getAttribute('href'), 'https://theporndb.net/performers/amalia-davis');
 });
 
-test('a cast shows without scene data, and the scene panel still does not', () => {
-  // The fix must not smuggle the rest of the metadata panel out of its
+test('a cast shows without scene data, and the rest of the scene data still does not', () => {
+  // The fix must not smuggle the provider's other scene fields out of their
   // confirmed-only gate: a group the provider was asked about and had nothing
   // for has no title, synopsis, date or poster to show, and never gains one by
   // acquiring a cast.
@@ -1072,8 +1074,10 @@ test('a cast shows without scene data, and the scene panel still does not', () =
 });
 
 test('a group with neither scene data nor a cast renders no performer list at all', () => {
-  // The empty case stays empty: an `<ul>` with no items is a stray bullet on
-  // every unanswered card in the library.
+  // The empty case stays empty. Not over a bullet — `.metadata-performers` is
+  // `list-style: none` — but over that rule's `margin: var(--space-2) 0`,
+  // which an empty `<ul>` would leave as a band of blank space at the foot of
+  // the identity column on every unanswered card in the library.
   render(<MediaCard group={{ ...GROUP, metadata: { state: 'none', performers: [] } }} onPick={() => {}} />);
   assert.equal(document.querySelectorAll('.metadata-performers').length, 0);
 });

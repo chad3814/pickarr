@@ -181,6 +181,27 @@ one pointing the wrong way, and this file has been weakened by accident before.
   usually open with a performer and only sometimes carry the scene title — while the provider
   returns the scene's actual title. Adoption is what puts the real title on the card. Recorded
   because it means this phase visibly renames most of the library.
+- **The title on the card is not searchable.** `searchTextFor` in
+  `packages/core/src/ingest/commit.ts` fills the stored `search_text` column from `display`
+  alone, and `groupSearchText` in `packages/web/src/api/search.ts` mirrors it, so for the
+  1,957 groups now showing a provider title the string on the card matches nothing typed
+  into the search box — on Browse through `search_text`, on Picks through
+  `groupSearchText`. Before this phase every displayed title was searchable, and that
+  stops being true here. §2 scopes the fix out and gives the reason (it is a data change,
+  not a change to one pure function); the consequence is recorded because it is not
+  discoverable from that scope note, only by typing a title off a card and getting nothing
+  back.
+- **Every other surface still names a group by its parsed title.**
+  `IdentityChangeConfirm` renders `plan.mergeInto.title`, which `titleOf` in
+  `manual/identity-plan.ts` reads from `display`, so it says "This will merge into Alex
+  Coal" while the heading of the card being merged into reads "A Different Title". So does
+  the Downloads row label (`views.ts` sends `title: display.title`), and so do the
+  post-merge notices in `Browse.tsx` ("Releases moved into …") and `Failed.tsx` ("… joined
+  an existing group"). Each is arguably correct: these are identity operations, and a
+  group's identity is the parsed title the merge actually keys on, not the provider's
+  opinion of the scene. But nobody decided that — it is what falls out of adopting in one
+  component — and one consequence is concrete rather than philosophical: a Downloads row's
+  link now carries a label that disagrees with the heading of the card it scrolls to.
 - **The synopsis has never been rendered at this width.** It moves from the card's full width
   into a column narrowed by the poster and by phase 1's nav change. §1 states why that is not
   assumable; the mitigation is looking at a real synopsis in the built app early, not at the

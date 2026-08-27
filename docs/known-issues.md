@@ -857,6 +857,24 @@ error, a warning — assert the visible affordance too: a real heading via
 the visible one cannot drift apart. Playwright's `toBeVisible()` does not close this gap
 either: an unstyled `<div>` full of text is genuinely visible.
 
+**Dissolving a wrapper can take the only handle a test had on a state, and the loss is
+narrower than it looks.** `MediaCard`'s scene panel was a `section.metadata`, and a test
+could assert its presence to prove a group's answer was `confirmed` even when the answer
+carried no poster, no synopsis and no cast. The poster-led card moved the panel's children
+into the identity column and deleted the wrapper, so a confirmed answer with nothing in it
+now renders nothing of its own — and the assertion that used to pin that state had nothing
+left to query. Re-adding the wrapper for the test's benefit was refused.
+
+Worth writing down for the reasoning error made while assessing it rather than for the gap
+itself, which is small. The first reading was "nothing in the DOM distinguishes this card
+from a group that was never asked at all", and that was false: `settled` in `MediaCard.tsx`
+is `(confirmed || none) && a requery handler`, both routes pass one, so a Requery button
+renders for a confirmed-but-empty card and not for an `absent` one. The real loss is
+`confirmed`-with-nothing versus `none` — the two states `settled` deliberately treats
+alike — which is a much narrower thing to be blind to, and one the card is designed to
+render identically anyway. Before accepting a coverage loss, enumerate what *does* still
+differ: a component with several independent conditions usually leaves more than one mark.
+
 **A round-trip assertion cannot pin any property of a helper shared by both directions.**
 `parse(name) → toManualValues → fromManualValues === parse(name)` looks like a strong
 property, and it is — until the two directions are deduplicated onto one function, which is

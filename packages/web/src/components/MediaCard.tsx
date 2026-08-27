@@ -187,8 +187,12 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
    * The group's cast as one list, or `null` when there is nobody to list.
    *
    * `null` rather than an empty `<ul>` is what lets the bare `{cast}` inside
-   * `.card-head-main` render nothing at all — an empty list would be a stray
-   * bullet on every unanswered card in the library. Built as its own variable
+   * `.card-head-main` render nothing at all. Not for the bullet — `card.css`
+   * sets `list-style: none` on `.metadata-performers`, so an empty list draws
+   * no marker — but for that same rule's `margin: var(--space-2) 0`, which
+   * applies to an empty list as readily as to a full one and leaves a band of
+   * blank space at the foot of the identity column on every unanswered card in
+   * the library. Built as its own variable
    * here, alongside the component's other derived values, rather than inlined
    * into the return: the two-branch ternary below is long enough that
    * inlining it would bury the one place that actually renders it.
@@ -300,7 +304,9 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
             // Named for what pressing it does, rather than taking its name from
             // the `alt` of the image inside it. That `alt` stays per-image, as
             // §3.1 requires — but with no poster the slot shows the first cast
-            // portrait, which is the shape ~1,494 of this library's groups have,
+            // portrait, which is the shape 3,046 of this library's 4,313 groups
+            // have — 71%, measured in §6 of the spec, and the ordinary case
+            // rather than the exception —
             // and an `alt`-derived name made this button and that same
             // performer's avatar button in the cast list beside it two controls
             // in one tab order with one accessible name and two different
@@ -331,8 +337,11 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
               )}
             </h2>
             {/*
-              * One span per part, with the separator drawn by CSS between
-              * adjacent siblings rather than joined here. Not because a join
+              * One span per part, each on its own condition, because the
+              * provider populates them unevenly — the scene panel this
+              * replaces recorded a running time with no release date as
+              * ordinary rather than rare. The separator between them is drawn
+              * by CSS rather than joined here. Not because a join
               * could not omit the absent parts — `context` above is built from
               * the present ones only, and `formatQuality` in `format.ts`
               * already joins a conditional list with this same ` · ` — but
