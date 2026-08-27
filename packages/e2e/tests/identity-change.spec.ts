@@ -87,7 +87,23 @@ test('adding a date to a picked group merges it into the dated one', async ({ pa
   const browseCards = page.locator('article.media-card');
   await expect(browseCards).toHaveCount(1);
   await expect(browseCards.getByRole('heading', { name: 'Title Of Scene' })).toHaveCount(1);
-  await expect(browseCards.locator('p.date')).toHaveText('2026-08-14');
+  // A provider *is* configured — `harness.ts` sets `metadataAvailable: true`
+  // and wires `createFakeMetadataClient()` for every test — but this spec never
+  // calls `setCandidates` or `runMetadataPass`, so nothing ever drains the
+  // queue and no answer is recorded for this group. With no confirmed answer
+  // there is no provider date, and the parsed date (`display.date`) left the
+  // card in this phase, so the line shows only the site.
+  //
+  // Both assertions, not one. The first is exact, so it still fails when a
+  // part is added to this line — that is a property worth keeping and the
+  // second does not have it. The second is redundant against the first today
+  // (a line whose whole text is `SomeSite` plainly does not contain a date)
+  // and is here to name the rule under test: the parsed date does not appear.
+  // Without it, nothing in this file says which behaviour the exact text is
+  // evidence of, and the exact text is the kind of assertion a later phase
+  // relaxes without noticing what it was for.
+  await expect(browseCards.locator('p.card-context')).toHaveText('SomeSite');
+  await expect(browseCards.locator('p.card-context')).not.toContainText('2026-08-14');
   await expect(browseCards.locator('li.release-row').filter({ hasText: DATED })).toHaveCount(1);
 
   await page.goto('/picks');
@@ -140,7 +156,9 @@ test('adding a date to a picked group merges it into the dated one', async ({ pa
   await expect(page.locator('article.media-card')).toHaveCount(1);
   const merged = page.locator('article.media-card');
   await expect(merged.getByRole('heading', { name: 'Title Of Scene' })).toHaveCount(1);
-  await expect(merged.locator('p.date')).toHaveText('2026-08-14');
+  // Same as above: still no provider answer post-merge, so still no date on
+  // the card — only the site the context line does have.
+  await expect(merged.locator('p.card-context')).toHaveText('SomeSite');
   await expect(merged.locator('span.badge')).toHaveText('Upgrade available');
 
   const releases = merged.locator('li.release-row');

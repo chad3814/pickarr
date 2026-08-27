@@ -178,25 +178,189 @@ test("the slot's artwork flows beside the identity block, spanning it, without c
   // header pushes the releases below it.
   expect(posterBox.y + posterBox.height).toBeLessThanOrEqual(releaseBox.y);
 
-  // And it is still on the right-hand side, not stacked above the title —
-  // `flex-direction` reverting to the default `row` is the way this fix
-  // regresses into "no overlap, because everything is vertical now".
+  // And it is still on the left-hand side, leading the card rather than
+  // stacked above the title. The stacking regression is what the first
+  // assertion below actually catches now that the artwork is first in the
+  // DOM: stacked, the poster's right edge would land at or past the
+  // heading's left edge rather than short of it. The y comparison alone no
+  // longer proves anything about stacking — stacked, the poster still sits
+  // above the heading, so `posterBox.y` is trivially less than the
+  // heading's bottom either way. What actually closes that gap is the
+  // poster-versus-fields comparison further down, which fails once the
+  // poster sits entirely above the whole column rather than beside it.
   const heading = page.getByRole('heading', { level: 2 }).first();
   const headingBox = await heading.boundingBox();
   if (headingBox === null) throw new Error('no heading box');
-  expect(posterBox.x).toBeGreaterThan(headingBox.x + headingBox.width - 1);
+  expect(posterBox.x + posterBox.width).toBeLessThan(headingBox.x + 1);
   expect(posterBox.y).toBeLessThan(headingBox.y + headingBox.height);
 
-  // The poster is beside the *whole* identity block, not just the title. The
-  // fields row is the last thing in that column, so a poster whose span still
-  // reaches it is one sharing a row with everything above it too — which is
-  // what keeps the column tall enough to avoid a band of empty space beneath
-  // it. Moving the Edit control or the fields back out of the column, below
-  // the row, would leave the poster's span ending above them and fail here
-  // while every no-overlap assertion above still passed.
+  // The poster is beside the *whole* identity block, not just the title.
+  // The fields row is the last thing actually rendered in *this fixture's*
+  // column — `candidateWithPoster` leaves `synopsis` null and `performers`
+  // empty, so nothing follows the chips — which is what lets this stand in
+  // for "spans the whole column" here. It is not true of the column in
+  // general any more: the synopsis and the cast can both render after the
+  // fields now for a confirmed group with data (`MediaCard.tsx`), so a
+  // fixture that populated either would need its own boundary, not this
+  // one. A poster whose span still reaches the fields is one sharing a row
+  // with everything above them too — which is what keeps the column tall
+  // enough to avoid a band of empty space beneath it. Moving the Edit
+  // control or the fields back out of the column, below the row, would
+  // leave the poster's span ending above them and fail here while every
+  // no-overlap assertion above still passed. The identity column now sits
+  // to the *right* of the poster rather than the left — the artwork leads
+  // the card — so it is the fields that are greater on x now, not less.
   const fields = page.locator('.fields').first();
   const fieldsBox = await fields.boundingBox();
   if (fieldsBox === null) throw new Error('no fields box');
-  expect(fieldsBox.x).toBeLessThan(posterBox.x);
+  expect(fieldsBox.x).toBeGreaterThan(posterBox.x);
   expect(posterBox.y + posterBox.height).toBeGreaterThan(fieldsBox.y);
+});
+
+/**
+ * The same scene, answered fully: a site, a provider date, a running time and
+ * a synopsis. `candidateWithPoster` deliberately leaves the last two null —
+ * the test above needs the fields chips to be the bottom of the identity
+ * column — so the two stylesheet properties measured below need a fixture of
+ * their own rather than a fourth null filled in up there.
+ */
+function candidateWithContext(): MetadataCandidate {
+  return {
+    sourceUuid: 'e2e-scene-context',
+    title: 'Alex Coal',
+    siteUuid: null,
+    siteId: null,
+    siteName: 'Vixen',
+    date: '2023-04-15',
+    performers: [],
+    durationSeconds: 1800,
+    // Long enough to wrap several times at any width this card is drawn at, so
+    // the measure below is the stylesheet's and not this string running out.
+    synopsis: 'A scene the provider had plenty to say about. '.repeat(12),
+    posterUrl: null,
+    slug: null,
+  };
+}
+
+test('the context separator is generated content, and the synopsis keeps its measure', async ({
+  page,
+  harness,
+}) => {
+  // Two things `MediaCard.test.tsx` cannot see, for the same reason: happy-dom
+  // lays nothing out and generates no content, so `textContent` there reads
+  // `Vixen2023-04-1530m` whether `card.css` draws a separator or not, and every
+  // box it reports is zero-sized. Deleting
+  // `.card-context > span + span::before` left the whole unit suite green and
+  // shipped a card reading `Brazzers2023-04-1530m`; that is the mutation this
+  // test exists for.
+  harness.ingest([RELEASE]);
+  harness.metadataClient.setCandidates([candidateWithContext()]);
+
+  const group = harness.db
+    .prepare('SELECT id FROM media_groups ORDER BY id DESC LIMIT 1')
+    .get() as { id: number } | undefined;
+  if (group === undefined) throw new Error('ingest did not create a group');
+
+  const requested = await fetch(`${harness.baseURL}/api/metadata/request`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ groupIds: [group.id] }),
+  });
+  if (!requested.ok) throw new Error(`enqueue failed: HTTP ${String(requested.status)}`);
+  await harness.runMetadataPass();
+
+  await page.goto('/');
+  // The answer is what puts the date, the running time and the synopsis on the
+  // card, so nothing below can be measured until the synopsis is on screen.
+  const synopsis = page.locator('p.metadata-synopsis');
+  await expect(synopsis).toBeVisible();
+
+  // `68ch` is the advance of `0` in the face that actually loaded, and
+  // `fonts.css` ships `font-display: swap` — so until the woff2 lands the
+  // measure below is a fallback's. Helvetica-class metrics resolve it to about
+  // 453.8px, which fails the floor asserted at the end of this test, and
+  // DejaVu's about 519.1px, which squeaks under the ceiling. Both are the
+  // wrong direction to leave to a race.
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+  });
+
+  const measured = await page.evaluate(() => {
+    const line = document.querySelector('p.card-context');
+    if (line === null) throw new Error('no context line');
+    const spans = [...line.querySelectorAll('span')];
+    const paragraph = document.querySelector('p.metadata-synopsis');
+    const column = document.querySelector('.card-head-main');
+    if (paragraph === null || column === null) throw new Error('no synopsis, or no column round it');
+    return {
+      parts: spans.length,
+      lineColor: getComputedStyle(line).color,
+      // Read at the use site rather than through a named helper: this callback
+      // is serialised and runs in the page, so a helper hoisted out of it — the
+      // move `unicorn(consistent-function-scoping)` asks for, since it captures
+      // nothing — would be a Node-scope function that does not exist here.
+      separators: spans.map((span) => {
+        const style = getComputedStyle(span, '::before');
+        return { content: style.content, color: style.color };
+      }),
+      // `max-width: 68ch` resolved by the browser, in px. Read back rather
+      // than recomputed here: `ch` is the advance of `0` in whatever face
+      // actually loaded, which is the one number this test cannot derive.
+      measure: parseFloat(getComputedStyle(paragraph).maxWidth),
+      synopsisWidth: paragraph.getBoundingClientRect().width,
+      columnWidth: column.getBoundingClientRect().width,
+      viewport: window.innerWidth,
+    };
+  });
+
+  // Three parts, so there are two adjacencies to draw a separator into and one
+  // span that must not get one.
+  expect(measured.parts).toBe(3);
+  // `'none'`, not `'" · "'`: the sibling selector skips the first span, which
+  // is what keeps a card whose only part is a running time from opening with a
+  // stray dot. `textContent` cannot tell these two cases apart at all.
+  expect(measured.separators[0]?.content).toBe('none');
+  expect(measured.separators[1]?.content).toBe('" · "');
+  expect(measured.separators[2]?.content).toBe('" · "');
+  // And the reason the separator is CSS rather than a `' · '` in a JS join,
+  // which is the only thing a join genuinely could not do: the dots are a
+  // tone lighter than the words either side of them (`--color-text-faint`
+  // against `--color-text-dim`, measured as rgb(143,136,124) against
+  // rgb(107,100,89)). Asserted as a difference rather than as two literals so
+  // it survives a palette change and still fails if the rule's `color` goes.
+  expect(measured.separators[1]?.color).not.toBe(measured.lineColor);
+
+  // The synopsis's measure. `card.css` caps it at `68ch`, which at
+  // `--text-meta` (0.75rem = 12px) in self-hosted IBM Plex Sans resolves to
+  // 489.6px — measured here, not computed, and only trustworthy because the
+  // face is loaded by the time this runs. The band is wide enough to survive
+  // a font revision and narrow enough that changing 68ch to anything a
+  // typographer would argue about fails it; deleting the cap makes
+  // `max-width` compute to `none`, `parseFloat` return `NaN`, and both
+  // assertions below fail.
+  expect(measured.measure).toBeGreaterThan(460);
+  expect(measured.measure).toBeLessThan(520);
+  expect(measured.synopsisWidth).toBeLessThanOrEqual(measured.measure + 0.5);
+
+  // And that the cap is what is actually holding the line length, rather than
+  // a dead letter the column already satisfies — the claim `card.css` makes in
+  // prose beside the rule, unguarded until now and due to be invalidated by
+  // phase 3's master/detail Browse, the next thing to change this column.
+  //
+  // This fixture leaves `posterUrl` null and `performers` empty, so it draws no
+  // slot and its identity column is the card's full inner width: 777.3px
+  // against the cap's 489.6, at this project's 1280px viewport. `.app` is
+  // `max-width: 60rem` plus `var(--space-4)` of padding a side and nothing in
+  // `src/styles` resets `box-sizing`, so its border box measures 992px and the
+  // layout stops changing at a 992px viewport, not at 960 — measured. Below
+  // that the column tracks the window and the cap stops binding near 705px
+  // (750px → 535px column, 700px → 485px).
+  //
+  // With a slot — 71% of the library, per spec §6 — the column loses the 98px
+  // frame and a 16px gap and runs 663.3px, so the cap binds there too but
+  // stops nearer an 818px viewport (820px → 491.3px column, still capped;
+  // 818px → 489.3px, no longer). Both shapes clear it on any desktop window;
+  // it is the figures that do not generalise, not the conclusion.
+  expect(measured.viewport).toBeGreaterThanOrEqual(992);
+  expect(measured.columnWidth).toBeGreaterThan(measured.measure);
 });
