@@ -282,6 +282,32 @@ test('the parsed title is the fallback when the provider has no title', () => {
   assert.ok(screen.getByRole('heading', { level: 2, name: 'Alex Coal' }));
 });
 
+test('an empty provider title falls back too, rather than rendering an empty heading', () => {
+  // `''`, not `null`: `maybeStr` (`db/row.ts`) folds only `NULL` and `undefined`
+  // into `null`, so an empty title column reaches the card as an empty string
+  // and `??` would accept it — leaving a card with no heading at all and
+  // nothing on it naming the group.
+  render(<MediaCard group={withMetadata({ title: '' })} onPick={() => {}} />);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Alex Coal' }));
+});
+
+test('an empty studio leaves no orphan separator either', () => {
+  // The same emptiness, one line down. An empty subtitle rendered as a span
+  // is invisible, and the CSS separator between adjacent spans still draws
+  // for it, so the line reads ` · 2023-04-15 · 30m` with nothing before the
+  // first separator.
+  render(
+    <MediaCard
+      group={{ ...withMetadata({}), display: { ...GROUP.display, subtitle: '' } }}
+      onPick={() => {}}
+    />,
+  );
+  const context = card('A Different Title').querySelector('.card-context');
+  assert.ok(context !== null, 'no context line');
+  assert.equal(context.querySelectorAll('span').length, 2, 'the empty studio drew no span');
+  assert.equal(context.textContent, '2023-04-1530m');
+});
+
 test('a group with no confirmed answer falls back too', () => {
   render(<MediaCard group={{ ...GROUP, metadata: { state: 'none' } }} onPick={() => {}} />);
   assert.ok(screen.getByRole('heading', { level: 2, name: 'Alex Coal' }));
@@ -520,18 +546,26 @@ test('the identity column tolerates a missing poster, synopsis and empty perform
         metadata: { ...CONFIRMED, hasPoster: false, synopsis: null, performerNames: [] },
       }}
       onPick={() => {}}
+      onRequeryMetadata={noop}
     />,
   );
   assert.ok(!screen.queryByRole('img'));
   assert.ok(!screen.queryByText('A synopsis from the provider.'));
-  // No assertion follows for this render. `section.metadata` used to give a
-  // confirmed-but-empty group a labelled region to check for even when
-  // poster, synopsis and cast were all absent; with that wrapper gone,
-  // nothing in the DOM distinguishes this case from a group that was never
-  // asked at all. Closing that gap would mean re-adding the wrapper this
-  // task dissolves, so it stays open rather than papered over with an
-  // assertion that would pass for an unrelated reason.
-  //
+  // `section.metadata` used to give a confirmed-but-empty group a labelled
+  // region to check for even when poster, synopsis and cast were all absent.
+  // With that wrapper gone the loss is narrower than "nothing identifies this
+  // card": `settled` in `MediaCard.tsx` is `(confirmed || none) && a requery
+  // handler`, and both routes pass one, so the Requery button below separates
+  // this card from a group that was never asked. What is genuinely
+  // indistinguishable now is `confirmed`-with-nothing from `none` — the two
+  // states `settled` deliberately treats alike — and closing *that* would mean
+  // re-adding the wrapper this task dissolves. Recorded in
+  // `docs/known-issues.md` under "Test-suite blind spots".
+  assert.ok(
+    screen.getByRole('button', { name: /requery/i }),
+    'a confirmed group with no poster, synopsis or cast still renders something identifiable',
+  );
+
   // What this test's name promises — that the three absences are
   // independent, not one masking another — is only partly pinned below, by
   // the two renders that follow. Render 2 isolates the synopsis: poster and
@@ -658,7 +692,12 @@ test('the slot opens the modal on the whole list, starting at the scene image', 
   // does not — the button is named for what it does — so this query reaches
   // exactly one control, and it is the one whose whole point is that it opens
   // somewhere other than the image it is showing.
-  fireEvent.click(screen.getByRole('button', { name: 'Browse images for Alex Coal' }));
+  //
+  // The name is spelled out rather than matched loosely because it is the one
+  // place the button's accessible name is pinned to a value: the group it
+  // names is `A Different Title`, the provider title the `<h2>` renders, and
+  // not the parsed `Alex Coal`, which appears nowhere on this card.
+  fireEvent.click(screen.getByRole('button', { name: 'Browse images for A Different Title' }));
   const dialog = screen.getByRole('dialog');
   // Index 0 is the background, which is not what was clicked. Deliberate: the
   // browse runs from the scene's own images outward.

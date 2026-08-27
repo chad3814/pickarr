@@ -76,6 +76,22 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 }
 
 /**
+ * A string with something in it, or `null` — every string this card renders can
+ * arrive as `''` rather than as an absent value, and `??` accepts `''`.
+ * `maybeStr` in `db/row.ts` folds only `NULL` and `undefined` into `null`, so an
+ * empty column reaches the view as an empty string and nothing upstream
+ * normalises it. Two of those would show: an empty provider title renders an
+ * empty `<h2>`, a card with no heading and nothing on it naming the group; an
+ * empty context part renders a span that `card.css`'s sibling separator then
+ * decorates, so the line reads ` · 2023-04-15`. `commit.ts`'s `isText` guards
+ * the same class of value for `display`'s own optional strings, though only
+ * against `undefined` — there is no shared helper to reuse here.
+ */
+function text(value: string | null | undefined): string | null {
+  return value === undefined || value === null || value === '' ? null : value;
+}
+
+/**
  * One card renders every media type. Plugins supply display fields, never UI.
  */
 export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, onRequeryMetadata }: Props) {
@@ -137,13 +153,22 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // one is usually performer-name-led. All three are inside the `'confirmed'`
   // member of the union, so they narrow together.
   const answered = metadata.state === 'confirmed' ? metadata : null;
-  const title = answered?.title ?? display.title;
+  // `text`, not `??`: an empty provider title is a title the card cannot show,
+  // so it falls back the same way a null one does.
+  const title = text(answered?.title) ?? display.title;
   const runtime = answered?.durationSeconds ?? null;
   // The date has no fallback on purpose: `display.date` is the parse of a
   // release name, and this phase stops presenting that as the scene's date.
-  const releaseDate = answered?.releaseDate ?? null;
+  const releaseDate = text(answered?.releaseDate);
+  // Every part of the line is tested for emptiness the same way, because the
+  // separator between them is drawn by CSS on whichever spans exist: a part
+  // that renders as an empty span is invisible and still gets a ` · `. The two
+  // strings go through `text`; the runtime is a number that is only ever
+  // absent as `null`, and `formatDuration` has no empty return — `0` renders
+  // `0m`, which a card is expected to show.
+  const studio = text(display.subtitle);
   const context: string[] = [];
-  if (display.subtitle !== undefined) context.push(display.subtitle);
+  if (studio !== null) context.push(studio);
   if (releaseDate !== null) context.push(releaseDate);
   if (runtime !== null) context.push(formatDuration(runtime));
   // The lazy trigger (`useGroupMetadata`) already owns every group that has
@@ -280,7 +305,14 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
             // performer's avatar button in the cast list beside it two controls
             // in one tab order with one accessible name and two different
             // actions (index 0 versus that performer's own entry).
-            aria-label={`Browse images for ${display.title}`}
+            //
+            // The group is named by `title` — the value the `<h2>` above
+            // actually renders — and not by `display.title`, which on the 45%
+            // of groups carrying a provider title is a name appearing nowhere
+            // on the card. The announced string and the visible one cannot
+            // drift apart if there is only one of them (`docs/known-issues.md`,
+            // "Test-suite blind spots", on `IdentityChangeConfirm`).
+            aria-label={`Browse images for ${title}`}
             onClick={() => setModal({ images, startIndex: 0 })}
           >
             <img src={slot.src} alt={slot.alt} />
