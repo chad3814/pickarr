@@ -78,18 +78,21 @@ test('a card gains its metadata panel without a reload once the worker confirms 
   await expect(card).toHaveCount(1);
 
   // `section.metadata` is gone as of the artwork-leads-the-card phase — the
-  // scene's synopsis and cast now render directly inside the identity
-  // column, `.card-head-main`, rather than inside a panel below the
-  // releases. `panel` keeps its name because it is still the card's scene
-  // metadata region; only what a "region" is changed.
-  const panel = card.locator('.card-head-main');
+  // scene's synopsis and cast now render directly inside `.card-head-main`,
+  // the identity column, rather than inside a panel below the releases.
+  // `main` names it for what it actually is now: the identity column, which
+  // *contains* the scene metadata among the title, context line, badge,
+  // identity form, actions and field chips — it is not a metadata region of
+  // its own, and no `role="region"` survives on the card at all now that the
+  // labelled `<section>` is gone.
+  const main = card.locator('.card-head-main');
 
   // The point of this test: nothing has answered the group yet, so browse's
   // own response carried `state: 'absent'` and the identity column renders
   // no synopsis yet — not an empty one. `.card-head-main` itself always
   // renders (it also holds the title and fields), so the synopsis is what
   // this has to check now.
-  await expect(panel.locator('.metadata-synopsis')).toHaveCount(0);
+  await expect(main.locator('.metadata-synopsis')).toHaveCount(0);
 
   // Wait for the SPA's own enqueue to actually land before draining the
   // queue — the row `runMetadataPass` needs has to exist first, and this is
@@ -109,12 +112,12 @@ test('a card gains its metadata panel without a reload once the worker confirms 
   // React re-renders the mounted card — if the SPA only refreshed metadata
   // on the initial browse response (the bug this whole file exists to catch),
   // the synopsis would never appear and this would time out. Waiting on
-  // `panel` itself would prove nothing any more: `.card-head-main` is
+  // `main` itself would prove nothing any more: `.card-head-main` is
   // already visible before the poll ever lands.
-  await expect(panel.locator('.metadata-synopsis')).toBeVisible({ timeout: 10_000 });
-  await expect(panel.locator('.metadata-synopsis')).toHaveText('A confirmed test synopsis.');
+  await expect(main.locator('.metadata-synopsis')).toBeVisible({ timeout: 10_000 });
+  await expect(main.locator('.metadata-synopsis')).toHaveText('A confirmed test synopsis.');
   // The whole stack round-trips a performer now: storage, the display view,
   // and the card all carry `MetadataPerformer`'s structured shape rather than
   // the bare names it replaced.
-  await expect(panel.locator('.metadata-performers li')).toHaveText(['Alex Coal']);
+  await expect(main.locator('.metadata-performers li')).toHaveText(['Alex Coal']);
 });

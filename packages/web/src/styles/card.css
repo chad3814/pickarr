@@ -16,7 +16,7 @@
    nothing else in the card is positioned, so it went with it. */
 /* The gap before the releases belongs to the row, not to the fields list
    inside it. It used to come from `.fields`' own bottom margin, which works
-   only while the left column is the taller of the two: when the slot is
+   only while the identity column is the taller of the two: when the slot is
    taller — a 9rem image against a title, an Edit button and one line of
    fields, which is the ordinary case — that margin is interior to the
    shorter column and contributes nothing, leaving the slot flush against
@@ -98,9 +98,12 @@
 .metadata-performers { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-2) 0; padding: 0; list-style: none; align-items: center; }
 /* The synopsis and the pending note both run at `--text-meta`
    (`.metadata-synopsis`, `.metadata-pending` below); an unsized `<li>`
-   inherits the 16px root instead, so without this a cast name — already an
-   amber, underlined anchor — would be the loudest text in the identity
-   column, ahead of the title it sits under. */
+   inherits the 16px root instead — the same size as the title, since
+   `--text-title` (`tokens.css`) is also `1rem` — which still outsizes
+   everything else in the column: the context line, the field chips, the
+   synopsis and the pending note all run smaller. Without this a cast name —
+   already an amber, underlined anchor — would rival the title for attention
+   rather than read as one more line of metadata under it. */
 .metadata-performers li { display: flex; align-items: center; gap: 0.35rem; font-size: var(--text-meta); }
 .avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
 .metadata-pending { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }

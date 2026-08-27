@@ -343,14 +343,14 @@ test('the scene link wraps whichever title renders', () => {
   assert.ok(screen.getByRole('link', { name: 'Alex Coal' }), 'the fallback title links too');
 });
 
-test('the scene panel no longer carries a second title, date or duration', () => {
+test('the identity column no longer carries a second title, date or duration', () => {
   render(<MediaCard group={withMetadata({})} onPick={() => {}} />);
   const cardEl = card('A Different Title');
   for (const cls of ['.metadata-title', '.metadata-release-date', '.metadata-duration']) {
     assert.ok(!cardEl.querySelector(cls), `${cls} moved into the header`);
   }
-  // The synopsis and cast keep their class names across this task's move
-  // into `.card-head-main` — this only checks presence, not where.
+  // The synopsis keeps its class name across this task's move into
+  // `.card-head-main` — this only checks presence, not where.
   assert.ok(cardEl.querySelector('.metadata-synopsis'));
 });
 
@@ -365,7 +365,15 @@ test('the artwork leads: it starts before the identity column in the DOM', () =>
   // DOM order, not CSS order: `flex-direction: row-reverse` or an `order`
   // property would put the artwork on the left visually while leaving a screen
   // reader and the tab order reading the identity column first.
-  assert.ok(children.indexOf(artwork) < children.indexOf(main), 'artwork precedes the identity column');
+  const artworkIndex = children.indexOf(artwork);
+  const mainIndex = children.indexOf(main);
+  // `indexOf` returns -1 for a non-member, and -1 is less than every real
+  // index — asserting the ordering alone would pass vacuously if `.card-artwork`
+  // ever stopped being a direct child of `.card-head` (moved a level deeper,
+  // say), rendered after the identity column but still "less than" it by
+  // this comparison.
+  assert.ok(artworkIndex !== -1 && mainIndex !== -1, 'artwork or identity column is not a direct child of .card-head');
+  assert.ok(artworkIndex < mainIndex, 'artwork precedes the identity column');
 });
 
 test('the synopsis and cast render inside the identity column, not below the releases', () => {
@@ -378,10 +386,29 @@ test('the synopsis and cast render inside the identity column, not below the rel
   assert.ok(main.querySelector('.metadata-performers'), 'the cast moved up');
 });
 
-test('the pending note moves up with the panel it describes', () => {
+test('the pending note renders right after the header, ahead of the fields', () => {
   render(<MediaCard group={{ ...GROUP, metadata: { state: 'pending' } }} onPick={() => {}} />);
   const main = card('Alex Coal').querySelector('.card-head-main');
-  assert.ok(main?.querySelector('.metadata-pending'), 'the note describes a lookup rendering above');
+  assert.ok(main !== null, 'no identity column');
+  const header = main.querySelector('header');
+  const pending = main.querySelector('.metadata-pending');
+  const fields = main.querySelector('.fields');
+  assert.ok(header !== null && pending !== null && fields !== null, 'identity column is missing a part');
+  const children = [...main.children];
+  const headerIndex = children.indexOf(header);
+  const pendingIndex = children.indexOf(pending);
+  const fieldsIndex = children.indexOf(fields);
+  assert.ok(
+    headerIndex !== -1 && pendingIndex !== -1 && fieldsIndex !== -1,
+    'header, pending note or fields is not a direct child of the identity column',
+  );
+  // Spec §3, position 4: right after the badge, before the identity form,
+  // `.card-actions` and the fields — the note describes the lookup that will
+  // change the title and context line above it, not the chips below.
+  assert.ok(
+    headerIndex < pendingIndex && pendingIndex < fieldsIndex,
+    'the pending note sits between the header and the fields',
+  );
 });
 
 test('the metadata section wrapper is gone', () => {
@@ -412,7 +439,7 @@ test('the release rows stay after the head, not inside it', () => {
   const head = cardEl.querySelector('.card-head');
   const releases = cardEl.querySelector('ul.releases');
   assert.ok(head !== null && releases !== null, 'card is missing a part');
-  assert.ok(!head.contains(releases), 'the releases are a sibling of the head, as before');
+  assert.ok(!head.contains(releases), 'the releases render outside the head, not inside it');
 });
 
 test('the card shows the provider release date and a human-formatted running time', () => {
@@ -497,14 +524,16 @@ test('the identity column tolerates a missing poster, synopsis and empty perform
   );
   assert.ok(!screen.queryByRole('img'));
   assert.ok(!screen.queryByText('A synopsis from the provider.'));
-  // With no wrapper left to render regardless of its contents (that was
-  // `section.metadata`'s job, before this task), a confirmed answer with
-  // nothing to show is indistinguishable in the DOM from one that was never
-  // asked — the three tolerances above already say everything there is to
-  // say about that. What is still checkable is that this group did not
-  // stall on a lookup in flight: the state is `'confirmed'`, not `'pending'`,
-  // so no pending note renders either.
-  assert.ok(!card('A Different Title').querySelector('.metadata-pending'));
+  // No assertion follows for this render. `section.metadata` used to give a
+  // confirmed-but-empty group a labelled region to check for even when
+  // poster, synopsis and cast were all absent; with that wrapper gone,
+  // nothing in the DOM distinguishes this case from a group that was never
+  // asked at all. Closing that gap would mean re-adding the wrapper this
+  // task dissolves, so it stays open rather than papered over with an
+  // assertion that would pass for an unrelated reason. What this test's name
+  // promises — that the three absences are independent, not one masking
+  // another — is still pinned by the two renders below, each of which shows
+  // exactly one of the three present while the other two stay absent.
 
   const { unmount } = render(
     <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, synopsis: null } }} onPick={() => {}} />,

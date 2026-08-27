@@ -179,24 +179,37 @@ test("the slot's artwork flows beside the identity block, spanning it, without c
   expect(posterBox.y + posterBox.height).toBeLessThanOrEqual(releaseBox.y);
 
   // And it is still on the left-hand side, leading the card rather than
-  // stacked above the title — `flex-direction` reverting to the default
-  // `row` is the way this fix regresses into "no overlap, because
-  // everything is vertical now".
+  // stacked above the title. The stacking regression is what the first
+  // assertion below actually catches now that the artwork is first in the
+  // DOM: stacked, the poster's right edge would land at or past the
+  // heading's left edge rather than short of it. The y comparison alone no
+  // longer proves anything about stacking — stacked, the poster still sits
+  // above the heading, so `posterBox.y` is trivially less than the
+  // heading's bottom either way. What actually closes that gap is the
+  // poster-versus-fields comparison further down, which fails once the
+  // poster sits entirely above the whole column rather than beside it.
   const heading = page.getByRole('heading', { level: 2 }).first();
   const headingBox = await heading.boundingBox();
   if (headingBox === null) throw new Error('no heading box');
   expect(posterBox.x + posterBox.width).toBeLessThan(headingBox.x + 1);
   expect(posterBox.y).toBeLessThan(headingBox.y + headingBox.height);
 
-  // The poster is beside the *whole* identity block, not just the title. The
-  // fields row is the last thing in that column, so a poster whose span still
-  // reaches it is one sharing a row with everything above it too — which is
-  // what keeps the column tall enough to avoid a band of empty space beneath
-  // it. Moving the Edit control or the fields back out of the column, below
-  // the row, would leave the poster's span ending above them and fail here
-  // while every no-overlap assertion above still passed. The identity column
-  // now sits to the *right* of the poster rather than the left — the artwork
-  // leads the card — so it is the fields that are greater on x now, not less.
+  // The poster is beside the *whole* identity block, not just the title.
+  // The fields row is the last thing actually rendered in *this fixture's*
+  // column — `candidateWithPoster` leaves `synopsis` null and `performers`
+  // empty, so nothing follows the chips — which is what lets this stand in
+  // for "spans the whole column" here. It is not true of the column in
+  // general any more: the synopsis and the cast can both render after the
+  // fields now for a confirmed group with data (`MediaCard.tsx`), so a
+  // fixture that populated either would need its own boundary, not this
+  // one. A poster whose span still reaches the fields is one sharing a row
+  // with everything above them too — which is what keeps the column tall
+  // enough to avoid a band of empty space beneath it. Moving the Edit
+  // control or the fields back out of the column, below the row, would
+  // leave the poster's span ending above them and fail here while every
+  // no-overlap assertion above still passed. The identity column now sits
+  // to the *right* of the poster rather than the left — the artwork leads
+  // the card — so it is the fields that are greater on x now, not less.
   const fields = page.locator('.fields').first();
   const fieldsBox = await fields.boundingBox();
   if (fieldsBox === null) throw new Error('no fields box');

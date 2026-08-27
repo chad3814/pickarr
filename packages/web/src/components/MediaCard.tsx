@@ -161,13 +161,12 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   /**
    * The group's cast as one list, or `null` when there is nobody to list.
    *
-   * `null` rather than an empty `<ul>` is what lets `cast`'s one call site —
-   * inside `.card-head-main`, after the pending note and the synopsis —
-   * decide whether to draw a wrapper at all: an empty list would be a stray
-   * bullet on every unanswered card in the library. One call site is new to
-   * this phase; the two-panel layout it replaced needed one call for a
-   * confirmed group and a second for one the provider had nothing for, which
-   * is why `cast` is still built up front here rather than inline.
+   * `null` rather than an empty `<ul>` is what lets the bare `{cast}` inside
+   * `.card-head-main` render nothing at all — an empty list would be a stray
+   * bullet on every unanswered card in the library. Built as its own variable
+   * here, alongside the component's other derived values, rather than inlined
+   * into the return: the two-branch ternary below is long enough that
+   * inlining it would bury the one place that actually renders it.
    *
    * One list or the other, never both. The server already guarantees that —
    * `metadataViewOf` empties `performerNames` the moment there is a structured
@@ -278,9 +277,9 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
             // §3.1 requires — but with no poster the slot shows the first cast
             // portrait, which is the shape ~1,494 of this library's groups have,
             // and an `alt`-derived name made this button and that same
-            // performer's avatar button in the cast list below two controls in
-            // one tab order with one accessible name and two different actions
-            // (index 0 versus that performer's own entry).
+            // performer's avatar button in the cast list beside it two controls
+            // in one tab order with one accessible name and two different
+            // actions (index 0 versus that performer's own entry).
             aria-label={`Browse images for ${display.title}`}
             onClick={() => setModal({ images, startIndex: 0 })}
           >
@@ -316,6 +315,20 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
             )}
             {group.upgradeReleaseId !== null && <span className="badge">Upgrade available</span>}
           </header>
+
+          {/*
+           * The one state worth telling the user about on its own: it is the
+           * only one that resolves into something else, so a card that says
+           * nothing here looks identical to one that will never get an
+           * answer. `none` (asked, nothing came back) and `absent` (never
+           * asked) are both terminal from the SPA's point of view and stay
+           * silent on purpose. Placed right after the header rather than
+           * down by the fields (spec §3): the note describes the lookup that
+           * will change the title and the context line above it, so it
+           * belongs beside them, not buried under the identity form or the
+           * field chips.
+           */}
+          {metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
 
           {canEdit && editing && (
             <IdentityForm
@@ -376,19 +389,13 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
 
           {/*
            * What the provider adds beyond the title, date and runtime already
-           * promoted into the collapsed header above: a pending note, the
-           * synopsis and the cast — the parts with nowhere to go in one line
-           * of context. These used to sit in a scene panel below the release
-           * rows; they now render here instead, in the same column as the
-           * title, because that panel had nothing left to be a panel about
-           * once its own title, date and duration moved into the header.
-           *
-           * `metadata.state === 'pending'` is the one state worth telling the
-           * user about on its own: it is the only one that resolves into
-           * something else, so a card that says nothing here looks identical
-           * to one that will never get an answer. `none` (asked, nothing came
-           * back) and `absent` (never asked) are both terminal from the SPA's
-           * point of view and stay silent on purpose.
+           * promoted into the collapsed header above: the synopsis and the
+           * cast — the parts with nowhere to go in one line of context.
+           * These used to sit in a scene panel below the release rows; they
+           * now render here instead, in the same column as the title,
+           * because that panel had nothing left to be a panel about once its
+           * own title, date, duration and pending note (see above) moved
+           * into the header.
            *
            * The synopsis renders only once the answer is `confirmed`, checked
            * independently of the cast — one being missing says nothing about
@@ -397,7 +404,6 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
            * serve both a confirmed group and one the provider had nothing
            * for, where the old two-panel layout needed a call site each.
            */}
-          {metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
           {metadata.state === 'confirmed' && metadata.synopsis !== null && (
             <p className="metadata-synopsis">{metadata.synopsis}</p>
           )}
