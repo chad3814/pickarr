@@ -178,13 +178,14 @@ test("the slot's artwork flows beside the identity block, spanning it, without c
   // header pushes the releases below it.
   expect(posterBox.y + posterBox.height).toBeLessThanOrEqual(releaseBox.y);
 
-  // And it is still on the right-hand side, not stacked above the title —
-  // `flex-direction` reverting to the default `row` is the way this fix
-  // regresses into "no overlap, because everything is vertical now".
+  // And it is still on the left-hand side, leading the card rather than
+  // stacked above the title — `flex-direction` reverting to the default
+  // `row` is the way this fix regresses into "no overlap, because
+  // everything is vertical now".
   const heading = page.getByRole('heading', { level: 2 }).first();
   const headingBox = await heading.boundingBox();
   if (headingBox === null) throw new Error('no heading box');
-  expect(posterBox.x).toBeGreaterThan(headingBox.x + headingBox.width - 1);
+  expect(posterBox.x + posterBox.width).toBeLessThan(headingBox.x + 1);
   expect(posterBox.y).toBeLessThan(headingBox.y + headingBox.height);
 
   // The poster is beside the *whole* identity block, not just the title. The
@@ -193,10 +194,12 @@ test("the slot's artwork flows beside the identity block, spanning it, without c
   // what keeps the column tall enough to avoid a band of empty space beneath
   // it. Moving the Edit control or the fields back out of the column, below
   // the row, would leave the poster's span ending above them and fail here
-  // while every no-overlap assertion above still passed.
+  // while every no-overlap assertion above still passed. The identity column
+  // now sits to the *right* of the poster rather than the left — the artwork
+  // leads the card — so it is the fields that are greater on x now, not less.
   const fields = page.locator('.fields').first();
   const fieldsBox = await fields.boundingBox();
   if (fieldsBox === null) throw new Error('no fields box');
-  expect(fieldsBox.x).toBeLessThan(posterBox.x);
+  expect(fieldsBox.x).toBeGreaterThan(posterBox.x);
   expect(posterBox.y + posterBox.height).toBeGreaterThan(fieldsBox.y);
 });

@@ -96,32 +96,22 @@
   border-radius: var(--radius-sm);
 }
 .metadata-performers { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-2) 0; padding: 0; list-style: none; align-items: center; }
-/* The rest of the panel runs at `--text-meta` (`.metadata-synopsis`); an
-   unsized `<li>` inherits the 16px root instead, so without this a cast name —
-   already an amber, underlined anchor — is the loudest text in a panel that is
-   meant to read as a second opinion, not the headline. */
+/* The synopsis and the pending note both run at `--text-meta`
+   (`.metadata-synopsis`, `.metadata-pending` below); an unsized `<li>`
+   inherits the 16px root instead, so without this a cast name — already an
+   amber, underlined anchor — would be the loudest text in the identity
+   column, ahead of the title it sits under. */
 .metadata-performers li { display: flex; align-items: center; gap: 0.35rem; font-size: var(--text-meta); }
 .avatar-thumb img, img.avatar-thumb { height: 2.4em; width: 2.4em; object-fit: cover; border-radius: 50%; }
 .metadata-pending { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }
 
 /*
- * The scene panel had no rules at all — `.metadata` and `.metadata-synopsis`
- * were rendered by `MediaCard` and inherited browser defaults. This is the
- * first time either is styled.
- *
- * A top rule rather than a nested box: the panel is a second opinion about the
- * card it sits in, not a separate object, and a border would make it read as one.
- */
-.metadata {
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--color-line);
-}
-
-/*
- * The measure is the point. An unbounded synopsis across a 60rem card is the
- * hardest thing on the screen to read, and 68ch is inside the 45–75 the
- * typographic advice settles on.
+ * The measure is the point. An unbounded synopsis is the hardest thing on the
+ * screen to read, and 68ch is inside the 45–75 the typographic advice settles
+ * on. Still the binding constraint, not a dead letter now that the synopsis
+ * sits in `.card-head-main` rather than spanning the whole card: measured at
+ * a typical width the identity column runs wider than 68ch resolves to, so
+ * this is what keeps the line length in range rather than the column itself.
  */
 .metadata-synopsis {
   max-width: 68ch;

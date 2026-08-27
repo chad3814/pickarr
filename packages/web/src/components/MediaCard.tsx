@@ -161,11 +161,13 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   /**
    * The group's cast as one list, or `null` when there is nobody to list.
    *
-   * Built once here rather than inline, because it is rendered from two places —
-   * inside the scene panel for a confirmed group, and on its own for one the
-   * provider had nothing for. `null` rather than an empty `<ul>` is what lets
-   * each call site decide whether to draw a wrapper at all: an empty list is a
-   * stray bullet on every unanswered card in the library.
+   * `null` rather than an empty `<ul>` is what lets `cast`'s one call site —
+   * inside `.card-head-main`, after the pending note and the synopsis —
+   * decide whether to draw a wrapper at all: an empty list would be a stray
+   * bullet on every unanswered card in the library. One call site is new to
+   * this phase; the two-panel layout it replaced needed one call for a
+   * confirmed group and a second for one the provider had nothing for, which
+   * is why `cast` is still built up front here rather than inline.
    *
    * One list or the other, never both. The server already guarantees that —
    * `metadataViewOf` empties `performerNames` the moment there is a structured
@@ -257,16 +259,35 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
     // a time — there is no arrangement in which two cards claim it.
     <article className="media-card" id={groupAnchor(group.id)}>
       {/*
-       * Everything identifying the group goes in the left column, the card's
-       * slot — a poster or a performer portrait — in the right, and the row
-       * is as tall as whichever is taller. The slot's image was positioned
-       * absolutely once, which reserved no height at all and left it hanging
-       * over the release rows; giving it a column beside the whole identity
-       * block — title, Edit, fields — rather than beside the title alone is
-       * what keeps that column tall enough to sit next to the slot without
-       * leaving a band of empty space under it.
+       * The card's slot — a poster or a performer portrait — leads in the
+       * left column, everything identifying the group follows in the right,
+       * and the row is as tall as whichever is taller. The slot's image was
+       * positioned absolutely once, which reserved no height at all and left
+       * it hanging over the release rows; giving it a column beside the
+       * whole identity block — title, Edit, fields — rather than beside the
+       * title alone is what keeps that column tall enough to sit next to the
+       * slot without leaving a band of empty space under it.
        */}
       <div className="card-head">
+        {slot !== null && (
+          <button
+            type="button"
+            className="card-artwork"
+            // Named for what pressing it does, rather than taking its name from
+            // the `alt` of the image inside it. That `alt` stays per-image, as
+            // §3.1 requires — but with no poster the slot shows the first cast
+            // portrait, which is the shape ~1,494 of this library's groups have,
+            // and an `alt`-derived name made this button and that same
+            // performer's avatar button in the cast list below two controls in
+            // one tab order with one accessible name and two different actions
+            // (index 0 versus that performer's own entry).
+            aria-label={`Browse images for ${display.title}`}
+            onClick={() => setModal({ images, startIndex: 0 })}
+          >
+            <img src={slot.src} alt={slot.alt} />
+          </button>
+        )}
+
         <div className="card-head-main">
           <header>
             <h2>
@@ -352,26 +373,36 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
               </li>
             ))}
           </ul>
-        </div>
 
-        {slot !== null && (
-          <button
-            type="button"
-            className="card-artwork"
-            // Named for what pressing it does, rather than taking its name from
-            // the `alt` of the image inside it. That `alt` stays per-image, as
-            // §3.1 requires — but with no poster the slot shows the first cast
-            // portrait, which is the shape ~1,494 of this library's groups have,
-            // and an `alt`-derived name made this button and that same
-            // performer's avatar button in the cast list below two controls in
-            // one tab order with one accessible name and two different actions
-            // (index 0 versus that performer's own entry).
-            aria-label={`Browse images for ${display.title}`}
-            onClick={() => setModal({ images, startIndex: 0 })}
-          >
-            <img src={slot.src} alt={slot.alt} />
-          </button>
-        )}
+          {/*
+           * What the provider adds beyond the title, date and runtime already
+           * promoted into the collapsed header above: a pending note, the
+           * synopsis and the cast — the parts with nowhere to go in one line
+           * of context. These used to sit in a scene panel below the release
+           * rows; they now render here instead, in the same column as the
+           * title, because that panel had nothing left to be a panel about
+           * once its own title, date and duration moved into the header.
+           *
+           * `metadata.state === 'pending'` is the one state worth telling the
+           * user about on its own: it is the only one that resolves into
+           * something else, so a card that says nothing here looks identical
+           * to one that will never get an answer. `none` (asked, nothing came
+           * back) and `absent` (never asked) are both terminal from the SPA's
+           * point of view and stay silent on purpose.
+           *
+           * The synopsis renders only once the answer is `confirmed`, checked
+           * independently of the cast — one being missing says nothing about
+           * the other. `cast` needs no guard of its own: it is already `null`
+           * when there is nobody to list, which is what lets one call site
+           * serve both a confirmed group and one the provider had nothing
+           * for, where the old two-panel layout needed a call site each.
+           */}
+          {metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
+          {metadata.state === 'confirmed' && metadata.synopsis !== null && (
+            <p className="metadata-synopsis">{metadata.synopsis}</p>
+          )}
+          {cast}
+        </div>
       </div>
 
       <ul className="releases">
@@ -397,62 +428,6 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
           />
         ))}
       </ul>
-
-      {/*
-       * A lookup in flight is the one state worth telling the user about: it
-       * is the only one that resolves into something else on its own, so a
-       * card that says nothing here looks identical to one that will never
-       * get an answer. `none` (asked, nothing came back) and `absent` (never
-       * asked) are both terminal from the SPA's point of view and stay
-       * silent on purpose.
-       */}
-      {metadata.state === 'pending' && <p className="metadata-pending">pending</p>}
-
-      {/*
-       * What the provider added beyond the title, date and runtime already
-       * promoted into the collapsed header above: synopsis and cast, the two
-       * fields with nowhere to go in one line of context. Those three left
-       * because a header has room for one title and one context line, and
-       * the provider's title and date are what that line now shows directly
-       * — this section is no longer where they're read. Rendered only once
-       * the answer is `confirmed`: a `pending` or `absent` group has nothing
-       * to show yet (`pending` gets its own note above), and `none` means
-       * the provider was asked and came back with nothing, which is
-       * likewise nothing to show. Synopsis and cast are still checked and
-       * rendered independently — one being missing says nothing about the
-       * other. The card's slot — a poster or a performer portrait — is
-       * rendered above, out of this section: it lives in `.card-head`, in
-       * normal flow beside the identity column, so it does not compete with
-       * anything here.
-       */}
-      {metadata.state === 'confirmed' && (
-        <section className="metadata" aria-label="Scene metadata">
-          {metadata.synopsis !== null && (
-            <p className="metadata-synopsis">{metadata.synopsis}</p>
-          )}
-          {cast}
-        </section>
-      )}
-
-      {/*
-       * The cast again, for a group the scene panel above does not render.
-       *
-       * Not a duplicate: exactly one of the two ever renders, because this is
-       * gated on the state that one is not. Both call sites exist because the
-       * cast belongs *inside* the scene panel when there is one — it reads as
-       * part of that answer — and has to stand alone when there is not.
-       *
-       * `state !== 'confirmed'` rather than `=== 'none'`: a cast is a fact about
-       * the group and the server now sends it whatever the scene answer is (see
-       * `CastView`), so a group still `pending` or never asked shows whoever the
-       * performer search already found rather than hiding them until a scene
-       * lookup that may never succeed.
-       */}
-      {metadata.state !== 'confirmed' && cast !== null && (
-        <section className="metadata" aria-label="Cast">
-          {cast}
-        </section>
-      )}
 
       {modal !== null && <ImageModal {...modal} onClose={() => setModal(null)} />}
     </article>

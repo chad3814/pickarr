@@ -349,8 +349,70 @@ test('the scene panel no longer carries a second title, date or duration', () =>
   for (const cls of ['.metadata-title', '.metadata-release-date', '.metadata-duration']) {
     assert.ok(!cardEl.querySelector(cls), `${cls} moved into the header`);
   }
-  // The synopsis and cast are untouched by this task.
+  // The synopsis and cast keep their class names across this task's move
+  // into `.card-head-main` — this only checks presence, not where.
   assert.ok(cardEl.querySelector('.metadata-synopsis'));
+});
+
+test('the artwork leads: it starts before the identity column in the DOM', () => {
+  render(<MediaCard group={withMetadata({ hasPoster: true })} onPick={() => {}} />);
+  const head = card('A Different Title').querySelector('.card-head');
+  assert.ok(head !== null, 'no card head');
+  const children = [...head.children];
+  const artwork = head.querySelector('.card-artwork');
+  const main = head.querySelector('.card-head-main');
+  assert.ok(artwork !== null && main !== null, 'head is missing a column');
+  // DOM order, not CSS order: `flex-direction: row-reverse` or an `order`
+  // property would put the artwork on the left visually while leaving a screen
+  // reader and the tab order reading the identity column first.
+  assert.ok(children.indexOf(artwork) < children.indexOf(main), 'artwork precedes the identity column');
+});
+
+test('the synopsis and cast render inside the identity column, not below the releases', () => {
+  render(<MediaCard group={withMetadata({ performers: [
+    { id: 4, name: 'Alice Maze', url: 'https://example/alice', hasAvatar: true, hasImage: true },
+  ] })} onPick={() => {}} />);
+  const main = card('A Different Title').querySelector('.card-head-main');
+  assert.ok(main !== null, 'no identity column');
+  assert.ok(main.querySelector('.metadata-synopsis'), 'the synopsis moved up');
+  assert.ok(main.querySelector('.metadata-performers'), 'the cast moved up');
+});
+
+test('the pending note moves up with the panel it describes', () => {
+  render(<MediaCard group={{ ...GROUP, metadata: { state: 'pending' } }} onPick={() => {}} />);
+  const main = card('Alex Coal').querySelector('.card-head-main');
+  assert.ok(main?.querySelector('.metadata-pending'), 'the note describes a lookup rendering above');
+});
+
+test('the metadata section wrapper is gone', () => {
+  render(<MediaCard group={withMetadata({})} onPick={() => {}} />);
+  // Its children now live in the identity column, so a wrapper whose only job
+  // was grouping them below the releases has nothing left to group.
+  assert.ok(!card('A Different Title').querySelector('section.metadata'));
+});
+
+test('the cast renders once for a confirmed group and once for an unconfirmed one', () => {
+  const performers = [
+    { id: 4, name: 'Alice Maze', url: 'https://example/alice', hasAvatar: true, hasImage: true },
+  ];
+  render(<MediaCard group={withMetadata({ performers })} onPick={() => {}} />);
+  assert.equal(card('A Different Title').querySelectorAll('.metadata-performers').length, 1);
+  cleanup();
+
+  // The old code had two call sites for exactly this pair of cases. With no
+  // enclosing section to be inside or outside of, one site serves both — and
+  // the exclusivity the old comment maintained by hand is now structural.
+  render(<MediaCard group={{ ...GROUP, metadata: { state: 'none', performers } }} onPick={() => {}} />);
+  assert.equal(card('Alex Coal').querySelectorAll('.metadata-performers').length, 1);
+});
+
+test('the release rows stay after the head, not inside it', () => {
+  render(<MediaCard group={withMetadata({})} onPick={() => {}} />);
+  const cardEl = card('A Different Title');
+  const head = cardEl.querySelector('.card-head');
+  const releases = cardEl.querySelector('ul.releases');
+  assert.ok(head !== null && releases !== null, 'card is missing a part');
+  assert.ok(!head.contains(releases), 'the releases are a sibling of the head, as before');
 });
 
 test('the card shows the provider release date and a human-formatted running time', () => {
@@ -423,7 +485,7 @@ test('no duration renders nothing; a duration of zero still renders 0m', () => {
   assert.ok(screen.getByText('0m'));
 });
 
-test('the panel tolerates a missing poster, synopsis and empty performers independently', () => {
+test('the identity column tolerates a missing poster, synopsis and empty performers independently', () => {
   render(
     <MediaCard
       group={{
@@ -435,11 +497,14 @@ test('the panel tolerates a missing poster, synopsis and empty performers indepe
   );
   assert.ok(!screen.queryByRole('img'));
   assert.ok(!screen.queryByText('A synopsis from the provider.'));
-  // The panel itself still rendered — checked directly, since the title that
-  // used to prove this indirectly now lives in the header instead — the three
-  // tolerances above are independent absences, not one that took the whole
-  // panel down with it.
-  assert.ok(screen.getByRole('region', { name: 'Scene metadata' }));
+  // With no wrapper left to render regardless of its contents (that was
+  // `section.metadata`'s job, before this task), a confirmed answer with
+  // nothing to show is indistinguishable in the DOM from one that was never
+  // asked — the three tolerances above already say everything there is to
+  // say about that. What is still checkable is that this group did not
+  // stall on a lookup in flight: the state is `'confirmed'`, not `'pending'`,
+  // so no pending note renders either.
+  assert.ok(!card('A Different Title').querySelector('.metadata-pending'));
 
   const { unmount } = render(
     <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, synopsis: null } }} onPick={() => {}} />,
