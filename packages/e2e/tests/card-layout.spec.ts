@@ -216,3 +216,127 @@ test("the slot's artwork flows beside the identity block, spanning it, without c
   expect(fieldsBox.x).toBeGreaterThan(posterBox.x);
   expect(posterBox.y + posterBox.height).toBeGreaterThan(fieldsBox.y);
 });
+
+/**
+ * The same scene, answered fully: a site, a provider date, a running time and
+ * a synopsis. `candidateWithPoster` deliberately leaves the last two null —
+ * the test above needs the fields chips to be the bottom of the identity
+ * column — so the two stylesheet properties measured below need a fixture of
+ * their own rather than a fourth null filled in up there.
+ */
+function candidateWithContext(): MetadataCandidate {
+  return {
+    sourceUuid: 'e2e-scene-context',
+    title: 'Alex Coal',
+    siteUuid: null,
+    siteId: null,
+    siteName: 'Vixen',
+    date: '2023-04-15',
+    performers: [],
+    durationSeconds: 1800,
+    // Long enough to wrap several times at any width this card is drawn at, so
+    // the measure below is the stylesheet's and not this string running out.
+    synopsis: 'A scene the provider had plenty to say about. '.repeat(12),
+    posterUrl: null,
+    slug: null,
+  };
+}
+
+test('the context separator is generated content, and the synopsis keeps its measure', async ({
+  page,
+  harness,
+}) => {
+  // Two things `MediaCard.test.tsx` cannot see, for the same reason: happy-dom
+  // lays nothing out and generates no content, so `textContent` there reads
+  // `Vixen2023-04-1530m` whether `card.css` draws a separator or not, and every
+  // box it reports is zero-sized. Deleting
+  // `.card-context > span + span::before` left the whole unit suite green and
+  // shipped a card reading `Brazzers2023-04-1530m`; that is the mutation this
+  // test exists for.
+  harness.ingest([RELEASE]);
+  harness.metadataClient.setCandidates([candidateWithContext()]);
+
+  const group = harness.db
+    .prepare('SELECT id FROM media_groups ORDER BY id DESC LIMIT 1')
+    .get() as { id: number } | undefined;
+  if (group === undefined) throw new Error('ingest did not create a group');
+
+  const requested = await fetch(`${harness.baseURL}/api/metadata/request`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ groupIds: [group.id] }),
+  });
+  if (!requested.ok) throw new Error(`enqueue failed: HTTP ${String(requested.status)}`);
+  await harness.runMetadataPass();
+
+  await page.goto('/');
+  // The answer is what puts the date, the running time and the synopsis on the
+  // card, so nothing below can be measured until the synopsis is on screen.
+  const synopsis = page.locator('p.metadata-synopsis');
+  await expect(synopsis).toBeVisible();
+
+  const measured = await page.evaluate(() => {
+    const line = document.querySelector('p.card-context');
+    if (line === null) throw new Error('no context line');
+    const spans = [...line.querySelectorAll('span')];
+    const before = (span: Element): { content: string; color: string } => {
+      const style = getComputedStyle(span, '::before');
+      return { content: style.content, color: style.color };
+    };
+    const paragraph = document.querySelector('p.metadata-synopsis');
+    const column = document.querySelector('.card-head-main');
+    if (paragraph === null || column === null) throw new Error('no synopsis, or no column round it');
+    return {
+      parts: spans.length,
+      lineColor: getComputedStyle(line).color,
+      separators: spans.map(before),
+      // `max-width: 68ch` resolved by the browser, in px. Read back rather
+      // than recomputed here: `ch` is the advance of `0` in whatever face
+      // actually loaded, which is the one number this test cannot derive.
+      measure: parseFloat(getComputedStyle(paragraph).maxWidth),
+      synopsisWidth: paragraph.getBoundingClientRect().width,
+      columnWidth: column.getBoundingClientRect().width,
+      viewport: window.innerWidth,
+    };
+  });
+
+  // Three parts, so there are two adjacencies to draw a separator into and one
+  // span that must not get one.
+  expect(measured.parts).toBe(3);
+  // `'none'`, not `'" · "'`: the sibling selector skips the first span, which
+  // is what keeps a card whose only part is a running time from opening with a
+  // stray dot. `textContent` cannot tell these two cases apart at all.
+  expect(measured.separators[0]?.content).toBe('none');
+  expect(measured.separators[1]?.content).toBe('" · "');
+  expect(measured.separators[2]?.content).toBe('" · "');
+  // And the reason the separator is CSS rather than a `' · '` in a JS join,
+  // which is the only thing a join genuinely could not do: the dots are a
+  // tone lighter than the words either side of them (`--color-text-faint`
+  // against `--color-text-dim`, measured as rgb(143,136,124) against
+  // rgb(107,100,89)). Asserted as a difference rather than as two literals so
+  // it survives a palette change and still fails if the rule's `color` goes.
+  expect(measured.separators[1]?.color).not.toBe(measured.lineColor);
+
+  // The synopsis's measure. `card.css` caps it at `68ch`, which at
+  // `--text-meta` (0.75rem = 12px) in self-hosted IBM Plex Sans resolves to
+  // 489.6px — measured here, not computed. The band is wide enough to survive
+  // a font revision and narrow enough that changing 68ch to anything a
+  // typographer would argue about fails it; deleting the cap makes
+  // `max-width` compute to `none`, `parseFloat` return `NaN`, and both
+  // assertions below fail.
+  expect(measured.measure).toBeGreaterThan(460);
+  expect(measured.measure).toBeLessThan(520);
+  expect(measured.synopsisWidth).toBeLessThanOrEqual(measured.measure + 0.5);
+
+  // And that the cap is what is actually holding the line length, rather than
+  // a dead letter the column already satisfies — the claim `card.css` makes in
+  // prose beside the rule, unguarded until now and due to be invalidated by
+  // phase 3's master/detail Browse, the next thing to change this column.
+  // Measured at this project's 1280px viewport: the identity column runs
+  // 777.3px against the cap's 489.6. `.app` caps itself at 60rem, so every
+  // viewport at or above 960px gives the same two numbers; the cap stops
+  // binding somewhere near 705px, where the column itself falls under 490
+  // (750px → 535px column, 700px → 485px, both measured).
+  expect(measured.viewport).toBeGreaterThanOrEqual(960);
+  expect(measured.columnWidth).toBeGreaterThan(measured.measure);
+});

@@ -37,10 +37,16 @@
    never shows up as a gap under a card with no actions. */
 .card-actions { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-2) 0; }
 /* One line of context under the title, from parts that render on independent
-   conditions. The separator is drawn between adjacent spans rather than joined
-   in the component, so an absent part leaves no orphan ` · ` — the same reason
-   `.metadata-release-date + .metadata-duration::before` used to exist, applied
-   once to any number of parts instead of once per pair. */
+   conditions. The separator lives here rather than in a JS join for one reason
+   only: it is `--color-text-faint` against the line's own `--color-text-dim`,
+   two tones a single text node cannot carry. That pairing is inherited from
+   `.metadata-release-date + .metadata-duration::before`, which this replaces —
+   applied once to any number of parts instead of once per pair. Omitting the
+   absent parts is not the reason: `MediaCard` builds `context` from the present
+   parts only, so a join would have nothing to work out. `card-layout.spec.ts`
+   asserts the generated content in a real browser, because `textContent` — what
+   the unit test reads — does not include it, and without that the card would
+   ship reading `Brazzers2023-04-1530m` with a green suite. */
 .card-context { margin: 0.1rem 0; color: var(--color-text-dim); font-size: var(--text-meta); }
 .card-context > span + span::before { content: ' · '; color: var(--color-text-faint); }
 
@@ -111,10 +117,16 @@
 /*
  * The measure is the point. An unbounded synopsis is the hardest thing on the
  * screen to read, and 68ch is inside the 45–75 the typographic advice settles
- * on. Still the binding constraint, not a dead letter now that the synopsis
- * sits in `.card-head-main` rather than spanning the whole card: measured at
- * a typical width the identity column runs wider than 68ch resolves to, so
- * this is what keeps the line length in range rather than the column itself.
+ * on. Still the binding constraint on a desktop window, not a dead letter now
+ * that the synopsis sits in `.card-head-main` rather than spanning the whole
+ * card: 68ch resolves to 489.6px at `--text-meta` (0.75rem) in IBM Plex Sans,
+ * and the identity column runs 777.3px wherever `.app`'s own 60rem cap is
+ * reached — every viewport at or above 960px — so this rule is what keeps the
+ * line length in range rather than the column. It stops being true on a window
+ * narrow enough for the column itself to fall under 490px, somewhere near a
+ * 705px viewport (measured: 750px gives a 535px column, 700px a 485px one).
+ * `card-layout.spec.ts` asserts both halves, so phase 3's master/detail Browse
+ * cannot quietly invalidate this note.
  */
 .metadata-synopsis {
   max-width: 68ch;

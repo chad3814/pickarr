@@ -317,12 +317,14 @@ test('the context line joins studio, provider date and runtime', () => {
   render(<MediaCard group={withMetadata({})} onPick={() => {}} />);
   const context = card('A Different Title').querySelector('.card-context');
   assert.ok(context !== null, 'no context line');
-  // Asserted as one string because the separators are the thing under test:
-  // they are drawn by CSS between adjacent spans, so what matters is which
-  // parts are present and in what order.
+  // Asserted as one string because the parts and their order are all this test
+  // can see. The separators are CSS `::before` content, which `textContent`
+  // does not include, so the parts run together below — and this assertion
+  // would read exactly the same with `card.css`'s separator rule deleted. The
+  // separator itself is pinned where generated content exists, in
+  // `packages/e2e/tests/card-layout.spec.ts`.
   // `formatDuration(1800)` is '30m' — verified against packages/web/src/api/format.ts,
-  // not assumed. The separators are CSS `::before` content, which `textContent`
-  // does not include, so the parts run together here.
+  // not assumed.
   assert.equal(context.textContent, 'Brazzers2023-04-1530m');
 });
 
@@ -412,28 +414,50 @@ test('the synopsis and cast render inside the identity column, not below the rel
   assert.ok(main.querySelector('.metadata-performers'), 'the cast moved up');
 });
 
-test('the pending note renders right after the header, ahead of the fields', () => {
-  render(<MediaCard group={{ ...GROUP, metadata: { state: 'pending' } }} onPick={() => {}} />);
+test('the pending note renders right after the header, ahead of the actions and the fields', () => {
+  // Given an editable group and a handler, so `.card-actions` is on screen to
+  // be ordered against: with `header < pending < fields` alone, moving the
+  // actions row above the note passed.
+  render(
+    <MediaCard
+      group={{ ...EDITABLE, metadata: { state: 'pending' } }}
+      onPick={() => {}}
+      fields={FIELDS}
+      onEditGroup={async () => true}
+    />,
+  );
   const main = card('Alex Coal').querySelector('.card-head-main');
   assert.ok(main !== null, 'no identity column');
   const header = main.querySelector('header');
   const pending = main.querySelector('.metadata-pending');
+  const actions = main.querySelector('.card-actions');
   const fields = main.querySelector('.fields');
-  assert.ok(header !== null && pending !== null && fields !== null, 'identity column is missing a part');
+  assert.ok(
+    header !== null && pending !== null && actions !== null && fields !== null,
+    'identity column is missing a part',
+  );
   const children = [...main.children];
   const headerIndex = children.indexOf(header);
   const pendingIndex = children.indexOf(pending);
+  const actionsIndex = children.indexOf(actions);
   const fieldsIndex = children.indexOf(fields);
   assert.ok(
-    headerIndex !== -1 && pendingIndex !== -1 && fieldsIndex !== -1,
-    'header, pending note or fields is not a direct child of the identity column',
+    headerIndex !== -1 && pendingIndex !== -1 && actionsIndex !== -1 && fieldsIndex !== -1,
+    'header, pending note, actions or fields is not a direct child of the identity column',
   );
-  // Spec §3, position 4: right after the badge, before the identity form,
-  // `.card-actions` and the fields — the note describes the lookup that will
-  // change the title and context line above it, not the chips below.
+  // Spec §3, position 4: right after the badge, before `.card-actions` and the
+  // fields — the note describes the lookup that will change the title and
+  // context line above it, not the chips below.
+  //
+  // Position 5, the identity form, is not pinned here and cannot be on this
+  // card: the form renders only while `editing`, and `.card-actions` on a
+  // pending group renders only while `canEdit && !editing` — `settled` is
+  // false for `pending`, so there is no Requery button to keep the row alive
+  // once the form opens. One render can hold the note and the form, or the
+  // note and the actions row, never all three.
   assert.ok(
-    headerIndex < pendingIndex && pendingIndex < fieldsIndex,
-    'the pending note sits between the header and the fields',
+    headerIndex < pendingIndex && pendingIndex < actionsIndex && actionsIndex < fieldsIndex,
+    'the pending note sits between the header and the actions row, which sits above the fields',
   );
 });
 

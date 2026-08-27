@@ -332,11 +332,16 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
             </h2>
             {/*
               * One span per part, with the separator drawn by CSS between
-              * adjacent siblings rather than joined here. The provider populates
-              * these unevenly — the panel this replaces documented a running
-              * time without a release date as ordinary — so a JS join would need
-              * to know which parts are present, which is exactly what the
-              * sibling selector already knows.
+              * adjacent siblings rather than joined here. Not because a join
+              * could not omit the absent parts — `context` above is built from
+              * the present ones only, and `formatQuality` in `format.ts`
+              * already joins a conditional list with this same ` · ` — but
+              * because the separator is a different colour from the line it
+              * sits in: `.card-context > span + span::before` (`card.css`)
+              * paints it `--color-text-faint` against the line's own
+              * `--color-text-dim`. That two-tone came from the pairwise
+              * `.metadata-release-date + .metadata-duration::before` rule this
+              * replaced, and one joined text node cannot carry it.
               */}
             {context.length > 0 && (
               <p className="card-context">
