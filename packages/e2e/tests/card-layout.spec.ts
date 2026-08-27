@@ -289,17 +289,20 @@ test('the context separator is generated content, and the synopsis keeps its mea
     const line = document.querySelector('p.card-context');
     if (line === null) throw new Error('no context line');
     const spans = [...line.querySelectorAll('span')];
-    const before = (span: Element): { content: string; color: string } => {
-      const style = getComputedStyle(span, '::before');
-      return { content: style.content, color: style.color };
-    };
     const paragraph = document.querySelector('p.metadata-synopsis');
     const column = document.querySelector('.card-head-main');
     if (paragraph === null || column === null) throw new Error('no synopsis, or no column round it');
     return {
       parts: spans.length,
       lineColor: getComputedStyle(line).color,
-      separators: spans.map(before),
+      // Read at the use site rather than through a named helper: this callback
+      // is serialised and runs in the page, so a helper hoisted out of it — the
+      // move `unicorn(consistent-function-scoping)` asks for, since it captures
+      // nothing — would be a Node-scope function that does not exist here.
+      separators: spans.map((span) => {
+        const style = getComputedStyle(span, '::before');
+        return { content: style.content, color: style.color };
+      }),
       // `max-width: 68ch` resolved by the browser, in px. Read back rather
       // than recomputed here: `ch` is the advance of `0` in whatever face
       // actually loaded, which is the one number this test cannot derive.
