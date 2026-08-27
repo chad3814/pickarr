@@ -530,10 +530,19 @@ test('the identity column tolerates a missing poster, synopsis and empty perform
   // nothing in the DOM distinguishes this case from a group that was never
   // asked at all. Closing that gap would mean re-adding the wrapper this
   // task dissolves, so it stays open rather than papered over with an
-  // assertion that would pass for an unrelated reason. What this test's name
-  // promises — that the three absences are independent, not one masking
-  // another — is still pinned by the two renders below, each of which shows
-  // exactly one of the three present while the other two stay absent.
+  // assertion that would pass for an unrelated reason.
+  //
+  // What this test's name promises — that the three absences are
+  // independent, not one masking another — is only partly pinned below, by
+  // the two renders that follow. Render 2 isolates the synopsis: poster and
+  // cast both keep `CONFIRMED`'s present values, and only `synopsis` is set
+  // to `null`, so its absence there cannot be explained by the other two
+  // also being gone. Render 3 does the same for the cast: poster and
+  // synopsis stay present, and only `performerNames` is emptied. Neither
+  // isolates the poster — the only render above where the poster is absent
+  // also empties the synopsis and the cast at the same time, so a
+  // poster-only absence is untested here; a third render setting just
+  // `hasPoster: false` would be needed to close that gap.
 
   const { unmount } = render(
     <MediaCard group={{ ...GROUP, metadata: { ...CONFIRMED, synopsis: null } }} onPick={() => {}} />,
@@ -548,6 +557,10 @@ test('the identity column tolerates a missing poster, synopsis and empty perform
   );
   assert.ok(screen.getByRole('img'));
   assert.ok(screen.getByText('A synopsis from the provider.'));
+  assert.ok(
+    !screen.queryByText('Alex Coal', { selector: 'li' }),
+    'the cast is absent when performerNames is empty',
+  );
 });
 
 test('the slot is a button that opens the modal, and the modal closes', () => {
