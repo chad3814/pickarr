@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { expect, test } from '../src/harness.ts';
+import { expect, sceneTitles, test } from '../src/harness.ts';
 
 /**
  * The bug this exists for: **acting on a row after "Load more" threw away
@@ -41,22 +41,6 @@ function at(titles: readonly string[], index: number): string {
   const title = titles[index];
   if (title === undefined) throw new Error(`the seeded list has no entry ${String(index)}`);
   return title;
-}
-
-/**
- * Distinct scene names the real parser accepts, one group each, whose display
- * titles carry the site so two seeded batches never share a heading.
- *
- * Generated rather than listed so the count can follow `PAGE_SIZE`; every one
- * still goes through `parseSceneRelease`, so nothing here can be a shape the
- * parser would refuse in production.
- */
-function sceneTitles(site: string, count: number): string[] {
-  return Array.from(
-    { length: count },
-    (_unused, index) =>
-      `${site}.23.07.${String(index + 1).padStart(2, '0')}.${site}.Scene.${String(index + 1)}.XXX.1080p.MP4-KTR`,
-  );
 }
 
 /** Names the parser refuses, so each becomes a row on the Failed tab. */

@@ -1,4 +1,4 @@
-import { expect, test } from '../src/harness.ts';
+import { expect, sceneTitles, test } from '../src/harness.ts';
 
 /**
  * The two properties of the vertical nav that only a real browser can check.
@@ -9,19 +9,6 @@ import { expect, test } from '../src/harness.ts';
  * when taller than the window" cannot be asserted at all in that suite. They are
  * the whole point of the change, so they are pinned here instead.
  */
-
-/**
- * Feed titles the real scenes parser accepts, so the page fills with real cards
- * through the real ingest path. Same shape as `pagination.spec.ts`'s helper of
- * the same name — this spec needs a tall page, not a particular scene.
- */
-function sceneTitles(site: string, count: number): string[] {
-  return Array.from(
-    { length: count },
-    (_unused, index) =>
-      `${site}.23.07.${String(index + 1).padStart(2, '0')}.${site}.Scene.${String(index + 1)}.XXX.1080p.MP4-KTR`,
-  );
-}
 
 test('the nav stays put while the page scrolls', async ({ page, harness }) => {
   // The requirement in its own words: the tabs must not scroll out of view. A

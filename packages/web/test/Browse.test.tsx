@@ -119,6 +119,18 @@ interface Options {
    * exercise the dialog, i.e. a merge.
    */
   identityPlan?: Partial<IdentityPlanView>;
+  /**
+   * What `GET /api/metadata` answers for these ids, overriding the echo below.
+   *
+   * The one shape the echo cannot express, and the ordinary production one:
+   * browse carries `absent` and the live endpoint answers `confirmed` a moment
+   * later. Echoing the page's own metadata keeps a *confirmed* page honest
+   * (see `servedGroups`), but it means every group a page serves as `absent`
+   * can only ever settle `'none'` — so no test could deliver a provider title
+   * through the poll alone, which is the only path `useGroupMetadata` exists
+   * for.
+   */
+  liveMetadata?: Record<number, MetadataView>;
 }
 
 /**
@@ -158,6 +170,24 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
     ['', { groups: options.firstPage ?? [group(1, 'Alpha')], nextCursor: '999:1' }],
     ['999:1', { groups: options.secondPage ?? [group(2, 'Beta')], nextCursor: null }],
   ]);
+  // Indexed by id so `/api/metadata` can echo back whatever a page already
+  // carried. A blanket `'none'` was fine while every served group's own
+  // metadata was `'absent'` — the two read identically on a card, since
+  // neither has a title to disagree with the parsed one. A group built with
+  // a `'confirmed'` answer breaks that: a real server's live endpoint agrees
+  // with its own browse listing, and a stub that does not would settle the
+  // poll on an answer the page it just served never gave.
+  //
+  // Built from `pages` only, so this guarantee covers a page-served group,
+  // not one that only ever appears via `options.groupEdit`, `options.releaseEdit`
+  // or the `pick` response: a confirmed group returned solely from one of
+  // those three still gets a blanket `'none'` back from `/api/metadata`. No
+  // test today serves a confirmed group only that way, so nothing is
+  // affected — but a test that starts doing so will hit this same
+  // disagreement rather than a documented limit here, until someone extends
+  // this map to those three paths too.
+  const servedGroups = new Map<number, GroupView>();
+  for (const page of pages.values()) for (const served of page.groups) servedGroups.set(served.id, served);
   let patches = 0;
 
   const picked: PickResponse = {
@@ -190,12 +220,20 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       } satisfies MetadataRequestResponse;
     }
     if (url.pathname === '/api/metadata') {
-      // Every id answers `'none'` — settled, so `useGroupMetadata` never polls
-      // again for it. These tests are about browse and edit flows, not the
-      // metadata panel, so nothing here needs a `'confirmed'` answer.
+      // Settled either way, so `useGroupMetadata` never polls again for it:
+      // `'none'` for a group whose own browse metadata was never
+      // `'confirmed'` (every group these tests build, except where a test
+      // deliberately sets one), and that group's own answer otherwise — see
+      // `servedGroups` above for why echoing it, rather than a blanket
+      // `'none'`, is what a real live endpoint does too.
       const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
       const response: Record<number, MetadataView> = {};
-      for (const id of ids) response[Number(id)] = { state: 'none' };
+      for (const id of ids) {
+        const served = servedGroups.get(Number(id));
+        const live = options.liveMetadata?.[Number(id)];
+        response[Number(id)] =
+          live ?? (served?.metadata.state === 'confirmed' ? served.metadata : { state: 'none' });
+      }
       return response;
     }
     if (url.pathname.endsWith('/identity-plan')) {
@@ -836,4 +874,188 @@ test('typing a term sends it to the server and starts the list over from page on
       'GET /api/browse?q=coal',
     ]),
   );
+});
+
+/**
+ * The view preference outlives a `cleanup()`, so a test that switches views
+ * would otherwise change the view every later test starts in. Cleared here
+ * rather than in each test, so a test added later cannot forget.
+ */
+afterEach(() => {
+  localStorage.removeItem('pickarr.browseView');
+});
+
+/** A confirmed answer whose title disagrees with the parsed one, as most real ones do. */
+function answered(title: string): MetadataView {
+  return {
+    state: 'confirmed',
+    title,
+    releaseDate: null,
+    durationSeconds: null,
+    synopsis: null,
+    hasPoster: false,
+    hasBackground: false,
+  };
+}
+
+test('a fresh browser gets the card list', () => {
+  // Spec §7: nobody's Browse changes shape without them asking.
+  serve(null);
+  render(<Browse />);
+  // #40: never `assert.equal(screen.queryBy*(...), null)`.
+  assert.ok(!screen.queryByRole('listbox', { name: 'Groups' }));
+});
+
+test('choosing the split view shows the list, and no card until a row is picked', async () => {
+  serve(null);
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  assert.ok(screen.getByRole('listbox', { name: 'Groups' }));
+  assert.ok(!document.querySelector('article.media-card'), 'nothing selected, so no card');
+  assert.ok(screen.getByText(/select a group/i), 'the pane says what to do instead');
+});
+
+test('clicking a row fills the pane with that group', async () => {
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  fireEvent.click(screen.getAllByRole('option')[1]!);
+
+  // The pane is a `MediaCard`, so the group's title is its heading.
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta' }));
+  assert.equal(document.querySelectorAll('article.media-card').length, 1, 'one card, not one per group');
+});
+
+test('the row and the pane show the same title, not the row the parsed one', async () => {
+  // The whole reason `groupTitle` is a shared function: a provider title that
+  // disagrees with the parsed one must reach both surfaces.
+  const alpha = group(1, 'Alpha');
+  alpha.metadata = answered('Provider Alpha');
+  serve(null, { firstPage: [alpha] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Provider Alpha')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  const row = screen.getByRole('option');
+  assert.match(row.textContent ?? '', /Provider Alpha/);
+  assert.equal(
+    row.querySelector('.group-row-title')?.textContent,
+    'Provider Alpha',
+    'the row shows the provider title and nothing else in its title slot',
+  );
+
+  fireEvent.click(row);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Provider Alpha' }));
+});
+
+test('a provider title that arrives by poll reaches the row, not just the pane', async () => {
+  // The test above puts the confirmed answer on the browse payload, so both
+  // surfaces read it out of `groups` and agree whatever the route does with
+  // the poll. This is the path that actually happens: browse says `absent`
+  // and `GET /api/metadata` answers `confirmed` a moment later — the sequence
+  // `useGroupMetadata` exists for, and the one Requery goes through too. Spec
+  // §5: the row and the pane must not disagree about what a group is called.
+  serve(null, { firstPage: [group(1, 'Alpha')], liveMetadata: { 1: answered('Provider Alpha') } });
+  render(<Browse />);
+  // Switched first, and the landing waited on by role rather than by the
+  // parsed title: the poll's answer can arrive before a `getByText('Alpha')`
+  // ever resolves, and then that wait fails on a page that is working
+  // perfectly. The divergence does not depend on the order either way — it
+  // lasts for the life of the mount, because nothing ever patches `groups`.
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  await waitFor(() => assert.ok(screen.getByRole('option')));
+  fireEvent.click(screen.getByRole('option'));
+
+  // The pane is where the answer showed up first when the merge lived only in
+  // `cardFor`, so waiting on the heading is waiting for the answer to have
+  // landed at all; the row is what the assertion is about.
+  await waitFor(() => assert.ok(screen.getByRole('heading', { level: 2, name: 'Provider Alpha' })));
+  assert.equal(
+    screen.getByRole('option').querySelector('.group-row-title')?.textContent,
+    'Provider Alpha',
+    'the row shows the title the poll delivered, the same one the pane is showing',
+  );
+});
+
+test('the selection clears when a term filters the selected group out', async () => {
+  // Spec §4: an id pointing at nothing leaves a pane showing a group the list
+  // beside it denies. `serve` answers every `?q=` with the same two pages, so
+  // the term is applied by replacing the page — which is what a real
+  // server-side search does, and what rebuilds `items`.
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  fireEvent.click(screen.getAllByRole('option')[1]!);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta' }));
+
+  // A term whose page omits Beta. Reinstall the stub so the next fetch answers
+  // with one group, then change the term, which rebuilds the list.
+  serve(null, { firstPage: [group(1, 'Alpha')] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: 'alpha' } });
+
+  await waitFor(() => assert.ok(!document.querySelector('article.media-card')));
+  assert.ok(screen.getByText(/select a group/i), 'the pane returned to its empty state');
+
+  // The pane empties either way, because `selected` re-derives from `groups`.
+  // What the clearing effect protects is the list: `GroupList`'s roving
+  // `tabIndex` keys the tab stop off `selectedId ?? groups[0]?.id`, so an id
+  // left pointing at a filtered-out group matches no row, every row gets
+  // `tabIndex={-1}`, and the list becomes unreachable by keyboard.
+  const stops = screen.getAllByRole('option').filter((row) => row.getAttribute('tabindex') === '0');
+  assert.equal(stops.length, 1, 'the list keeps exactly one tab stop');
+});
+
+test('a selection does not resurrect once a term matching nothing is cleared', async () => {
+  // A narrowed page (the test above) still leaves `groups` non-empty, so its
+  // pane-is-empty check is meaningful on its own. A term matching *nothing*
+  // is a different case, and a weaker one to assert on directly: `groups`
+  // becomes `[]`, and `selected` re-derives to `null` from an empty `groups`
+  // regardless of whether `selectedId` was ever cleared — so the pane looks
+  // identical, empty, whether or not the fix in `Browse.tsx` actually ran.
+  // The only place a survived `selectedId` becomes visible is on the way
+  // back: if it was never cleared, repopulating `groups` hands the pane a
+  // group matching that id again, and it reappears without the reader
+  // re-selecting anything — exactly what spec §4 forbids.
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  fireEvent.click(screen.getAllByRole('option')[1]!);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta' }));
+
+  // A term whose page is empty, not merely narrowed. Waited for by row count
+  // rather than the pane, which (as above) would already read empty before
+  // this fetch even lands.
+  serve(null, { firstPage: [] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: 'nothing' } });
+  await waitFor(() => assert.equal(screen.queryAllByRole('option').length, 0));
+
+  // Clear the term. Both groups return, Beta included. Waited for by row
+  // count, not by finding "Beta" — a resurrected selection would put that
+  // text in both the row and the pane's heading, and `getByText` throwing on
+  // an ambiguous match is not the failure this test is about.
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: '' } });
+
+  await waitFor(() => assert.equal(screen.queryAllByRole('option').length, 2));
+  assert.ok(!document.querySelector('article.media-card'), 'a returning group is not a resurrected selection');
+  assert.ok(screen.getByText(/select a group/i), 'the pane stayed empty rather than repopulating on its own');
+});
+
+test('the chosen view survives a remount', async () => {
+  serve(null);
+  const first = render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  first.unmount();
+
+  serve(null);
+  render(<Browse />);
+  assert.ok(screen.getByRole('listbox', { name: 'Groups' }), 'the preference was read back');
 });

@@ -18,6 +18,7 @@
 @import './base.css' layer(base);
 @import './nav.css' layer(components);
 @import './card.css' layer(components);
+@import './browse.css' layer(components);
 @import './rows.css' layer(components);
 @import './forms.css' layer(components);
 @import './dialog.css' layer(components);

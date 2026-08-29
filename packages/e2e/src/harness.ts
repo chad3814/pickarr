@@ -50,6 +50,48 @@ const KNOWN_SITES = ['SomeSite'];
  */
 const CLOCK_ORIGIN = 1_700_000_000_000;
 
+/**
+ * Distinct scene names the real parser accepts, one group each, whose display
+ * titles carry the site so two seeded batches never share a heading.
+ *
+ * Generated rather than listed so the count can follow whatever a spec needs;
+ * every one still goes through `parseSceneRelease`, so nothing here can be a
+ * shape the parser would refuse in production. The day rolls into a fresh
+ * month every 28 titles, and the month rolls into a fresh year every 12 of
+ * those, so neither `toIsoDate`'s (`packages/plugin-scenes/src/parse.ts`)
+ * `day > 31` nor its `month > 12` refusal is reachable at any count a spec
+ * plausibly asks for. Two earlier versions each hit one of those the hard
+ * way: the first ran the day straight through with no month rollover, and
+ * seeding 60 titles in one month silently refused 29 of them into unintended
+ * Failed rows while every assertion that only checked "some count of rows"
+ * stayed green; the second rolled the month but not the year, which only
+ * moved the same ceiling from 31 to 168 rather than removing it — worth
+ * naming because a *shared* helper's ceiling is every future caller's, not
+ * one spec's. 28 rather than a calendar-accurate 30 or 31 so the same
+ * arithmetic is safe whichever month it lands in; rolling the year too is
+ * what lets February, and every month, occur at a large enough count,
+ * rather than the generator only ever landing on July through December.
+ *
+ * A ceiling still exists — the two-digit year field itself gives out once
+ * the rolled year passes 99, somewhere past 25,000 titles — but that is far
+ * beyond anything a spec in this suite plausibly seeds, unlike the 60 and
+ * 168 the two previous versions actually hit.
+ *
+ * The one copy: previously duplicated between `pagination.spec.ts`,
+ * `nav.spec.ts`, and `browse-split.spec.ts`, with the day-overflow bug live
+ * in whichever copy the count first ran past 31 — `nav.spec.ts`'s call with
+ * 40 was refusing 9 of them until this extraction.
+ */
+export function sceneTitles(site: string, count: number): string[] {
+  return Array.from({ length: count }, (_unused, index) => {
+    const totalMonths = Math.floor(index / 28);
+    const month = ((6 + totalMonths) % 12) + 1;
+    const year = 23 + Math.floor((6 + totalMonths) / 12);
+    const day = (index % 28) + 1;
+    return `${site}.${String(year).padStart(2, '0')}.${String(month).padStart(2, '0')}.${String(day).padStart(2, '0')}.${site}.Scene.${String(index + 1)}.XXX.1080p.MP4-KTR`;
+  });
+}
+
 export interface AddedUrl {
   url: string;
   /** The job name Pickarr asked the client to use, marker and all. */
