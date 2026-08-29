@@ -1,4 +1,4 @@
-import { expect, test } from '../src/harness.ts';
+import { expect, sceneTitles, test } from '../src/harness.ts';
 
 /**
  * The split view's layout, in a real browser rather than on paper.
@@ -17,24 +17,7 @@ import { expect, test } from '../src/harness.ts';
 const FIRST = 'Tushy.23.05.02.Emma.Stone.XXX.1080p.MP4-KTR';
 const SECOND = 'Blacked.23.06.11.Jane.Doe.XXX.720p.MP4-KTR';
 
-/**
- * Distinct scene names the real parser accepts, one group each — the same
- * generator `pagination.spec.ts` uses, needed here for the same reason: a
- * list long enough to actually scroll the page. Sixty rows comfortably
- * outruns any viewport this suite runs at (`playwright.config.ts` uses
- * `devices['Desktop Chrome']`'s default), so the list's own content height,
- * not the detail pane's, is what makes `.browse-split` — and therefore the
- * document — taller than the window.
- */
-function sceneTitles(site: string, count: number): string[] {
-  return Array.from(
-    { length: count },
-    (_unused, index) =>
-      `${site}.23.07.${String(index + 1).padStart(2, '0')}.${site}.Scene.${String(index + 1)}.XXX.1080p.MP4-KTR`,
-  );
-}
-
-test('the split view lists groups beside a sticky detail pane, widens the shell, and survives a reload', async ({
+test('selecting and arrowing through the split-view list drives the detail pane, persists across a reload, and widens the shell', async ({
   page,
   harness,
 }) => {
@@ -122,7 +105,12 @@ test('the detail pane stays put while the list scrolls past it, and only because
 }) => {
   // Sixty rows across two pages — `usePagedList`'s default page size is 30
   // (`pagination.spec.ts`) — so the list is tall regardless of how it loads,
-  // and long past what one screen can show.
+  // and long past what one screen can show. Genuinely sixty: `sceneTitles`
+  // rolls the release date into a new month every 28 titles rather than
+  // overflowing the day past 31, which is what a first version of this test
+  // did — 60 titles all dated in one month parsed 31 of them and refused 29,
+  // seeding an equal number of unintended Failed rows, and every assertion
+  // below still passed because none of them checks the row count itself.
   harness.ingest(sceneTitles('Riverside', 60));
 
   await page.goto('/');

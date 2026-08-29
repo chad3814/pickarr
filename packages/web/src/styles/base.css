@@ -15,12 +15,20 @@ body {
    window edge on a wide screen. */
 .app { display: flex; gap: var(--space-5); max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
 /* Split view divides `<main>` between two panes, and 60rem is not enough for
-   both: the detail pane would land near 600px, and after the card's 98px
-   artwork and its gap that is a text column near 490px — the width at which
-   `card.css` records the synopsis's `68ch` cap stopping binding, and the regime
-   its `card-layout` guard does not cover. Keyed off the view rather than a media
-   query because the view is a preference: a reader in the card list gets the
-   60rem column at any window size. */
+   both. `card.css`'s own measured note puts `<main>`'s content box at
+   809.3px at this cap — its 777.3px no-slot card column plus the card's own
+   32px of padding — so nav and its gap take ~150.7px of `.app`'s 960px
+   content width, not nothing: subtracting the list's 22rem and its gap from
+   `.app`'s own width instead of `<main>`'s overstates what the detail pane
+   would get by that much. Split inside 60rem and the pane lands around
+   433px, and after the card's own padding, its 98px artwork frame and its
+   gap, a with-slot text column around 287px — well past the point where
+   `card.css`'s `68ch` cap even applies. A column that narrow isn't at the
+   cap's threshold, it is simply too narrow on its own, in the regime phase
+   2's `card-layout` guard does not cover because that guard measures the
+   widest card shape. Widening avoids walking into it. Keyed off the view
+   rather than a media query because the view is a preference: a reader in
+   the card list gets the 60rem column at any window size. */
 .app:has([data-browse-view='split']) { max-width: 90rem; }
 /* `min-width: 0` for the reason `.card-head-main` gives: a flex item refuses to
    shrink below its content by default, so one long unbroken release name would

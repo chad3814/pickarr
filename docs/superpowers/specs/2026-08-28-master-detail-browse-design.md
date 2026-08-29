@@ -141,29 +141,47 @@ second consumer exists — not in anticipation of one.
 space lands in `<main>`, which is what the two panes divide.
 
 Phase 1 pinned 60rem and phase 2 kept it; this phase is where changing it was always going to
-happen. Splitting inside 60rem would leave the detail pane around 600px, and after the card's
-98px artwork and its gap that is a text column near 490px — the exact width at which phase 2's
-measured note says the synopsis's `68ch` cap stops binding, and the regime its `card-layout`
-guard does not cover, because that guard measures the widest card shape. Widening avoids
-walking into the one measurement phase 2 flagged as unverified.
+happen. Phase 2's own measured note puts `<main>`'s content box at 809.3px at this cap — its
+777.3px no-slot card column plus the card's own 32px of padding — so nav and its gap take
+~150.7px of `.app`'s 960px content width, not nothing: subtracting the list's 22rem and its gap
+from `.app`'s own width instead of `<main>`'s overstates what the detail pane would get by that
+much. Splitting inside 60rem would leave the detail pane around 433px, and after the card's own
+padding, its 98px artwork frame and its gap, a with-slot text column around 287px — well past
+the point where phase 2's measured note says the synopsis's `68ch` cap even applies. A column
+that narrow isn't at the cap's threshold, it is simply too narrow on its own, in the regime the
+`card-layout` guard does not cover because that guard measures the widest card shape. Widening
+avoids walking into it.
 
-The list pane takes `22rem` and the detail pane the rest — enough for a title to run two lines
-before wrapping at the narrowest supported window, and it leaves the pane wider than the 60rem
-column the card renders in today.
+The list pane takes `22rem` and the detail pane the rest. `.group-row-title` truncates with an
+ellipsis rather than wrapping (§3), so 22rem's job is not to hold a title over two lines — it is
+wide enough that an ordinary title reads in full before that ellipsis engages, with room left
+over for the meta and the upgrade marker beside it. The detail pane runs wider than the 60rem
+column the card renders in today only once the window is wider than roughly 1334px; narrower
+than that it runs somewhat narrower than that column (roughly 720px at a 1280px window), which
+task 4's step 3 confirmed by eye still reads well.
 
 **Neither pane gets its own scrollbar, and that is a constraint rather than a preference.**
 `usePagedList` observes its sentinel with an `IntersectionObserver` whose root is the viewport
 (`ROOT_MARGIN = '200px'`, no `root` option), and `Browse` renders that sentinel after the whole
 split row, outside the master list entirely. That placement is why giving the master list its
-own scroll container does not fail the way it first sounds like it would. Confirmed in a real
-browser during task 4: `overflow-y: auto` on the list alone does nothing at all, because the
-list's height already equals its content and no scroll container forms. Pair it with a height
-bound — the realistic way anyone reaches for this — and the failure inverts instead of going
-quiet: once the list stops growing taller as rows arrive, the split row's height (and so the
-document's) stops tracking how many groups have loaded, the sentinel sits within the viewport
-almost immediately, and `usePagedList`'s re-arm effect cascades through every remaining page in
-one burst at mount, before the reader scrolls at all. Either way the observer would need its
-root rethreaded to the container to behave, which §2 puts out of scope.
+own scroll container does not fail the way it first sounds like it would.
+
+Confirmed in a real browser during task 4: `overflow-y: auto` on the list alone does nothing
+observable. The box becomes a scroll container in the CSS Overflow sense, but with no scrollable
+overflow to speak of — the list's height already equals its content, so nothing scrolls, nothing
+clips, and the sentinel is untouched either way. Pair it with a height bound, though — the
+realistic way anyone reaches for this — and the failure inverts instead of going quiet: once the
+list stops growing taller as rows arrive, the split row's height (and so the document's) stops
+tracking how many groups have loaded, the sentinel sits within the viewport almost immediately,
+and `usePagedList`'s re-arm effect cascades through every remaining page in one burst at mount,
+before the reader scrolls at all.
+
+A working fix needs both changes at once, not either alone — the sentinel moved inside the list
+*and* the observer's root rethreaded to it. Rethreading the root without moving the sentinel is
+strictly worse than the bug: an observer rooted at the list would then watch a target it can
+never see intersect, since the sentinel still renders outside it, and paging would stop entirely
+rather than merely misbehave. Neither change is in scope; §2 puts the observer's root
+rethreading out of scope, and moving the sentinel was never proposed at all.
 
 So the page scrolls, as it does today, and **the detail pane is `position: sticky`** so it stays
 in view while the list scrolls past it. That keeps the observer untouched and avoids the wart

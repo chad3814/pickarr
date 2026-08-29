@@ -50,6 +50,34 @@ const KNOWN_SITES = ['SomeSite'];
  */
 const CLOCK_ORIGIN = 1_700_000_000_000;
 
+/**
+ * Distinct scene names the real parser accepts, one group each, whose display
+ * titles carry the site so two seeded batches never share a heading.
+ *
+ * Generated rather than listed so the count can follow whatever a spec needs;
+ * every one still goes through `parseSceneRelease`, so nothing here can be a
+ * shape the parser would refuse in production.
+ *
+ * The day rolls into a fresh month every 28 titles rather than running past
+ * it: `toIsoDate` (`packages/plugin-scenes/src/parse.ts`) refuses `day > 31`,
+ * so a naive `23.07.${n}` counting past 31 would silently *refuse* every title
+ * from the 32nd on instead of seeding it — this generator's first version did
+ * exactly that at a count of 60, seeding 31 groups and 29 unintended Failed
+ * rows while every assertion that only checked "some count of rows" stayed
+ * green. 28 rather than a calendar-accurate 30 or 31 so the same arithmetic
+ * is safe whichever month it lands in, February included.
+ *
+ * Previously duplicated between `pagination.spec.ts` and `browse-split.spec.ts`;
+ * this is the one copy.
+ */
+export function sceneTitles(site: string, count: number): string[] {
+  return Array.from({ length: count }, (_unused, index) => {
+    const month = 7 + Math.floor(index / 28);
+    const day = (index % 28) + 1;
+    return `${site}.23.${String(month).padStart(2, '0')}.${String(day).padStart(2, '0')}.${site}.Scene.${String(index + 1)}.XXX.1080p.MP4-KTR`;
+  });
+}
+
 export interface AddedUrl {
   url: string;
   /** The job name Pickarr asked the client to use, marker and all. */
