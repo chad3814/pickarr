@@ -39,21 +39,28 @@ export function GroupList({ groups, selectedId, onSelect }: Props) {
   }, [selectedId]);
 
   function step(by: number): void {
-    if (groups.length === 0) return;
     const current = groups.findIndex((group) => group.id === selectedId);
     // Nothing selected yet: ArrowDown takes the first row, ArrowUp does
     // nothing. Starting at the last row for ArrowUp would move the reader to
     // the far end of a paged list on one keypress.
     if (current === -1) {
-      if (by > 0) onSelect(groups[0]!.id);
+      if (by > 0) {
+        const first = groups[0];
+        if (first !== undefined) onSelect(first.id);
+      }
       return;
     }
     const next = current + by;
-    // Clamped rather than wrapped: a list that grows by paging has no
-    // meaningful end to wrap to, and arriving at the top from the bottom reads
-    // as a jump rather than a move.
-    if (next < 0 || next >= groups.length) return;
-    onSelect(groups[next]!.id);
+    // The bounds check is the index read, not a separate guard before it.
+    // `noUncheckedIndexedAccess` types `groups[next]` as possibly undefined, so
+    // handling that *is* the clamp — and removing it is a compile error rather
+    // than a `TypeError` thrown inside a keydown handler, which is what a
+    // non-null assertion here would have hidden. Clamped rather than wrapped:
+    // a list that grows by paging has no meaningful end to wrap to, and
+    // arriving at the top from the bottom reads as a jump rather than a move.
+    const target = groups[next];
+    if (target === undefined) return;
+    onSelect(target.id);
   }
 
   const tabStopId = selectedId ?? groups[0]?.id ?? null;
