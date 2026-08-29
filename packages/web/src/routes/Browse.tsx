@@ -254,7 +254,7 @@ export function Browse() {
   }, [selectedId, loading, selected]);
 
   return (
-    <section>
+    <section data-browse-view={view}>
       <h1>Browse</h1>
       {/*
         The same control Picks and Downloads render, but not the same job: this
