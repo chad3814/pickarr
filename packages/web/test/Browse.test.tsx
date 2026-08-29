@@ -945,6 +945,14 @@ test('the selection clears when a term filters the selected group out', async ()
 
   await waitFor(() => assert.ok(!document.querySelector('article.media-card')));
   assert.ok(screen.getByText(/select a group/i), 'the pane returned to its empty state');
+
+  // The pane empties either way, because `selected` re-derives from `groups`.
+  // What the clearing effect protects is the list: `GroupList`'s roving
+  // `tabIndex` keys the tab stop off `selectedId ?? groups[0]?.id`, so an id
+  // left pointing at a filtered-out group matches no row, every row gets
+  // `tabIndex={-1}`, and the list becomes unreachable by keyboard.
+  const stops = screen.getAllByRole('option').filter((row) => row.getAttribute('tabindex') === '0');
+  assert.equal(stops.length, 1, 'the list keeps exactly one tab stop');
 });
 
 test('the chosen view survives a remount', async () => {
