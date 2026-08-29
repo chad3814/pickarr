@@ -968,6 +968,43 @@ test('the selection clears when a term filters the selected group out', async ()
   assert.equal(stops.length, 1, 'the list keeps exactly one tab stop');
 });
 
+test('a selection does not resurrect once a term matching nothing is cleared', async () => {
+  // A narrowed page (the test above) still leaves `groups` non-empty, so its
+  // pane-is-empty check is meaningful on its own. A term matching *nothing*
+  // is a different case, and a weaker one to assert on directly: `groups`
+  // becomes `[]`, and `selected` re-derives to `null` from an empty `groups`
+  // regardless of whether `selectedId` was ever cleared — so the pane looks
+  // identical, empty, whether or not the fix in `Browse.tsx` actually ran.
+  // The only place a survived `selectedId` becomes visible is on the way
+  // back: if it was never cleared, repopulating `groups` hands the pane a
+  // group matching that id again, and it reappears without the reader
+  // re-selecting anything — exactly what spec §4 forbids.
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  fireEvent.click(screen.getAllByRole('option')[1]!);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta' }));
+
+  // A term whose page is empty, not merely narrowed. Waited for by row count
+  // rather than the pane, which (as above) would already read empty before
+  // this fetch even lands.
+  serve(null, { firstPage: [] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: 'nothing' } });
+  await waitFor(() => assert.equal(screen.queryAllByRole('option').length, 0));
+
+  // Clear the term. Both groups return, Beta included. Waited for by row
+  // count, not by finding "Beta" — a resurrected selection would put that
+  // text in both the row and the pane's heading, and `getByText` throwing on
+  // an ambiguous match is not the failure this test is about.
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: '' } });
+
+  await waitFor(() => assert.equal(screen.queryAllByRole('option').length, 2));
+  assert.ok(!document.querySelector('article.media-card'), 'a returning group is not a resurrected selection');
+  assert.ok(screen.getByText(/select a group/i), 'the pane stayed empty rather than repopulating on its own');
+});
+
 test('the chosen view survives a remount', async () => {
   serve(null);
   const first = render(<Browse />);
