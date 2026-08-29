@@ -3,7 +3,8 @@ import type { GroupView, ManualField } from '../api/client.ts';
 import type { GroupImage } from '../api/groupImages.ts';
 import { groupAnchor } from '../api/anchors.ts';
 import { groupImages, slotImage } from '../api/groupImages.ts';
-import { formatDuration } from '../api/format.ts';
+import { formatDuration, text } from '../api/format.ts';
+import { groupTitle } from '../api/groupTitle.ts';
 import { useIdentityPreview } from '../api/useIdentityPreview.ts';
 import { ImageModal } from './ImageModal.tsx';
 import { ManualForm, seed } from './ManualForm.tsx';
@@ -76,25 +77,6 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 }
 
 /**
- * A string with something in it, or `null` — every string this card renders can
- * arrive as `''` rather than as an absent value, and `??` accepts `''`.
- * `maybeStr` in `db/row.ts` folds only `NULL` and `undefined` into `null`, so an
- * empty column reaches the view as an empty string and nothing upstream
- * normalises it. Three of those would show. An empty provider title renders an
- * empty `<h2>`, a card with no heading and nothing on it naming the group. An
- * empty context part renders a span that `card.css`'s sibling separator then
- * decorates, so the line reads ` · 2023-04-15`. And an empty synopsis passes
- * `!== null` and renders an empty `<p class="metadata-synopsis">`, whose
- * `margin: var(--space-2) 0 0` is the same 8px of blank space the `cast`
- * variable below returns `null` to avoid. `commit.ts`'s `isText` guards
- * the same class of value for `display`'s own optional strings, though only
- * against `undefined` — there is no shared helper to reuse here.
- */
-function text(value: string | null | undefined): string | null {
-  return value === undefined || value === null || value === '' ? null : value;
-}
-
-/**
  * One card renders every media type. Plugins supply display fields, never UI.
  */
 export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, onRequeryMetadata }: Props) {
@@ -156,9 +138,9 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
   // one is usually performer-name-led. All three are inside the `'confirmed'`
   // member of the union, so they narrow together.
   const answered = metadata.state === 'confirmed' ? metadata : null;
-  // `text`, not `??`: an empty provider title is a title the card cannot show,
-  // so it falls back the same way a null one does.
-  const title = text(answered?.title) ?? display.title;
+  // The same rule the master list uses, so a group is called one thing
+  // wherever it is shown. See `groupTitle`'s doc for why it is not derived here.
+  const title = groupTitle(group);
   const runtime = answered?.durationSeconds ?? null;
   // The date has no fallback on purpose: `display.date` is the parse of a
   // release name, and this phase stops presenting that as the scene's date.

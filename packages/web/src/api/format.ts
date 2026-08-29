@@ -23,6 +23,27 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * A string with something in it, or `null`.
+ *
+ * `maybeStr` in `db/row.ts` folds only `NULL` and `undefined` into `null`, so an
+ * empty column reaches the view as an empty string and nothing upstream
+ * normalises it. Every consumer that would render such a value has to decide
+ * what an empty one means, and for all of them so far the answer is "the same
+ * as absent": an empty provider title renders a heading with no text, an empty
+ * context part renders a span the sibling separator then decorates so the line
+ * reads ` · 2023-04-15`, and an empty synopsis renders a paragraph whose margin
+ * is blank space with nothing in it.
+ *
+ * Here rather than private to a component because `groupTitle` needs the same
+ * question answered the same way. `commit.ts`'s `isText` guards the same class
+ * of value for `display`'s own optional strings, but only against `undefined`,
+ * so it is not this.
+ */
+export function text(value: string | null | undefined): string | null {
+  return value === undefined || value === null || value === '' ? null : value;
+}
+
+/**
  * A running time in seconds, as `1h 30m` (or `30m` under an hour) — the
  * provider stores `duration_s`, but nobody reading a card wants to do
  * seconds-to-minutes arithmetic in their head. Rounded to the nearest minute
