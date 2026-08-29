@@ -17,6 +17,23 @@ import { expect, test } from '../src/harness.ts';
 const FIRST = 'Tushy.23.05.02.Emma.Stone.XXX.1080p.MP4-KTR';
 const SECOND = 'Blacked.23.06.11.Jane.Doe.XXX.720p.MP4-KTR';
 
+/**
+ * Distinct scene names the real parser accepts, one group each — the same
+ * generator `pagination.spec.ts` uses, needed here for the same reason: a
+ * list long enough to actually scroll the page. Sixty rows comfortably
+ * outruns any viewport this suite runs at (`playwright.config.ts` uses
+ * `devices['Desktop Chrome']`'s default), so the list's own content height,
+ * not the detail pane's, is what makes `.browse-split` — and therefore the
+ * document — taller than the window.
+ */
+function sceneTitles(site: string, count: number): string[] {
+  return Array.from(
+    { length: count },
+    (_unused, index) =>
+      `${site}.23.07.${String(index + 1).padStart(2, '0')}.${site}.Scene.${String(index + 1)}.XXX.1080p.MP4-KTR`,
+  );
+}
+
 test('the split view lists groups beside a sticky detail pane, widens the shell, and survives a reload', async ({
   page,
   harness,
@@ -97,4 +114,65 @@ test('the split view lists groups beside a sticky detail pane, widens the shell,
   const splitBox = await listViewApp.boundingBox();
   if (splitBox === null) throw new Error('no .app box in split view');
   expect(splitBox.width).toBeGreaterThan(listBox.width + 100);
+});
+
+test('the detail pane stays put while the list scrolls past it, and only because it is sticky', async ({
+  page,
+  harness,
+}) => {
+  // Sixty rows across two pages — `usePagedList`'s default page size is 30
+  // (`pagination.spec.ts`) — so the list is tall regardless of how it loads,
+  // and long past what one screen can show.
+  harness.ingest(sceneTitles('Riverside', 60));
+
+  await page.goto('/');
+  await page.getByRole('radio', { name: 'Split' }).click();
+  await page.getByRole('option').first().click();
+  await expect(page.locator('article.media-card')).toHaveCount(1);
+
+  const list = page.locator('.group-list');
+  const pane = page.locator('.browse-detail');
+
+  /**
+   * `window.scrollTo` to `y` and wait for it to actually land there —
+   * `window.scrollTo` rather than a wheel gesture, for the same determinism
+   * `pagination.spec.ts`'s `scrollToEnd` wants: one clean jump rather than a
+   * tuned number of wheel ticks.
+   */
+  async function scrollTo(y: number): Promise<void> {
+    await page.evaluate((target) => window.scrollTo(0, target), y);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(y - 5);
+  }
+
+  // Scrolled just past the point where the pane's own natural (unstuck)
+  // position — `123px` down, below `<h1>` and the controls row — would rise
+  // above its `top: var(--space-4)` (16px) offset. Comparing this box against
+  // one further down is the actual test; comparing it against the unscrolled
+  // page would just be measuring the one-time settle into "stuck", which
+  // happens once regardless of whether `position: sticky` is even there —
+  // an unstuck pane also starts 123px down and wanders as the page scrolls,
+  // so that transition alone proves nothing.
+  await scrollTo(150);
+  const listAtA = await list.boundingBox();
+  const paneAtA = await pane.boundingBox();
+  if (listAtA === null || paneAtA === null) throw new Error('no box for the list or the pane at the first scroll');
+
+  // Scrolled further still, comfortably inside `.browse-split` — the
+  // sixty-row list, not the one selected card, is what makes this box far
+  // taller than the distance scrolled between the two checkpoints.
+  await scrollTo(400);
+  const listAtB = await list.boundingBox();
+  const paneAtB = await pane.boundingBox();
+  if (listAtB === null || paneAtB === null) throw new Error('no box for the list or the pane at the second scroll');
+
+  // The premise: the list actually moved a meaningful amount between the two
+  // checkpoints. Without this, a pane that read the same at both would also
+  // pass on a page that never scrolled between them at all.
+  expect(listAtA.y - listAtB.y).toBeGreaterThan(200);
+
+  // The point: once stuck, the pane does not move again as the list keeps
+  // scrolling past it — `position: sticky` holding it at `top: var(--space-4)`
+  // for as long as `.browse-split` is still on screen, which at this distance
+  // it is.
+  expect(Math.abs(paneAtB.y - paneAtA.y)).toBeLessThan(2);
 });

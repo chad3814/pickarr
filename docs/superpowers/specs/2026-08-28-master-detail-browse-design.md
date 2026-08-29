@@ -153,9 +153,17 @@ column the card renders in today.
 
 **Neither pane gets its own scrollbar, and that is a constraint rather than a preference.**
 `usePagedList` observes its sentinel with an `IntersectionObserver` whose root is the viewport
-(`ROOT_MARGIN = '200px'`, no `root` option). Give the master list its own scroll container and
-the sentinel stops entering the viewport as that container scrolls, so paging silently stops —
-the observer would need its root rethreaded to the container, which §2 puts out of scope.
+(`ROOT_MARGIN = '200px'`, no `root` option), and `Browse` renders that sentinel after the whole
+split row, outside the master list entirely. That placement is why giving the master list its
+own scroll container does not fail the way it first sounds like it would. Confirmed in a real
+browser during task 4: `overflow-y: auto` on the list alone does nothing at all, because the
+list's height already equals its content and no scroll container forms. Pair it with a height
+bound — the realistic way anyone reaches for this — and the failure inverts instead of going
+quiet: once the list stops growing taller as rows arrive, the split row's height (and so the
+document's) stops tracking how many groups have loaded, the sentinel sits within the viewport
+almost immediately, and `usePagedList`'s re-arm effect cascades through every remaining page in
+one burst at mount, before the reader scrolls at all. Either way the observer would need its
+root rethreaded to the container to behave, which §2 puts out of scope.
 
 So the page scrolls, as it does today, and **the detail pane is `position: sticky`** so it stays
 in view while the list scrolls past it. That keeps the observer untouched and avoids the wart
