@@ -141,24 +141,31 @@ second consumer exists — not in anticipation of one.
 space lands in `<main>`, which is what the two panes divide.
 
 Phase 1 pinned 60rem and phase 2 kept it; this phase is where changing it was always going to
-happen. Phase 2's own measured note puts `<main>`'s content box at 809.3px at this cap — its
-777.3px no-slot card column plus the card's own 32px of padding — so nav and its gap take
-~150.7px of `.app`'s 960px content width, not nothing: subtracting the list's 22rem and its gap
-from `.app`'s own width instead of `<main>`'s overstates what the detail pane would get by that
-much. Splitting inside 60rem would leave the detail pane around 433px, and after the card's own
-padding, its 98px artwork frame and its gap, a with-slot text column around 287px — well past
-the point where phase 2's measured note says the synopsis's `68ch` cap even applies. A column
-that narrow isn't at the cap's threshold, it is simply too narrow on its own, in the regime the
-`card-layout` guard does not cover because that guard measures the widest card shape. Widening
-avoids walking into it.
+happen. Phase 2's own measured note puts `<main>`'s content box at 811.3px at this cap — its
+777.3px no-slot card column plus the card's own 32px of padding *and* its 1px border on each
+side, which that same note flags: nothing in `card.css`'s directory resets `box-sizing`, so a
+border counts. Nav and its gap take the other ~148.7px of `.app`'s 960px content width, not
+nothing: subtracting the list's 22rem and its gap from `.app`'s own width instead of `<main>`'s
+overstates what the detail pane would get by that much. Splitting inside 60rem would leave the
+detail pane around 435px, and after the card's own padding and border, its 98px artwork frame
+and its gap, a with-slot text column around 287px — well past the point where phase 2's measured
+note says the synopsis's `68ch` cap even applies. A column that narrow isn't at the cap's
+threshold, it is simply too narrow on its own, in the regime the `card-layout` guard does not
+cover because that guard measures the widest card shape. Widening avoids walking into it.
 
 The list pane takes `22rem` and the detail pane the rest. `.group-row-title` truncates with an
 ellipsis rather than wrapping (§3), so 22rem's job is not to hold a title over two lines — it is
 wide enough that an ordinary title reads in full before that ellipsis engages, with room left
 over for the meta and the upgrade marker beside it. The detail pane runs wider than the 60rem
-column the card renders in today only once the window is wider than roughly 1334px; narrower
-than that it runs somewhat narrower than that column (roughly 720px at a 1280px window), which
-task 4's step 3 confirmed by eye still reads well.
+column the card renders in today only once the window is wider than 1334px: the pane's width is
+the viewport less `.app`'s 32px of padding, less nav and its gap (~148.7px), less the list and
+its own gap (376px) — `V − 556.7` — and that reaches the 777.3px no-slot column at `V = 1334`.
+Narrower than that, a direct measurement (`browse-split.spec.ts`'s own `boundingBox()` calls
+during development) puts the pane at 723.27px in this suite's 1280px-viewport Chromium — not a
+±15px, OS-scrollbar-dependent estimate, because `window.innerWidth` equals `document
+.documentElement.clientWidth` there: this environment reserves no layout width for a scrollbar.
+A narrower pane than today's column is fine: task 4's step 3 confirmed by eye it still reads
+well.
 
 **Neither pane gets its own scrollbar, and that is a constraint rather than a preference.**
 `usePagedList` observes its sentinel with an `IntersectionObserver` whose root is the viewport
@@ -176,12 +183,24 @@ tracking how many groups have loaded, the sentinel sits within the viewport almo
 and `usePagedList`'s re-arm effect cascades through every remaining page in one burst at mount,
 before the reader scrolls at all.
 
-A working fix needs both changes at once, not either alone — the sentinel moved inside the list
-*and* the observer's root rethreaded to it. Rethreading the root without moving the sentinel is
-strictly worse than the bug: an observer rooted at the list would then watch a target it can
-never see intersect, since the sentinel still renders outside it, and paging would stop entirely
-rather than merely misbehave. Neither change is in scope; §2 puts the observer's root
-rethreading out of scope, and moving the sentinel was never proposed at all.
+The two possible fixes are not symmetric. Moving the sentinel inside the list, on its own,
+actually works: with the implicit viewport root, the browser's intersection computation already
+accounts for every overflow-clipping ancestor between the target and that root, which is exactly
+why a sentinel behind `.group-list`'s own `max-height` + `overflow-y: auto` would stop reporting
+itself as intersecting once it scrolled out of the list's own visible area, and start again
+exactly when the reader scrolls it back into view — correct, incremental paging, no root
+rethreading needed. The only casualty is `ROOT_MARGIN`'s 200px lookahead, which `usePagedList`'s
+own comment calls a prefetch convenience rather than a correctness condition: a margin grows the
+root's own rect, and does nothing to a tighter ancestor clip. Rethreading the root *without*
+moving the sentinel is the one combination that is strictly worse than the bug — the sentinel
+still renders outside `.group-list` entirely, so an observer rooted at the list would watch a
+target it can never see intersect, and paging would stop rather than merely lose its lookahead.
+
+Moving the sentinel is not a change nobody proposed: §1.1, twenty lines above, already describes
+"the split view renders it at the foot of the master list", which is exactly this placement. The
+implementation has not made that move — `Browse` renders the sentinel after the whole split row,
+not inside `.group-list` — and doing so is outside this correction's scope; only the mechanism
+above was wrong, not the absence of the change.
 
 So the page scrolls, as it does today, and **the detail pane is `position: sticky`** so it stays
 in view while the list scrolls past it. That keeps the observer untouched and avoids the wart

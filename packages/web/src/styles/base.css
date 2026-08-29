@@ -16,12 +16,14 @@ body {
 .app { display: flex; gap: var(--space-5); max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
 /* Split view divides `<main>` between two panes, and 60rem is not enough for
    both. `card.css`'s own measured note puts `<main>`'s content box at
-   809.3px at this cap — its 777.3px no-slot card column plus the card's own
-   32px of padding — so nav and its gap take ~150.7px of `.app`'s 960px
-   content width, not nothing: subtracting the list's 22rem and its gap from
-   `.app`'s own width instead of `<main>`'s overstates what the detail pane
-   would get by that much. Split inside 60rem and the pane lands around
-   433px, and after the card's own padding, its 98px artwork frame and its
+   811.3px at this cap — its 777.3px no-slot card column plus the card's own
+   32px of padding *and* its 1px border on each side, which `card.css`
+   itself flags: nothing in this directory resets `box-sizing`, so a border
+   counts. Nav and its gap take the other ~148.7px of `.app`'s 960px content
+   width, not nothing: subtracting the list's 22rem and its gap from `.app`'s
+   own width instead of `<main>`'s overstates what the detail pane would get
+   by that much. Split inside 60rem and the pane lands around 435px, and
+   after the card's own padding and border, its 98px artwork frame and its
    gap, a with-slot text column around 287px — well past the point where
    `card.css`'s `68ch` cap even applies. A column that narrow isn't at the
    cap's threshold, it is simply too narrow on its own, in the regime phase
