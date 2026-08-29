@@ -158,6 +158,15 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
     ['', { groups: options.firstPage ?? [group(1, 'Alpha')], nextCursor: '999:1' }],
     ['999:1', { groups: options.secondPage ?? [group(2, 'Beta')], nextCursor: null }],
   ]);
+  // Indexed by id so `/api/metadata` can echo back whatever a page already
+  // carried. A blanket `'none'` was fine while every served group's own
+  // metadata was `'absent'` — the two read identically on a card, since
+  // neither has a title to disagree with the parsed one. A group built with
+  // a `'confirmed'` answer breaks that: a real server's live endpoint agrees
+  // with its own browse listing, and a stub that does not would settle the
+  // poll on an answer the page it just served never gave.
+  const servedGroups = new Map<number, GroupView>();
+  for (const page of pages.values()) for (const served of page.groups) servedGroups.set(served.id, served);
   let patches = 0;
 
   const picked: PickResponse = {
@@ -190,12 +199,18 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       } satisfies MetadataRequestResponse;
     }
     if (url.pathname === '/api/metadata') {
-      // Every id answers `'none'` — settled, so `useGroupMetadata` never polls
-      // again for it. These tests are about browse and edit flows, not the
-      // metadata panel, so nothing here needs a `'confirmed'` answer.
+      // Settled either way, so `useGroupMetadata` never polls again for it:
+      // `'none'` for a group whose own browse metadata was never
+      // `'confirmed'` (every group these tests build, except where a test
+      // deliberately sets one), and that group's own answer otherwise — see
+      // `servedGroups` above for why echoing it, rather than a blanket
+      // `'none'`, is what a real live endpoint does too.
       const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
       const response: Record<number, MetadataView> = {};
-      for (const id of ids) response[Number(id)] = { state: 'none' };
+      for (const id of ids) {
+        const served = servedGroups.get(Number(id));
+        response[Number(id)] = served?.metadata.state === 'confirmed' ? served.metadata : { state: 'none' };
+      }
       return response;
     }
     if (url.pathname.endsWith('/identity-plan')) {
@@ -836,4 +851,110 @@ test('typing a term sends it to the server and starts the list over from page on
       'GET /api/browse?q=coal',
     ]),
   );
+});
+
+/**
+ * The view preference outlives a `cleanup()`, so a test that switches views
+ * would otherwise change the view every later test starts in. Cleared here
+ * rather than in each test, so a test added later cannot forget.
+ */
+afterEach(() => {
+  localStorage.removeItem('pickarr.browseView');
+});
+
+/** A confirmed answer whose title disagrees with the parsed one, as most real ones do. */
+function answered(title: string): MetadataView {
+  return {
+    state: 'confirmed',
+    title,
+    releaseDate: null,
+    durationSeconds: null,
+    synopsis: null,
+    hasPoster: false,
+    hasBackground: false,
+  };
+}
+
+test('a fresh browser gets the card list', () => {
+  // Spec §7: nobody's Browse changes shape without them asking.
+  serve(null);
+  render(<Browse />);
+  // #40: never `assert.equal(screen.queryBy*(...), null)`.
+  assert.ok(!screen.queryByRole('listbox', { name: 'Groups' }));
+});
+
+test('choosing the split view shows the list, and no card until a row is picked', async () => {
+  serve(null);
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  assert.ok(screen.getByRole('listbox', { name: 'Groups' }));
+  assert.ok(!document.querySelector('article.media-card'), 'nothing selected, so no card');
+  assert.ok(screen.getByText(/select a group/i), 'the pane says what to do instead');
+});
+
+test('clicking a row fills the pane with that group', async () => {
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  fireEvent.click(screen.getAllByRole('option')[1]!);
+
+  // The pane is a `MediaCard`, so the group's title is its heading.
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta' }));
+  assert.equal(document.querySelectorAll('article.media-card').length, 1, 'one card, not one per group');
+});
+
+test('the row and the pane show the same title, not the row the parsed one', async () => {
+  // The whole reason `groupTitle` is a shared function: a provider title that
+  // disagrees with the parsed one must reach both surfaces.
+  const alpha = group(1, 'Alpha');
+  alpha.metadata = answered('Provider Alpha');
+  serve(null, { firstPage: [alpha] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Provider Alpha')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  const row = screen.getByRole('option');
+  assert.match(row.textContent ?? '', /Provider Alpha/);
+  assert.ok(!(row.textContent ?? '').includes('Alpha,'), 'the row does not also carry the parsed title');
+
+  fireEvent.click(row);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Provider Alpha' }));
+});
+
+test('the selection clears when a term filters the selected group out', async () => {
+  // Spec §4: an id pointing at nothing leaves a pane showing a group the list
+  // beside it denies. `serve` answers every `?q=` with the same two pages, so
+  // the term is applied by replacing the page — which is what a real
+  // server-side search does, and what rebuilds `items`.
+  serve(null, { firstPage: [group(1, 'Alpha'), group(2, 'Beta')] });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  fireEvent.click(screen.getAllByRole('option')[1]!);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta' }));
+
+  // A term whose page omits Beta. Reinstall the stub so the next fetch answers
+  // with one group, then change the term, which rebuilds the list.
+  serve(null, { firstPage: [group(1, 'Alpha')] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: 'alpha' } });
+
+  await waitFor(() => assert.ok(!document.querySelector('article.media-card')));
+  assert.ok(screen.getByText(/select a group/i), 'the pane returned to its empty state');
+});
+
+test('the chosen view survives a remount', async () => {
+  serve(null);
+  const first = render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  first.unmount();
+
+  serve(null);
+  render(<Browse />);
+  assert.ok(screen.getByRole('listbox', { name: 'Groups' }), 'the preference was read back');
 });

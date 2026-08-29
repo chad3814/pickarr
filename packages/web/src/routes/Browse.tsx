@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, RequestError, type ManualFieldsResponse } from '../api/client.ts';
+import { api, RequestError, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
 import { requeryOneGroup } from '../api/requeryMetadata.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { usePagedList } from '../api/usePagedList.ts';
 import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
+import { readView, writeView, type BrowseView } from '../browseView.ts';
+import { GroupList } from '../components/GroupList.tsx';
 import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
 import { MediaCard } from '../components/MediaCard.tsx';
 import { SearchBox } from '../components/SearchBox.tsx';
+import { ViewToggle } from '../components/ViewToggle.tsx';
 
 export function Browse() {
   const [fields, setFields] = useState<ManualFieldsResponse>({});
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<BrowseView>(readView);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   // Rebuilt whenever the term changes, which is `usePagedList`'s signal to start
   // the list over from the first page.
@@ -53,6 +58,39 @@ export function Browse() {
    */
   function requeryMetadata(groupId: number): Promise<void> {
     return requeryOneGroup(groupId, rearmMetadata);
+  }
+
+  function chooseView(next: BrowseView): void {
+    writeView(next);
+    setView(next);
+  }
+
+  /**
+   * One group's card, however it is being shown. Both views render this rather
+   * than each composing the card's seven props, because two copies of a prop
+   * list are two things to keep in step — and the pane and the list are meant
+   * to show the same card, not similar ones.
+   */
+  function cardFor(group: GroupView) {
+    return (
+      <MediaCard
+        key={group.id}
+        // The live answer once the poll has one, falling back to what
+        // browse already carried (typically `absent`, since nothing has
+        // asked yet): the fallback is what lets the very first paint show
+        // whatever the last page load already knew, rather than every card
+        // flashing "no metadata" until the hook's first request lands.
+        group={{ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata }}
+        onPick={(releaseId) => void pick(group.id, releaseId)}
+        // A plugin with no manual hooks is *missing* from this map, and a
+        // group can outlive the package that made it; either way the card
+        // finds no schema and offers no editing.
+        fields={fields[group.plugin]}
+        onEditGroup={(values) => identityChange.begin(group.id, values)}
+        onEditRelease={(releaseId, values) => editRelease(group.id, releaseId, values)}
+        onRequeryMetadata={requeryMetadata}
+      />
+    );
   }
 
   // The schemas are configuration, one map for every card on every page, so
@@ -194,6 +232,21 @@ export function Browse() {
     }
   }
 
+  // The pane derives its group from `groups` rather than holding a copy, so a
+  // metadata answer, a pick or an edit reaches it the same way it reaches a
+  // card: the route merges the update into `groups` and this re-derives.
+  const selected = selectedId === null ? null : groups.find((group) => group.id === selectedId) ?? null;
+
+  // A term that filters the selected group out — or a new term, which rebuilds
+  // the list from page one — leaves an id pointing at nothing. Clearing is the
+  // honest outcome: the alternative is a pane showing a group the list beside
+  // it says is not there. Guarded on `groups.length` so the gap between a term
+  // changing and its first page arriving does not clear a still-valid
+  // selection.
+  useEffect(() => {
+    if (selectedId !== null && groups.length > 0 && selected === null) setSelectedId(null);
+  }, [selectedId, groups, selected]);
+
   return (
     <section>
       <h1>Browse</h1>
@@ -205,7 +258,10 @@ export function Browse() {
         callback above, and `usePagedList`'s `generation` for how a page still in
         flight for the previous term is dropped rather than appended.
       */}
-      <SearchBox label="Search groups" value={search} onChange={setSearch} />
+      <div className="browse-controls">
+        <SearchBox label="Search groups" value={search} onChange={setSearch} />
+        <ViewToggle view={view} onChange={chooseView} />
+      </div>
       {notice !== null && <p className="notice">{notice}</p>}
       {error !== null && <p className="error">{error}</p>}
       {identityChange.plan !== null && (
@@ -218,25 +274,20 @@ export function Browse() {
         />
       )}
 
-      {groups.map((group) => (
-        <MediaCard
-          key={group.id}
-          // The live answer once the poll has one, falling back to what
-          // browse already carried (typically `absent`, since nothing has
-          // asked yet): the fallback is what lets the very first paint show
-          // whatever the last page load already knew, rather than every card
-          // flashing "no metadata" until the hook's first request lands.
-          group={{ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata }}
-          onPick={(releaseId) => void pick(group.id, releaseId)}
-          // A plugin with no manual hooks is *missing* from this map, and a
-          // group can outlive the package that made it; either way the card
-          // finds no schema and offers no editing.
-          fields={fields[group.plugin]}
-          onEditGroup={(values) => identityChange.begin(group.id, values)}
-          onEditRelease={(releaseId, values) => editRelease(group.id, releaseId, values)}
-          onRequeryMetadata={requeryMetadata}
-        />
-      ))}
+      {view === 'list' ? (
+        groups.map((group) => cardFor(group))
+      ) : (
+        <div className="browse-split">
+          <GroupList groups={groups} selectedId={selectedId} onSelect={setSelectedId} />
+          <div className="browse-detail">
+            {selected === null ? (
+              <p className="browse-detail-empty">Select a group to see its releases.</p>
+            ) : (
+              cardFor(selected)
+            )}
+          </div>
+        </div>
+      )}
 
       {!done && (
         <>
