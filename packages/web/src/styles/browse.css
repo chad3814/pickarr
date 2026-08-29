@@ -15,13 +15,12 @@
    1334px: the pane's width is the viewport less `.app`'s 32px of padding,
    less nav and its gap (~148.7px), less the list and its own gap (376px) —
    `V − 556.7` — and that reaches `card.css`'s own 777.3px no-slot column at
-   `V = 1334`. Narrower than that, a direct measurement (`browse-split
-   .spec.ts`'s own `boundingBox()` calls during development) puts the pane
-   at 723.27px in this suite's 1280px-viewport Chromium — not a ±15px,
-   OS-scrollbar-dependent estimate, because `window.innerWidth` equals
-   `document.documentElement.clientWidth` there: this environment reserves
-   no layout width for a scrollbar. A narrower pane than today's column is
-   fine: task 4's step 3 confirmed by eye it still reads well. */
+   `V = 1334`. Narrower than that, measured in this suite's Chromium at a
+   1280px viewport: the pane runs 723.27px, not a ±15px estimate that would
+   depend on the OS's scrollbar — `window.innerWidth` equals `document
+   .documentElement.clientWidth` there, so this environment reserves no
+   layout width for one. A narrower pane than today's column is fine: task 4's
+   step 3 confirmed by eye it still reads well. */
 .browse-split { display: flex; align-items: flex-start; gap: var(--space-5); }
 .group-list { flex: none; width: 22rem; margin: 0; padding: 0; list-style: none; }
 

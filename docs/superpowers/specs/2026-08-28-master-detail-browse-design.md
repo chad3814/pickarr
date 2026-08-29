@@ -39,8 +39,9 @@ out not to apply, and saying so is most of what keeps this phase small:
   standard this app currently holds itself to, and adding it for selection alone would be the
   only URL state in the application.
 - **No rethink of infinite scroll.** `usePagedList` already returns `sentinelRef`; the split
-  view renders it at the foot of the master list instead of the card list. Nothing about
-  paging changes.
+  view renders it at the foot of the master list instead of the card list — though the shipped
+  code renders it after the whole split row rather than after the list alone (§6). Nothing
+  about paging changes.
 - **No shared abstraction for Picks.** Picks has the same too-long-list problem and will get
   its own treatment, with ideas that are not this design's to guess at. Building a component
   parameterised over a Picks that has not been designed would be inventing an interface for
@@ -160,14 +161,14 @@ over for the meta and the upgrade marker beside it. The detail pane runs wider t
 column the card renders in today only once the window is wider than 1334px: the pane's width is
 the viewport less `.app`'s 32px of padding, less nav and its gap (~148.7px), less the list and
 its own gap (376px) — `V − 556.7` — and that reaches the 777.3px no-slot column at `V = 1334`.
-Narrower than that, a direct measurement (`browse-split.spec.ts`'s own `boundingBox()` calls
-during development) puts the pane at 723.27px in this suite's 1280px-viewport Chromium — not a
-±15px, OS-scrollbar-dependent estimate, because `window.innerWidth` equals `document
-.documentElement.clientWidth` there: this environment reserves no layout width for a scrollbar.
-A narrower pane than today's column is fine: task 4's step 3 confirmed by eye it still reads
-well.
+Narrower than that, measured in this suite's Chromium at a 1280px viewport: the pane runs
+723.27px, not a ±15px estimate that would depend on the OS's scrollbar — `window.innerWidth`
+equals `document.documentElement.clientWidth` there, so this environment reserves no layout
+width for one. A narrower pane than today's column is fine: task 4's step 3 confirmed by eye it
+still reads well.
 
-**Neither pane gets its own scrollbar, and that is a constraint rather than a preference.**
+**Neither pane gets its own scrollbar in the shipped code, and that is a constraint rather than
+a preference given where `Browse` renders the sentinel today.**
 `usePagedList` observes its sentinel with an `IntersectionObserver` whose root is the viewport
 (`ROOT_MARGIN = '200px'`, no `root` option), and `Browse` renders that sentinel after the whole
 split row, outside the master list entirely. That placement is why giving the master list its
@@ -189,18 +190,18 @@ accounts for every overflow-clipping ancestor between the target and that root, 
 why a sentinel behind `.group-list`'s own `max-height` + `overflow-y: auto` would stop reporting
 itself as intersecting once it scrolled out of the list's own visible area, and start again
 exactly when the reader scrolls it back into view — correct, incremental paging, no root
-rethreading needed. The only casualty is `ROOT_MARGIN`'s 200px lookahead, which `usePagedList`'s
-own comment calls a prefetch convenience rather than a correctness condition: a margin grows the
-root's own rect, and does nothing to a tighter ancestor clip. Rethreading the root *without*
-moving the sentinel is the one combination that is strictly worse than the bug — the sentinel
-still renders outside `.group-list` entirely, so an observer rooted at the list would watch a
-target it can never see intersect, and paging would stop rather than merely lose its lookahead.
+rethreading needed. The only casualty is `ROOT_MARGIN`'s 200px lookahead: a margin grows the
+root's own rect and does nothing to a tighter ancestor clip, so losing it costs prefetch time,
+not correctness. Rethreading the root *without* moving the sentinel is the one combination that
+is strictly worse than the bug — the sentinel still renders outside `.group-list` entirely, so
+an observer rooted at the list would watch a target it can never see intersect, and paging would
+stop rather than merely lose its lookahead.
 
-Moving the sentinel is not a change nobody proposed: §1.1, twenty lines above, already describes
-"the split view renders it at the foot of the master list", which is exactly this placement. The
-implementation has not made that move — `Browse` renders the sentinel after the whole split row,
-not inside `.group-list` — and doing so is outside this correction's scope; only the mechanism
-above was wrong, not the absence of the change.
+Moving the sentinel is not a change nobody proposed: §1.1 already describes "the split view
+renders it at the foot of the master list", which is exactly this placement. The implementation
+has not made that move — `Browse` renders the sentinel after the whole split row, not inside
+`.group-list` — and doing so is outside this correction's scope; only the mechanism above was
+wrong, not the absence of the change.
 
 So the page scrolls, as it does today, and **the detail pane is `position: sticky`** so it stays
 in view while the list scrolls past it. That keeps the observer untouched and avoids the wart

@@ -17,7 +17,7 @@ import { expect, sceneTitles, test } from '../src/harness.ts';
 const FIRST = 'Tushy.23.05.02.Emma.Stone.XXX.1080p.MP4-KTR';
 const SECOND = 'Blacked.23.06.11.Jane.Doe.XXX.720p.MP4-KTR';
 
-test("the list's selection, keyboard movement, and generated separator all drive the detail pane, list and split stay mutually exclusive, the split view survives a reload, and the shell widens", async ({
+test("the list's selection and keyboard movement drive the detail pane, its generated separator holds, list and split stay mutually exclusive, the split view survives a reload, and the shell widens", async ({
   page,
   harness,
 }) => {
