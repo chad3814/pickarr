@@ -90,8 +90,10 @@ ArrowUp and ArrowDown move the selection and scroll the newly selected row into 
 Home/End, no type-ahead — neither was asked for, and a listbox that grows by paging is a poor
 place to promise "End".
 
-`usePagedList`'s `sentinelRef` renders at the foot of the list, so scrolling the master list
-loads the next page exactly as scrolling the card list does.
+`usePagedList`'s `sentinelRef` still drives paging, though it does not sit inside the master
+list: in split view `Browse` renders it after the whole split row, and since neither pane gets
+its own scrollbar it is the page that scrolls (§6). Paging behaves as it does in the card list
+because both views scroll the document, not because the sentinel is a child of the list.
 
 ## 4. Selection
 
