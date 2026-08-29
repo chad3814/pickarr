@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, RequestError, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
 import { requeryOneGroup } from '../api/requeryMetadata.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
@@ -49,6 +49,33 @@ export function Browse() {
   );
 
   /**
+   * Every loaded group with the poll's answer folded in — the one list every
+   * surface on this screen reads from.
+   *
+   * Merged here rather than per card, and that is the whole point. `groupTitle`
+   * being one shared function only makes the master row and the detail pane
+   * agree if they are handed the same *value*, and for a while they were not:
+   * the card merged the live answer inline while `GroupList` got the raw list,
+   * so a provider title arriving by poll — or by Requery, which arrives no
+   * other way at all — moved the pane's heading and left the row's alone (spec
+   * §5). Two places to keep in step is how that happened, so there is now one.
+   *
+   * The live answer where the poll has one, falling back to what browse
+   * already carried (typically `absent`, since nothing has asked yet): the
+   * fallback is what lets the very first paint show whatever the last page
+   * load already knew, rather than every card flashing "no metadata" until the
+   * hook's first request lands.
+   *
+   * `useGroupMetadata` is still asked about `groups`, not this: the ids are
+   * the same either way, and depending on the merged list would make the hook's
+   * own output an input to the array it keys off.
+   */
+  const shown = useMemo(
+    () => groups.map((group) => ({ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata })),
+    [groups, liveMetadata],
+  );
+
+  /**
    * `MediaCard`'s Requery button, via `onRequeryMetadata`. This route (not the
    * card, and not the hook) is what holds both halves `requeryOneGroup` needs:
    * the server call, and the hook's own handle to tell it to watch the group
@@ -75,12 +102,9 @@ export function Browse() {
     return (
       <MediaCard
         key={group.id}
-        // The live answer once the poll has one, falling back to what
-        // browse already carried (typically `absent`, since nothing has
-        // asked yet): the fallback is what lets the very first paint show
-        // whatever the last page load already knew, rather than every card
-        // flashing "no metadata" until the hook's first request lands.
-        group={{ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata }}
+        // Already carrying the poll's answer: every caller passes a group out
+        // of `shown`.
+        group={group}
         onPick={(releaseId) => void pick(group.id, releaseId)}
         // A plugin with no manual hooks is *missing* from this map, and a
         // group can outlive the package that made it; either way the card
@@ -232,10 +256,10 @@ export function Browse() {
     }
   }
 
-  // The pane derives its group from `groups` rather than holding a copy, so a
+  // The pane derives its group from `shown` rather than holding a copy, so a
   // metadata answer, a pick or an edit reaches it the same way it reaches a
-  // card: the route merges the update into `groups` and this re-derives.
-  const selected = selectedId === null ? null : groups.find((group) => group.id === selectedId) ?? null;
+  // card: the route merges the update into the list and this re-derives.
+  const selected = selectedId === null ? null : shown.find((group) => group.id === selectedId) ?? null;
 
   // A term that filters the selected group out — or a new term, which rebuilds
   // the list from page one — leaves an id pointing at nothing. Clearing is the
@@ -281,10 +305,10 @@ export function Browse() {
       )}
 
       {view === 'list' ? (
-        groups.map((group) => cardFor(group))
+        shown.map((group) => cardFor(group))
       ) : (
         <div className="browse-split">
-          <GroupList groups={groups} selectedId={selectedId} onSelect={setSelectedId} />
+          <GroupList groups={shown} selectedId={selectedId} onSelect={setSelectedId} />
           <div className="browse-detail">
             {selected === null ? (
               <p className="browse-detail-empty">Select a group to see its releases.</p>

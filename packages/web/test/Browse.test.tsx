@@ -119,6 +119,18 @@ interface Options {
    * exercise the dialog, i.e. a merge.
    */
   identityPlan?: Partial<IdentityPlanView>;
+  /**
+   * What `GET /api/metadata` answers for these ids, overriding the echo below.
+   *
+   * The one shape the echo cannot express, and the ordinary production one:
+   * browse carries `absent` and the live endpoint answers `confirmed` a moment
+   * later. Echoing the page's own metadata keeps a *confirmed* page honest
+   * (see `servedGroups`), but it means every group a page serves as `absent`
+   * can only ever settle `'none'` — so no test could deliver a provider title
+   * through the poll alone, which is the only path `useGroupMetadata` exists
+   * for.
+   */
+  liveMetadata?: Record<number, MetadataView>;
 }
 
 /**
@@ -218,7 +230,9 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       const response: Record<number, MetadataView> = {};
       for (const id of ids) {
         const served = servedGroups.get(Number(id));
-        response[Number(id)] = served?.metadata.state === 'confirmed' ? served.metadata : { state: 'none' };
+        const live = options.liveMetadata?.[Number(id)];
+        response[Number(id)] =
+          live ?? (served?.metadata.state === 'confirmed' ? served.metadata : { state: 'none' });
       }
       return response;
     }
@@ -937,6 +951,35 @@ test('the row and the pane show the same title, not the row the parsed one', asy
 
   fireEvent.click(row);
   assert.ok(screen.getByRole('heading', { level: 2, name: 'Provider Alpha' }));
+});
+
+test('a provider title that arrives by poll reaches the row, not just the pane', async () => {
+  // The test above puts the confirmed answer on the browse payload, so both
+  // surfaces read it out of `groups` and agree whatever the route does with
+  // the poll. This is the path that actually happens: browse says `absent`
+  // and `GET /api/metadata` answers `confirmed` a moment later — the sequence
+  // `useGroupMetadata` exists for, and the one Requery goes through too. Spec
+  // §5: the row and the pane must not disagree about what a group is called.
+  serve(null, { firstPage: [group(1, 'Alpha')], liveMetadata: { 1: answered('Provider Alpha') } });
+  render(<Browse />);
+  // Switched first, and the landing waited on by role rather than by the
+  // parsed title: the poll's answer can arrive before a `getByText('Alpha')`
+  // ever resolves, and then that wait fails on a page that is working
+  // perfectly. The divergence does not depend on the order either way — it
+  // lasts for the life of the mount, because nothing ever patches `groups`.
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  await waitFor(() => assert.ok(screen.getByRole('option')));
+  fireEvent.click(screen.getByRole('option'));
+
+  // The pane is where the answer showed up first when the merge lived only in
+  // `cardFor`, so waiting on the heading is waiting for the answer to have
+  // landed at all; the row is what the assertion is about.
+  await waitFor(() => assert.ok(screen.getByRole('heading', { level: 2, name: 'Provider Alpha' })));
+  assert.equal(
+    screen.getByRole('option').querySelector('.group-row-title')?.textContent,
+    'Provider Alpha',
+    'the row shows the title the poll delivered, the same one the pane is showing',
+  );
 });
 
 test('the selection clears when a term filters the selected group out', async () => {

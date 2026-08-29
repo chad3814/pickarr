@@ -86,8 +86,9 @@ part, separator drawn between adjacent siblings, so an absent part leaves no orp
 
 **The list is a listbox.** `role="listbox"` on the container, `role="option"` with
 `aria-selected` on each row, and a roving `tabIndex` so exactly one row sits in the tab order.
-ArrowUp and ArrowDown move the selection and scroll the newly selected row into view. No
-Home/End, no type-ahead — neither was asked for, and a listbox that grows by paging is a poor
+ArrowUp and ArrowDown move the selection, scroll the newly selected row into view, and move DOM
+focus onto it — the other half of a roving `tabIndex`, and what makes the selection an
+accessibility event rather than only a style. No Home/End, no type-ahead — neither was asked for, and a listbox that grows by paging is a poor
 place to promise "End".
 
 `usePagedList`'s `sentinelRef` still drives paging, though it does not sit inside the master
@@ -110,8 +111,7 @@ page — `usePagedList` bumps a generation and rebuilds. Clearing is the honest 
 alternative is a pane showing a group the list beside it says is not there.
 
 Nothing is selected on arrival. The pane's empty state says so, rather than auto-selecting the
-first row: an auto-selection would fire a metadata lookup for a group the reader never asked
-about, and on a library this size the first row is not a meaningful default.
+first row: on a library this size the first row is not a meaningful default.
 
 ## 5. One extraction: the title rule
 
@@ -159,15 +159,21 @@ cover because that guard measures the widest card shape. Widening avoids walking
 The list pane takes `22rem` and the detail pane the rest. `.group-row-title` truncates with an
 ellipsis rather than wrapping (§3), so 22rem's job is not to hold a title over two lines — it is
 wide enough that an ordinary title reads in full before that ellipsis engages, with room left
-over for the meta and the upgrade marker beside it. The detail pane runs wider than the 60rem
-column the card renders in today only once the window is wider than 1334px: the pane's width is
+over for the meta and the upgrade marker beside it.
+
+Two different widths are easy to confuse here, so both are named. **The pane's border box** is
 the viewport less `.app`'s 32px of padding, less nav and its gap (~148.7px), less the list and
-its own gap (376px) — `V − 556.7` — and that reaches the 777.3px no-slot column at `V = 1334`.
-Narrower than that, measured in this suite's Chromium at a 1280px viewport: the pane runs
-723.27px, not a ±15px estimate that would depend on the OS's scrollbar — `window.innerWidth`
-equals `document.documentElement.clientWidth` there, so this environment reserves no layout
-width for one. A narrower pane than today's column is fine: task 4's step 3 confirmed by eye it
-still reads well.
+its own gap (376px): `V − 556.7`. **The card's text column** is 34px narrower than whatever box
+the card fills — the card's own 32px of padding and its 1px border a side, the conversion the
+paragraph above already applies — and `.browse-detail` has no padding or border of its own, so
+the card's border box is the pane's. The comparison worth making is column to column, because
+that is what the text renders in: `V − 590.7` reaches the 777.3px no-slot column the card gets
+at today's 60rem cap when `V = 1368`. Below that the split view's column is the narrower of the
+two. Measured in this suite's Chromium at a 1280px viewport the pane runs 723.27px — not a ±15px
+estimate that would depend on the OS's scrollbar, since `window.innerWidth` equals
+`document.documentElement.clientWidth` there, so this environment reserves no layout width for
+one — which by the same conversion is a 689.3px column. A narrower column than today's is fine:
+task 4's step 3 confirmed by eye it still reads well.
 
 **Neither pane gets its own scrollbar in the shipped code, and that is a constraint rather than
 a preference given where `Browse` renders the sentinel today.**
@@ -241,7 +247,8 @@ Web suite (`.test.tsx`):
   non-negative `tabIndex`.
 - The switcher: renders both views, persists across a remount, and defaults to the card list
   with nothing stored.
-- A `localStorage` that throws on read leaves the route rendering the card list.
+- A `localStorage` that throws on read reads as the card list, and one that throws on write does
+  not throw at the caller (`browseView`'s own tests; there is no route-level test for either).
 
 Playwright: switching views and clicking a row, in a real browser, plus the keyboard movement —
 which is the part happy-dom's focus handling is least trustworthy for, and phase 1.8 already

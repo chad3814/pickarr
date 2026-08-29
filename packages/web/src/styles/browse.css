@@ -10,17 +10,32 @@
    with an ellipsis rather than wrapping (below), so 22rem's job is not to
    hold a title over two lines — it is wide enough that an ordinary title
    reads in full before that ellipsis engages, with room left over for the
-   meta and the upgrade marker beside it. The detail pane runs wider than the
-   60rem column the card renders in today only once the window is wider than
-   1334px: the pane's width is the viewport less `.app`'s 32px of padding,
-   less nav and its gap (~148.7px), less the list and its own gap (376px) —
-   `V − 556.7` — and that reaches `card.css`'s own 777.3px no-slot column at
-   `V = 1334`. Narrower than that, measured in this suite's Chromium at a
-   1280px viewport: the pane runs 723.27px, not a ±15px estimate that would
-   depend on the OS's scrollbar — `window.innerWidth` equals `document
-   .documentElement.clientWidth` there, so this environment reserves no
-   layout width for one. A narrower pane than today's column is fine: task 4's
-   step 3 confirmed by eye it still reads well. */
+   meta and the upgrade marker beside it.
+
+   Two widths are easy to confuse here, so both are named. The *pane's border
+   box* is the viewport less `.app`'s 32px of padding, less nav and its gap
+   (~148.7px), less the list and its own gap (376px): `V − 556.7`. The *card's
+   text column* is 34px narrower than whatever box the card fills — the card's
+   own 32px of padding and its 1px border a side, and nothing in this
+   directory resets `box-sizing`, so the border counts — and `.browse-detail`
+   has no padding or border of its own, so the card's border box is the pane's.
+   Column to column is the comparison worth making, because the column is what
+   the text renders in: `V − 590.7` reaches the 777.3px no-slot column
+   `card.css` measures at today's 60rem cap when `V = 1368`, and below that
+   the split view's column is the narrower of the two. Measured in this suite's
+   Chromium at a 1280px viewport the pane runs 723.27px — not a ±15px estimate
+   that would depend on the OS's scrollbar, since `window.innerWidth` equals
+   `document.documentElement.clientWidth` there, so this environment reserves
+   no layout width for one — which by the same conversion is a 689.3px column.
+   A narrower column than today's is fine: task 4's step 3 confirmed by eye it
+   still reads well.
+
+   `align-items: flex-start` is load-bearing, not tidiness — the same fact
+   `nav.css` opens with about `align-self`. A flex item stretches to the
+   container's height by default, and a detail pane as tall as a sixty-row
+   list has no free space to travel in, so the `position: sticky` below would
+   silently do nothing. Shrinking it to its content is what gives it room to
+   move. */
 .browse-split { display: flex; align-items: flex-start; gap: var(--space-5); }
 .group-list { flex: none; width: 22rem; margin: 0; padding: 0; list-style: none; }
 

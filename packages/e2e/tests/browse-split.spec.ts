@@ -7,8 +7,10 @@ import { expect, sceneTitles, test } from '../src/harness.ts';
  * covers: happy-dom lays nothing out, so `.app`'s width and a listbox row's
  * actual selected appearance are both unmeasurable there, and its keyboard
  * handling is the part phase 1.8 found a real focus bug in that only a real
- * browser saw (`GroupList.tsx`'s roving `tabIndex` relies on the browser's own
- * focus model, which happy-dom does not implement).
+ * browser saw. happy-dom does answer `.focus()` and `document.activeElement`,
+ * so the unit suite can assert where focus ends up — but a pointer click there
+ * focuses nothing, so a reader *reaching* `GroupList.tsx`'s roving `tabIndex`
+ * the way a reader actually does is only true in a browser.
  *
  * Two groups, distinct enough that the master list's two rows and the two
  * `MediaCard` headings they drive never collide on a `getByRole` or `filter`
@@ -68,10 +70,19 @@ test("the list's selection and keyboard movement drive the detail pane, its gene
   // "Tushy1 release" — this is the assertion that would have caught it.
   const metaSeparator = await firstOption.evaluate((row) => {
     const spans = [...row.querySelectorAll('.group-row-meta span')];
-    if (spans.length !== 2) throw new Error(`expected 2 meta spans, found ${String(spans.length)}`);
+    // The destructuring *is* the bounds check: `noUncheckedIndexedAccess`
+    // types both as possibly undefined, so deleting this `if` is a compile
+    // error rather than a swallowed runtime `TypeError` — which is why there is
+    // no `as Element` here. The length check stays because "exactly two" is
+    // what the assertions below rely on, and destructuring only proves "at
+    // least two".
+    const [studio, count] = spans;
+    if (spans.length !== 2 || studio === undefined || count === undefined) {
+      throw new Error(`expected 2 meta spans, found ${String(spans.length)}`);
+    }
     return {
-      first: getComputedStyle(spans[0] as Element, '::before').content,
-      second: getComputedStyle(spans[1] as Element, '::before').content,
+      first: getComputedStyle(studio, '::before').content,
+      second: getComputedStyle(count, '::before').content,
     };
   });
   expect(metaSeparator.first).toBe('none');
@@ -83,6 +94,12 @@ test("the list's selection and keyboard movement drive the detail pane, its gene
   await expect(secondOption).toHaveClass(/group-row-selected/);
   await expect(secondOption).toHaveAttribute('aria-selected', 'true');
   await expect(firstOption).not.toHaveClass(/group-row-selected/);
+  // DOM focus follows the roving `tabIndex` — the half of that pattern that
+  // makes a selection change an accessibility event rather than a style. The
+  // unit suite asserts this too, but only after placing focus itself; the focus
+  // under test here is the one the click above left behind, which is the
+  // browser's own doing.
+  await expect(secondOption).toBeFocused();
   await expect(page.locator('article.media-card')).toHaveCount(1);
   await expect(page.getByRole('heading', { level: 2 })).toHaveText(secondTitle);
 

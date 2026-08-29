@@ -1,5 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { useState } from 'react';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { GroupList } from '../src/components/GroupList.tsx';
 import type { GroupView, MetadataView, ReleaseView } from '../src/api/client.ts';
@@ -54,6 +55,18 @@ test('an absent studio leaves no orphan separator', () => {
                     selectedId={null} onSelect={() => {}} />);
   const row = screen.getByRole('option');
   assert.ok(!(row.textContent ?? '').includes('·'), 'the separator is drawn by CSS between siblings');
+  assert.equal(row.querySelectorAll('.group-row-meta > span').length, 1, 'one part, one span');
+});
+
+test('an empty studio leaves no orphan separator either', () => {
+  // `''` is not the same case as absent, and `DisplayFields` allows it —
+  // `subtitle?: string` with `isText` accepting any string. An empty span is
+  // still a span, so `.group-row-meta > span + span::before` would draw the
+  // ` · ` before the count and the row would read " · 1 release". `text()` is
+  // what collapses the two cases into one, the same as on the card.
+  render(<GroupList groups={[group({ id: 1, display: { title: 'Group 1', subtitle: '', fields: [] } })]}
+                    selectedId={null} onSelect={() => {}} />);
+  const row = screen.getByRole('option');
   assert.equal(row.querySelectorAll('.group-row-meta > span').length, 1, 'one part, one span');
 });
 
@@ -140,6 +153,63 @@ test('neither arrow walks off an end', () => {
   render(<GroupList groups={THREE} selectedId={3} onSelect={(id) => picked.push(id)} />);
   fireEvent.keyDown(screen.getByRole('listbox'), { key: 'ArrowDown' });
   assert.deepEqual(picked, [], 'nothing below the last');
+});
+
+/**
+ * A caller that holds the selection, as the route does. Tests that pin
+ * `selectedId` can only see what one render does; anything the selection
+ * *change* causes — the effect that scrolls and focuses — needs the re-render
+ * a real caller performs.
+ */
+function Controlled({ initialId }: { initialId: number | null }) {
+  const [selectedId, setSelectedId] = useState(initialId);
+  return <GroupList groups={THREE} selectedId={selectedId} onSelect={setSelectedId} />;
+}
+
+test('an arrow key moves focus onto the newly selected row', () => {
+  // The other half of the roving `tabIndex`. Without it `aria-selected` moves
+  // to a row that is neither focused nor pointed at by
+  // `aria-activedescendant`, so there is no accessibility event at all and the
+  // focus ring stays on the row the reader arrived at.
+  render(<Controlled initialId={1} />);
+  const rows = screen.getAllByRole('option');
+  const first = rows[0];
+  const second = rows[1];
+  assert.ok(first !== undefined && second !== undefined, 'three rows rendered');
+  first.focus();
+  // dom.ts: element identity is `assert.ok(a === b, '…')`, never `assert.equal`.
+  assert.ok(document.activeElement === first, 'the list holds focus to begin with');
+
+  fireEvent.keyDown(first, { key: 'ArrowDown' });
+
+  assert.ok(document.activeElement === second, 'focus followed the selection down a row');
+});
+
+/** A caller that can change the selection without the reader being in the list. */
+function WithOutsideControl() {
+  const [selectedId, setSelectedId] = useState<number | null>(1);
+  return (
+    <>
+      <button type="button" onClick={() => setSelectedId(3)}>Select the third</button>
+      <GroupList groups={THREE} selectedId={selectedId} onSelect={setSelectedId} />
+    </>
+  );
+}
+
+test('a selection changed from outside the list does not steal focus', () => {
+  // The guard on the focus move. A row clicked with the pointer, or a caller
+  // setting `selectedId` itself, must not yank focus out of whatever the reader
+  // is actually using.
+  render(<WithOutsideControl />);
+  const button = screen.getByRole('button', { name: 'Select the third' });
+  button.focus();
+  assert.ok(document.activeElement === button, 'focus starts outside the list');
+
+  fireEvent.click(button);
+
+  const selected = screen.getAllByRole('option').find((row) => row.getAttribute('aria-selected') === 'true');
+  assert.match(selected?.textContent ?? '', /Group 3/, 'the selection did move');
+  assert.ok(document.activeElement === button, 'focus stayed where the reader put it');
 });
 
 test('an empty list renders a listbox with no options and no crash', () => {
