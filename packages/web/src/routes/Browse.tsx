@@ -240,12 +240,18 @@ export function Browse() {
   // A term that filters the selected group out — or a new term, which rebuilds
   // the list from page one — leaves an id pointing at nothing. Clearing is the
   // honest outcome: the alternative is a pane showing a group the list beside
-  // it says is not there. Guarded on `groups.length` so the gap between a term
-  // changing and its first page arriving does not clear a still-valid
-  // selection.
+  // it says is not there. Two conditions, two different jobs: `!loading` is
+  // for the page-in-flight case, where a term change has emptied or is about
+  // to replace `groups` and the still-valid old selection must survive until
+  // the new page actually lands; `selected === null` is for the
+  // filtered-out case, once loading has settled, where `groups` no longer
+  // has the id at all. `groups.length > 0` used to stand in for the first
+  // half and got the second one wrong: a term matching nothing leaves
+  // `groups` at `[]` forever, so that guard suppressed the clear
+  // permanently instead of just until the fetch landed (spec §4).
   useEffect(() => {
-    if (selectedId !== null && groups.length > 0 && selected === null) setSelectedId(null);
-  }, [selectedId, groups, selected]);
+    if (selectedId !== null && !loading && selected === null) setSelectedId(null);
+  }, [selectedId, loading, selected]);
 
   return (
     <section>

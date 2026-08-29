@@ -165,6 +165,15 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
   // a `'confirmed'` answer breaks that: a real server's live endpoint agrees
   // with its own browse listing, and a stub that does not would settle the
   // poll on an answer the page it just served never gave.
+  //
+  // Built from `pages` only, so this guarantee covers a page-served group,
+  // not one that only ever appears via `options.groupEdit`, `options.releaseEdit`
+  // or the `pick` response: a confirmed group returned solely from one of
+  // those three still gets a blanket `'none'` back from `/api/metadata`. No
+  // test today serves a confirmed group only that way, so nothing is
+  // affected — but a test that starts doing so will hit this same
+  // disagreement rather than a documented limit here, until someone extends
+  // this map to those three paths too.
   const servedGroups = new Map<number, GroupView>();
   for (const page of pages.values()) for (const served of page.groups) servedGroups.set(served.id, served);
   let patches = 0;
@@ -920,7 +929,11 @@ test('the row and the pane show the same title, not the row the parsed one', asy
 
   const row = screen.getByRole('option');
   assert.match(row.textContent ?? '', /Provider Alpha/);
-  assert.ok(!(row.textContent ?? '').includes('Alpha,'), 'the row does not also carry the parsed title');
+  assert.equal(
+    row.querySelector('.group-row-title')?.textContent,
+    'Provider Alpha',
+    'the row shows the provider title and nothing else in its title slot',
+  );
 
   fireEvent.click(row);
   assert.ok(screen.getByRole('heading', { level: 2, name: 'Provider Alpha' }));
