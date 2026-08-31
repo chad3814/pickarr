@@ -684,3 +684,78 @@ export function resetForRetry(db: DatabaseSync, id: number, now: number): Downlo
 
   return getDownload(db, id);
 }
+
+/** One release's most recent download attempt, as the API exposes it. */
+export interface LatestDownload {
+  downloadId: number;
+  releaseId: number;
+  status: DownloadStatus;
+  error: string | null;
+  absentSince: number | null;
+}
+
+/*
+ * `ORDER BY id DESC LIMIT 1` per release, the same spelling of "latest attempt"
+ * as `latestDownloadFailed` in db/groups.ts — see its comment. Ids are
+ * monotonic, so the highest is the newest; `updated_at` moves on every poll and
+ * would let a stalled retry read as older than the failure it replaced.
+ *
+ * Expressed as a correlated `NOT EXISTS` rather than a window function or a
+ * `GROUP BY` with `MAX(id)`: it keeps the whole row without a second lookup,
+ * and it is one statement for any number of groups.
+ */
+const LATEST_PER_RELEASE = `
+  SELECT d.id, d.group_id, d.release_id, d.status, d.error, d.absent_since
+    FROM downloads d
+   WHERE NOT EXISTS (
+     SELECT 1 FROM downloads later
+      WHERE later.release_id = d.release_id AND later.id > d.id
+   )`;
+
+function toLatest(row: SqlRow): LatestDownload {
+  return {
+    downloadId: num(row, 'id'),
+    releaseId: num(row, 'release_id'),
+    status: str(row, 'status') as DownloadStatus,
+    error: maybeStr(row, 'error'),
+    absentSince: maybeNum(row, 'absent_since'),
+  };
+}
+
+/** Release id → its most recent download, for one group. */
+export function latestDownloadsForGroup(
+  db: DatabaseSync,
+  groupId: number,
+): Map<number, LatestDownload> {
+  const rows = db.prepare(`${LATEST_PER_RELEASE} AND d.group_id = ?`).all(groupId);
+  const map = new Map<number, LatestDownload>();
+  for (const row of rows) {
+    const latest = toLatest(row as SqlRow);
+    map.set(latest.releaseId, latest);
+  }
+  return map;
+}
+
+/** Group id → (release id → its most recent download), for many groups in one query. */
+export function latestDownloadsForGroups(
+  db: DatabaseSync,
+  groupIds: readonly number[],
+): Map<number, Map<number, LatestDownload>> {
+  const map = new Map<number, Map<number, LatestDownload>>();
+  // Every requested group gets an entry, empty or not, so a caller can tell
+  // "asked, nothing downloading" from "never asked".
+  for (const id of groupIds) map.set(id, new Map());
+  if (groupIds.length === 0) return map;
+
+  const holes = groupIds.map(() => '?').join(',');
+  const rows = db.prepare(`${LATEST_PER_RELEASE} AND d.group_id IN (${holes})`).all(...groupIds);
+  for (const row of rows) {
+    const sql = row as SqlRow;
+    const latest = toLatest(sql);
+    // Present because the loop above seeded it; checked rather than asserted,
+    // so deleting the seeding loop is a compile error and not a crash here.
+    const forGroup = map.get(num(sql, 'group_id'));
+    if (forGroup !== undefined) forGroup.set(latest.releaseId, latest);
+  }
+  return map;
+}
