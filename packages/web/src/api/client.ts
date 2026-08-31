@@ -53,6 +53,9 @@ export interface ReleaseDownloadView {
   absentSince: number | null;
 }
 
+/** Mirrors `ReleaseDownloadsResponse` in `packages/core/src/http/views.ts`. */
+export type ReleaseDownloadsResponse = Record<number, Record<number, ReleaseDownloadView>>;
+
 export interface ReleaseView {
   id: number;
   score: number;
@@ -761,6 +764,12 @@ export const api = {
   metadata: (ids: number[], signal?: AbortSignal) =>
     request<Record<number, MetadataView>>(
       `/api/metadata?ids=${ids.join(',')}`,
+      signal === undefined ? undefined : { signal },
+    ),
+  /** `ids` is joined the same `"1,2,3"` way `/api/downloads/for-groups` expects. */
+  releaseDownloads: (ids: number[], signal?: AbortSignal) =>
+    request<ReleaseDownloadsResponse>(
+      `/api/downloads/for-groups?ids=${ids.join(',')}`,
       signal === undefined ? undefined : { signal },
     ),
   config: () => request<ConfigResponse>('/api/config'),

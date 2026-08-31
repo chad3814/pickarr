@@ -253,6 +253,15 @@ export interface ReleaseDownloadView {
   absentSince: number | null;
 }
 
+/**
+ * Group id → (release id → that release's latest download).
+ *
+ * Nested rather than flat because the client polls by group and renders by
+ * release, and a flat list keyed by release id would make "this group has
+ * nothing" unrepresentable — which is the state that stops the poll.
+ */
+export type ReleaseDownloadsResponse = Record<number, Record<number, ReleaseDownloadView>>;
+
 export interface ReleaseView {
   id: number;
   score: number;

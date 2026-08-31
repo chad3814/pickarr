@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaTypePlugin, MetadataCandidate } from '@pickarr/plugin-api';
+import type { FastifyInstance } from 'fastify';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { insertGroup } from '../../src/db/groups.ts';
+import { setStatus, type DownloadStatus } from '../../src/db/downloads.ts';
 import {
   dueMetadataQueue,
   enqueueMetadata,
@@ -1354,4 +1356,127 @@ test('the five counters still partition a mixed request', async () => {
   assert.deepEqual(body.refreshed, [stale], 'only the id that had an answer before needs a rearm');
 
   db.close();
+});
+
+/**
+ * One group with one release, picked (and so given a download) unless `status`
+ * is `null` — the caller for the "nothing downloaded" case, where no download
+ * row should exist at all. `status: 'queued'` still picks, matching what a
+ * fresh pick's download already is, so the caller that wants "some download
+ * exists, whatever its state" is not forced to fabricate a transition to reach it.
+ */
+async function pickedGroupWithDownload(options: {
+  status: DownloadStatus | null;
+}): Promise<{ app: FastifyInstance; groupId: number; releaseId: number }> {
+  const db = openTestDatabase();
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'Alpha.1080p', 'https://indexer.invalid/1.nzb', 1)`,
+  ).run();
+  const groupId = group(db, 'askable', 'Alpha');
+  const releaseId = 1;
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (?, ?, 1, '{}', 1, 1)`,
+  ).run(releaseId, groupId);
+  const app = buildServer(deps(db));
+  if (options.status !== null) {
+    const pick = await app.inject({
+      method: 'POST',
+      url: `/api/groups/${groupId}/pick`,
+      payload: { releaseId },
+    });
+    const downloadId = (pick.json() as { download: { id: number } }).download.id;
+    setStatus(db, downloadId, options.status, NOW);
+  }
+  return { app, groupId, releaseId };
+}
+
+/**
+ * Two picked groups, each with one release and one download: the first left
+ * `downloading`, the second moved to `failed`. Exists for the test that reads
+ * both keys of the response at once — a single group cannot show that the
+ * response is keyed by group *and* by release, only that it has one entry.
+ */
+async function twoPickedGroupsWithDownloads(): Promise<{
+  app: FastifyInstance;
+  first: { groupId: number; releaseId: number };
+  second: { groupId: number; releaseId: number };
+}> {
+  const db = openTestDatabase();
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at)
+     VALUES (1, 'f', 'g1', 'Alpha.1080p', 'https://indexer.invalid/1.nzb', 1),
+            (2, 'f', 'g2', 'Beta.1080p',  'https://indexer.invalid/2.nzb', 1)`,
+  ).run();
+  const firstGroupId = group(db, 'askable', 'Alpha');
+  const secondGroupId = group(db, 'askable', 'Beta');
+  const firstReleaseId = 1;
+  const secondReleaseId = 2;
+  db.prepare(
+    `INSERT INTO releases (id, group_id, feed_item_id, quality, score, created_at)
+     VALUES (1, ?, 1, '{}', 1, 1), (2, ?, 2, '{}', 1, 1)`,
+  ).run(firstGroupId, secondGroupId);
+  const app = buildServer(deps(db));
+  const firstPick = await app.inject({
+    method: 'POST',
+    url: `/api/groups/${firstGroupId}/pick`,
+    payload: { releaseId: firstReleaseId },
+  });
+  const secondPick = await app.inject({
+    method: 'POST',
+    url: `/api/groups/${secondGroupId}/pick`,
+    payload: { releaseId: secondReleaseId },
+  });
+  setStatus(db, (firstPick.json() as { download: { id: number } }).download.id, 'downloading', NOW);
+  setStatus(db, (secondPick.json() as { download: { id: number } }).download.id, 'failed', NOW);
+  return {
+    app,
+    first: { groupId: firstGroupId, releaseId: firstReleaseId },
+    second: { groupId: secondGroupId, releaseId: secondReleaseId },
+  };
+}
+
+test('the route answers a release download per group, keyed both ways', async () => {
+  const { app, first, second } = await twoPickedGroupsWithDownloads();
+  const res = await app.inject({
+    method: 'GET',
+    url: `/api/downloads/for-groups?ids=${first.groupId},${second.groupId}`,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body[first.groupId][first.releaseId].status, 'downloading');
+  assert.equal(body[second.groupId][second.releaseId].status, 'failed');
+});
+
+test('a group with nothing downloaded answers an empty object rather than being missing', async () => {
+  const { app, groupId } = await pickedGroupWithDownload({ status: null });
+  const body = await app
+    .inject({ method: 'GET', url: `/api/downloads/for-groups?ids=${groupId}` })
+    .then((r) => r.json());
+  // Present-and-empty, not absent: the client tells "asked, nothing there" from
+  // "not asked" and stops polling on the former.
+  assert.deepEqual(body[groupId], {});
+});
+
+test('it returns terminal downloads too, not only in-flight ones', async () => {
+  const { app, groupId, releaseId } = await pickedGroupWithDownload({ status: 'imported' });
+  const body = await app
+    .inject({ method: 'GET', url: `/api/downloads/for-groups?ids=${groupId}` })
+    .then((r) => r.json());
+  // If this ever returns only in-flight rows, a download that imports while the
+  // tab is open drops out of the live map and the row reads `downloading`
+  // forever, falling back to a static value captured at page load.
+  assert.equal(body[groupId][releaseId].status, 'imported');
+});
+
+test('a malformed or oversized id list is a 400, not a partial answer', async () => {
+  const { app } = await pickedGroupWithDownload({ status: 'queued' });
+  const missing = await app.inject({ method: 'GET', url: '/api/downloads/for-groups' });
+  assert.equal(missing.statusCode, 400);
+  const junk = await app.inject({ method: 'GET', url: '/api/downloads/for-groups?ids=1,abc' });
+  assert.equal(junk.statusCode, 400);
+  const tooMany = Array.from({ length: 101 }, (_, index) => index + 1).join(',');
+  const over = await app.inject({ method: 'GET', url: `/api/downloads/for-groups?ids=${tooMany}` });
+  assert.equal(over.statusCode, 400);
 });
