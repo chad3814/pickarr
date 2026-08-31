@@ -242,9 +242,14 @@ confirm that test fails and the others in the file do not, restore.
 - Seed an entry for every release regardless of downloads → test 2 fails.
 - Return `?? undefined` instead of null → test 3 fails.
 - Drop the `group_id IN` clause → test 4 fails.
-- Remove the `length === 0` early return → test 5 still passes (an empty `IN ()`
-  is a SQL syntax error, so it fails loudly) — **this is expected**; record that
-  the early return is a clarity guard, not the thing under test.
+- Remove the `length === 0` early return → test 5 still passes, and **not** for
+  the reason first written here. `WHERE x IN ()` does not throw in this SQLite
+  build; it silently matches nothing and returns zero rows. The test passes
+  because the seeding loop above also has nothing to iterate when `groupIds` is
+  empty, so both paths produce the same empty map. The early return is therefore
+  an optimisation — one saved query — not a guard against a crash, and test 5
+  pins the observable contract rather than the guard. Record that; do not
+  redesign the test to make the mutation bite.
 
 - [ ] **Step 6: Commit**
 
