@@ -84,17 +84,22 @@ function unwrap(node: ts.Expression): ts.Expression {
  * `screen.getByRole('img').getAttribute('src')` is a string and formats for
  * nothing, and the suite is full of the second kind. Testing whether a DOM call
  * appears *anywhere* in the operand would condemn all of them.
+ *
+ * The method name alone decides it, regardless of what the call is made on.
+ * A testing-library query — anything matching `SCREEN_QUERY` — returns an
+ * element or a list of them no matter what object it is called on:
+ * `within(row).getByRole('img')` and `const q = within(row); q.getByRole(…)`
+ * are exactly as hazardous as `screen.getByRole(…)`, because there is no case
+ * in this library where `x.getByRole(…)` returns something that is not an
+ * element. Gating that on the receiver being the literal identifier `screen`
+ * missed both of those shapes.
  */
 function yieldsElement(node: ts.Expression): boolean {
   const expression = unwrap(node);
 
   if (ts.isCallExpression(expression) && ts.isPropertyAccessExpression(expression.expression)) {
-    const callee = expression.expression;
-    const method = callee.name.text;
-    if (ts.isIdentifier(callee.expression) && callee.expression.text === 'screen') {
-      return SCREEN_QUERY.test(method);
-    }
-    return ELEMENT_RETURNING_METHODS.has(method);
+    const method = expression.expression.name.text;
+    return SCREEN_QUERY.test(method) || ELEMENT_RETURNING_METHODS.has(method);
   }
 
   // `document.activeElement` — a property read, not a call, and the operand

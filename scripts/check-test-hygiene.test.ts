@@ -62,6 +62,31 @@ test('querySelector and closest are flagged, since they return elements too', ()
   );
 });
 
+test('a testing-library query is flagged no matter what it is called on, not just `screen`', () => {
+  // `within(row)` returns something that answers to the same query methods as
+  // `screen`, and gating the check on the receiver being the literal
+  // identifier `screen` missed it entirely — this is the shape that actually
+  // slipped through and cost a 30-second hang and a bare `'test failed'`.
+  assert.deepEqual(
+    flagged(`assert.equal(within(row).queryByText('x'), null);`),
+    [`within(row).queryByText('x')`],
+  );
+  assert.deepEqual(
+    flagged(`const q = within(row); assert.equal(q.queryByText('x'), null);`),
+    [`q.queryByText('x')`],
+  );
+});
+
+test('a property read off a query on any receiver is not flagged, matching the `screen` case', () => {
+  // Same distinction as the `screen.getByRole('img').getAttribute('src')`
+  // case below, but off a `within(...)` result: the outermost expression is
+  // the string-returning `.getAttribute`, not the query.
+  assert.deepEqual(
+    flagged(`assert.equal(within(row).getByRole('img').getAttribute('src'), '/x');`),
+    [],
+  );
+});
+
 test('a property read off an element is not flagged, because a string formats cheaply', () => {
   // The outermost expression is what node:assert has to print. This is the
   // distinction the whole check turns on: there are many assertions of this
