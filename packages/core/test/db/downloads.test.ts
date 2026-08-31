@@ -703,3 +703,22 @@ test('the batched form asked about nothing returns an empty map without touching
   assert.equal(latestDownloadsForGroups(db, []).size, 0);
   db.close();
 });
+
+test('a group asked about with no downloads at all gets an empty entry, not a missing one', () => {
+  const db = openTestDatabase();
+  const withDownload = seedRelease(db);
+  const withNothing = seedRelease(db);
+  seedDownload(db, {
+    groupId: withDownload.groupId,
+    releaseId: withDownload.releaseId,
+    status: 'downloading',
+  });
+
+  const map = latestDownloadsForGroups(db, [withDownload.groupId, withNothing.groupId]);
+  // Present and empty — not absent. A caller distinguishes "asked, nothing
+  // downloading" from "never asked" on exactly this, and Task 6 stops polling
+  // a group on the strength of it.
+  assert.equal(map.has(withNothing.groupId), true);
+  assert.equal(map.get(withNothing.groupId)?.size, 0);
+  db.close();
+});

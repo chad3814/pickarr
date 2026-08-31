@@ -752,8 +752,12 @@ export function latestDownloadsForGroups(
   for (const row of rows) {
     const sql = row as SqlRow;
     const latest = toLatest(sql);
-    // Present because the loop above seeded it; checked rather than asserted,
-    // so deleting the seeding loop is a compile error and not a crash here.
+    // Present because the loop above seeded it, and checked rather than
+    // `!`-asserted because `Map.get` is typed `V | undefined` whatever seeded
+    // the map. The check is not what protects the seeding loop — deleting that
+    // loop compiles and does not crash, it just returns a map missing the
+    // groups that have no downloads, which is what the "entry, empty or not"
+    // test exists to catch.
     const forGroup = map.get(num(sql, 'group_id'));
     if (forGroup !== undefined) forGroup.set(latest.releaseId, latest);
   }
