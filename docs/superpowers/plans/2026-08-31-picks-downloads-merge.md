@@ -983,10 +983,19 @@ grep -c "^test(" packages/web/test/Downloads.test.tsx
 grep -n "^test(" packages/web/test/Picks.test.tsx packages/web/test/MediaCard.test.tsx
 ```
 
-**Sixteen** tests exist in the old file, and they split three ways:
+**Twelve** tests remain in the old file at this point. It held sixteen when the
+plan was written; Task 5 moved four of them (`:67`, `:83`, `:96`, `:110`) to
+`MediaCard.test.tsx` and deleted the originals, so the arithmetic below counts
+what is left rather than what was there. They split three ways:
 
-- **Eleven must have a home.** `:67`, `:83`, `:96`, `:110` → `ReleaseRow` (Task 5).
-  `:171`, `:188`, `:223`, `:277`, `:328`, `:364`, `:555` → `Picks` (Tasks 6-7).
+- **Seven must still have a home**, all of them going to `Picks` (Tasks 6-7):
+  a bodyless retry request carrying no JSON content-type; a refused retry
+  surfacing instead of vanishing; a retry refreshing its row without waiting on
+  the poll; untracked entries rendering inert and labelled; a term filtering
+  untracked entries and taking their heading with them; a poll landing not
+  clearing the term; and two untracked entries from different clients sharing a
+  `ref` being keyed apart. Match them by name — the line numbers moved when
+  Task 5 removed four tests from the middle of the file.
 - **Four die with the thing they test.** `:134` and `:162` assert a download row
   links to its group, and the linker is deleted. `:488` and `:522` are about
   `usePagedList` and `mergeNewestPage` driving the tracked list; Picks is
