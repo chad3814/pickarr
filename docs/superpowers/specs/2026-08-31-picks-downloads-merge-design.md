@@ -264,15 +264,27 @@ placement is revisited when Picks is paginated.
   - `:171`, `:188`, `:223` — a bodyless retry request carries no JSON
     content-type, a refused retry surfaces instead of vanishing, and a retry
     refreshes its row without waiting on the poll — become `Picks` tests.
-  - `:277`, `:328` — untracked entries render inert and labelled, and a term
-    filters them and takes their heading with it — become `Picks` tests.
+  - `:277`, `:328`, `:555` — untracked entries render inert and labelled, a term
+    filters them and takes their heading with it, and two entries from different
+    clients sharing a `ref` are keyed apart — become `Picks` tests. `:555` is the
+    test for the composite key §6 promises to carry across, so losing it would
+    leave that promise unguarded.
   - `:364` — a poll landing does not clear the search term or unfilter the list —
     becomes a `Picks` test about the *download* poll, which is the first poll
     that screen has ever had and so the first thing that could do this to it.
+  - `:488`, `:522` — a poll landing keeps page two on screen while patching page
+    one, and a term filters rows from every page loaded — die with their subject.
+    Both are about `usePagedList` and `mergeNewestPage` driving the *tracked*
+    list, and Picks is unpaginated; there is no page two to keep on screen. The
+    equivalent guarantees for Browse and Failed are tested on those screens.
   - `:310` — a term leaves only the matching tracked rows — is the one to think
     about rather than mechanically move. Tracked rows no longer exist; Picks
     already filters cards by term, and that is already tested. Dropped, and named
     here so the drop is a decision rather than an omission.
+
+  Sixteen tests, of which **eleven must have a home**, four die with the thing
+  they test, and one is dropped on purpose. Task 8 of the plan checks this off
+  before the file is deleted.
 
 Every test above states a rule with more than one branch, so each is
 mutation-checked individually: break the branch, prove that test and no other
