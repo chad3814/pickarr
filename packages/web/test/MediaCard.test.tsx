@@ -150,8 +150,9 @@ test('the release you already own is marked and not offered again', () => {
   );
   assert.ok(screen.getByText(/current/i));
   assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
-  // No `downloadFailed` on any release, so nothing claims a failure. The server
-  // omits the field for a healthy release rather than sending `false`.
+  // No `download` on any release, so nothing claims a failure. The server
+  // omits the field for a release that has never been downloaded rather than
+  // sending one whose status is something other than `failed`.
   assert.equal(gone(/failed/i), true);
 });
 
@@ -184,10 +185,12 @@ test('a card carries the anchor a Downloads row links to', () => {
   assert.notEqual(groupAnchor(7), groupAnchor(1));
 });
 
-/** `GROUP`'s releases with `downloadFailed` set on the ids named. */
+/** `GROUP`'s releases with a failed download on the ids named. */
 function failing(...ids: number[]): GroupView['releases'] {
   return GROUP.releases.map((release) =>
-    ids.includes(release.id) ? { ...release, downloadFailed: true } : release,
+    ids.includes(release.id)
+      ? { ...release, download: { downloadId: 1, status: 'failed', error: null, absentSince: null } }
+      : release,
   );
 }
 

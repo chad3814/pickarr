@@ -67,7 +67,9 @@ function failedPick(healthy: GroupView): GroupView {
   return {
     ...healthy,
     releases: healthy.releases.map((release) =>
-      release.id === healthy.pickedReleaseId ? { ...release, downloadFailed: true } : release,
+      release.id === healthy.pickedReleaseId
+        ? { ...release, download: { downloadId: 1, status: 'failed', error: null, absentSince: null } }
+        : release,
     ),
   };
 }

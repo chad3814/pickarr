@@ -6,9 +6,9 @@ import type {
   QualityTokens,
 } from '@pickarr/plugin-api';
 import type { EditableConfig } from '../config/editable.ts';
-import { displayJsonForGroups, failedReleaseIds, type GroupRow } from '../db/groups.ts';
+import { displayJsonForGroups, type GroupRow } from '../db/groups.ts';
 import { releasesForGroup } from '../db/releases.ts';
-import type { DownloadRow } from '../db/downloads.ts';
+import { latestDownloadsForGroup, type DownloadRow, type DownloadStatus, type LatestDownload } from '../db/downloads.ts';
 import type { FeedItemRow } from '../db/feed-items.ts';
 import type { GroupMetadata } from '../db/metadata.ts';
 import type { IdentityPlan } from '../manual/identity-plan.ts';
@@ -245,6 +245,14 @@ export function metadataViewOf(
   };
 }
 
+/** The part of a download a card shows. Mirrors `LatestDownload` in db/downloads.ts. */
+export interface ReleaseDownloadView {
+  downloadId: number;
+  status: DownloadStatus;
+  error: string | null;
+  absentSince: number | null;
+}
+
 export interface ReleaseView {
   id: number;
   score: number;
@@ -254,12 +262,18 @@ export interface ReleaseView {
   /** The quality half of an edit form, prefilled. Absent when the plugin has no `toManualValues`. */
   manualValues?: Record<string, string>;
   /**
-   * True when this release's most recent download failed, and **absent**
-   * otherwise — never `false`. Per release rather than per group because the
-   * card has to say *which* version failed: the group flag only gets the user
-   * to the card.
+   * This release's most recent download, absent when it has never had one.
+   *
+   * Per release rather than per group because the card has to say *which*
+   * version is downloading or failed: an upgrade deliberately leaves
+   * `picked_release_id` on the old release until the replacement imports (see
+   * `pickRelease`), so the row to mark is frequently not the current one.
+   *
+   * Widened from a `downloadFailed?: boolean`, which was exactly
+   * `download?.status === 'failed'`. The boolean could not say `downloading`,
+   * and the screen that could was deleted.
    */
-  downloadFailed?: boolean;
+  download?: ReleaseDownloadView;
 }
 
 export interface GroupView {
@@ -275,7 +289,7 @@ export interface GroupView {
   /** The identity half of an edit form, prefilled. Absent when the plugin has no `toManualValues`. */
   manualValues?: Record<string, string>;
   // No group-level "something here failed" field. There was one, and nothing
-  // read it: the card marks rows from `ReleaseView.downloadFailed`, and the
+  // read it: the card marks rows from `ReleaseView.download`, and the
   // ordering it would have explained is decided in SQL by `pickedGroups`, which
   // the client never re-derives. A payload field whose only exercise is a test
   // asserting something no screen consumes is a field to add when a screen
@@ -423,6 +437,21 @@ function manualValuesFor(
   }
 }
 
+/** `downloads`'s entry for `releaseId`, as the card needs it — dropping `releaseId` itself, which the caller already has as the map key. */
+function downloadViewOf(
+  downloads: Map<number, LatestDownload>,
+  releaseId: number,
+): ReleaseDownloadView | undefined {
+  const latest = downloads.get(releaseId);
+  if (latest === undefined) return undefined;
+  return {
+    downloadId: latest.downloadId,
+    status: latest.status,
+    error: latest.error,
+    absentSince: latest.absentSince,
+  };
+}
+
 /**
  * `plugin` is the one registered for `group.plugin`, or undefined when no
  * plugin claims that id any more — a group outlives the package that made it.
@@ -446,7 +475,7 @@ export function toGroupView(
   // does, because a per-release fact that clears only when that release is
   // retried made a permanent sort key out of a group the user had already dealt
   // with.
-  const failed = failedReleaseIds(db, group.id);
+  const downloads = latestDownloadsForGroup(db, group.id);
 
   const releases = releasesForGroup(db, group.id).map((release) => {
     const feedItem = db
@@ -467,13 +496,15 @@ export function toGroupView(
         feedItem === undefined || (feedItem as SqlRow)['published_at'] === null
           ? null
           : Number((feedItem as SqlRow)['published_at']),
-      // Present only when true, as `manualValues` is: absent means "not
-      // failed", so a healthy release serialises to exactly what it always did.
-      ...(failed.has(release.id) ? { downloadFailed: true } : {}),
     };
     // Set only when there is one. Never assigned `undefined`: the field is
     // absent or it is a value, and the SPA reads the difference.
     if (manualValues !== undefined) view.manualValues = manualValues;
+    // Same discipline as `manualValues` just above: absent means "never
+    // downloaded", so a release that has never been picked serialises to
+    // exactly what it always did.
+    const download = downloadViewOf(downloads, release.id);
+    if (download !== undefined) view.download = download;
     return view;
   });
 
