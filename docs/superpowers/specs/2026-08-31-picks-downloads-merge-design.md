@@ -251,10 +251,28 @@ placement is revisited when Picks is paginated.
   picked — `:35` is the spec's only `Pick` click, on the dateless release — so it
   has no download and the in-flight suppression never applies to it. If either
   assertion breaks, the precedence table in §4 is wrong.
-- **`packages/web/test/Downloads.test.tsx` is deleted** with the route it
-  covers. Anything it asserts that is not about Downloads specifically — the
-  untracked list's composite key and its heading's disappearance under a filter —
-  moves to `Picks.test.tsx` rather than being dropped.
+- **`packages/web/test/Downloads.test.tsx` is deleted, but most of it is
+  re-homed rather than dropped.** Only two of its tests are about the deleted
+  screen as such — `:134` and `:162`, which assert a download row links to its
+  group, and the link goes with `DownloadRow`. Everything else asserts behaviour
+  this change *keeps* and must keep working somewhere:
+  - `:67`, `:83`, `:96`, `:110` — status shown, absence warned, error kept, and
+    retry offered for exactly the statuses the API guard accepts — become
+    `ReleaseRow` tests. `:110` is the one that matters most: it pins the
+    `status === 'failed' || absentSince !== null` rule against the server's, and
+    that rule is being moved verbatim.
+  - `:171`, `:188`, `:223` — a bodyless retry request carries no JSON
+    content-type, a refused retry surfaces instead of vanishing, and a retry
+    refreshes its row without waiting on the poll — become `Picks` tests.
+  - `:277`, `:328` — untracked entries render inert and labelled, and a term
+    filters them and takes their heading with it — become `Picks` tests.
+  - `:364` — a poll landing does not clear the search term or unfilter the list —
+    becomes a `Picks` test about the *download* poll, which is the first poll
+    that screen has ever had and so the first thing that could do this to it.
+  - `:310` — a term leaves only the matching tracked rows — is the one to think
+    about rather than mechanically move. Tracked rows no longer exist; Picks
+    already filters cards by term, and that is already tested. Dropped, and named
+    here so the drop is a decision rather than an omission.
 
 Every test above states a rule with more than one branch, so each is
 mutation-checked individually: break the branch, prove that test and no other
