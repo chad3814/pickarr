@@ -123,9 +123,10 @@ test('the confirmation dialog follows the app theme, not the OS scheme', async (
  *
  * Browse and Picks each get a `.media-card h2` from one picked release;
  * Failed gets a `.failed-row h2` from one name the parser refuses (per
- * `manual.spec.ts`). Downloads' own `<h2>` only renders once the client
- * reports a job Pickarr's database has no row for, so one is seeded through
- * the same `setSnapshot` + `reconcile()` path `retry.spec.ts` and
+ * `manual.spec.ts`). The "Not managed by Pickarr" `<h2>` moved onto Picks
+ * itself once Downloads was deleted, and it still only renders once the
+ * client reports a job Pickarr's database has no row for, so one is seeded
+ * through the same `setSnapshot` + `reconcile()` path `retry.spec.ts` and
  * `identity-change.spec.ts` use — the state the regression actually lived
  * in, not a substitute for it. Settings renders no heading below `h1` at
  * all; the loop below still runs on it; it simply has one heading to compare
@@ -164,7 +165,7 @@ test("h1 is strictly the largest heading on every route", async ({
       // A job the client reports under Pickarr's own category, on a ref
       // Pickarr never issued via `addUrl` and a name carrying none of its
       // labels — the shape `reconcile()` reports back as untracked, which is
-      // the only way Downloads' "Not managed by Pickarr" heading renders.
+      // the only way Picks' "Not managed by Pickarr" heading renders.
       {
         ref: 'external-job-1',
         name: 'Something Pickarr Never Added',
@@ -178,7 +179,7 @@ test("h1 is strictly the largest heading on every route", async ({
   });
   await harness.reconcile();
 
-  for (const route of ['/', '/picks', '/downloads', '/failed', '/settings']) {
+  for (const route of ['/', '/picks', '/failed', '/settings']) {
     await page.goto(route);
     const headings = await page.locator('h1, h2, h3, h4, h5, h6').evaluateAll((nodes) =>
       nodes.map((node) => ({

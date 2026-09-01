@@ -68,8 +68,7 @@ export function ReleaseRow({ release, isCurrent, download, onPick, onRetry, fiel
   // download.
   const inFlight = download !== undefined && download.status !== 'imported' && !failed;
 
-  // Copied from `DownloadRow.tsx`'s own guard, for the reason stated there:
-  // retry has to accept exactly what `POST /api/downloads/:id/retry` accepts,
+  // Retry has to accept exactly what `POST /api/downloads/:id/retry` accepts,
   // or a wider or narrower offer here just becomes a 409 on click.
   const retryable = download !== undefined && (failed || download.absentSince !== null);
   const downloadId = download?.downloadId;

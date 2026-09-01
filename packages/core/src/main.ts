@@ -578,10 +578,10 @@ async function main(): Promise<void> {
   const server = buildServer({
     db,
     clientForFeed: (feedId) => clientsByFeed.get(feedId) ?? null,
-    // Flattened over every configured client rather than asked of one, so the
-    // Downloads screen shows the orphans of all of them. `untrackedFor` itself
-    // is unchanged: the scheduler still keys its map per client, because that
-    // is the granularity a reconcile tick produces.
+    // Flattened over every configured client rather than asked of one, so
+    // Picks' untracked list shows the orphans of all of them. `untrackedFor`
+    // itself is unchanged: the scheduler still keys its map per client,
+    // because that is the granularity a reconcile tick produces.
     untrackedAll: () => [...clients.keys()].flatMap((id) => scheduler.untrackedFor(id)),
     now: () => Date.now(),
     webRoot,

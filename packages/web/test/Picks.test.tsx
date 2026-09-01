@@ -2,25 +2,38 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { App } from '../src/App.tsx';
 import { Picks } from '../src/routes/Picks.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
-import type {
-  DownloadsResponse,
-  GroupEditResponse,
-  GroupView,
-  IdentityPlanView,
-  ManualField,
-  ManualFieldsResponse,
-  MetadataRequestResponse,
-  MetadataRequeryResponse,
-  MetadataView,
-  PicksResponse,
+import {
+  api,
+  type DownloadsResponse,
+  type DownloadView,
+  type GroupEditResponse,
+  type GroupView,
+  type IdentityPlanView,
+  type ManualField,
+  type ManualFieldsResponse,
+  type MetadataRequestResponse,
+  type MetadataRequeryResponse,
+  type MetadataView,
+  type PicksResponse,
+  type ReleaseDownloadsResponse,
+  type ReleaseDownloadView,
+  type UntrackedEntry,
 } from '../src/api/client.ts';
+import { POLL_MS } from '../src/api/useGroupDownloads.ts';
 import { fetchStub } from './fetchStub.ts';
 import { gone } from './dom.ts';
 
 afterEach(cleanup);
+
+/**
+ * `/api/downloads`'s answer for every test that has no interest in the
+ * download client's own queue — Picks now fetches it unconditionally on
+ * mount, so every stub in this file has to answer the route even though most
+ * tests are about picking, not about downloads.
+ */
+const EMPTY_DOWNLOADS: DownloadsResponse = { tracked: [], untracked: [], nextCursor: null };
 
 function group(id: number, title: string, over: Partial<GroupView> = {}): GroupView {
   return {
@@ -69,6 +82,35 @@ function failedPick(healthy: GroupView): GroupView {
     releases: healthy.releases.map((release) =>
       release.id === healthy.pickedReleaseId
         ? { ...release, download: { downloadId: 1, status: 'failed', error: null, absentSince: null } }
+        : release,
+    ),
+  };
+}
+
+/**
+ * `failedPick`'s own shape, generalized to any status (and, when a test needs
+ * one, an overridden `downloadId` or `absentSince`): the mark on the release
+ * that holds the download, and nothing else — `download` is per release
+ * (`ReleaseView.download`'s own doc), not a group-level field, so this never
+ * needs to touch the rest of `healthy`.
+ */
+function withDownload(
+  healthy: GroupView,
+  over: { status: string } & Partial<Pick<ReleaseDownloadView, 'downloadId' | 'absentSince'>>,
+): GroupView {
+  return {
+    ...healthy,
+    releases: healthy.releases.map((release) =>
+      release.id === healthy.pickedReleaseId
+        ? {
+            ...release,
+            download: {
+              downloadId: release.id,
+              error: null,
+              absentSince: null,
+              ...over,
+            },
+          }
         : release,
     ),
   };
@@ -200,6 +242,11 @@ function stubApi(options: StubOptions): { patched: Patched[]; pickCalls: number 
         headers: { 'content-type': 'application/json' },
       });
     }
+    if (url.pathname === '/api/downloads') {
+      return new Response(JSON.stringify(EMPTY_DOWNLOADS), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     if (url.pathname.endsWith('/identity-plan')) {
       if (options.identityPlan === undefined) {
         throw new Error(`identity-plan requested but no plan stubbed for ${url.pathname}`);
@@ -268,12 +315,18 @@ const metadataRequestBodies: number[][] = [];
  * `Browse.test.tsx` uses for the same reason — these tests are about picking
  * and reloading, not the metadata panel.
  */
-function serve(first: GroupView[], reloaded?: GroupView[]): void {
+function serve(first: GroupView[], reloaded?: GroupView[], untracked: UntrackedEntry[] = []): void {
   let loads = 0;
   metadataRequestBodies.length = 0;
   globalThis.fetch = fetchStub(async (input, init) => {
     const url = new URL(input, 'http://test.invalid');
 
+    if (url.pathname === '/api/downloads') {
+      const body: DownloadsResponse = { tracked: [], untracked, nextCursor: null };
+      return new Response(JSON.stringify(body), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     if (url.pathname === '/api/metadata/request') {
       const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
       metadataRequestBodies.push(body.groupIds);
@@ -316,6 +369,107 @@ function serve(first: GroupView[], reloaded?: GroupView[]): void {
       headers: { 'content-type': 'application/json' },
     });
   });
+}
+
+interface DownloadsStubOptions {
+  /**
+   * `/api/picks`'s answer, as a function of how many times it has now been
+   * called (1-based) — the same "first vs. every load after" shape `serve()`
+   * hard-codes for two calls, generalized so a test can drive a reload with a
+   * click rather than a second fixed argument.
+   */
+  picksFor(loadNumber: number): GroupView[];
+  /**
+   * `/api/downloads/for-groups`'s answer, read the same way
+   * `useGroupDownloads.test.tsx`'s own stub reads the `ids` query param —
+   * this is `useGroupDownloads`'s only channel in, so a test proves what
+   * Picks watched by inspecting the `ids` it was actually asked about.
+   */
+  answerDownloads(ids: number[]): ReleaseDownloadsResponse;
+  /**
+   * `POST /api/downloads/:id/retry`'s answer. Absent for every test that
+   * never clicks Retry, which is most of them.
+   */
+  retry?(downloadId: number): Response;
+}
+
+/**
+ * `serve()`'s own endpoints, plus `/api/downloads/for-groups` and
+ * `POST /api/downloads/:id/retry` — the two this task wires up for the first
+ * time. Kept separate from `serve()` itself rather than folded into it: every
+ * test written before this task passes no downloads answer at all, and
+ * `useGroupDownloads`'s own early return on an empty `watched` list means
+ * none of them ever reach this endpoint — adding it to `serve()` unconditionally
+ * would just be dead code there.
+ */
+function serveWithDownloads(options: DownloadsStubOptions): {
+  forGroupsCalls: number[][];
+  picksCalls: number;
+} {
+  const state = { forGroupsCalls: [] as number[][], picksCalls: 0 };
+  globalThis.fetch = fetchStub(async (input, init) => {
+    const url = new URL(input, 'http://test.invalid');
+
+    if (url.pathname === '/api/downloads') {
+      return new Response(JSON.stringify(EMPTY_DOWNLOADS), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.pathname === '/api/downloads/for-groups') {
+      const ids = (url.searchParams.get('ids') ?? '')
+        .split(',')
+        .filter((part) => part.length > 0)
+        .map(Number);
+      state.forGroupsCalls.push(ids);
+      return new Response(JSON.stringify(options.answerDownloads(ids)), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    const retryMatch = /^\/api\/downloads\/(\d+)\/retry$/.exec(url.pathname);
+    if (retryMatch !== null && options.retry !== undefined) {
+      return options.retry(Number(retryMatch[1]));
+    }
+    if (url.pathname === '/api/metadata/request') {
+      const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
+      return new Response(
+        JSON.stringify({
+          queued: 0,
+          alreadyAnswered: body.groupIds.length,
+          pending: 0,
+          missing: 0,
+          unavailable: 0,
+        } satisfies MetadataRequestResponse),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.pathname === '/api/metadata') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
+      const response: Record<number, MetadataView> = {};
+      for (const id of ids) response[Number(id)] = { state: 'none' };
+      return new Response(JSON.stringify(response), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.pathname === '/api/manual-fields') {
+      return new Response(JSON.stringify({} satisfies ManualFieldsResponse), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    // A pick POSTs and then reloads; its response body goes unread — the
+    // same shape `serve()`'s own POST branch is.
+    if (init?.method === 'POST') {
+      return new Response('{}', { headers: { 'content-type': 'application/json' } });
+    }
+    if (url.pathname === '/api/picks') {
+      state.picksCalls += 1;
+      const body: PicksResponse = { groups: options.picksFor(state.picksCalls) };
+      return new Response(JSON.stringify(body), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected request to ${url.pathname}`);
+  });
+  return state;
 }
 
 /**
@@ -399,96 +553,6 @@ test('a card that arrives in a later load is still landed on', async () => {
   fireEvent.click(screen.getAllByRole('button', { name: /pick/i })[0]!);
   await waitFor(() => assert.ok(screen.getByText('Beta')));
   await waitFor(() => assert.deepEqual(scrolled, ['group-2']));
-});
-
-test('a failed download on Downloads reaches its group on Picks', async () => {
-  // The two ends of the anchor, joined: the row builds an href and the card
-  // builds an id, and this is the only place that proves they are the same
-  // string. Reported live as the whole defect — a failure named a title, and
-  // the group holding three untried alternatives was unreachable from it.
-  //
-  // The landing is asserted against the literal `group-2`. Computing it from
-  // `groupAnchor` made the strongest test in the suite the blindest: both ends
-  // of the journey are built from that one function, so it agreed with itself
-  // whatever it returned, and a constant `group-x` sailed through here while
-  // every card on the page claimed the same DOM id.
-  const scrolled = watchScroll();
-  const downloads: DownloadsResponse = {
-    tracked: [
-      {
-        id: 1,
-        groupId: 2,
-        releaseId: 20,
-        title: 'Beta',
-        kind: 'initial',
-        status: 'failed',
-        error: 'Repair failed, not enough repair blocks (92 short)',
-        attempts: 1,
-        updatedAt: 1,
-        absentSince: null,
-      },
-    ],
-    untracked: [],
-    nextCursor: null,
-  };
-  const picks: PicksResponse = {
-    groups: [failedPick(group(2, 'Beta')), group(1, 'Alpha')],
-  };
-  globalThis.fetch = fetchStub(async (input, init) => {
-    const url = new URL(input, 'http://test.invalid');
-    if (url.pathname === '/api/downloads') {
-      return new Response(JSON.stringify(downloads), {
-        headers: { 'content-type': 'application/json' },
-      });
-    }
-    // The Picks route this test navigates to now polls for metadata too; see
-    // `serve()`'s own comment for why `'none'` is the right answer here.
-    if (url.pathname === '/api/metadata/request') {
-      const body = JSON.parse(String(init?.body)) as { groupIds: number[] };
-      return new Response(
-        JSON.stringify({
-          queued: 0,
-          alreadyAnswered: body.groupIds.length,
-          pending: 0,
-          missing: 0,
-          unavailable: 0,
-        } satisfies MetadataRequestResponse),
-        { headers: { 'content-type': 'application/json' } },
-      );
-    }
-    if (url.pathname === '/api/metadata') {
-      const ids = (url.searchParams.get('ids') ?? '').split(',').filter((part) => part.length > 0);
-      const response: Record<number, MetadataView> = {};
-      for (const id of ids) response[Number(id)] = { state: 'none' };
-      return new Response(JSON.stringify(response), {
-        headers: { 'content-type': 'application/json' },
-      });
-    }
-    // Picks now fetches its schema map on mount (Task 10); no plugin has one
-    // here, which is what keeps every card free of an Edit button this test
-    // has no interest in.
-    if (url.pathname === '/api/manual-fields') {
-      return new Response(JSON.stringify({} satisfies ManualFieldsResponse), {
-        headers: { 'content-type': 'application/json' },
-      });
-    }
-    return new Response(JSON.stringify(picks), { headers: { 'content-type': 'application/json' } });
-  });
-
-  render(
-    <MemoryRouter initialEntries={['/downloads']}>
-      <App />
-    </MemoryRouter>,
-  );
-  await waitFor(() => assert.ok(screen.getByRole('link', { name: 'Beta' })));
-  fireEvent.click(screen.getByRole('link', { name: 'Beta' }));
-
-  await waitFor(() => assert.deepEqual(scrolled, ['group-2']));
-  // Scoped to the card: the nav has a Failed tab of its own, and a bare query
-  // for the word finds both.
-  const card = document.getElementById('group-2');
-  assert.ok(card !== null);
-  assert.ok(within(card).getByText('Failed'));
 });
 
 test('a failed pick reads Failed on the Picks tab', async () => {
@@ -598,6 +662,13 @@ test('polling stops once nothing is pending', async () => {
         headers: { 'content-type': 'application/json' },
       });
     }
+    // Picks now fetches the download client's own queue on mount too; this
+    // test is about the metadata poll, so the answer carries nothing.
+    if (url.pathname === '/api/downloads') {
+      return new Response(JSON.stringify(EMPTY_DOWNLOADS), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     throw new Error(`unexpected request to ${url.pathname}`);
   });
 
@@ -655,6 +726,13 @@ test('does not poll forever when metadata is unavailable server-wide', async () 
     // polling, not editing, so no plugin has one.
     if (url.pathname === '/api/manual-fields') {
       return new Response(JSON.stringify({} satisfies ManualFieldsResponse), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    // Picks now fetches the download client's own queue on mount too; this
+    // test is about the metadata poll, so the answer carries nothing.
+    if (url.pathname === '/api/downloads') {
+      return new Response(JSON.stringify(EMPTY_DOWNLOADS), {
         headers: { 'content-type': 'application/json' },
       });
     }
@@ -987,4 +1065,584 @@ test('a filtered-out card keeps its metadata polled', async () => {
   // Long enough that a hook handed a narrowed list would have asked again.
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.deepEqual(metadataRequestBodies, [[1, 2, 3]]);
+});
+
+// Picks watching its own downloads. `useGroupDownloads` (Task 4) does the
+// polling; what belongs here is the wiring the Downloads tab used to own
+// outright — which groups are worth asking about, merging the live answer
+// over what `/api/picks` already said, and a retry that patches rather than
+// reloading.
+
+/** A `DownloadView`, defaulted the same way `Downloads.test.tsx`'s own `download()` is. */
+function download(over: Partial<DownloadView> = {}): DownloadView {
+  return {
+    id: 1,
+    groupId: 1,
+    releaseId: 10,
+    title: 'Alpha',
+    kind: 'initial',
+    status: 'downloading',
+    error: null,
+    attempts: 0,
+    updatedAt: 1,
+    absentSince: null,
+    ...over,
+  };
+}
+
+/** Lets an already-queued microtask run, and React commit what it produced. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test('only groups with something in flight are polled', async () => {
+  // One group already landed, one still going — `watched` must reach exactly
+  // the second.
+  const groups = [withDownload(group(1, 'Alpha'), { status: 'imported' }), withDownload(group(2, 'Beta'), { status: 'downloading' })];
+  const stub = serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: () => ({}),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  await waitFor(() => assert.ok(stub.forGroupsCalls.length > 0));
+  assert.deepEqual(stub.forGroupsCalls[0], [2], 'only the downloading group is watched');
+});
+
+test('a live status overrides the one the payload arrived with', async () => {
+  // `/api/picks` said "downloading"; the poll's own answer says the download
+  // has since failed. The row has to show the fresher of the two.
+  const groups = [withDownload(group(1, 'Alpha'), { status: 'downloading' })];
+  const stub = serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: (ids) =>
+      ids.includes(1)
+        ? { 1: { 10: { downloadId: 1, status: 'failed', error: 'disk full', absentSince: null } } }
+        : {},
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  await waitFor(() => assert.ok(screen.getByText('Failed')));
+  assert.ok(gone('downloading'), 'the static answer no longer shows once a fresher one has landed');
+  assert.deepEqual(stub.forGroupsCalls[0], [1]);
+});
+
+test('a download that imports mid-poll stops being watched', async () => {
+  // Otherwise the poll runs forever on a finished download. `watched` is
+  // recomputed from `groups` on every render — not from the live answer
+  // itself, which this hook has no way to feed back in — so what has to
+  // change is the *static* payload: a reload (here, picking the untried
+  // alternative) that reports the download has landed.
+  //
+  // Real timers, not `t.mock.timers`: mocking `setInterval` ahead of this
+  // component's initial async load is a measured source of stalls in this
+  // file. Run solo eight times before this change, this test failed twice —
+  // both times on the first `waitFor` below, timing out on an empty screen —
+  // and the two retry tests further down that already prefer real timers
+  // give the same reason. The cost here is the same one they already pay: a
+  // few real seconds waiting a `POLL_MS` tick out instead of ticking a mock.
+  const downloading = [withDownload(group(1, 'Alpha'), { status: 'downloading' })];
+  const imported = [withDownload(group(1, 'Alpha'), { status: 'imported' })];
+  const stub = serveWithDownloads({
+    picksFor: (loadNumber) => (loadNumber === 1 ? downloading : imported),
+    answerDownloads: () => ({}),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  await waitFor(() => assert.deepEqual(stub.forGroupsCalls, [[1]]));
+
+  // The untried alternative's Pick button — the only one rendered, since the
+  // downloading release is both current and in flight. A click here already
+  // runs `reload()`.
+  fireEvent.click(screen.getByRole('button', { name: /pick/i }));
+  await waitFor(() => assert.ok(screen.getByText('Current')), { timeout: 5_000 });
+  assert.equal(stub.picksCalls, 2);
+
+  // No further request for group 1 ever fires: `watched` is now empty, so
+  // `useGroupDownloads`'s effect returns before scheduling one. Waiting out a
+  // real `POLL_MS` tick is what would have produced a second call if the
+  // filter had kept watching it.
+  await new Promise((resolve) => setTimeout(resolve, POLL_MS + 500));
+  assert.deepEqual(stub.forGroupsCalls, [[1]], 'nothing left to watch, so no further request');
+});
+
+test('a download that imports through the poll alone, with no reload, stops being watched', async () => {
+  // The passive case the test above cannot reach: nothing here ever picks,
+  // edits, or retries anything — `/api/picks` answers the same `downloading`
+  // group on every load, so the *only* way this group's `imported` status can
+  // ever reach `groups` is the write-back effect folding the poll's own
+  // answer in. Assert on the request ids the stub receives, not on what the
+  // row displays: `mergedReleases` always prefers the live answer over
+  // `groups`, so the display was already correct before this effect existed
+  // — a display assertion here would pass whether or not the fix exists,
+  // which is exactly why the bug shipped unnoticed.
+  const groups = [withDownload(group(1, 'Alpha'), { status: 'downloading' })];
+  let pollCount = 0;
+  const stub = serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: () => {
+      pollCount += 1;
+      return {
+        1: { 10: { downloadId: 10, status: pollCount === 1 ? 'downloading' : 'imported', error: null, absentSince: null } },
+      };
+    },
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  await waitFor(() => assert.deepEqual(stub.forGroupsCalls, [[1]]));
+
+  // The next real `POLL_MS` tick reports `imported`. Once `groups` absorbs
+  // it, `watched` drops group 1 on its own — no click, no reload.
+  await waitFor(() => assert.equal(stub.forGroupsCalls.length, 2), { timeout: POLL_MS + 3_000 });
+  assert.equal(stub.picksCalls, 1, 'the mount load only — nothing here ever reloads');
+
+  // No third request ever fires: waiting out another real `POLL_MS` tick is
+  // what would have produced one had `watched` kept including this group.
+  await new Promise((resolve) => setTimeout(resolve, POLL_MS + 500));
+  assert.deepEqual(
+    stub.forGroupsCalls,
+    [[1], [1]],
+    'group 1 drops out of watched once its download settles, with no reload',
+  );
+});
+
+test('a poll landing that changes nothing does not loop', async () => {
+  // Every tick reports the same non-terminal status, forever — nothing for
+  // the write-back effect to ever settle. If writing to `groups` were not
+  // guarded against a no-op change, each poll tick (a new `Map` every time,
+  // per `useGroupDownloads`) would trigger a `groups` update, a re-render,
+  // and — since the effect depends on `liveDownloads` — the risk of driving
+  // more polls or renders than the flat `POLL_MS` interval itself calls for.
+  // One request per elapsed `POLL_MS` is what a correctly-guarded effect
+  // produces; a tight loop would blow well past that in the same window.
+  const groups = [withDownload(group(1, 'Alpha'), { status: 'downloading' })];
+  const stub = serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: () => ({
+      1: { 10: { downloadId: 10, status: 'downloading', error: null, absentSince: null } },
+    }),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Alpha')));
+  await waitFor(() => assert.ok(stub.forGroupsCalls.length > 0));
+
+  await new Promise((resolve) => setTimeout(resolve, POLL_MS * 2 + 500));
+  assert.ok(
+    stub.forGroupsCalls.length <= 3,
+    `expected at most 3 requests (the mount poll plus two real ticks), got ${stub.forGroupsCalls.length}`,
+  );
+});
+
+test('a refused retry surfaces instead of vanishing', async () => {
+  // Re-homed from `Downloads.test.tsx` — the row moved, the failure mode
+  // (a click that looked like it did nothing) did not.
+  const groups = [failedPick(group(1, 'Alpha'))];
+  serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: () => ({}),
+    retry: () =>
+      new Response(JSON.stringify({ error: 'Only a failed download can be retried' }), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      }),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
+  fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+  await waitFor(() => assert.ok(screen.getByText(/only a failed download can be retried/i)));
+});
+
+test('retry refreshes the row immediately, without waiting on the poll', async () => {
+  // Re-homed from `Downloads.test.tsx`, now proving the same property through
+  // `useGroupDownloads`'s `patch` instead of a screen-owned `setItems` — and
+  // built around `failed`, retry's primary case, rather than an absent-but-
+  // not-failed download: a `failed` release is excluded from `watched`
+  // before the click, so nothing here can reach `queued` except `retry`
+  // itself, either through `patch` directly or through the immediate poll
+  // `watched` triggers once `groups` reflects the retried status. Real
+  // timers throughout, deliberately: this test finishes in well under
+  // `POLL_MS`, so nothing here needs to freeze the recurring poll to prove
+  // it never fired — and mocking `setInterval` before this component's
+  // initial async load lands is its own hazard (see the "not wiped" test
+  // below for the measured cost).
+  const groups = [withDownload(group(1, 'Alpha'), { status: 'failed', downloadId: 5 })];
+
+  const stub = serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: (ids) =>
+      ids.includes(1) ? { 1: { 10: { downloadId: 5, status: 'queued', error: null, absentSince: null } } } : {},
+    retry: () =>
+      new Response(
+        JSON.stringify(download({ id: 5, groupId: 1, releaseId: 10, status: 'queued', attempts: 1 }) satisfies DownloadView),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
+  fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+  await waitFor(() => assert.equal(screen.getByText('queued').textContent, 'queued'));
+  // The mount's own load, and nothing else: the retry patched the row rather
+  // than reloading the screen to learn it.
+  assert.equal(stub.picksCalls, 1);
+});
+
+test('a retried failed download is not wiped by the next poll when another group is watched', async () => {
+  // The bug this pins: `watched` is derived from `groups`, and a `failed`
+  // download is excluded from it by design. If `retry` only patched
+  // `useGroupDownloads`'s own map — never `groups` — then with group 2
+  // already watched, the next poll would replace that map wholesale for
+  // *group 2's* answer alone (`useGroupDownloads.ts`'s poll always replaces
+  // its whole map with exactly what it just asked about) and wipe the
+  // patched `queued` entry straight back out, reverting the row to `Failed`
+  // even though the retry succeeded on the server.
+  //
+  // Real timers, not `t.mock.timers`: mocking `setInterval` ahead of this
+  // component's initial async load turns out to be its own source of
+  // flakiness in this test environment — a genuine, reproducible stall (the
+  // very first `waitFor` below sometimes never sees the mount's own fetch
+  // land, ~30-40% of runs measured in isolation) rather than a slow-poll
+  // race, and it pre-dates this task: the same pattern already flakes the
+  // same way in `Downloads.test.tsx`'s own un-mocked-by-this-task version of
+  // this test. Waiting out a real `POLL_MS` below costs a few seconds but
+  // sidesteps that hazard entirely, the same way `useGroupDownloads.test.tsx`
+  // itself already prefers real timers over mocked ones for its own poll
+  // assertions.
+  const groups = [
+    withDownload(group(1, 'Alpha'), { status: 'failed', downloadId: 5 }),
+    withDownload(group(2, 'Beta'), { status: 'downloading', downloadId: 6 }),
+  ];
+
+  serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: (ids) => {
+      const answer: ReleaseDownloadsResponse = {};
+      if (ids.includes(1)) answer[1] = { 10: { downloadId: 5, status: 'queued', error: null, absentSince: null } };
+      if (ids.includes(2)) answer[2] = { 20: { downloadId: 6, status: 'downloading', error: null, absentSince: null } };
+      return answer;
+    },
+    retry: () =>
+      new Response(
+        JSON.stringify(download({ id: 5, groupId: 1, releaseId: 10, status: 'queued', attempts: 1 }) satisfies DownloadView),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
+  fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+  await waitFor(() => assert.equal(screen.getByText('queued').textContent, 'queued'));
+
+  // One real `POLL_MS` tick must not wipe the retried row back to Failed.
+  await new Promise((resolve) => setTimeout(resolve, POLL_MS + 500));
+  assert.equal(screen.getByText('queued').textContent, 'queued', 'the retried row must not revert to Failed');
+  assert.ok(gone('Failed'), 'the row must not have reverted to Failed');
+});
+
+test('a retried failed download joins the watch list instead of freezing when nothing else is watched', async () => {
+  // The other half of the same bug: with no other group watched,
+  // `useGroupDownloads`'s effect never starts at all for an empty `watched`
+  // list, so if `retry` left `groups` unchanged the patched `queued` state
+  // would freeze forever — never confirmed, never corrected — instead of
+  // reflecting real progress. A freshly-`queued` download is genuinely
+  // non-terminal, so it has to earn its way back onto `watched` rather than
+  // sitting there unpolled.
+  //
+  // Real timers, for the same reason the "not wiped" test above gives: this
+  // only needs the *immediate* poll a newly non-empty `watched` triggers, not
+  // the recurring one, so there is nothing here worth mocking `setInterval`
+  // for in the first place.
+  const groups = [withDownload(group(1, 'Alpha'), { status: 'failed', downloadId: 5 })];
+
+  const stub = serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: (ids) =>
+      ids.includes(1) ? { 1: { 10: { downloadId: 5, status: 'queued', error: null, absentSince: null } } } : {},
+    retry: () =>
+      new Response(
+        JSON.stringify(download({ id: 5, groupId: 1, releaseId: 10, status: 'queued', attempts: 1 }) satisfies DownloadView),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /retry/i })));
+  assert.deepEqual(stub.forGroupsCalls, [], 'a failed-only group is never watched before the retry');
+
+  fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+  // The retry's own response makes the download non-terminal, so the poll
+  // must actually start for it now — not just the hook's map getting one
+  // write that then sits with nothing left to confirm or correct it.
+  await waitFor(() => assert.ok(stub.forGroupsCalls.length > 0));
+  assert.deepEqual(stub.forGroupsCalls[0], [1]);
+});
+
+test('a bodyless request carries no json content-type', async () => {
+  // Re-homed from `Downloads.test.tsx`. Retry sends no body. Declaring one
+  // anyway made Fastify reject it with a 400 before the route ran, so the
+  // button never worked — and the click site had no catch, so it failed in
+  // silence (`client.ts` around line 449 records why).
+  const sent: RequestInit[] = [];
+  globalThis.fetch = fetchStub(async (_input, init) => {
+    sent.push(init ?? {});
+    return new Response('{}', { headers: { 'content-type': 'application/json' } });
+  });
+
+  await api.retry(7);
+  assert.equal(sent[0]?.headers, undefined);
+
+  await api.pick(1, 2);
+  assert.deepEqual(sent[1]?.headers, { 'content-type': 'application/json' });
+});
+
+test('a poll landing does not clear the term or unfilter the list', async () => {
+  // Re-homed from `Downloads.test.tsx`, and newly relevant: `useGroupDownloads`
+  // is the first poll Picks has ever had, so it is the first thing that could
+  // do to this screen what an equivalent bug did to Downloads — a box that
+  // still holds a term while the list has silently gone back to showing
+  // everything, or a card the term is hiding that reappears the moment fresh
+  // information lands for it.
+  //
+  // Real timers, not `t.mock.timers`: mocking `setInterval` ahead of this
+  // component's initial async load is a measured source of stalls in this
+  // file — see "a download that imports mid-poll stops being watched" above
+  // for the counts. Deferred promises (rather than `waitFor`) still pin
+  // exactly which poll has landed, for the same reason `Downloads.test.tsx`'s
+  // own version of this test gives; the second poll is now awaited out over
+  // the real interval instead of ticked forward on a mocked one.
+  const groups = [withDownload(group(1, 'Alpha'), { status: 'downloading' }), group(2, 'Beta')];
+
+  const resolvers: (() => void)[] = [];
+  const handedBack = Array.from({ length: 2 }, () => new Promise<void>((resolve) => resolvers.push(resolve)));
+  let polls = 0;
+  serveWithDownloads({
+    picksFor: () => groups,
+    answerDownloads: (ids) => {
+      polls += 1;
+      // The second poll is the one that matters: Alpha's status changes
+      // under the term, which is the case a filter re-derived from fresh
+      // data must not let through.
+      const status = polls === 1 ? 'downloading' : 'failed';
+      resolvers[polls - 1]?.();
+      return ids.includes(1) ? { 1: { 10: { downloadId: 1, status, error: null, absentSince: null } } } : {};
+    },
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await handedBack[0];
+  await flush();
+  assert.ok(screen.getByText('Beta'));
+
+  const box = screen.getByRole('searchbox', { name: 'Search picks' });
+  fireEvent.change(box, { target: { value: 'beta' } });
+  assert.ok(gone('Alpha'));
+
+  // The real interval, not a ticked mock, is what produces the second poll.
+  await handedBack[1];
+  assert.equal(polls, 2);
+  await flush();
+
+  // The term survived the landing, and the card it hides stayed hidden.
+  assert.equal((box as HTMLInputElement).value, 'beta', 'the term is still what was typed');
+  assert.ok(screen.getByText('Beta'));
+  assert.ok(gone('Alpha'), 'a live status change must not unfilter a card the term is hiding');
+
+  // And it really did arrive — without this, every assertion above would also
+  // hold if the second answer had simply never reached state, which is the
+  // vacuous pass this guards against.
+  fireEvent.change(box, { target: { value: '' } });
+  assert.ok(screen.getByText('Alpha'));
+  assert.ok(screen.getByText('Failed'));
+});
+
+// The download client's own queue — re-homed from `Downloads.test.tsx`, now
+// rendered at the foot of this screen instead of on its own tab. `serve()`'s
+// third argument is `untracked`; every test above this point passes none,
+// which is what keeps the section absent from every one of them.
+
+test('untracked entries render inert and labelled', async () => {
+  serve(
+    [],
+    undefined,
+    [{ clientId: 'sab', ref: 'x', name: 'Someone Elses', state: 'downloading', percentage: 40 }],
+  );
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => assert.ok(screen.getByText('Someone Elses')));
+  assert.ok(screen.getByText(/not managed by pickarr/i));
+  assert.ok(!screen.queryByRole('button', { name: /retry/i }), 'no retry button on this row');
+});
+
+test('the term filters untracked entries too, and takes their heading with them', async () => {
+  // The heading is the whole of what says these rows are not Pickarr's.
+  // Leaving it standing over an empty list would read as "Pickarr has lost
+  // track of something", when all that happened is the reader typed.
+  serve(
+    [group(1, 'Alex Coal'), group(2, 'Riley Reid')],
+    undefined,
+    [
+      { clientId: 'sab', ref: 'a', name: 'Someone Elses', state: 'downloading', percentage: 40 },
+      { clientId: 'sab', ref: 'b', name: 'Alex Coal Extras', state: 'completed', percentage: 100 },
+    ],
+  );
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await waitFor(() => assert.ok(screen.getByText('Someone Elses')));
+  const box = screen.getByRole('searchbox', { name: 'Search picks' });
+
+  // A term both halves can satisfy filters each of them and keeps the heading
+  // between: the two lists are filtered independently, not one and then the
+  // other discarded.
+  fireEvent.change(box, { target: { value: 'alex' } });
+  assert.ok(screen.getByText('Alex Coal'));
+  assert.ok(screen.getByText('Alex Coal Extras'));
+  assert.ok(screen.getByText(/not managed by pickarr/i));
+  assert.ok(gone('Riley Reid'));
+  assert.ok(gone('Someone Elses'));
+
+  // A term only a card can satisfy takes the whole section, heading and all,
+  // rather than leaving the label over nothing.
+  fireEvent.change(box, { target: { value: 'riley' } });
+  assert.ok(screen.getByText('Riley Reid'));
+  assert.ok(gone('Alex Coal Extras'));
+  assert.ok(gone('Someone Elses'));
+  assert.ok(gone(/not managed by pickarr/i));
+});
+
+// A term filtering both halves is exercised above only through the "takes the
+// heading with them" case, i.e. one term that clears the whole section. This
+// pins the pairing directly: one term, still narrowing both a card and an
+// untracked entry down to the ones that match, with neither list emptied.
+test('a term filters cards and untracked entries together', async () => {
+  serve(
+    [group(1, 'Alex Coal'), group(2, 'Riley Reid')],
+    undefined,
+    [
+      { clientId: 'sab', ref: 'a', name: 'Alex Coal Extras', state: 'downloading', percentage: 40 },
+      { clientId: 'sab', ref: 'b', name: 'Someone Elses', state: 'completed', percentage: 100 },
+    ],
+  );
+
+  render(
+    <MemoryRouter initialEntries={['/picks']}>
+      <Picks />
+    </MemoryRouter>,
+  );
+  await waitFor(() => assert.ok(screen.getByText('Someone Elses')));
+
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search picks' }), {
+    target: { value: 'alex' },
+  });
+
+  assert.ok(screen.getByText('Alex Coal'), 'the matching card stays');
+  assert.ok(screen.getByText('Alex Coal Extras'), 'the matching untracked entry stays');
+  assert.ok(gone('Riley Reid'), 'the non-matching card is filtered');
+  assert.ok(gone('Someone Elses'), 'the non-matching untracked entry is filtered');
+});
+
+// Two clients can each be running a job the other knows nothing about, and
+// `nzo_id` is unique only within one SABnzbd — so once #34 made a second
+// client reachable, two untracked entries can arrive sharing a `ref`.
+//
+// The console is asserted on rather than the rows, because keying on `ref`
+// alone does *not* visibly drop a row on first render: React renders both and
+// complains that the behaviour "may cause children to be duplicated and/or
+// omitted" and "could change in a future version". That warning is the whole
+// observable defect on mount. Unlike `Downloads.tsx`'s old copy of this list,
+// nothing here repolls it (see `Picks.tsx`'s own comment on why), but the
+// list still re-renders on every render of this screen — a search keystroke
+// among them — so a duplicate key is exactly as live a hazard here as it was
+// on a poll-driven re-render.
+test('two untracked entries from different clients sharing a ref are keyed apart', async () => {
+  serve(
+    [],
+    undefined,
+    [
+      { clientId: 'sab-a', ref: 'nzo_1', name: 'Stranger On A', state: 'downloading', percentage: 5 },
+      { clientId: 'sab-b', ref: 'nzo_1', name: 'Stranger On B', state: 'completed', percentage: null },
+    ],
+  );
+
+  const complaints: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => complaints.push(args.map(String).join(' '));
+  try {
+    render(
+      <MemoryRouter initialEntries={['/picks']}>
+        <Picks />
+      </MemoryRouter>,
+    );
+    await waitFor(() => assert.ok(screen.getByText('Stranger On A')));
+    assert.ok(screen.getByText('Stranger On B'));
+  } finally {
+    console.error = realError;
+  }
+  assert.deepEqual(complaints, []);
 });

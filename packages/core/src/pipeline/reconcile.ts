@@ -53,8 +53,8 @@ export interface UntrackedEntry {
    * unique only *within* that client, so once more than one is configured —
    * which is what #34 made reachable — two entries from two clients can carry
    * the same `ref`. Anything collecting these into one list (the scheduler's
-   * map, `/api/downloads`, the Downloads screen's keys) needs the pair, and a
-   * field the producer might omit would leave those callers guessing.
+   * map, `/api/downloads`, Picks' own untracked list keys) needs the pair,
+   * and a field the producer might omit would leave those callers guessing.
    */
   clientId: string;
   ref: string;

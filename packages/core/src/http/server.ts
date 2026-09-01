@@ -176,8 +176,8 @@ const browseQuerySchema = z.object({
 });
 
 /**
- * The same two fields `browseQuerySchema` has, and deliberately no `q`. The
- * Downloads screen's search box still filters in the client; moving that term
+ * The same two fields `browseQuerySchema` has, and deliberately no `q`.
+ * Picks' one shared search box still filters in the client; moving that term
  * into SQL changes what the box *means* — it would reach rows no page has
  * loaded — and belongs with the rest of issue #31 rather than smuggled in
  * behind the pagination.

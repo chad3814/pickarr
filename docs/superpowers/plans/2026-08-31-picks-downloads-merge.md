@@ -988,7 +988,13 @@ plan was written; Task 5 moved four of them (`:67`, `:83`, `:96`, `:110`) to
 `MediaCard.test.tsx` and deleted the originals, so the arithmetic below counts
 what is left rather than what was there. They split three ways:
 
-- **Seven must still have a home**, all of them going to `Picks` (Tasks 6-7):
+**All seven have now been re-homed** — Tasks 6 and 7 took four and three
+respectively, and each name appears exactly once in `Picks.test.tsx`. The file
+now holds nine tests: four whose originals Task 6 copied without deleting, and
+five that die with their subject or were dropped on purpose. Deleting the file is
+therefore safe; verify by name rather than by count, and the list to verify is:
+
+- **The seven, all now in `Picks` (Tasks 6-7) — confirm each is present before deleting:**
   a bodyless retry request carrying no JSON content-type; a refused retry
   surfacing instead of vanishing; a retry refreshing its row without waiting on
   the poll; untracked entries rendering inert and labelled; a term filtering

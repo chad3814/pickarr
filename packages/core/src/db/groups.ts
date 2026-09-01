@@ -253,9 +253,10 @@ function committedScore(groupId: string, pickedReleaseId: string): string {
  * with its Pick button, so retrying it is one click, and an attempt that
  * succeeds makes the release eligible again on its own — no marker to clear
  * (see `latestDownloadFailed`). A failed *pick* has no Pick button, because
- * `ReleaseRow` gives the current release none; it is retried from the
- * Downloads tab instead. Either way the row is marked `Failed` and the release
- * merely stops being advertised as an upgrade.
+ * `ReleaseRow` gives the current release none; it is retried instead from the
+ * Retry button on that same row's own detail line, on the Picks screen.
+ * Either way the row is marked `Failed` and the release merely stops being
+ * advertised as an upgrade.
  */
 function deriveUpgradeReleaseId(
   db: DatabaseSync,

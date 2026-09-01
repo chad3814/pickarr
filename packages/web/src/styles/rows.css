@@ -123,15 +123,22 @@
  */
 .release-detail { flex: 1 0 100%; display: flex; gap: var(--space-3); align-items: center; }
 
+/* Red, for the same reason `.release-failed` and `.status-failed
+   .download-status` above are: a download in this state needs no softening.
+   `DownloadRow.tsx` is gone — `ReleaseRow.tsx`'s own detail line is this
+   class's only user now — kept unrenamed anyway, since a rename here is
+   cosmetic churn this branch's deletion diff did not need. */
 .download-error { color: var(--color-error); font-size: var(--text-meta); }
 
 /* Amber, not red: absence is not yet a failure, only a client that has gone
    quiet. It shares the accent hue — see the badge in `card.css` on why that is
    accepted, and how form rather than hue separates a warning from an action.
-   Shared verbatim with the release row's own detail line — not renamed,
-   because `DownloadRow.tsx` still renders its own `.download-row` beside this
-   same class today and a rename here without updating that file would leave
-   the two disagreeing about what colours a download's absence. */
+   `DownloadRow.tsx` is gone — `ReleaseRow.tsx`'s own detail line is this
+   class's only user now, same as `.download-error` above — kept unrenamed for
+   the same reason: `.download-row`, `.downloads`, and `.untracked` are still
+   genuinely live (the untracked queue moved onto Picks and still uses them),
+   so a rename sweep here would touch names that still mean what they say
+   only to chase two that no longer share a component with them. */
 .download-absent { color: var(--color-accent-text); font-size: var(--text-meta); }
 
 .download-row.untracked { color: var(--color-text-dim); font-style: italic; }

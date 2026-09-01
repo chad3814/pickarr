@@ -292,10 +292,10 @@ export interface DownloadPageQuery {
  * with `id` descending inside a tie, the next page holds ids *smaller* than the
  * cursor's.
  *
- * No search predicate here, deliberately. The Downloads screen still filters in
- * the client; moving that term into SQL is the rest of #31 and is left to be
- * judged on its own, since it changes what the search box means as well as
- * where it runs.
+ * No search predicate here, deliberately. Picks' shared search box still
+ * filters in the client; moving that term into SQL is the rest of #31 and is
+ * left to be judged on its own, since it changes what the search box means
+ * as well as where it runs.
  */
 export function pageOfDownloads(db: DatabaseSync, query: DownloadPageQuery): DownloadRow[] {
   const where =

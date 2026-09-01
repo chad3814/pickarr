@@ -407,9 +407,9 @@ test('an absent release warns how long it has been missing and offers Retry', ()
 test('Retry is offered for exactly the statuses the API guard accepts', () => {
   // Re-homed from Downloads.test.tsx:110. This is the load-bearing one: it
   // pins `status === 'failed' || absentSince !== null` against the server's
-  // own guard (`packages/core/src/http/server.ts`, also mirrored verbatim in
-  // `DownloadRow.tsx:14`) — a wider or narrower offer here just becomes a 409
-  // on click.
+  // own guard (`packages/core/src/http/server.ts`), which `ReleaseRow.tsx`
+  // mirrors verbatim — a wider or narrower offer here just becomes a 409 on
+  // click.
   const statuses = ['queued', 'downloading', 'completed', 'importing', 'imported', 'failed'] as const;
   for (const status of statuses) {
     for (const absentSince of [null, Date.now() - 60_000]) {
