@@ -305,8 +305,17 @@ export interface GroupView {
   // wants it.
 }
 
+/**
+ * One row of the merged Browse list: a browsable group or a name the parser
+ * refused, tagged so the SPA can render each under its own card without
+ * guessing from which fields happen to be present.
+ */
+export type BrowseItem =
+  | { kind: 'group'; group: GroupView }
+  | { kind: 'failed'; item: FailedItemView };
+
 export interface BrowseResponse {
-  groups: GroupView[];
+  items: BrowseItem[];
   nextCursor: string | null;
 }
 

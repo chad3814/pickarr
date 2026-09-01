@@ -15,14 +15,14 @@ import type { PickarrConfig } from '../config/schema.ts';
 import type { JsonValue } from '../json.ts';
 import {
   browsableGroup,
-  browseGroups,
   getGroup,
+  groupsByIds,
   pickedGroups,
   type GroupRow,
 } from '../db/groups.ts';
-import type { BrowseCursor, BrowseKind } from '../db/browse-page.ts';
+import { pageOfBrowseItems, type BrowseCursor, type BrowseKind } from '../db/browse-page.ts';
 import { getDownload, latestDownloadsForGroups, pageOfDownloads, resetForRetry } from '../db/downloads.ts';
-import { failedFeedItems } from '../db/feed-items.ts';
+import { failedFeedItems, feedItemsByIds } from '../db/feed-items.ts';
 import {
   enqueueMetadata,
   enqueueRefresh,
@@ -52,6 +52,7 @@ import {
   toDownloadViews,
   toFailedItemView,
   toGroupView,
+  type BrowseItem,
   type BrowseResponse,
   type ConfigResponse,
   type ConfigSaveResponse,
@@ -860,28 +861,52 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // `limit` long can be told apart from the last page: without the extra
     // row, "the page came back exactly `limit` long" is ambiguous between
     // "there is more" and "that was exactly everything left."
-    const overFetched = browseGroups(db, {
-      cursor: cursor === null ? null : { listRankAt: cursor.sortKey, id: cursor.id },
+    const overFetched = pageOfBrowseItems(db, {
+      cursor,
       limit: query.data.limit + 1,
       search: query.data.q ?? null,
     });
     const hasMore = overFetched.length > query.data.limit;
-    const groups = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
+    const page = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
 
-    // One query for the whole page, not one per group: see `metadataForGroups`
-    // and the `viewOf` doc comment above. Issue #31 is the defect this must
-    // not repeat.
-    const metadata = metadataForGroups(db, groups.map((group) => group.id));
-    const performers = performersForGroups(db, groups.map((group) => group.id));
+    // Two batches, not one query per row: the discipline `metadataForGroups`
+    // and `performersForGroups` already hold for the group half, extended to
+    // the failed half by `groupsByIds`/`feedItemsByIds`. Issues #31 and #33
+    // both name a per-row lookup on this exact route as the defect to avoid.
+    const groupIds = page.filter((row) => row.kind === 'group').map((row) => row.id);
+    const failedIds = page.filter((row) => row.kind === 'failed').map((row) => row.id);
+    const groups = groupsByIds(db, groupIds);
+    const failedItems = feedItemsByIds(db, failedIds);
+    const metadata = metadataForGroups(db, groupIds);
+    const performers = performersForGroups(db, groupIds);
 
-    const last = groups.at(-1);
+    // Mapped over the query's own rows rather than concatenating the two
+    // hydrated lists, so the interleaved order `pageOfBrowseItems` computed is
+    // the order served. A row absent from its batch (deleted between listing
+    // and hydrating it) is simply dropped, the same fact a `get` returning
+    // nothing carried before.
+    const items: BrowseItem[] = page.flatMap((row): BrowseItem[] => {
+      if (row.kind === 'group') {
+        const group = groups.get(row.id);
+        if (group === undefined) return [];
+        return [{ kind: 'group', group: viewOf(group, metadata.get(group.id), performers.get(group.id) ?? []) }];
+      }
+      const item = failedItems.get(row.id);
+      if (item === undefined) return [];
+      return [{ kind: 'failed', item: toFailedItemView(item, deps.pluginForFeed(item.feedId)) }];
+    });
+
+    const last = page.at(-1);
     const response: BrowseResponse = {
-      groups: groups.map((group) => viewOf(group, metadata.get(group.id), performers.get(group.id) ?? [])),
-      // `kind: 'group'` because `browseGroups` above is the only source this
-      // route reads from today — every row it can hand back is a group.
+      items,
+      // Minted from the last row's own kind and sort key, not a hardcoded
+      // `'group'`: once the failed half is merged in, a page can end on either
+      // kind, and a cursor naming the wrong one reads the wrong boundary in
+      // `pageOfBrowseItems`'s keyset on the next request (issue #33's failure,
+      // a third cause).
       nextCursor:
         hasMore && last !== undefined
-          ? mintBrowseCursor({ sortKey: last.listRankAt, kind: 'group', id: last.id })
+          ? mintBrowseCursor({ sortKey: last.sortKey, kind: last.kind, id: last.id })
           : null,
     };
     return response;

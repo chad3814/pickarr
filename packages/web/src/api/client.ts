@@ -388,8 +388,18 @@ export interface ReleaseEditResponse {
  */
 export type ManualPreviewResponse = { identityKey: string } | { error: string };
 
+/**
+ * One row of the merged Browse list: a browsable group or a name the parser
+ * refused, tagged so the SPA can render each under its own card without
+ * guessing from which fields happen to be present. Mirrors `BrowseItem` in
+ * `packages/core/src/http/views.ts`.
+ */
+export type BrowseItem =
+  | { kind: 'group'; group: GroupView }
+  | { kind: 'failed'; item: FailedItemView };
+
 export interface BrowseResponse {
-  groups: GroupView[];
+  items: BrowseItem[];
   nextCursor: string | null;
 }
 

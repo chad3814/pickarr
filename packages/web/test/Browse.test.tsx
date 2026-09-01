@@ -4,6 +4,7 @@ import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-li
 import { Browse } from '../src/routes/Browse.tsx';
 import { stubIntersectionObserver, type Intersection } from './intersection.ts';
 import type {
+  BrowseItem,
   BrowseResponse,
   GroupEditResponse,
   GroupView,
@@ -88,6 +89,13 @@ function group(id: number, title: string, over: Overrides = {}): GroupView {
   return view;
 }
 
+/** A page of plain groups, as `BrowseResponse.items` now carries them. None of
+ * these tests exercise the failed half of the merge — that is a later task's
+ * card — so every stubbed page here is groups only. */
+function groupItems(groups: readonly GroupView[]): BrowseItem[] {
+  return groups.map((g) => ({ kind: 'group', group: g }));
+}
+
 interface Options {
   /** What `PATCH /api/groups/:id` answers. */
   groupEdit?: GroupEditResponse;
@@ -167,8 +175,8 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
   const calls: string[] = [];
   sent.length = 0;
   const pages = new Map<string, BrowseResponse>([
-    ['', { groups: options.firstPage ?? [group(1, 'Alpha')], nextCursor: '999:1' }],
-    ['999:1', { groups: options.secondPage ?? [group(2, 'Beta')], nextCursor: null }],
+    ['', { items: groupItems(options.firstPage ?? [group(1, 'Alpha')]), nextCursor: '999:1' }],
+    ['999:1', { items: groupItems(options.secondPage ?? [group(2, 'Beta')]), nextCursor: null }],
   ]);
   // Indexed by id so `/api/metadata` can echo back whatever a page already
   // carried. A blanket `'none'` was fine while every served group's own
@@ -187,7 +195,9 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
   // disagreement rather than a documented limit here, until someone extends
   // this map to those three paths too.
   const servedGroups = new Map<number, GroupView>();
-  for (const page of pages.values()) for (const served of page.groups) servedGroups.set(served.id, served);
+  for (const page of pages.values()) {
+    for (const item of page.items) if (item.kind === 'group') servedGroups.set(item.group.id, item.group);
+  }
   let patches = 0;
 
   const picked: PickResponse = {
@@ -737,7 +747,7 @@ function serveSettledGroup(answers: readonly MetadataView[]): () => number {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/browse') {
       return new Response(
-        JSON.stringify({ groups: [alpha], nextCursor: null } satisfies BrowseResponse),
+        JSON.stringify({ items: groupItems([alpha]), nextCursor: null } satisfies BrowseResponse),
         { headers: { 'content-type': 'application/json' } },
       );
     }

@@ -60,6 +60,27 @@ export function getFeedItem(db: DatabaseSync, id: number): FeedItemRow | null {
   return row === undefined ? null : toFeedItemRow(row as SqlRow);
 }
 
+/**
+ * A whole page's worth of feed items, keyed by id, in one query — the same
+ * batching discipline `groupsByIds` and `metadataForGroups` follow, applied to
+ * the other namespace `/api/browse` now merges in. Hydrating a merged page's
+ * failed rows one `getFeedItem` at a time is exactly the per-row pattern
+ * issues #31 and #33 both name.
+ *
+ * A missing id is simply absent from the map, the same fact a `get` returning
+ * null carried before.
+ */
+export function feedItemsByIds(db: DatabaseSync, ids: readonly number[]): Map<number, FeedItemRow> {
+  const found = new Map<number, FeedItemRow>();
+  if (ids.length === 0) return found;
+  const holes = ids.map(() => '?').join(', ');
+  for (const row of db.prepare(`${SELECT} WHERE id IN (${holes})`).all(...ids)) {
+    const item = toFeedItemRow(row as SqlRow);
+    found.set(item.id, item);
+  }
+  return found;
+}
+
 export interface FailedQuery {
   cursor: { firstSeenAt: number; id: number } | null;
   limit: number;

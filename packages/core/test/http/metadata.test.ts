@@ -790,8 +790,11 @@ test('browse carries metadata and reads it in one query', async () => {
     'browse must read group_metadata in one query execution for the whole page',
   );
 
-  const body = response.json() as { groups: { id: number; metadata: unknown }[] };
-  const byId = new Map(body.groups.map((g) => [g.id, g.metadata]));
+  const body = response.json() as {
+    items: ({ kind: 'group'; group: { id: number; metadata: unknown } } | { kind: 'failed' })[];
+  };
+  const groups = body.items.flatMap((item) => (item.kind === 'group' ? [item.group] : []));
+  const byId = new Map(groups.map((g) => [g.id, g.metadata]));
   assert.deepEqual(byId.get(g1), {
     state: 'confirmed',
     title: 'Alpha Scene',
@@ -847,9 +850,13 @@ test('browse gives each group its own cast, never the other one\'s', async () =>
   assert.equal(response.statusCode, 200);
 
   const body = response.json() as {
-    groups: { id: number; metadata: { performers: { name: string }[] } }[];
+    items: (
+      | { kind: 'group'; group: { id: number; metadata: { performers: { name: string }[] } } }
+      | { kind: 'failed' }
+    )[];
   };
-  const namesById = new Map(body.groups.map((g) => [g.id, g.metadata.performers.map((p) => p.name)]));
+  const groups = body.items.flatMap((item) => (item.kind === 'group' ? [item.group] : []));
+  const namesById = new Map(groups.map((g) => [g.id, g.metadata.performers.map((p) => p.name)]));
   assert.deepEqual(namesById.get(g1), ['Alice Maze']);
   assert.deepEqual(namesById.get(g2), ['Bella Rolland']);
 
@@ -1217,9 +1224,13 @@ test('browse carries the cast of a group with no scene data', async () => {
 
   assert.equal(response.statusCode, 200);
   const body = response.json() as {
-    groups: { id: number; metadata: { state: string; performers: { name: string }[] } }[];
+    items: (
+      | { kind: 'group'; group: { id: number; metadata: { state: string; performers: { name: string }[] } } }
+      | { kind: 'failed' }
+    )[];
   };
-  const found = body.groups.find((entry) => entry.id === groupId);
+  const groups = body.items.flatMap((item) => (item.kind === 'group' ? [item.group] : []));
+  const found = groups.find((entry) => entry.id === groupId);
   assert.equal(found?.metadata.state, 'none');
   assert.deepEqual(found?.metadata.performers.map((p) => p.name), ['Amalia Davis']);
 

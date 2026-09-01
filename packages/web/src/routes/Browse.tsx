@@ -24,7 +24,12 @@ export function Browse() {
   const fetchPage = useCallback(
     async (cursor: string | null) => {
       const page = await api.browse(cursor, search);
-      return { items: page.groups, nextCursor: page.nextCursor };
+      // The merged list now also carries names the parser refused, under
+      // `kind: 'failed'`. This screen does not have a card for those yet — a
+      // later task adds one — so for now it renders the groups exactly as it
+      // did before the merge and drops the failed rows on the floor.
+      const groups = page.items.flatMap((item) => (item.kind === 'group' ? [item.group] : []));
+      return { items: groups, nextCursor: page.nextCursor };
     },
     [search],
   );

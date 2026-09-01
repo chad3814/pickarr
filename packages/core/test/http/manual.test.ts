@@ -928,7 +928,13 @@ test('a release edit that takes the group out of the browse list answers group: 
   assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
   assert.equal(browsableGroup(db, 1), null);
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  assert.deepEqual(browse['groups'], []);
+  // `seedFeedItems` also seeds a few undismissed parse failures, which the
+  // merged list now carries alongside groups — so this checks the group half
+  // specifically, rather than the whole page being empty.
+  assert.deepEqual(
+    browse['items'].filter((item: { kind: string }) => item.kind === 'group'),
+    [],
+  );
   await server.close();
   db.close();
 });
@@ -1088,7 +1094,10 @@ test('a group and its releases carry the values that would prefill an edit form'
   const server = buildServer(deps(db));
 
   const body = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const group = body['groups'].find((candidate: { id: number }) => candidate.id === 2);
+  const groups = body['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const group = groups.find((candidate: { id: number }) => candidate.id === 2);
 
   // The group's half is identity-only, which is exactly what a group edit
   // submits over: no quality, because a group holds none.
@@ -1111,7 +1120,10 @@ test('a plugin without the prefill hook produces no manualValues at all', async 
   const server = buildServer(deps(db, BARE));
 
   const body = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const group = body['groups'][0];
+  const groups = body['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const group = groups[0];
 
   // Their absence is how the SPA decides not to offer an Edit control, so an
   // empty object here would put a form in front of a plugin that cannot read
@@ -1135,7 +1147,11 @@ test('a plugin whose prefill hook throws costs the Edit control, not the list', 
   // whole list down rather than one card's Edit button.
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.includes('manualValues'), false);
-  const group = response.json()['groups'][0];
+  const body = response.json();
+  const groups = body['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const group = groups[0];
   assert.equal('manualValues' in group, false);
   assert.equal('manualValues' in group['releases'][0], false);
   await server.close();
@@ -1207,7 +1223,10 @@ test('opening Edit on a listing group and saving nothing merges nothing', async 
 
   const server = buildServer(deps(db, scenes));
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 1);
+  const groups = browse['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const listed = groups.find((candidate: { id: number }) => candidate.id === 1);
   const untouched = listed['manualValues'] as Record<string, string>;
 
   // Spec §11 calls this preview the only guard against a wrong manual
@@ -1274,7 +1293,10 @@ test('a group stored by the pre-fix parser survives opening Edit and saving noth
 
   const server = buildServer(deps(db, scenes));
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 1);
+  const groups = browse['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const listed = groups.find((candidate: { id: number }) => candidate.id === 1);
   const untouched = listed['manualValues'] as Record<string, string>;
 
   const preview = await server.inject({
@@ -1312,7 +1334,10 @@ test('every manual route answers a group view the browse list would agree with',
     })
   ).json()['group'];
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 2);
+  const groups = browse['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const listed = groups.find((candidate: { id: number }) => candidate.id === 2);
 
   // The SPA patches this card straight in, so the two have to be the same
   // object down to the prefill values.
