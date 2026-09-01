@@ -20,6 +20,7 @@ import {
   pickedGroups,
   type GroupRow,
 } from '../db/groups.ts';
+import type { BrowseCursor, BrowseKind } from '../db/browse-page.ts';
 import { getDownload, latestDownloadsForGroups, pageOfDownloads, resetForRetry } from '../db/downloads.ts';
 import { failedFeedItems } from '../db/feed-items.ts';
 import {
@@ -475,6 +476,44 @@ function cursorFrom(raw: string | undefined): { cursor: KeysetCursor | null } | 
 }
 
 /**
+ * The `"<sort key>:<kind>:<id>"` string `/api/browse` mints, or `null` when the
+ * text is not one of those.
+ *
+ * The same rule as `parseCursor` above plus a discriminator, not a second rule:
+ * the numeric parts go through the same two helpers and reject the same forms,
+ * and `null` means malformed here too — a 400 rather than a first page (#33).
+ *
+ * The two-component form is malformed *for this route*. It stays valid for the
+ * routes that order on one table, and accepting it here would mean reading a
+ * two-part boundary against a three-part order — a silently wrong page rather
+ * than a loud refusal.
+ */
+function parseBrowseCursor(raw: string): BrowseCursor | null {
+  const parts = raw.split(':');
+  if (parts.length !== 3) return null;
+  const [rawSortKey, rawKind, rawId] = parts;
+  if (rawSortKey === undefined || rawKind === undefined || rawId === undefined) return null;
+  if (rawKind !== 'failed' && rawKind !== 'group') return null;
+  const sortKey = parseNonNegativeInt(rawSortKey);
+  const id = parsePositiveInt(rawId);
+  if (sortKey === null || id === null) return null;
+  return { sortKey, kind: rawKind, id };
+}
+
+/** As `cursorFrom`, for the merged list: absence is a first page, unreadability is not. */
+function browseCursorFrom(
+  raw: string | undefined,
+): { cursor: BrowseCursor | null } | { error: string } {
+  if (raw === undefined) return { cursor: null };
+  const cursor = parseBrowseCursor(raw);
+  return cursor === null ? { error: 'Invalid cursor' } : { cursor };
+}
+
+function mintBrowseCursor(row: { sortKey: number; kind: BrowseKind; id: number }): string {
+  return `${row.sortKey}:${row.kind}:${row.id}`;
+}
+
+/**
  * A plugin's field list, or nothing.
  *
  * Nothing when it cannot also *consume* the values: a form whose every submit
@@ -810,7 +849,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/browse', async (request, reply) => {
     const query = browseQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
-    const from = cursorFrom(query.data.cursor);
+    // The composite parser, not `cursorFrom`: this list's boundary already
+    // carries the `kind` a merged failed-item branch needs to stay total, even
+    // before that branch is wired in below.
+    const from = browseCursorFrom(query.data.cursor);
     if ('error' in from) return reply.code(400).send({ error: from.error });
     const { cursor } = from;
 
@@ -835,7 +877,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const last = groups.at(-1);
     const response: BrowseResponse = {
       groups: groups.map((group) => viewOf(group, metadata.get(group.id), performers.get(group.id) ?? [])),
-      nextCursor: hasMore && last !== undefined ? `${last.listRankAt}:${last.id}` : null,
+      // `kind: 'group'` because `browseGroups` above is the only source this
+      // route reads from today — every row it can hand back is a group.
+      nextCursor:
+        hasMore && last !== undefined
+          ? mintBrowseCursor({ sortKey: last.listRankAt, kind: 'group', id: last.id })
+          : null,
     };
     return response;
   });
@@ -1226,8 +1273,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const query = downloadsQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
     // Refused with the same message `/api/browse` and `/api/failed` use, from
-    // the same parser: three lists paging identically, and a cursor rule that
-    // held on only two of them would leave the third scrolling forever (#33).
+    // the same `cursorFrom`/`parseCursor` — but not any more from an identical
+    // rule on all three. Browse's cursor now carries a third component, the
+    // row kind, that this list and `/api/failed` don't need because each
+    // orders on one table alone; the shared rule is that parser plus a
+    // discriminator, not one shape copied three times. A cursor rule that held
+    // on only two of the three lists would leave the third scrolling forever
+    // (#33), which is why the shape is checked rather than assumed even here.
     const from = cursorFrom(query.data.cursor);
     if ('error' in from) return reply.code(400).send({ error: from.error });
     const { cursor } = from;
@@ -1309,9 +1361,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/failed', async (request, reply) => {
     const query = failedQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
-    // Refused for the same reason and with the same message `/api/browse` uses:
-    // the two lists page identically, and a cursor rule that held on only one
-    // of them would leave the other scrolling forever.
+    // Refused for the same reason and with the same message `/api/browse`
+    // uses, and from the same `cursorFrom`/`parseCursor` `/api/downloads`
+    // shares too — though browse's own cursor now carries a third component,
+    // the row kind, that this list doesn't need because it orders on one
+    // table alone. A cursor rule that held on only some of these lists would
+    // leave the others scrolling forever.
     const from = cursorFrom(query.data.cursor);
     if ('error' in from) return reply.code(400).send({ error: from.error });
     const { cursor } = from;

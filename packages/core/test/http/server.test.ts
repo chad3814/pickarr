@@ -265,12 +265,12 @@ test('a browse cursor whose group has since been deleted still pages from where 
   const server = buildServer(deps(db));
 
   const first = (await server.inject({ method: 'GET', url: '/api/browse?limit=1' })).json();
-  assert.equal(first['nextCursor'], '200:2');
+  assert.equal(first['nextCursor'], '200:group:2');
   db.prepare('DELETE FROM releases WHERE group_id = 2').run();
   db.prepare('DELETE FROM media_groups WHERE id = 2').run();
 
   const second = (
-    await server.inject({ method: 'GET', url: '/api/browse?limit=1&cursor=200:2' })
+    await server.inject({ method: 'GET', url: '/api/browse?limit=1&cursor=200:group:2' })
   ).json();
 
   // Not malformed — well-formed and merely stale. The keyset comparison is
@@ -282,6 +282,74 @@ test('a browse cursor whose group has since been deleted still pages from where 
     ['Alpha'],
   );
   assert.equal(second['nextCursor'], null);
+  await server.close();
+  db.close();
+});
+
+test('a three-component browse cursor round-trips', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  const first = (await server.inject({ method: 'GET', url: '/api/browse?limit=1' })).json();
+  assert.match(String(first['nextCursor']), /^\d+:(failed|group):\d+$/);
+
+  const second = await server.inject({
+    method: 'GET',
+    url: `/api/browse?cursor=${encodeURIComponent(String(first['nextCursor']))}&limit=1`,
+  });
+  assert.equal(second.statusCode, 200);
+  await server.close();
+  db.close();
+});
+
+test('a two-component cursor is malformed on browse, and still valid on the other lists', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  // The old shape. Accepting it would read `(sortKey, id)` against a total
+  // order that now has three components, which is a wrong boundary rather than
+  // a loud failure.
+  const stale = await server.inject({ method: 'GET', url: '/api/browse?cursor=100:5' });
+  assert.equal(stale.statusCode, 400);
+  assert.deepEqual(stale.json(), { error: 'Invalid cursor' });
+  // Unchanged for the routes that still order on one table.
+  const downloads = await server.inject({ method: 'GET', url: '/api/downloads?cursor=100:5' });
+  assert.equal(downloads.statusCode, 200);
+  await server.close();
+  db.close();
+});
+
+test('an unknown kind is malformed on a browse cursor', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  const res = await server.inject({ method: 'GET', url: '/api/browse?cursor=100:banana:5' });
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.json(), { error: 'Invalid cursor' });
+  await server.close();
+  db.close();
+});
+
+test('a browse cursor rejects the numeric forms the shared parser rejects', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  for (const cursor of ['1e3:group:5', '0x10:group:5', '+1:group:5', ' 1:group:5', '100:group:0']) {
+    // eslint-disable-next-line no-await-in-loop -- five cursors, sequential like the malformed-cursor table above
+    const res = await server.inject({
+      method: 'GET',
+      url: `/api/browse?cursor=${encodeURIComponent(cursor)}`,
+    });
+    assert.equal(res.statusCode, 400, cursor);
+  }
+  // The sort key may be 0 where the id may not — both stamps come from an
+  // injected clock that hands out 0.
+  const zero = await server.inject({ method: 'GET', url: '/api/browse?cursor=0:group:5' });
+  assert.equal(zero.statusCode, 200);
   await server.close();
   db.close();
 });
