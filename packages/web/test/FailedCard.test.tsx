@@ -66,6 +66,11 @@ test('an item whose plugin has no fields still offers Dismiss', () => {
 });
 
 test('Fix… opens the form seeded with the suggested values', () => {
+  // The load-bearing seed is `FixForm`'s `values={item.suggestedValues}` prop
+  // to `ManualForm` (see that component's own `seed` doc): mutating it is what
+  // this test catches. `FixForm`'s local `draft` state feeds only the identity
+  // preview and never the rendered inputs, so mutating its initialiser instead
+  // is a false lead that leaves this test green with the bug live.
   render(<FailedCard item={ITEM} fields={FIELDS} onFix={() => {}} onDismiss={() => {}} />);
 
   fireEvent.click(screen.getByRole('button', { name: /fix/i }));

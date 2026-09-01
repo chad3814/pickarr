@@ -23,7 +23,10 @@ export function FixForm({ item, fields, onSubmit, onCancel }: FixProps) {
   // Seeded here as well as inside the form, and handed the *prefill* rather
   // than this draft, so that both callers of `ManualForm` pass it the same kind
   // of thing: the raw values, which it seeds for itself. This copy exists only
-  // to give the preview the draft the form will submit.
+  // to give the preview the draft the form will submit — it is not what seeds
+  // the rendered inputs. That is `values={item.suggestedValues}` below: `seed`
+  // there is `ManualForm`'s own, called on its own `values` prop, and mutating
+  // *this* `draft` initialiser is a false lead — the inputs never read it.
   const [draft, setDraft] = useState(() => seed(fields, item.suggestedValues));
   const preview = useIdentityPreview(item.plugin, draft);
 
