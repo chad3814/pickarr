@@ -48,23 +48,34 @@ export function ReleaseRow({ release, isCurrent, download, onPick, onRetry, fiel
   // rather than three independent conditions, so `Failed` never has to exclude
   // a status word by name and `Current` never has to exclude either.
   //
-  // A download's status is shown whenever there is one, `imported` included.
-  // That last part was a carve-out here until a real library disproved it: the
-  // first version substituted `Current` for `imported` on the reasoning that
-  // the reader has the file and `Current` is what that has always meant. But
-  // 1137 of 1164 picked groups sit at `imported`, so the carve-out hid the
-  // download's state on essentially every row and left the feature invisible.
-  // `Current` now means what nothing else says — picked, with no download row
-  // at all.
+  // A download's status is shown whenever there is one — with one exception,
+  // and the exception is not the one this rule started with.
+  //
+  // Version one substituted `Current` for `imported` everywhere, reasoning that
+  // the reader has the file. Measured against a real library that was wrong by
+  // scale: 1137 of 1164 picked groups sit at `imported`, so it hid the state on
+  // essentially every row. Version two therefore showed every status including
+  // `imported`, and was wrong by kind — after `completeUpgrade` moves
+  // `picked_release_id` to the replacement (`db/groups.ts`), the superseded
+  // release keeps its own `imported` download in history, so BOTH rows read
+  // `imported`, nothing said which file the reader actually holds, and the
+  // superseded one said it beside a Pick button.
+  //
+  // The rule that survives both: a terminal success on a release you no longer
+  // hold is history, not state. Every non-terminal status is live and belongs
+  // on whichever release owns it — an in-flight upgrade is deliberately *not*
+  // the pick (§2), so keying those to `isCurrent` would hide them entirely.
+  // Only `imported` is qualified, and only when it is not the pick.
   //
   // Checking `failed` first keeps a failed download out of the status branch
-  // below it, and keeps its red styling; checking the status branch before
-  // `isCurrent` keeps a downloading *upgrade* of the current release from
-  // reading `Current` out from under its own status.
+  // and keeps its red styling; checking the status branch before `isCurrent`
+  // keeps a downloading upgrade from reading `Current` out from under its own
+  // status.
   const failed = download?.status === 'failed';
+  const supersededImport = download?.status === 'imported' && !isCurrent;
   const label: { text: string; className: string } | null = failed
     ? { text: 'Failed', className: isCurrent ? 'release-current release-failed' : 'release-failed' }
-    : download !== undefined
+    : download !== undefined && !supersededImport
       ? { text: download.status, className: 'release-status' }
       : isCurrent
         ? { text: 'Current', className: 'release-current' }

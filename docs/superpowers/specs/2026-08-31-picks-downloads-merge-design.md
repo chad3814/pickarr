@@ -133,7 +133,8 @@ permanently.
 |---|---|
 | download failed | `Failed`, in red — today's behaviour |
 | download in `queued`/`downloading`/`completed`/`importing` | the status word |
-| any release with a download in any other status, `imported` included | the status word |
+| any release with a download in any other status, **except `imported` on a release that is not the pick** | the status word |
+| a release that is not the pick whose download `imported` | nothing — the `Pick` button stands alone |
 | picked release with no download row at all | `Current` |
 | other release, no download | nothing (the `Pick` button stands alone) |
 
@@ -156,6 +157,23 @@ word covers: picked, with no download row at all. That state does not occur in
 the measured library, but it is reachable — a group picked before downloads
 existed, or one whose download rows were purged — so the branch stays and has
 its own test.
+
+**Amended a second time, for the same reason in the opposite direction.** The
+first amendment was wrong by *kind* where the original was wrong by *scale*.
+`completeUpgrade` (`db/groups.ts`) moves `picked_release_id` onto the
+replacement when an upgrade imports, and the superseded release keeps its own
+`imported` download in history — so after any completed upgrade **both** rows
+read `imported`, nothing said which file the reader actually holds, and the
+superseded row said it beside a `Pick` button offering to fetch what it appeared
+to claim was already there. Measured at 14 such releases.
+
+The rule that survives both mistakes: **a terminal success on a release you no
+longer hold is history, not state.** Only `imported` is qualified by the pick,
+and only when it is not the pick. Every non-terminal status stays keyed to
+whichever release owns it, because an in-flight upgrade is by definition not the
+pick (§2) and qualifying those on the pick would hide them entirely — the
+orphaning this design exists to prevent. Both halves have a test, and each dies
+to a mutation in its own direction.
 
 **A detail line under the release**, rendered only when there is something to
 put on it: the download's `error`, the `missing from client for X` warning, and

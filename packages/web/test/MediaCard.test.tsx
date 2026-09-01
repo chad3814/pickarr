@@ -296,6 +296,48 @@ test('a picked release whose download imported reads imported, not Current', () 
   assert.equal(gone('Current'), true);
 });
 
+test('a superseded release whose old download imported says nothing, and keeps its Pick', () => {
+  // After `completeUpgrade` moves `picked_release_id` to the replacement, the
+  // release the reader no longer holds still carries its own `imported`
+  // download in history. Showing that word here made two rows both read
+  // `imported`, with nothing saying which file is actually on disk — and said
+  // it beside a Pick button. A terminal success on a superseded release is
+  // history, not state. Measured at 14 such releases in a real library.
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        state: 'picked',
+        pickedReleaseId: 2,
+        releases: withDownload(1, { status: 'imported' }),
+      }}
+      onPick={() => {}}
+    />,
+  );
+  assert.equal(gone('imported'), true);
+  assert.ok(within(row('R1')).getByRole('button', { name: /pick/i }));
+});
+
+test('an in-flight upgrade still shows its status even though it is not the pick', () => {
+  // The guard against over-applying the rule above. `pickRelease` leaves
+  // `picked_release_id` on the old release until the replacement imports, so
+  // an upgrade in flight is BY DEFINITION not the pick — qualifying every
+  // status on `isCurrent` rather than only `imported` would hide it entirely,
+  // which is the orphaning §2 exists to prevent.
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        state: 'picked',
+        pickedReleaseId: 2,
+        releases: withDownload(1, { status: 'downloading' }),
+      }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(within(row('R1')).getByText('downloading'));
+});
+
 test('a picked release with no download row at all is what still reads Current', () => {
   // The only remaining path to that word, and the reason it is still here.
   render(
