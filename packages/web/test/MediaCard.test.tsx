@@ -275,8 +275,12 @@ test('a picked release with no download reads Current', () => {
   assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
 });
 
-test('a picked release whose download imported still reads Current, not imported', () => {
-  // The reader has the file, which is what `Current` has always meant here.
+test('a picked release whose download imported reads imported, not Current', () => {
+  // The inverse of what this test asserted first. Substituting `Current` for
+  // `imported` read well in the spec and hid the feature in practice: a real
+  // library sits at 1137 imported picks out of 1164, so every row said
+  // `Current` and no row ever said what its download had done. `Current` is
+  // now reserved for the one thing no status covers — picked, no download row.
   render(
     <MediaCard
       group={{
@@ -288,8 +292,19 @@ test('a picked release whose download imported still reads Current, not imported
       onPick={() => {}}
     />,
   );
+  assert.ok(within(row('R1')).getByText('imported'));
+  assert.equal(gone('Current'), true);
+});
+
+test('a picked release with no download row at all is what still reads Current', () => {
+  // The only remaining path to that word, and the reason it is still here.
+  render(
+    <MediaCard
+      group={{ ...GROUP, state: 'picked', pickedReleaseId: 1 }}
+      onPick={() => {}}
+    />,
+  );
   assert.ok(within(row('R1')).getByText('Current'));
-  assert.equal(gone('imported'), true);
 });
 
 test('a release downloading reads its status, whether or not it is the pick', () => {
