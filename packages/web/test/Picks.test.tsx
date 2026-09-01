@@ -1173,7 +1173,10 @@ test('a download that imports mid-poll stops being watched', async () => {
   // downloading release is both current and in flight. A click here already
   // runs `reload()`.
   fireEvent.click(screen.getByRole('button', { name: /pick/i }));
-  await waitFor(() => assert.ok(screen.getByText('Current')), { timeout: 5_000 });
+  // `imported`, not `Current`: this is only a synchronisation point for "the
+  // reload landed and reported the download settled", and an imported download
+  // now shows its own status instead of borrowing `Current` (§4, amended).
+  await waitFor(() => assert.ok(screen.getByText('imported')), { timeout: 5_000 });
   assert.equal(stub.picksCalls, 2);
 
   // No further request for group 1 ever fires: `watched` is now empty, so

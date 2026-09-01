@@ -44,18 +44,27 @@ export function ReleaseRow({ release, isCurrent, download, onPick, onRetry, fiel
   // legitimate prefill for a plugin whose fields are all optional.
   const values = release.manualValues;
 
-  // Spec §4's precedence, in the order that IS the rule — this is an
-  // if/else-if chain, not three independent conditions, so a status word
-  // never has to be excluded from `Failed` by name and `Current` never has to
-  // be excluded from either by name. Checking `failed` first is what keeps a
-  // failed download from also matching the "any non-terminal status" branch
-  // below it; checking the status branch before `isCurrent` is what keeps a
-  // downloading *upgrade* of the current release from reading `Current` out
-  // from under its own status.
+  // Spec §4's precedence, in the order that IS the rule — an if/else-if chain
+  // rather than three independent conditions, so `Failed` never has to exclude
+  // a status word by name and `Current` never has to exclude either.
+  //
+  // A download's status is shown whenever there is one, `imported` included.
+  // That last part was a carve-out here until a real library disproved it: the
+  // first version substituted `Current` for `imported` on the reasoning that
+  // the reader has the file and `Current` is what that has always meant. But
+  // 1137 of 1164 picked groups sit at `imported`, so the carve-out hid the
+  // download's state on essentially every row and left the feature invisible.
+  // `Current` now means what nothing else says — picked, with no download row
+  // at all.
+  //
+  // Checking `failed` first keeps a failed download out of the status branch
+  // below it, and keeps its red styling; checking the status branch before
+  // `isCurrent` keeps a downloading *upgrade* of the current release from
+  // reading `Current` out from under its own status.
   const failed = download?.status === 'failed';
   const label: { text: string; className: string } | null = failed
     ? { text: 'Failed', className: isCurrent ? 'release-current release-failed' : 'release-failed' }
-    : download !== undefined && download.status !== 'imported'
+    : download !== undefined
       ? { text: download.status, className: 'release-status' }
       : isCurrent
         ? { text: 'Current', className: 'release-current' }

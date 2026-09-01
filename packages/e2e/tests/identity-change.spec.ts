@@ -165,7 +165,9 @@ test('adding a date to a picked group merges it into the dated one', async ({ pa
   await expect(releases).toHaveCount(2);
   const survivingRow = releases.filter({ hasText: DATELESS });
   await expect(survivingRow).toHaveCount(1);
-  await expect(survivingRow.locator('.release-current')).toHaveText('Current');
+  // Its download imported for real at the reconcile above, and an imported
+  // download now shows its own status rather than borrowing `Current`.
+  await expect(survivingRow.locator('.release-status')).toHaveText('imported');
   const upgradeRow = releases.filter({ hasText: DATED });
   await expect(upgradeRow).toHaveCount(1);
   await expect(upgradeRow.getByRole('button', { name: 'Pick' })).toBeVisible();

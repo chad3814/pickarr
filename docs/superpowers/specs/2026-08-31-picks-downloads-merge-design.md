@@ -133,13 +133,29 @@ permanently.
 |---|---|
 | download failed | `Failed`, in red — today's behaviour |
 | download in `queued`/`downloading`/`completed`/`importing` | the status word |
-| picked release, no download or `imported` | `Current` — today's behaviour |
+| any release with a download in any other status, `imported` included | the status word |
+| picked release with no download row at all | `Current` |
 | other release, no download | nothing (the `Pick` button stands alone) |
 
-`imported` reads `Current` rather than `imported` because the reader has the
+**Amended after the fact, against a real library.** This section first said
+`imported` reads `Current` rather than `imported`, because the reader has the
 file, which is what that word has always meant here; a release cannot be
 `imported` and *not* the pick, since `completeUpgrade` (`groups.ts:374`) moves
 `picked_release_id` onto it at import.
+
+That reasoning was sound about the word and wrong about the screen. Measured on
+a real database: **1137 of 1164 picked groups sit at `imported`**, 26 at
+`failed`, one `downloading`, and none with no download at all. So the carve-out
+applied to essentially every row, every card kept saying `Current`, and the
+feature this whole design exists to deliver was invisible — which is the
+opposite of the brief, whose words were "expand what can be shown in the
+`release-current` span to be the contents of the `download-status`".
+
+`imported` now shows itself. `Current` is reserved for the one state no status
+word covers: picked, with no download row at all. That state does not occur in
+the measured library, but it is reachable — a group picked before downloads
+existed, or one whose download rows were purged — so the branch stays and has
+its own test.
 
 **A detail line under the release**, rendered only when there is something to
 put on it: the download's `error`, the `missing from client for X` warning, and
@@ -245,8 +261,9 @@ placement is revisited when Picks is paginated.
 - **`packages/e2e/tests/identity-change.spec.ts`** should keep passing
   untouched, and for reasons worth stating rather than assuming. Its surviving
   row asserts `.release-current` reads `Current` (`:168`) — that row's release
-  *does* have a download, imported at `:66` (`reconciled.imported === 1`), so it
-  passes because `imported` reads `Current`, not because the download is absent.
+  *does* have a download, imported at `:66` (`reconciled.imported === 1`). Under
+  the amended §4 that row reads `imported` in `.release-status`, and the spec
+  was updated along with the rule rather than left describing the first version.
   Its upgrade row asserts `Pick` is visible (`:171`); that release is never
   picked — `:35` is the spec's only `Pick` click, on the dateless release — so it
   has no download and the in-flight suppression never applies to it. If either
