@@ -155,7 +155,7 @@ export interface MetadataCandidate {
    * Optional rather than required: this is a published contract that
    * third-party plugins implement, and `posterUrl` has some thirty
    * construction sites. The same reasoning `MetadataView.performers`, the web
-   * `ReleaseRow` component's `hasFailed` prop, and `ReleaseView.downloadFailed`
+   * `ReleaseRow` component's `download` prop, and `ReleaseView.download`
    * record — a new key must not break every caller written before it
    * existed.
    *

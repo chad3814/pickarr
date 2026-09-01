@@ -12,6 +12,7 @@ import {
   bumpAttempts,
   clearAbsent,
   clientJobName,
+  type DownloadStatus,
   downloadLabel,
   extractLabel,
   failDownload,
@@ -19,6 +20,8 @@ import {
   indexDownloadsForClient,
   insertDownload,
   labelsFor,
+  latestDownloadsForGroup,
+  latestDownloadsForGroups,
   markAbsent,
   pageOfDownloads,
   recordError,
@@ -581,5 +584,141 @@ test('pageOfDownloads returns at most limit rows and nothing past the end', () =
   // The oldest row's own cursor: there is nothing older, and an empty page is
   // how the route learns to answer `nextCursor: null`.
   assert.deepEqual(pageOfDownloads(db, { cursor: { createdAt: 1, id: 1 }, limit: 99 }), []);
+  db.close();
+});
+
+// --- latestDownloadsForGroup / latestDownloadsForGroups ------------------
+
+let seedReleaseSeq = 0;
+
+/**
+ * A group and a release, each on a feed item of its own — `seed` and
+ * `seedSecond` above hardcode a single group's ids, but the batched-form
+ * tests below need several independent groups in the same database, so this
+ * lets SQLite assign every id via rowid instead of naming them.
+ */
+function seedRelease(db: DatabaseSync): { groupId: number; releaseId: number } {
+  seedReleaseSeq += 1;
+  const n = seedReleaseSeq;
+  const feedItemResult = db
+    .prepare(
+      `INSERT INTO feed_items (feed_id, guid, raw_title, link, first_seen_at)
+       VALUES ('f', ?, 'Title', ?, 1)`,
+    )
+    .run(`latest-${n}`, `https://indexer.invalid/latest-${n}.nzb`);
+  const feedItemId = Number(feedItemResult.lastInsertRowid);
+
+  const groupResult = db
+    .prepare(
+      `INSERT INTO media_groups (plugin, identity_key, display, search_text, created_at, list_rank_at)
+       VALUES ('test', ?, '{}', 't', 1, 1)`,
+    )
+    .run(`latest-${n}`);
+  const groupId = Number(groupResult.lastInsertRowid);
+
+  const releaseResult = db
+    .prepare(
+      `INSERT INTO releases (group_id, feed_item_id, quality, score, created_at)
+       VALUES (?, ?, '{}', 100, 1)`,
+    )
+    .run(groupId, feedItemId);
+  const releaseId = Number(releaseResult.lastInsertRowid);
+
+  return { groupId, releaseId };
+}
+
+/**
+ * A download row with an explicit status and `updated_at`, for tests that
+ * need to control both independently of `insertDownload`'s always-`'queued'`-
+ * at-`createdAt` shape.
+ */
+function seedDownload(
+  db: DatabaseSync,
+  opts: { groupId: number; releaseId: number; status: DownloadStatus; updatedAt?: number },
+): number {
+  const result = db
+    .prepare(
+      `INSERT INTO downloads (release_id, group_id, client_id, kind, status, created_at, updated_at)
+       VALUES (?, ?, 'sab', 'initial', ?, 1, ?)`,
+    )
+    .run(opts.releaseId, opts.groupId, opts.status, opts.updatedAt ?? 1);
+  return Number(result.lastInsertRowid);
+}
+
+test('the latest download of a release is the highest id, not the newest updated_at', () => {
+  const db = openTestDatabase();
+  const { groupId, releaseId } = seedRelease(db);
+  // The failure is the *earlier* attempt and is stamped LATER, which is exactly
+  // the shape `updated_at` gets wrong: a stalled retry polls, so its updated_at
+  // can trail the failure it replaced.
+  const first = seedDownload(db, { groupId, releaseId, status: 'failed', updatedAt: 9_000 });
+  const second = seedDownload(db, { groupId, releaseId, status: 'downloading', updatedAt: 1_000 });
+  assert.ok(second > first, 'ids are monotonic');
+
+  const latest = latestDownloadsForGroup(db, groupId).get(releaseId);
+  assert.equal(latest?.downloadId, second);
+  assert.equal(latest?.status, 'downloading');
+  db.close();
+});
+
+test('a release with no download is absent from the map rather than present and empty', () => {
+  const db = openTestDatabase();
+  const { groupId, releaseId } = seedRelease(db);
+  const map = latestDownloadsForGroup(db, groupId);
+  assert.equal(map.has(releaseId), false);
+  assert.equal(map.size, 0);
+  db.close();
+});
+
+test('error and absentSince come back as null rather than undefined when unset', () => {
+  const db = openTestDatabase();
+  const { groupId, releaseId } = seedRelease(db);
+  seedDownload(db, { groupId, releaseId, status: 'queued' });
+  const latest = latestDownloadsForGroup(db, groupId).get(releaseId);
+  // null, not undefined: the view type says `string | null`, and a JSON payload
+  // carrying undefined drops the key entirely.
+  assert.equal(latest?.error, null);
+  assert.equal(latest?.absentSince, null);
+  db.close();
+});
+
+test('the batched form answers many groups in one query and keeps them apart', () => {
+  const db = openTestDatabase();
+  const a = seedRelease(db);
+  const b = seedRelease(db);
+  seedDownload(db, { groupId: a.groupId, releaseId: a.releaseId, status: 'imported' });
+  seedDownload(db, { groupId: b.groupId, releaseId: b.releaseId, status: 'failed' });
+
+  const map = latestDownloadsForGroups(db, [a.groupId, b.groupId]);
+  assert.equal(map.get(a.groupId)?.get(a.releaseId)?.status, 'imported');
+  assert.equal(map.get(b.groupId)?.get(b.releaseId)?.status, 'failed');
+  // A group asked about but holding nothing gets an entry, so a caller can tell
+  // "asked, nothing there" from "never asked".
+  assert.equal(map.get(a.groupId)?.has(b.releaseId), false);
+  db.close();
+});
+
+test('the batched form asked about nothing returns an empty map without touching the db', () => {
+  const db = openTestDatabase();
+  assert.equal(latestDownloadsForGroups(db, []).size, 0);
+  db.close();
+});
+
+test('a group asked about with no downloads at all gets an empty entry, not a missing one', () => {
+  const db = openTestDatabase();
+  const withDownload = seedRelease(db);
+  const withNothing = seedRelease(db);
+  seedDownload(db, {
+    groupId: withDownload.groupId,
+    releaseId: withDownload.releaseId,
+    status: 'downloading',
+  });
+
+  const map = latestDownloadsForGroups(db, [withDownload.groupId, withNothing.groupId]);
+  // Present and empty — not absent. A caller distinguishes "asked, nothing
+  // downloading" from "never asked" on exactly this, and Task 6 stops polling
+  // a group on the strength of it.
+  assert.equal(map.has(withNothing.groupId), true);
+  assert.equal(map.get(withNothing.groupId)?.size, 0);
   db.close();
 });

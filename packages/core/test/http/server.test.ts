@@ -5,7 +5,7 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, openTestDatabase } from '../../src/db/open.ts';
-import { failDownload, getDownload } from '../../src/db/downloads.ts';
+import { failDownload, getDownload, setStatus } from '../../src/db/downloads.ts';
 import { getGroup } from '../../src/db/groups.ts';
 import { insertImportedFile } from '../../src/db/imported-files.ts';
 import { buildServer, type ServerDeps } from '../../src/http/server.ts';
@@ -361,7 +361,10 @@ test('a picked group with no upgrade drops out of browse and appears in picks', 
 interface PickedGroup {
   id: number;
   pickedReleaseId: number | null;
-  releases: { id: number; downloadFailed?: boolean }[];
+  releases: {
+    id: number;
+    download?: { downloadId: number; status: string; error: string | null; absentSince: number | null };
+  }[];
 }
 
 async function picksOf(server: FastifyInstance): Promise<PickedGroup[]> {
@@ -388,13 +391,50 @@ test('picks flags a group whose download failed, marks the release, and says not
   // and nothing on the client re-derives one.
   // The card is told *which* release, which is the part a screen reads.
   const alpha = groups[0]?.releases ?? [];
-  assert.equal(alpha.find((release) => release.id === 2)?.downloadFailed, true);
-  // Absent, not `false`, on the healthy sibling release and on the healthy
-  // group alike: a payload with nothing wrong with it is byte-for-byte what it
-  // was before either field existed, which is what lets the SPA ignore them
-  // wherever it does not care.
-  assert.equal(Object.hasOwn(alpha.find((release) => release.id === 1) ?? {}, 'downloadFailed'), false);
-  assert.equal(Object.hasOwn(groups[1]?.releases[0] ?? {}, 'downloadFailed'), false);
+  assert.equal(alpha.find((release) => release.id === 2)?.download?.status, 'failed');
+  // Absent on the sibling release that was never picked, so it has never had
+  // a download at all — a payload with nothing wrong with it is byte-for-byte
+  // what it was before the field existed, which is what lets the SPA ignore
+  // it wherever it does not care.
+  assert.equal(Object.hasOwn(alpha.find((release) => release.id === 1) ?? {}, 'download'), false);
+  // Beta's pick does have a download — it was picked too — but a healthy one
+  // never reads `failed`.
+  assert.notEqual(groups[1]?.releases[0]?.download?.status, 'failed');
+  await server.close();
+  db.close();
+});
+
+test('a release carries its latest download, not merely whether it failed', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+  // A state the old boolean could not express at all — `downloadFailed` was
+  // exactly `status === 'failed'`, and `downloading` is neither `true` nor
+  // `false` under that rule — so this cannot pass by accident.
+  setStatus(db, 1, 'downloading', 2000);
+
+  const alpha = (await picksOf(server)).find((group) => group.id === 1);
+  const release = alpha?.releases.find((candidate) => candidate.id === 2);
+  assert.equal(release?.download?.status, 'downloading');
+  assert.equal(release?.download?.error, null);
+  assert.equal(release?.download?.absentSince, null);
+  await server.close();
+  db.close();
+});
+
+test('a release with no download omits the key entirely', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+  await server.inject({ method: 'POST', url: '/api/groups/1/pick', payload: { releaseId: 2 } });
+
+  // Release 1 was never picked, so it has never had a download.
+  const alpha = (await picksOf(server)).find((group) => group.id === 1);
+  const release = alpha?.releases.find((candidate) => candidate.id === 1);
+  // Absent, not present-and-null: the field is absent or it is a value,
+  // matching how `manualValues` already behaves on the same type.
+  assert.equal(Object.hasOwn(release ?? {}, 'download'), false);
   await server.close();
   db.close();
 });
@@ -429,11 +469,10 @@ test('a failed upgrade flags its group even though the pick imported fine, and l
   // The pick is untouched — the user still has the 1080p and still wants the
   // content — but the group is flagged and the 2160p is the release marked.
   assert.equal(alpha?.pickedReleaseId, 1);
-  assert.equal(alpha?.releases.find((release) => release.id === 2)?.downloadFailed, true);
-  assert.equal(
-    Object.hasOwn(alpha?.releases.find((release) => release.id === 1) ?? {}, 'downloadFailed'),
-    false,
-  );
+  assert.equal(alpha?.releases.find((release) => release.id === 2)?.download?.status, 'failed');
+  // Release 1 has a download too — the pick that imported fine — but it never
+  // reads `failed`: the mark belongs to the release that actually failed.
+  assert.notEqual(alpha?.releases.find((release) => release.id === 1)?.download?.status, 'failed');
 
   // Off Browse in the same instant it appeared on Picks, not at whatever later
   // write next happened to re-derive the flag. Advertising "Upgrade available"

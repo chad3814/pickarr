@@ -12,7 +12,6 @@ test('the built SPA loads and its API answers', async ({ page, request }) => {
   const nav = page.locator('nav');
   await expect(nav.getByRole('link', { name: 'Browse' })).toBeVisible();
   await expect(nav.getByRole('link', { name: 'Picks' })).toBeVisible();
-  await expect(nav.getByRole('link', { name: 'Downloads' })).toBeVisible();
   await expect(nav.getByRole('link', { name: 'Failed' })).toBeVisible();
 
   // Through the same origin the SPA is served from, so a route that only works

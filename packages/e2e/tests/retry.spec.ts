@@ -30,7 +30,7 @@ import { expect, test } from '../src/harness.ts';
  * together, which a narrow pin aimed at one half cannot see. If you revert one
  * half and this spec stays green, check the pin for the half you didn't touch
  * before concluding it's worthless:
- *   - client half: `packages/web/test/Downloads.test.tsx` — "a bodyless
+ *   - client half: `packages/web/test/Picks.test.tsx` — "a bodyless
  *     request carries no json content-type"
  *   - server half: `packages/core/test/http/server.test.ts` — "retry takes no
  *     body, and is not refused for having none"
@@ -73,9 +73,12 @@ test('Retry takes a failed download out of failed', async ({ page, harness }) =>
   const reconciled = await harness.reconcile();
   expect(reconciled.failed).toBe(1);
 
-  await page.getByRole('link', { name: 'Downloads' }).click();
-  const row = page.locator('li.download-row').filter({ hasText: 'Alex Coal' });
-  await expect(row.locator('.download-status')).toHaveText('failed');
+  await page.goto('/picks');
+  const picksCard = page
+    .locator('article.media-card')
+    .filter({ has: page.getByRole('heading', { name: 'Alex Coal' }) });
+  const row = picksCard.locator('li.release-row');
+  await expect(row.locator('.release-current')).toHaveText('Failed');
   await expect(row.locator('.download-error')).toHaveText('unpack failed at the client');
 
   await row.getByRole('button', { name: 'Retry' }).click();
@@ -84,7 +87,7 @@ test('Retry takes a failed download out of failed', async ({ page, harness }) =>
   // and nothing here reconciles again yet, so the row stays there. Asserting
   // the status rather than the button's absence is deliberate: the button
   // would also disappear if the row vanished entirely.
-  await expect(row.locator('.download-status')).toHaveText('queued');
+  await expect(row.locator('.release-status')).toHaveText('queued');
   await expect(row.locator('.download-error')).toHaveCount(0);
   // The 400 surfaced here, under the heading, and nowhere else. An empty error
   // slot is what says the request was accepted rather than swallowed.

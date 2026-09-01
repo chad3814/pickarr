@@ -32,6 +32,7 @@
 
 .release-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
   padding: var(--space-1) 0;
@@ -86,6 +87,14 @@
    these two adjacent lines would reverse it, and no test would catch that. */
 .release-failed { color: var(--color-error); }
 
+/* Every non-terminal status but `failed` (which `.release-failed` above
+   already owns) reads plainly, the same way `.download-status` above does
+   for the screen this row absorbed: `ReleaseDownloadView.status` is typed
+   `string` on the wire — the closed union lives in core's `db/downloads.ts`
+   and does not travel — so a status this rule has not heard of still renders
+   rather than disappearing. */
+.release-status { color: var(--color-text-dim); font-size: var(--text-meta); }
+
 /* The one genuinely primary button in the app, and it is distinguished in
    markup rather than by context: it carries `className="pick"`.
    The `.pick` class exists because a bare `.release-row button` selector reaches
@@ -105,11 +114,31 @@
   border-color: var(--color-line);
   color: var(--color-text-faint);
 }
+/*
+ * A release's detail line — its error, its absence warning, its Retry —
+ * sits under the row proper rather than inside it. `.release-row` is one flex
+ * line (above); `flex: 1 0 100%` on this wrapper is what forces it onto a
+ * second one instead of squeezing in beside the name and the Pick button,
+ * the way `flex-wrap: wrap` on the row makes room for.
+ */
+.release-detail { flex: 1 0 100%; display: flex; gap: var(--space-3); align-items: center; }
+
+/* Red, for the same reason `.release-failed` and `.status-failed
+   .download-status` above are: a download in this state needs no softening.
+   `DownloadRow.tsx` is gone — `ReleaseRow.tsx`'s own detail line is this
+   class's only user now — kept unrenamed anyway, since a rename here is
+   cosmetic churn this branch's deletion diff did not need. */
 .download-error { color: var(--color-error); font-size: var(--text-meta); }
 
 /* Amber, not red: absence is not yet a failure, only a client that has gone
    quiet. It shares the accent hue — see the badge in `card.css` on why that is
-   accepted, and how form rather than hue separates a warning from an action. */
+   accepted, and how form rather than hue separates a warning from an action.
+   `DownloadRow.tsx` is gone — `ReleaseRow.tsx`'s own detail line is this
+   class's only user now, same as `.download-error` above — kept unrenamed for
+   the same reason: `.download-row`, `.downloads`, and `.untracked` are still
+   genuinely live (the untracked queue moved onto Picks and still uses them),
+   so a rename sweep here would touch names that still mean what they say
+   only to chase two that no longer share a component with them. */
 .download-absent { color: var(--color-accent-text); font-size: var(--text-meta); }
 
 .download-row.untracked { color: var(--color-text-dim); font-style: italic; }

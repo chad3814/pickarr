@@ -131,14 +131,13 @@ export function insertGroup(db: DatabaseSync, group: NewGroup): number {
  * A SQL fragment parameterised by the *expression* naming the release rather
  * than by a release id, because its callers name it differently: the upgrade
  * derivation correlates against `releases.id` of the candidate row it is
- * judging, `failedReleasesOf` against `releases.id` of a whole group's worth,
- * and a bare `?` binds one release directly. Whatever is passed has to resolve
- * in the query this is embedded in, which means every such query must select
- * from that table by name. One function rather than several spellings: "this
- * cannot be downloaded" decides which group the user is sent to, which release
- * on that card is marked, and which alternatives are advertised — three
- * answers that must be the same answer, or the user is sent to a group to be
- * offered the very thing that failed.
+ * judging, and a bare `?` binds one release directly. Whatever is passed has
+ * to resolve in the query this is embedded in, which means every such query
+ * must select from that table by name. One function rather than several
+ * spellings: "this cannot be downloaded" decides which group the user is sent
+ * to and which alternatives are advertised — two answers that must be the same
+ * answer, or the user is sent to a group to be offered the very thing that
+ * failed.
  *
  * *Most recent* is the whole of it. Re-picking a release whose earlier attempt
  * failed inserts a second `downloads` row rather than reviving the first
@@ -254,9 +253,10 @@ function committedScore(groupId: string, pickedReleaseId: string): string {
  * with its Pick button, so retrying it is one click, and an attempt that
  * succeeds makes the release eligible again on its own — no marker to clear
  * (see `latestDownloadFailed`). A failed *pick* has no Pick button, because
- * `ReleaseRow` gives the current release none; it is retried from the
- * Downloads tab instead. Either way the row is marked `Failed` and the release
- * merely stops being advertised as an upgrade.
+ * `ReleaseRow` gives the current release none; it is retried instead from the
+ * Retry button on that same row's own detail line, on the Picks screen.
+ * Either way the row is marked `Failed` and the release merely stops being
+ * advertised as an upgrade.
  */
 function deriveUpgradeReleaseId(
   db: DatabaseSync,
@@ -467,45 +467,6 @@ export function browseGroups(db: DatabaseSync, query: BrowseQuery): GroupRow[] {
     )
     .all(...params)
     .map((row) => toGroupRow(row as SqlRow));
-}
-
-/**
- * The ids of the releases in one group whose latest download failed, as a
- * `SELECT` correlated on whatever expression names the group.
- *
- * *Any* release, not just the pick. The narrower reading — only
- * `picked_release_id` — was the first version of this and it missed the case
- * that matters most: own a 1080p, a 2160p arrives and is flagged as an
- * upgrade, the user picks it, and `pickRelease` records that as an upgrade so
- * `picked_release_id` still names the 1080p. When the 2160p then fails, the
- * pick is a release that imported perfectly well, so "did the pick fail" is
- * *false* — and the group sits on Browse advertising the release that just
- * failed, with nothing anywhere saying so. A group is worth surfacing when
- * something in it failed, whichever release that was.
- *
- * The same select answers both questions the callers have, which is why it
- * yields ids rather than a bare flag: `EXISTS` over it is the group-level sort
- * key, and the ids themselves say which row on the card to mark. Two queries
- * could drift; a group hoisted to the top of Picks with no release on it
- * marked would be exactly the drift that matters.
- */
-function failedReleasesOf(groupId: string): string {
-  return `SELECT id FROM releases
-     WHERE group_id = ${groupId} AND ${latestDownloadFailed('releases.id')} = 1`;
-}
-
-/**
- * Which of a group's releases have a failed latest download — empty for a
- * healthy group.
- *
- * A set rather than a boolean because it answers per release: it says which rows
- * on a card read `Failed` rather than `Current`. It decides nothing about where
- * the card sits; `pickedGroups` used to sort on the same predicate and that is
- * exactly what this no longer feeds.
- */
-export function failedReleaseIds(db: DatabaseSync, groupId: number): Set<number> {
-  const rows = db.prepare(failedReleasesOf('?')).all(groupId);
-  return new Set(rows.map((row) => num(row as SqlRow, 'id')));
 }
 
 /**

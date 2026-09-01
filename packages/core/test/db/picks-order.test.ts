@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { failedReleaseIds, flagUpgrade, getGroup, pickedGroups } from '../../src/db/groups.ts';
-import { failDownload } from '../../src/db/downloads.ts';
+import { flagUpgrade, getGroup, pickedGroups } from '../../src/db/groups.ts';
+import { failDownload, latestDownloadsForGroup } from '../../src/db/downloads.ts';
 
 // A group holding a failed download is invisible everywhere else. Browse lists
 // `state = 'new' OR upgrade_release_id IS NOT NULL`, and a picked group whose
@@ -28,10 +28,10 @@ import { failDownload } from '../../src/db/downloads.ts';
 // is the same reason `latestDownloadFailed` reads the most recent attempt rather
 // than storing a flag.
 //
-// The per-release marking is untouched: `failedReleaseIds` still names the rows
-// the card marks `Failed`, and that answer is still "the latest download of this
-// release failed". Only the group's *place in the list* stopped being derived
-// from it.
+// The per-release marking is untouched: `latestDownloadsForGroup` still names
+// the rows the card marks `Failed` — a release whose latest download's status
+// is `'failed'` — via `failedReleaseIdsOf` below. Only the group's *place in
+// the list* stopped being derived from it.
 
 interface GroupSpec {
   id: number;
@@ -118,6 +118,20 @@ function orderOf(db: DatabaseSync): number[] {
   return pickedGroups(db).map((group) => group.id);
 }
 
+/**
+ * Which of a group's releases have a failed latest download — the same
+ * question the deleted `failedReleaseIds` answered, now asked of Task 1's
+ * `latestDownloadsForGroup`: a release is in this set exactly when its most
+ * recent download's `status` is `'failed'`.
+ */
+function failedReleaseIdsOf(db: DatabaseSync, groupId: number): Set<number> {
+  const downloads = latestDownloadsForGroup(db, groupId);
+  const failed = [...downloads.values()]
+    .filter((download) => download.status === 'failed')
+    .map((download) => download.releaseId);
+  return new Set(failed);
+}
+
 test('a failure lifts its group to the top of the list', () => {
   const db = openTestDatabase();
   // Group 1 is the older of the two by list_rank_at, so before the failure it
@@ -180,7 +194,7 @@ test('a group whose other version succeeded is not pinned by the version that fa
   assert.deepEqual(orderOf(db), [2, 1]);
   // The release is still marked, which is the part a screen reads. Only the
   // group's place in the list stopped being derived from it.
-  assert.deepEqual([...failedReleaseIds(db, 1)], [alternativeOf(1)]);
+  assert.deepEqual([...failedReleaseIdsOf(db, 1)], [alternativeOf(1)]);
   db.close();
 });
 
@@ -201,7 +215,7 @@ test('groups keep the list_rank_at DESC, id ASC order, failed or not', () => {
   db.close();
 });
 
-test('failedReleaseIds still names exactly the releases whose latest attempt failed', () => {
+test('latestDownloadsForGroup still names exactly the releases whose latest attempt failed', () => {
   const db = openTestDatabase();
   seedPicked(db, [
     { id: 1, listRankAt: 100 },
@@ -216,8 +230,8 @@ test('failedReleaseIds still names exactly the releases whose latest attempt fai
   // Spelled as the literal release id rather than `pickOf(1)`: an expectation
   // computed by the same helper that seeded the row would survive that helper
   // changing under it.
-  assert.deepEqual([...failedReleaseIds(db, 1)], [1]);
-  assert.deepEqual([...failedReleaseIds(db, 2)], []);
+  assert.deepEqual([...failedReleaseIdsOf(db, 1)], [1]);
+  assert.deepEqual([...failedReleaseIdsOf(db, 2)], []);
   db.close();
 });
 

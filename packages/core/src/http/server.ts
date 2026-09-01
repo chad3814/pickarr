@@ -20,7 +20,7 @@ import {
   pickedGroups,
   type GroupRow,
 } from '../db/groups.ts';
-import { getDownload, pageOfDownloads, resetForRetry } from '../db/downloads.ts';
+import { getDownload, latestDownloadsForGroups, pageOfDownloads, resetForRetry } from '../db/downloads.ts';
 import { failedFeedItems } from '../db/feed-items.ts';
 import {
   enqueueMetadata,
@@ -63,6 +63,8 @@ import {
   type MetadataRequeryResponse,
   type MetadataView,
   type PickResponse,
+  type ReleaseDownloadView,
+  type ReleaseDownloadsResponse,
   type ReleaseEditResponse,
   type ResolveResponse,
 } from './views.ts';
@@ -174,8 +176,8 @@ const browseQuerySchema = z.object({
 });
 
 /**
- * The same two fields `browseQuerySchema` has, and deliberately no `q`. The
- * Downloads screen's search box still filters in the client; moving that term
+ * The same two fields `browseQuerySchema` has, and deliberately no `q`.
+ * Picks' one shared search box still filters in the client; moving that term
  * into SQL changes what the box *means* — it would reach rows no page has
  * loaded — and belongs with the rest of issue #31 rather than smuggled in
  * behind the pagination.
@@ -214,7 +216,8 @@ const metadataRequestBodySchema = z.object({
   groupIds: z.array(z.number().int().positive()).max(MAX_PAGE_LIMIT),
 });
 
-const metadataQuerySchema = z.object({
+/** The `?ids=1,2,3` query shape shared by every route that answers about a batch of ids. */
+const idsQuerySchema = z.object({
   ids: z.string().min(1),
 });
 
@@ -1010,7 +1013,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   });
 
   server.get('/api/metadata', async (request, reply) => {
-    const query = metadataQuerySchema.safeParse(request.query);
+    const query = idsQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
     const ids = parseIds(query.data.ids);
     if (ids === null) return reply.code(400).send({ error: 'Invalid ids' });
@@ -1024,6 +1027,32 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const response: Record<number, MetadataView> = {};
     for (const id of ids) {
       response[id] = metadataViewOf(answered.get(id), performers.get(id) ?? [], queuedNextAt.get(id));
+    }
+    return response;
+  });
+
+  server.get('/api/downloads/for-groups', async (request, reply) => {
+    const query = idsQuerySchema.safeParse(request.query);
+    if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
+    const ids = parseIds(query.data.ids);
+    if (ids === null) return reply.code(400).send({ error: 'Invalid ids' });
+
+    // One query for however many ids were asked about, never a query per id —
+    // the same discipline `GET /api/metadata` above states for itself.
+    const byGroup = latestDownloadsForGroups(db, ids);
+    const response: ReleaseDownloadsResponse = {};
+    for (const id of ids) {
+      const releases: Record<number, ReleaseDownloadView> = {};
+      // Every requested id gets an object, empty or not: see the type's comment.
+      for (const [releaseId, latest] of byGroup.get(id) ?? new Map()) {
+        releases[releaseId] = {
+          downloadId: latest.downloadId,
+          status: latest.status,
+          error: latest.error,
+          absentSince: latest.absentSince,
+        };
+      }
+      response[id] = releases;
     }
     return response;
   });

@@ -23,8 +23,14 @@ interface Props {
   onEditGroup?(values: Record<string, string>): Promise<boolean>;
   onEditRelease?(releaseId: number, values: Record<string, string>): Promise<boolean>;
   /**
+   * Resubmits a release's download. Passed straight through to every
+   * `ReleaseRow` on the card — this component owns none of the retry logic
+   * itself, the same division `onPick` already has with the route above it.
+   */
+  onRetry?: ((downloadId: number) => void) | undefined;
+  /**
    * Re-asks the provider about this group's already-settled metadata. Owned
-   * by the route, the same as the three handlers above: it is the route that
+   * by the route, the same as the four handlers above: it is the route that
    * holds `useGroupMetadata`'s handle and can tell it to watch this id again
    * once the requery lands, which is machinery this card has no business
    * duplicating.
@@ -79,7 +85,15 @@ function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityPr
 /**
  * One card renders every media type. Plugins supply display fields, never UI.
  */
-export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, onRequeryMetadata }: Props) {
+export function MediaCard({
+  group,
+  onPick,
+  fields,
+  onEditGroup,
+  onEditRelease,
+  onRequeryMetadata,
+  onRetry,
+}: Props) {
   const { display } = group;
   const [editing, setEditing] = useState(false);
   // One piece of state, so the card slot's image and a performer's full image
@@ -454,12 +468,13 @@ export function MediaCard({ group, onPick, fields, onEditGroup, onEditRelease, o
             isCurrent={release.id === group.pickedReleaseId}
             // Per release, not per group: an upgrade that failed leaves
             // `pickedReleaseId` on the file the user still has, so the row to
-            // mark is frequently not the current one. Absent means "not
-            // failed" — the server omits the field rather than sending
-            // `false`, so a card built from a response that predates it reads
-            // exactly as it did before.
-            hasFailed={release.downloadFailed}
+            // mark is frequently not the current one. Absent when the release
+            // has never had a download — the server omits the field rather
+            // than sending it as null, so a card built from a response that
+            // predates it reads exactly as it did before.
+            download={release.download}
             onPick={onPick}
+            onRetry={onRetry}
             fields={qualityFields}
             onEdit={
               onEditRelease === undefined

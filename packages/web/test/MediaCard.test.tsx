@@ -1,9 +1,9 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { MediaCard } from '../src/components/MediaCard.tsx';
 import { groupAnchor } from '../src/api/anchors.ts';
-import type { GroupView, ManualField, MetadataView, PerformerView } from '../src/api/client.ts';
+import type { GroupView, ManualField, MetadataView, PerformerView, ReleaseDownloadView } from '../src/api/client.ts';
 import { gone } from './dom.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
@@ -150,8 +150,9 @@ test('the release you already own is marked and not offered again', () => {
   );
   assert.ok(screen.getByText(/current/i));
   assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
-  // No `downloadFailed` on any release, so nothing claims a failure. The server
-  // omits the field for a healthy release rather than sending `false`.
+  // No `download` on any release, so nothing claims a failure. The server
+  // omits the field for a release that has never been downloaded rather than
+  // sending one whose status is something other than `failed`.
   assert.equal(gone(/failed/i), true);
 });
 
@@ -184,10 +185,12 @@ test('a card carries the anchor a Downloads row links to', () => {
   assert.notEqual(groupAnchor(7), groupAnchor(1));
 });
 
-/** `GROUP`'s releases with `downloadFailed` set on the ids named. */
+/** `GROUP`'s releases with a failed download on the ids named. */
 function failing(...ids: number[]): GroupView['releases'] {
   return GROUP.releases.map((release) =>
-    ids.includes(release.id) ? { ...release, downloadFailed: true } : release,
+    ids.includes(release.id)
+      ? { ...release, download: { downloadId: 1, status: 'failed', error: null, absentSince: null } }
+      : release,
   );
 }
 
@@ -239,6 +242,193 @@ test('only the release that failed is marked', () => {
     />,
   );
   assert.equal(screen.getAllByText('Failed').length, 1);
+});
+
+/** `GROUP`'s releases with the given download attached to the release named `id`. */
+function withDownload(id: number, download: Partial<ReleaseDownloadView>): GroupView['releases'] {
+  const full: ReleaseDownloadView = {
+    downloadId: 1,
+    status: 'downloading',
+    error: null,
+    absentSince: null,
+    ...download,
+  };
+  return GROUP.releases.map((release) => (release.id === id ? { ...release, download: full } : release));
+}
+
+/**
+ * The `<li>` for one release row, found by the release name it renders.
+ * `GROUP`'s releases are named `R2` (2160p) and `R1` (1080p) — see the
+ * fixture above — so a test scopes to one release's row by picking the
+ * matching name.
+ */
+function row(name: string): HTMLElement {
+  const element = screen.getByText(name).closest('li');
+  assert.ok(element !== null, `no row for ${name}`);
+  return element;
+}
+
+test('a picked release with no download reads Current', () => {
+  render(<MediaCard group={{ ...GROUP, state: 'picked', pickedReleaseId: 1 }} onPick={() => {}} />);
+  assert.ok(within(row('R1')).getByText('Current'));
+  // The alternative keeps its Pick — nothing about it failed or is in flight.
+  assert.equal(screen.getAllByRole('button', { name: /pick/i }).length, 1);
+});
+
+test('a picked release whose download imported still reads Current, not imported', () => {
+  // The reader has the file, which is what `Current` has always meant here.
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        state: 'picked',
+        pickedReleaseId: 1,
+        releases: withDownload(1, { status: 'imported' }),
+      }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(within(row('R1')).getByText('Current'));
+  assert.equal(gone('imported'), true);
+});
+
+test('a release downloading reads its status, whether or not it is the pick', () => {
+  // Both cases in one test on purpose: the rule is that status is keyed by
+  // release, and an in-flight *upgrade* is by definition not the pick
+  // (`pickRelease` leaves `pickedReleaseId` on the old release).
+  const { unmount } = render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        state: 'picked',
+        pickedReleaseId: 1,
+        releases: withDownload(1, { status: 'downloading' }),
+      }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(within(row('R1')).getByText('downloading'));
+  assert.equal(gone('Current'), true);
+  unmount();
+
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        state: 'picked',
+        pickedReleaseId: 1,
+        releases: withDownload(2, { status: 'downloading' }),
+      }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(within(row('R2')).getByText('downloading'));
+  // Release 1 is still the file the user has; an upgrade in progress does not
+  // take that word away from it.
+  assert.ok(within(row('R1')).getByText('Current'));
+});
+
+test('a failed release reads Failed rather than its status word', () => {
+  render(
+    <MediaCard group={{ ...GROUP, releases: withDownload(2, { status: 'failed' }) }} onPick={() => {}} />,
+  );
+  assert.ok(within(row('R2')).getByText('Failed'));
+  assert.equal(gone('failed'), true);
+});
+
+test('an alternative with no download reads nothing and offers Pick', () => {
+  render(<MediaCard group={{ ...GROUP, state: 'picked', pickedReleaseId: 1 }} onPick={() => {}} />);
+  const alt = within(row('R2'));
+  assert.ok(!alt.queryByText('Failed'), 'no Failed label for the alternative');
+  assert.ok(!alt.queryByText('Current'), 'no Current label for the alternative');
+  assert.ok(alt.getByRole('button', { name: /pick/i }));
+});
+
+test('Pick is suppressed while a download is in flight and restored once it fails', () => {
+  const { rerender } = render(
+    <MediaCard
+      group={{ ...GROUP, releases: withDownload(2, { status: 'downloading' }) }}
+      onPick={() => {}}
+    />,
+  );
+  assert.ok(!within(row('R2')).queryByRole('button', { name: /pick/i }), 'no Pick while in flight');
+
+  rerender(
+    <MediaCard group={{ ...GROUP, releases: withDownload(2, { status: 'failed' }) }} onPick={() => {}} />,
+  );
+  assert.ok(within(row('R2')).getByRole('button', { name: /pick/i }));
+});
+
+test('the detail line is absent when there is nothing to put on it', () => {
+  // A healthy downloading row: no error, not absent, so no second line at all.
+  render(
+    <MediaCard
+      group={{ ...GROUP, releases: withDownload(2, { status: 'downloading' }) }}
+      onPick={() => {}}
+      onRetry={() => {}}
+    />,
+  );
+  assert.ok(!within(row('R2')).queryByRole('button', { name: /retry/i }), 'no Retry on a healthy row');
+  assert.equal(gone(/missing from client/i), true);
+});
+
+test('a failed release shows its error and a Retry button on the detail line', () => {
+  const retried: number[] = [];
+  render(
+    <MediaCard
+      group={{ ...GROUP, releases: withDownload(2, { status: 'failed', error: 'disk full' }) }}
+      onPick={() => {}}
+      onRetry={(downloadId) => retried.push(downloadId)}
+    />,
+  );
+  const alt = within(row('R2'));
+  assert.ok(alt.getByText('disk full'));
+  fireEvent.click(alt.getByRole('button', { name: /retry/i }));
+  assert.deepEqual(retried, [1]);
+});
+
+test('an absent release warns how long it has been missing and offers Retry', () => {
+  const threeHoursAgo = Date.now() - 3 * 60 * 60 * 1000;
+  render(
+    <MediaCard
+      group={{
+        ...GROUP,
+        releases: withDownload(2, { status: 'downloading', absentSince: threeHoursAgo }),
+      }}
+      onPick={() => {}}
+      onRetry={() => {}}
+    />,
+  );
+  const alt = within(row('R2'));
+  assert.ok(alt.getByText(/missing from client for 3h/i));
+  assert.ok(alt.getByRole('button', { name: /retry/i }));
+});
+
+test('Retry is offered for exactly the statuses the API guard accepts', () => {
+  // Re-homed from Downloads.test.tsx:110. This is the load-bearing one: it
+  // pins `status === 'failed' || absentSince !== null` against the server's
+  // own guard (`packages/core/src/http/server.ts`), which `ReleaseRow.tsx`
+  // mirrors verbatim — a wider or narrower offer here just becomes a 409 on
+  // click.
+  const statuses = ['queued', 'downloading', 'completed', 'importing', 'imported', 'failed'] as const;
+  for (const status of statuses) {
+    for (const absentSince of [null, Date.now() - 60_000]) {
+      const { unmount } = render(
+        <MediaCard
+          group={{ ...GROUP, releases: withDownload(2, { status, absentSince }) }}
+          onPick={() => {}}
+          onRetry={() => {}}
+        />,
+      );
+      const expectRetry = status === 'failed' || absentSince !== null;
+      assert.equal(
+        within(row('R2')).queryByRole('button', { name: /retry/i }) !== null,
+        expectRetry,
+        `status=${status} absentSince=${String(absentSince)}`,
+      );
+      unmount();
+    }
+  }
 });
 
 test('the provider synopsis renders only once the answer is confirmed', () => {

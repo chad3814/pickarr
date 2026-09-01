@@ -45,6 +45,17 @@ export interface ManualField {
  */
 export type ManualFieldsResponse = Record<string, ManualField[]>;
 
+/** The part of a download a card shows. Mirrors `ReleaseDownloadView` in `packages/core/src/http/views.ts`. */
+export interface ReleaseDownloadView {
+  downloadId: number;
+  status: string;
+  error: string | null;
+  absentSince: number | null;
+}
+
+/** Mirrors `ReleaseDownloadsResponse` in `packages/core/src/http/views.ts`. */
+export type ReleaseDownloadsResponse = Record<number, Record<number, ReleaseDownloadView>>;
+
 export interface ReleaseView {
   id: number;
   score: number;
@@ -58,11 +69,18 @@ export interface ReleaseView {
    */
   manualValues?: Record<string, string>;
   /**
-   * True when this release's most recent download failed, and **absent**
-   * otherwise — never `false`. The row reads `Failed`, in red, instead of
-   * claiming the user has the file.
+   * This release's most recent download, absent when it has never had one.
+   *
+   * Per release rather than per group because the card has to say *which*
+   * version is downloading or failed: an upgrade deliberately leaves
+   * `pickedReleaseId` on the old release until the replacement imports, so
+   * the row to mark is frequently not the current one.
+   *
+   * Widened from a `downloadFailed?: boolean`, which was exactly
+   * `download?.status === 'failed'`. The boolean could not say `downloading`,
+   * and the screen that could was deleted.
    */
-  downloadFailed?: boolean;
+  download?: ReleaseDownloadView;
 }
 
 /** Mirrors `PerformerView` in `packages/core/src/http/views.ts`; see the note on `MetadataView` below. */
@@ -237,8 +255,8 @@ export interface GroupView {
   manualValues?: Record<string, string>;
   // Nothing group-level about failures. `/api/picks` already returns failed
   // groups first, so the order carries that fact; which row to mark is
-  // `ReleaseView.downloadFailed`. The failed release is frequently not the
-  // pick — an upgrade that failed leaves `pickedReleaseId` on the file the user
+  // `ReleaseView.download`. The failed release is frequently not the pick —
+  // an upgrade that failed leaves `pickedReleaseId` on the file the user
   // still has, and the pick is untouched by a failure either way: the user
   // still wants the content, so the group stays picked and its alternatives
   // stay on offer.
@@ -746,6 +764,12 @@ export const api = {
   metadata: (ids: number[], signal?: AbortSignal) =>
     request<Record<number, MetadataView>>(
       `/api/metadata?ids=${ids.join(',')}`,
+      signal === undefined ? undefined : { signal },
+    ),
+  /** `ids` is joined the same `"1,2,3"` way `/api/downloads/for-groups` expects. */
+  releaseDownloads: (ids: number[], signal?: AbortSignal) =>
+    request<ReleaseDownloadsResponse>(
+      `/api/downloads/for-groups?ids=${ids.join(',')}`,
       signal === undefined ? undefined : { signal },
     ),
   config: () => request<ConfigResponse>('/api/config'),
