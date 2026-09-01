@@ -44,7 +44,7 @@ h1 { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.015em; ma
  * A bare `h2` is a section heading beneath a route's `h1` and has to read as
  * subordinate to it, not louder than it: unstyled, it renders at the UA's
  * 1.5em/700, which is bigger than `h1`'s own `--text-page` at 600. This rule
- * sits in the `base` layer, so `.media-card h2`, `.failed-row h2` and
+ * sits in the `base` layer, so `.media-card h2`, `.failed-card h2` and
  * `.confirm h2` in `components` still win wherever a card, a failed row or
  * the dialog gives its `h2` a different treatment — that is the layering
  * working as intended, not a gap in this rule.

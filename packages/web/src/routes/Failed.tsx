@@ -1,50 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import {
-  api,
-  type FailedItemView,
-  type ManualField,
-  type ManualFieldsResponse,
-} from '../api/client.ts';
-import { ManualForm, seed } from '../components/ManualForm.tsx';
-import { useIdentityPreview } from '../api/useIdentityPreview.ts';
+import { api, type ManualFieldsResponse } from '../api/client.ts';
+// `FixForm` lives in `FailedCard.tsx` now, not here: its doc comment there is
+// about why one form instance must never be shared between items, and this
+// route still renders its own rows rather than that card until the tab that
+// replaces this screen (see the module doc below).
+import { FixForm } from '../components/FailedCard.tsx';
 import { usePagedList } from '../api/usePagedList.ts';
-
-interface FixProps {
-  item: FailedItemView;
-  fields: ManualField[];
-  onSubmit(values: Record<string, string>): void;
-  onCancel(): void;
-}
-
-/**
- * The form for one refused item, with the plugin's live reading of it.
- *
- * It is separate from the row so that the draft the preview watches is state of
- * the form's own, mounted and discarded with it. Rendering it inside the row
- * also settles the seeding problem for free: `ManualForm` seeds once and never
- * again, so a single form moved between rows would go on showing the first
- * row's suggestions.
- */
-function FixForm({ item, fields, onSubmit, onCancel }: FixProps) {
-  // Seeded here as well as inside the form, and handed the *prefill* rather
-  // than this draft, so that both callers of `ManualForm` pass it the same kind
-  // of thing: the raw values, which it seeds for itself. This copy exists only
-  // to give the preview the draft the form will submit.
-  const [draft, setDraft] = useState(() => seed(fields, item.suggestedValues));
-  const preview = useIdentityPreview(item.plugin, draft);
-
-  return (
-    <ManualForm
-      fields={fields}
-      values={item.suggestedValues}
-      preview={preview}
-      submitLabel="Save"
-      onChange={setDraft}
-      onSubmit={onSubmit}
-      onCancel={onCancel}
-    />
-  );
-}
 
 /**
  * The names the parser refused, each with the reason and a way to describe it
