@@ -898,6 +898,35 @@ they were found by grepping the label rather than the href:
 - `settings.spec.ts:42` asserts nav **geometry**: that `hr.nav-separator` sits below the `Failed` link and above `Settings`, deliberately replacing an older `toContainText('Failed—Settings')` because "a rule contributes no text". With `Failed` gone its locator returns null and the test fails on `expect(failed).not.toBeNull()`. The link above the rule becomes `Dismissed`, which preserves the exact property under test.
 - `retry.spec.ts:81` asserts `.release-current` reads `Failed` and **must not be touched** — that is a download's status label on a release row, nothing to do with the nav.
 
+**Three more sites, found later and added here rather than left to be discovered.**
+The four above were found by grepping the nav label and the route path. That
+missed a third representation entirely — **the CSS class used as a Playwright
+locator** — and a fourth, an empty-state string. This is the same enumeration
+failure as the Downloads merge, so the full set is now listed:
+
+- **`manual.spec.ts:41-42` and `:57`** — this spec fixes a refused name through
+  the Failed tab: `page.goto('/failed')`, then `page.locator('li.failed-row')`,
+  then asserting `'Nothing failed to parse.'` once the list empties. That whole
+  flow moves to **Browse**, where the failed card now lives. Retarget the goto to
+  `/`, the locator to `li.failed-card`, and decide what Browse's empty state says
+  — it cannot be "Nothing failed to parse", because Browse's list is not only
+  failures. If Browse has no equivalent empty string, assert on the card being
+  gone instead of on prose.
+- **`pagination.spec.ts:127-128`** — counts `li.failed-row` on `/failed` to prove
+  that list pages. Retarget to the **Dismissed** tab, which is the surviving
+  paginated list of feed items and the closest analogue. Its comments at `:11`,
+  `:30` and `:46` also name "the Failed tab" and `failedQuerySchema`; correct
+  them to match whatever the route and schema are called after the rename.
+- **`theme.spec.ts:125` and `:140-141`** — the heading-size check needs a
+  `.failed-row h2` to inspect, and its comments say so by name. Task 4 renamed
+  the CSS rule to `.failed-card` while the old route kept emitting the old class,
+  which is why this still passes today. Once the route is deleted the check must
+  find its heading on a **Browse failed card** (`.failed-card h2`), and both
+  comments must name what it actually inspects.
+
+Run `npm run e2e` after these and confirm **25 passed**. If the count moves, say
+which spec and why.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```tsx
