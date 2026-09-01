@@ -42,8 +42,9 @@ export interface PagedList<T> {
  * twenty pages noticed, and with scrolling the list silently shortens and they
  * scroll again. Callers get `setItems` precisely so they never need the refetch;
  * it is pinned by `picking after "load more" keeps the pages already loaded` and
- * its by-scrolling twin in `Browse.test.tsx`, and by the resolve and dismiss pair
- * in `Failed.test.tsx`.
+ * its by-scrolling twin in `Browse.test.tsx`, and by that same file's fixing
+ * and dismissing pairs for the failed half of the merge — the same rule
+ * `Dismissed.tsx`'s own `fix` follows, for the tab that list's actions moved to.
  *
  * `fetchPage` is expected to be a `useCallback` over whatever the list is
  * filtered by; a change in its identity is the signal to start over from the

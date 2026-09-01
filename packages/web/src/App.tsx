@@ -1,7 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router';
 import { Browse } from './routes/Browse.tsx';
 import { Picks } from './routes/Picks.tsx';
-import { Failed } from './routes/Failed.tsx';
+import { Dismissed } from './routes/Dismissed.tsx';
 import { Settings } from './routes/Settings.tsx';
 import { ThemeToggle } from './components/ThemeToggle.tsx';
 
@@ -11,7 +11,7 @@ export function App() {
       <nav>
         <NavLink to="/">Browse</NavLink>
         <NavLink to="/picks">Picks</NavLink>
-        <NavLink to="/failed">Failed</NavLink>
+        <NavLink to="/dismissed">Dismissed</NavLink>
         {/*
           Settings is not a view of the library, it is a view of the
           installation, and this rule is what says so.
@@ -39,7 +39,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<Browse />} />
           <Route path="/picks" element={<Picks />} />
-          <Route path="/failed" element={<Failed />} />
+          <Route path="/dismissed" element={<Dismissed />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

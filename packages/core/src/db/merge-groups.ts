@@ -54,7 +54,7 @@ export function mergeGroupInto(
   // A release moving into a group and beating its pick *is* an arrival at
   // that group. It merely took a slower route, in through a human, exactly
   // as a resolve does — and a resolve bumps (§7.1). Reaching the same
-  // scene by the Failed tab and by an identity correction must not leave
+  // scene by resolving a refused name and by an identity correction must not leave
   // it ordered two different ways.
   //
   // The rule that an edit does not bump still holds for the two cases it

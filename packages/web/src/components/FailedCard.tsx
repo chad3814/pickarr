@@ -13,11 +13,11 @@ interface FixProps {
 /**
  * The form for one refused item, with the plugin's live reading of it.
  *
- * It is separate from the row so that the draft the preview watches is state of
- * the form's own, mounted and discarded with it. Rendering it inside the row
- * also settles the seeding problem for free: `ManualForm` seeds once and never
- * again, so a single form moved between rows would go on showing the first
- * row's suggestions.
+ * It is separate from the card so that the draft the preview watches is state
+ * of the form's own, mounted and discarded with it. Rendering it inside the
+ * card also settles the seeding problem for free: `ManualForm` seeds once and
+ * never again, so a single form moved between cards would go on showing the
+ * first card's suggestions.
  */
 export function FixForm({ item, fields, onSubmit, onCancel }: FixProps) {
   // Seeded here as well as inside the form, and handed the *prefill* rather

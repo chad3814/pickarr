@@ -544,8 +544,8 @@ test('pageOfDownloads breaks a created_at tie on descending id', () => {
   assert.deepEqual(first.map((download) => download.id), [3], 'newest first, highest id in a tie');
 
   // The cursor names the tie's higher id, so the row after it is the *lower*
-  // one sharing that `created_at`. `browseGroups` and `failedFeedItems` both
-  // compare `id >` inside a tie and this list has to compare `id <`; a copy of
+  // one sharing that `created_at`. `browseGroups` and `dismissedFeedItems`
+  // both compare `id >` inside a tie and this list has to compare `id <`; a copy of
   // either would answer id 4 here and lose id 2 for good.
   const second = pageOfDownloads(db, { cursor: { createdAt: 5, id: 3 }, limit: 2 });
   assert.deepEqual(second.map((download) => download.id), [2, 4]);

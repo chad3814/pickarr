@@ -494,8 +494,8 @@ test('a merge bumps list_rank_at when an incoming release beats the target pick'
   const target = getGroup(db, 1)!;
   // The 2160 moving in beats the picked 720, so it is an *arrival* at group 1:
   // the same event ingest bumps for, reached by a slower route through a
-  // human, exactly as a resolve is. The same scene fixed from the Failed tab
-  // bumps, and these two routes must not order it differently.
+  // human, exactly as a resolve is. The same scene fixed by resolving a
+  // refused name bumps, and these two routes must not order it differently.
   assert.equal(target.listRankAt, NOW);
   assert.equal(target.upgradeReleaseId, 2);
   db.close();

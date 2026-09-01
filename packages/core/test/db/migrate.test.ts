@@ -110,8 +110,8 @@ test('an existing database gains the manual-metadata columns without losing its 
 
   // Every pre-existing value is still there, and the three added columns read
   // NULL — "nobody has dismissed or edited this" is the only honest answer for
-  // a row that predates the columns, and it is what the Failed list's default
-  // filter and the edit stamps both assume of history.
+  // a row that predates the columns, and it is what browse's union, the
+  // Dismissed list and the edit stamps all assume of history.
   const item = db
     .prepare('SELECT raw_title, parse_error, dismissed_at FROM feed_items WHERE id = 1')
     .get();
@@ -142,7 +142,7 @@ test('an upgraded database gets the partial index the failed listing pages on', 
   // Asserted on both paths because they are different code: the upgrade runs
   // migration 3's CREATE INDEX against a populated table, the fresh create
   // runs it against an empty one, and an index missing from either would make
-  // the Failed list scan the whole feed history.
+  // browse's failed branch and the Dismissed list scan the whole feed history.
   for (const db of [upgraded, fresh]) {
     const row = db
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")

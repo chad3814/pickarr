@@ -22,7 +22,7 @@ import {
 } from '../db/groups.ts';
 import { pageOfBrowseItems, type BrowseCursor, type BrowseKind } from '../db/browse-page.ts';
 import { getDownload, latestDownloadsForGroups, pageOfDownloads, resetForRetry } from '../db/downloads.ts';
-import { failedFeedItems, feedItemsByIds } from '../db/feed-items.ts';
+import { dismissedFeedItems, feedItemsByIds } from '../db/feed-items.ts';
 import {
   enqueueMetadata,
   enqueueRefresh,
@@ -56,8 +56,8 @@ import {
   type BrowseResponse,
   type ConfigResponse,
   type ConfigSaveResponse,
+  type DismissedResponse,
   type DownloadsResponse,
-  type FailedResponse,
   type GroupEditResponse,
   type GroupView,
   type IdentityPlanResponse,
@@ -272,12 +272,9 @@ function parseIds(raw: string): number[] | null {
   return ids;
 }
 
-const failedQuerySchema = z.object({
+const dismissedQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(30),
-  // A string rather than a coerced boolean: `z.coerce.boolean()` reads every
-  // non-empty string as true, so `?includeDismissed=false` would show them.
-  includeDismissed: z.string().optional(),
 });
 
 const pickBodySchema = z.object({ releaseId: z.number().int().positive() });
@@ -1297,11 +1294,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/downloads', async (request, reply) => {
     const query = downloadsQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
-    // Refused with the same message `/api/browse` and `/api/failed` use, from
-    // the same `cursorFrom`/`parseCursor` — but not any more from an identical
-    // rule on all three. Browse's cursor now carries a third component, the
-    // row kind, that this list and `/api/failed` don't need because each
-    // orders on one table alone; the shared rule is that parser plus a
+    // Refused with the same message `/api/browse` and `/api/dismissed` use,
+    // from the same `cursorFrom`/`parseCursor` — but not any more from an
+    // identical rule on all three. Browse's cursor now carries a third
+    // component, the row kind, that this list and `/api/dismissed` don't need
+    // because each orders on one table alone; the shared rule is that parser plus a
     // discriminator, not one shape copied three times. A cursor rule that held
     // on only two of the three lists would leave the third scrolling forever
     // (#33), which is why the shape is checked rather than assumed even here.
@@ -1383,8 +1380,14 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return schemas;
   });
 
-  server.get('/api/failed', async (request, reply) => {
-    const query = failedQuerySchema.safeParse(request.query);
+  // Names the parser refused that a person waved off. The open half of the
+  // same failures is queried inside `/api/browse`'s own union now, so this
+  // route's only reader wants dismissed items and nothing needs "all" —
+  // which is why it takes no `includeDismissed` flag: a route named
+  // `dismissed` that could still answer with open failures would be the same
+  // false name this rename exists to fix.
+  server.get('/api/dismissed', async (request, reply) => {
+    const query = dismissedQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
     // Refused for the same reason and with the same message `/api/browse`
     // uses, and from the same `cursorFrom`/`parseCursor` `/api/downloads`
@@ -1399,16 +1402,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // Over-fetched by one for the same reason `/api/browse` is: a page that
     // comes back exactly `limit` long is otherwise ambiguous between "there is
     // more" and "that was exactly everything left."
-    const overFetched = failedFeedItems(db, {
+    const overFetched = dismissedFeedItems(db, {
       cursor: cursor === null ? null : { firstSeenAt: cursor.sortKey, id: cursor.id },
       limit: query.data.limit + 1,
-      includeDismissed: query.data.includeDismissed === '1',
     });
     const hasMore = overFetched.length > query.data.limit;
     const items = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
 
     const last = items.at(-1);
-    const response: FailedResponse = {
+    const response: DismissedResponse = {
       items: items.map((item) => toFailedItemView(item, deps.pluginForFeed(item.feedId))),
       nextCursor: hasMore && last !== undefined ? `${last.firstSeenAt}:${last.id}` : null,
     };

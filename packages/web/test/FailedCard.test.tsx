@@ -1,8 +1,9 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { FailedCard } from '../src/components/FailedCard.tsx';
 import type { FailedItemView, ManualField } from '../src/api/client.ts';
+import { fetchStub } from './fetchStub.ts';
 
 // Unmount between tests rather than at the end of each one: a test that fails
 // mid-way otherwise leaves its card behind, and every later query sees two.
@@ -77,6 +78,54 @@ test('Fix… opens the form seeded with the suggested values', () => {
 
   assert.equal((screen.getByLabelText('Site') as HTMLInputElement).value, 'brazzers');
   assert.equal((screen.getByLabelText('Title') as HTMLInputElement).value, '');
+});
+
+test('opening Fix on another card shows that card, not the first one', () => {
+  // `ManualForm` seeds its draft once, deliberately, so that a parent render
+  // cannot overwrite what is being typed. A `FixForm` shared between cards
+  // would therefore keep showing the first card's suggestions forever — the
+  // reason `FixForm` mounts and unmounts with its own card rather than living
+  // above the list (see `FailedCard.tsx`'s own doc on `FixForm`).
+  const other: FailedItemView = {
+    ...ITEM,
+    id: 2,
+    rawTitle: 'Beta.RAW.720p',
+    suggestedValues: { site: 'evilangel', title: 'Beta Thing' },
+  };
+  render(
+    <>
+      <FailedCard item={ITEM} fields={FIELDS} onFix={() => {}} onDismiss={() => {}} />
+      <FailedCard item={other} fields={FIELDS} onFix={() => {}} onDismiss={() => {}} />
+    </>,
+  );
+
+  fireEvent.click(within(card(ITEM.rawTitle)).getByRole('button', { name: /fix/i }));
+  assert.equal((within(card(ITEM.rawTitle)).getByLabelText('Site') as HTMLInputElement).value, 'brazzers');
+
+  fireEvent.click(within(card(other.rawTitle)).getByRole('button', { name: /fix/i }));
+  assert.equal((within(card(other.rawTitle)).getByLabelText('Site') as HTMLInputElement).value, 'evilangel');
+  assert.equal(
+    (within(card(other.rawTitle)).getByLabelText('Title') as HTMLInputElement).value,
+    'Beta Thing',
+  );
+});
+
+test('the identity preview describes the draft, under the plugin that will build it', async () => {
+  // Echoes what it was asked, so the assertion can tell that the plugin id and
+  // the live draft — not the item's suggestions — are what reached the server.
+  globalThis.fetch = fetchStub(async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { plugin: string; values: Record<string, string> };
+    return new Response(
+      JSON.stringify({ identityKey: `${body.plugin}:${body.values['site'] ?? ''}:${body.values['title'] ?? ''}` }),
+      { headers: { 'content-type': 'application/json' } },
+    );
+  });
+  render(<FailedCard item={ITEM} fields={FIELDS} onFix={() => {}} onDismiss={() => {}} />);
+
+  fireEvent.click(screen.getByRole('button', { name: /fix/i }));
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A Thing' } });
+
+  await waitFor(() => assert.ok(screen.getByText('scenes:brazzers:A Thing')));
 });
 
 test('submitting the form calls onFix with the typed values', () => {

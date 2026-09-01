@@ -139,14 +139,16 @@ test('the nav separates Settings from the library tabs with a rule', () => {
   // `Failed—Settings`, which a rule cannot produce — and presence alone would
   // pass with the divider at the top of the nav, which is the one place it must
   // not be. `compareDocumentPosition` states the ordering directly rather than
-  // inferring it from text.
-  const failed = screen.getByRole('link', { name: 'Failed' });
+  // inferring it from text. `Dismissed` is the link immediately above the rule
+  // now that Failed is gone; the property under test — the rule's position,
+  // not which label sits beside it — is unchanged.
+  const dismissed = screen.getByRole('link', { name: 'Dismissed' });
   const settings = screen.getByRole('link', { name: 'Settings' });
   const preceding = Node.DOCUMENT_POSITION_PRECEDING;
   const following = Node.DOCUMENT_POSITION_FOLLOWING;
   assert.ok(
-    (rule.compareDocumentPosition(failed) & preceding) !== 0,
-    'the rule comes after Failed',
+    (rule.compareDocumentPosition(dismissed) & preceding) !== 0,
+    'the rule comes after Dismissed',
   );
   assert.ok(
     (rule.compareDocumentPosition(settings) & following) !== 0,

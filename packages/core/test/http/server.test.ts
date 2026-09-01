@@ -195,9 +195,9 @@ test('browse paginates with a stable cursor', async () => {
 
 /**
  * Every shape that is not a cursor this route could have minted, and why each
- * one is in the list. `parseCursor` is shared with `/api/failed`, so this table
- * covers the rule for both lists; `manual.test.ts` checks that the failed route
- * really does go through it.
+ * one is in the list. `parseCursor` is shared with `/api/dismissed`, so this
+ * table covers the rule for both lists; `manual.test.ts` checks that the
+ * dismissed route really does go through it.
  */
 const MALFORMED_CURSORS: readonly string[] = [
   '', // `?cursor=` — sent by a client that has no cursor, which is not the same as sending none.
@@ -1273,7 +1273,7 @@ test('no route ever returns the client api key', async () => {
     '/api/picks',
     '/api/downloads',
     '/api/health',
-    '/api/failed',
+    '/api/dismissed',
     '/api/manual-fields',
   ]) {
     const body = (await server.inject({ method: 'GET', url })).body;

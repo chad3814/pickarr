@@ -334,7 +334,8 @@ export interface FailedItemView {
   dismissedAt: number | null;
 }
 
-export interface FailedResponse {
+/** The shape `GET /api/dismissed` answers with — the two-component cursor is Task 2's, unchanged by the route's rename. */
+export interface DismissedResponse {
   items: FailedItemView[];
   nextCursor: string | null;
 }
@@ -557,10 +558,11 @@ export function toGroupView(
  * The hook's contract says it must never throw — and the guard is here anyway,
  * for the same reason `manualValuesFor` has one: a contract states what a
  * plugin owes, not what it does, and this call site is the one that pays. It
- * runs once per row on the Failed page, so a single plugin throwing on a
- * single refused name would 500 the whole endpoint and take down the worklist
- * of broken names — the one screen a broken plugin most needs to be visible
- * on, and the only route from a refusal to a correction.
+ * runs once per row wherever a refused name is listed — Browse's merged list
+ * and the Dismissed tab alike — so a single plugin throwing on a single
+ * refused name would 500 the whole page and take down the worklist of every
+ * other broken name showing there too, the one place a broken plugin most
+ * needs to be visible, and the only route from a refusal to a correction.
  *
  * An empty object rather than `undefined`, because unlike `manualValues` this
  * field is not a signal: the SPA offers the Fix form from the plugin's field
@@ -593,8 +595,9 @@ export function toFailedItemView(
     plugin: plugin?.id ?? '',
     rawTitle: row.rawTitle,
     link: row.link,
-    // Never null in practice: `failedFeedItems` selects on `parse_error IS NOT
-    // NULL`. The fallback keeps that guarantee out of the wire format.
+    // Never null in practice: every caller filters on `parse_error IS NOT
+    // NULL` — `dismissedFeedItems` and browse's own union branch alike. The
+    // fallback keeps that guarantee out of the wire format.
     parseError: row.parseError ?? '',
     firstSeenAt: row.firstSeenAt,
     publishedAt: row.publishedAt,

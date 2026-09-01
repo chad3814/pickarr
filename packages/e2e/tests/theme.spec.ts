@@ -122,7 +122,7 @@ test('the confirmation dialog follows the app theme, not the OS scheme', async (
  * rule that swept in every element would flag that as a false positive.
  *
  * Browse and Picks each get a `.media-card h2` from one picked release;
- * Failed gets a `.failed-row h2` from one name the parser refuses (per
+ * Browse also gets a `.failed-card h2` from one name the parser refuses (per
  * `manual.spec.ts`). The "Not managed by Pickarr" `<h2>` moved onto Picks
  * itself once Downloads was deleted, and it still only renders once the
  * client reports a job Pickarr's database has no row for, so one is seeded
@@ -137,8 +137,8 @@ test("h1 is strictly the largest heading on every route", async ({
   harness,
 }) => {
   harness.ingest(['Vixen.23.04.15.Alex.Coal.XXX.1080p.MP4-KTR']);
-  // The one name in `manual.spec.ts` the parser genuinely refuses, so Failed
-  // has a `.failed-row h2` to check.
+  // The one name in `manual.spec.ts` the parser genuinely refuses, so Browse
+  // has a `.failed-card h2` to check too, alongside its `.media-card h2`.
   harness.ingest(['agmx.084.4k']);
 
   await page.goto('/');
@@ -179,7 +179,7 @@ test("h1 is strictly the largest heading on every route", async ({
   });
   await harness.reconcile();
 
-  for (const route of ['/', '/picks', '/failed', '/settings']) {
+  for (const route of ['/', '/picks', '/dismissed', '/settings']) {
     await page.goto(route);
     const headings = await page.locator('h1, h2, h3, h4, h5, h6').evaluateAll((nodes) =>
       nodes.map((node) => ({

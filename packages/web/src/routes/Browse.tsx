@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, RequestError, type GroupView, type ManualFieldsResponse } from '../api/client.ts';
+import {
+  api,
+  RequestError,
+  type BrowseItem,
+  type FailedItemView,
+  type GroupView,
+  type ManualFieldsResponse,
+} from '../api/client.ts';
 import { requeryOneGroup } from '../api/requeryMetadata.ts';
 import { useGroupMetadata } from '../api/useGroupMetadata.ts';
 import { usePagedList } from '../api/usePagedList.ts';
 import { useIdentityChange, type ApplyOutcome } from '../api/useIdentityChange.ts';
 import { readView, writeView, type BrowseView } from '../browseView.ts';
-import { GroupList } from '../components/GroupList.tsx';
+import { FailedCard } from '../components/FailedCard.tsx';
+import { GroupList, matchesSelection, type BrowseSelection } from '../components/GroupList.tsx';
 import { IdentityChangeConfirm } from '../components/IdentityChangeConfirm.tsx';
 import { MediaCard } from '../components/MediaCard.tsx';
 import { SearchBox } from '../components/SearchBox.tsx';
@@ -17,31 +25,31 @@ export function Browse() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<BrowseView>(readView);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selection, setSelection] = useState<BrowseSelection | null>(null);
 
   // Rebuilt whenever the term changes, which is `usePagedList`'s signal to start
   // the list over from the first page.
   const fetchPage = useCallback(
     async (cursor: string | null) => {
       const page = await api.browse(cursor, search);
-      // The merged list now also carries names the parser refused, under
-      // `kind: 'failed'`. This screen does not have a card for those yet — a
-      // later task adds one — so for now it renders the groups exactly as it
-      // did before the merge and drops the failed rows on the floor.
-      const groups = page.items.flatMap((item) => (item.kind === 'group' ? [item.group] : []));
-      return { items: groups, nextCursor: page.nextCursor };
+      return { items: page.items, nextCursor: page.nextCursor };
     },
     [search],
   );
 
-  const {
-    items: groups,
-    setItems: setGroups,
-    loading,
-    done,
-    loadMore,
-    sentinelRef,
-  } = usePagedList(fetchPage, setError);
+  const { items, setItems, loading, done, loadMore, sentinelRef } = usePagedList(
+    fetchPage,
+    setError,
+  );
+
+  // The group half of `items`, in the same order they arrived — used only to
+  // seed the metadata poll below. Both views render from `shown` (below),
+  // which carries a failed row exactly where the server placed it and renders
+  // each item by its own kind.
+  const groups = useMemo(
+    () => items.flatMap((item) => (item.kind === 'group' ? [item.group] : [])),
+    [items],
+  );
 
   // Every group ever loaded onto this screen, not just the current page: a page
   // that arrived earlier — by scrolling, or from the fallback button — is still
@@ -54,8 +62,9 @@ export function Browse() {
   );
 
   /**
-   * Every loaded group with the poll's answer folded in — the one list every
-   * surface on this screen reads from.
+   * Every loaded item with the poll's answer folded into its group half — the
+   * one list both views read from, in the order the server sent it. A failed
+   * item carries no metadata and passes through unchanged.
    *
    * Merged here rather than per card, and that is the whole point. `groupTitle`
    * being one shared function only makes the master row and the detail pane
@@ -75,9 +84,17 @@ export function Browse() {
    * the same either way, and depending on the merged list would make the hook's
    * own output an input to the array it keys off.
    */
-  const shown = useMemo(
-    () => groups.map((group) => ({ ...group, metadata: liveMetadata.get(group.id) ?? group.metadata })),
-    [groups, liveMetadata],
+  const shown = useMemo<BrowseItem[]>(
+    () =>
+      items.map((item) =>
+        item.kind === 'group'
+          ? {
+              kind: 'group',
+              group: { ...item.group, metadata: liveMetadata.get(item.group.id) ?? item.group.metadata },
+            }
+          : item,
+      ),
+    [items, liveMetadata],
   );
 
   /**
@@ -106,7 +123,10 @@ export function Browse() {
   function cardFor(group: GroupView) {
     return (
       <MediaCard
-        key={group.id}
+        // Prefixed against `failedCardFor`'s key below: a group and a failed
+        // item can carry the same numeric id, since the two are minted from
+        // separate tables, and both kinds can land as siblings in this list.
+        key={`group-${group.id}`}
         // Already carrying the poll's answer: every caller passes a group out
         // of `shown`.
         group={group}
@@ -122,8 +142,30 @@ export function Browse() {
     );
   }
 
-  // The schemas are configuration, one map for every card on every page, so
-  // they are fetched once for the screen rather than per group.
+  /**
+   * One refused name's card. The counterpart to `cardFor`, kept as a
+   * separate function rather than folded into it because the two kinds share
+   * no props: a failed item has no releases, no metadata and no identity to
+   * edit, only a fix form and a dismissal.
+   */
+  function failedCardFor(item: FailedItemView) {
+    return (
+      <FailedCard
+        key={`failed-${item.id}`}
+        item={item}
+        // A plugin with no manual hooks is *missing* from this map, and an
+        // item whose feed has left configuration reports no plugin at all;
+        // either way the card finds no schema and offers no editing.
+        fields={fields[item.plugin]}
+        onFix={(values) => void fix(item.id, values)}
+        onDismiss={() => void dismiss(item.id)}
+      />
+    );
+  }
+
+  // The schemas are configuration, one map for every card on every page —
+  // group cards and failed cards alike — so they are fetched once for the
+  // screen rather than per row.
   useEffect(() => {
     let cancelled = false;
 
@@ -153,10 +195,14 @@ export function Browse() {
       // picking a lesser one leaves it with the better release still offered —
       // so nothing here has to re-derive that rule.
       const { group } = await api.pick(groupId, releaseId);
-      setGroups((previous) =>
+      setItems((previous) =>
         group === null
-          ? previous.filter((existing) => existing.id !== groupId)
-          : previous.map((existing) => (existing.id === groupId ? group : existing)),
+          ? previous.filter((existing) => !(existing.kind === 'group' && existing.group.id === groupId))
+          : previous.map((existing) =>
+              existing.kind === 'group' && existing.group.id === groupId
+                ? { kind: 'group', group }
+                : existing,
+            ),
       );
       setNotice(null);
       setError(null);
@@ -185,7 +231,7 @@ export function Browse() {
    * That is also why a merge says so out loud. When the target is on a page
    * nobody has loaded, the card disappears and nothing else on screen changes,
    * so the notice is the only account of where the releases went — the same
-   * thing the Failed tab reports when a fix joins an existing group.
+   * thing `fix`, below, reports when it joins an existing group.
    *
    * A stale `planDigest` answers 409 and is the one failure `confirm` retries
    * by re-planning (see `useIdentityChange`'s `ApplyOutcome` doc) — reporting
@@ -200,10 +246,16 @@ export function Browse() {
   ): Promise<ApplyOutcome> {
     try {
       const { group, mergedInto, failed } = await api.editGroup(groupId, values, planDigest);
-      setGroups((previous) => {
+      setItems((previous) => {
         const kept =
-          mergedInto === null ? previous : previous.filter((existing) => existing.id !== groupId);
-        return kept.map((existing) => (existing.id === group.id ? group : existing));
+          mergedInto === null
+            ? previous
+            : previous.filter((existing) => !(existing.kind === 'group' && existing.group.id === groupId));
+        return kept.map((existing) =>
+          existing.kind === 'group' && existing.group.id === group.id
+            ? { kind: 'group', group }
+            : existing,
+        );
       });
       setNotice(mergedInto === null ? null : `Releases moved into ${group.display.title}`);
       // A save that landed but left files unmoved is not fully done — the
@@ -246,10 +298,14 @@ export function Browse() {
   ): Promise<boolean> {
     try {
       const { group } = await api.editRelease(releaseId, values);
-      setGroups((previous) =>
+      setItems((previous) =>
         group === null
-          ? previous.filter((existing) => existing.id !== groupId)
-          : previous.map((existing) => (existing.id === group.id ? group : existing)),
+          ? previous.filter((existing) => !(existing.kind === 'group' && existing.group.id === groupId))
+          : previous.map((existing) =>
+              existing.kind === 'group' && existing.group.id === group.id
+                ? { kind: 'group', group }
+                : existing,
+            ),
       );
       setNotice(null);
       setError(null);
@@ -261,26 +317,79 @@ export function Browse() {
     }
   }
 
-  // The pane derives its group from `shown` rather than holding a copy, so a
+  /**
+   * Resolves a refused name into a group and drops its card from this list.
+   *
+   * The joined or new group is not inserted here: placing it correctly in a
+   * keyset-ordered list means computing where the server would have put it,
+   * which is the client re-deriving the server's ordering rule — the thing
+   * this whole design keeps out of the client. The notice says where it went
+   * instead; it shows up for real on the next page load, the same account a
+   * merge gives when its target is not on a loaded page (see `applyEdit`'s
+   * own doc).
+   */
+  async function fix(itemId: number, values: Record<string, string>): Promise<void> {
+    try {
+      const { group, joinedExisting } = await api.resolveFeedItem(itemId, values);
+      setItems((previous) =>
+        previous.filter((existing) => !(existing.kind === 'failed' && existing.item.id === itemId)),
+      );
+      setNotice(
+        `${group.display.title} ${joinedExisting ? 'joined an existing group' : 'became a new group'}`,
+      );
+      setError(null);
+    } catch (cause) {
+      setNotice(null);
+      setError((cause as Error).message);
+    }
+  }
+
+  /**
+   * Dismisses a refused name and drops its card unconditionally.
+   *
+   * Simpler than the old Failed tab's version, which had to choose between
+   * dropping the row and flipping it to a `Dismissed` badge depending on a
+   * "show dismissed" toggle this screen does not have: Browse shows only open
+   * failures, so a dismissed one no longer belongs here at all.
+   */
+  async function dismiss(itemId: number): Promise<void> {
+    try {
+      await api.dismissFeedItem(itemId);
+      setItems((previous) =>
+        previous.filter((existing) => !(existing.kind === 'failed' && existing.item.id === itemId)),
+      );
+      setNotice(null);
+      setError(null);
+    } catch (cause) {
+      setNotice(null);
+      setError((cause as Error).message);
+    }
+  }
+
+  // The pane derives its item from `shown` rather than holding a copy, so a
   // metadata answer, a pick or an edit reaches it the same way it reaches a
   // card: the route merges the update into the list and this re-derives.
-  const selected = selectedId === null ? null : shown.find((group) => group.id === selectedId) ?? null;
+  // `matchesSelection` compares both halves of the composite key — a bare id
+  // lookup would hand the pane a group whenever a failed item happened to
+  // share its numeric id with the one actually selected.
+  const selectedItem =
+    selection === null ? null : shown.find((item) => matchesSelection(item, selection)) ?? null;
 
-  // A term that filters the selected group out — or a new term, which rebuilds
-  // the list from page one — leaves an id pointing at nothing. Clearing is the
-  // honest outcome: the alternative is a pane showing a group the list beside
-  // it says is not there. Two conditions, two different jobs: `!loading` is
-  // for the page-in-flight case, where a term change has emptied or is about
-  // to replace `groups` and the still-valid old selection must survive until
-  // the new page actually lands; `selected === null` is for the
-  // filtered-out case, once loading has settled, where `groups` no longer
-  // has the id at all. `groups.length > 0` used to stand in for the first
-  // half and got the second one wrong: a term matching nothing leaves
-  // `groups` at `[]` forever, so that guard suppressed the clear
-  // permanently instead of just until the fetch landed (spec §4).
+  // A term that filters the selected row out — or a new term, which rebuilds
+  // the list from page one — leaves a selection pointing at nothing. Clearing
+  // is the honest outcome: the alternative is a pane showing a row the list
+  // beside it says is not there. Two conditions, two different jobs:
+  // `!loading` is for the page-in-flight case, where a term change has
+  // emptied or is about to replace `shown` and the still-valid old selection
+  // must survive until the new page actually lands; `selectedItem === null`
+  // is for the filtered-out case, once loading has settled, where `shown` no
+  // longer has the row at all. `shown.length > 0` used to stand in for the
+  // first half and got the second one wrong: a term matching nothing leaves
+  // `shown` at `[]` forever, so that guard suppressed the clear permanently
+  // instead of just until the fetch landed (spec §4).
   useEffect(() => {
-    if (selectedId !== null && !loading && selected === null) setSelectedId(null);
-  }, [selectedId, loading, selected]);
+    if (selection !== null && !loading && selectedItem === null) setSelection(null);
+  }, [selection, loading, selectedItem]);
 
   return (
     <section data-browse-view={view}>
@@ -310,15 +419,17 @@ export function Browse() {
       )}
 
       {view === 'list' ? (
-        shown.map((group) => cardFor(group))
+        shown.map((item) => (item.kind === 'group' ? cardFor(item.group) : failedCardFor(item.item)))
       ) : (
         <div className="browse-split">
-          <GroupList groups={shown} selectedId={selectedId} onSelect={setSelectedId} />
+          <GroupList items={shown} selected={selection} onSelect={setSelection} />
           <div className="browse-detail">
-            {selected === null ? (
+            {selectedItem === null ? (
               <p className="browse-detail-empty">Select a group to see its releases.</p>
+            ) : selectedItem.kind === 'group' ? (
+              cardFor(selectedItem.group)
             ) : (
-              cardFor(selected)
+              failedCardFor(selectedItem.item)
             )}
           </div>
         </div>
