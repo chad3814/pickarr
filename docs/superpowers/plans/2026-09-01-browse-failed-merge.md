@@ -325,13 +325,25 @@ export function pageOfBrowseItems(
 ```
 
 **Confirm the indexes are actually used.** Run `EXPLAIN QUERY PLAN` on the
-statement above against the real schema and check that each branch's scan uses
-its own index — `media_groups_browse` for the group branch, the partial
-`feed_items_failed` for the failed branch — and that the only `USE TEMP B-TREE
-FOR ORDER BY` is the outer one over the merged stream. That outer sort is
-expected and is bounded to `2 × limit` rows by the per-branch limits; a temp
-b-tree on a *branch* means that branch is not using its index and is a finding.
-Paste the plan output into your report.
+statement above against the real schema. What it should show, measured:
+
+```
+MERGE (UNION ALL)
+LEFT   CO-ROUTINE  SCAN media_groups USING INDEX media_groups_browse
+                   SCAN (subquery-1)  USE TEMP B-TREE FOR ORDER BY
+RIGHT  CO-ROUTINE  SCAN feed_items USING INDEX feed_items_failed
+                   SCAN (subquery-3)  USE TEMP B-TREE FOR ORDER BY
+```
+
+Both branches use their own index for the underlying scan, and **each arm also
+builds its own small temp b-tree** to hand the merge a sorted stream. Those
+b-trees are expected and are bounded to `limit` rows apiece by the inner
+`LIMIT`, so the sort is over ~62 rows at the default page size.
+
+A temp b-tree on a branch is **not** evidence that the branch skipped its index —
+the `SCAN … USING INDEX` line sits directly above it. What would be a finding is
+a `SCAN media_groups` or `SCAN feed_items` with no `USING INDEX`, which is a full
+table scan. Paste the plan output into your report.
 
 - [ ] **Step 4: Run them and confirm they pass**
 
