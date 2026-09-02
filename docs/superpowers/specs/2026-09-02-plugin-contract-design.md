@@ -82,10 +82,26 @@ interface MediaPlugin {
 }
 ```
 
-**Three entry points, none optional.** That is the deliberate contrast with §2:
-if a plugin cannot answer all three it is not a plugin. Everything else it does,
-it does by enqueueing its own jobs — so the surface stops growing as flows get
-more elaborate, which is what produced eleven optional methods last time.
+**Three entry points, none optional.** If a plugin cannot answer all three it is
+not a plugin.
+
+**This does not reduce the number of entry points, and an earlier draft of this
+spec wrongly claimed it did.** A plugin's `jobs` map is open-ended: one with
+eleven job kinds has eleven entry points, sitting behind `JobHandler` instead of
+in the interface. The surface moves; it does not shrink. Three things do change,
+and they are the actual argument:
+
+- **The host's coupling stops growing.** `MediaPlugin` is fixed at three methods
+  no matter how elaborate a plugin's flow becomes. In 1.x every new plugin need
+  meant a new optional method on a type the host and all plugins shared.
+- **The handlers are uniform.** Every one is `(payload, ctx) => Promise<void>`,
+  retryable, and required to be idempotent. The eleven optional methods each had
+  a bespoke signature, and nothing in the type said which combinations were
+  coherent — whether `siteCandidates` without `learnSites` was valid was
+  unanswerable from the type.
+- **Optionality is gone.** A job kind a plugin enqueues but does not handle is a
+  dead-letter row with `last_error` set, not a silently absent method. The
+  failure is visible where the old one was invisible.
 
 **Why plugins own the flow rather than the host.** The rejected alternative kept
 plugins pure and had the host run a fixed pipeline, calling the plugin at
@@ -230,6 +246,12 @@ version.
   third-party plugin would have to ship its own migration folder for the host to
   apply, which is a second mechanism and is out of scope until one exists.
 
+Plugins are **wired explicitly**, as in 1.x — constructed and registered in the
+host's startup, not discovered from a directory or a config glob. That is what
+keeps the migration story above simple: every plugin is a workspace package the
+generator can already see. Genuine drop-in plugins would need each to ship its
+own generated migration folder, and that is deferred until one exists.
+
 Plugin tables must be prefixed with the plugin id (`xxx_site`, `tv_season`), and
 plugin migrations run after the host's, because plugin tables reference
 `media_item`.
@@ -246,17 +268,30 @@ The service is `https://media-name-parser.vercel.app`; its OpenAPI defines
 `POST /api/v1/lookup` taking one `{category, name}` or `{items: [...]}` up to
 100, and `GET /api/v1/lookup/{id}`.
 
-**`partial: true` gets its own hop.** A lookup that runs out of time answers
-`202` with a `lookupId` and no media; a background job finishes it. The flow as
-first described — "when the request returns, update the media items" — had no
-step for an answer that has not arrived. The lookup job, seeing `partial`,
-enqueues a **poll** job carrying the `lookupId`, with backoff. This is what the
+**`partial: true` gets its own hop, and it is per item rather than per
+response.** A *single* lookup that runs out of time answers HTTP `202`. A
+**batch always answers 200**, with each entry carrying its own `status` and its
+own `partial` flag — so the response arriving tells you nothing about whether the
+answers did. Since we always batch, the `202` status never reaches us at the HTTP
+level and **every result must be scanned individually for `partial`**.
+
+The flow as first described — "when the request returns, update the media items"
+— had no step for an answer that has not arrived. The lookup handler, seeing a
+`partial` entry, enqueues a **poll** job carrying that entry's `lookupId`, with
+backoff. Other entries in the same batch proceed immediately. This is what the
 durable table is for.
 
 **`refusal` and `unresolved` are different, and neither is an error.** A subtitle
 or sidecar answers `state: resolved` with a `refusal` string: that is a
 *successful* identification of a non-media file. `unresolved` means the name was
-not recognised. So `rss_item.resolution` is
+not recognised.
+
+**Refusals should be rare here**, because feeds hand us media filenames rather
+than the contents of a completed download — so this is a state to handle, not a
+state to expect. The reason to build it anyway is that the alternative to
+handling it is misfiling it: without a distinct state, a refusal has to land in
+`unresolved`, where it would be retried forever and shown to a reader as a
+problem they cannot fix. So `rss_item.resolution` is
 `pending | resolved | refused | unresolved`:
 
 | Resolution | Meaning | Retried | Shown as a problem |
