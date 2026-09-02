@@ -172,7 +172,7 @@ const HOST_MIGRATIONS: readonly Migration[] = [{ version: 1, up: (db) => db.exec
  * separate table and a separate version space from `plugin_migrations`, so a
  * plugin's version 1 and the host's version 1 never collide.
  */
-export function migrateHost(raw: DatabaseSync, list: readonly Migration[] = HOST_MIGRATIONS): void {
+export function migrateHost(raw: DatabaseSync): void {
   raw.exec(`
     CREATE TABLE IF NOT EXISTS host_migrations (
       version    INTEGER PRIMARY KEY,
@@ -187,7 +187,7 @@ export function migrateHost(raw: DatabaseSync, list: readonly Migration[] = HOST
 
   const record = raw.prepare('INSERT INTO host_migrations (version, applied_at) VALUES (?, ?)');
 
-  for (const migration of list.toSorted((a, b) => a.version - b.version)) {
+  for (const migration of HOST_MIGRATIONS.toSorted((a, b) => a.version - b.version)) {
     if (applied.has(migration.version)) continue;
     migration.up(raw);
     record.run(migration.version, Date.now());
