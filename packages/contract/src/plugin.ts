@@ -14,8 +14,11 @@ export interface DownloadedFile {
 
 export interface PluginContext {
   /**
-   * Drizzle over this plugin's own tables. Typed from the plugin's own schema,
-   * which is why the host cannot type it: only the plugin knows the shape.
+   * The host's raw `node:sqlite` connection, untyped here because only the
+   * plugin knows its own schema. The host cannot hand back a Drizzle handle
+   * typed to that schema — it has never seen it — so a plugin wraps this
+   * connection in Drizzle itself, over whichever tables its own migrations
+   * created.
    */
   db: unknown;
   media: MediaWriter;
