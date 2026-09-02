@@ -16,11 +16,27 @@ export const DEFAULT_BACKOFF_MS = (attempts: number): number => Math.min(1000 * 
 /** How many times a job may fail before it dead-letters. */
 export const DEFAULT_MAX_ATTEMPTS = 5;
 
+/**
+ * What came of dispatching a batch of new rss items.
+ *
+ * Returned, not thrown: an id with no registered owner and a plugin whose
+ * handler rejected are both data the caller must act on, not exceptions —
+ * every other id in the same batch may have been delivered successfully,
+ * and a caller that retries on rejection would re-deliver ids the owned
+ * plugins already handled, which no plugin here has proven idempotent.
+ */
+export interface NotifyOutcome {
+  /** Ids whose feed has no registered plugin. Empty when every id was owned. */
+  unowned: readonly number[];
+  /** One entry per plugin whose `onNewRssItems` rejected, so a second plugin's failure can never hide behind a first. */
+  failures: readonly { pluginId: string; error: unknown }[];
+}
+
 export interface Host {
   /** Applies the plugin's migrations and registers its handlers. */
   register(plugin: MediaPlugin): void;
   /** Dispatches to the plugin owning the feed those items came from. */
-  notifyNewRssItems(ids: readonly number[]): Promise<void>;
+  notifyNewRssItems(ids: readonly number[]): Promise<NotifyOutcome>;
   requestDownload(rssItemId: number): Promise<void>;
   runOnce(): Promise<boolean>;
   recover(): number;
@@ -120,21 +136,30 @@ export function createHost(deps: {
       // Each plugin sees its own whole batch in one call, not one call per
       // item: an item's position in the caller's array is not something a
       // plugin should have to reassemble from repeated single-item calls.
-      // The plugins are independent of one another, so their calls run
-      // concurrently rather than one after another in a loop.
-      await Promise.all(
-        Array.from(grouped.values(), ({ plugin, ids: ownIds }) => plugin.onNewRssItems(ownIds, ctxFor(plugin.id))),
+      // `allSettled`, not `all`: a rejecting plugin must not stop the others
+      // from running, and must not stop this function from ever reading
+      // their outcomes — `all` would reject on the first failure and drop
+      // every later plugin's result on the floor.
+      const groups = Array.from(grouped.values());
+      const settled = await Promise.allSettled(
+        groups.map(({ plugin, ids: ownIds }) => plugin.onNewRssItems(ownIds, ctxFor(plugin.id))),
       );
 
-      if (unowned.length > 0) {
-        // Reported by rejecting, after every owned group above has already
-        // been dispatched: an id with no registered owner is a configuration
-        // problem the caller must see, not a reason to withhold delivery from
-        // the items that do have one.
-        throw new Error(
-          `rss item id(s) ${unowned.join(', ')} belong to a feed whose plugin is not registered`,
-        );
+      const failures: { pluginId: string; error: unknown }[] = [];
+      for (let i = 0; i < settled.length; i += 1) {
+        const outcome = settled[i];
+        const group = groups[i];
+        if (outcome === undefined || group === undefined) continue;
+        if (outcome.status === 'rejected') {
+          failures.push({ pluginId: group.plugin.id, error: outcome.reason });
+        }
       }
+
+      // `unowned` and `failures` are reported together, in the same
+      // returned value, rather than one hiding behind the other: a plugin
+      // erroring on its own items must not suppress the unrelated report
+      // that some other id had no owner at all, and vice versa.
+      return { unowned, failures };
     },
 
     async requestDownload(rssItemId) {

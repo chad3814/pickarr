@@ -188,13 +188,62 @@ test('an rss item whose feed has no registered plugin is reported, not silently 
   const itemA = insertRssItem(raw, feedA);
   const itemGhost = insertRssItem(raw, feedGhost);
 
-  await assert.rejects(
-    () => host.notifyNewRssItems([itemA, itemGhost]),
-    (err: unknown) => err instanceof Error && err.message.includes(String(itemGhost)),
-  );
+  const outcome = await host.notifyNewRssItems([itemA, itemGhost]);
+
+  // Reported as data, by id, not merely "the array is non-empty".
+  assert.deepEqual(outcome.unowned, [itemGhost]);
+  assert.deepEqual(outcome.failures, []);
 
   // The unowned item being reported must not have cost alpha its own,
   // legitimately owned, delivery.
   assert.equal(alphaReceived.length, 1);
   assert.deepEqual(alphaReceived[0], [itemA]);
+});
+
+test('a second plugin\'s failure is not masked by the first', async () => {
+  const { raw, host } = setup();
+
+  const alpha = makePlugin({ id: 'alpha', onNewRssItems: async () => { throw new Error('alpha failed'); } });
+  const beta = makePlugin({ id: 'beta', onNewRssItems: async () => { throw new Error('beta failed'); } });
+  host.register(alpha);
+  host.register(beta);
+
+  const feedA = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  const feedB = insertFeed(raw, 'beta', 'https://b.test/feed');
+  const a1 = insertRssItem(raw, feedA);
+  const b1 = insertRssItem(raw, feedB);
+
+  const outcome = await host.notifyNewRssItems([a1, b1]);
+
+  // Both plugins rejected; both must show up. `Promise.all` would reject on
+  // whichever settles first and lose the other's failure entirely.
+  assert.equal(outcome.failures.length, 2, 'both plugin failures must be reported, not just the first');
+  const alphaFailure = outcome.failures.find((f) => f.pluginId === 'alpha');
+  const betaFailure = outcome.failures.find((f) => f.pluginId === 'beta');
+  assert.ok(alphaFailure, 'alpha\'s failure is missing');
+  assert.ok(betaFailure, 'beta\'s failure is missing');
+  assert.ok(alphaFailure.error instanceof Error && alphaFailure.error.message === 'alpha failed');
+  assert.ok(betaFailure.error instanceof Error && betaFailure.error.message === 'beta failed');
+});
+
+test('a plugin failure does not suppress the unowned report', async () => {
+  const { raw, host } = setup();
+
+  const alpha = makePlugin({ id: 'alpha', onNewRssItems: async () => { throw new Error('alpha failed'); } });
+  host.register(alpha);
+
+  const feedA = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  const feedGhost = insertFeed(raw, 'ghost', 'https://ghost.test/feed'); // 'ghost' never registered
+  const a1 = insertRssItem(raw, feedA);
+  const itemGhost = insertRssItem(raw, feedGhost);
+
+  // The compounding case: one plugin fails *and* one id is unowned, in the
+  // same call. Both facts must come back together, neither hiding the other.
+  const outcome = await host.notifyNewRssItems([a1, itemGhost]);
+
+  assert.deepEqual(outcome.unowned, [itemGhost]);
+  assert.equal(outcome.failures.length, 1);
+  const failure = outcome.failures.find((f) => f.pluginId === 'alpha');
+  assert.ok(failure, 'alpha\'s failure is missing');
+  assert.ok(failure.error instanceof Error && failure.error.message === 'alpha failed');
 });
