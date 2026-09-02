@@ -35,9 +35,13 @@ const fakeCtx: PluginContext = {
 
 /** A row read back from `jobs`, narrowed the same way `migrate.test.ts` does. */
 function readJob(raw: ReturnType<typeof openTestDatabase>['raw'], id: number) {
-  const row = raw.prepare('SELECT state, attempts, run_at, last_error FROM jobs WHERE id = ?').get(id);
+  const row = raw.prepare(
+    'SELECT state, attempts, run_at, last_error, updated_at FROM jobs WHERE id = ?',
+  ).get(id);
   assert.ok(row, `job ${id} has no row`);
-  return row as { state: unknown; attempts: unknown; run_at: unknown; last_error: unknown };
+  return row as {
+    state: unknown; attempts: unknown; run_at: unknown; last_error: unknown; updated_at: unknown;
+  };
 }
 
 /** Shared by every test whose handler must throw; none of them reads the message. */
@@ -101,6 +105,33 @@ test('a throwing handler is retried with backoff written to run_at', async () =>
   assert.equal(row.run_at, now + 5000);
   assert.equal(row.attempts, 1);
   assert.equal(row.last_error, 'handler boom');
+});
+
+test('backoff is measured from when the handler failed, not from when the job was claimed', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  let now = 1000;
+  const runner = createRunner(raw, { now: () => now, backoffMs: () => 5000, defaultMaxAttempts: 5 });
+
+  const id = runner.enqueue('alpha', { kind: 'slow', payload: {} });
+
+  // A handler that takes longer than its own backoff. The clock has to move
+  // *across* the handler, which is why the frozen clock every other test here
+  // injects cannot catch this: with `now` constant, the claim time and the
+  // failure time are the same number and either implementation passes.
+  const slow: JobHandler = async () => {
+    now += 30_000;
+    throw new Error('handler boom');
+  };
+  assert.equal(await runner.runOnce(() => slow, () => fakeCtx), true);
+
+  const row = readJob(raw, id);
+  assert.equal(row.state, 'ready');
+  // 31_000 is when it failed. Offsetting from the claim would give 6_000,
+  // already in the past — a handler slower than its curve would retry with no
+  // delay at all, and one much slower would retry instantly until it died.
+  assert.equal(row.run_at, 36_000, 'run_at is the failure time plus the backoff');
+  assert.equal(row.updated_at, 31_000, 'the row was written when the handler failed, not when it was claimed');
 });
 
 test('a handler that always throws reaches dead after max_attempts, and its row remains', async () => {

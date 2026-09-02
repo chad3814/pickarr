@@ -109,19 +109,30 @@ export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
 
       try {
         await handler(record, ctx);
-        raw.prepare('UPDATE jobs SET state = ?, updated_at = ? WHERE id = ?').run('done', now, row.id);
+        // The clock is re-read after the handler, not reused from the claim.
+        // Everything below records what happened *after* an await of unbounded
+        // length, and the claim's `now` is only when the work started.
+        raw.prepare('UPDATE jobs SET state = ?, updated_at = ? WHERE id = ?')
+          .run('done', opts.now(), row.id);
       } catch (err) {
+        // The failure time, not the claim time. Backoff measured from the
+        // claim is no backoff at all for a handler slower than its own curve,
+        // and slow handlers are designed for: a handler holds its claim while
+        // the per-hostname fetch queue makes it wait, so anything queued
+        // behind a slow host outlives the 60s cap routinely and would then
+        // retry instantly, over and over, until it dead-lettered.
+        const failedAt = opts.now();
         const message = err instanceof Error ? err.message : String(err);
         if (attempts >= row.max_attempts) {
           // Dead-lettering means the row stays, with `last_error` set, rather
           // than being deleted — a job that vanishes on failure is a job
           // nobody can diagnose.
           raw.prepare('UPDATE jobs SET state = ?, last_error = ?, updated_at = ? WHERE id = ?')
-            .run('dead', message, now, row.id);
+            .run('dead', message, failedAt, row.id);
         } else {
-          const runAt = now + opts.backoffMs(attempts);
+          const runAt = failedAt + opts.backoffMs(attempts);
           raw.prepare('UPDATE jobs SET state = ?, run_at = ?, last_error = ?, updated_at = ? WHERE id = ?')
-            .run('ready', runAt, message, now, row.id);
+            .run('ready', runAt, message, failedAt, row.id);
         }
       }
       return true;
