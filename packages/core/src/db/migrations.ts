@@ -109,22 +109,23 @@ CREATE TABLE discovered_sites (
  * What a human, rather than the parser, decided about a row.
  *
  * `feed_items.dismissed_at` is "I have looked at this failure and it is not
- * worth fixing" — a third state alongside failed and resolved, and the default
- * filter of the Failed list. It is nullable rather than a boolean flag because
- * *when* it was waved off is the only thing that distinguishes an old
- * dismissal from a fresh one, and clearing it back to NULL is how a resolve
- * says the decision was reversed.
+ * worth fixing" — a third state alongside failed and resolved: browse's union
+ * excludes it, and the Dismissed tab's whole query is built on it being set.
+ * It is nullable rather than a boolean flag because *when* it was waved off
+ * is the only thing that distinguishes an old dismissal from a fresh one, and
+ * clearing it back to NULL is how a resolve says the decision was reversed.
  *
  * The two `edited_at` columns record that the current values were typed rather
  * than parsed. Nothing reads them yet; they exist so that a future re-parse
  * pass can tell which rows it must not overwrite, which is a fact only
  * recordable at the moment of the edit.
  *
- * The partial index carries the Failed list's exact ORDER BY. `WHERE
- * parse_error IS NOT NULL` keeps it proportional to the failures rather than
- * to the whole feed history, which is the far larger table and never queried
- * this way. `id` is left ascending inside the index because the list tiebreaks
- * ascending on it — see `failedFeedItems`.
+ * The partial index carries the shared ORDER BY both failed-branch queries
+ * use — browse's own union and the Dismissed list alike. `WHERE parse_error
+ * IS NOT NULL` keeps it proportional to the failures rather than to the whole
+ * feed history, which is the far larger table and never queried this way.
+ * `id` is left ascending inside the index because both tiebreak ascending on
+ * it — see `dismissedFeedItems`.
  */
 const MANUAL_METADATA = `
 ALTER TABLE feed_items   ADD COLUMN dismissed_at INTEGER;

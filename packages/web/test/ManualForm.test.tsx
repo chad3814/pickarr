@@ -218,7 +218,7 @@ test('cancel does not submit', () => {
   assert.equal(cancels.length, 1);
 });
 
-test('the failed list asks for dismissed items only when told to', async () => {
+test('the dismissed list takes an optional cursor and nothing else', async () => {
   const urls: string[] = [];
   globalThis.fetch = fetchStub(async (input) => {
     urls.push(input);
@@ -227,13 +227,11 @@ test('the failed list asks for dismissed items only when told to', async () => {
     });
   });
 
-  await api.failed(null, false);
-  await api.failed('1700:42', true);
+  await api.dismissed(null);
+  await api.dismissed('1700:42');
 
-  assert.equal(urls[0], '/api/failed?');
-  // The server reads the literal string '1', not truthiness: `z.coerce.boolean`
-  // would have read 'false' as true, so it takes a string and compares.
-  assert.equal(urls[1], '/api/failed?cursor=1700%3A42&includeDismissed=1');
+  assert.equal(urls[0], '/api/dismissed?');
+  assert.equal(urls[1], '/api/dismissed?cursor=1700%3A42');
 });
 
 test('a rejected preview is an answer, not a failure', async () => {

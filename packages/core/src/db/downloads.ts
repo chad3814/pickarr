@@ -278,7 +278,7 @@ export interface DownloadPageQuery {
  * table.
  *
  * **The tiebreak is descending `id`, the opposite of `browseGroups` and
- * `failedFeedItems`.** Both of those compare `id >` inside a tie, and copying
+ * `dismissedFeedItems`.** Both of those compare `id >` inside a tie, and copying
  * either here would skip or repeat rows silently rather than fail anywhere
  * visible. The difference is not a style choice: those two list rows written by
  * ingest, which walks a newest-first feed and so gives the *newest* item in a

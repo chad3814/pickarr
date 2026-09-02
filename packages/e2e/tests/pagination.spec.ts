@@ -8,7 +8,9 @@ import { expect, sceneTitles, test } from '../src/harness.ts';
  * `Browse`'s pick handler refetched page one (`loadPage(null, search, true)`)
  * instead of patching the one card the server had just answered about, so a
  * pick made on page one snapped a three-page list back to thirty cards. The
- * Failed tab's resolve and dismiss had the same shape and the same fix.
+ * old Failed tab's resolve and dismiss had the same shape and the same fix;
+ * that behaviour now lives in Browse's own failed cards and in the Dismissed
+ * tab's resolve.
  *
  * Why the existing suite could not see it. It needs three things at once that
  * a stubbed `fetch` cannot supply together: a real `/api/browse` deciding where
@@ -27,7 +29,7 @@ import { expect, sceneTitles, test } from '../src/harness.ts';
  * `scrollToEnd` for why the click could not simply be kept.
  */
 
-/** The default `limit` in `browseQuerySchema` and `failedQuerySchema`. */
+/** The default `limit` in `browseQuerySchema` and `dismissedQuerySchema`. */
 const PAGE_SIZE = 30;
 
 /**
@@ -43,7 +45,7 @@ function at(titles: readonly string[], index: number): string {
   return title;
 }
 
-/** Names the parser refuses, so each becomes a row on the Failed tab. */
+/** Names the parser refuses, so each becomes a card once dismissed onto the Dismissed tab. */
 function refusedTitles(prefix: string, count: number): string[] {
   return Array.from(
     { length: count },
@@ -112,7 +114,7 @@ test('picking after scrolling to a later page keeps that page on screen', async 
   await expect(cards).toHaveCount(PAGE_SIZE + tail.length);
 });
 
-test('resolving and dismissing after scrolling keep the later pages on screen', async ({
+test('resolving after scrolling on the Dismissed tab keeps the later pages on screen', async ({
   page,
   harness,
 }) => {
@@ -120,20 +122,29 @@ test('resolving and dismissing after scrolling keep the later pages on screen', 
   harness.ingest(tail);
   const head = refusedTitles('agmx', PAGE_SIZE);
   const refused = harness.ingest(head);
-  // Every seeded name has to have actually been refused, or the rows this test
+  // Every seeded name has to have actually been refused, or the cards this test
   // pages through do not exist.
   expect(refused.parseErrors).toBe(PAGE_SIZE);
 
-  await page.goto('/failed');
-  const rows = page.locator('li.failed-row');
+  // The Dismissed tab lists only dismissed names, and it offers no Dismiss
+  // button of its own to produce that state through the UI — waving these off
+  // directly is the only way to seed it, short of PAGE_SIZE + tail.length
+  // clicks on Browse before the scroll this test is actually about could even
+  // begin.
+  harness.db
+    .prepare('UPDATE feed_items SET dismissed_at = ? WHERE parse_error IS NOT NULL')
+    .run(Date.now());
+
+  await page.goto('/dismissed');
+  const rows = page.locator('article.failed-card');
   await expect(rows).toHaveCount(PAGE_SIZE);
 
   await scrollToEnd(page);
   await expect(rows).toHaveCount(PAGE_SIZE + tail.length);
 
-  // The *last* row of page two. Acting on a row shortens the list, so page one
-  // refetched pulls the front of page two up into itself — only the rows past
-  // that point disappear, and asserting on the first of them would pass.
+  // The *last* card of page two. Acting on a card shortens the list, so page
+  // one refetched pulls the front of page two up into itself — only the cards
+  // past that point disappear, and asserting on the first of them would pass.
   const lastTail = rows.filter({ hasText: at(tail, tail.length - 1) });
   await expect(lastTail).toBeVisible();
 
@@ -148,13 +159,6 @@ test('resolving and dismissing after scrolling keep the later pages on screen', 
 
   await expect(toResolve).toHaveCount(0);
   await expect(rows).toHaveCount(PAGE_SIZE + tail.length - 1);
-  await expect(lastTail).toBeVisible();
-
-  const toDismiss = rows.filter({ hasText: at(head, 6) });
-  await toDismiss.getByRole('button', { name: 'Dismiss' }).click();
-
-  await expect(toDismiss).toHaveCount(0);
-  await expect(rows).toHaveCount(PAGE_SIZE + tail.length - 2);
   await expect(lastTail).toBeVisible();
 });
 

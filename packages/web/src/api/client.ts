@@ -278,7 +278,8 @@ export interface FailedItemView {
   dismissedAt: number | null;
 }
 
-export interface FailedResponse {
+/** The shape `GET /api/dismissed` answers with. Mirrors `DismissedResponse` in `packages/core/src/http/views.ts`. */
+export interface DismissedResponse {
   items: FailedItemView[];
   nextCursor: string | null;
 }
@@ -388,8 +389,18 @@ export interface ReleaseEditResponse {
  */
 export type ManualPreviewResponse = { identityKey: string } | { error: string };
 
+/**
+ * One row of the merged Browse list: a browsable group or a name the parser
+ * refused, tagged so the SPA can render each under its own card without
+ * guessing from which fields happen to be present. Mirrors `BrowseItem` in
+ * `packages/core/src/http/views.ts`.
+ */
+export type BrowseItem =
+  | { kind: 'group'; group: GroupView }
+  | { kind: 'failed'; item: FailedItemView };
+
 export interface BrowseResponse {
-  groups: GroupView[];
+  items: BrowseItem[];
   nextCursor: string | null;
 }
 
@@ -677,14 +688,10 @@ export const api = {
   retry: (downloadId: number) =>
     request<DownloadView>(`/api/downloads/${downloadId}/retry`, { method: 'POST' }),
   manualFields: () => request<ManualFieldsResponse>('/api/manual-fields'),
-  failed: (cursor: string | null, includeDismissed: boolean) => {
+  dismissed: (cursor: string | null) => {
     const params = new URLSearchParams();
     if (cursor !== null) params.set('cursor', cursor);
-    // The literal '1'; the server compares against it rather than coercing,
-    // because every non-empty string coerces to true and `=false` would then
-    // include them.
-    if (includeDismissed) params.set('includeDismissed', '1');
-    return request<FailedResponse>(`/api/failed?${params.toString()}`);
+    return request<DismissedResponse>(`/api/dismissed?${params.toString()}`);
   },
   resolveFeedItem: (feedItemId: number, values: Record<string, string>) =>
     request<ResolveResponse>(`/api/feed-items/${feedItemId}/resolve`, {

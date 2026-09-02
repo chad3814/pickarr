@@ -15,13 +15,14 @@ import type { PickarrConfig } from '../config/schema.ts';
 import type { JsonValue } from '../json.ts';
 import {
   browsableGroup,
-  browseGroups,
   getGroup,
+  groupsByIds,
   pickedGroups,
   type GroupRow,
 } from '../db/groups.ts';
+import { pageOfBrowseItems, type BrowseCursor, type BrowseKind } from '../db/browse-page.ts';
 import { getDownload, latestDownloadsForGroups, pageOfDownloads, resetForRetry } from '../db/downloads.ts';
-import { failedFeedItems } from '../db/feed-items.ts';
+import { dismissedFeedItems, feedItemsByIds } from '../db/feed-items.ts';
 import {
   enqueueMetadata,
   enqueueRefresh,
@@ -51,11 +52,12 @@ import {
   toDownloadViews,
   toFailedItemView,
   toGroupView,
+  type BrowseItem,
   type BrowseResponse,
   type ConfigResponse,
   type ConfigSaveResponse,
+  type DismissedResponse,
   type DownloadsResponse,
-  type FailedResponse,
   type GroupEditResponse,
   type GroupView,
   type IdentityPlanResponse,
@@ -270,12 +272,9 @@ function parseIds(raw: string): number[] | null {
   return ids;
 }
 
-const failedQuerySchema = z.object({
+const dismissedQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(30),
-  // A string rather than a coerced boolean: `z.coerce.boolean()` reads every
-  // non-empty string as true, so `?includeDismissed=false` would show them.
-  includeDismissed: z.string().optional(),
 });
 
 const pickBodySchema = z.object({ releaseId: z.number().int().positive() });
@@ -472,6 +471,44 @@ function cursorFrom(raw: string | undefined): { cursor: KeysetCursor | null } | 
   if (raw === undefined) return { cursor: null };
   const cursor = parseCursor(raw);
   return cursor === null ? { error: 'Invalid cursor' } : { cursor };
+}
+
+/**
+ * The `"<sort key>:<kind>:<id>"` string `/api/browse` mints, or `null` when the
+ * text is not one of those.
+ *
+ * The same rule as `parseCursor` above plus a discriminator, not a second rule:
+ * the numeric parts go through the same two helpers and reject the same forms,
+ * and `null` means malformed here too — a 400 rather than a first page (#33).
+ *
+ * The two-component form is malformed *for this route*. It stays valid for the
+ * routes that order on one table, and accepting it here would mean reading a
+ * two-part boundary against a three-part order — a silently wrong page rather
+ * than a loud refusal.
+ */
+function parseBrowseCursor(raw: string): BrowseCursor | null {
+  const parts = raw.split(':');
+  if (parts.length !== 3) return null;
+  const [rawSortKey, rawKind, rawId] = parts;
+  if (rawSortKey === undefined || rawKind === undefined || rawId === undefined) return null;
+  if (rawKind !== 'failed' && rawKind !== 'group') return null;
+  const sortKey = parseNonNegativeInt(rawSortKey);
+  const id = parsePositiveInt(rawId);
+  if (sortKey === null || id === null) return null;
+  return { sortKey, kind: rawKind, id };
+}
+
+/** As `cursorFrom`, for the merged list: absence is a first page, unreadability is not. */
+function browseCursorFrom(
+  raw: string | undefined,
+): { cursor: BrowseCursor | null } | { error: string } {
+  if (raw === undefined) return { cursor: null };
+  const cursor = parseBrowseCursor(raw);
+  return cursor === null ? { error: 'Invalid cursor' } : { cursor };
+}
+
+function mintBrowseCursor(row: { sortKey: number; kind: BrowseKind; id: number }): string {
+  return `${row.sortKey}:${row.kind}:${row.id}`;
 }
 
 /**
@@ -810,7 +847,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/browse', async (request, reply) => {
     const query = browseQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
-    const from = cursorFrom(query.data.cursor);
+    // The composite parser, not `cursorFrom`: this list's boundary already
+    // carries the `kind` a merged failed-item branch needs to stay total, even
+    // before that branch is wired in below.
+    const from = browseCursorFrom(query.data.cursor);
     if ('error' in from) return reply.code(400).send({ error: from.error });
     const { cursor } = from;
 
@@ -818,24 +858,53 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // `limit` long can be told apart from the last page: without the extra
     // row, "the page came back exactly `limit` long" is ambiguous between
     // "there is more" and "that was exactly everything left."
-    const overFetched = browseGroups(db, {
-      cursor: cursor === null ? null : { listRankAt: cursor.sortKey, id: cursor.id },
+    const overFetched = pageOfBrowseItems(db, {
+      cursor,
       limit: query.data.limit + 1,
       search: query.data.q ?? null,
     });
     const hasMore = overFetched.length > query.data.limit;
-    const groups = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
+    const page = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
 
-    // One query for the whole page, not one per group: see `metadataForGroups`
-    // and the `viewOf` doc comment above. Issue #31 is the defect this must
-    // not repeat.
-    const metadata = metadataForGroups(db, groups.map((group) => group.id));
-    const performers = performersForGroups(db, groups.map((group) => group.id));
+    // Two batches, not one query per row: the discipline `metadataForGroups`
+    // and `performersForGroups` already hold for the group half, extended to
+    // the failed half by `groupsByIds`/`feedItemsByIds`. Issues #31 and #33
+    // both name a per-row lookup on this exact route as the defect to avoid.
+    const groupIds = page.filter((row) => row.kind === 'group').map((row) => row.id);
+    const failedIds = page.filter((row) => row.kind === 'failed').map((row) => row.id);
+    const groups = groupsByIds(db, groupIds);
+    const failedItems = feedItemsByIds(db, failedIds);
+    const metadata = metadataForGroups(db, groupIds);
+    const performers = performersForGroups(db, groupIds);
 
-    const last = groups.at(-1);
+    // Mapped over the query's own rows rather than concatenating the two
+    // hydrated lists, so the interleaved order `pageOfBrowseItems` computed is
+    // the order served. A row absent from its batch (deleted between listing
+    // and hydrating it) is simply dropped, the same fact a `get` returning
+    // nothing carried before.
+    const items: BrowseItem[] = page.flatMap((row): BrowseItem[] => {
+      if (row.kind === 'group') {
+        const group = groups.get(row.id);
+        if (group === undefined) return [];
+        return [{ kind: 'group', group: viewOf(group, metadata.get(group.id), performers.get(group.id) ?? []) }];
+      }
+      const item = failedItems.get(row.id);
+      if (item === undefined) return [];
+      return [{ kind: 'failed', item: toFailedItemView(item, deps.pluginForFeed(item.feedId)) }];
+    });
+
+    const last = page.at(-1);
     const response: BrowseResponse = {
-      groups: groups.map((group) => viewOf(group, metadata.get(group.id), performers.get(group.id) ?? [])),
-      nextCursor: hasMore && last !== undefined ? `${last.listRankAt}:${last.id}` : null,
+      items,
+      // Minted from the last row's own kind and sort key, not a hardcoded
+      // `'group'`: once the failed half is merged in, a page can end on either
+      // kind, and a cursor naming the wrong one reads the wrong boundary in
+      // `pageOfBrowseItems`'s keyset on the next request (issue #33's failure,
+      // a third cause).
+      nextCursor:
+        hasMore && last !== undefined
+          ? mintBrowseCursor({ sortKey: last.sortKey, kind: last.kind, id: last.id })
+          : null,
     };
     return response;
   });
@@ -1225,9 +1294,14 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   server.get('/api/downloads', async (request, reply) => {
     const query = downloadsQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
-    // Refused with the same message `/api/browse` and `/api/failed` use, from
-    // the same parser: three lists paging identically, and a cursor rule that
-    // held on only two of them would leave the third scrolling forever (#33).
+    // Refused with the same message `/api/browse` and `/api/dismissed` use,
+    // from the same `cursorFrom`/`parseCursor` — but not any more from an
+    // identical rule on all three. Browse's cursor now carries a third
+    // component, the row kind, that this list and `/api/dismissed` don't need
+    // because each orders on one table alone; the shared rule is that parser plus a
+    // discriminator, not one shape copied three times. A cursor rule that held
+    // on only two of the three lists would leave the third scrolling forever
+    // (#33), which is why the shape is checked rather than assumed even here.
     const from = cursorFrom(query.data.cursor);
     if ('error' in from) return reply.code(400).send({ error: from.error });
     const { cursor } = from;
@@ -1306,12 +1380,21 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return schemas;
   });
 
-  server.get('/api/failed', async (request, reply) => {
-    const query = failedQuerySchema.safeParse(request.query);
+  // Names the parser refused that a person waved off. The open half of the
+  // same failures is queried inside `/api/browse`'s own union now, so this
+  // route's only reader wants dismissed items and nothing needs "all" —
+  // which is why it takes no `includeDismissed` flag: a route named
+  // `dismissed` that could still answer with open failures would be the same
+  // false name this rename exists to fix.
+  server.get('/api/dismissed', async (request, reply) => {
+    const query = dismissedQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid query' });
-    // Refused for the same reason and with the same message `/api/browse` uses:
-    // the two lists page identically, and a cursor rule that held on only one
-    // of them would leave the other scrolling forever.
+    // Refused for the same reason and with the same message `/api/browse`
+    // uses, and from the same `cursorFrom`/`parseCursor` `/api/downloads`
+    // shares too — though browse's own cursor now carries a third component,
+    // the row kind, that this list doesn't need because it orders on one
+    // table alone. A cursor rule that held on only some of these lists would
+    // leave the others scrolling forever.
     const from = cursorFrom(query.data.cursor);
     if ('error' in from) return reply.code(400).send({ error: from.error });
     const { cursor } = from;
@@ -1319,16 +1402,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // Over-fetched by one for the same reason `/api/browse` is: a page that
     // comes back exactly `limit` long is otherwise ambiguous between "there is
     // more" and "that was exactly everything left."
-    const overFetched = failedFeedItems(db, {
+    const overFetched = dismissedFeedItems(db, {
       cursor: cursor === null ? null : { firstSeenAt: cursor.sortKey, id: cursor.id },
       limit: query.data.limit + 1,
-      includeDismissed: query.data.includeDismissed === '1',
     });
     const hasMore = overFetched.length > query.data.limit;
     const items = hasMore ? overFetched.slice(0, query.data.limit) : overFetched;
 
     const last = items.at(-1);
-    const response: FailedResponse = {
+    const response: DismissedResponse = {
       items: items.map((item) => toFailedItemView(item, deps.pluginForFeed(item.feedId))),
       nextCursor: hasMore && last !== undefined ? `${last.firstSeenAt}:${last.id}` : null,
     };

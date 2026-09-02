@@ -157,11 +157,17 @@ test('browse returns groups newest-rank first with their releases', async () => 
   const response = await server.inject({ method: 'GET', url: '/api/browse' });
   const body = response.json();
 
-  assert.equal(body['groups'].length, 2);
-  assert.equal(body['groups'][0]['display']['title'], 'Beta');
-  assert.equal(body['groups'][1]['display']['title'], 'Alpha');
-  assert.equal(body['groups'][1]['releases'].length, 2);
-  assert.equal(body['groups'][1]['releases'][0]['score'], 2160);
+  // What `body['groups']` used to be, before the merge tagged each row with a
+  // `kind`. None of the fixtures below insert a failed feed item, so every
+  // element here is a group.
+  const groups = body['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0]['display']['title'], 'Beta');
+  assert.equal(groups[1]['display']['title'], 'Alpha');
+  assert.equal(groups[1]['releases'].length, 2);
+  assert.equal(groups[1]['releases'][0]['score'], 2160);
   await server.close();
   db.close();
 });
@@ -172,7 +178,7 @@ test('browse paginates with a stable cursor', async () => {
   const server = buildServer(deps(db));
 
   const first = (await server.inject({ method: 'GET', url: '/api/browse?limit=1' })).json();
-  assert.equal(first['groups'].length, 1);
+  assert.equal(first['items'].length, 1);
   assert.ok(first['nextCursor']);
 
   const second = (
@@ -181,7 +187,7 @@ test('browse paginates with a stable cursor', async () => {
       url: `/api/browse?limit=1&cursor=${encodeURIComponent(String(first['nextCursor']))}`,
     })
   ).json();
-  assert.equal(second['groups'][0]['display']['title'], 'Alpha');
+  assert.equal(second['items'][0]['group']['display']['title'], 'Alpha');
   assert.equal(second['nextCursor'], null);
   await server.close();
   db.close();
@@ -189,9 +195,9 @@ test('browse paginates with a stable cursor', async () => {
 
 /**
  * Every shape that is not a cursor this route could have minted, and why each
- * one is in the list. `parseCursor` is shared with `/api/failed`, so this table
- * covers the rule for both lists; `manual.test.ts` checks that the failed route
- * really does go through it.
+ * one is in the list. `parseCursor` is shared with `/api/dismissed`, so this
+ * table covers the rule for both lists; `manual.test.ts` checks that the
+ * dismissed route really does go through it.
  */
 const MALFORMED_CURSORS: readonly string[] = [
   '', // `?cursor=` — sent by a client that has no cursor, which is not the same as sending none.
@@ -231,7 +237,7 @@ test('a malformed browse cursor is a 400, never a silent first page', async () =
     // cursor nobody minted with page one hands the SPA the same `nextCursor`
     // page two already used, and the list scrolls forever (issue #33).
     assert.equal(
-      Object.hasOwn(response.json(), 'groups'),
+      Object.hasOwn(response.json(), 'items'),
       false,
       `cursor ${JSON.stringify(cursor)} should not answer with a page`,
     );
@@ -249,10 +255,11 @@ test('an omitted browse cursor is still the first page', async () => {
   // request every list opens with, and the two were the same answer before
   // issue #33 — which is exactly how a broken cursor passed for a first page.
   const response = await server.inject({ method: 'GET', url: '/api/browse' });
+  const body = response.json();
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json()['groups'].map((group: { display: { title: string } }) => group.display.title),
+    body['items'].map((item: { group: { display: { title: string } } }) => item.group.display.title),
     ['Beta', 'Alpha'],
   );
   await server.close();
@@ -265,12 +272,12 @@ test('a browse cursor whose group has since been deleted still pages from where 
   const server = buildServer(deps(db));
 
   const first = (await server.inject({ method: 'GET', url: '/api/browse?limit=1' })).json();
-  assert.equal(first['nextCursor'], '200:2');
+  assert.equal(first['nextCursor'], '200:group:2');
   db.prepare('DELETE FROM releases WHERE group_id = 2').run();
   db.prepare('DELETE FROM media_groups WHERE id = 2').run();
 
   const second = (
-    await server.inject({ method: 'GET', url: '/api/browse?limit=1&cursor=200:2' })
+    await server.inject({ method: 'GET', url: '/api/browse?limit=1&cursor=200:group:2' })
   ).json();
 
   // Not malformed — well-formed and merely stale. The keyset comparison is
@@ -278,10 +285,78 @@ test('a browse cursor whose group has since been deleted still pages from where 
   // it still names the right boundary; ingest and edits delete rows underneath a
   // list that is being paged, and refusing this would break ordinary paging.
   assert.deepEqual(
-    second['groups'].map((group: { display: { title: string } }) => group.display.title),
+    second['items'].map((item: { group: { display: { title: string } } }) => item.group.display.title),
     ['Alpha'],
   );
   assert.equal(second['nextCursor'], null);
+  await server.close();
+  db.close();
+});
+
+test('a three-component browse cursor round-trips', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  const first = (await server.inject({ method: 'GET', url: '/api/browse?limit=1' })).json();
+  assert.match(String(first['nextCursor']), /^\d+:(failed|group):\d+$/);
+
+  const second = await server.inject({
+    method: 'GET',
+    url: `/api/browse?cursor=${encodeURIComponent(String(first['nextCursor']))}&limit=1`,
+  });
+  assert.equal(second.statusCode, 200);
+  await server.close();
+  db.close();
+});
+
+test('a two-component cursor is malformed on browse, and still valid on the other lists', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  // The old shape. Accepting it would read `(sortKey, id)` against a total
+  // order that now has three components, which is a wrong boundary rather than
+  // a loud failure.
+  const stale = await server.inject({ method: 'GET', url: '/api/browse?cursor=100:5' });
+  assert.equal(stale.statusCode, 400);
+  assert.deepEqual(stale.json(), { error: 'Invalid cursor' });
+  // Unchanged for the routes that still order on one table.
+  const downloads = await server.inject({ method: 'GET', url: '/api/downloads?cursor=100:5' });
+  assert.equal(downloads.statusCode, 200);
+  await server.close();
+  db.close();
+});
+
+test('an unknown kind is malformed on a browse cursor', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  const res = await server.inject({ method: 'GET', url: '/api/browse?cursor=100:banana:5' });
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.json(), { error: 'Invalid cursor' });
+  await server.close();
+  db.close();
+});
+
+test('a browse cursor rejects the numeric forms the shared parser rejects', async () => {
+  const db = openTestDatabase();
+  seedGroups(db);
+  const server = buildServer(deps(db));
+
+  for (const cursor of ['1e3:group:5', '0x10:group:5', '+1:group:5', ' 1:group:5', '100:group:0']) {
+    // eslint-disable-next-line no-await-in-loop -- five cursors, sequential like the malformed-cursor table above
+    const res = await server.inject({
+      method: 'GET',
+      url: `/api/browse?cursor=${encodeURIComponent(cursor)}`,
+    });
+    assert.equal(res.statusCode, 400, cursor);
+  }
+  // The sort key may be 0 where the id may not — both stamps come from an
+  // injected clock that hands out 0.
+  const zero = await server.inject({ method: 'GET', url: '/api/browse?cursor=0:group:5' });
+  assert.equal(zero.statusCode, 200);
   await server.close();
   db.close();
 });
@@ -291,8 +366,8 @@ test('browse filters by q', async () => {
   seedGroups(db);
   const server = buildServer(deps(db));
   const body = (await server.inject({ method: 'GET', url: '/api/browse?q=ALP' })).json();
-  assert.equal(body['groups'].length, 1);
-  assert.equal(body['groups'][0]['display']['title'], 'Alpha');
+  assert.equal(body['items'].length, 1);
+  assert.equal(body['items'][0]['group']['display']['title'], 'Alpha');
   await server.close();
   db.close();
 });
@@ -321,11 +396,213 @@ test('browse matches a literal % in q rather than every group', async () => {
   const body = (await server.inject({ method: 'GET', url: '/api/browse?q=%25' })).json();
 
   assert.deepEqual(
-    body['groups'].map((group: { display: { title: string } }) => group.display.title),
+    body['items'].map((item: { group: { display: { title: string } } }) => item.group.display.title),
     ['100% Natural'],
   );
   await server.close();
   db.close();
+});
+
+/**
+ * A database seeded with browsable groups and undismissed parse failures
+ * whose recency stamps interleave, plus a server built on it — shared by the
+ * merged-list tests below.
+ *
+ * With no `rows` given (the default, two failed items), the four rows land
+ * in exactly the pattern `['group', 'failed', 'group', 'failed']`: group 2
+ * ("Alpha Group", `list_rank_at` 400), failed item 2 ("Second Failed Title",
+ * `first_seen_at` 300), group 1 ("Beta Group", 200), failed item 1 ("Alpha
+ * Failed Title", 100). Group 2 and failed item 1 both carry "alpha" so a
+ * search test can see a match land in each kind from this default alone.
+ *
+ * With `rows` given (the total number of failed items), the fixture instead
+ * places exactly two groups at positions 4 and 8 of the merged order — sort
+ * keys descending from an arbitrary high water mark — and fills every other
+ * position with a failed item. That keeps the group side fixed at two
+ * regardless of how large the failed side grows, which is what lets the
+ * query-count test compare a small and a large fixture and expect the same
+ * number of statements; it also guarantees a paging walk with a small limit
+ * crosses a group-to-failed boundary more than once, which is what the
+ * end-to-end paging test needs to prove the boundary is not always the same
+ * kind. Callers of this branch pass at least 6.
+ *
+ * `countStatements`, when true, exposes `statements.count`: every
+ * `db.prepare` call after this function returns increments it, the same
+ * wrapper `'one downloads page costs one group query, not one per row'`
+ * above uses. Callers snapshot the count after this resolves and diff against
+ * it later, so it does not matter that the fixture's own seeding is counted
+ * too.
+ */
+async function appWithInterleavedFixtures(
+  options: { countStatements?: boolean; rows?: number } = {},
+): Promise<{ app: FastifyInstance; statements: { count: number }; expectedKeys: string[] }> {
+  const db = openTestDatabase();
+
+  interface PlannedRow {
+    kind: 'group' | 'failed';
+    id: number;
+    sortKey: number;
+  }
+  const planned: PlannedRow[] = [];
+
+  function insertGroup(id: number, title: string, sortKey: number): void {
+    db.prepare(
+      `INSERT INTO media_groups (id, plugin, identity_key, display, search_text, state, created_at, list_rank_at)
+       VALUES (?, 'test', ?, ?, ?, 'new', ?, ?)`,
+    ).run(id, `key${id}`, JSON.stringify({ title, fields: [] }), title.toLowerCase(), sortKey, sortKey);
+    planned.push({ kind: 'group', id, sortKey });
+  }
+
+  function insertFailed(id: number, rawTitle: string, sortKey: number): void {
+    db.prepare(
+      `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, first_seen_at, parse_error)
+       VALUES (?, 'f', ?, ?, ?, ?, 'could not parse')`,
+    ).run(id, `guid${id}`, rawTitle, `https://indexer.invalid/${id}.nzb`, sortKey);
+    planned.push({ kind: 'failed', id, sortKey });
+  }
+
+  const failedCount = options.rows ?? 2;
+  if (failedCount === 2) {
+    insertGroup(2, 'Alpha Group', 400);
+    insertFailed(2, 'Second Failed Title', 300);
+    insertGroup(1, 'Beta Group', 200);
+    insertFailed(1, 'Alpha Failed Title', 100);
+  } else if (failedCount === 7) {
+    // Built for the end-to-end paging test, and deliberately carries one
+    // *tie*: a group and a failed item sharing the exact same sort key, with
+    // the failed one landing on a page boundary (limit 2 below) so its
+    // cursor is what gets minted. `media_groups.id` and `feed_items.id` are
+    // unrelated namespaces — see `BrowseCursor`'s doc comment — so the tied
+    // group is given the *lower* id (1) and the tied failed item the higher
+    // one (10): a cursor that wrongly names this boundary row `'group'`
+    // compares that failed id against the group's own id column
+    // (`id > cursor.id`, 1 > 10) and drops the tied group from every later
+    // page for good, which is exactly the row `'no row served twice'` /
+    // `every row exactly once` below is watching for. A cursor built from
+    // rows that never tie could not tell a correct mint from a hardcoded one
+    // — see the boundary comparison `pageOfBrowseItems` documents for why.
+    insertGroup(2, 'Group 2', 900);
+    insertFailed(10, 'Failed 10', 800);
+    insertGroup(1, 'Group 1', 800);
+    insertFailed(9, 'Failed 9', 700);
+    insertFailed(8, 'Failed 8', 600);
+    insertFailed(7, 'Failed 7', 500);
+    insertFailed(6, 'Failed 6', 400);
+    insertFailed(5, 'Failed 5', 300);
+    insertFailed(4, 'Failed 4', 200);
+  } else {
+    // Used only by the query-count test, which cares that the *number* of
+    // groups a full page hydrates stays the same no matter how large the
+    // failed side grows — not about ties or boundaries — so two groups sit
+    // at fixed positions 4 and 8 and every other position is a failed item.
+    const total = 2 + failedCount;
+    let nextGroupId = 1;
+    let nextFailedId = 1;
+    for (let position = 1; position <= total; position += 1) {
+      const sortKey = 10_000 - position;
+      if (position === 4 || position === 8) {
+        insertGroup(nextGroupId, `Group ${nextGroupId}`, sortKey);
+        nextGroupId += 1;
+      } else {
+        insertFailed(nextFailedId, `Failed ${nextFailedId}`, sortKey);
+        nextFailedId += 1;
+      }
+    }
+  }
+
+  // The same total order `pageOfBrowseItems` computes —
+  // `(sortKey DESC, kind ASC, id ASC)`, where `'failed' < 'group'` — derived
+  // from the plan above rather than paged out by hand, so it cannot silently
+  // drift from what this fixture actually inserted.
+  const expectedKeys = planned
+    .toSorted((a, b) => b.sortKey - a.sortKey || a.kind.localeCompare(b.kind) || a.id - b.id)
+    .map((row) => `${row.kind}:${row.id}`);
+
+  const statements = { count: 0 };
+  if (options.countStatements === true) {
+    const prepare = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      statements.count += 1;
+      return prepare(sql);
+    };
+  }
+
+  const app = buildServer(deps(db));
+  return { app, statements, expectedKeys };
+}
+
+test('a browse page carries both kinds, in the order the query returned them', async () => {
+  const { app } = await appWithInterleavedFixtures();
+  const body = await app.inject({ method: 'GET', url: '/api/browse?limit=10' }).then((r) => r.json());
+  assert.deepEqual(
+    body.items.map((item: { kind: string }) => item.kind),
+    ['group', 'failed', 'group', 'failed'],
+  );
+  // Each kind carries its own view, under its own key.
+  const group = body.items[0];
+  assert.ok(group.group.display);
+  const failed = body.items[1];
+  assert.ok(failed.item.rawTitle);
+  assert.equal('group' in failed, false);
+  await app.close();
+});
+
+test('the two kinds hydrate in a fixed number of queries, not one per row', async () => {
+  // Guarded by counting statements rather than by reading: this is the defect
+  // issues #31 and #33 both name, and it is invisible until the list is long.
+  const { app, statements } = await appWithInterleavedFixtures({ countStatements: true });
+  const before = statements.count;
+  await app.inject({ method: 'GET', url: '/api/browse?limit=30' });
+  const perPage = statements.count - before;
+
+  const { app: bigger, statements: biggerCount } = await appWithInterleavedFixtures({
+    countStatements: true,
+    rows: 60,
+  });
+  const beforeBig = biggerCount.count;
+  await bigger.inject({ method: 'GET', url: '/api/browse?limit=30' });
+  assert.equal(biggerCount.count - beforeBig, perPage, 'query count must not grow with page size');
+  await app.close();
+  await bigger.close();
+});
+
+test('paging the route end to end yields every row exactly once', async () => {
+  const { app, expectedKeys } = await appWithInterleavedFixtures({ rows: 7 });
+  const seen: string[] = [];
+  // Annotated for the same reason `'downloads paginates with a stable
+  // cursor, newest first'` annotates its own `url`: the loop is circular for
+  // inference otherwise, since `cursor` is read to build the url and written
+  // from the response the url produced.
+  let cursor: string | null = null;
+  for (let guard = 0; guard < 30; guard += 1) {
+    const url: string =
+      cursor === null ? '/api/browse?limit=2' : `/api/browse?cursor=${cursor}&limit=2`;
+    // eslint-disable-next-line no-await-in-loop -- a stable-cursor walk, inherently sequential
+    const body = await app.inject({ method: 'GET', url }).then((r) =>
+      r.json<{
+        items: ({ kind: 'group'; group: { id: number } } | { kind: 'failed'; item: { id: number } })[];
+        nextCursor: string | null;
+      }>(),
+    );
+    for (const item of body.items) {
+      seen.push(item.kind === 'group' ? `group:${item.group.id}` : `failed:${item.item.id}`);
+    }
+    cursor = body.nextCursor;
+    if (cursor === null) break;
+  }
+  assert.deepEqual(seen, expectedKeys);
+  assert.equal(new Set(seen).size, seen.length, 'no row served twice');
+  await app.close();
+});
+
+test('a term filters both kinds in one response', async () => {
+  const { app } = await appWithInterleavedFixtures();
+  const body = await app
+    .inject({ method: 'GET', url: '/api/browse?q=alpha&limit=10' })
+    .then((r) => r.json());
+  assert.ok(body.items.some((i: { kind: string }) => i.kind === 'group'));
+  assert.ok(body.items.some((i: { kind: string }) => i.kind === 'failed'));
+  await app.close();
 });
 
 test('a picked group with no upgrade drops out of browse and appears in picks', async () => {
@@ -346,7 +623,7 @@ test('a picked group with no upgrade drops out of browse and appears in picks', 
 
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
   assert.deepEqual(
-    browse['groups'].map((group: { display: { title: string } }) => group.display.title),
+    browse['items'].map((item: { group: { display: { title: string } } }) => item.group.display.title),
     ['Beta'],
   );
 
@@ -480,7 +757,7 @@ test('a failed upgrade flags its group even though the pick imported fine, and l
   assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
   assert.deepEqual(
-    browse['groups'].map((group: { display: { title: string } }) => group.display.title),
+    browse['items'].map((item: { group: { display: { title: string } } }) => item.group.display.title),
     ['Beta'],
   );
   await server.close();
@@ -510,7 +787,7 @@ test('picking a lesser release keeps the group in browse, with the better one st
   // The same group the browse list itself would return — the client patches
   // this straight in, so the two must agree.
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 1);
+  const listed = browse['items'].find((item: { group: { id: number } }) => item.group.id === 1)?.['group'];
   assert.deepEqual(listed, group);
   await server.close();
   db.close();
@@ -552,7 +829,7 @@ test('picking an upgrade answers with no group, and browse stops listing it', as
   // client view that has quietly stopped matching the database.
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
   assert.deepEqual(
-    browse['groups'].map((candidate: { id: number }) => candidate.id),
+    browse['items'].map((item: { group: { id: number } }) => item.group.id),
     [2],
   );
 
@@ -996,7 +1273,7 @@ test('no route ever returns the client api key', async () => {
     '/api/picks',
     '/api/downloads',
     '/api/health',
-    '/api/failed',
+    '/api/dismissed',
     '/api/manual-fields',
   ]) {
     const body = (await server.inject({ method: 'GET', url })).body;

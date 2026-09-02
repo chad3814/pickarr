@@ -33,19 +33,21 @@ test('the nav separates Settings from the library tabs', async ({ page }) => {
 
   // Was `toContainText('Failed—Settings')` while the divider was an em dash. A
   // rule contributes no text, so the property has to be stated as geometry
-  // instead: the divider sits below Failed and above Settings in a column that
-  // now stacks. That is a stronger claim than the text match ever made, which
-  // would have passed with the divider anywhere the two labels stayed adjacent.
+  // instead: the divider sits below the last library tab and above Settings in
+  // a column that now stacks. That is a stronger claim than the text match ever
+  // made, which would have passed with the divider anywhere the two labels
+  // stayed adjacent. `Dismissed` is that last library tab now that Failed is
+  // gone; the geometry under test is unchanged.
   const rule = nav.locator('hr.nav-separator');
   await expect(rule).toBeVisible();
 
-  const failed = await nav.getByRole('link', { name: 'Failed' }).boundingBox();
+  const dismissed = await nav.getByRole('link', { name: 'Dismissed' }).boundingBox();
   const settings = await nav.getByRole('link', { name: 'Settings' }).boundingBox();
   const divider = await rule.boundingBox();
-  expect(failed).not.toBeNull();
+  expect(dismissed).not.toBeNull();
   expect(settings).not.toBeNull();
   expect(divider).not.toBeNull();
-  expect(divider!.y).toBeGreaterThan(failed!.y);
+  expect(divider!.y).toBeGreaterThan(dismissed!.y);
   expect(settings!.y).toBeGreaterThan(divider!.y);
 });
 

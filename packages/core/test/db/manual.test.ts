@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import {
   clearParseError,
-  failedFeedItems,
+  dismissedFeedItems,
   getFeedItem,
   setDismissedAt,
 } from '../../src/db/feed-items.ts';
@@ -25,15 +25,18 @@ import {
 } from '../../src/db/releases.ts';
 import { maybeNum, type SqlRow } from '../../src/db/row.ts';
 
-// The Failed tab, the group editor and the release editor all read and write
-// rows the parser produced. These are the storage-level pieces they stand on:
-// a listing of what failed, the two `edited_at` stamps that record a human
-// touched a row, and the merge primitives an identity edit needs.
+// Browse's failed branch, the Dismissed tab, the group editor and the release
+// editor all read and write rows the parser produced. These are the
+// storage-level pieces they stand on: a listing of what was dismissed, the
+// two `edited_at` stamps that record a human touched a row, and the merge
+// primitives an identity edit needs.
 
 /**
- * Four feed items covering every case the Failed list has to sort out: two
- * live failures sharing one `first_seen_at` (so tie ordering is observable), a
- * dismissed failure, and an item that parsed cleanly.
+ * Six feed items covering every case the Dismissed list has to sort out: two
+ * live (non-dismissed) failures sharing one `first_seen_at`, two dismissed
+ * failures sharing a different `first_seen_at` (so the dismissed-only tie
+ * ordering is observable on its own), a third dismissed failure standing
+ * alone as the newest row overall, and an item that parsed cleanly.
  *
  * Ids ascend as `first_seen_at` descends, mirroring ingest: a batch is walked
  * newest-first, so within one batch the lowest id is the newest item.
@@ -45,7 +48,9 @@ function seedFeedItems(db: DatabaseSync): void {
      VALUES (1, 'f', 'g1', 'T1', 'https://indexer.invalid/1.nzb', NULL, 300, 'no site',  NULL),
             (2, 'f', 'g2', 'T2', 'https://indexer.invalid/2.nzb', NULL, 300, 'no date',  NULL),
             (3, 'f', 'g3', 'T3', 'https://indexer.invalid/3.nzb', NULL, 200, 'no title', 900),
-            (4, 'f', 'g4', 'T4', 'https://indexer.invalid/4.nzb', 1234, 100, NULL,       NULL)`,
+            (4, 'f', 'g4', 'T4', 'https://indexer.invalid/4.nzb', 1234, 100, NULL,       NULL),
+            (5, 'f', 'g5', 'T5', 'https://indexer.invalid/5.nzb', NULL, 200, 'no scene', 950),
+            (6, 'f', 'g6', 'T6', 'https://indexer.invalid/6.nzb', NULL, 350, 'no site',  1000)`,
   ).run();
 }
 
@@ -84,58 +89,57 @@ function releaseEditedAt(db: DatabaseSync, id: number): number | null {
   return maybeNum(row as SqlRow, 'edited_at');
 }
 
-// --- Failed feed items -------------------------------------------------
+// --- Dismissed feed items -----------------------------------------------
 
-test('failedFeedItems lists only failures, newest first, lowest id within a tie', () => {
+test('dismissedFeedItems lists only dismissed items, newest first, lowest id within a tie', () => {
   const db = openTestDatabase();
   seedFeedItems(db);
 
-  const page = failedFeedItems(db, { cursor: null, limit: 10, includeDismissed: false });
+  const page = dismissedFeedItems(db, { cursor: null, limit: 10 });
 
-  // Item 4 parsed, so it is not a failure; item 3 is dismissed. Items 1 and 2
-  // share a first_seen_at, and ascending id inside that tie is newest-first
-  // for the same reason browseGroups tiebreaks that way.
+  // Items 1 and 2 are live failures, never dismissed; item 4 parsed. Item 6 is
+  // the newest dismissal and stands alone; items 3 and 5 share a
+  // first_seen_at, and ascending id inside that tie is newest-first for the
+  // same reason browseGroups tiebreaks that way.
   assert.deepEqual(
     page.map((item) => item.id),
-    [1, 2],
+    [6, 3, 5],
   );
   db.close();
 });
 
-test('failedFeedItems includes dismissed items on request', () => {
+test('dismissedFeedItems excludes a live failure and a cleanly parsed item', () => {
   const db = openTestDatabase();
   seedFeedItems(db);
 
-  const page = failedFeedItems(db, { cursor: null, limit: 10, includeDismissed: true });
+  const ids = dismissedFeedItems(db, { cursor: null, limit: 10 }).map((item) => item.id);
 
-  assert.deepEqual(
-    page.map((item) => item.id),
-    [1, 2, 3],
-  );
+  assert.equal(ids.includes(1), false, 'item 1 is a live failure, never dismissed');
+  assert.equal(ids.includes(4), false, 'item 4 parsed cleanly and was never a failure at all');
   db.close();
 });
 
-test('failedFeedItems pages over a first_seen_at tie exactly once per row', () => {
+test('dismissedFeedItems pages over a first_seen_at tie exactly once per row', () => {
   const db = openTestDatabase();
   seedFeedItems(db);
 
   const seen: number[] = [];
   let cursor: { firstSeenAt: number; id: number } | null = null;
   for (let guard = 0; guard < 10; guard += 1) {
-    const page = failedFeedItems(db, { cursor, limit: 1, includeDismissed: true });
+    const page = dismissedFeedItems(db, { cursor, limit: 1 });
     if (page.length === 0) break;
     for (const item of page) seen.push(item.id);
     const last = page.at(-1);
     cursor = last === undefined ? null : { firstSeenAt: last.firstSeenAt, id: last.id };
   }
 
-  // The tie between 1 and 2 is where a cursor that tiebroke in the other
+  // The tie between 3 and 5 is where a cursor that tiebroke in the other
   // direction from the ORDER BY would either skip a row or repeat one.
-  assert.deepEqual(seen, [1, 2, 3]);
+  assert.deepEqual(seen, [6, 3, 5]);
   db.close();
 });
 
-test('getFeedItem maps every column the failed list needs', () => {
+test('getFeedItem maps every column the Dismissed list needs', () => {
   const db = openTestDatabase();
   seedFeedItems(db);
 
@@ -165,13 +169,16 @@ test('clearParseError also clears dismissed_at, because a resolve overrides a di
   const item = getFeedItem(db, 3);
   assert.equal(item?.parseError, null);
   // Leaving dismissed_at set would keep a now-resolved item filtered out of
-  // the default view while it holds a perfectly good release.
+  // Browse's own list while it holds a perfectly good release.
   assert.equal(item?.dismissedAt, null);
-  assert.equal(failedFeedItems(db, { cursor: null, limit: 10, includeDismissed: true }).length, 2);
+  assert.deepEqual(
+    dismissedFeedItems(db, { cursor: null, limit: 10 }).map((row) => row.id),
+    [6, 5],
+  );
   db.close();
 });
 
-test('setDismissedAt stamps the item and drops it from the default list', () => {
+test('setDismissedAt stamps the item and it joins the Dismissed list', () => {
   const db = openTestDatabase();
   seedFeedItems(db);
 
@@ -179,10 +186,8 @@ test('setDismissedAt stamps the item and drops it from the default list', () => 
 
   assert.equal(getFeedItem(db, 1)?.dismissedAt, 5000);
   assert.deepEqual(
-    failedFeedItems(db, { cursor: null, limit: 10, includeDismissed: false }).map(
-      (item) => item.id,
-    ),
-    [2],
+    dismissedFeedItems(db, { cursor: null, limit: 10 }).map((item) => item.id),
+    [6, 1, 3, 5],
   );
   db.close();
 });

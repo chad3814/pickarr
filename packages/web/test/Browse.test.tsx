@@ -4,7 +4,10 @@ import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-li
 import { Browse } from '../src/routes/Browse.tsx';
 import { stubIntersectionObserver, type Intersection } from './intersection.ts';
 import type {
+  BrowseItem,
   BrowseResponse,
+  DismissResponse,
+  FailedItemView,
   GroupEditResponse,
   GroupView,
   IdentityPlanView,
@@ -16,6 +19,7 @@ import type {
   PickResponse,
   ReleaseEditResponse,
   ReleaseView,
+  ResolveResponse,
 } from '../src/api/client.ts';
 import { fetchStub } from './fetchStub.ts';
 import { gone } from './dom.ts';
@@ -88,6 +92,42 @@ function group(id: number, title: string, over: Overrides = {}): GroupView {
   return view;
 }
 
+/** A page of plain groups, wrapped as `BrowseResponse.items` now carries them.
+ * Most of these tests exercise only the group half of the merge — editing,
+ * picking, paging — so this is the default `serve` reaches for; `failedItems`
+ * below is its counterpart for the tests that exercise the other half. */
+function groupItems(groups: readonly GroupView[]): BrowseItem[] {
+  return groups.map((g) => ({ kind: 'group', group: g }));
+}
+
+/** One name the parser refused, with just enough shape for a `FailedCard` to
+ * render and its Fix form to submit: a schema-matching plugin id, and the
+ * suggestions actually offered. */
+function failedItem(
+  id: number,
+  rawTitle: string,
+  over: { suggestedValues?: Record<string, string>; plugin?: string } = {},
+): FailedItemView {
+  return {
+    id,
+    feedId: 'scenes-daily',
+    plugin: over.plugin ?? 'scenes',
+    rawTitle,
+    link: `http://feed.invalid/${id}`,
+    parseError: `no anchor in ${rawTitle}`,
+    firstSeenAt: 1700 - id,
+    publishedAt: null,
+    suggestedValues: over.suggestedValues ?? {},
+    dismissedAt: null,
+  };
+}
+
+/** `failedItem`'s counterpart to `groupItems`, for a page carrying the other
+ * half of the merge. */
+function failedItems(items: readonly FailedItemView[]): BrowseItem[] {
+  return items.map((item) => ({ kind: 'failed', item }));
+}
+
 interface Options {
   /** What `PATCH /api/groups/:id` answers. */
   groupEdit?: GroupEditResponse;
@@ -101,6 +141,17 @@ interface Options {
   firstPage?: GroupView[];
   /** Replaces the second page, to tell "the page survived" from "the card was patched". */
   secondPage?: GroupView[];
+  /**
+   * Replaces the first/second page with raw items rather than groups alone —
+   * for a page mixing a group and a refused name. Takes priority over
+   * `firstPage`/`secondPage` when given.
+   */
+  firstPageItems?: BrowseItem[];
+  secondPageItems?: BrowseItem[];
+  /** What `POST /api/feed-items/:id/resolve` answers. */
+  resolve?: ResolveResponse;
+  /** What `POST /api/feed-items/:id/dismiss` answers. */
+  dismiss?: DismissResponse;
   /**
    * The status `refusal`/`refuseOnce` answer with. Defaults to 409, right for
    * a release edit (untouched by the identity-plan flow, so any status just
@@ -167,8 +218,20 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
   const calls: string[] = [];
   sent.length = 0;
   const pages = new Map<string, BrowseResponse>([
-    ['', { groups: options.firstPage ?? [group(1, 'Alpha')], nextCursor: '999:1' }],
-    ['999:1', { groups: options.secondPage ?? [group(2, 'Beta')], nextCursor: null }],
+    [
+      '',
+      {
+        items: options.firstPageItems ?? groupItems(options.firstPage ?? [group(1, 'Alpha')]),
+        nextCursor: '999:1',
+      },
+    ],
+    [
+      '999:1',
+      {
+        items: options.secondPageItems ?? groupItems(options.secondPage ?? [group(2, 'Beta')]),
+        nextCursor: null,
+      },
+    ],
   ]);
   // Indexed by id so `/api/metadata` can echo back whatever a page already
   // carried. A blanket `'none'` was fine while every served group's own
@@ -187,7 +250,9 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
   // disagreement rather than a documented limit here, until someone extends
   // this map to those three paths too.
   const servedGroups = new Map<number, GroupView>();
-  for (const page of pages.values()) for (const served of page.groups) servedGroups.set(served.id, served);
+  for (const page of pages.values()) {
+    for (const item of page.items) if (item.kind === 'group') servedGroups.set(item.group.id, item.group);
+  }
   let patches = 0;
 
   const picked: PickResponse = {
@@ -246,6 +311,12 @@ function serve(pick: PickResponse['group'], options: Options = {}): () => string
       // what reached the server.
       const body = JSON.parse(String(init?.body)) as { plugin: string; values: Record<string, string> };
       return { identityKey: `${body.plugin}:${body.values['site'] ?? ''}:${body.values['title'] ?? ''}` };
+    }
+    if (url.pathname.endsWith('/resolve')) {
+      return options.resolve ?? ({ group: group(9, 'Resolved'), joinedExisting: true } satisfies ResolveResponse);
+    }
+    if (url.pathname.endsWith('/dismiss')) {
+      return options.dismiss ?? ({ id: 1, dismissedAt: 1800 } satisfies DismissResponse);
     }
     if (init?.method === 'PATCH') {
       const body = JSON.parse(String(init.body)) as { values: Record<string, string> };
@@ -513,7 +584,7 @@ test('a merge into a group on no loaded page inserts nothing', async () => {
 test('a merge says where the releases went, confirmation included', async () => {
   // The card vanishes and, when the target is not loaded, nothing else on
   // screen changes — so without this the user is told nothing at all. The
-  // Failed tab reports the same thing when a fix joins an existing group.
+  // `fix` tests below report the same thing when a fix joins an existing group.
   //
   // This behaviour predates `useIdentityChange` — it is pinned here rather
   // than only exercised incidentally, because routing `onEditGroup` through
@@ -696,6 +767,337 @@ test('the schemas are fetched once for the screen, not once per card', async () 
   );
 });
 
+// The failed half of the merge: a refused name renders as `FailedCard`
+// alongside `MediaCard`, in the order the response listed them, and its Fix
+// and Dismiss actions live here now — moved from the Failed tab this branch
+// went on to delete.
+
+test('a page of both kinds renders a media card and a failed card', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'group', group: group(1, 'Alpha') },
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW') },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+
+  await waitFor(() => assert.ok(screen.getByText('Beta.RAW')));
+  assert.ok(card('Alpha').classList.contains('media-card'), 'a group renders MediaCard');
+  assert.ok(card('Beta.RAW').classList.contains('failed-card'), 'a failed item renders FailedCard');
+});
+
+test('the cards appear in the order the response listed them', async () => {
+  // Not just "both are present" — the interleaving is the feature. Rendering
+  // both kinds but sorting by kind first would still pass a test that only
+  // checked presence.
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(3, 'Zeta.RAW') },
+      { kind: 'group', group: group(1, 'Alpha') },
+      { kind: 'failed', item: failedItem(4, 'Eta.RAW') },
+      { kind: 'group', group: group(2, 'Beta') },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  const titles = screen.getAllByRole('heading', { level: 2 }).map((node) => node.textContent);
+  assert.deepEqual(titles, ['Zeta.RAW', 'Alpha', 'Eta.RAW', 'Beta']);
+});
+
+test('saving a fix drops the row and says it joined an existing group', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW', { suggestedValues: { site: 'brazzers' } }) },
+      { kind: 'group', group: group(1, 'Gamma') },
+    ],
+    secondPageItems: [],
+    resolve: { group: group(9, 'Zed Thing'), joinedExisting: true },
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Beta.RAW')).getByRole('button', { name: /fix/i })));
+
+  fireEvent.click(within(card('Beta.RAW')).getByRole('button', { name: /fix/i }));
+  fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'A Thing' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+  await waitFor(() => assert.ok(gone('Beta.RAW')));
+  assert.ok(screen.getByText('Zed Thing joined an existing group'));
+  // The rest of the list is untouched.
+  assert.ok(screen.getByText('Gamma'));
+});
+
+test('a fix that made a new group says that instead', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW', { suggestedValues: { site: 'brazzers' } }) },
+    ],
+    secondPageItems: [],
+    resolve: { group: group(9, 'Zed Thing'), joinedExisting: false },
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Beta.RAW')).getByRole('button', { name: /fix/i })));
+
+  fireEvent.click(within(card('Beta.RAW')).getByRole('button', { name: /fix/i }));
+  fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'A Thing' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+  await waitFor(() => assert.ok(screen.getByText('Zed Thing became a new group')));
+});
+
+test('the resolved group does not appear until the next load, and the notice says so', async () => {
+  // Placing it correctly in a keyset-ordered list means computing where the
+  // server would have put it — the client re-deriving the server's ordering
+  // rule, which this design keeps out of the client. The notice is the whole
+  // account of where it went.
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW', { suggestedValues: { site: 'brazzers' } }) },
+    ],
+    secondPageItems: [],
+    resolve: { group: group(9, 'Zed Thing'), joinedExisting: true },
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Beta.RAW')).getByRole('button', { name: /fix/i })));
+
+  fireEvent.click(within(card('Beta.RAW')).getByRole('button', { name: /fix/i }));
+  fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'A Thing' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+  await waitFor(() => assert.ok(screen.getByText('Zed Thing joined an existing group')));
+  assert.ok(!screen.queryByRole('heading', { level: 2, name: 'Zed Thing' }), 'not patched in');
+});
+
+test('Dismiss drops the row', async () => {
+  const calls = serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(3, 'Gamma.RAW', { plugin: '' }) },
+      { kind: 'group', group: group(1, 'Alpha') },
+    ],
+    secondPageItems: [],
+    dismiss: { id: 3, dismissedAt: 1800 },
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Gamma.RAW')).getByRole('button', { name: /dismiss/i })));
+
+  fireEvent.click(within(card('Gamma.RAW')).getByRole('button', { name: /dismiss/i }));
+
+  await waitFor(() => assert.ok(gone('Gamma.RAW')));
+  assert.ok(screen.getByText('Alpha'));
+  assert.ok(calls().includes('POST /api/feed-items/3/dismiss'));
+});
+
+test('a failed request while fixing reports and leaves the card in place', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW', { suggestedValues: { site: 'brazzers' } }) },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Beta.RAW')).getByRole('button', { name: /fix/i })));
+  fireEvent.click(within(card('Beta.RAW')).getByRole('button', { name: /fix/i }));
+  fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'A Thing' } });
+
+  // Refuses only `/resolve`: the form's own debounced identity preview keeps
+  // hitting `/api/manual-preview` while this is open, and answering that with
+  // the same 400 body would put the identical text under the form too — a
+  // read that would pass whether or not `fix`'s own error handling worked.
+  const original = globalThis.fetch;
+  globalThis.fetch = fetchStub(async (url, init) => {
+    if (new URL(url, 'http://test.invalid').pathname.endsWith('/resolve')) {
+      return new Response(JSON.stringify({ error: 'site must be one of the configured values' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return original(url, init);
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+  await waitFor(() => assert.equal(document.querySelector('p.error')?.textContent, 'site must be one of the configured values'));
+  assert.ok(screen.getByText('Beta.RAW'));
+  assert.equal((screen.getByLabelText('Scene') as HTMLInputElement).value, 'A Thing');
+});
+
+test('a refused request is reported rather than swallowed', async () => {
+  serve(null, {
+    firstPageItems: failedItems([failedItem(3, 'Gamma.RAW', { plugin: '' })]),
+    secondPageItems: [],
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Gamma.RAW')).getByRole('button', { name: /dismiss/i })));
+
+  globalThis.fetch = fetchStub(async () =>
+    new Response(JSON.stringify({ error: 'Feed item 3 is already dismissed' }), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+  fireEvent.click(within(card('Gamma.RAW')).getByRole('button', { name: /dismiss/i }));
+
+  await waitFor(() => assert.ok(screen.getByText('Feed item 3 is already dismissed')));
+  // The row stays: nothing happened to it.
+  assert.ok(screen.getByText('Gamma.RAW'));
+});
+
+test('a term that matches nothing leaves an empty list rather than a stale one', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'group', group: group(1, 'Alpha') },
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW') },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta.RAW')));
+
+  // A term whose page is empty. Reinstall the stub so the next fetch answers
+  // with nothing, then change the term, which rebuilds the list.
+  serve(null, { firstPageItems: [], secondPageItems: [] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: 'coal' } });
+
+  await waitFor(() => assert.equal(document.querySelectorAll('article').length, 0));
+  assert.ok(gone('Alpha'));
+  assert.ok(gone('Beta.RAW'));
+});
+
+test('fixing after "load more" keeps the pages already loaded', async () => {
+  // The regression this mirrors on Browse's group half: acting on a row
+  // refetched the first page and replaced the list with it, so everything
+  // loaded past it vanished.
+  const calls = serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(1, 'Alpha.RAW', { suggestedValues: { site: 'brazzers' } }) },
+    ],
+    secondPageItems: groupItems([group(2, 'Beta')]),
+    resolve: { group: group(9, 'Zed Thing'), joinedExisting: true },
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Alpha.RAW')).getByRole('button', { name: /fix/i })));
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  const before = browseRequests(calls()).length;
+
+  fireEvent.click(within(card('Alpha.RAW')).getByRole('button', { name: /fix/i }));
+  fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'A Thing' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+  await waitFor(() => assert.ok(gone('Alpha.RAW')));
+  assert.ok(screen.getByText('Beta'));
+  assert.equal(browseRequests(calls()).length, before);
+});
+
+test('dismissing after "load more" keeps the pages already loaded', async () => {
+  const calls = serve(null, {
+    firstPageItems: failedItems([failedItem(1, 'Alpha.RAW')]),
+    secondPageItems: groupItems([group(2, 'Beta')]),
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Alpha.RAW')).getByRole('button', { name: /dismiss/i })));
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => assert.ok(screen.getByText('Beta')));
+  const before = browseRequests(calls()).length;
+
+  fireEvent.click(within(card('Alpha.RAW')).getByRole('button', { name: /dismiss/i }));
+
+  await waitFor(() => assert.ok(gone('Alpha.RAW')));
+  assert.ok(screen.getByText('Beta'));
+  assert.equal(browseRequests(calls()).length, before);
+});
+
+test('fixing after a page arrived by scrolling keeps the pages already loaded', async () => {
+  // The same invariant as the "load more" test above, on the path that now
+  // loads most pages: under a button a reader who lost a page noticed, under
+  // scrolling the list silently shortens and they scroll again.
+  const view = stubIntersectionObserver();
+  try {
+    const calls = serve(null, {
+      firstPageItems: [
+        { kind: 'failed', item: failedItem(1, 'Alpha.RAW', { suggestedValues: { site: 'brazzers' } }) },
+      ],
+      secondPageItems: groupItems([group(2, 'Beta')]),
+      resolve: { group: group(9, 'Zed Thing'), joinedExisting: true },
+    });
+    render(<Browse />);
+    await waitFor(() => assert.ok(within(card('Alpha.RAW')).getByRole('button', { name: /fix/i })));
+    view.enter();
+    await waitFor(() => assert.ok(screen.getByText('Beta')));
+    const before = browseRequests(calls()).length;
+
+    fireEvent.click(within(card('Alpha.RAW')).getByRole('button', { name: /fix/i }));
+    fireEvent.change(screen.getByLabelText('Scene'), { target: { value: 'A Thing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => assert.ok(gone('Alpha.RAW')));
+    assert.ok(screen.getByText('Beta'));
+    assert.equal(browseRequests(calls()).length, before);
+  } finally {
+    view.restore();
+  }
+});
+
+test('dismissing after a page arrived by scrolling keeps the pages already loaded', async () => {
+  const view = stubIntersectionObserver();
+  try {
+    const calls = serve(null, {
+      firstPageItems: failedItems([failedItem(1, 'Alpha.RAW')]),
+      secondPageItems: groupItems([group(2, 'Beta')]),
+    });
+    render(<Browse />);
+    await waitFor(() => assert.ok(within(card('Alpha.RAW')).getByRole('button', { name: /dismiss/i })));
+    view.enter();
+    await waitFor(() => assert.ok(screen.getByText('Beta')));
+    const before = browseRequests(calls()).length;
+
+    fireEvent.click(within(card('Alpha.RAW')).getByRole('button', { name: /dismiss/i }));
+
+    await waitFor(() => assert.ok(gone('Alpha.RAW')));
+    assert.ok(screen.getByText('Beta'));
+    assert.equal(browseRequests(calls()).length, before);
+  } finally {
+    view.restore();
+  }
+});
+
+test('"load more" appends the next page rather than replacing the list', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'group', group: group(1, 'Alpha') },
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW') },
+    ],
+    secondPageItems: groupItems([group(3, 'Gamma')]),
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta.RAW')));
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => assert.ok(screen.getByText('Gamma')));
+
+  const titles = screen.getAllByRole('heading', { level: 2 }).map((node) => node.textContent);
+  assert.deepEqual(titles, ['Alpha', 'Beta.RAW', 'Gamma']);
+  // Exhausted, so there is nothing left to ask for.
+  assert.equal(screen.queryAllByRole('button', { name: /load more/i }).length, 0);
+});
+
+test('the schemas are fetched once for the screen, not once per row', async () => {
+  const calls = serve(null, {
+    firstPageItems: failedItems([failedItem(1, 'Alpha.RAW')]),
+    secondPageItems: failedItems([failedItem(2, 'Beta.RAW')]),
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(within(card('Alpha.RAW')).getByRole('button', { name: /fix/i })));
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => assert.ok(within(card('Beta.RAW')).getByRole('button', { name: /fix/i })));
+
+  assert.deepEqual(
+    calls().filter((call) => call.includes('/api/manual-fields')),
+    ['GET /api/manual-fields'],
+  );
+});
+
 /** The settled answer both Requery tests below start from, and the fresher one they end at. */
 const REQUERY_ORIGINAL: MetadataView = {
   state: 'confirmed',
@@ -737,7 +1139,7 @@ function serveSettledGroup(answers: readonly MetadataView[]): () => number {
     const url = new URL(input, 'http://test.invalid');
     if (url.pathname === '/api/browse') {
       return new Response(
-        JSON.stringify({ groups: [alpha], nextCursor: null } satisfies BrowseResponse),
+        JSON.stringify({ items: groupItems([alpha]), nextCursor: null } satisfies BrowseResponse),
         { headers: { 'content-type': 'application/json' } },
       );
     }
@@ -903,7 +1305,7 @@ test('a fresh browser gets the card list', () => {
   serve(null);
   render(<Browse />);
   // #40: never `assert.equal(screen.queryBy*(...), null)`.
-  assert.ok(!screen.queryByRole('listbox', { name: 'Groups' }));
+  assert.ok(!screen.queryByRole('listbox', { name: 'Groups and refused names' }));
 });
 
 test('choosing the split view shows the list, and no card until a row is picked', async () => {
@@ -913,7 +1315,7 @@ test('choosing the split view shows the list, and no card until a row is picked'
 
   fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
 
-  assert.ok(screen.getByRole('listbox', { name: 'Groups' }));
+  assert.ok(screen.getByRole('listbox', { name: 'Groups and refused names' }));
   assert.ok(!document.querySelector('article.media-card'), 'nothing selected, so no card');
   assert.ok(screen.getByText(/select a group/i), 'the pane says what to do instead');
 });
@@ -1057,5 +1459,102 @@ test('the chosen view survives a remount', async () => {
 
   serve(null);
   render(<Browse />);
-  assert.ok(screen.getByRole('listbox', { name: 'Groups' }), 'the preference was read back');
+  assert.ok(screen.getByRole('listbox', { name: 'Groups and refused names' }), 'the preference was read back');
+});
+
+// The split view's list now interleaves both kinds too (Task 6), addressed by
+// `{ kind, id }` rather than a bare id for the same reason `GroupList.test.tsx`
+// exercises directly: a group and a failed item can carry the same number.
+
+test('selecting a failed row shows its card in the detail pane', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'group', group: group(1, 'Alpha') },
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW') },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta.RAW')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  const failedRow = screen.getAllByRole('option').find((row) => /Beta\.RAW/.test(row.textContent ?? ''));
+  assert.ok(failedRow !== undefined, 'the failed row is in the list');
+  fireEvent.click(failedRow);
+
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta.RAW' }));
+  assert.equal(document.querySelectorAll('article.failed-card').length, 1, 'a failed card, not a media card');
+  assert.ok(!document.querySelector('article.media-card'), 'not the group card');
+});
+
+test('selecting a group row shows its media card in the detail pane', async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW') },
+      { kind: 'group', group: group(1, 'Alpha') },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta.RAW')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+
+  const groupRow = screen.getAllByRole('option').find((row) => /Alpha/.test(row.textContent ?? ''));
+  assert.ok(groupRow !== undefined, 'the group row is in the list');
+  fireEvent.click(groupRow);
+
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Alpha' }));
+  assert.equal(document.querySelectorAll('article.media-card').length, 1, 'a media card, not a failed card');
+  assert.ok(!document.querySelector('article.failed-card'), 'not the failed card');
+});
+
+test('a selection filtered out by a term is cleared once loading settles', async () => {
+  // The group-only case is covered above ("the selection clears when a term
+  // filters the selected group out"); this is the case that only exists once
+  // the split view addresses a failed row too — the clearing effect has to
+  // recognise a *failed* selection the term dropped, not just a group one.
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW') },
+      { kind: 'group', group: group(1, 'Alpha') },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta.RAW')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  const failedRow = screen.getAllByRole('option').find((row) => /Beta\.RAW/.test(row.textContent ?? ''));
+  assert.ok(failedRow !== undefined);
+  fireEvent.click(failedRow);
+  assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta.RAW' }));
+
+  // A term whose page omits the failed row entirely.
+  serve(null, { firstPageItems: [{ kind: 'group', group: group(1, 'Alpha') }], secondPageItems: [] });
+  fireEvent.change(screen.getByLabelText('Search groups'), { target: { value: 'alpha' } });
+
+  await waitFor(() => assert.ok(!document.querySelector('article.failed-card')));
+  assert.ok(screen.getByText(/select a group/i), 'the pane returned to its empty state');
+
+  const stops = screen.getAllByRole('option').filter((row) => row.getAttribute('tabindex') === '0');
+  assert.equal(stops.length, 1, 'the list keeps exactly one tab stop once the failed selection clears');
+});
+
+test("a failed item's Fix… form opens inside the detail pane", async () => {
+  serve(null, {
+    firstPageItems: [
+      { kind: 'failed', item: failedItem(2, 'Beta.RAW', { suggestedValues: { site: 'brazzers' } }) },
+    ],
+    secondPageItems: [],
+  });
+  render(<Browse />);
+  await waitFor(() => assert.ok(screen.getByText('Beta.RAW')));
+  fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
+  fireEvent.click(screen.getByRole('option'));
+  await waitFor(() => assert.ok(screen.getByRole('heading', { level: 2, name: 'Beta.RAW' })));
+
+  const pane = document.querySelector<HTMLElement>('.browse-detail');
+  assert.ok(pane !== null, 'the detail pane exists');
+  fireEvent.click(within(pane).getByRole('button', { name: /fix/i }));
+
+  assert.ok(within(pane).getByLabelText('Scene'), 'the fix form opened inside the pane');
 });

@@ -30,7 +30,7 @@ test("the list's selection and keyboard movement drive the detail pane, its gene
 
   // The card list is what a fresh browser gets.
   await expect(page.locator('article.media-card')).toHaveCount(2);
-  await expect(page.getByRole('listbox', { name: 'Groups' })).toHaveCount(0);
+  await expect(page.getByRole('listbox', { name: 'Groups and refused names' })).toHaveCount(0);
 
   // `.app`'s width in the view a fresh browser gets, to compare the split
   // view's width against below — the widening rule is keyed off
@@ -42,7 +42,7 @@ test("the list's selection and keyboard movement drive the detail pane, its gene
 
   // Switching shows the list and an empty pane.
   await page.getByRole('radio', { name: 'Split' }).click();
-  await expect(page.getByRole('listbox', { name: 'Groups' })).toBeVisible();
+  await expect(page.getByRole('listbox', { name: 'Groups and refused names' })).toBeVisible();
   await expect(page.locator('article.media-card')).toHaveCount(0);
   await expect(page.locator('.browse-detail-empty')).toBeVisible();
 
@@ -105,7 +105,7 @@ test("the list's selection and keyboard movement drive the detail pane, its gene
 
   // The choice survives a reload.
   await page.reload();
-  await expect(page.getByRole('listbox', { name: 'Groups' })).toBeVisible();
+  await expect(page.getByRole('listbox', { name: 'Groups and refused names' })).toBeVisible();
 
   // The shell widened, and only in split view: `.app`'s cap rises from 60rem
   // to 90rem only under `[data-browse-view='split']`, so a box measured after

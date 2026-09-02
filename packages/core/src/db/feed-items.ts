@@ -60,14 +60,37 @@ export function getFeedItem(db: DatabaseSync, id: number): FeedItemRow | null {
   return row === undefined ? null : toFeedItemRow(row as SqlRow);
 }
 
-export interface FailedQuery {
+/**
+ * A whole page's worth of feed items, keyed by id, in one query — the same
+ * batching discipline `groupsByIds` and `metadataForGroups` follow, applied to
+ * the other namespace `/api/browse` now merges in. Hydrating a merged page's
+ * failed rows one `getFeedItem` at a time is exactly the per-row pattern
+ * issues #31 and #33 both name.
+ *
+ * A missing id is simply absent from the map, the same fact a `get` returning
+ * null carried before.
+ */
+export function feedItemsByIds(db: DatabaseSync, ids: readonly number[]): Map<number, FeedItemRow> {
+  const found = new Map<number, FeedItemRow>();
+  if (ids.length === 0) return found;
+  const holes = ids.map(() => '?').join(', ');
+  for (const row of db.prepare(`${SELECT} WHERE id IN (${holes})`).all(...ids)) {
+    const item = toFeedItemRow(row as SqlRow);
+    found.set(item.id, item);
+  }
+  return found;
+}
+
+export interface DismissedQuery {
   cursor: { firstSeenAt: number; id: number } | null;
   limit: number;
-  includeDismissed: boolean;
 }
 
 /**
- * The Failed list: everything the parser could not decode, newest first.
+ * The Dismissed list: names the parser refused that a person waved off,
+ * newest first. The open half of the same failures — never dismissed — is no
+ * longer this function's concern; `browse-page.ts` queries `feed_items`
+ * itself for those, as one branch of the merged Browse union.
  *
  * Keyset pagination on (first_seen_at, id) rather than OFFSET, so a page stays
  * stable while ingest is inserting ahead of it — the same reason and the same
@@ -85,11 +108,10 @@ export interface FailedQuery {
  * The cursor comparison's tiebreak has to mirror the ORDER BY's: with `id`
  * ascending inside a tie, the next page holds ids *greater* than the cursor's.
  */
-export function failedFeedItems(db: DatabaseSync, query: FailedQuery): FeedItemRow[] {
-  const conditions = ['parse_error IS NOT NULL'];
+export function dismissedFeedItems(db: DatabaseSync, query: DismissedQuery): FeedItemRow[] {
+  const conditions = ['parse_error IS NOT NULL', 'dismissed_at IS NOT NULL'];
   const params: number[] = [];
 
-  if (!query.includeDismissed) conditions.push('dismissed_at IS NULL');
   if (query.cursor !== null) {
     conditions.push('(first_seen_at < ? OR (first_seen_at = ? AND id > ?))');
     params.push(query.cursor.firstSeenAt, query.cursor.firstSeenAt, query.cursor.id);
@@ -111,9 +133,10 @@ export function setParseError(db: DatabaseSync, feedItemId: number, error: strin
 /**
  * Clears `dismissed_at` alongside the error, because an item cannot be both
  * dismissed and resolved. Fixing something previously waved off is a
- * legitimate change of mind — reachable through the list's `includeDismissed`
- * view — and leaving the dismissal behind would hide an item that now holds a
- * perfectly good release from the default view forever.
+ * legitimate change of mind — reachable through the Dismissed tab, whose Fix…
+ * form this same function is called from — and leaving the dismissal behind
+ * would hide an item that now holds a perfectly good release from Browse's
+ * own list forever.
  */
 export function clearParseError(db: DatabaseSync, id: number): void {
   db.prepare('UPDATE feed_items SET parse_error = NULL, dismissed_at = NULL WHERE id = ?').run(id);

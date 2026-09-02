@@ -35,11 +35,11 @@ test('a refused name described by hand joins the group its identity names', asyn
   harness.ingest([parsed]);
   const refused = harness.ingest([REFUSED]);
   // If the parser ever learns to read this name the test still has to fail
-  // loudly, rather than quietly passing with an empty Failed tab.
+  // loudly, rather than quietly passing with no failed card on Browse.
   expect(refused.parseErrors).toBe(1);
 
-  await page.goto('/failed');
-  const row = page.locator('li.failed-row').filter({ hasText: REFUSED });
+  await page.goto('/');
+  const row = page.locator('article.failed-card').filter({ hasText: REFUSED });
   await expect(row).toBeVisible();
 
   await row.getByRole('button', { name: 'Fix' }).click();
@@ -52,11 +52,16 @@ test('a refused name described by hand joins the group its identity names', asyn
   await form.getByLabel('Scene', { exact: true }).fill('Alex Coal');
   await form.getByRole('button', { name: 'Save' }).click();
 
+  // Browse's list is not only failures, so it has no "Nothing failed to
+  // parse" equivalent to assert on; the card leaving is the fact that matters.
   await expect(row).toHaveCount(0);
   await expect(page.locator('p.notice')).toHaveText('Alex Coal joined an existing group');
-  await expect(page.getByText('Nothing failed to parse.')).toBeVisible();
 
-  await page.getByRole('link', { name: 'Browse' }).click();
+  // The merge is not patched into the loaded card — Browse only drops the
+  // fixed name, the same "the resolved group does not appear until the next
+  // load" rule `Browse.test.tsx` pins — so a fresh load is what shows the
+  // release having actually landed under Alex Coal's group.
+  await page.reload();
   const card = page
     .locator('article.media-card')
     .filter({ has: page.getByRole('heading', { name: 'Alex Coal' }) });

@@ -72,7 +72,7 @@ const THROWS_ON_PREFILL: MediaTypePlugin = {
   },
 };
 
-/** A plugin whose suggestion hook is broken, which no Failed page can avoid. */
+/** A plugin whose suggestion hook is broken, which no failed listing can avoid. */
 const THROWS_ON_SUGGEST: MediaTypePlugin = {
   ...PLUGIN,
   suggestManualValues: () => {
@@ -294,10 +294,10 @@ test('manual-fields omits a plugin that describes a form it cannot read back', a
 
   const body = (await server.inject({ method: 'GET', url: '/api/manual-fields' })).json();
 
-  // Listing it would put a Fix form on the Failed screen whose every submit is
+  // Listing it would put a Fix… form on a failed card whose every submit is
   // a 409 from `resolveFeedItem`. Browse is already right about this plugin —
-  // it has no `toManualValues`, so no card offers Edit — and the two screens
-  // have to agree.
+  // it has no `toManualValues`, so no card offers Edit — and Browse's failed
+  // cards and the Dismissed tab's have to agree.
   assert.deepEqual(body, {});
   await server.close();
   db.close();
@@ -318,37 +318,57 @@ test('a plugin whose field list throws costs its schema, not the endpoint', asyn
   db.close();
 });
 
-// --- The failed list ---------------------------------------------------
+// --- The Dismissed list -------------------------------------------------
 
-test('failed lists refusals newest-first with the plugin and its suggestions', async () => {
+/**
+ * Two more dismissed items alongside item 3 from `seedFeedItems`, at ids well
+ * clear of every other fixture in this file — used only with that function's
+ * own database. 101 is the newest dismissal and 102 the oldest, with item 3
+ * falling between them, so the Dismissed list has three rows to page and tie
+ * over without disturbing the single-dismissal shape the rest of the file's
+ * fixture keeps.
+ */
+function seedExtraDismissed(db: DatabaseSync): void {
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, published_at, first_seen_at,
+                             parse_error, dismissed_at)
+     VALUES (101, 'f', 'g101', 'Zeta.OneOhOne', 'https://indexer.invalid/101.nzb', NULL, 500, 'no site', 950),
+            (102, 'f', 'g102', 'Eta.OneOhTwo',  'https://indexer.invalid/102.nzb', NULL, 250, 'no date', 920)`,
+  ).run();
+}
+
+test('dismissed lists refusals newest-first with the plugin and its suggestions', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
+  seedExtraDismissed(db);
   const server = buildServer(deps(db));
 
-  const response = await server.inject({ method: 'GET', url: '/api/failed' });
+  const response = await server.inject({ method: 'GET', url: '/api/dismissed' });
 
   assert.equal(response.statusCode, 200);
   const body = response.json();
-  // 3 is dismissed and 4 parsed; 5 is newest and comes first.
-  assert.deepEqual(idsOf(body), [5, 2, 1]);
+  // 1, 2 and 5 were never dismissed and 4 parsed; 101 is the newest dismissal
+  // and comes first, 102 the oldest and comes last.
+  assert.deepEqual(idsOf(body), [101, 3, 102]);
   assert.equal(body['nextCursor'], null);
 
-  // The whole item, not a chosen few fields: the Failed screen renders the feed
-  // it came from and links the nzb, and neither `feedId`, `link` nor
+  // The whole item, not a chosen few fields: the Dismissed tab renders the
+  // feed it came from and links the nzb, and neither `feedId`, `link` nor
   // `firstSeenAt` is checked anywhere else — `nextCursor` is built from the row,
   // not from this view, so a blanked field here would reach the UI silently.
   // Comparing the object also fails loudly if a field is added without a test.
-  assert.deepEqual((body['items'] as FailedItemBody[])[2], {
-    id: 1,
+  const gamma = (body['items'] as FailedItemBody[]).find((item) => item.id === 3);
+  assert.deepEqual(gamma, {
+    id: 3,
     feedId: 'f',
     plugin: 'test',
-    rawTitle: 'Alpha.One',
-    link: 'https://indexer.invalid/1.nzb',
+    rawTitle: 'Gamma.Three',
+    link: 'https://indexer.invalid/3.nzb',
     parseError: 'no site',
-    firstSeenAt: 100,
-    publishedAt: 11,
-    suggestedValues: { title: 'Alpha One' },
-    dismissedAt: null,
+    firstSeenAt: 300,
+    publishedAt: null,
+    suggestedValues: { title: 'Gamma Three' },
+    dismissedAt: 900,
   });
   await server.close();
   db.close();
@@ -357,65 +377,75 @@ test('failed lists refusals newest-first with the plugin and its suggestions', a
 test('a plugin whose suggestion hook throws costs the prefill, not the page', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
+  seedExtraDismissed(db);
   const server = buildServer(deps(db, THROWS_ON_SUGGEST));
 
-  const response = await server.inject({ method: 'GET', url: '/api/failed' });
+  const response = await server.inject({ method: 'GET', url: '/api/dismissed' });
 
   // The hook's contract forbids throwing, but a contract is what a plugin owes
   // rather than what it does — and this call site runs once per row, so one
   // plugin breaking on one refused name would 500 the entire worklist of
-  // broken names. That is the screen a broken plugin most needs to be visible
+  // broken names. That is the tab a broken plugin most needs to be visible
   // on, and the only route from a refusal to a correction.
   assert.equal(response.statusCode, 200);
   const items = response.json()['items'] as FailedItemBody[];
-  assert.deepEqual(idsOf(response.json()), [5, 2, 1]);
+  assert.deepEqual(idsOf(response.json()), [101, 3, 102]);
   for (const item of items) assert.deepEqual(item.suggestedValues, {});
   await server.close();
   db.close();
 });
 
-test('a failed item from a feed no longer in configuration names no plugin', async () => {
+test('a dismissed item from a feed no longer in configuration names no plugin', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
+  // A dismissed orphan of its own: item 5 in `seedFeedItems` is on the
+  // unconfigured feed but was never dismissed, so it never reaches this list.
+  db.prepare(
+    `INSERT INTO feed_items (id, feed_id, guid, raw_title, link, published_at, first_seen_at,
+                             parse_error, dismissed_at)
+     VALUES (103, 'gone', 'g103', 'Theta.OneOhThree', 'https://indexer.invalid/103.nzb', NULL, 350, 'no site', 930)`,
+  ).run();
   const server = buildServer(deps(db));
 
-  const body = (await server.inject({ method: 'GET', url: '/api/failed' })).json();
+  const body = (await server.inject({ method: 'GET', url: '/api/dismissed' })).json();
   const orphan = (body['items'] as FailedItemBody[])[0]!;
 
   // Nothing can say which schema would describe it, so the SPA offers no form
   // — and asking a plugin picked at random for suggestions would be worse.
-  assert.equal(orphan.id, 5);
+  assert.equal(orphan.id, 103);
   assert.equal(orphan.plugin, '');
   assert.deepEqual(orphan.suggestedValues, {});
   await server.close();
   db.close();
 });
 
-test('failed paginates with a cursor and reports the last page as the last page', async () => {
+test('dismissed paginates with a cursor and reports the last page as the last page', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
+  seedExtraDismissed(db);
   const server = buildServer(deps(db));
 
-  const first = (await server.inject({ method: 'GET', url: '/api/failed?limit=2' })).json();
-  assert.deepEqual(idsOf(first), [5, 2]);
-  assert.equal(first['nextCursor'], '200:2');
+  const first = (await server.inject({ method: 'GET', url: '/api/dismissed?limit=2' })).json();
+  assert.deepEqual(idsOf(first), [101, 3]);
+  assert.equal(first['nextCursor'], '300:3');
 
   const second = (
     await server.inject({
       method: 'GET',
-      url: `/api/failed?limit=2&cursor=${encodeURIComponent(String(first['nextCursor']))}`,
+      url: `/api/dismissed?limit=2&cursor=${encodeURIComponent(String(first['nextCursor']))}`,
     })
   ).json();
-  assert.deepEqual(idsOf(second), [1]);
+  assert.deepEqual(idsOf(second), [102]);
   // One page exactly the length of the list is not a page with more behind it.
   assert.equal(second['nextCursor'], null);
   await server.close();
   db.close();
 });
 
-test('a malformed failed cursor is a 400, never a silent first page', async () => {
+test('a malformed dismissed cursor is a 400, never a silent first page', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
+  seedExtraDismissed(db);
   const server = buildServer(deps(db));
 
   // A representative shape of each way a cursor can fail to be one: no
@@ -424,12 +454,12 @@ test('a malformed failed cursor is a 400, never a silent first page', async () =
   // one past `Number.MAX_SAFE_INTEGER`. The exhaustive table lives beside
   // `/api/browse` in `server.test.ts` — both routes go through the same
   // `parseCursor`, and what this test is for is that this one does too. A
-  // refused cursor answered with page one would scroll the Failed tab forever
-  // (issue #33), exactly as it did Browse.
+  // refused cursor answered with page one would scroll the Dismissed tab
+  // forever (issue #33), exactly as it did Browse.
   for (const cursor of ['nonsense', '', ':2', '200:', '200:2:3', '1e3:2', '9007199254740993:2']) {
     const response = await server.inject({
       method: 'GET',
-      url: `/api/failed?cursor=${encodeURIComponent(cursor)}`,
+      url: `/api/dismissed?cursor=${encodeURIComponent(cursor)}`,
     });
 
     assert.equal(response.statusCode, 400, `cursor ${JSON.stringify(cursor)} should be refused`);
@@ -441,89 +471,86 @@ test('a malformed failed cursor is a 400, never a silent first page', async () =
     );
   }
 
-  // Sending none still means the first page, which is the request the screen
+  // Sending none still means the first page, which is the request the tab
   // opens with.
-  const firstPage = await server.inject({ method: 'GET', url: '/api/failed' });
+  const firstPage = await server.inject({ method: 'GET', url: '/api/dismissed' });
   assert.equal(firstPage.statusCode, 200);
-  assert.deepEqual(idsOf(firstPage.json()), [5, 2, 1]);
+  assert.deepEqual(idsOf(firstPage.json()), [101, 3, 102]);
   await server.close();
   db.close();
 });
 
-test('a failed cursor whose item has since been resolved away still pages from where it pointed', async () => {
+test('a dismissed cursor whose item has since been resolved away still pages from where it pointed', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
+  seedExtraDismissed(db);
   const server = buildServer(deps(db));
 
-  const first = (await server.inject({ method: 'GET', url: '/api/failed?limit=2' })).json();
-  assert.equal(first['nextCursor'], '200:2');
+  const first = (await server.inject({ method: 'GET', url: '/api/dismissed?limit=2' })).json();
+  assert.equal(first['nextCursor'], '300:3');
   // How a row actually leaves this list, rather than `DELETE FROM feed_items`:
   // nothing in `packages/core/src` deletes a feed item, and resolving one goes
-  // through `clearParseError`, which nulls the column the list filters on and
-  // leaves the row where it was. A deleted row would exercise a state the
-  // application cannot reach, and would pass for the wrong reason — the boundary
-  // holds here *because* the comparison never looks the row up, so a row that is
-  // present but filtered out is the case that has to work.
-  clearParseError(db, 2);
+  // through `clearParseError`, which nulls both the column this list filters
+  // on and `dismissed_at`, leaving the row where it was. A deleted row would
+  // exercise a state the application cannot reach, and would pass for the
+  // wrong reason — the boundary holds here *because* the comparison never
+  // looks the row up, so a row that is present but filtered out is the case
+  // that has to work. Resolving item 3 here is also the ordinary case: it is
+  // the very row the cursor names, the one the user was working on.
+  clearParseError(db, 3);
 
   const second = (
-    await server.inject({ method: 'GET', url: '/api/failed?limit=2&cursor=200:2' })
+    await server.inject({ method: 'GET', url: '/api/dismissed?limit=2&cursor=300:3' })
   ).json();
 
   // Well-formed and merely stale, which is not malformed: the comparison is
-  // `(first_seen_at, id)` against the index and not a lookup of that row, so the
-  // boundary still holds. This is the ordinary case — the row a cursor names is
-  // the one the user was working on, and resolving it is what the screen is for.
-  assert.deepEqual(idsOf(second), [1]);
+  // `(first_seen_at, id)` against the index and not a lookup of that row, so
+  // the boundary still holds.
+  assert.deepEqual(idsOf(second), [102]);
   assert.equal(second['nextCursor'], null);
   await server.close();
   db.close();
 });
 
-test('a page exactly as long as what remains still reports no next page', async () => {
+test('a dismissed page exactly as long as what remains still reports no next page', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
+  seedExtraDismissed(db);
   const server = buildServer(deps(db));
 
-  const body = (await server.inject({ method: 'GET', url: '/api/failed?limit=3' })).json();
+  const body = (await server.inject({ method: 'GET', url: '/api/dismissed?limit=3' })).json();
 
-  assert.deepEqual(idsOf(body), [5, 2, 1]);
+  assert.deepEqual(idsOf(body), [101, 3, 102]);
   assert.equal(body['nextCursor'], null);
   await server.close();
   db.close();
 });
 
-test('failed hides dismissed items unless includeDismissed is 1', async () => {
+test('the removed includeDismissed parameter no longer has any effect', async () => {
+  // `/api/failed` used to read the literal string '1' here; `/api/dismissed`
+  // has no such field in its schema at all, so passing it is simply an
+  // unrecognised query key — dropped by zod rather than rejected, and the
+  // response is identical with or without it.
   const db = openTestDatabase();
   seedFeedItems(db);
   const server = buildServer(deps(db));
 
-  const hidden = (await server.inject({ method: 'GET', url: '/api/failed' })).json();
-  assert.equal(idsOf(hidden).includes(3), false);
-
-  const shown = (
-    await server.inject({ method: 'GET', url: '/api/failed?includeDismissed=1' })
+  const withoutParam = (await server.inject({ method: 'GET', url: '/api/dismissed' })).json();
+  const withParam = (
+    await server.inject({ method: 'GET', url: '/api/dismissed?includeDismissed=1' })
   ).json();
-  assert.deepEqual(idsOf(shown), [5, 3, 2, 1]);
-  assert.equal((shown['items'] as FailedItemBody[])[1]?.dismissedAt, 900);
 
-  // The flag is the literal string '1'; anything else is off, so a stray
-  // `?includeDismissed=false` cannot read as true.
-  for (const value of ['0', 'false', 'true', 'yes', '']) {
-    const body = (
-      await server.inject({ method: 'GET', url: `/api/failed?includeDismissed=${value}` })
-    ).json();
-    assert.equal(idsOf(body).includes(3), false, `includeDismissed=${value} should be off`);
-  }
+  assert.deepEqual(idsOf(withoutParam), [3]);
+  assert.deepEqual(idsOf(withParam), [3]);
   await server.close();
   db.close();
 });
 
-test('a failed page over the maximum limit is a 400', async () => {
+test('a dismissed page over the maximum limit is a 400', async () => {
   const db = openTestDatabase();
   seedFeedItems(db);
   const server = buildServer(deps(db));
-  const response = await server.inject({ method: 'GET', url: '/api/failed?limit=1000' });
+  const response = await server.inject({ method: 'GET', url: '/api/dismissed?limit=1000' });
   assert.equal(response.statusCode, 400);
   await server.close();
   db.close();
@@ -928,7 +955,13 @@ test('a release edit that takes the group out of the browse list answers group: 
   assert.equal(getGroup(db, 1)?.upgradeReleaseId, null);
   assert.equal(browsableGroup(db, 1), null);
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  assert.deepEqual(browse['groups'], []);
+  // `seedFeedItems` also seeds a few undismissed parse failures, which the
+  // merged list now carries alongside groups — so this checks the group half
+  // specifically, rather than the whole page being empty.
+  assert.deepEqual(
+    browse['items'].filter((item: { kind: string }) => item.kind === 'group'),
+    [],
+  );
   await server.close();
   db.close();
 });
@@ -1088,7 +1121,10 @@ test('a group and its releases carry the values that would prefill an edit form'
   const server = buildServer(deps(db));
 
   const body = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const group = body['groups'].find((candidate: { id: number }) => candidate.id === 2);
+  const groups = body['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const group = groups.find((candidate: { id: number }) => candidate.id === 2);
 
   // The group's half is identity-only, which is exactly what a group edit
   // submits over: no quality, because a group holds none.
@@ -1111,7 +1147,10 @@ test('a plugin without the prefill hook produces no manualValues at all', async 
   const server = buildServer(deps(db, BARE));
 
   const body = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const group = body['groups'][0];
+  const groups = body['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const group = groups[0];
 
   // Their absence is how the SPA decides not to offer an Edit control, so an
   // empty object here would put a form in front of a plugin that cannot read
@@ -1135,7 +1174,11 @@ test('a plugin whose prefill hook throws costs the Edit control, not the list', 
   // whole list down rather than one card's Edit button.
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.includes('manualValues'), false);
-  const group = response.json()['groups'][0];
+  const body = response.json();
+  const groups = body['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const group = groups[0];
   assert.equal('manualValues' in group, false);
   assert.equal('manualValues' in group['releases'][0], false);
   await server.close();
@@ -1207,7 +1250,10 @@ test('opening Edit on a listing group and saving nothing merges nothing', async 
 
   const server = buildServer(deps(db, scenes));
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 1);
+  const groups = browse['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const listed = groups.find((candidate: { id: number }) => candidate.id === 1);
   const untouched = listed['manualValues'] as Record<string, string>;
 
   // Spec §11 calls this preview the only guard against a wrong manual
@@ -1274,7 +1320,10 @@ test('a group stored by the pre-fix parser survives opening Edit and saving noth
 
   const server = buildServer(deps(db, scenes));
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 1);
+  const groups = browse['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const listed = groups.find((candidate: { id: number }) => candidate.id === 1);
   const untouched = listed['manualValues'] as Record<string, string>;
 
   const preview = await server.inject({
@@ -1312,7 +1361,10 @@ test('every manual route answers a group view the browse list would agree with',
     })
   ).json()['group'];
   const browse = (await server.inject({ method: 'GET', url: '/api/browse' })).json();
-  const listed = browse['groups'].find((candidate: { id: number }) => candidate.id === 2);
+  const groups = browse['items']
+    .filter((item: { kind: string }) => item.kind === 'group')
+    .map((item: { group: unknown }) => item.group);
+  const listed = groups.find((candidate: { id: number }) => candidate.id === 2);
 
   // The SPA patches this card straight in, so the two have to be the same
   // object down to the prefill values.

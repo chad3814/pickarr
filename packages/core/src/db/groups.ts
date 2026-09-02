@@ -57,6 +57,27 @@ export function getGroup(db: DatabaseSync, id: number): GroupRow | null {
 }
 
 /**
+ * A whole page's worth of groups, keyed by id, in one query — the same shape
+ * as `metadataForGroups` and `performersForGroups`, empty-input early return
+ * included. `/api/browse` uses this to hydrate the group rows a merged page
+ * names by id, rather than one `getGroup` per row: issues #31 and #33 both
+ * name that per-row pattern as this route's recurring defect.
+ *
+ * A missing id is simply absent from the map, the same fact a `get` returning
+ * null carried before.
+ */
+export function groupsByIds(db: DatabaseSync, ids: readonly number[]): Map<number, GroupRow> {
+  const found = new Map<number, GroupRow>();
+  if (ids.length === 0) return found;
+  const holes = ids.map(() => '?').join(', ');
+  for (const row of db.prepare(`${SELECT} WHERE id IN (${holes})`).all(...ids)) {
+    const group = toGroupRow(row as SqlRow);
+    found.set(group.id, group);
+  }
+  return found;
+}
+
+/**
  * The `display` column for a whole page of groups, in one query — the same
  * shape as `metadataForGroups`, empty-input early return included, and for the
  * same reason: `/api/downloads` used to ask for one group's display per
@@ -380,12 +401,13 @@ export function completeUpgrade(db: DatabaseSync, groupId: number, releaseId: nu
 /**
  * What it means for a group to belong in the browse list: nothing picked yet,
  * or something better than what was picked. Written once and shared by the
- * list query and the single-group lookup below, because the two must never
- * disagree — a client that patched a card into a list the server would not
- * have returned, or dropped one it would have, is a list that quietly stops
- * matching the database.
+ * list query, the single-group lookup below, and `browse-page.ts`'s merged
+ * query, because none of the three must ever disagree — a client that
+ * patched a card into a list the server would not have returned, or dropped
+ * one it would have, is a list that quietly stops matching the database.
+ * Exported rather than copied, for the same reason.
  */
-const BROWSABLE = "(state = 'new' OR upgrade_release_id IS NOT NULL)";
+export const BROWSABLE = "(state = 'new' OR upgrade_release_id IS NOT NULL)";
 
 /**
  * The group, but only if it still belongs in the browse list.

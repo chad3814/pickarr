@@ -58,8 +58,8 @@ interface IdentityProps {
  * The identity half of a group, with the plugin's live reading of it.
  *
  * Separate from the card so the draft the preview watches is state of the
- * form's own, mounted and discarded with it — the same reason `Failed`'s
- * `FixForm` is separate from its row.
+ * form's own, mounted and discarded with it — the same reason `FailedCard`
+ * keeps its own `FixForm` separate from the card around it.
  */
 function IdentityForm({ plugin, fields, values, onSubmit, onCancel }: IdentityProps) {
   // Seeded over the *identity* fields with `ManualForm`'s own seeding, not a
