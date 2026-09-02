@@ -1,7 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
-import type { DownloadClients, HostFetch, JobHandler, MediaPlugin, PluginContext } from '@pickarr/contract';
+import type {
+  DownloadClients,
+  DownloadSubmission,
+  HostFetch,
+  JobHandler,
+  MediaPlugin,
+  PluginContext,
+} from '@pickarr/contract';
 import { openTestDatabase } from '../src/db/open.ts';
 import { migrateHost } from '../src/db/migrate.ts';
 import { createHost } from '../src/host.ts';
@@ -164,6 +171,44 @@ test('a download request reaches the plugin owning that item\'s feed', async () 
 
   assert.deepEqual(alphaReceived, [itemA]);
   assert.deepEqual(betaReceived, []);
+});
+
+test('a plugin submitting a download reaches the injected client and reads back its reference', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+
+  // A recording client rather than the throwing one every other test here
+  // uses: `DownloadClients` has no implementation in `src` yet, so this is
+  // the only thing that says `ctx.downloads.submit` is wired through to the
+  // host's own dependency at all.
+  const submitted: DownloadSubmission[] = [];
+  const downloads: DownloadClients = {
+    submit: async (submission) => {
+      submitted.push(submission);
+      return `sab-${submission.rssItemId}`;
+    },
+  };
+  const host = createHost({ raw, db, fetch: unusedFetch, downloads, now: () => 1000 });
+
+  // The reference is read, not discarded. A call whose return value nothing
+  // consumes pins only the parameters — `submit` could answer `undefined` and
+  // this test would not notice.
+  const references: string[] = [];
+  host.register(makePlugin({
+    id: 'alpha',
+    onDownloadRequest: async (rssItemId, ctx) => {
+      const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: 7 });
+      references.push(reference.toUpperCase());
+    },
+  }));
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  const itemId = insertRssItem(raw, feedId);
+
+  await host.requestDownload(itemId);
+
+  assert.deepEqual(submitted, [{ rssItemId: itemId, downloadClientId: 7 }]);
+  assert.deepEqual(references, [`SAB-${itemId}`]);
 });
 
 test('registering two plugins with the same id is refused', () => {
