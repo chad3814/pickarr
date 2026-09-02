@@ -336,14 +336,23 @@ import type { JobHandler, MediaPlugin, PluginContext } from '../src/index.ts';
  * compiling — which is the assertion. `npm run typecheck` is the gate.
  */
 const lookup: JobHandler = async (job, ctx) => {
+  // The rss item id comes from the payload, not from `job.id`. Both are
+  // numbers, so passing the job's own id would compile and be wrong — it would
+  // set the resolution of whatever rss item happens to share that rowid. A
+  // handler's payload is the only thing that knows which item it is about.
+  const { rssItemId } = job.payload as { rssItemId: number };
+
   const mediaItemId = await ctx.media.createMediaItem({
     pluginId: 'fixture', title: 'A Title', releaseDate: null, description: null,
   });
   const claim = await ctx.media.claimProviderRef(mediaItemId, 'tmdb', 'movie:1');
-  if (claim.dropped !== null) await ctx.media.dropMediaItem(claim.dropped);
+  if (claim.dropped !== null) {
+    await ctx.media.dropMediaItem(claim.dropped);
+    await ctx.media.relinkRssItem(rssItemId, claim.kept);
+  }
   const personId = await ctx.media.upsertPerson({ name: 'Someone', providerRef: 'p1' });
   await ctx.media.attachRole(claim.kept, { personId, role: 'cast', name: null, billingOrder: 0 });
-  await ctx.media.setResolution(job.id, 'resolved', null);
+  await ctx.media.setResolution(rssItemId, 'resolved', null);
 };
 
 const fixture: MediaPlugin = {
