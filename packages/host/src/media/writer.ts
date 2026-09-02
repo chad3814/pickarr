@@ -95,17 +95,28 @@ export function createMediaWriter(db: HostDb, now: () => number): MediaWriter {
 
     async attachPoster(mediaItemId: number, poster: PosterInit): Promise<void> {
       const at = now();
+      // Upsert on `(media_item_id, url)`, not a bare INSERT: every handler
+      // has to be safe to run twice, because crash recovery re-runs a job
+      // that was already claimed. `created_at` is left as the first write
+      // set it -- the row is the same row, seen again.
       raw.prepare(`
         INSERT INTO poster (media_item_id, title, language, url, width, height, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (media_item_id, url) DO UPDATE
+          SET title = excluded.title, language = excluded.language,
+              width = excluded.width, height = excluded.height
       `).run(mediaItemId, poster.title, poster.language, poster.url, poster.width, poster.height, at);
     },
 
     async attachBackground(mediaItemId: number, background: BackgroundInit): Promise<void> {
       const at = now();
+      // Idempotent for the same reason as `attachPoster`.
       raw.prepare(`
         INSERT INTO background (media_item_id, title, description, language, url, width, height, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (media_item_id, url) DO UPDATE
+          SET title = excluded.title, description = excluded.description,
+              language = excluded.language, width = excluded.width, height = excluded.height
       `).run(
         mediaItemId,
         background.title,
@@ -138,9 +149,17 @@ export function createMediaWriter(db: HostDb, now: () => number): MediaWriter {
 
     async attachRole(mediaItemId: number, role: RoleInit): Promise<void> {
       const at = now();
+      // Upsert on `(media_item_id, person_id, role)`. One person plays one
+      // part in one item once, so re-attaching the same part is the same row
+      // rather than a second one -- which is what lets a `lookup` handler run
+      // twice without doubling an item's cast, and what makes the dedup's
+      // re-attach of the loser's people onto the winner a no-op where the two
+      // casts overlap.
       raw.prepare(`
         INSERT INTO role (media_item_id, person_id, role, name, billing_order, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (media_item_id, person_id, role) DO UPDATE
+          SET name = excluded.name, billing_order = excluded.billing_order
       `).run(mediaItemId, role.personId, role.role, role.name, role.billingOrder, at);
     },
 

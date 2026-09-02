@@ -116,7 +116,10 @@ export const role = sqliteTable('role', {
   billingOrder: integer('billing_order'),
   createdAt: integer('created_at').notNull(),
 }, (t) => [
-  index('role_media_item').on(t.mediaItemId),
+  // Unique, not a plain index: `attachRole` upserts onto it, which is what
+  // makes a re-run job handler idempotent. Its leading column is
+  // `mediaItemId`, so it also serves "every role on this item".
+  uniqueIndex('role_media_item_person_role').on(t.mediaItemId, t.personId, t.role),
 ]);
 
 /**
@@ -145,7 +148,9 @@ export const poster = sqliteTable('poster', {
   height: integer('height').notNull(),
   createdAt: integer('created_at').notNull(),
 }, (t) => [
-  index('poster_media_item').on(t.mediaItemId),
+  // Unique on the url for the same reason as `role_media_item_person_role`:
+  // one image is one row however many times a handler re-runs.
+  uniqueIndex('poster_media_item_url').on(t.mediaItemId, t.url),
 ]);
 
 export const background = sqliteTable('background', {
@@ -159,10 +164,14 @@ export const background = sqliteTable('background', {
   height: integer('height').notNull(),
   createdAt: integer('created_at').notNull(),
 }, (t) => [
-  index('background_media_item').on(t.mediaItemId),
+  uniqueIndex('background_media_item_url').on(t.mediaItemId, t.url),
 ]);
 
-/** Same shape as `poster` — nothing populates either until the image slice. */
+/**
+ * Same columns as `poster`, but with no writer at all: `MediaWriter` has
+ * `attachPoster` and `attachBackground` and nothing for a logo, so this table
+ * is unreachable through the contract until the image slice adds one.
+ */
 export const logo = sqliteTable('logo', {
   id: integer('id').primaryKey(),
   mediaItemId: integer('media_item_id').notNull().references(() => mediaItem.id),

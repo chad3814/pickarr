@@ -173,7 +173,9 @@ test('setResolution records refused and unresolved as different states', async (
   assert.ok(unresolved);
   assert.equal(unresolved.resolution, 'unresolved');
   assert.equal(unresolved.resolution_detail, 'unrecognised filename');
-  assert.notEqual(refused.resolution, unresolved.resolution, 'refused and unresolved must not collapse to the same state');
+  // The two `assert.equal`s above are already what stops the two states
+  // collapsing into one; a third assertion that the two differ restates them
+  // rather than adding a way for this test to fail.
 });
 
 test('upsertPerson returns the same id for a repeated providerRef', async () => {
@@ -206,4 +208,92 @@ test('dropMediaItem removes the loser and leaves the keeper', async () => {
 
   assert.equal(readMediaItem(raw, loserId), undefined, 'the loser must be gone');
   assert.ok(readMediaItem(raw, keeperId), 'the keeper must be untouched');
+});
+
+/**
+ * Rows read back from `role`, column by column: node:sqlite hands back
+ * null-prototype rows, which `deepEqual` will not match against a literal.
+ */
+function readRoles(raw: DatabaseSync) {
+  return raw.prepare(
+    'SELECT media_item_id, person_id, role, name, billing_order, created_at FROM role ORDER BY id',
+  ).all().map((row) => ({
+    mediaItemId: row['media_item_id'],
+    personId: row['person_id'],
+    role: row['role'],
+    name: row['name'],
+    billingOrder: row['billing_order'],
+    createdAt: row['created_at'],
+  }));
+}
+
+test('attachRole is idempotent: the same part attached twice is one row, with the later details', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  let at = 1000;
+  const writer = createMediaWriter(db, () => at);
+
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  const personId = await writer.upsertPerson({ name: 'Ada', providerRef: 'p-1' });
+
+  await writer.attachRole(mediaItemId, { personId, role: 'cast', name: 'The Countess', billingOrder: 3 });
+  at = 2000;
+  // Every job handler must be safe to run twice, because crash recovery
+  // re-runs a job that was already claimed. A second identical attach is what
+  // that re-run looks like from here.
+  await writer.attachRole(mediaItemId, { personId, role: 'cast', name: 'The Countess', billingOrder: 3 });
+
+  assert.deepEqual(readRoles(raw), [
+    { mediaItemId, personId, role: 'cast', name: 'The Countess', billingOrder: 3, createdAt: 1000 },
+  ]);
+
+  // A different part for the same person in the same item is a different row,
+  // so the dedup key is the part and not just the person.
+  await writer.attachRole(mediaItemId, { personId, role: 'director', name: null, billingOrder: null });
+  assert.equal(readRoles(raw).length, 2, 'a second role for one person is a second row');
+
+  // The upsert corrects the row rather than ignoring the write: a provider
+  // that revises a billing order has to be able to land it.
+  await writer.attachRole(mediaItemId, { personId, role: 'cast', name: 'The Countess', billingOrder: 0 });
+  const roles = readRoles(raw);
+  assert.equal(roles.length, 2, 'a revised part is still one row');
+  const cast = roles.at(0);
+  assert.ok(cast);
+  assert.equal(cast.billingOrder, 0, 'the second attach must correct the row, not be discarded');
+  assert.equal(cast.createdAt, 1000, 'created_at belongs to the first write: this is the same row seen again');
+});
+
+test('attachPoster and attachBackground are idempotent on their url', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 1000);
+
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  const url = 'https://images.test/poster.jpg';
+
+  await writer.attachPoster(mediaItemId, { title: null, language: null, url, width: 300, height: 450 });
+  await writer.attachPoster(mediaItemId, { title: 'front', language: 'en', url, width: 600, height: 900 });
+  const posters = raw.prepare('SELECT title, language, url, width, height FROM poster ORDER BY id')
+    .all().map((row) => ({
+      title: row['title'], language: row['language'], url: row['url'],
+      width: row['width'], height: row['height'],
+    }));
+  assert.deepEqual(posters, [{ title: 'front', language: 'en', url, width: 600, height: 900 }]);
+
+  // A second image for the same item is a second row: the key is the url, not
+  // the item, or an item could only ever hold one poster.
+  await writer.attachPoster(mediaItemId, { title: null, language: null, url: `${url}?v=2`, width: 300, height: 450 });
+  assert.equal(raw.prepare('SELECT id FROM poster').all().length, 2);
+
+  const bgUrl = 'https://images.test/bg.jpg';
+  await writer.attachBackground(mediaItemId, { title: null, description: null, language: null, url: bgUrl, width: 1920, height: 1080 });
+  await writer.attachBackground(mediaItemId, { title: 'wide', description: 'a grid', language: 'en', url: bgUrl, width: 3840, height: 2160 });
+  const backgrounds = raw.prepare('SELECT title, description, language, url, width, height FROM background ORDER BY id')
+    .all().map((row) => ({
+      title: row['title'], description: row['description'], language: row['language'],
+      url: row['url'], width: row['width'], height: row['height'],
+    }));
+  assert.deepEqual(backgrounds, [
+    { title: 'wide', description: 'a grid', language: 'en', url: bgUrl, width: 3840, height: 2160 },
+  ]);
 });

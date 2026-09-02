@@ -81,9 +81,25 @@ export interface MediaWriter {
   /** Deletes a media item that lost a provider-ref claim. */
   dropMediaItem(mediaItemId: number): Promise<void>;
 
+  /**
+   * Attaches a poster, keyed on its url: attaching the same url twice leaves
+   * one row, so a handler re-run by crash recovery does not double-write.
+   *
+   * Nothing calls this yet. The image slice is where posters are fetched and
+   * chosen; the method is here because a media item's artwork is a shared row
+   * and shared rows have one writer.
+   */
   attachPoster(mediaItemId: number, poster: PosterInit): Promise<void>;
+  /** As `attachPoster`, for a backdrop. Also uncalled until the image slice. */
   attachBackground(mediaItemId: number, background: BackgroundInit): Promise<void>;
   upsertPerson(person: PersonInit): Promise<number>;
+  /**
+   * Attaches one person's part in one item, keyed on
+   * `(mediaItemId, personId, role)`: re-attaching the same part updates that
+   * row rather than adding a second, so a handler is safe to run twice and a
+   * dedup that re-attaches the loser's cast onto the winner cannot duplicate
+   * the people the two answers shared.
+   */
   attachRole(mediaItemId: number, role: RoleInit): Promise<void>;
   setResolution(rssItemId: number, resolution: Resolution, detail: string | null): Promise<void>;
 }

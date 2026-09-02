@@ -96,7 +96,10 @@ CREATE TABLE role (
   billing_order INTEGER,
   created_at    INTEGER NOT NULL
 );
-CREATE INDEX role_media_item ON role (media_item_id);
+-- Unique, not a plain index: attachRole upserts onto it, which is what makes
+-- a re-run job handler idempotent. Its leading column is media_item_id, so it
+-- also serves "every role on this item".
+CREATE UNIQUE INDEX role_media_item_person_role ON role (media_item_id, person_id, role);
 
 CREATE TABLE external_reference (
   id            INTEGER PRIMARY KEY,
@@ -117,7 +120,9 @@ CREATE TABLE poster (
   height        INTEGER NOT NULL,
   created_at    INTEGER NOT NULL
 );
-CREATE INDEX poster_media_item ON poster (media_item_id);
+-- Unique on the url for the same reason as role_media_item_person_role: one
+-- image is one row however many times a handler re-runs.
+CREATE UNIQUE INDEX poster_media_item_url ON poster (media_item_id, url);
 
 CREATE TABLE background (
   id            INTEGER PRIMARY KEY,
@@ -130,7 +135,7 @@ CREATE TABLE background (
   height        INTEGER NOT NULL,
   created_at    INTEGER NOT NULL
 );
-CREATE INDEX background_media_item ON background (media_item_id);
+CREATE UNIQUE INDEX background_media_item_url ON background (media_item_id, url);
 
 CREATE TABLE logo (
   id            INTEGER PRIMARY KEY,

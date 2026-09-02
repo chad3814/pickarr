@@ -537,7 +537,7 @@ test('two rss items resolving to one provider ref end up sharing one media item'
     title: 'The Grid',
     releaseDate: '2019-04-02',
     description: null,
-    people: [ADA],
+    people: [ADA, GRACE],
   });
   const repack = resolvedEntry(REPACK, {
     lookupId: 'lk-b',
@@ -546,7 +546,12 @@ test('two rss items resolving to one provider ref end up sharing one media item'
     title: 'The Grid (repack)',
     releaseDate: '2019-04-02',
     description: null,
-    people: [GRACE],
+    // The same cast as the entry above, because a repack of a film is that
+    // film. Disjoint casts would make this test pass against an
+    // implementation that duplicated every shared person: the loser's people
+    // are re-attached to the winner, so an overlap is the only fixture in
+    // which the duplicate is observable at all.
+    people: [ADA, GRACE],
   });
   const { raw, host } = setup(script([original, repack]));
   const ids = given(raw, [MOVIE, REPACK]);
@@ -562,18 +567,14 @@ test('two rss items resolving to one provider ref end up sharing one media item'
   assert.equal(await host.runOnce(), true);
   assert.equal(await host.runOnce(), false);
 
-  // One survivor: whichever item claimed the reference first.
+  // One survivor: whichever item claimed the reference first. `only` is what
+  // says the loser was deleted rather than merely left unclaimed -- an
+  // unclaimed duplicate would still be a second row here -- and the title
+  // says which of the two survived.
   const media = only(mediaItems(raw), 'media item');
   assert.equal(media.title, 'The Grid');
   assert.equal(media.provider, 'tmdb');
   assert.equal(media.providerRef, GRID_REF);
-  // And the loser is deleted, not merely left unclaimed -- an unclaimed
-  // duplicate would still show up as a second item to every reader.
-  assert.equal(
-    mediaItems(raw).some((row) => row.title === 'The Grid (repack)'),
-    false,
-    'the item that lost the claim is still there',
-  );
 
   // Both rss items point at the survivor, and so do the double's own rows.
   assert.equal(rssItemState(raw, firstId).mediaItemId, media.id);
@@ -582,9 +583,20 @@ test('two rss items resolving to one provider ref end up sharing one media item'
   assert.equal(rssItemState(raw, secondId).resolution, 'resolved');
   assert.deepEqual(doubleRows(raw).map((row) => row.mediaItemId), [media.id, media.id]);
 
-  // Both answers' people land on the one survivor.
-  assert.deepEqual(persons(raw).map((person) => person.name), ['Ada Lovelace', 'Grace Hopper']);
-  assert.deepEqual(roles(raw).map((role) => role.mediaItemId), [media.id, media.id]);
+  // Both answers' people land on the one survivor, once each. The loser's
+  // people are attached to the *winner's* media item, so a cast the two
+  // answers share arrives twice and only `attachRole`'s upsert keeps it to
+  // one row per part.
+  const people = persons(raw);
+  assert.deepEqual(people.map((person) => person.name), ['Ada Lovelace', 'Grace Hopper']);
+  const ada = people.at(0);
+  const grace = people.at(1);
+  assert.ok(ada);
+  assert.ok(grace);
+  assert.deepEqual(roles(raw), [
+    { mediaItemId: media.id, personId: ada.id, role: 'cast', name: 'The Countess', billingOrder: 0 },
+    { mediaItemId: media.id, personId: grace.id, role: 'director', name: null, billingOrder: null },
+  ]);
 });
 
 /** Every outcome in one batch, so the crash resumes the whole flow rather than one branch of it. */
@@ -663,6 +675,51 @@ function snapshot(raw: DatabaseSync): Record<string, Row[]> {
 function lookupAttempts(raw: DatabaseSync): number {
   return only(jobs(raw).filter((job) => job.kind === 'lookup'), 'lookup job').attempts;
 }
+
+test('a handler that runs to completion twice does not double-write', async () => {
+  // The property the contract requires of every handler, because crash
+  // recovery re-runs a job that was already claimed. The crash test below
+  // does not cover it and cannot: it hangs the *first* request, so the
+  // abandoned handler had written nothing, and its snapshot equality proves
+  // the flow resumes rather than that re-running work already done is safe.
+  // This test lets the handler finish, then hands it the same job again.
+  const grid = resolvedEntry(MOVIE, {
+    lookupId: 'lk-grid',
+    provider: 'tmdb',
+    providerRef: GRID_REF,
+    title: 'The Grid',
+    releaseDate: '2019-04-02',
+    description: 'A film about a grid.',
+    people: [ADA, GRACE],
+  });
+  const { raw, host } = setup(script([grid]));
+  const ids = given(raw, [MOVIE]);
+
+  const outcome = await host.notifyNewRssItems(ids);
+  assert.deepEqual(outcome.unowned, []);
+  assert.deepEqual(outcome.failures, []);
+  assert.equal(await host.runOnce(), true, 'the lookup must run the first time');
+  assert.equal(only(jobs(raw), 'job').state, 'done', 'the first run must finish, not hang');
+
+  const afterFirstRun = snapshot(raw);
+  // A resolved entry writes to all five tables; a snapshot of five empty
+  // tables would be equal to itself whatever the second run did.
+  assert.equal(mediaItems(raw).length, 1);
+  assert.equal(roles(raw).length, 2);
+
+  // Back to `ready`, which is exactly the state `recover` leaves a job the
+  // process died holding, and run the same payload through the same handler.
+  const job = only(jobs(raw), 'job');
+  raw.prepare("UPDATE jobs SET state = 'ready' WHERE id = ?").run(job.id);
+  assert.equal(await host.runOnce(), true, 'the re-run must claim the same job');
+
+  // `snapshot` leaves `jobs.attempts` out, which is the one column a second
+  // run legitimately moves. Everything the handler wrote must be untouched:
+  // not one extra media item, person, role or double_media row, and no
+  // rewritten resolution.
+  assert.deepEqual(snapshot(raw), afterFirstRun);
+  assert.equal(lookupAttempts(raw), 2, 'the re-run consumed a second attempt');
+});
 
 test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   // The run to be matched. An actual second run rather than a hand-written
