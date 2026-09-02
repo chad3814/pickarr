@@ -23,6 +23,12 @@ const lookup: JobHandler = async (job, ctx) => {
     await ctx.media.dropMediaItem(claim.dropped);
     await ctx.media.relinkRssItem(rssItemId, claim.kept);
   }
+  await ctx.media.attachPoster(claim.kept, {
+    title: null, language: null, url: 'https://example.com/poster.jpg', width: 300, height: 450,
+  });
+  await ctx.media.attachBackground(claim.kept, {
+    title: null, description: null, language: null, url: 'https://example.com/bg.jpg', width: 1920, height: 1080,
+  });
   const personId = await ctx.media.upsertPerson({ name: 'Someone', providerRef: 'p1' });
   await ctx.media.attachRole(claim.kept, { personId, role: 'cast', name: null, billingOrder: 0 });
   await ctx.media.setResolution(rssItemId, 'resolved', null);
@@ -37,7 +43,13 @@ const fixture: MediaPlugin = {
     await ctx.jobs.enqueue({ kind: 'lookup', payload: { ids } });
   },
   onDownloadedFile: async () => {},
-  onDownloadRequest: async () => {},
+  onDownloadRequest: async (rssItemId, ctx: PluginContext) => {
+    // The client's own reference must be a real string, not `void` behind an
+    // ignored await — `.toUpperCase()` only compiles if `submit` kept its
+    // promised return type.
+    const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: 1 });
+    ctx.log('submitted download', { reference: reference.toUpperCase() });
+  },
 };
 
 test('the contract composes into a whole plugin', () => {

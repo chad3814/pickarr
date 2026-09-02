@@ -1,3 +1,4 @@
+import type { DownloadClients } from './downloads.ts';
 import type { HostFetch } from './fetch.ts';
 import type { JobQueue, JobRecord } from './jobs.ts';
 import type { MediaWriter } from './media.ts';
@@ -20,6 +21,7 @@ export interface PluginContext {
   media: MediaWriter;
   jobs: JobQueue;
   fetch: HostFetch;
+  downloads: DownloadClients;
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }
 

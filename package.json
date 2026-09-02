@@ -19,14 +19,18 @@
     "reclassify-artwork": "node --import tsx --conditions development scripts/reclassify-artwork.ts",
     "e2e": "npm run e2e -w @pickarr/e2e",
     "check": "npm run lint && npm run typecheck && npm run test-hygiene && npm run test",
-    "build": "npm run build -w @pickarr/contract -w @pickarr/plugin-api -w @pickarr/plugin-scenes -w @pickarr/core -w @pickarr/web"
+    "build": "npm run build -w @pickarr/contract -w @pickarr/plugin-api -w @pickarr/plugin-scenes -w @pickarr/core -w @pickarr/web -w @pickarr/host"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@typescript/native-preview": "latest",
+    "drizzle-kit": "1.0.0-rc.4",
     "esbuild": "^0.25.0",
     "oxlint": "^1.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "drizzle-orm": "1.0.0-rc.4"
   }
 }
