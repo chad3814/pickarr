@@ -260,8 +260,53 @@ test('recover dead-letters a job that crashed on its last permitted attempt, rat
   // restart, forever - it has to dead-letter instead.
   assert.equal(row.state, 'dead');
   assert.equal(row.attempts, 1);
-  assert.equal(typeof row.last_error, 'string');
-  assert.ok(String(row.last_error).length > 0, 'a dead-lettered row must say why');
+  // Not merely "some non-empty string": a crash and a rejection are different
+  // diagnoses, and `recover` sets this message specifically so a reader can
+  // tell which happened. Any other non-empty literal would satisfy a length
+  // check and satisfy nobody reading the row.
+  assert.match(
+    String(row.last_error),
+    /crashed/,
+    'a row dead because the process died has to say that is why',
+  );
+
+  release();
+  await stalled;
+});
+
+test('recover replaces a stale rejection message rather than letting it explain a crash', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  const options = { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 2 };
+  const runner = createRunner(raw, options);
+
+  const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
+
+  // Attempt one rejects, so the row really does carry a rejection's message —
+  // which is what makes the assertion below capable of failing. A job that had
+  // never rejected would have `last_error` NULL, and "the crash message is not
+  // the rejection's" would hold whatever `recover` wrote.
+  assert.equal(await runner.runOnce(() => boom, () => fakeCtx), true);
+  assert.equal(readJob(raw, id).last_error, 'handler boom');
+
+  // Attempt two is the last permitted one, and this time the process dies.
+  let release = noop;
+  const hang = new Promise<void>((resolve) => { release = resolve; });
+  const handler: JobHandler = async () => { await hang; };
+  const stalled = runner.runOnce(() => handler, () => fakeCtx);
+  assert.equal(readJob(raw, id).attempts, 2);
+
+  assert.equal(createRunner(raw, options).recover(), 1);
+
+  const row = readJob(raw, id);
+  assert.equal(row.state, 'dead');
+  assert.notEqual(
+    row.last_error,
+    'handler boom',
+    'this row is dead because the process died, not because the handler threw',
+  );
+  assert.match(String(row.last_error), /crashed/);
 
   release();
   await stalled;
