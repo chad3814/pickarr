@@ -217,6 +217,11 @@ function tableNames(raw: DatabaseSync): Set<string> {
  *
  * Table names must start with `<pluginId>_`. Enforced rather than documented,
  * because the failure it prevents is two plugins silently sharing a table.
+ * The check compares `sqlite_master`'s tables before and against after, so it
+ * sees new tables and nothing else: a migration that alters or writes to a
+ * host table, or creates a view, index or trigger under any name, passes it.
+ * `up()` receives the raw connection, so that is convention rather than a
+ * boundary — the same limitation `PluginContext.db` has.
  */
 export function migratePlugin(
   raw: DatabaseSync,
@@ -232,18 +237,36 @@ export function migratePlugin(
   for (const migration of migrations.toSorted((a, b) => a.version - b.version)) {
     if (done.has(migration.version)) continue;
     const before = tableNames(raw);
-    migration.up(raw);
-    for (const name of tableNames(raw)) {
-      if (before.has(name)) continue;
-      if (!name.startsWith(`${pluginId}_`)) {
-        throw new Error(
-          `plugin ${pluginId} migration ${migration.version} created table ${name}, ` +
-          `which lacks the required ${pluginId}_ prefix`,
-        );
+    // The migration, the prefix check and the row recording the version are
+    // one transaction, so a refused migration leaves no trace. SQLite's DDL
+    // autocommits, so without this the throw below lands *after* the offending
+    // table exists and *before* the version is recorded: the table survives
+    // into the next boot, where it is in `before`, the migration appears to
+    // create nothing new, the guard passes and the version is recorded as
+    // applied. The enforcement would last exactly one process lifetime.
+    raw.exec('SAVEPOINT plugin_migration');
+    try {
+      migration.up(raw);
+      for (const name of tableNames(raw)) {
+        if (before.has(name)) continue;
+        if (!name.startsWith(`${pluginId}_`)) {
+          throw new Error(
+            `plugin ${pluginId} migration ${migration.version} created table ${name}, ` +
+            `which lacks the required ${pluginId}_ prefix`,
+          );
+        }
       }
+      raw.prepare('INSERT INTO plugin_migrations (plugin_id, version, applied_at) VALUES (?, ?, ?)')
+        .run(pluginId, migration.version, Date.now());
+    } catch (err) {
+      // `ROLLBACK TO` undoes the work but leaves the savepoint on the stack;
+      // `RELEASE` is what pops it, so the connection is not left inside a
+      // transaction that nothing will ever close.
+      raw.exec('ROLLBACK TO plugin_migration');
+      raw.exec('RELEASE plugin_migration');
+      throw err;
     }
-    raw.prepare('INSERT INTO plugin_migrations (plugin_id, version, applied_at) VALUES (?, ?, ?)')
-      .run(pluginId, migration.version, Date.now());
+    raw.exec('RELEASE plugin_migration');
     ran += 1;
   }
   return ran;
