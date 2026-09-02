@@ -1,0 +1,616 @@
+/**
+ * A test-double media plugin, and the fake parser service it talks to.
+ *
+ * The contract in `@pickarr/contract` was designed before any real plugin
+ * existed, so this double is its only consumer. It therefore implements the
+ * whole new-items flow rather than a happy path: every lookup outcome the
+ * service can answer with — resolved, refused, unresolved and not-yet-answered
+ * — has a branch here, and `flow.test.ts` drives all of them.
+ *
+ * It depends on `@pickarr/contract`, `drizzle-orm` and `node:sqlite` and on
+ * nothing from `../../src`. That is deliberate: a double that reached into the
+ * host's own modules would prove the host composes with itself rather than
+ * that the contract is sufficient for a plugin written against it.
+ */
+import { DatabaseSync } from 'node:sqlite';
+import type { SQLOutputValue } from 'node:sqlite';
+import { drizzle } from 'drizzle-orm/node-sqlite';
+import { eq, inArray } from 'drizzle-orm';
+import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import type {
+  JobHandler,
+  MediaPlugin,
+  MediaType,
+  Migration,
+  PluginContext,
+} from '@pickarr/contract';
+
+/** Also the required prefix for every table this plugin declares. */
+export const DOUBLE_ID = 'double';
+
+/** The category the double sends the parser service, which is its own media type. */
+const MEDIA_TYPE: MediaType = 'movie';
+
+export const PARSER_ORIGIN = 'https://parser.test';
+export const LOOKUP_PATH = '/api/v1/lookup';
+
+/** How long a poll waits before asking the service again. */
+export const POLL_DELAY_MS = 5_000;
+
+/**
+ * Where a download goes. A real plugin would take this from the `rss_feed`
+ * row the item came from, which names a client by id; the double has no
+ * reason to configure more than one.
+ */
+const DEFAULT_DOWNLOAD_CLIENT_ID = 1;
+
+/**
+ * The double's own row: what it knows about one rss item's identification.
+ *
+ * Keyed per rss item rather than per media item, because the dedup points two
+ * rss items at a single media item — a per-media-item key would make the
+ * loser's row collide with the winner's.
+ *
+ * `.references()` is absent on purpose. The migration below carries the
+ * foreign keys, and their targets are the host's tables, whose Drizzle objects
+ * a plugin has no business importing.
+ */
+export const doubleMedia = sqliteTable('double_media', {
+  id: integer('id').primaryKey(),
+  rssItemId: integer('rss_item_id').notNull(),
+  /** Null until a lookup resolves: nothing identifies the item before then. */
+  mediaItemId: integer('media_item_id'),
+  /** The job that will identify it — the id `JobQueue.enqueue` returned. */
+  lookupJobId: integer('lookup_job_id'),
+  /** `provider:ref`, copied onto the double's own row once a claim settles. */
+  providerRef: text('provider_ref'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+});
+
+/**
+ * One table, one migration. Every name starts with `double_` because
+ * `migratePlugin` enforces the plugin's id as the prefix and rejects a
+ * migration that creates anything else.
+ */
+const MIGRATIONS: readonly Migration[] = [{
+  version: 1,
+  up: (db) => db.exec(`
+CREATE TABLE double_media (
+  id            INTEGER PRIMARY KEY,
+  rss_item_id   INTEGER NOT NULL REFERENCES rss_item (id),
+  media_item_id INTEGER REFERENCES media_item (id),
+  lookup_job_id INTEGER,
+  provider_ref  TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX double_media_rss_item ON double_media (rss_item_id);
+`),
+}];
+
+/** One person the service named, with the part they played. */
+export interface LookupPerson {
+  name: string;
+  /** The provider's own person id, which is what de-duplicates people. */
+  providerRef: string;
+  role: string;
+  /** The character's name where the provider gives one. */
+  characterName: string | null;
+  billingOrder: number | null;
+}
+
+/**
+ * One name's answer.
+ *
+ * `partial` is separate from `status` and has to be read first. A partial
+ * entry carries the status it *expects* to reach, not one it has reached: the
+ * service knows the lookup will resolve, it just ran out of time before
+ * filling in the payload. Trusting `status` alone would treat a blank answer
+ * as a finished one.
+ */
+export interface LookupEntry {
+  /** Echoed back, so a caller can match answers to the names it sent. */
+  name: string;
+  /** The service's own id for this lookup, which a poll asks about. */
+  lookupId: string;
+  status: 'resolved' | 'unresolved';
+  /** True when the answer is not here yet. */
+  partial: boolean;
+  /** Set when the name was identified as something that is not media. */
+  refusal: string | null;
+  provider: string | null;
+  providerRef: string | null;
+  title: string | null;
+  releaseDate: string | null;
+  description: string | null;
+  people: readonly LookupPerson[];
+}
+
+/** What `POST /api/v1/lookup` answers. Always with HTTP 200 — see `LookupEntry.partial`. */
+export interface LookupBatchResponse {
+  results: readonly LookupEntry[];
+}
+
+/** What `GET /api/v1/lookup/{id}` answers. */
+export interface LookupPollResponse {
+  result: LookupEntry;
+}
+
+/** The fields a resolved answer carries beyond the ones every entry has. */
+export interface ResolvedFields {
+  lookupId: string;
+  provider: string;
+  providerRef: string;
+  title: string;
+  releaseDate: string | null;
+  description: string | null;
+  people: readonly LookupPerson[];
+}
+
+export function resolvedEntry(name: string, fields: ResolvedFields): LookupEntry {
+  return {
+    name,
+    lookupId: fields.lookupId,
+    status: 'resolved',
+    partial: false,
+    refusal: null,
+    provider: fields.provider,
+    providerRef: fields.providerRef,
+    title: fields.title,
+    releaseDate: fields.releaseDate,
+    description: fields.description,
+    people: fields.people,
+  };
+}
+
+/**
+ * A non-media file, successfully identified as one. `status` is `resolved`,
+ * because identifying a subtitle *is* a successful identification.
+ */
+export function refusedEntry(name: string, fields: { lookupId: string; refusal: string }): LookupEntry {
+  return {
+    name,
+    lookupId: fields.lookupId,
+    status: 'resolved',
+    partial: false,
+    refusal: fields.refusal,
+    provider: null,
+    providerRef: null,
+    title: null,
+    releaseDate: null,
+    description: null,
+    people: [],
+  };
+}
+
+export function unresolvedEntry(name: string, fields: { lookupId: string }): LookupEntry {
+  return {
+    name,
+    lookupId: fields.lookupId,
+    status: 'unresolved',
+    partial: false,
+    refusal: null,
+    provider: null,
+    providerRef: null,
+    title: null,
+    releaseDate: null,
+    description: null,
+    people: [],
+  };
+}
+
+/** An answer that has not arrived: `status` is what it expects, nothing else is filled in. */
+export function partialEntry(name: string, fields: { lookupId: string }): LookupEntry {
+  return {
+    name,
+    lookupId: fields.lookupId,
+    status: 'resolved',
+    partial: true,
+    refusal: null,
+    provider: null,
+    providerRef: null,
+    title: null,
+    releaseDate: null,
+    description: null,
+    people: [],
+  };
+}
+
+/** What the fake service answers, by name for a batch and by lookup id for a poll. */
+export interface ParserScript {
+  /** Keyed by filename. A name the double asks about that is absent here is a test bug. */
+  batch: ReadonlyMap<string, LookupEntry>;
+  /** Keyed by lookup id: successive poll answers, one consumed per `GET`. */
+  polls: ReadonlyMap<string, readonly LookupEntry[]>;
+}
+
+export interface FakeParserService {
+  /**
+   * Hand this to `createHostFetch({ fetch })`. Nothing here touches
+   * `globalThis.fetch`, so no test has to put it back.
+   */
+  readonly fetch: typeof globalThis.fetch;
+  /** Live view: the names each batch `POST` asked about, one array per request. */
+  readonly batchRequests: readonly (readonly string[])[];
+  /** Live view: the lookup ids each poll `GET` asked about, in order. */
+  readonly pollRequests: readonly string[];
+}
+
+function urlOf(input: Parameters<typeof globalThis.fetch>[0]): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
+
+/** The names a batch request asked about, read back out of the body the double sent. */
+function readRequestedNames(body: RequestInit['body']): string[] {
+  if (typeof body !== 'string') {
+    throw new TypeError('fake parser service: a batch request must carry a JSON string body');
+  }
+  const parsed: unknown = JSON.parse(body);
+  if (typeof parsed !== 'object' || parsed === null || !('items' in parsed)) {
+    throw new TypeError('fake parser service: a batch request body must carry items');
+  }
+  const items: unknown = parsed.items;
+  if (!Array.isArray(items)) {
+    throw new TypeError('fake parser service: items is not an array');
+  }
+  return items.map((item: unknown) => {
+    if (typeof item !== 'object' || item === null || !('name' in item) || typeof item.name !== 'string') {
+      throw new TypeError('fake parser service: an item carries no name');
+    }
+    return item.name;
+  });
+}
+
+function jsonResponse(body: LookupBatchResponse | LookupPollResponse): Response {
+  // 200 whatever the entries say. A batch never answers 202: the per-entry
+  // `partial` flag is the only place "not yet" is reported.
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+export function createFakeParserService(script: ParserScript): FakeParserService {
+  const batchRequests: string[][] = [];
+  const pollRequests: string[] = [];
+  // Copied, so consuming an answer does not mutate the caller's script.
+  const remaining = new Map<string, LookupEntry[]>(
+    Array.from(script.polls, ([lookupId, answers]) => [lookupId, [...answers]]),
+  );
+
+  const serviceFetch: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(urlOf(input));
+    if (url.origin !== PARSER_ORIGIN) {
+      throw new Error(`fake parser service: unexpected origin ${url.origin}`);
+    }
+    const method = init?.method ?? 'GET';
+
+    if (method === 'POST' && url.pathname === LOOKUP_PATH) {
+      const names = readRequestedNames(init?.body);
+      batchRequests.push(names);
+      return jsonResponse({
+        results: names.map((name) => {
+          const entry = script.batch.get(name);
+          if (entry === undefined) {
+            throw new Error(`fake parser service: nothing scripted for "${name}"`);
+          }
+          return entry;
+        }),
+      });
+    }
+
+    const pollPrefix = `${LOOKUP_PATH}/`;
+    if (method === 'GET' && url.pathname.startsWith(pollPrefix)) {
+      const lookupId = url.pathname.slice(pollPrefix.length);
+      pollRequests.push(lookupId);
+      const answer = remaining.get(lookupId)?.shift();
+      if (answer === undefined) {
+        throw new Error(`fake parser service: no poll answer left for lookup ${lookupId}`);
+      }
+      return jsonResponse({ result: answer });
+    }
+
+    throw new Error(`fake parser service: unexpected ${method} ${url.pathname}`);
+  };
+
+  return { fetch: serviceFetch, batchRequests, pollRequests };
+}
+
+type DoubleDb = ReturnType<typeof drizzle>;
+
+/**
+ * `PluginContext.db` is `unknown` by contract: the host has never seen this
+ * plugin's schema, so it cannot hand back a handle typed to it. The plugin
+ * narrows the connection once, here, and pays for it with a runtime check —
+ * there is no compile-time route from `unknown` to a connection.
+ */
+function asDatabase(db: unknown): DatabaseSync {
+  if (!(db instanceof DatabaseSync)) {
+    throw new TypeError('double: ctx.db is not a node:sqlite DatabaseSync');
+  }
+  return db;
+}
+
+/**
+ * One Drizzle handle per connection, remembered rather than rebuilt on every
+ * entry point. `drizzle({ client })` wraps the connection it is given, so
+ * rebuilding is harmless — just pointless work on a hot path.
+ */
+const handles = new WeakMap<DatabaseSync, DoubleDb>();
+
+function ownTables(ctx: PluginContext): { raw: DatabaseSync; db: DoubleDb } {
+  const raw = asDatabase(ctx.db);
+  const existing = handles.get(raw);
+  if (existing !== undefined) return { raw, db: existing };
+  const db = drizzle({ client: raw });
+  handles.set(raw, db);
+  return { raw, db };
+}
+
+function readInteger(row: Record<string, SQLOutputValue>, column: string): number {
+  const value = row[column];
+  if (typeof value !== 'number') {
+    throw new TypeError(`double: column ${column} is not an integer`);
+  }
+  return value;
+}
+
+function readText(row: Record<string, SQLOutputValue>, column: string): string {
+  const value = row[column];
+  if (typeof value !== 'string') {
+    throw new TypeError(`double: column ${column} is not text`);
+  }
+  return value;
+}
+
+interface RssItemName {
+  id: number;
+  filename: string;
+}
+
+/**
+ * The filenames to look up.
+ *
+ * Hand-written SQL against a table the plugin does not own, because the
+ * contract has one writer for shared tables (`MediaWriter`) and no matching
+ * reader: `ctx.db` is the only route to a column a plugin needs and cannot
+ * write.
+ */
+function readRssItems(raw: DatabaseSync, ids: readonly number[]): RssItemName[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = raw.prepare(`SELECT id, filename FROM rss_item WHERE id IN (${placeholders})`).all(...ids);
+  const byId = new Map(rows.map((row) => [readInteger(row, 'id'), readText(row, 'filename')]));
+  // Answered in the caller's order rather than the database's, so the order
+  // the double sends names in — and therefore which of two items claiming one
+  // provider ref wins the dedup — is the caller's, not sqlite's.
+  return ids.map((id) => {
+    const filename = byId.get(id);
+    if (filename === undefined) {
+      throw new Error(`double: rss item ${id} does not exist`);
+    }
+    return { id, filename };
+  });
+}
+
+function readLookupPayload(payload: unknown): number[] {
+  if (typeof payload !== 'object' || payload === null || !('rssItemIds' in payload)) {
+    throw new TypeError('double: a lookup payload must carry rssItemIds');
+  }
+  const ids: unknown = payload.rssItemIds;
+  if (!Array.isArray(ids)) {
+    throw new TypeError('double: rssItemIds is not an array');
+  }
+  return ids.map((id: unknown) => {
+    if (typeof id !== 'number') {
+      throw new TypeError('double: rssItemIds holds a non-number');
+    }
+    return id;
+  });
+}
+
+function readPollPayload(payload: unknown): { lookupId: string; rssItemId: number } {
+  if (typeof payload !== 'object' || payload === null
+    || !('lookupId' in payload) || !('rssItemId' in payload)) {
+    throw new TypeError('double: a poll payload must carry lookupId and rssItemId');
+  }
+  const { lookupId, rssItemId } = payload;
+  if (typeof lookupId !== 'string' || typeof rssItemId !== 'number') {
+    throw new TypeError('double: a poll payload must carry lookupId and rssItemId');
+  }
+  return { lookupId, rssItemId };
+}
+
+/** The service's people, de-duplicated by the provider's own person id as they are written. */
+async function attachPeople(
+  people: readonly LookupPerson[],
+  mediaItemId: number,
+  ctx: PluginContext,
+): Promise<void> {
+  for (const person of people) {
+    // eslint-disable-next-line no-await-in-loop -- one person at a time: `attachRole` below needs the id this upsert returns, and the role rows have to land in billing order
+    const personId = await ctx.media.upsertPerson({ name: person.name, providerRef: person.providerRef });
+    // eslint-disable-next-line no-await-in-loop -- see above; this is the same person's own role
+    await ctx.media.attachRole(mediaItemId, {
+      personId,
+      role: person.role,
+      name: person.characterName,
+      billingOrder: person.billingOrder,
+    });
+  }
+}
+
+export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
+  async function applyResolved(
+    entry: LookupEntry,
+    rssItemId: number,
+    ctx: PluginContext,
+    db: DoubleDb,
+  ): Promise<void> {
+    const { provider, providerRef, title } = entry;
+    if (provider === null || providerRef === null || title === null) {
+      throw new Error(`double: the service resolved "${entry.name}" without a provider reference`);
+    }
+    const at = deps.now();
+
+    // Created here rather than when the item arrived, though §9 of the design
+    // describes it the other way round: `MediaWriter` has no way to update a
+    // media item's title, release date or description after `createMediaItem`,
+    // so a row created before the service answered could never be corrected.
+    const mine = await ctx.media.createMediaItem({
+      pluginId: DOUBLE_ID,
+      title,
+      releaseDate: entry.releaseDate,
+      description: entry.description,
+    });
+
+    const claim = await ctx.media.claimProviderRef(mine, provider, providerRef);
+    if (claim.dropped !== null) {
+      // Lost the dedup race. Nothing points at our row — the rss item is
+      // linked below, to whichever item kept the reference — so dropping it
+      // now leaves nothing dangling.
+      await ctx.media.dropMediaItem(claim.dropped);
+    }
+    await ctx.media.relinkRssItem(rssItemId, claim.kept);
+    await db.update(doubleMedia)
+      .set({ mediaItemId: claim.kept, providerRef: `${provider}:${providerRef}`, updatedAt: at })
+      .where(eq(doubleMedia.rssItemId, rssItemId));
+
+    await attachPeople(entry.people, claim.kept, ctx);
+    await ctx.media.setResolution(rssItemId, 'resolved', null);
+  }
+
+  /** The four outcomes, in the one order that reads them correctly. */
+  async function applyEntry(
+    entry: LookupEntry,
+    rssItemId: number,
+    ctx: PluginContext,
+    db: DoubleDb,
+  ): Promise<void> {
+    // `partial` first, and per entry rather than once for the response. A
+    // batch always answers HTTP 200, and a partial entry carries the status it
+    // expects to reach, so neither the response arriving nor this entry's own
+    // status says whether the answer is here.
+    if (entry.partial) {
+      await ctx.jobs.enqueue({
+        kind: 'poll',
+        payload: { lookupId: entry.lookupId, rssItemId },
+        runAt: deps.now() + POLL_DELAY_MS,
+      });
+      // Resolution stays `pending`: nothing is known about this item yet.
+      return;
+    }
+
+    if (entry.refusal !== null) {
+      // A refusal is the service successfully identifying a non-media file.
+      // Terminal: no retry, and no media rows to write. Folding it into
+      // `unresolved` would retry a subtitle forever and show it to a reader
+      // as a problem they cannot fix.
+      await ctx.media.setResolution(rssItemId, 'refused', entry.refusal);
+      return;
+    }
+
+    if (entry.status === 'unresolved') {
+      // Not an error either: the name was not recognised, which is the state a
+      // human might fix. Nothing is enqueued — a retry happens on request.
+      await ctx.media.setResolution(
+        rssItemId,
+        'unresolved',
+        `the parser service did not recognise "${entry.name}"`,
+      );
+      return;
+    }
+
+    await applyResolved(entry, rssItemId, ctx, db);
+  }
+
+  const lookup: JobHandler = async (job, ctx) => {
+    const { raw, db } = ownTables(ctx);
+    const items = readRssItems(raw, readLookupPayload(job.payload));
+
+    // One request for the whole batch. It answers HTTP 200 even when some
+    // entries have no answer yet, so `ctx.fetch.json` resolving proves only
+    // that the response arrived.
+    const body = await ctx.fetch.json<LookupBatchResponse>(`${PARSER_ORIGIN}${LOOKUP_PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        items: items.map((item) => ({ category: MEDIA_TYPE, name: item.filename })),
+      }),
+    });
+
+    const byName = new Map(body.results.map((entry) => [entry.name, entry]));
+    for (const item of items) {
+      const entry = byName.get(item.filename);
+      if (entry === undefined) {
+        throw new Error(`double: the parser service answered nothing for "${item.filename}"`);
+      }
+      // eslint-disable-next-line no-await-in-loop -- entries are applied in the order they were asked for, because that order decides which of two items claiming one provider ref wins
+      await applyEntry(entry, item.id, ctx, db);
+    }
+  };
+
+  const poll: JobHandler = async (job, ctx) => {
+    const { db } = ownTables(ctx);
+    // The rss item comes from the payload, never from `job.id`. Both are
+    // numbers, so the wrong one compiles and quietly resolves a stranger.
+    const { lookupId, rssItemId } = readPollPayload(job.payload);
+    const body = await ctx.fetch.json<LookupPollResponse>(
+      `${PARSER_ORIGIN}${LOOKUP_PATH}/${lookupId}`,
+    );
+    // The same four branches as the batch, so a poll that is still partial
+    // enqueues the next one through the very code that enqueued this one.
+    await applyEntry(body.result, rssItemId, ctx, db);
+  };
+
+  return {
+    id: DOUBLE_ID,
+    mediaType: MEDIA_TYPE,
+    migrations: MIGRATIONS,
+    jobs: { lookup, poll },
+
+    async onNewRssItems(ids, ctx) {
+      if (ids.length === 0) return;
+      const { db } = ownTables(ctx);
+      const at = deps.now();
+
+      await db.insert(doubleMedia).values(ids.map((rssItemId) => ({
+        rssItemId,
+        mediaItemId: null,
+        lookupJobId: null,
+        providerRef: null,
+        createdAt: at,
+        updatedAt: at,
+      })));
+
+      // One job for the whole batch, not one per item. The parser service
+      // takes up to 100 names per request; nothing here sends more than a
+      // handful, so this double never has a second batch to split off.
+      const jobId = await ctx.jobs.enqueue({ kind: 'lookup', payload: { rssItemIds: [...ids] } });
+
+      // `enqueue`'s return recorded rather than discarded: a job id nothing
+      // keeps is a job nobody can trace back to the rows it is identifying.
+      await db.update(doubleMedia)
+        .set({ lookupJobId: jobId, updatedAt: at })
+        .where(inArray(doubleMedia.rssItemId, [...ids]));
+    },
+
+    // The two entry points the flow tests never reach. Both are required —
+    // a plugin that cannot answer all three is not a plugin — and neither is
+    // a stub: this is what the double would really do if called.
+    async onDownloadedFile(file, ctx) {
+      ctx.log('a download finished', { path: file.path, sizeBytes: file.sizeBytes });
+    },
+
+    async onDownloadRequest(rssItemId, ctx) {
+      const reference = await ctx.downloads.submit({
+        rssItemId,
+        downloadClientId: DEFAULT_DOWNLOAD_CLIENT_ID,
+      });
+      ctx.log('submitted a download', { rssItemId, reference });
+    },
+  };
+}
