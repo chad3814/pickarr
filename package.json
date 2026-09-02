@@ -19,7 +19,7 @@
     "reclassify-artwork": "node --import tsx --conditions development scripts/reclassify-artwork.ts",
     "e2e": "npm run e2e -w @pickarr/e2e",
     "check": "npm run lint && npm run typecheck && npm run test-hygiene && npm run test",
-    "build": "npm run build -w @pickarr/plugin-api -w @pickarr/plugin-scenes -w @pickarr/core -w @pickarr/web"
+    "build": "npm run build -w @pickarr/contract -w @pickarr/plugin-api -w @pickarr/plugin-scenes -w @pickarr/core -w @pickarr/web"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
