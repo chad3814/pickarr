@@ -74,8 +74,17 @@ export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
       // The claim is one statement, so two workers can never take the same
       // job even though this is single-process today: the row a second caller
       // could see is already `running` by the time its own `UPDATE` runs.
+      //
+      // The attempt is consumed by that same statement, and `RETURNING` reads
+      // the incremented value back. It has to be one statement and not two: a
+      // handler that crashes the process must already have consumed an
+      // attempt, or crash recovery (`recover`) hands the row back to `ready`
+      // with its count untouched and a job kind that reliably kills the
+      // process is readied again on every restart, forever. A separate
+      // increment leaves a window — however narrow — in which a crash lands
+      // between the two and reopens exactly that loop.
       const claimed = db.all<ClaimedRow>(sql`
-        UPDATE jobs SET state = 'running', updated_at = ${now}
+        UPDATE jobs SET state = 'running', attempts = attempts + 1, updated_at = ${now}
          WHERE id = (SELECT id FROM jobs
                       WHERE state = 'ready' AND run_at <= ${now}
                       ORDER BY run_at, id LIMIT 1)
@@ -83,13 +92,7 @@ export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
       `);
       const row = claimed.at(0);
       if (!row) return false;
-
-      // Incremented before the handler runs, not after: a handler that
-      // crashes the process still has to have consumed an attempt, or crash
-      // recovery (`recover`) hands the row back to `ready` with its attempt
-      // count untouched and it retries forever.
-      const attempts = row.attempts + 1;
-      raw.prepare('UPDATE jobs SET attempts = ?, updated_at = ? WHERE id = ?').run(attempts, now, row.id);
+      const attempts = row.attempts;
 
       const pluginId = row.plugin_id;
       const handler = handlers(pluginId, row.kind);
@@ -141,7 +144,7 @@ export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
     recover() {
       const now = opts.now();
       // Attempts are left untouched either way: the crashed attempt already
-      // consumed one, back when the claim incremented it. A row already at
+      // consumed one, in the same statement that claimed the row. A row already at
       // `max_attempts` does not get another try — it goes straight to
       // `dead` — because readying it just hands the same crash back to the
       // next restart.

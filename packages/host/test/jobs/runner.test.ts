@@ -156,6 +156,45 @@ test('a handler that always throws reaches dead after max_attempts, and its row 
   assert.equal(row.last_error, 'handler boom');
 });
 
+test('the claim and the attempt increment are one statement, not two', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+
+  // Every UPDATE to `jobs`, recorded as it lands. A process can be killed
+  // between two statements but not inside one, so "how many writes did the
+  // claim take" is the whole of whether a crash can land between taking the
+  // row and consuming its attempt — and it is not observable from JavaScript,
+  // which never runs between two synchronous statements.
+  raw.exec(`
+    CREATE TABLE jobs_audit (seq INTEGER PRIMARY KEY, state TEXT NOT NULL, attempts INTEGER NOT NULL);
+    CREATE TRIGGER jobs_audit_update AFTER UPDATE ON jobs BEGIN
+      INSERT INTO jobs_audit (state, attempts) VALUES (NEW.state, NEW.attempts);
+    END;
+  `);
+
+  runner.enqueue('alpha', { kind: 'audited', payload: {} });
+
+  // Read from inside the handler: by then the claim has finished and nothing
+  // else has written the row yet.
+  let duringHandler: { state: unknown; attempts: unknown }[] = [];
+  const handler: JobHandler = async () => {
+    duringHandler = raw.prepare('SELECT state, attempts FROM jobs_audit ORDER BY seq').all()
+      .map((row) => {
+        const audited = row as { state: unknown; attempts: unknown };
+        return { state: audited.state, attempts: audited.attempts };
+      });
+  };
+  assert.equal(await runner.runOnce(() => handler, () => fakeCtx), true);
+
+  // One write, carrying both facts. Two writes — `running` with the old
+  // count, then the count — is the window a crash slips through: `recover`
+  // would read `attempts` as unconsumed, ready the row, and hand the same
+  // process-killing job back on every restart.
+  assert.deepEqual(duringHandler, [{ state: 'running', attempts: 1 }]);
+});
+
 test('recover returns a job left running to ready', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
@@ -165,10 +204,10 @@ test('recover returns a job left running to ready', async () => {
   const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
 
   // A handler that never resolves, standing in for a process that crashed
-  // mid-handler. Calling `runOnce` without awaiting it lets the claim and the
-  // attempts-increment run to completion — both happen before the handler's
-  // first `await` — while leaving the row `running` forever, exactly like a
-  // real crash would.
+  // mid-handler. Calling `runOnce` without awaiting it runs the claim — which
+  // is one statement, so there is no point between taking the row and
+  // consuming its attempt for this simulation to miss — and then leaves the
+  // row `running` forever, which is what a crashed process leaves behind.
   let release = noop;
   const hang = new Promise<void>((resolve) => { release = resolve; });
   const handler: JobHandler = async () => { await hang; };
