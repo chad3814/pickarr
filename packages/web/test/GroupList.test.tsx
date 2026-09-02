@@ -117,7 +117,7 @@ test('clicking a row reports its selection', () => {
 
 test('it is a listbox with exactly one selected option', () => {
   render(<GroupList items={THREE} selected={sel(2)} onSelect={() => {}} />);
-  assert.ok(screen.getByRole('listbox', { name: 'Groups' }));
+  assert.ok(screen.getByRole('listbox', { name: 'Groups and refused names' }));
   const selected = screen.getAllByRole('option').filter((row) => row.getAttribute('aria-selected') === 'true');
   assert.equal(selected.length, 1);
   assert.match(selected[0]?.textContent ?? '', /Group 2/);
@@ -239,7 +239,7 @@ test('a selection changed from outside the list does not steal focus', () => {
 
 test('an empty list renders a listbox with no options and no crash', () => {
   render(<GroupList items={[]} selected={null} onSelect={() => {}} />);
-  assert.ok(screen.getByRole('listbox', { name: 'Groups' }));
+  assert.ok(screen.getByRole('listbox', { name: 'Groups and refused names' }));
   // #40: never `assert.equal(screen.queryBy*(...), null)`.
   assert.ok(!screen.queryByRole('option'));
 });
@@ -324,4 +324,17 @@ test('arrow keys move across both kinds and move DOM focus with the selection', 
   assert.ok(third !== undefined);
   assert.ok(document.activeElement === third, 'focus continued onto the group row past it');
   assert.match(third.textContent ?? '', /Group 3/);
+});
+
+test('the listbox accessible name is true when both groups and refused names are present', () => {
+  // Regression test: the label must describe all kinds of rows in the list,
+  // not just groups. A screen-reader user arrowkey-ing onto a refused name
+  // must be told the true listbox name, not a false claim about groups only.
+  const items: BrowseItem[] = [
+    groupItem(group({ id: 1 })),
+    failedItem(failed({ id: 2, rawTitle: 'Failed Title' })),
+    groupItem(group({ id: 3 })),
+  ];
+  render(<GroupList items={items} selected={null} onSelect={() => {}} />);
+  assert.ok(screen.getByRole('listbox', { name: 'Groups and refused names' }));
 });

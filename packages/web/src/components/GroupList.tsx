@@ -158,7 +158,7 @@ export function GroupList({ items, selected, onSelect }: Props) {
       ref={list}
       className="group-list"
       role="listbox"
-      aria-label="Groups"
+      aria-label="Groups and refused names"
       onKeyDown={(event) => {
         if (event.key === 'ArrowDown') { event.preventDefault(); step(1); }
         if (event.key === 'ArrowUp') { event.preventDefault(); step(-1); }

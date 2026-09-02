@@ -1305,7 +1305,7 @@ test('a fresh browser gets the card list', () => {
   serve(null);
   render(<Browse />);
   // #40: never `assert.equal(screen.queryBy*(...), null)`.
-  assert.ok(!screen.queryByRole('listbox', { name: 'Groups' }));
+  assert.ok(!screen.queryByRole('listbox', { name: 'Groups and refused names' }));
 });
 
 test('choosing the split view shows the list, and no card until a row is picked', async () => {
@@ -1315,7 +1315,7 @@ test('choosing the split view shows the list, and no card until a row is picked'
 
   fireEvent.click(screen.getByRole('radio', { name: 'Split' }));
 
-  assert.ok(screen.getByRole('listbox', { name: 'Groups' }));
+  assert.ok(screen.getByRole('listbox', { name: 'Groups and refused names' }));
   assert.ok(!document.querySelector('article.media-card'), 'nothing selected, so no card');
   assert.ok(screen.getByText(/select a group/i), 'the pane says what to do instead');
 });
@@ -1459,7 +1459,7 @@ test('the chosen view survives a remount', async () => {
 
   serve(null);
   render(<Browse />);
-  assert.ok(screen.getByRole('listbox', { name: 'Groups' }), 'the preference was read back');
+  assert.ok(screen.getByRole('listbox', { name: 'Groups and refused names' }), 'the preference was read back');
 });
 
 // The split view's list now interleaves both kinds too (Task 6), addressed by
