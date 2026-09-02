@@ -77,9 +77,16 @@ export function createHost(deps: {
     defaultMaxAttempts: DEFAULT_MAX_ATTEMPTS,
   });
 
-  // Shared across every plugin: `MediaWriter`'s methods all take the
-  // writing plugin's id as a parameter, so one instance has nothing
-  // per-plugin to close over.
+  // One instance shared by every plugin, because `MediaWriter` is
+  // plugin-agnostic: eight of its nine methods take no plugin id at all, and
+  // the ninth — `createMediaItem`, through `MediaItemInit.pluginId` — stores
+  // the id it is handed without checking it against the plugin doing the
+  // writing. So there is nothing per-plugin here to close over, and equally
+  // nothing that stops `ctx.media.setResolution(anyRssItemId, …)` or
+  // `ctx.media.dropMediaItem(anyId)` from reaching another plugin's rows.
+  // What this writer holds is the shared-row invariants, in one place; what
+  // keeps a plugin on its own side of them is convention and explicit
+  // wiring, not enforcement.
   const media = createMediaWriter(deps.db, deps.now);
 
   function ctxFor(pluginId: string): PluginContext {
