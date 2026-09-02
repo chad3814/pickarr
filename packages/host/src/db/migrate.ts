@@ -5,6 +5,8 @@ import type { Migration } from '@pickarr/contract';
  * The shared tables, in dependency order so every `REFERENCES` names a table
  * that already exists. Column names and types mirror `schema.ts` exactly —
  * this is the DDL Drizzle's types describe, not a schema Drizzle generates.
+ * Nothing generates one from the other, so `test/db/schema.test.ts` compares
+ * them: two sources of truth are only safe while something checks they agree.
  */
 const INITIAL_SCHEMA = `
 CREATE TABLE download_client (
