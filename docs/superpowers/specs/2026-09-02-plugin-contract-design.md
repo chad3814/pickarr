@@ -4,6 +4,10 @@ The first slice of the 2.0 backend. It defines what a media plugin is, what the
 host gives it, what the host asks of it, and the durable machinery that carries a
 multi-hop flow across a restart. It ships no real plugin.
 
+**Section 12 supersedes anything below that it contradicts.** The slice is built,
+and implementing it disproved several claims made here in advance. They are
+corrected in place where leaving them would mislead, and logged in 12 either way.
+
 ## 1. What this delivers
 
 Pickarr 2.0 splits into shared infrastructure — RSS reading, download clients,
@@ -314,9 +318,17 @@ an argument for plugins owning their flows (§3) rather than against it.
 ## 9. The flows
 
 **New items.** The host's feed reader inserts `rss_item` rows and calls
-`onNewRssItems(ids)`. The plugin, for each id: creates a media item and its own
-specific row via `media.createMediaItem` plus its own Drizzle insert, links the
-rss item, then enqueues one `lookup` job per batch of up to 100.
+`onNewRssItems(ids)`, which returns `{ unowned, failures }` — both fields are data
+the caller must read, not exceptions. The plugin enqueues one `lookup` job per
+batch of up to 100 and **creates nothing yet**.
+
+The media item is created in the `lookup` handler's resolved branch, once the
+answer is in hand. This is a correction: an earlier draft of this section had the
+plugin create the media item here, before the lookup. That is not implementable —
+`MediaWriter` has no method to update a media item, so a row created before the
+answer arrives could never receive the looked-up title. Creating early would also
+require being able to *unlink* an rss item in order to refuse one, which the
+contract cannot express either (see 12).
 
 The `lookup` handler calls the parser service through `ctx.fetch`, then per
 result: `refusal` → `setResolution(refused)`; `unresolved` → `setResolution(unresolved)`;
@@ -376,3 +388,82 @@ branch, prove that test and no other fails.
 - **Plugins can write shared rows only through `MediaWriter`**, so any shared-row
   capability a plugin needs and does not have becomes a host change. That is the
   intended trade: the shared model keeps one writer.
+
+## 12. Corrections from implementation
+
+This section is authoritative where it contradicts anything above. Every entry
+was found by building the slice — the test-double plugin of Task 7 exists to
+surface exactly this, and it earned its place.
+
+### 12.1 What the contract cannot express
+
+Three gaps, all verified in code rather than argued. None breaks the delivered
+slice; each is the first thing a real plugin will want.
+
+- **`MediaWriter` cannot update a media item.** This is what makes the original
+  9 flow impossible, and 9 has been corrected. Whether to add
+  `updateMediaItem` or keep create-when-resolved is a decision for the first
+  real plugin, not for a double.
+- **An rss item cannot be unlinked.** `relinkRssItem` takes a non-null id and
+  `rss_item.media_item_id` carries a foreign key, so `dropMediaItem` throws
+  (`errcode 787`) while any item still points at the row. The consequence is
+  wider than "cannot refuse after linking": **any row ever linked pins its media
+  item permanently.** The fix is a signature change — `mediaItemId: number |
+  null` — rather than a new method.
+- **`PluginContext` has no clock.** A plugin's own rows would be stamped
+  `Date.now()` while `MediaWriter`'s come from the host's injected `now`, inside
+  one logical write. The double had to be constructed with its own clock; without
+  it, Task 7's crash test could not compare rows at all. Note the host itself has
+  two clocks today — `migrate.ts` stamps `applied_at` with `Date.now()` — so this
+  wants fixing in one pass or the inconsistency merely moves.
+
+### 12.2 The one-writer rule is convention, not enforcement
+
+4 and 11 say plugins write shared rows only through `MediaWriter`. That is not
+enforced and cannot be, as built: `ctx.db` is the whole raw `node:sqlite`
+connection, so a plugin can insert a `jobs` row under **another plugin's**
+`plugin_id` and have the victim's handler run it, and can rewrite any `rss_item`.
+
+The `Runner.enqueue(pluginId, job)` seam does hold through the contract API — a
+plugin's `ctx.jobs` closes over its own id and cannot name another's. The raw
+handle goes around the seam rather than through it. `MediaWriter` is also
+plugin-agnostic: eight of its nine methods take no plugin id at all, and the
+ninth stores one without checking it, so `setResolution` and `dropMediaItem`
+reach another plugin's rows through the sanctioned API.
+
+Real enforcement needs a restricted per-plugin handle. That is design work for
+the slice that ships real plugins; until then the rule is a convention, and this
+paragraph exists so nobody mistakes it for a guarantee.
+
+### 12.3 Corrections to the claims above
+
+| § | Said | Actually | 
+|---|---|---|
+| 3 | `MediaPlugin` has `readonly schema: PluginSchema` | No such member, and **nothing named `PluginSchema` exists**. The host cannot use it and the double proves a plugin does not need it. Dropped. |
+| 4 | `db: PluginDatabase`, "Drizzle bound to this plugin's own tables only" | `db: unknown`, the whole raw connection. See 12.2. |
+| 4 | `log: Logger` | An inline `(message, detail?) => void`. |
+| 4 | `MediaWriter` has 8 methods; `setResolution(…, detail?)` | Nine methods — `dropMediaItem` was added — and `detail` is a required `string \| null`, because `exactOptionalPropertyTypes` makes an optional property mean something different. |
+| 5 | "a claim is one transactional statement" | It is now. It was two, and a crash between them readied a process-killing job forever. 5 also omits that `recover` dead-letters a row already at its last attempt. |
+| 6 | "a host that hangs holds one job, not the runner" | False as built: `runOnce` is the only pump and it is serial, so a hung handler holds the only worker. The sentence describes a pool a later slice adds. No deadlock exists in the delivered flow. |
+| 7 | `drizzle-kit generate` is repo-scoped and covers plugin schemas | No drizzle config exists and `drizzle-kit` is unused. Migrations are hand-written. |
+| 7 | "plugin migrations run after the host's" | Unenforced. Registering a plugin before `migrateHost` succeeds, creates a table with a dangling foreign key, and records the version as applied — so a mis-ordered startup is permanent. |
+| 9 | "one `lookup` job per batch of up to 100" | The double enqueues one job whatever the batch size, disclosed in its own comment. It is a double; a real plugin must honour the cap. |
+| 9 | "write the specific row's provider fields" | `external_reference` exists in the schema with no `MediaWriter` method, so a media item's secondary provider ids are unreachable through the contract. |
+| 10 | "a handler that runs twice does not double-write" | No such test existed **and the property was false** — the attach writes were bare inserts and `role` had no unique index. Both fixed, and the test now exists. |
+| 1.2 | the host provides a throwing `DownloadClients` and a test asserts the throw | Neither existed. A test now asserts a submit reaches the injected client and that the reference it answers is read. |
+
+### 12.4 One verified fact that corrects 7
+
+7 records the Drizzle calls as verified. One is wrong for the pinned
+`drizzle-orm@1.0.0-rc.4`: **`drizzle({ client: raw, schema })` does not compile.**
+SQLite's config is `Omit<DrizzleConfig, 'schema'>` — v1 replaced the key with
+`relations`. The working form is:
+
+```ts
+drizzle({ client: raw, relations: defineRelations(schema) })
+```
+
+after which `db.query.mediaItem` resolves and `db.$client` is unchanged. Until
+this was wired, `schema.ts` had no importers at all and duplicated the migration
+DDL with nothing keeping the two in step; they are now checked against each other
+by test.
