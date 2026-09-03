@@ -1,41 +1,97 @@
 import type { HostFetch } from '@pickarr/contract';
 
-/** The default `release` a slot starts with, before its gate promise's executor assigns the real resolver. */
-const noop = (): void => {};
+/**
+ * The concurrency budget `createHostFetch` enforces per hostname. `default`
+ * applies to any hostname without its own entry in `perHost`; both are
+ * counts of requests allowed to run at once, not a rate. Never exported from
+ * `@pickarr/contract`: unlike `HostFetch`, nothing here is reachable from
+ * `PluginContext` -- it is consumed only by `createHostFetch`'s
+ * construction-time `deps`, a host-wide policy a plugin never sees.
+ */
+export interface FetchLimits {
+  /** Applied to any hostname without a specific entry. */
+  default: number;
+  /** Keyed by exact hostname, e.g. `{ 'cdn.example.com': 10 }`. */
+  perHost?: Readonly<Record<string, number>>;
+}
 
 /**
- * One active request per hostname; everything else to that hostname queues
- * behind it. The hostname is derived from the url inside `enqueue`, so a
- * plugin has no way to opt out of the serialisation — it is a property of
- * this queue, not a habit a caller could skip.
- *
- * `tails` holds, per hostname, a promise that resolves once the slot is
- * free for the next request. It is deliberately a *gate*, not the previous
- * request's own result: a gate always settles, so a request that rejects
- * still lets the next one in. A request's actual outcome is carried by the
- * promise `enqueue` returns to its caller, never by the gate.
+ * A hostname's concurrency budget: `running` counts requests currently
+ * inside `task()`, capped at `limit`; `waiting` holds a resolver per
+ * request that arrived once the cap was already hit, in arrival order.
  */
-export function createHostFetch(deps: { fetch: typeof globalThis.fetch }): HostFetch {
-  const tails = new Map<string, Promise<unknown>>();
+interface HostQueue {
+  running: number;
+  limit: number;
+  waiting: Array<() => void>;
+}
 
-  function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
-    const previous = tails.get(hostname) ?? Promise.resolve();
+/**
+ * A limit of 0 or below is not "disable this host" -- it is `q.running >=
+ * q.limit` (e.g. `0 >= 0`) true before any request has ever run, so the
+ * very first request queues behind a slot nothing will ever grant. Nothing
+ * later would observe that: no error, no timeout, just a promise that never
+ * settles. Reject it here, at construction, loudly and by name, rather than
+ * clamp it -- clamping would silently substitute behaviour nobody asked for,
+ * and rather than let it surface invisibly whenever the first request to
+ * that hostname happens to be made.
+ */
+function assertValidLimit(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`fetch limit for '${name}' must be an integer of at least 1, got ${value}`);
+  }
+}
 
-    let release: () => void = noop;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    tails.set(hostname, gate);
+function assertValidLimits(limits: FetchLimits | undefined): void {
+  if (!limits) return;
+  assertValidLimit('default', limits.default);
+  for (const [hostname, value] of Object.entries(limits.perHost ?? {})) {
+    assertValidLimit(hostname, value);
+  }
+}
 
-    return previous.then(async () => {
-      try {
-        return await task();
-      } finally {
-        // Runs whether `task` resolved or rejected. Drop this and a
-        // rejected request never releases its hostname's gate, so every
-        // later request to that hostname waits on a promise that can never
-        // settle -- the queue is wedged forever, silently.
-        release();
-      }
-    });
+/**
+ * Requests are queued per hostname with a configurable number allowed to run
+ * at once. The hostname is computed from the url in `json`/`bytes` and
+ * passed into `enqueue`, never accepted from the caller as its own
+ * parameter, so a plugin has no way to opt out of its queue -- that stays a
+ * property of this function, not a habit a caller could skip. What is
+ * configurable is only how many requests to that hostname may be in flight
+ * together; the default is one, so every caller that never sets `limits`
+ * behaves exactly as before.
+ */
+export function createHostFetch(deps: { fetch: typeof globalThis.fetch; limits?: FetchLimits }): HostFetch {
+  assertValidLimits(deps.limits);
+
+  const queues = new Map<string, HostQueue>();
+
+  function queueFor(hostname: string): HostQueue {
+    const existing = queues.get(hostname);
+    if (existing) return existing;
+
+    const limit = deps.limits?.perHost?.[hostname] ?? deps.limits?.default ?? 1;
+    const created: HostQueue = { running: 0, limit, waiting: [] };
+    queues.set(hostname, created);
+    return created;
+  }
+
+  async function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
+    const q = queueFor(hostname);
+    if (q.running >= q.limit) {
+      await new Promise<void>((resolve) => { q.waiting.push(resolve); });
+    }
+    q.running += 1;
+    try {
+      return await task();
+    } finally {
+      // Runs whether `task` resolved or rejected. Drop either half of this
+      // and a rejected request leaves its slot permanently occupied: every
+      // later request to that hostname either queues past the real limit
+      // (skip the decrement) or waits on a wake that never comes (skip the
+      // shift) -- the queue is wedged forever, silently.
+      q.running -= 1;
+      q.waiting.shift()?.();
+    }
   }
 
   async function request(url: string, init: RequestInit | undefined): Promise<Response> {
