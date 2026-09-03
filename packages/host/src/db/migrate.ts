@@ -188,7 +188,12 @@ ALTER TABLE logo       ADD COLUMN path TEXT;
 CREATE UNIQUE INDEX logo_media_item_url ON logo (media_item_id, url);
 `;
 
-const HOST_MIGRATIONS: readonly Migration[] = [
+/**
+ * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
+ * only version 1) rather than a synthetic list, so it can seed a row on the
+ * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
+ */
+export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 1, up: (db) => db.exec(INITIAL_SCHEMA) },
   { version: 2, up: (db) => db.exec(MIGRATION_2) },
 ];
