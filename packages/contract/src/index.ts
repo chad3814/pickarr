@@ -3,6 +3,7 @@ export type { JobEnqueue, JobQueue, JobRecord } from './jobs.ts';
 export type {
   BackgroundInit,
   MediaItemInit,
+  MediaItemUpdate,
   MediaWriter,
   PersonInit,
   PosterInit,

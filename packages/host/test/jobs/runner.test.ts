@@ -15,6 +15,7 @@ const fakeCtx: PluginContext = {
   db: undefined,
   media: {
     createMediaItem: async () => { throw new Error('media.createMediaItem: not used by this test'); },
+    updateMediaItem: async () => { throw new Error('media.updateMediaItem: not used by this test'); },
     claimProviderRef: async () => { throw new Error('media.claimProviderRef: not used by this test'); },
     relinkRssItem: async () => { throw new Error('media.relinkRssItem: not used by this test'); },
     dropMediaItem: async () => { throw new Error('media.dropMediaItem: not used by this test'); },

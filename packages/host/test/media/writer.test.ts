@@ -8,10 +8,20 @@ import { createMediaWriter } from '../../src/media/writer.ts';
 /** A row read back from `media_item`, narrowed the same way `migrate.test.ts` does. */
 function readMediaItem(raw: DatabaseSync, id: number) {
   const row = raw.prepare(
-    'SELECT provider, provider_ref, title, updated_at, created_at FROM media_item WHERE id = ?',
+    `SELECT plugin_id, provider, provider_ref, title, release_date, description, updated_at, created_at
+     FROM media_item WHERE id = ?`,
   ).get(id);
   return row as
-    | { provider: unknown; provider_ref: unknown; title: unknown; updated_at: unknown; created_at: unknown }
+    | {
+      plugin_id: unknown;
+      provider: unknown;
+      provider_ref: unknown;
+      title: unknown;
+      release_date: unknown;
+      description: unknown;
+      updated_at: unknown;
+      created_at: unknown;
+    }
     | undefined;
 }
 
@@ -153,6 +163,77 @@ test('relinkRssItem repoints the item and bumps updated_at', async () => {
   // updated_at is what the client's "what changed since" flow reads -- a
   // relink that does not bump it makes the row invisible to sync.
   assert.equal(after.updated_at, 999);
+});
+
+test('updateMediaItem replaces title, release date and description, and bumps updated_at', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  let at = 1000;
+  const writer = createMediaWriter(db, () => at);
+
+  const mediaItemId = await writer.createMediaItem({
+    pluginId: 'alpha',
+    title: 'placeholder',
+    releaseDate: null,
+    description: null,
+  });
+
+  at = 2000;
+  await writer.updateMediaItem(mediaItemId, {
+    title: 'The Real Title',
+    releaseDate: '2024-01-01',
+    description: 'a description from the lookup',
+  });
+
+  const row = readMediaItem(raw, mediaItemId);
+  assert.ok(row);
+  assert.equal(row.title, 'The Real Title');
+  assert.equal(row.release_date, '2024-01-01');
+  assert.equal(row.description, 'a description from the lookup');
+  // updated_at must come from the injected clock at the time of this write,
+  // not the row's original created_at.
+  assert.equal(row.updated_at, 2000);
+});
+
+test('updateMediaItem leaves plugin_id, provider and provider_ref untouched', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 1000);
+
+  const mediaItemId = await writer.createMediaItem({
+    pluginId: 'alpha',
+    title: 'placeholder',
+    releaseDate: null,
+    description: null,
+  });
+  await writer.claimProviderRef(mediaItemId, 'tmdb', 'ref-1');
+
+  await writer.updateMediaItem(mediaItemId, {
+    title: 'The Real Title',
+    releaseDate: '2024-01-01',
+    description: 'a description',
+  });
+
+  const row = readMediaItem(raw, mediaItemId);
+  assert.ok(row);
+  // Ownership does not change here, and provider/provider_ref are
+  // claimProviderRef's alone to write -- a second writer for them would race
+  // with the unique index that method relies on.
+  assert.equal(row.plugin_id, 'alpha');
+  assert.equal(row.provider, 'tmdb');
+  assert.equal(row.provider_ref, 'ref-1');
+});
+
+test('updateMediaItem on an id that does not exist throws rather than silently doing nothing', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 1000);
+
+  await assert.rejects(() => writer.updateMediaItem(999_999, {
+    title: 'nope',
+    releaseDate: null,
+    description: null,
+  }));
 });
 
 test('setResolution records refused and unresolved as different states', async () => {

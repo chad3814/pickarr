@@ -17,6 +17,23 @@ export interface MediaItemInit {
   description: string | null;
 }
 
+/**
+ * The fields a lookup answer can revise on an existing media item.
+ *
+ * Deliberately not `pluginId`, `provider` or `providerRef`: ownership does
+ * not change after `createMediaItem`, and the provider reference is
+ * `claimProviderRef`'s to write -- a second writer for it would race with
+ * the unique index that method relies on. A full replacement, not a partial
+ * patch, because `exactOptionalPropertyTypes` makes an absent field
+ * ambiguous between "leave it" and "set it null", and a lookup answers with
+ * all three fields anyway.
+ */
+export interface MediaItemUpdate {
+  title: string;
+  releaseDate: string | null;
+  description: string | null;
+}
+
 export interface PosterInit {
   title: string | null;
   language: string | null;
@@ -65,6 +82,16 @@ export interface ProviderClaim {
  */
 export interface MediaWriter {
   createMediaItem(init: MediaItemInit): Promise<number>;
+
+  /**
+   * Replaces `title`, `releaseDate` and `description` on an existing media
+   * item -- the fields a lookup answer fills in, so a row can be created
+   * when an rss item arrives and completed once the lookup answers, rather
+   * than waiting on the answer to create it at all. Throws if `mediaItemId`
+   * does not exist, and bumps `updated_at` from the injected clock like
+   * every other mutating method here.
+   */
+  updateMediaItem(mediaItemId: number, update: MediaItemUpdate): Promise<void>;
 
   /**
    * Claims `(provider, ref)` for `mediaItemId`, or reports who already holds it.

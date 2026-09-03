@@ -1,6 +1,7 @@
 import type {
   BackgroundInit,
   MediaItemInit,
+  MediaItemUpdate,
   MediaWriter,
   PersonInit,
   PosterInit,
@@ -40,6 +41,9 @@ function isUniqueConstraintViolation(err: unknown): boolean {
  *   here, once, rather than something every plugin has to get right.
  * - every method that mutates a row with an `updated_at` column sets it from
  *   `now`, so the client's "what changed since" flow never misses a write.
+ * - a mutation that targets a row by id throws if no row matched, rather
+ *   than succeeding silently: a caller that got the id wrong finds out here,
+ *   not later when the write it expected turns out never to have happened.
  *
  * Built on `db.$client`, the same raw `node:sqlite` handle `HostDb` wraps,
  * rather than Drizzle's query builder: `claimProviderRef` needs the driver's
@@ -56,6 +60,19 @@ export function createMediaWriter(db: HostDb, now: () => number): MediaWriter {
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(init.pluginId, init.title, init.releaseDate, init.description, at, at);
       return Number(result.lastInsertRowid);
+    },
+
+    async updateMediaItem(mediaItemId: number, update: MediaItemUpdate): Promise<void> {
+      const at = now();
+      // Replaces exactly title, release_date and description -- not
+      // plugin_id, and not provider/provider_ref, which are claimProviderRef's
+      // to write. A full replacement, not a partial patch: see MediaItemUpdate.
+      const result = raw.prepare(
+        'UPDATE media_item SET title = ?, release_date = ?, description = ?, updated_at = ? WHERE id = ?',
+      ).run(update.title, update.releaseDate, update.description, at, mediaItemId);
+      if (result.changes === 0) {
+        throw new Error(`updateMediaItem: no media item ${mediaItemId}`);
+      }
     },
 
     async claimProviderRef(mediaItemId: number, provider: string, ref: string): Promise<ProviderClaim> {
