@@ -1,7 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { drizzle } from 'drizzle-orm/node-sqlite';
-import { sql } from 'drizzle-orm';
+import { defineRelations, sql } from 'drizzle-orm';
 import type { JobEnqueue, JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
+import * as schema from '../db/schema.ts';
 
 export interface RunnerOptions {
   /** Injected clock, so backoff is testable without waiting on wall time. */
@@ -49,11 +50,11 @@ interface ClaimedRow {
 
 export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
   // A local Drizzle handle over the same raw connection, not a new database —
-  // `{ client: raw }` is the form that shares it. Only used for the claim
-  // statement below, which is a single `UPDATE ... RETURNING` that node:sqlite
-  // itself can run, but Drizzle's `db.all<T>(sql\`…\`)` gives it a typed result
-  // instead of the driver's untyped row objects.
-  const db = drizzle({ client: raw });
+  // `{ client: raw }` is the form that shares it. Wired with `relations` the
+  // same way `open.ts` wires every handle it hands out, so the claim below is
+  // not the one unwired handle in the module; `db.all<T>(sql\`…\`)` does not
+  // itself need the schema, but nothing here depends on it being absent.
+  const db = drizzle({ client: raw, relations: defineRelations(schema) });
 
   return {
     enqueue(pluginId, job) {
