@@ -217,13 +217,15 @@ function tableNames(raw: DatabaseSync): Set<string> {
  * Versions are per plugin, so two plugins may both ship a version 1 — the
  * primary key is `(plugin_id, version)` rather than `version` alone.
  *
- * Table names must start with `<pluginId>_`. Enforced rather than documented,
- * because the failure it prevents is two plugins silently sharing a table.
- * The check compares `sqlite_master`'s tables before and against after, so it
- * sees new tables and nothing else: a migration that alters or writes to a
- * host table, or creates a view, index or trigger under any name, passes it.
- * `up()` receives the raw connection, so that is convention rather than a
- * boundary — the same limitation `PluginContext.db` has.
+ * Table names must start with `<pluginId>_`; the check diffs `sqlite_master`'s
+ * persistent tables before and after `up()` runs, so it catches a migration
+ * that creates a new host-visible table under the wrong name — the
+ * two-plugins-sharing-a-table failure this exists to prevent. Everything else
+ * passes silently: `CREATE TEMP TABLE` (invisible to `sqlite_master`, and
+ * still fully usable), `DROP TABLE`, `ALTER TABLE`, and any view, index or
+ * trigger under any name. So this is a tripwire on new-table creation, not a
+ * sandbox around `up()` — which receives the raw connection and can do
+ * anything that connection can do, the same limitation `PluginContext.db` has.
  */
 export function migratePlugin(
   raw: DatabaseSync,
