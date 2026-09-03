@@ -30,9 +30,11 @@ function isUniqueConstraintViolation(err: unknown): boolean {
 }
 
 /**
- * The only implementation of `MediaWriter`. Plugins reach it through
- * `PluginContext.media`, never through Drizzle directly, so the two
- * invariants below hold no matter which plugin is writing:
+ * The only implementation of `MediaWriter`. `PluginContext` also hands every
+ * plugin `ctx.db`, the same raw `node:sqlite` connection this is built on, so
+ * nothing stops a plugin from writing to a shared table directly and
+ * bypassing both invariants below. They hold only for writes that go through
+ * `ctx.media` instead of `ctx.db` — convention, not enforcement:
  *
  * - `claimProviderRef`'s dedup on `(provider, provider_ref)` is resolved
  *   here, once, rather than something every plugin has to get right.

@@ -57,10 +57,11 @@ export interface ProviderClaim {
 }
 
 /**
- * The only way a plugin writes shared rows.
- *
- * Plugins use Drizzle freely on their own tables; shared tables have exactly
- * one writer so that the two invariants below cannot drift between plugins.
+ * The intended way a plugin writes shared rows, not the only way: a plugin's
+ * `PluginContext.db` is the same raw connection the shared tables live in, so
+ * nothing stops a plugin from writing to `media_item`, `role` and the rest
+ * directly instead. The two invariants below hold only for writes that go
+ * through this interface.
  */
 export interface MediaWriter {
   createMediaItem(init: MediaItemInit): Promise<number>;
