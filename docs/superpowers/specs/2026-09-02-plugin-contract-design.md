@@ -440,8 +440,8 @@ connection, so a plugin can insert a `jobs` row under **another plugin's**
 The `Runner.enqueue(pluginId, job)` seam does hold through the contract API — a
 plugin's `ctx.jobs` closes over its own id and cannot name another's. The raw
 handle goes around the seam rather than through it. `MediaWriter` is also
-plugin-agnostic: eight of its nine methods take no plugin id at all, and the
-ninth stores one without checking it, so `setResolution` and `dropMediaItem`
+plugin-agnostic: nine of its ten methods take no plugin id at all, and the
+tenth stores one without checking it, so `setResolution` and `dropMediaItem`
 reach another plugin's rows through the sanctioned API.
 
 Real enforcement needs a restricted per-plugin handle. That is design work for
