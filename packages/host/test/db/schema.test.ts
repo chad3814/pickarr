@@ -1,13 +1,17 @@
 /**
  * `schema.ts` and `migrate.ts`'s `INITIAL_SCHEMA` declare the same 13 tables
- * twice — once as Drizzle objects, once as DDL — and nothing generates either
- * from the other. There is no drizzle config in this repo and no script runs
- * `drizzle-kit`, so these tests are the whole of what keeps the two in step.
+ * and 13 indexes twice — once as Drizzle objects, once as DDL — and nothing
+ * generates either from the other. There is no drizzle config in this repo
+ * and no script runs `drizzle-kit`, so these tests are what keeps the two in
+ * step: the table set; every column's name, SQL type and nullability; and
+ * every index's table, column list (in order) and uniqueness. They do not
+ * compare foreign-key targets or a partial index's `WHERE` condition, so
+ * those two could still drift unnoticed.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getTableColumns, getTableName, is } from 'drizzle-orm';
-import { SQLiteTable } from 'drizzle-orm/sqlite-core';
+import { SQLiteColumn, SQLiteTable, getTableConfig } from 'drizzle-orm/sqlite-core';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import * as schema from '../../src/db/schema.ts';
@@ -25,6 +29,56 @@ function ddlColumns(raw: ReturnType<typeof openTestDatabase>['raw'], table: stri
     const row = r as { name: unknown; type: unknown; notnull: unknown };
     return { name: String(row.name), type: String(row.type), notNull: Number(row.notnull) === 1 };
   });
+}
+
+/** An index by name: the table it is on, its columns in order, and whether it is unique. */
+interface IndexInfo {
+  table: string;
+  columns: string[];
+  unique: boolean;
+}
+
+function ddlIndexes(raw: ReturnType<typeof openTestDatabase>['raw'], tables: readonly string[]): Map<string, IndexInfo> {
+  const indexes = new Map<string, IndexInfo>();
+  for (const table of tables) {
+    const list = raw.prepare(`PRAGMA index_list(${table})`).all().map((r) => {
+      const row = r as { name: unknown; unique: unknown; origin: unknown };
+      return { name: String(row.name), unique: Number(row.unique) === 1, origin: String(row.origin) };
+    });
+    for (const entry of list) {
+      // `origin`: 'c' is an explicit `CREATE INDEX`, 'u'/'pk' are indexes
+      // SQLite makes up for an inline `UNIQUE`/primary-key constraint —
+      // `schema.ts` declares none of those, so only 'c' has a Drizzle
+      // counterpart to compare against.
+      if (entry.origin !== 'c') continue;
+      const columns = raw.prepare(`PRAGMA index_info(${entry.name})`).all()
+        .map((r) => {
+          const row = r as { seqno: unknown; name: unknown };
+          return { seqno: Number(row.seqno), name: String(row.name) };
+        })
+        .toSorted((a, b) => a.seqno - b.seqno)
+        .map((r) => r.name);
+      indexes.set(entry.name, { table, columns, unique: entry.unique });
+    }
+  }
+  return indexes;
+}
+
+/** Every index Drizzle declares on `schema.ts`'s tables, by name. */
+function declaredIndexes(): Map<string, IndexInfo> {
+  const indexes = new Map<string, IndexInfo>();
+  for (const [tableName, table] of declaredTables()) {
+    for (const index of getTableConfig(table).indexes) {
+      const columns = index.config.columns.map((column) => {
+        if (!is(column, SQLiteColumn)) {
+          throw new Error(`index ${index.config.name} indexes a SQL expression, which this comparison cannot name`);
+        }
+        return column.name;
+      });
+      indexes.set(index.config.name, { table: tableName, columns, unique: index.config.unique });
+    }
+  }
+  return indexes;
 }
 
 /** Every `sqliteTable` exported by `schema.ts`, by its SQL name. */
@@ -84,6 +138,37 @@ test('every schema column matches the migration DDL by name, type and nullabilit
         disagreements.push(`${name}.${column.name} is in the DDL and absent from schema.ts`);
       }
     }
+  }
+
+  assert.deepEqual(disagreements, []);
+});
+
+test('every schema index matches the migration DDL by table, columns and uniqueness', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const declared = declaredIndexes();
+  const actual = ddlIndexes(raw, [...declaredTables().keys()]);
+
+  const disagreements: string[] = [];
+  for (const [name, index] of declared) {
+    const ddl = actual.get(name);
+    if (!ddl) {
+      disagreements.push(`${name} is declared in schema.ts and absent from the DDL`);
+      continue;
+    }
+    if (ddl.table !== index.table) {
+      disagreements.push(`${name}: DDL is on ${ddl.table}, schema.ts is on ${index.table}`);
+    }
+    if (ddl.columns.join(',') !== index.columns.join(',')) {
+      disagreements.push(`${name}: DDL columns are (${ddl.columns.join(', ')}), schema.ts columns are (${index.columns.join(', ')})`);
+    }
+    if (ddl.unique !== index.unique) {
+      disagreements.push(`${name}: DDL unique=${ddl.unique}, schema.ts unique=${index.unique}`);
+    }
+  }
+  for (const name of actual.keys()) {
+    if (!declared.has(name)) disagreements.push(`${name} is in the DDL and absent from schema.ts`);
   }
 
   assert.deepEqual(disagreements, []);
