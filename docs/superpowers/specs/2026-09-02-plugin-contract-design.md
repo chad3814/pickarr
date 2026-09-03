@@ -323,12 +323,20 @@ the caller must read, not exceptions. The plugin enqueues one `lookup` job per
 batch of up to 100 and **creates nothing yet**.
 
 The media item is created in the `lookup` handler's resolved branch, once the
-answer is in hand. This is a correction: an earlier draft of this section had the
-plugin create the media item here, before the lookup. That is not implementable —
-`MediaWriter` has no method to update a media item, so a row created before the
-answer arrives could never receive the looked-up title. Creating early would also
-require being able to *unlink* an rss item in order to refuse one, which the
-contract cannot express either (see 12).
+answer is in hand.
+
+This paragraph has been corrected twice, so the history is worth keeping. It
+originally had the plugin create the media item on notification, before the
+lookup. That was **not implementable** when the slice was built: `MediaWriter`
+could not update a media item, so a row created before the answer could never
+receive the looked-up title, and it could not unlink an rss item either, so a
+refusal could not clean up after itself. Both gaps have since been closed —
+`updateMediaItem` exists, and `relinkRssItem` accepts `null` — so **either
+ordering is now implementable**, and the choice belongs to the plugin.
+
+The test double still creates late, because creating late means the refusal and
+unresolved branches never have a row to clean up. A plugin that wants the item to
+exist while a lookup is in flight should create early and fill it in on resolve.
 
 The `lookup` handler calls the parser service through `ctx.fetch`, then per
 result: `refusal` → `setResolution(refused)`; `unresolved` → `setResolution(unresolved)`;
@@ -400,16 +408,21 @@ surface exactly this, and it earned its place.
 Three gaps, all verified in code rather than argued. None breaks the delivered
 slice; each is the first thing a real plugin will want.
 
-- **`MediaWriter` cannot update a media item.** This is what makes the original
-  9 flow impossible, and 9 has been corrected. Whether to add
-  `updateMediaItem` or keep create-when-resolved is a decision for the first
-  real plugin, not for a double.
-- **An rss item cannot be unlinked.** `relinkRssItem` takes a non-null id and
-  `rss_item.media_item_id` carries a foreign key, so `dropMediaItem` throws
-  (`errcode 787`) while any item still points at the row. The consequence is
-  wider than "cannot refuse after linking": **any row ever linked pins its media
-  item permanently.** The fix is a signature change — `mediaItemId: number |
-  null` — rather than a new method.
+- ~~**`MediaWriter` cannot update a media item.**~~ **Closed.**
+  `updateMediaItem(id, { title, releaseDate, description })` replaces exactly
+  those three fields — not `pluginId`, and deliberately not
+  `provider`/`provider_ref`, which `claimProviderRef` owns along with the unique
+  index over them. It is a full replacement rather than a partial patch, because
+  under `exactOptionalPropertyTypes` an absent field is ambiguous between "leave
+  it" and "set it null", and a lookup answers with all three anyway. It throws on
+  an id that matches no row, rather than silently doing nothing.
+- ~~**An rss item cannot be unlinked.**~~ **Closed**, and it shipped with the
+  update above because the two are one capability: creating a row early is only
+  safe if it can be undone to refuse. `relinkRssItem(rssItemId, mediaItemId:
+  number | null)` unlinks when passed `null`, after which `dropMediaItem`
+  succeeds instead of failing on `errcode 787`. No migration was needed —
+  `rss_item.media_item_id` was already nullable in the DDL, so only the
+  signature and the implementation were wrong.
 - **`PluginContext` has no clock.** A plugin's own rows would be stamped
   `Date.now()` while `MediaWriter`'s come from the host's injected `now`, inside
   one logical write. The double had to be constructed with its own clock; without
@@ -442,7 +455,7 @@ paragraph exists so nobody mistakes it for a guarantee.
 | 3 | `MediaPlugin` has `readonly schema: PluginSchema` | No such member, and **nothing named `PluginSchema` exists**. The host cannot use it and the double proves a plugin does not need it. Dropped. |
 | 4 | `db: PluginDatabase`, "Drizzle bound to this plugin's own tables only" | `db: unknown`, the whole raw connection. See 12.2. |
 | 4 | `log: Logger` | An inline `(message, detail?) => void`. |
-| 4 | `MediaWriter` has 8 methods; `setResolution(…, detail?)` | Nine methods — `dropMediaItem` was added — and `detail` is a required `string \| null`, because `exactOptionalPropertyTypes` makes an optional property mean something different. |
+| 4 | `MediaWriter` has 8 methods; `setResolution(…, detail?)` | **Ten** methods — `dropMediaItem`, then `updateMediaItem` (12.1) — and `detail` is a required `string \| null`, because `exactOptionalPropertyTypes` makes an optional property mean something different. |
 | 5 | "a claim is one transactional statement" | It is now. It was two, and a crash between them readied a process-killing job forever. 5 also omits that `recover` dead-letters a row already at its last attempt. |
 | 6 | "a host that hangs holds one job, not the runner" | False as built: `runOnce` is the only pump and it is serial, so a hung handler holds the only worker. The sentence describes a pool a later slice adds. No deadlock exists in the delivered flow. |
 | 7 | `drizzle-kit generate` is repo-scoped and covers plugin schemas | No drizzle config exists and `drizzle-kit` is unused. Migrations are hand-written. |

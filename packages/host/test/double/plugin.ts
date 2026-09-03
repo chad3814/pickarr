@@ -456,10 +456,12 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     }
     const at = deps.now();
 
-    // Created here rather than when the item arrived, though §9 of the design
-    // describes it the other way round: `MediaWriter` has no way to update a
-    // media item's title, release date or description after `createMediaItem`,
-    // so a row created before the service answered could never be corrected.
+    // Created here rather than when the item arrived. `MediaWriter` now has
+    // `updateMediaItem`, so creating early and filling in on resolve is also
+    // implementable -- this double simply does not do it. Creating late keeps
+    // the refusal and unresolved branches from having a row to clean up at all,
+    // which is the cheaper shape for a double; a real plugin that wants an item
+    // to exist while a lookup is in flight should create early instead.
     const mine = await ctx.media.createMediaItem({
       pluginId: DOUBLE_ID,
       title,
