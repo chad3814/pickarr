@@ -1,6 +1,23 @@
 import type { HostFetch } from '@pickarr/contract';
 
 /**
+ * `createHostFetch`'s actual return shape: `HostFetch`'s two methods plus
+ * `text`, for the one caller so far that needs a body neither `json` nor
+ * `bytes` gives it -- the feed reader, reading XML. Not part of `HostFetch`
+ * itself: widening that contract would hand every plugin a method none of
+ * them use, for the sake of a caller that is not a plugin at all. A plugin
+ * still only ever sees `HostFetch` through `PluginContext.fetch`; only host
+ * wiring, holding the concrete value this function returns, can reach
+ * `text` -- and reaching it costs nothing extra, because it runs through
+ * this same instance's `enqueue`, so a feed's host shares its per-hostname
+ * budget with any `json`/`bytes` call to that same host, rather than being
+ * exempt from the limit Task 2 built.
+ */
+export interface QueuedFetch extends HostFetch {
+  text(url: string, init?: RequestInit): Promise<string>;
+}
+
+/**
  * The concurrency budget `createHostFetch` enforces per hostname. `default`
  * applies to any hostname without its own entry in `perHost`; both are
  * counts of requests allowed to run at once, not a rate. Never exported from
@@ -60,7 +77,7 @@ function assertValidLimits(limits: FetchLimits | undefined): void {
  * together; the default is one, so every caller that never sets `limits`
  * behaves exactly as before.
  */
-export function createHostFetch(deps: { fetch: typeof globalThis.fetch; limits?: FetchLimits }): HostFetch {
+export function createHostFetch(deps: { fetch: typeof globalThis.fetch; limits?: FetchLimits }): QueuedFetch {
   assertValidLimits(deps.limits);
 
   const queues = new Map<string, HostQueue>();
@@ -122,6 +139,14 @@ export function createHostFetch(deps: { fetch: typeof globalThis.fetch; limits?:
         const res = await request(url, init);
         const buf = await res.arrayBuffer();
         return new Uint8Array(buf);
+      });
+    },
+
+    text(url: string, init?: RequestInit): Promise<string> {
+      const hostname = new URL(url).hostname;
+      return enqueue(hostname, async () => {
+        const res = await request(url, init);
+        return res.text();
       });
     },
   };

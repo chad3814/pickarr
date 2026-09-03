@@ -168,6 +168,28 @@ test('the limit is keyed by hostname, so two hosts proceed in parallel', async (
   assert.equal(resultB.url, 'http://b.example/one');
 });
 
+test('text shares its hostname queue with json and bytes, so a feed is paced like any other call to that host', async () => {
+  const track = trackingFetch();
+  const hostFetch = createHostFetch({ fetch: track.fetchFn });
+
+  const first = hostFetch.json<Echo>('http://a.example/feed.json');
+  const second = hostFetch.text('http://a.example/feed.xml');
+
+  await tick();
+  assert.equal(track.activeNow(), 1, 'a text request to a hostname already at its limit must wait its turn');
+
+  track.releaseNext();
+  await first;
+
+  await tick();
+  assert.equal(track.activeNow(), 1, 'the text request only starts once the json request has finished');
+  track.releaseNext();
+  const secondResult = await second;
+  assert.equal(secondResult, JSON.stringify({ url: 'http://a.example/feed.xml' } satisfies Echo));
+
+  assert.equal(track.maxActive(), 1, 'json and text to the same host never ran at once');
+});
+
 test('the hostname comes from the url, so a caller cannot opt out of its limit', async () => {
   const track = trackingFetch();
   const hostFetch = createHostFetch({ fetch: track.fetchFn });
