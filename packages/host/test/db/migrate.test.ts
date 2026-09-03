@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { migrateHost, migratePlugin } from '../../src/db/migrate.ts';
+import { migrateHost, migrateHostWith, migratePlugin } from '../../src/db/migrate.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -11,6 +11,16 @@ function tableNames(raw: DatabaseSync): Set<string> {
     raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()
       .map((r) => String((r as { name: unknown }).name)),
   );
+}
+
+/**
+ * Same rows as `tableNames`, but as an array: the atomicity test below filters
+ * the result, and `Set` has no `.filter`. Kept local rather than exported
+ * from `migrate.ts` — its private `tableNames` stays private.
+ */
+function tableNamesFor(raw: DatabaseSync): string[] {
+  return raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()
+    .map((r) => String((r as { name: unknown }).name));
 }
 
 /** The `(plugin_id, version)` pairs recorded as applied, or `[]` when the table is absent. */
@@ -107,4 +117,22 @@ test('a plugin migration that throws part way leaves neither its tables nor its 
 
   assert.equal(tableNames(raw).has('eps_first'), false, 'the half-applied table must be rolled back');
   assert.deepEqual(appliedVersions(raw), []);
+});
+
+test('a host migration that throws leaves no trace of itself', () => {
+  const raw = new DatabaseSync(':memory:');
+  const boom: Migration[] = [
+    { version: 1, up: (db) => db.exec('CREATE TABLE kept (id INTEGER PRIMARY KEY)') },
+    { version: 2, up: (db) => {
+      db.exec('CREATE TABLE half_done (id INTEGER PRIMARY KEY)');
+      throw new Error('migration 2 failed');
+    } },
+  ];
+  assert.throws(() => migrateHostWith(raw, boom), /migration 2 failed/);
+
+  // Version 1 stands. Version 2 left neither its table nor its version row,
+  // so the next boot re-runs it rather than skipping it as applied.
+  assert.deepEqual(tableNamesFor(raw).filter((n) => n === 'kept' || n === 'half_done'), ['kept']);
+  const versions = raw.prepare('SELECT version FROM host_migrations ORDER BY version').all();
+  assert.deepEqual(versions.map((r) => Number((r as { version: unknown }).version)), [1]);
 });

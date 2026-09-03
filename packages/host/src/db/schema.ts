@@ -42,6 +42,10 @@ export const rssFeed = sqliteTable('rss_feed', {
   // Nullable: absent means picks from this feed go to the host's default
   // client rather than a specific one.
   downloadClientId: integer('download_client_id').references(() => downloadClient.id),
+  // 'torrent' | 'usenet'. Defaulted so the column was legal to add to a table
+  // that may already hold rows; existing feeds inherit 'torrent'.
+  downloadType: text('download_type').notNull().default('torrent'),
+  pollIntervalS: integer('poll_interval_s').notNull().default(900),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 }, (t) => [
@@ -80,9 +84,15 @@ export const rssItem = sqliteTable('rss_item', {
   rankingScore: integer('ranking_score'),
   resolution: text('resolution').notNull(),
   resolutionDetail: text('resolution_detail'),
+  // Nullable: the reader always writes one, falling back to the link when a
+  // feed's item has none — a NULL means a row that predates this column.
+  // SQLite treats NULLs as distinct in a unique index, so those rows do not
+  // collide with each other under `rss_item_feed_guid`.
+  guid: text('guid'),
 }, (t) => [
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),
+  uniqueIndex('rss_item_feed_guid').on(t.feedId, t.guid),
 ]);
 
 export const person = sqliteTable('person', {
@@ -147,6 +157,9 @@ export const poster = sqliteTable('poster', {
   width: integer('width').notNull(),
   height: integer('height').notNull(),
   createdAt: integer('created_at').notNull(),
+  // Nullable: set once the artwork writer has fetched the file to disk: rows
+  // written before that (or before this column existed) have none yet.
+  path: text('path'),
 }, (t) => [
   // Unique on the url for the same reason as `role_media_item_person_role`:
   // one image is one row however many times a handler re-runs.
@@ -163,6 +176,7 @@ export const background = sqliteTable('background', {
   width: integer('width').notNull(),
   height: integer('height').notNull(),
   createdAt: integer('created_at').notNull(),
+  path: text('path'),
 }, (t) => [
   uniqueIndex('background_media_item_url').on(t.mediaItemId, t.url),
 ]);
@@ -181,8 +195,15 @@ export const logo = sqliteTable('logo', {
   width: integer('width').notNull(),
   height: integer('height').notNull(),
   createdAt: integer('created_at').notNull(),
+  path: text('path'),
 }, (t) => [
   index('logo_media_item').on(t.mediaItemId),
+  // Unique to match `poster`/`background`: this is the write path that makes
+  // a re-run of the (still forthcoming) logo writer idempotent instead of
+  // duplicating rows. The plain index above stays — same leading column, so
+  // it still serves the same lookups, and dropping it is unrelated to this
+  // change.
+  uniqueIndex('logo_media_item_url').on(t.mediaItemId, t.url),
 ]);
 
 export const jobs = sqliteTable('jobs', {
