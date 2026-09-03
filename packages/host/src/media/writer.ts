@@ -102,10 +102,13 @@ export function createMediaWriter(db: HostDb, now: () => number): MediaWriter {
       }
     },
 
-    async relinkRssItem(rssItemId: number, mediaItemId: number): Promise<void> {
+    async relinkRssItem(rssItemId: number, mediaItemId: number | null): Promise<void> {
       const at = now();
-      raw.prepare('UPDATE rss_item SET media_item_id = ?, updated_at = ? WHERE id = ?')
+      const result = raw.prepare('UPDATE rss_item SET media_item_id = ?, updated_at = ? WHERE id = ?')
         .run(mediaItemId, at, rssItemId);
+      if (result.changes === 0) {
+        throw new Error(`relinkRssItem: no rss item ${rssItemId}`);
+      }
     },
 
     async dropMediaItem(mediaItemId: number): Promise<void> {

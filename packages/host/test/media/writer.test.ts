@@ -165,6 +165,33 @@ test('relinkRssItem repoints the item and bumps updated_at', async () => {
   assert.equal(after.updated_at, 999);
 });
 
+test('relinkRssItem(id, null) unlinks and bumps updated_at', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+
+  const feedId = insertFeed(raw, 'https://example.test/feed');
+  const itemId = insertRssItem(raw, feedId, 500);
+
+  const writer = createMediaWriter(db, () => 999);
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  await writer.relinkRssItem(itemId, mediaItemId);
+
+  await writer.relinkRssItem(itemId, null);
+
+  const after = readRssItem(raw, itemId);
+  assert.ok(after);
+  assert.equal(after.media_item_id, null);
+  assert.equal(after.updated_at, 999);
+});
+
+test('relinkRssItem on an rss item that does not exist throws', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 1000);
+
+  await assert.rejects(() => writer.relinkRssItem(999_999, null));
+});
+
 test('updateMediaItem replaces title, release date and description, and bumps updated_at', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
@@ -234,6 +261,30 @@ test('updateMediaItem on an id that does not exist throws rather than silently d
     releaseDate: null,
     description: null,
   }));
+});
+
+test('creating an item, linking, unlinking with null, then dropping it succeeds', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 1000);
+
+  const feedId = insertFeed(raw, 'https://example.test/feed');
+  const itemId = insertRssItem(raw, feedId, 0);
+
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  await writer.relinkRssItem(itemId, mediaItemId);
+
+  // The refusal path: a lookup refuses, so the rss item is unlinked before
+  // the row it never got to complete is dropped. Without the unlink, this
+  // dropMediaItem would fail with SQLITE_CONSTRAINT_FOREIGNKEY (787), because
+  // the rss item still points at the row.
+  await writer.relinkRssItem(itemId, null);
+  await writer.dropMediaItem(mediaItemId);
+
+  assert.equal(readMediaItem(raw, mediaItemId), undefined, 'the media item must be gone');
+  const after = readRssItem(raw, itemId);
+  assert.ok(after);
+  assert.equal(after.media_item_id, null, 'the rss item stays unlinked');
 });
 
 test('setResolution records refused and unresolved as different states', async () => {

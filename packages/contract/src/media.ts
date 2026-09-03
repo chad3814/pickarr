@@ -103,8 +103,15 @@ export interface MediaWriter {
    */
   claimProviderRef(mediaItemId: number, provider: string, ref: string): Promise<ProviderClaim>;
 
-  /** Repoints an rss item at a different media item. */
-  relinkRssItem(rssItemId: number, mediaItemId: number): Promise<void>;
+  /**
+   * Repoints an rss item at a different media item, or at nothing when
+   * `mediaItemId` is `null`. The unlink is what lets a media item created
+   * before a lookup answers be dropped again when the answer is a refusal:
+   * `dropMediaItem` throws while any rss item still points at the row, and
+   * without a way to unlink, that link could never be broken. Throws if
+   * `rssItemId` does not exist.
+   */
+  relinkRssItem(rssItemId: number, mediaItemId: number | null): Promise<void>;
 
   /** Deletes a media item that lost a provider-ref claim. */
   dropMediaItem(mediaItemId: number): Promise<void>;
