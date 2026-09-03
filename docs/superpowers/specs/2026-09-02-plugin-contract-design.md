@@ -467,3 +467,48 @@ after which `db.query.mediaItem` resolves and `db.$client` is unchanged. Until
 this was wired, `schema.ts` had no importers at all and duplicated the migration
 DDL with nothing keeping the two in step; they are now checked against each other
 by test.
+
+### 12.5 Conditions and follow-ups
+
+Recorded here rather than in a review file, because review files are scratch and
+these outlive the branch.
+
+**Two conditions.** Each names the event that makes it urgent, because a note
+without a trigger decays into background noise.
+
+- **`migrateHost` is not atomic** — it `exec`s the initial schema and then
+  records the version in a separate statement, the same defect fixed in
+  `migratePlugin`. It is worse than that one was: a crash between the two kills
+  every later boot on `table download_client already exists`. It is harmless
+  today only because `openDatabase` has no caller, so all call sites are
+  in-memory tests and recovery is deleting an empty file. **Fix before either a
+  production startup calls `openDatabase`, or `HOST_MIGRATIONS` gains a version
+  2.**
+- **`notifyNewRssItems` has no caller.** Returning `{ unowned, failures }`
+  removed a bug where one plugin's failure hid another's, but it moved the
+  obligation onto a caller that does not exist yet. **Whoever writes the
+  rss-poll job must read both fields**; a caller that ignores `failures`
+  reintroduces the silent loss by another route.
+
+**Shared tables have a writer and no reader.** `MediaWriter` covers writes;
+nothing reads. The test double hand-writes SQL against `rss_item` through the
+untyped `ctx.db`, which is the same hole 12.2 describes, reached from the other
+side. The read API is slice D's, and until it exists every plugin will improvise
+one.
+
+**`role` has no reader and no dedup beyond its unique index.** A deduped media
+item can accumulate a duplicate cast entry that nothing would surface.
+
+**Unreached by any test, deliberately or otherwise.** `onDownloadedFile` has no
+caller by design, as 1.2 says. `attachPoster` and `attachBackground` are never
+executed by a test — artwork is slice B's, and they were built for it. Five
+tables have no writer, `external_reference` is unreachable through the contract
+(12.3), and `ranking_score` is never written.
+
+**A note on 1.x, which this slice does not touch.** `packages/web`'s
+`Browse.test.tsx` has two distinct flaky tests, both measured during this work
+rather than inferred: `the selection clears when a term filters the selected
+group out` fails roughly one run in three, and `picking costs one request, not a
+refetch` was seen failing once and did not reproduce. Neither is caused by 2.0 —
+they are recorded so a future run does not mistake either for a regression it
+introduced.
