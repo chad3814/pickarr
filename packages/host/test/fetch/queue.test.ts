@@ -94,6 +94,92 @@ test('a rejected request still releases its slot, so the next request to that ho
   assert.equal(calls, 2, 'the second call to the same hostname actually reached fetch');
 });
 
+test('a request that never settles times out, rejects, and releases its hostname slot', async () => {
+  // The wedge this guards, and the reason it is the whole process rather
+  // than one feed: a hung request holds its hostname's only slot, and --
+  // the pump being serial -- the job claim and the pump loop with it, so
+  // nothing else ever runs and `SIGTERM` cannot even end it. `timeoutMs` is
+  // small only so the test need not wait the shipped thirty seconds.
+  let calls = 0;
+  const fetchFn: typeof globalThis.fetch = async (input) => {
+    calls += 1;
+    // The first call ignores the signal entirely and never settles -- the
+    // exact behaviour a real unresponsive host produces, and the case a
+    // signal alone would not save this from.
+    if (calls === 1) return new Promise<Response>(() => {});
+    return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
+  };
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 20 });
+
+  await assert.rejects(
+    hostFetch.text('http://a.example/hangs'),
+    /timed out after 20ms/,
+    'a hung request must reject on the timeout, not hang forever',
+  );
+
+  // And the rejection has to have run `enqueue`'s release: a *later* request
+  // to the *same* hostname has to actually reach fetch, not queue behind a
+  // slot nothing will ever grant.
+  const second = await hostFetch.json<Echo>('http://a.example/after');
+  assert.equal(second.url, 'http://a.example/after');
+  assert.equal(calls, 2, 'the next request to the same hostname actually reached fetch');
+});
+
+test('a response whose body never completes times out too, and releases its hostname slot', async () => {
+  // The other half of the same wedge, and the one a race around `fetch`
+  // alone does not cover: the headers arrive promptly, so the response
+  // resolves and any timeout that only wrapped `fetch` has already settled
+  // successfully -- and then the body read hangs forever, holding the
+  // hostname slot and (the pump being serial) the job claim with it. The
+  // body read has to be inside the timeout window, which is why `timed`
+  // calls `read` inside the race rather than after it.
+  let calls = 0;
+  const fetchFn: typeof globalThis.fetch = async (input) => {
+    calls += 1;
+    // A stream that is never enqueued to and never closed, and a signal this
+    // fake deliberately ignores -- a real stalled server, minus the socket.
+    if (calls === 1) return new Response(new ReadableStream({ start() {} }));
+    return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
+  };
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 20 });
+
+  await assert.rejects(
+    hostFetch.text('http://a.example/stalls'),
+    /timed out after 20ms/,
+    'a response whose body never completes must reject on the timeout, not hang reading it',
+  );
+
+  // And the slot has to be free again: the release runs off the rejection,
+  // so a timeout that never rejects is also a timeout that never releases.
+  const second = await hostFetch.json<Echo>('http://a.example/after');
+  assert.equal(second.url, 'http://a.example/after');
+  assert.equal(calls, 2, 'the next request to the same hostname actually reached fetch');
+});
+
+test('a caller\'s own abort signal is composed with the timeout, not replaced by it', async () => {
+  // `text`/`json`/`bytes` all take a `RequestInit`, so a caller may already
+  // have a signal of its own. Overwriting it with the timeout's would make
+  // the caller's abort silently do nothing.
+  const seen: Array<AbortSignal | null | undefined> = [];
+  const fetchFn: typeof globalThis.fetch = async (_input, init) => {
+    seen.push(init?.signal);
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => { reject(new Error('aborted by the caller')); }, { once: true });
+    });
+  };
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 30_000 });
+
+  const controller = new AbortController();
+  const pending = hostFetch.text('http://a.example/slow', { signal: controller.signal });
+  await tick();
+  const handed = seen[0];
+  assert.ok(handed !== undefined && handed !== null, 'fetch was handed a signal');
+  assert.equal(handed.aborted, false, 'nothing has aborted yet');
+
+  controller.abort();
+  await assert.rejects(pending, /aborted by the caller/, 'the caller\'s abort still reaches fetch');
+});
+
 test('a per-host limit of two lets two run at once and makes a third wait', async () => {
   const track = trackingFetch();
   const hostFetch = createHostFetch({ fetch: track.fetchFn, limits: { default: 1, perHost: { 'a.example': 2 } } });
@@ -245,6 +331,19 @@ test('a negative limit throws at construction', () => {
     () => createHostFetch({ fetch: unusedFetch, limits: { default: -1 } }),
     /'default'.*-1/,
   );
+});
+
+test('an invalid timeoutMs throws at construction, naming the parameter and the value', () => {
+  // The same guard `assertValidLimit` gives a limit, for the same reason:
+  // each of these constructs silently otherwise, and then fails every
+  // request -- `0` timing out instantly, the rest with a `RangeError` about
+  // "delay" that names neither `timeoutMs` nor `createHostFetch`.
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: 0 }), /timeoutMs.*\b0\b/);
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: -1 }), /timeoutMs.*-1/);
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: 1.5 }), /timeoutMs.*1\.5/);
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: Number.NaN }), /timeoutMs.*NaN/);
+  // And the shipped default is not caught by its own guard.
+  assert.doesNotThrow(() => createHostFetch({ fetch: unusedFetch }));
 });
 
 test('a valid perHost limit of 1 and a large value both construct without throwing', () => {

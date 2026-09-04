@@ -11,12 +11,14 @@
     }
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js",
+    "build": "esbuild src/index.ts src/bin.ts --bundle --platform=node --format=esm --packages=external --outdir=dist",
+    "start": "node --import tsx --conditions development src/bin.ts",
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@pickarr/contract": "*",
     "drizzle-orm": "1.0.0-rc.4",
-    "fast-xml-parser": "^4.5.0"
+    "fast-xml-parser": "^4.5.0",
+    "image-size": "^2.0.2"
   }
 }

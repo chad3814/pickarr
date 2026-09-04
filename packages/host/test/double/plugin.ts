@@ -18,6 +18,7 @@ import { drizzle } from 'drizzle-orm/node-sqlite';
 import { eq, inArray } from 'drizzle-orm';
 import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import type {
+  ImageInit,
   JobHandler,
   MediaPlugin,
   MediaType,
@@ -101,6 +102,21 @@ export interface LookupPerson {
 }
 
 /**
+ * One image the service offers for a resolved entry, and which artwork slot
+ * it fills. The double asks for nothing beyond what `ImageInit` itself needs
+ * plus the slot, because the slot is what picks `attachPoster`,
+ * `attachBackground` or `attachLogo` -- the service does not hand back
+ * anything shaped like a contract type, this is just the double's own wire
+ * shape for the fake service's answer.
+ */
+export interface LookupImage {
+  role: 'poster' | 'background' | 'logo';
+  url: string;
+  title: string | null;
+  language: string | null;
+}
+
+/**
  * One name's answer.
  *
  * `partial` is separate from `status` and has to be read first. A partial
@@ -125,6 +141,8 @@ export interface LookupEntry {
   releaseDate: string | null;
   description: string | null;
   people: readonly LookupPerson[];
+  /** Empty for every outcome but a resolved one -- nothing else has artwork to offer. */
+  images: readonly LookupImage[];
 }
 
 /** What `POST /api/v1/lookup` answers. Always with HTTP 200 — see `LookupEntry.partial`. */
@@ -146,6 +164,8 @@ export interface ResolvedFields {
   releaseDate: string | null;
   description: string | null;
   people: readonly LookupPerson[];
+  /** Absent or empty for the many tests that have nothing to do with artwork. */
+  images?: readonly LookupImage[];
 }
 
 export function resolvedEntry(name: string, fields: ResolvedFields): LookupEntry {
@@ -161,6 +181,7 @@ export function resolvedEntry(name: string, fields: ResolvedFields): LookupEntry
     releaseDate: fields.releaseDate,
     description: fields.description,
     people: fields.people,
+    images: fields.images ?? [],
   };
 }
 
@@ -181,6 +202,7 @@ export function refusedEntry(name: string, fields: { lookupId: string; refusal: 
     releaseDate: null,
     description: null,
     people: [],
+    images: [],
   };
 }
 
@@ -197,6 +219,7 @@ export function unresolvedEntry(name: string, fields: { lookupId: string }): Loo
     releaseDate: null,
     description: null,
     people: [],
+    images: [],
   };
 }
 
@@ -214,6 +237,7 @@ export function partialEntry(name: string, fields: { lookupId: string }): Lookup
     releaseDate: null,
     description: null,
     people: [],
+    images: [],
   };
 }
 
@@ -424,6 +448,41 @@ function readPollPayload(payload: unknown): { lookupId: string; rssItemId: numbe
   return { lookupId, rssItemId };
 }
 
+/** `role`'s three literals are not a type `!==` narrows `unknown` to on its own -- this is what does. */
+function isImageRole(value: unknown): value is LookupImage['role'] {
+  return value === 'poster' || value === 'background' || value === 'logo';
+}
+
+/** Narrows one element of an artwork payload's `images` array, thrown at whichever field is malformed. */
+function readLookupImage(value: unknown): LookupImage {
+  if (typeof value !== 'object' || value === null
+    || !('role' in value) || !('url' in value) || !('title' in value) || !('language' in value)) {
+    throw new TypeError('double: an artwork payload image is missing a field');
+  }
+  const { role, url, title, language } = value;
+  if (
+    !isImageRole(role)
+    || typeof url !== 'string'
+    || (title !== null && typeof title !== 'string')
+    || (language !== null && typeof language !== 'string')
+  ) {
+    throw new TypeError('double: an artwork payload image has a malformed field');
+  }
+  return { role, url, title, language };
+}
+
+function readArtworkPayload(payload: unknown): { mediaItemId: number; images: LookupImage[] } {
+  if (typeof payload !== 'object' || payload === null
+    || !('mediaItemId' in payload) || !('images' in payload)) {
+    throw new TypeError('double: an artwork payload must carry mediaItemId and images');
+  }
+  const { mediaItemId, images } = payload;
+  if (typeof mediaItemId !== 'number' || !Array.isArray(images)) {
+    throw new TypeError('double: an artwork payload must carry mediaItemId and images');
+  }
+  return { mediaItemId, images: images.map((image: unknown) => readLookupImage(image)) };
+}
+
 /** The service's people, de-duplicated by the provider's own person id as they are written. */
 async function attachPeople(
   people: readonly LookupPerson[],
@@ -483,6 +542,18 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
 
     await attachPeople(entry.people, claim.kept, ctx);
     await ctx.media.setResolution(rssItemId, 'resolved', null);
+
+    // A separate job, not fetched inline here, and only when the service
+    // actually offered something: enqueuing an empty job would still be
+    // correct but would give every plugin test an extra job row to filter
+    // out. The point of the separation is retry isolation -- everything
+    // above this line has already committed the media item, its provider
+    // claim and its resolution, so an image that never downloads, or one
+    // `image-size` refuses to measure, can exhaust its own job's attempts
+    // and dead-letter without touching any of that.
+    if (entry.images.length > 0) {
+      await ctx.jobs.enqueue({ kind: 'artwork', payload: { mediaItemId: claim.kept, images: entry.images } });
+    }
   }
 
   /** The four outcomes, in the one order that reads them correctly. */
@@ -568,11 +639,57 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     await applyEntry(body.result, rssItemId, ctx, db);
   };
 
+  /**
+   * Fetches every image `applyResolved` scheduled and attaches it to its
+   * slot. `images.map` kicks every fetch off in the same synchronous pass,
+   * not a loop of awaits: `ctx.fetch.bytes` is queued per hostname by the
+   * host, so two images on different hosts genuinely run at once here, and
+   * two on the same host serialise inside that queue regardless of how this
+   * loop is written. Awaiting each image in turn would still be idempotent,
+   * but it would leave the fetch queue emptied by a plugin that never asked
+   * it to serialise its own requests across hosts.
+   *
+   * `Promise.allSettled`, not `Promise.all`: `all` resolves the moment the
+   * first member rejects and abandons the rest mid-flight, so a test -- or a
+   * real crash -- reading the database right after would catch the good
+   * images half-written. `allSettled` waits for every image to finish, good
+   * or bad, before this handler decides anything, so an image this handler
+   * cannot fetch or measure never costs its neighbours: they are already
+   * attached by the time the throw below runs. The throw still fails the job
+   * as a whole, which is right -- a partially-attached run is not "done",
+   * and the runner's own retry/backoff is what gives the failed image
+   * another attempt. `attachPoster`/`attachBackground`/`attachLogo` are
+   * keyed on `(mediaItemId, url)`, so a retry that re-attaches an image
+   * already written is a no-op rather than a duplicate.
+   */
+  const artwork: JobHandler = async (job, ctx) => {
+    const { mediaItemId, images } = readArtworkPayload(job.payload);
+    const settled = await Promise.allSettled(images.map(async (image) => {
+      const bytes = await ctx.fetch.bytes(image.url);
+      const init: ImageInit = { url: image.url, title: image.title, language: image.language, bytes };
+      if (image.role === 'poster') {
+        await ctx.media.attachPoster(mediaItemId, init);
+      } else if (image.role === 'background') {
+        await ctx.media.attachBackground(mediaItemId, init);
+      } else {
+        await ctx.media.attachLogo(mediaItemId, init);
+      }
+    }));
+    const failed = settled.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+    if (failed !== undefined) {
+      // `PromiseRejectedResult.reason` is typed `any` by the language's own
+      // lib types; narrowed here the same way every other caught error in
+      // this file is, rather than let that `any` leak into what this
+      // handler throws.
+      throw failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
+    }
+  };
+
   return {
     id: DOUBLE_ID,
     mediaType: MEDIA_TYPE,
     migrations: MIGRATIONS,
-    jobs: { lookup, poll },
+    jobs: { lookup, poll, artwork },
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;

@@ -68,6 +68,37 @@ function assertValidLimits(limits: FetchLimits | undefined): void {
 }
 
 /**
+ * A timeout of 0 or below, a fraction, or `NaN` is the same class of mistake
+ * `assertValidLimit` above exists for, and the same answer: refuse it at
+ * construction, by name and value. Left unchecked, every one of them
+ * constructs silently and then fails every single request afterwards:
+ * probed directly, `0` gives a signal already aborting, so every request
+ * times out instantly, while `-1`, `1.5` and `NaN` throw a `RangeError`
+ * about "delay" from inside `AbortSignal.timeout` -- naming neither this
+ * parameter nor this function, so the value that caused it appears nowhere
+ * in the diagnosis.
+ */
+function assertValidTimeout(value: number): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`fetch timeoutMs must be an integer of at least 1, got ${value}`);
+  }
+}
+
+/**
+ * How long one request may take before it is aborted -- 1.x's own number
+ * (`FETCH_TIMEOUT_MS` in `packages/core/src/feeds/fetch-feed.ts`), applied
+ * here rather than at each call site so that every caller of
+ * `json`/`bytes`/`text` gets it without having to remember to.
+ *
+ * A request that never settles is the one failure nothing above this can
+ * survive: it holds its hostname's only queue slot forever, and because the
+ * pump runs one job at a time it holds that job's claim and the pump's own
+ * loop with it -- so no job of any kind runs again, and `Pump.done` never
+ * resolves, which means even `SIGTERM` cannot end the process.
+ */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
  * Requests are queued per hostname with a configurable number allowed to run
  * at once. The hostname is computed from the url in `json`/`bytes` and
  * passed into `enqueue`, never accepted from the caller as its own
@@ -76,9 +107,17 @@ function assertValidLimits(limits: FetchLimits | undefined): void {
  * configurable is only how many requests to that hostname may be in flight
  * together; the default is one, so every caller that never sets `limits`
  * behaves exactly as before.
+ *
+ * `timeoutMs` exists so a test can watch a hung request actually time out
+ * without waiting the full thirty seconds; nothing in production sets it,
+ * and there is no other way to reach it -- a plugin holds only `HostFetch`.
  */
-export function createHostFetch(deps: { fetch: typeof globalThis.fetch; limits?: FetchLimits }): QueuedFetch {
+export function createHostFetch(
+  deps: { fetch: typeof globalThis.fetch; limits?: FetchLimits; timeoutMs?: number },
+): QueuedFetch {
   assertValidLimits(deps.limits);
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  assertValidTimeout(timeoutMs);
 
   const queues = new Map<string, HostQueue>();
 
@@ -111,19 +150,67 @@ export function createHostFetch(deps: { fetch: typeof globalThis.fetch; limits?:
     }
   }
 
-  async function request(url: string, init: RequestInit | undefined): Promise<Response> {
-    const res = await deps.fetch(url, init);
-    if (!res.ok) {
-      throw new Error(`fetch ${url} failed: ${res.status} ${res.statusText}`);
+  /**
+   * One request, under the timeout, from the call to `fetch` through reading
+   * its body -- the body is inside the window deliberately, matching 1.x,
+   * where the signal stays live across `await response.text()`: a host that
+   * answers with headers and then stalls the stream wedges a slot exactly as
+   * one that never answers at all. `read` is called INSIDE the race for that
+   * reason, and `queue.test.ts`'s stalled-body test fails if it is moved
+   * outside -- otherwise the race settles on the response and the body read
+   * hangs on afterwards, still holding the slot and the job claim.
+   *
+   * Two mechanisms, and both are load-bearing. The composed signal is what
+   * cancels a real request (undici aborts the socket and errors a body
+   * already streaming), so a timed-out fetch stops costing anything. The
+   * race is what makes this *reject* rather than hang if the `fetch` it was
+   * handed ignores the signal -- and rejecting is what runs `enqueue`'s
+   * `finally`, releasing the hostname slot. A caller's own signal is
+   * composed with the timeout rather than replaced by it, so passing one
+   * cannot silently opt out of the timeout and the timeout cannot silently
+   * discard it.
+   */
+  async function timed<T>(
+    url: string,
+    init: RequestInit | undefined,
+    read: (res: Response) => Promise<T>,
+  ): Promise<T> {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const callerSignal = init?.signal ?? undefined;
+    const signal = callerSignal === undefined ? timeout : AbortSignal.any([callerSignal, timeout]);
+    // Aborted in the `finally` below, which is what detaches the listener:
+    // otherwise every completed request would leave one attached to a signal
+    // with up to `timeoutMs` still to run.
+    const settled = new AbortController();
+    const onTimeout = new Promise<never>((_resolve, reject) => {
+      timeout.addEventListener('abort', () => {
+        reject(new Error(`fetch ${url} timed out after ${timeoutMs}ms`));
+      }, { once: true, signal: settled.signal });
+    });
+    try {
+      return await Promise.race([
+        (async () => {
+          const res = await deps.fetch(url, { ...init, signal });
+          if (!res.ok) {
+            throw new Error(`fetch ${url} failed: ${res.status} ${res.statusText}`);
+          }
+          return read(res);
+        })(),
+        onTimeout,
+      ]);
+    } finally {
+      settled.abort();
     }
-    return res;
+  }
+
+  function fetched<T>(url: string, init: RequestInit | undefined, read: (res: Response) => Promise<T>): Promise<T> {
+    const hostname = new URL(url).hostname;
+    return enqueue(hostname, () => timed(url, init, read));
   }
 
   return {
     json<T>(url: string, init?: RequestInit): Promise<T> {
-      const hostname = new URL(url).hostname;
-      return enqueue(hostname, async () => {
-        const res = await request(url, init);
+      return fetched(url, init, async (res) => {
         // `Response.json()` hands back `unknown` here, not `any` -- the
         // explicit annotation is what stops that from leaking any further.
         // The `T` below is the caller's assertion about that shape, not a
@@ -134,20 +221,11 @@ export function createHostFetch(deps: { fetch: typeof globalThis.fetch; limits?:
     },
 
     bytes(url: string, init?: RequestInit): Promise<Uint8Array> {
-      const hostname = new URL(url).hostname;
-      return enqueue(hostname, async () => {
-        const res = await request(url, init);
-        const buf = await res.arrayBuffer();
-        return new Uint8Array(buf);
-      });
+      return fetched(url, init, async (res) => new Uint8Array(await res.arrayBuffer()));
     },
 
     text(url: string, init?: RequestInit): Promise<string> {
-      const hostname = new URL(url).hostname;
-      return enqueue(hostname, async () => {
-        const res = await request(url, init);
-        return res.text();
-      });
+      return fetched(url, init, (res) => res.text());
     },
   };
 }

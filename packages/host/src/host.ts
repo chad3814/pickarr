@@ -1,10 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { DownloadClients, HostFetch, JobHandler, MediaPlugin, PluginContext } from '@pickarr/contract';
+import type { DownloadClients, JobHandler, MediaPlugin, PluginContext } from '@pickarr/contract';
+import { createArtworkStore } from './artwork/store.ts';
 import type { HostDb } from './db/open.ts';
 import { migratePlugin } from './db/migrate.ts';
 import { createMediaWriter } from './media/writer.ts';
 import { createRunner } from './jobs/runner.ts';
 import type { Runner } from './jobs/runner.ts';
+import { createFeedReader } from './feeds/reader.ts';
+import type { QueuedFetch } from './fetch/queue.ts';
 
 /**
  * Exponential, capped at a minute. Not an override knob: `backoffMs` is a
@@ -15,6 +18,41 @@ export const DEFAULT_BACKOFF_MS = (attempts: number): number => Math.min(1000 * 
 
 /** How many times a job may fail before it dead-letters. */
 export const DEFAULT_MAX_ATTEMPTS = 5;
+
+/**
+ * The host's own plugin id. `jobs.plugin_id` is `NOT NULL` and handlers are
+ * keyed by `(pluginId, kind)`, so a job the host itself owns still needs a
+ * plugin id to dispatch on — this is the one no plugin may claim. `register`
+ * refuses it outright, so a plugin can never silently capture the host's own
+ * handlers. It declares no tables, so `migratePlugin`'s `<pluginId>_` prefix
+ * rule never applies to it — nothing ever calls `migratePlugin` with this id.
+ */
+export const HOST_PLUGIN_ID = 'host';
+
+/** Narrows a `poll` job's `unknown` payload rather than casting it, so a malformed row fails loudly instead of coercing silently. */
+function readPollPayload(payload: unknown): { feedId: number } {
+  const feedId = tryReadPollFeedId(payload);
+  if (feedId === undefined) {
+    throw new Error(`poll job payload is not shaped like { feedId: number }: ${JSON.stringify(payload)}`);
+  }
+  return { feedId };
+}
+
+/**
+ * The non-throwing twin of `readPollPayload`, for a scan over rows that are
+ * not the one being run. `readPollPayload` throwing is right inside the
+ * handler, where the payload IS the job under execution and a bad one
+ * should fail loudly and dead-letter. It is wrong here: a scan that throws
+ * on the first unparseable row it meets would let one corrupt job poison
+ * every other feed's scheduling, including feeds with nothing wrong at all.
+ * Returns `undefined` for anything not shaped like `{ feedId: number }`,
+ * rather than coercing it into one.
+ */
+function tryReadPollFeedId(payload: unknown): number | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const feedId = (payload as { feedId: unknown }).feedId;
+  return typeof feedId === 'number' ? feedId : undefined;
+}
 
 /**
  * What came of dispatching a batch of new rss items.
@@ -40,6 +78,8 @@ export interface Host {
   requestDownload(rssItemId: number): Promise<void>;
   runOnce(): Promise<boolean>;
   recover(): number;
+  /** Enqueues the first `poll` job for a feed. Idempotent per feed. */
+  schedulePoll(feedId: number, runAt?: number): number;
 }
 
 /** The `rss_feed` row an rss item belongs to names its owning plugin directly. */
@@ -56,9 +96,23 @@ function ownerPluginId(raw: DatabaseSync, rssItemId: number): string | undefined
 export function createHost(deps: {
   raw: DatabaseSync;
   db: HostDb;
-  fetch: HostFetch;
+  // `QueuedFetch`, not the narrower `HostFetch` every plugin sees through
+  // `PluginContext.fetch`: the feed reader built below needs `text`, and
+  // wiring it to anything but this same queued instance's `text` method
+  // would let a feed's fetches skip the per-hostname budget every other
+  // call to that hostname is paced by.
+  fetch: QueuedFetch;
   downloads: DownloadClients;
   now: () => number;
+  /**
+   * Where `MediaWriter` caches artwork bytes it measures on the way in.
+   * Threaded explicitly rather than defaulted here: a default would hide
+   * the wiring and could write artwork somewhere the caller never chose --
+   * mirrors 1.x's `resolveArtworkDir`, whose default is `artwork/` next to
+   * the database file, but that resolution belongs to whatever composes
+   * `createHost` with a real database path, not to the host itself.
+   */
+  artworkDir: string;
 }): Host {
   // Plugins are wired explicitly via `register`, never discovered, so this
   // map is the host's whole notion of "who exists" — an id absent here is an
@@ -77,17 +131,27 @@ export function createHost(deps: {
     defaultMaxAttempts: DEFAULT_MAX_ATTEMPTS,
   });
 
+  // Shared by the feed reader, the host's own job-scanning code below, and
+  // the artwork store created next -- a corrupt row, a feed lookup failure
+  // and an unlink that failed for a reason other than the file already
+  // being gone all surface through the same channel a plugin's own
+  // `ctx.log` would use.
+  function hostLog(message: string, detail?: Readonly<Record<string, unknown>>): void {
+    console.log(`[${HOST_PLUGIN_ID}] ${message}`, detail ?? {});
+  }
+
   // One instance shared by every plugin, because `MediaWriter` is
-  // plugin-agnostic: eight of its nine methods take no plugin id at all, and
-  // the ninth — `createMediaItem`, through `MediaItemInit.pluginId` — stores
-  // the id it is handed without checking it against the plugin doing the
-  // writing. So there is nothing per-plugin here to close over, and equally
+  // plugin-agnostic: ten of its eleven methods take no plugin id at all, and
+  // the eleventh — `createMediaItem`, through `MediaItemInit.pluginId` —
+  // stores the id it is handed without checking it against the plugin doing
+  // the writing. So there is nothing per-plugin here to close over, and equally
   // nothing that stops `ctx.media.setResolution(anyRssItemId, …)` or
   // `ctx.media.dropMediaItem(anyId)` from reaching another plugin's rows.
   // What this writer holds is the shared-row invariants, in one place; what
   // keeps a plugin on its own side of them is convention and explicit
   // wiring, not enforcement.
-  const media = createMediaWriter(deps.db, deps.now);
+  const artwork = createArtworkStore(deps.artworkDir, hostLog);
+  const media = createMediaWriter(deps.db, deps.now, artwork);
 
   function ctxFor(pluginId: string): PluginContext {
     return {
@@ -108,8 +172,162 @@ export function createHost(deps: {
     };
   }
 
+  // A named function, not an inline method on the returned object: the feed
+  // reader built below needs the very same dispatch this host promises
+  // through `Host.notifyNewRssItems`, and closing over a second copy of it
+  // would let the two drift apart from a single edit landing in only one.
+  async function notifyNewRssItems(ids: readonly number[]): Promise<NotifyOutcome> {
+    const grouped = new Map<string, { plugin: MediaPlugin; ids: number[] }>();
+    // Ids whose feed names no plugin at all, or names one this host never
+    // registered. Collected rather than dropped: a batch that silently lost
+    // an item would look identical to one that never had it.
+    const unowned: number[] = [];
+
+    for (const id of ids) {
+      const pluginId = ownerPluginId(deps.raw, id);
+      const plugin = pluginId !== undefined ? plugins.get(pluginId) : undefined;
+      if (pluginId === undefined || !plugin) {
+        unowned.push(id);
+        continue;
+      }
+      const entry = grouped.get(pluginId);
+      if (entry) {
+        entry.ids.push(id);
+      } else {
+        grouped.set(pluginId, { plugin, ids: [id] });
+      }
+    }
+
+    // Each plugin sees its own whole batch in one call, not one call per
+    // item: an item's position in the caller's array is not something a
+    // plugin should have to reassemble from repeated single-item calls.
+    // `allSettled`, not `all`: a rejecting plugin must not stop the others
+    // from running, and must not stop this function from ever reading
+    // their outcomes — `all` would reject on the first failure and drop
+    // every later plugin's result on the floor.
+    const groups = Array.from(grouped.values());
+    const settled = await Promise.allSettled(
+      groups.map(({ plugin, ids: ownIds }) => plugin.onNewRssItems(ownIds, ctxFor(plugin.id))),
+    );
+
+    const failures: { pluginId: string; error: unknown }[] = [];
+    for (let i = 0; i < settled.length; i += 1) {
+      const outcome = settled[i];
+      const group = groups[i];
+      if (outcome === undefined || group === undefined) continue;
+      if (outcome.status === 'rejected') {
+        failures.push({ pluginId: group.plugin.id, error: outcome.reason });
+      }
+    }
+
+    // `unowned` and `failures` are reported together, in the same
+    // returned value, rather than one hiding behind the other: a plugin
+    // erroring on its own items must not suppress the unrelated report
+    // that some other id had no owner at all, and vice versa.
+    return { unowned, failures };
+  }
+
+  // The host's own feed reader. `fetchText` is this same `deps.fetch`
+  // instance's `text` method, never a bare function wired around it — that
+  // is what keeps a feed's fetch inside the per-hostname queue every
+  // `json`/`bytes` call to that host already shares.
+  const reader = createFeedReader({
+    raw: deps.raw,
+    fetchText: (url) => deps.fetch.text(url),
+    notify: notifyNewRssItems,
+    now: deps.now,
+    log: hostLog,
+  });
+
+  // The handler runs last: rescheduling only after `pollFeed` has resolved,
+  // so a poll that throws is retried through the runner's own backoff
+  // instead of silently skipping to the next cycle. The feed row is read
+  // BEFORE polling, not after: `pollFeed` throws on an unknown feed id, so
+  // reading afterward would let a deleted feed's poll throw first, never
+  // reach the "stop rescheduling" check, and retry to exhaustion instead of
+  // ending the cycle cleanly.
+  //
+  // The reschedule goes through `enqueuePollUnlessPending`, the same guarded
+  // path `schedulePoll` uses, rather than calling `runner.enqueue` directly.
+  // A bare enqueue is not idempotent, and this handler can legitimately run
+  // twice: the enqueue and the runner's `state = 'done'` write are separate
+  // autocommit statements, so a process death between them leaves this job
+  // `running`, `recover` readies it, and the re-run would enqueue a SECOND
+  // self-perpetuating cycle -- doubling that feed's poll rate permanently.
+  // `job.id` is excluded from the guard's scan because this job is itself
+  // `running` while its own handler executes; without that exclusion the
+  // guard would find it, decline to schedule anything, and silence the feed.
+  const pollHandler: JobHandler = async (job) => {
+    const { feedId } = readPollPayload(job.payload);
+    const row = deps.raw.prepare('SELECT poll_interval_s FROM rss_feed WHERE id = ?').get(feedId);
+    if (row === undefined) return; // the feed was deleted; end its poll cycle rather than dead-letter on a row that is gone
+    await reader.pollFeed(feedId);
+    const seconds = Number((row as { poll_interval_s: unknown }).poll_interval_s);
+    enqueuePollUnlessPending(feedId, deps.now() + seconds * 1000, job.id);
+  };
+  handlers.set(HOST_PLUGIN_ID, new Map([['poll', pollHandler]]));
+
+  /**
+   * The id of a `poll` job already `ready` or `running` for this feed, so no
+   * caller ever starts a second concurrent cycle. Uses `tryReadPollFeedId`,
+   * not `readPollPayload`: this scans every OTHER pending poll job looking
+   * for a match, and one unrelated row with a payload nothing understands is
+   * not a reason to fail the whole scan -- it is simply not the feed being
+   * looked for. Still logged, though: a payload nothing here can read means
+   * something wrote a row this host never would have.
+   *
+   * `exceptJobId` is for the one caller that is itself a running poll job for
+   * this feed and must not count as its own reason not to reschedule.
+   */
+  function pendingPollJobId(feedId: number, exceptJobId?: number): number | undefined {
+    const rows = deps.raw.prepare(`
+      SELECT id, payload_json FROM jobs WHERE plugin_id = ? AND kind = 'poll' AND state IN ('ready', 'running')
+    `).all(HOST_PLUGIN_ID);
+    for (const row of rows) {
+      const id = Number((row as { id: unknown }).id);
+      if (id === exceptJobId) continue;
+      const payloadJson = String((row as { payload_json: unknown }).payload_json);
+      const payload: unknown = JSON.parse(payloadJson);
+      const otherFeedId = tryReadPollFeedId(payload);
+      if (otherFeedId === undefined) {
+        hostLog('poll job payload is not shaped like { feedId: number }, skipping it', { jobId: id, payload: payloadJson });
+        continue;
+      }
+      if (otherFeedId === feedId) {
+        return id;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The single place a `poll` job is created: returns the pending job's id if
+   * this feed already has one, and otherwise enqueues. Both callers --
+   * `schedulePoll` on the way in and `pollHandler`'s own reschedule -- go
+   * through here, so neither can create a duplicate cycle the other would
+   * then honour forever.
+   */
+  function enqueuePollUnlessPending(feedId: number, runAt: number | undefined, exceptJobId: number | undefined): number {
+    const existing = pendingPollJobId(feedId, exceptJobId);
+    if (existing !== undefined) return existing;
+    // Built as two shapes, not one object literal with `runAt` always
+    // present: `runAt` is `number | undefined` here, but `JobEnqueue.runAt`
+    // is an optional `number` with `exactOptionalPropertyTypes` on, so an
+    // explicit `undefined` is not the same thing as the property being
+    // absent.
+    return runAt === undefined
+      ? runner.enqueue(HOST_PLUGIN_ID, { kind: 'poll', payload: { feedId } })
+      : runner.enqueue(HOST_PLUGIN_ID, { kind: 'poll', payload: { feedId }, runAt });
+  }
+
   return {
     register(plugin) {
+      // Otherwise a plugin silently captures the host's own handlers: both
+      // would sit under the same `plugin_id` in `handlers`, and whichever
+      // registered second would win.
+      if (plugin.id === HOST_PLUGIN_ID) {
+        throw new Error(`plugin id "${HOST_PLUGIN_ID}" is reserved for the host`);
+      }
       if (plugins.has(plugin.id)) {
         throw new Error(`plugin "${plugin.id}" is already registered`);
       }
@@ -118,55 +336,12 @@ export function createHost(deps: {
       handlers.set(plugin.id, new Map(Object.entries(plugin.jobs)));
     },
 
-    async notifyNewRssItems(ids) {
-      const grouped = new Map<string, { plugin: MediaPlugin; ids: number[] }>();
-      // Ids whose feed names no plugin at all, or names one this host never
-      // registered. Collected rather than dropped: a batch that silently lost
-      // an item would look identical to one that never had it.
-      const unowned: number[] = [];
+    notifyNewRssItems,
 
-      for (const id of ids) {
-        const pluginId = ownerPluginId(deps.raw, id);
-        const plugin = pluginId !== undefined ? plugins.get(pluginId) : undefined;
-        if (pluginId === undefined || !plugin) {
-          unowned.push(id);
-          continue;
-        }
-        const entry = grouped.get(pluginId);
-        if (entry) {
-          entry.ids.push(id);
-        } else {
-          grouped.set(pluginId, { plugin, ids: [id] });
-        }
-      }
-
-      // Each plugin sees its own whole batch in one call, not one call per
-      // item: an item's position in the caller's array is not something a
-      // plugin should have to reassemble from repeated single-item calls.
-      // `allSettled`, not `all`: a rejecting plugin must not stop the others
-      // from running, and must not stop this function from ever reading
-      // their outcomes — `all` would reject on the first failure and drop
-      // every later plugin's result on the floor.
-      const groups = Array.from(grouped.values());
-      const settled = await Promise.allSettled(
-        groups.map(({ plugin, ids: ownIds }) => plugin.onNewRssItems(ownIds, ctxFor(plugin.id))),
-      );
-
-      const failures: { pluginId: string; error: unknown }[] = [];
-      for (let i = 0; i < settled.length; i += 1) {
-        const outcome = settled[i];
-        const group = groups[i];
-        if (outcome === undefined || group === undefined) continue;
-        if (outcome.status === 'rejected') {
-          failures.push({ pluginId: group.plugin.id, error: outcome.reason });
-        }
-      }
-
-      // `unowned` and `failures` are reported together, in the same
-      // returned value, rather than one hiding behind the other: a plugin
-      // erroring on its own items must not suppress the unrelated report
-      // that some other id had no owner at all, and vice versa.
-      return { unowned, failures };
+    schedulePoll(feedId, runAt) {
+      // No `exceptJobId`: an outside caller is not a poll job, so every
+      // pending row it finds is a real reason not to schedule a second.
+      return enqueuePollUnlessPending(feedId, runAt, undefined);
     },
 
     async requestDownload(rssItemId) {

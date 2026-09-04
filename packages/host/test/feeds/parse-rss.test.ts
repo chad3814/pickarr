@@ -148,8 +148,10 @@ test('a numeric-looking guid stays a string, so an identity cannot change type',
   const entries = parseRss(xml);
   const first = entries[0];
   assert.ok(first !== undefined, 'expected one entry');
-  // `strictEqual`, never `equal`: loose equality holds between 123 and '123',
-  // so `assert.equal` here would pass against the very coercion this test
-  // exists to forbid.
+  // The property is the TYPE, not just the digits: a guid arriving as the
+  // number 123 would break the dedup index that keys on it. This file imports
+  // `node:assert/strict`, so `equal` is already `strictEqual` and either would
+  // catch it; `strictEqual` is named explicitly because a reader should not
+  // have to check the import to know a type-sensitive assertion is safe.
   assert.strictEqual(first.guid, '123');
 });

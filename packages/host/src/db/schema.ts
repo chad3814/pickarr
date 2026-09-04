@@ -182,9 +182,11 @@ export const background = sqliteTable('background', {
 ]);
 
 /**
- * Same columns as `poster`, but with no writer at all: `MediaWriter` has
- * `attachPoster` and `attachBackground` and nothing for a logo, so this table
- * is unreachable through the contract until the image slice adds one.
+ * Same columns as `poster`, and now with the same kind of writer:
+ * `MediaWriter.attachLogo`. It was the one artwork table slice A left with
+ * neither a writer nor a unique index, which is why both arrived together --
+ * the index is what makes the writer's re-run idempotent rather than
+ * duplicating rows.
  */
 export const logo = sqliteTable('logo', {
   id: integer('id').primaryKey(),
@@ -198,9 +200,8 @@ export const logo = sqliteTable('logo', {
   path: text('path'),
 }, (t) => [
   index('logo_media_item').on(t.mediaItemId),
-  // Unique to match `poster`/`background`: this is the write path that makes
-  // a re-run of the (still forthcoming) logo writer idempotent instead of
-  // duplicating rows. The plain index above stays — same leading column, so
+  // Unique to match `poster`/`background`: this is what makes a re-run of
+  // `attachLogo` idempotent instead of duplicating rows. The plain index above stays — same leading column, so
   // it still serves the same lookups, and dropping it is unrelated to this
   // change.
   uniqueIndex('logo_media_item_url').on(t.mediaItemId, t.url),

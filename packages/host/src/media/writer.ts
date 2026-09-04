@@ -1,14 +1,14 @@
 import type {
-  BackgroundInit,
+  ImageInit,
   MediaItemInit,
   MediaItemUpdate,
   MediaWriter,
   PersonInit,
-  PosterInit,
   ProviderClaim,
   Resolution,
   RoleInit,
 } from '@pickarr/contract';
+import type { ArtworkStore } from '../artwork/store.ts';
 import type { HostDb } from '../db/open.ts';
 
 /** SQLite's own code for a UNIQUE constraint failure -- verified against `node:sqlite`. */
@@ -48,9 +48,32 @@ function isUniqueConstraintViolation(err: unknown): boolean {
  * Built on `db.$client`, the same raw `node:sqlite` handle `HostDb` wraps,
  * rather than Drizzle's query builder: `claimProviderRef` needs the driver's
  * own error, unwrapped, to tell a UNIQUE violation from anything else.
+ *
+ * Takes an `ArtworkStore` because `attachPoster`/`attachBackground`/
+ * `attachLogo` now measure and cache the bytes they are handed, not just
+ * write a row: one writer for the row and the file is what keeps the two
+ * from disagreeing the way 1.x's row and cached file could. That makes this
+ * writer perform filesystem I/O it did not before -- the cost of that one
+ * writer.
  */
-export function createMediaWriter(db: HostDb, now: () => number): MediaWriter {
+export function createMediaWriter(db: HostDb, now: () => number, artwork: ArtworkStore): MediaWriter {
   const raw = db.$client;
+
+  /**
+   * Every cached file path this media item's artwork rows still point at.
+   * Read before any row is deleted -- `dropMediaItem` needs this list
+   * intact to unlink the files afterward.
+   */
+  function artworkPaths(mediaItemId: number): string[] {
+    const rows = raw.prepare(`
+      SELECT path FROM poster     WHERE media_item_id = ? AND path IS NOT NULL
+      UNION ALL
+      SELECT path FROM background WHERE media_item_id = ? AND path IS NOT NULL
+      UNION ALL
+      SELECT path FROM logo       WHERE media_item_id = ? AND path IS NOT NULL
+    `).all(mediaItemId, mediaItemId, mediaItemId);
+    return rows.map((row) => String((row as { path: unknown }).path));
+  }
 
   return {
     async createMediaItem(init: MediaItemInit): Promise<number> {
@@ -112,43 +135,81 @@ export function createMediaWriter(db: HostDb, now: () => number): MediaWriter {
     },
 
     async dropMediaItem(mediaItemId: number): Promise<void> {
-      raw.prepare('DELETE FROM media_item WHERE id = ?').run(mediaItemId);
+      // Read the paths, delete the rows, then unlink the files best-effort --
+      // in that order. A failed unlink after the row is gone leaks a file; a
+      // failed row delete after the unlink leaves a row pointing at nothing,
+      // which is worse, because something will try to serve it.
+      const paths = artworkPaths(mediaItemId);
+      // One savepoint for the three artwork tables and the media item row:
+      // a crash between them must not leave, say, the poster rows gone but
+      // the media item row (and thus its background/logo rows) still there.
+      raw.exec('SAVEPOINT drop_media_item');
+      try {
+        raw.prepare('DELETE FROM poster WHERE media_item_id = ?').run(mediaItemId);
+        raw.prepare('DELETE FROM background WHERE media_item_id = ?').run(mediaItemId);
+        raw.prepare('DELETE FROM logo WHERE media_item_id = ?').run(mediaItemId);
+        raw.prepare('DELETE FROM media_item WHERE id = ?').run(mediaItemId);
+      } catch (err) {
+        raw.exec('ROLLBACK TO drop_media_item');
+        raw.exec('RELEASE drop_media_item');
+        throw err;
+      }
+      raw.exec('RELEASE drop_media_item');
+      await Promise.all(paths.map((path) => artwork.remove(path)));
     },
 
-    async attachPoster(mediaItemId: number, poster: PosterInit): Promise<void> {
+    async attachPoster(mediaItemId: number, poster: ImageInit): Promise<void> {
       const at = now();
+      const { path, width, height } = await artwork.put(mediaItemId, poster.url, poster.bytes);
       // Upsert on `(media_item_id, url)`, not a bare INSERT: every handler
       // has to be safe to run twice, because crash recovery re-runs a job
       // that was already claimed. `created_at` is left as the first write
-      // set it -- the row is the same row, seen again.
+      // set it -- the row is the same row, seen again. The path is derived
+      // from `(mediaItemId, url)` (see `createArtworkStore`), matching this
+      // very index, so a re-attach resolves to the same file and this
+      // `path` update is a no-op in practice.
       raw.prepare(`
-        INSERT INTO poster (media_item_id, title, language, url, width, height, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (media_item_id, url) DO UPDATE
-          SET title = excluded.title, language = excluded.language,
-              width = excluded.width, height = excluded.height
-      `).run(mediaItemId, poster.title, poster.language, poster.url, poster.width, poster.height, at);
-    },
-
-    async attachBackground(mediaItemId: number, background: BackgroundInit): Promise<void> {
-      const at = now();
-      // Idempotent for the same reason as `attachPoster`.
-      raw.prepare(`
-        INSERT INTO background (media_item_id, title, description, language, url, width, height, created_at)
+        INSERT INTO poster (media_item_id, title, language, url, width, height, path, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (media_item_id, url) DO UPDATE
-          SET title = excluded.title, description = excluded.description,
-              language = excluded.language, width = excluded.width, height = excluded.height
-      `).run(
-        mediaItemId,
-        background.title,
-        background.description,
-        background.language,
-        background.url,
-        background.width,
-        background.height,
-        at,
-      );
+          SET title = excluded.title, language = excluded.language,
+              width = excluded.width, height = excluded.height, path = excluded.path
+      `).run(mediaItemId, poster.title, poster.language, poster.url, width, height, path, at);
+    },
+
+    async attachBackground(mediaItemId: number, background: ImageInit): Promise<void> {
+      const at = now();
+      const { path, width, height } = await artwork.put(mediaItemId, background.url, background.bytes);
+      // Idempotent for the same reason as `attachPoster`. `description` has
+      // no home in `ImageInit` (see the contract's doc comment) and is never
+      // set here, on either the insert or the conflict update -- it stays
+      // whatever it already was, which for every row this method has ever
+      // written is null.
+      raw.prepare(`
+        INSERT INTO background (media_item_id, title, language, url, width, height, path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (media_item_id, url) DO UPDATE
+          SET title = excluded.title, language = excluded.language,
+              width = excluded.width, height = excluded.height, path = excluded.path
+      `).run(mediaItemId, background.title, background.language, background.url, width, height, path, at);
+    },
+
+    async attachLogo(mediaItemId: number, logo: ImageInit): Promise<void> {
+      const at = now();
+      const { path, width, height } = await artwork.put(mediaItemId, logo.url, logo.bytes);
+      // Idempotent for the same reason as `attachPoster` -- but not for free:
+      // `logo` is the one artwork table slice A left with neither a writer
+      // nor a unique index (see `schema.ts`'s own note on it), so this slice
+      // added both. The index is `logo_media_item_url` in
+      // `migrate.ts`; without it this `ON CONFLICT` clause has nothing to
+      // conflict on and a re-run would duplicate rows instead of updating.
+      raw.prepare(`
+        INSERT INTO logo (media_item_id, title, language, url, width, height, path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (media_item_id, url) DO UPDATE
+          SET title = excluded.title, language = excluded.language,
+              width = excluded.width, height = excluded.height, path = excluded.path
+      `).run(mediaItemId, logo.title, logo.language, logo.url, width, height, path, at);
     },
 
     async upsertPerson(person: PersonInit): Promise<number> {
