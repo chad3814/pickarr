@@ -84,8 +84,9 @@ Clamping also collapses the timer and the safety interval into one mechanism:
 the interval becomes the upper bound the timer already respects.
 
 **Firing.** Select every `ready` row whose `run_at` has passed, **oldest
-first**, up to the dispatch cap. Mark each `running` in one statement, then
-hand each to the queue. Nothing is awaited.
+first**, up to the dispatch cap, **excluding ids already queued in memory**
+(§5). Hand each to the queue and re-arm. Nothing is written to the rows here
+and nothing is awaited — the queue worker owns both the row and the waiting.
 
 **Shutdown does not drain.** `stop()` clears the timer and returns. In-flight
 handlers are abandoned deliberately: their rows stay `running`, and the next
@@ -98,36 +99,47 @@ The handler receives a `signal` from `AbortSignal.timeout(300_000)`. Nothing
 compels a handler to honour it, so the dispatcher does not rely on that:
 
 ```ts
-const signal = AbortSignal.timeout(300_000);
-const running = makeQPromise(handler(job, signal));
+async function runJob(job: JobRecord, handler: JobHandler): Promise<void> {
+  const signal = AbortSignal.timeout(300_000);
+  const running = makeQPromise(handler(job, signal));
 
-signal.addEventListener('abort', () => {
-  // Two seconds for a cooperative handler to unwind on its own.
-  setTimeout(() => {
-    if (running.isPending()) failRow(job, new Error('job exceeded 5 minutes'));
-  }, 2000);
-}, { once: true });
+  signal.addEventListener('abort', () => {
+    // Two seconds for a cooperative handler to unwind on its own. Wrapped
+    // rather than `async` directly: an async listener that rejects has
+    // nowhere to report, so its failure would surface as an unhandled
+    // rejection instead of a failed row.
+    void (async () => {
+      await sleep(2000);
+      if (running.isPending()) failRow(job, new Error('job exceeded 5 minutes'));
+    })().catch((err: unknown) => log('job timeout handler failed', { err }));
+  }, { once: true });
 
-running
-  .then(() => completeRow(job))
-  .catch((err: unknown) => failRow(job, err));
+  try {
+    await running;
+    completeRow(job);
+  } catch (err: unknown) {
+    failRow(job, err);
+  }
+}
 ```
 
-Four details, each of which was wrong in an earlier sketch of this:
+`await running` inside a `try` is what makes one `catch` cover both paths —
+without the `await`, a rejection lands on a later tick where no enclosing
+`try` can see it. The `await` is safe precisely because **the dispatcher never
+awaits `runJob`**; the queue worker does, and the queue's concurrency bounds
+how many slots a hung handler can hold.
+
+Three details, each of which was wrong in an earlier sketch of this:
 
 - **`isPending()` is a function.** Reading `running.isPending` is always
   truthy, which would time out every job.
-- **The timeout writes a row; it does not throw.** A `throw` inside a
-  `setTimeout` callback is uncatchable by any enclosing `try` — it lands on the
-  timer's tick as an uncaught exception, so a slow handler would kill the
-  process.
-- **`.catch()` is required.** `makeQPromise` returns `promise.then(ok, err)`
-  where the error path re-throws, so a rejected handler with no `catch`
-  produces an unhandled rejection.
+- **The timeout writes a row; it does not throw.** A `throw` on the timer's
+  tick is uncatchable by any enclosing `try` and would kill the process.
 - **Row updates are conditional: `WHERE id = ? AND state = 'running'`.** A
   handler that finishes at six minutes would otherwise overwrite the row the
-  timeout already failed. The conditional makes a late settle a no-op, the same
-  shape the atomic claim already uses.
+  timeout already failed — because `await running` resumes and calls
+  `completeRow` regardless. The conditional makes a late settle a no-op, the
+  same shape the atomic claim already uses.
 
 The orphaned handler keeps running. It unwinds when its fetch hits the 30
 second timeout, which is the other half of why that timeout stays.
@@ -153,22 +165,33 @@ adding the `async` package: the fetch subsystem keeps one instance per
 hostname, and the dispatcher uses a single instance with its own concurrency.
 One implementation, already proven, no new dependency.
 
-**A queued job is `running` before it starts.** Marking at dispatch is what
-makes a crash recoverable — the row says "this was taken" whether or not a
-worker had reached it. But that means `running` alone cannot mean "a handler is
-executing", which matters for a five-minute budget:
+**A queued job stays `ready` until a worker starts it.** The row is not
+touched at dispatch. Marking it early would mean `running` covered both "a
+handler is executing" and "this was taken but never began", and on a crash the
+second kind would wrongly have its `attempts` incremented for a try that never
+happened.
 
-> **Decision.** `state` becomes `running` at **dispatch**, so a crash sweeps it.
-> `started_at` is stamped, and the abort timer created, when the **queue worker
-> actually begins** the job. A job waiting behind others therefore does not
-> burn its allowance in the queue, and a `running` row with a null `started_at`
-> is a job that was taken and never started — which is exactly what a crash
-> leaves behind, and worth being able to see.
+> **Decision.** Nothing is written to the row at dispatch. The **queue worker**
+> sets `state = 'running'` and stamps `started_at` as its first act, because
+> that is the moment the job has actually been tried. A crash before a worker
+> reaches a queued job therefore leaves it exactly as it was — `ready`, at its
+> original `run_at` — and the next `start()` simply finds it due again.
+
+That has a consequence which must be built, not assumed: **the dispatcher keeps
+an in-memory set of job ids it has queued but not yet started, and excludes
+them from selection.** Without it, the next timer fire — or the 60 second
+safety interval — re-selects a row that is still `ready` and dispatches a
+second copy of a job already waiting in the queue. The set is deliberately
+in-memory only: it dies with the process, which is correct, since after a crash
+those rows *should* be selectable again.
 
 ## 6. Crash recovery
 
 Since there is one process, **any `running` row at `start()` is by definition
-crashed.** Recovery is not a restart:
+crashed** — and because §5 writes that state only when a worker begins, a
+`running` row also means the job was genuinely tried. That is what makes
+incrementing `attempts` correct rather than punitive. Recovery is not a
+restart:
 
 - Increment `attempts`.
 - A row already at its last permitted attempt goes to `dead`, not back to
