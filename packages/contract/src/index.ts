@@ -1,12 +1,11 @@
 export type { DownloadedFile, JobHandler, MediaPlugin, MediaType, PluginContext } from './plugin.ts';
 export type { JobEnqueue, JobQueue, JobRecord } from './jobs.ts';
 export type {
-  BackgroundInit,
+  ImageInit,
   MediaItemInit,
   MediaItemUpdate,
   MediaWriter,
   PersonInit,
-  PosterInit,
   ProviderClaim,
   Resolution,
   RoleInit,

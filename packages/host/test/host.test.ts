@@ -4,36 +4,76 @@ import type { DatabaseSync } from 'node:sqlite';
 import type {
   DownloadClients,
   DownloadSubmission,
-  HostFetch,
   JobHandler,
   MediaPlugin,
   PluginContext,
 } from '@pickarr/contract';
 import { openTestDatabase } from '../src/db/open.ts';
 import { migrateHost } from '../src/db/migrate.ts';
-import { createHost } from '../src/host.ts';
+import { createHost, HOST_PLUGIN_ID } from '../src/host.ts';
+import type { QueuedFetch } from '../src/fetch/queue.ts';
 
-/** A `HostFetch` that fails loudly if a test never meant to reach the network. */
-const unusedFetch: HostFetch = {
+/** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
+const unusedFetch: QueuedFetch = {
   json: async () => { throw new Error('fetch.json: not used by this test'); },
   bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
+  text: async () => { throw new Error('fetch.text: not used by this test'); },
 };
+
+/** A `QueuedFetch` whose `text` is scripted; `json`/`bytes` still fail loudly, since nothing under test needs them. */
+function textFetch(text: (url: string) => Promise<string>): QueuedFetch {
+  return { ...unusedFetch, text };
+}
+
+/** An empty, well-formed RSS document -- a feed with nothing new to report. */
+const EMPTY_RSS = '<?xml version="1.0"?><rss><channel></channel></rss>';
+
+/** A controllable clock, so a reschedule's `run_at` can be pinned to a value the test chose, not one merely observed. */
+function createClock(start: number): { now: () => number; set: (at: number) => void } {
+  let value = start;
+  return { now: () => value, set: (at) => { value = at; } };
+}
 
 /** A `DownloadClients` that fails loudly if a test never meant to submit anywhere. */
 const unusedDownloads: DownloadClients = {
   submit: async () => { throw new Error('downloads.submit: not used by this test'); },
 };
 
+/**
+ * No test in this file attaches artwork, so this directory is never
+ * created or written to -- `createArtworkStore` only touches the
+ * filesystem from its first `put()`. A path under a directory that does
+ * not exist means a test that unexpectedly did call an `attach*` method
+ * would fail loudly on `mkdir`, rather than quietly writing somewhere real.
+ */
+const unusedArtworkDir = '/nonexistent/pickarr-test-artwork-unused';
+
 /** An entry point a plugin under test never expects to be reached. */
 function unusedEntryPoint(name: string): () => Promise<never> {
   return async () => { throw new Error(`${name}: not used by this test`); };
 }
 
-function insertFeed(raw: DatabaseSync, pluginId: string, url: string): number {
+function insertFeed(raw: DatabaseSync, pluginId: string, url: string, pollIntervalS = 900): number {
   const result = raw.prepare(`
-    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES (?, 'feed', ?, 0, 0)
-  `).run(pluginId, url);
+    INSERT INTO rss_feed (plugin_id, name, url, poll_interval_s, created_at, updated_at) VALUES (?, 'feed', ?, ?, 0, 0)
+  `).run(pluginId, url, pollIntervalS);
   return Number(result.lastInsertRowid);
+}
+
+/** Every `poll` job row the host currently holds, with its payload's `feedId` parsed out for filtering. */
+function pollJobRows(raw: DatabaseSync): { id: number; feedId: number; state: string; runAt: number; attempts: number }[] {
+  return raw.prepare(`
+    SELECT id, payload_json, state, run_at, attempts FROM jobs WHERE plugin_id = ? AND kind = 'poll'
+  `).all(HOST_PLUGIN_ID).map((row) => {
+    const payload = JSON.parse(String((row as { payload_json: unknown }).payload_json)) as { feedId: unknown };
+    return {
+      id: Number((row as { id: unknown }).id),
+      feedId: Number(payload.feedId),
+      state: String((row as { state: unknown }).state),
+      runAt: Number((row as { run_at: unknown }).run_at),
+      attempts: Number((row as { attempts: unknown }).attempts),
+    };
+  });
 }
 
 function insertRssItem(raw: DatabaseSync, feedId: number): number {
@@ -57,10 +97,17 @@ function makePlugin(overrides: Partial<MediaPlugin> & { id: string }): MediaPlug
   };
 }
 
-function setup() {
+function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const host = createHost({ raw, db, fetch: unusedFetch, downloads: unusedDownloads, now: () => 1000 });
+  const host = createHost({
+    raw,
+    db,
+    fetch: overrides?.fetch ?? unusedFetch,
+    downloads: unusedDownloads,
+    now: overrides?.now ?? (() => 1000),
+    artworkDir: unusedArtworkDir,
+  });
   return { raw, db, host };
 }
 
@@ -188,7 +235,7 @@ test('a plugin submitting a download reaches the injected client and reads back 
       return `sab-${submission.rssItemId}`;
     },
   };
-  const host = createHost({ raw, db, fetch: unusedFetch, downloads, now: () => 1000 });
+  const host = createHost({ raw, db, fetch: unusedFetch, downloads, now: () => 1000, artworkDir: unusedArtworkDir });
 
   // The reference is read, not discarded. A call whose return value nothing
   // consumes pins only the parameters — `submit` could answer `undefined` and
@@ -291,4 +338,196 @@ test('a plugin failure does not suppress the unowned report', async () => {
   const failure = outcome.failures.find((f) => f.pluginId === 'alpha');
   assert.ok(failure, 'alpha\'s failure is missing');
   assert.ok(failure.error instanceof Error && failure.error.message === 'alpha failed');
+});
+
+test('registering a plugin whose id is the reserved host id is refused', () => {
+  const { host } = setup();
+
+  // Otherwise a plugin silently captures the host's own handlers.
+  assert.throws(
+    () => host.register(makePlugin({ id: HOST_PLUGIN_ID })),
+    /reserved/i,
+  );
+});
+
+test('a poll job dispatches to the host handler, not to a plugin', async () => {
+  const { raw, host } = setup({ fetch: textFetch(async () => EMPTY_RSS) });
+
+  // Alpha registers its own "poll" handler under its own plugin id. The
+  // host's poll job runs under HOST_PLUGIN_ID, so this must never fire for
+  // it -- proving dispatch is keyed by (pluginId, kind), not by kind alone.
+  const alphaPollRuns: unknown[] = [];
+  host.register(makePlugin({ id: 'alpha', jobs: { poll: async (job) => { alphaPollRuns.push(job.payload); } } }));
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  host.schedulePoll(feedId);
+
+  assert.equal(await host.runOnce(), true);
+
+  assert.equal(alphaPollRuns.length, 0, 'alpha\'s own "poll" handler must never run for the host\'s job');
+  // The host's own handler ran instead: a poll that dispatched nowhere
+  // would leave no rescheduled job behind.
+  const ready = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
+  assert.equal(ready.length, 1, 'the host handler must have run and rescheduled the next poll');
+});
+
+test('a poll job re-enqueues itself at now plus the feed interval', async () => {
+  const clock = createClock(1000);
+  const { raw, host } = setup({ fetch: textFetch(async () => EMPTY_RSS), now: clock.now });
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed', 300);
+  host.schedulePoll(feedId, 1000);
+
+  // Advance the clock between scheduling and running: asserting against the
+  // clock's value AT EXECUTION, not the original schedule time, is what
+  // proves the reschedule is computed from "now", not from a stale value --
+  // an immediate re-enqueue (or one anchored to the old run_at) would not
+  // land on this number.
+  clock.set(5000);
+  assert.equal(await host.runOnce(), true);
+
+  const ready = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
+  assert.equal(ready.length, 1, 'exactly one rescheduled job must remain for this feed');
+  assert.equal(ready[0]?.runAt, 5000 + 300_000, 'run_at must be execution-time now() plus the feed\'s poll interval');
+});
+
+test('a poll whose re-enqueue is lost leaves its feed silent, and nothing in the host notices', async () => {
+  let polls = 0;
+  const { raw, host } = setup({
+    fetch: textFetch(async () => {
+      polls += 1;
+      return EMPTY_RSS;
+    }),
+  });
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  host.schedulePoll(feedId);
+
+  assert.equal(await host.runOnce(), true);
+  assert.equal(polls, 1, 'the feed polled once');
+
+  // The negative the suite otherwise cannot see: every job here succeeds,
+  // so only killing the re-enqueue shows what a lost one costs. The row the
+  // handler wrote is deleted -- what a lost enqueue leaves behind -- and
+  // then the host is given every chance to notice: `recover`, and repeated
+  // claims. It has none. Nothing rescans `rss_feed` for a feed with no
+  // pending poll job, so this feed is never polled again for the life of
+  // the process and no log line says so. That absence is the finding, and
+  // asserting it here is what will fail loudly if a later slice adds the
+  // watchdog and forgets to say so.
+  const rescheduled = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
+  assert.equal(rescheduled.length, 1, 'there is a re-enqueued job to lose');
+  const lost = rescheduled[0];
+  assert.ok(lost !== undefined);
+  raw.prepare('DELETE FROM jobs WHERE id = ?').run(lost.id);
+
+  assert.equal(host.recover(), 0, 'recover cannot help: the row is gone, not left running');
+  assert.equal(await host.runOnce(), false, 'nothing is claimable');
+  assert.equal(await host.runOnce(), false, 'and nothing has appeared in the meantime');
+  assert.equal(polls, 1, 'the feed was never polled again');
+  assert.deepEqual(
+    pollJobRows(raw).filter((r) => r.feedId === feedId && (r.state === 'ready' || r.state === 'running')),
+    [],
+    'nothing re-created the lost poll job',
+  );
+});
+
+test('a poll re-run after a crash in its re-enqueue window leaves exactly one poll cycle', async () => {
+  const clock = createClock(1000);
+  const { raw, host } = setup({ fetch: textFetch(async () => EMPTY_RSS), now: clock.now });
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed', 300);
+  const firstJobId = host.schedulePoll(feedId, 1000);
+
+  assert.equal(await host.runOnce(), true);
+  const rescheduled = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
+  assert.equal(rescheduled.length, 1, 'the first run rescheduled once');
+
+  // The crash window: the handler's re-enqueue and the runner's
+  // `state = 'done'` write are separate autocommit statements, so a process
+  // death between them leaves the ORIGINAL job `running` with its
+  // replacement already on file. `recover` then hands the original back and
+  // it runs a second time -- legitimately, and the handler must be
+  // idempotent across that. A bare `runner.enqueue` is not: it would create
+  // a second self-perpetuating cycle, permanently doubling this feed's poll
+  // rate, and every later crash would double it again.
+  raw.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(firstJobId);
+  assert.equal(host.recover(), 1);
+  clock.set(6000);
+  assert.equal(await host.runOnce(), true, 'the recovered job is claimed and re-run');
+
+  const ready = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
+  assert.equal(ready.length, 1, 'a re-run must not add a second cycle for one feed');
+  assert.equal(ready[0]?.id, rescheduled[0]?.id, 'and the surviving cycle is the one the first run created');
+});
+
+test('a poll job that throws is retried rather than dead-lettered on its first attempt', async () => {
+  const { raw, host } = setup({ fetch: textFetch(async () => { throw new Error('network down'); }) });
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  host.schedulePoll(feedId);
+
+  assert.equal(await host.runOnce(), true);
+
+  const rows = pollJobRows(raw).filter((r) => r.feedId === feedId);
+  // Exactly the original job: a reschedule computed before the throw (rather
+  // than after a successful poll) would leave a second row behind here.
+  assert.equal(rows.length, 1, 'a failed poll must not also have rescheduled a next one');
+  assert.equal(rows[0]?.state, 'ready', 'a first failure must retry through backoff, not dead-letter');
+  assert.equal(rows[0]?.attempts, 1);
+});
+
+test('a poll for a feed that no longer exists stops rescheduling instead of looping', async () => {
+  const { raw, host } = setup();
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  host.schedulePoll(feedId);
+  raw.prepare('DELETE FROM rss_feed WHERE id = ?').run(feedId);
+
+  // `fetch` is `unusedFetch` here: a correct implementation reads the feed
+  // row before polling and never reaches the network at all for a feed
+  // that is gone.
+  assert.equal(await host.runOnce(), true);
+
+  const rows = pollJobRows(raw).filter((r) => r.feedId === feedId);
+  assert.equal(rows.length, 1, 'no new job was created for a deleted feed');
+  assert.equal(rows[0]?.state, 'done', 'the job must succeed quietly, not dead-letter or retry against a row that is gone');
+});
+
+function insertRawPollJob(raw: DatabaseSync, payloadJson: string, runAt: number): number {
+  const result = raw.prepare(`
+    INSERT INTO jobs (plugin_id, kind, payload_json, attempts, max_attempts, run_at, state, last_error, created_at, updated_at)
+    VALUES (?, 'poll', ?, 0, 5, ?, 'ready', NULL, 0, 0)
+  `).run(HOST_PLUGIN_ID, payloadJson, runAt);
+  return Number(result.lastInsertRowid);
+}
+
+test('calling schedulePoll twice for one feed leaves one poll job', () => {
+  const { raw, host } = setup();
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
+
+  const first = host.schedulePoll(feedId);
+  const second = host.schedulePoll(feedId);
+
+  // The count, not just the return value: a mutation that still returns the
+  // first id while having inserted a second row anyway would pass an
+  // assertion on the return value alone.
+  assert.equal(second, first, 'the second call must report the existing job, not create a new one');
+  const rows = pollJobRows(raw).filter((r) => r.feedId === feedId);
+  assert.equal(rows.length, 1, 'exactly one poll job must exist for this feed after two schedulePoll calls');
+});
+
+test('a corrupt poll payload does not stop another feed from being scheduled', () => {
+  const { raw, host } = setup();
+
+  // A row nothing here wrote: some other process, or an earlier schema,
+  // left a poll job whose payload this host cannot read.
+  insertRawPollJob(raw, JSON.stringify({ nope: 1 }), 1000);
+
+  const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
+  const jobId = host.schedulePoll(feedId);
+
+  assert.equal(typeof jobId, 'number', 'the healthy feed must still get a job id back');
+  const rows = pollJobRows(raw).filter((r) => r.feedId === feedId);
+  assert.equal(rows.length, 1, 'the healthy feed must still have its own poll job scheduled');
 });

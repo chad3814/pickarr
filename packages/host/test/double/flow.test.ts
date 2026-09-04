@@ -2,7 +2,9 @@
  * The contract's five lookup outcomes, driven end to end through the
  * test-double plugin: resolved, refused, unresolved, an answer that has not
  * arrived yet and the poll that collects it, the dedup, and a crash in the
- * middle of it all.
+ * middle of it all. Also the artwork job a resolved entry can schedule: the
+ * double's first caller of `attachPoster`/`attachBackground`/`attachLogo`,
+ * and the first workload the per-hostname fetch queue actually has to pace.
  *
  * These are the only tests that exercise the whole contract at once, so they
  * assert on rows rather than on calls: what a plugin wrote is the observable
@@ -11,6 +13,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
@@ -22,13 +27,15 @@ import {
   createDoublePlugin,
   createFakeParserService,
   DOUBLE_ID,
+  PARSER_ORIGIN,
   partialEntry,
   POLL_DELAY_MS,
   refusedEntry,
   resolvedEntry,
   unresolvedEntry,
 } from './plugin.ts';
-import type { FakeParserService, LookupEntry, LookupPerson, ParserScript } from './plugin.ts';
+import type { FakeParserService, LookupEntry, LookupImage, LookupPerson, ParserScript } from './plugin.ts';
+import { gifBytes } from '../support/gif.ts';
 
 /** Where every run's clock starts, so expected `run_at` values can be written down. */
 const START = 1_000;
@@ -48,6 +55,13 @@ function createClock(): Clock {
 const unusedDownloads: DownloadClients = {
   submit: async () => { throw new Error('downloads.submit: not used by these tests'); },
 };
+
+/**
+ * What every test that never attaches artwork passes to `setup` -- see the
+ * identical constant in `host.test.ts`. The tests below that do attach
+ * artwork pass `setup` a real temp directory instead (`withArtworkDir`).
+ */
+const unusedArtworkDir = '/nonexistent/pickarr-test-artwork-unused';
 
 const ADA: LookupPerson = {
   name: 'Ada Lovelace',
@@ -100,7 +114,34 @@ interface Harness {
   plugin: MediaPlugin;
 }
 
-function setup(parserScript: ParserScript): Harness {
+/**
+ * The url a fetch call was made with, whatever form it arrived in --
+ * `plugin.ts` has an identical private helper; this file needs its own
+ * because that one is not exported.
+ */
+function requestUrl(input: Parameters<typeof globalThis.fetch>[0]): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
+
+/**
+ * Routes a request by origin to the fake parser service or to a fake image
+ * host, so one `createHostFetch` -- and therefore one shared per-hostname
+ * queue -- serves both fakes through the single `fetch` a host is built
+ * with, exactly as a real host's own would.
+ */
+function combineFetch(parser: typeof globalThis.fetch, images: typeof globalThis.fetch): typeof globalThis.fetch {
+  return (input, init) => {
+    const url = new URL(requestUrl(input));
+    return url.origin === PARSER_ORIGIN ? parser(input, init) : images(input, init);
+  };
+}
+
+function setup(
+  parserScript: ParserScript,
+  opts: { artworkDir?: string; imagesFetch?: typeof globalThis.fetch } = {},
+): Harness {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const clock = createClock();
@@ -111,9 +152,14 @@ function setup(parserScript: ParserScript): Harness {
     db,
     // The fake service reaches the plugin through the real fetch queue, so
     // its per-hostname serialisation is part of what these tests run.
-    // `globalThis.fetch` is never touched.
-    fetch: createHostFetch({ fetch: service.fetch }),
+    // `globalThis.fetch` is never touched. A test that also scripts artwork
+    // hands `imagesFetch` in, and `combineFetch` is what lets both fakes
+    // share this one queue.
+    fetch: createHostFetch({
+      fetch: opts.imagesFetch ? combineFetch(service.fetch, opts.imagesFetch) : service.fetch,
+    }),
     downloads: unusedDownloads,
+    artworkDir: opts.artworkDir ?? unusedArtworkDir,
     now: () => clock.now(),
   });
   host.register(plugin);
@@ -318,6 +364,119 @@ async function runToCompletion(host: Host, clock: Clock, raw: DatabaseSync): Pro
     clock.set(due);
   }
   throw new Error('runToCompletion: the queue never drained');
+}
+
+/**
+ * A minimal, valid GIF: `image-size` reads width and height straight out of
+ * the logical screen descriptor (bytes 6-9), with no CRC or pixel data
+ * needed. The same construction `store.test.ts` and `writer.test.ts` use --
+ * reused rather than invented a third time.
+ */
+
+/** Not a GIF, a PNG, or anything else `image-size` recognises -- what a truncated download or an html error page served as 200 looks like. */
+const UNMEASURABLE_BYTES = new TextEncoder().encode('<html>not an image</html>');
+
+/** A fresh artwork directory per test, removed afterward so a test that attaches artwork does not leave files behind. */
+async function withArtworkDir(run: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-artwork-'));
+  try {
+    await run(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+interface ArtworkRow {
+  mediaItemId: number;
+  title: string | null;
+  language: string | null;
+  url: string;
+  width: number;
+  height: number;
+  path: string | null;
+}
+
+function artworkRows(raw: DatabaseSync, table: 'poster' | 'background' | 'logo'): ArtworkRow[] {
+  return rowsOf(
+    raw,
+    `SELECT media_item_id, title, language, url, width, height, path FROM ${table} ORDER BY id`,
+  ).map((row) => ({
+    mediaItemId: readInteger(row, 'media_item_id'),
+    title: readTextOrNull(row, 'title'),
+    language: readTextOrNull(row, 'language'),
+    url: readText(row, 'url'),
+    width: readInteger(row, 'width'),
+    height: readInteger(row, 'height'),
+    path: readTextOrNull(row, 'path'),
+  }));
+}
+
+/**
+ * A fake image host that answers every request immediately from a fixed
+ * script, and records every url it was asked for. `bytesByUrl` can map a url
+ * to `UNMEASURABLE_BYTES` just as easily as to a real image -- this fake
+ * does not care what `image-size` will make of what it serves.
+ */
+interface FakeImages {
+  fetch: typeof globalThis.fetch;
+  requests: readonly string[];
+}
+
+function createFakeImages(bytesByUrl: ReadonlyMap<string, Uint8Array>): FakeImages {
+  const requests: string[] = [];
+  const fetch: typeof globalThis.fetch = async (input) => {
+    const url = requestUrl(input);
+    requests.push(url);
+    const bytes = bytesByUrl.get(url);
+    if (bytes === undefined) {
+      throw new Error(`fake images: nothing scripted for ${url}`);
+    }
+    return new Response(bytes, { status: 200 });
+  };
+  return { fetch, requests };
+}
+
+/**
+ * A fake image host that never settles a request on its own: the test
+ * releases it explicitly, once it has seen what it needs to see. This is
+ * what lets a test assert two requests are in flight *at once* without
+ * measuring elapsed time -- a serialised implementation would leave the
+ * second request never made at all until the test releases the first.
+ */
+interface GatedImages {
+  fetch: typeof globalThis.fetch;
+  /** How many requests for this exact url are currently unreleased. */
+  inFlight(url: string): number;
+  /** Lets the oldest unreleased request for this url resolve, with its scripted bytes. */
+  release(url: string): void;
+}
+
+function createGatedImages(bytesByUrl: ReadonlyMap<string, Uint8Array>): GatedImages {
+  const inFlightCounts = new Map<string, number>();
+  const pending = new Map<string, Array<() => void>>();
+
+  const fetch: typeof globalThis.fetch = (input) => new Promise<Response>((resolve) => {
+    const url = requestUrl(input);
+    inFlightCounts.set(url, (inFlightCounts.get(url) ?? 0) + 1);
+    const queue = pending.get(url) ?? [];
+    queue.push(() => {
+      inFlightCounts.set(url, (inFlightCounts.get(url) ?? 1) - 1);
+      const bytes = bytesByUrl.get(url);
+      if (bytes === undefined) throw new Error(`gated images: nothing scripted for ${url}`);
+      resolve(new Response(bytes, { status: 200 }));
+    });
+    pending.set(url, queue);
+  });
+
+  return {
+    fetch,
+    inFlight: (url) => inFlightCounts.get(url) ?? 0,
+    release: (url) => {
+      const release = pending.get(url)?.shift();
+      if (release === undefined) throw new Error(`gated images: no pending request for ${url}`);
+      release();
+    },
+  };
 }
 
 test('a resolved entry writes the media item, its provider ref, its people, and resolution resolved', async () => {
@@ -599,6 +758,214 @@ test('two rss items resolving to one provider ref end up sharing one media item'
   ]);
 });
 
+const POSTER_URL = 'https://images-a.test/poster.gif';
+const BACKGROUND_URL = 'https://images-b.test/background.gif';
+const LOGO_URL = 'https://images-c.test/logo.gif';
+
+/** A resolved entry that also schedules an artwork job, for the tests below that need one. */
+function movieWithImages(name: string, ref: string, title: string, images: readonly LookupImage[]): LookupEntry {
+  return resolvedEntry(name, {
+    lookupId: `lk-${ref}`,
+    provider: 'tmdb',
+    providerRef: `movie:${ref}`,
+    title,
+    releaseDate: null,
+    description: null,
+    people: [],
+    images,
+  });
+}
+
+test('a resolved entry gets its poster, background and logo attached', async () => {
+  await withArtworkDir(async (artworkDir) => {
+    const images = createFakeImages(new Map([
+      [POSTER_URL, gifBytes(300, 450)],
+      [BACKGROUND_URL, gifBytes(1920, 1080)],
+      [LOGO_URL, gifBytes(512, 128)],
+    ]));
+    const grid = movieWithImages(MOVIE, '512', 'The Grid', [
+      { role: 'poster', url: POSTER_URL, title: 'Poster art', language: 'en' },
+      { role: 'background', url: BACKGROUND_URL, title: null, language: null },
+      { role: 'logo', url: LOGO_URL, title: null, language: null },
+    ]);
+    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const ids = given(raw, [MOVIE]);
+
+    const outcome = await host.notifyNewRssItems(ids);
+    assert.deepEqual(outcome.failures, []);
+    assert.equal(await host.runOnce(), true, 'the lookup job must run');
+    assert.equal(await host.runOnce(), true, 'the artwork job it scheduled must run');
+    assert.equal(await host.runOnce(), false, 'nothing else must be queued');
+
+    const media = only(mediaItems(raw), 'media item');
+
+    const poster = only(artworkRows(raw, 'poster'), 'poster row');
+    assert.equal(poster.mediaItemId, media.id);
+    assert.equal(poster.url, POSTER_URL);
+    assert.equal(poster.title, 'Poster art');
+    assert.equal(poster.language, 'en');
+    assert.equal(poster.width, 300);
+    assert.equal(poster.height, 450);
+    assert.ok(poster.path?.startsWith(artworkDir), 'the cached file must live in the artwork directory');
+
+    const background = only(artworkRows(raw, 'background'), 'background row');
+    assert.equal(background.mediaItemId, media.id);
+    assert.equal(background.width, 1920);
+    assert.equal(background.height, 1080);
+
+    const logo = only(artworkRows(raw, 'logo'), 'logo row');
+    assert.equal(logo.mediaItemId, media.id);
+    assert.equal(logo.width, 512);
+    assert.equal(logo.height, 128);
+
+    const files = await readdir(artworkDir);
+    assert.equal(files.length, 3, 'one cached file per image');
+  });
+});
+
+test('artwork runs as its own job, so a failed image does not undo a resolved item', async () => {
+  await withArtworkDir(async (artworkDir) => {
+    // The service can never measure this: exhausting the artwork job's
+    // attempts must leave a media item with no artwork, never no media item.
+    const images = createFakeImages(new Map([[POSTER_URL, UNMEASURABLE_BYTES]]));
+    const grid = movieWithImages(MOVIE, '512', 'The Grid', [
+      { role: 'poster', url: POSTER_URL, title: null, language: null },
+    ]);
+    const { raw, host, clock } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const ids = given(raw, [MOVIE]);
+    const itemId = only(ids, 'rss item');
+
+    const outcome = await host.notifyNewRssItems(ids);
+    assert.deepEqual(outcome.failures, []);
+    await runToCompletion(host, clock, raw);
+
+    // The lookup's own work is untouched: a media item, claimed and resolved.
+    const media = only(mediaItems(raw), 'media item');
+    assert.equal(media.title, 'The Grid');
+    const item = rssItemState(raw, itemId);
+    assert.equal(item.mediaItemId, media.id);
+    assert.equal(item.resolution, 'resolved', 'the lookup outcome must not be undone by the artwork job failing');
+
+    // The artwork job itself is what failed, and dead-lettered on its own.
+    const artworkJob = only(jobs(raw).filter((job) => job.kind === 'artwork'), 'artwork job');
+    assert.equal(artworkJob.state, 'dead');
+    assert.equal(artworkJob.attempts, DEFAULT_MAX_ATTEMPTS);
+    assert.deepEqual(artworkRows(raw, 'poster'), [], 'an image that never measures must never get a row');
+  });
+});
+
+test('images on different hosts are fetched in parallel', async () => {
+  await withArtworkDir(async (artworkDir) => {
+    const gated = createGatedImages(new Map([
+      [POSTER_URL, gifBytes(300, 450)],
+      [BACKGROUND_URL, gifBytes(1920, 1080)],
+    ]));
+    const grid = movieWithImages(MOVIE, '512', 'The Grid', [
+      { role: 'poster', url: POSTER_URL, title: null, language: null },
+      { role: 'background', url: BACKGROUND_URL, title: null, language: null },
+    ]);
+    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: gated.fetch });
+    const ids = given(raw, [MOVIE]);
+
+    const outcome = await host.notifyNewRssItems(ids);
+    assert.deepEqual(outcome.failures, []);
+    assert.equal(await host.runOnce(), true, 'the lookup job must run');
+
+    // Started, not awaited: both hosts' requests should already be in flight
+    // by the time this settles, and neither request in this test ever
+    // resolves on its own -- a serialised implementation would leave the
+    // second one never made at all.
+    const artworkRun = host.runOnce();
+    await flush();
+
+    assert.equal(gated.inFlight(POSTER_URL), 1, 'the poster request must already be in flight');
+    assert.equal(
+      gated.inFlight(BACKGROUND_URL),
+      1,
+      'the background request must already be in flight -- proving it did not wait for the poster host',
+    );
+
+    gated.release(POSTER_URL);
+    gated.release(BACKGROUND_URL);
+    assert.equal(await artworkRun, true, 'the artwork job must complete once both requests are released');
+
+    assert.equal(only(artworkRows(raw, 'poster'), 'poster row').width, 300);
+    assert.equal(only(artworkRows(raw, 'background'), 'background row').width, 1920);
+  });
+});
+
+test('an image the service offers but the host cannot measure leaves the other two attached', async () => {
+  await withArtworkDir(async (artworkDir) => {
+    const images = createFakeImages(new Map([
+      [POSTER_URL, gifBytes(300, 450)],
+      [BACKGROUND_URL, gifBytes(1920, 1080)],
+      [LOGO_URL, UNMEASURABLE_BYTES],
+    ]));
+    const grid = movieWithImages(MOVIE, '512', 'The Grid', [
+      { role: 'poster', url: POSTER_URL, title: null, language: null },
+      { role: 'background', url: BACKGROUND_URL, title: null, language: null },
+      { role: 'logo', url: LOGO_URL, title: null, language: null },
+    ]);
+    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const ids = given(raw, [MOVIE]);
+
+    const outcome = await host.notifyNewRssItems(ids);
+    assert.deepEqual(outcome.failures, []);
+    assert.equal(await host.runOnce(), true, 'the lookup job must run');
+    // The artwork job itself still "runs" -- `runOnce` only reports whether a
+    // job was claimed, not whether its handler succeeded -- but it fails,
+    // because the logo could not be measured.
+    assert.equal(await host.runOnce(), true, 'the artwork job attempt runs, even though it will fail overall');
+
+    assert.equal(only(artworkRows(raw, 'poster'), 'poster row').width, 300);
+    assert.equal(only(artworkRows(raw, 'background'), 'background row').width, 1920);
+    assert.deepEqual(artworkRows(raw, 'logo'), [], 'the unmeasurable image must have produced no row');
+  });
+});
+
+test('re-running the artwork job attaches nothing new', async () => {
+  await withArtworkDir(async (artworkDir) => {
+    const images = createFakeImages(new Map([
+      [POSTER_URL, gifBytes(300, 450)],
+      [BACKGROUND_URL, gifBytes(1920, 1080)],
+      [LOGO_URL, gifBytes(512, 128)],
+    ]));
+    const grid = movieWithImages(MOVIE, '512', 'The Grid', [
+      { role: 'poster', url: POSTER_URL, title: null, language: null },
+      { role: 'background', url: BACKGROUND_URL, title: null, language: null },
+      { role: 'logo', url: LOGO_URL, title: null, language: null },
+    ]);
+    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const ids = given(raw, [MOVIE]);
+
+    await host.notifyNewRssItems(ids);
+    assert.equal(await host.runOnce(), true, 'the lookup job must run');
+    assert.equal(await host.runOnce(), true, 'the artwork job must run');
+
+    const beforeRerun = {
+      poster: artworkRows(raw, 'poster'),
+      background: artworkRows(raw, 'background'),
+      logo: artworkRows(raw, 'logo'),
+    };
+    const filesBeforeRerun = await readdir(artworkDir);
+    assert.equal(filesBeforeRerun.length, 3);
+
+    // Back to `ready`, exactly the state `recover` leaves a job the process
+    // died holding -- see the crash test below -- and run the very same
+    // payload through the very same handler a second time.
+    const artworkJob = only(jobs(raw).filter((job) => job.kind === 'artwork'), 'artwork job');
+    raw.prepare("UPDATE jobs SET state = 'ready' WHERE id = ?").run(artworkJob.id);
+    assert.equal(await host.runOnce(), true, 'the re-run must claim the same job');
+
+    assert.deepEqual(artworkRows(raw, 'poster'), beforeRerun.poster, 'one row, not two');
+    assert.deepEqual(artworkRows(raw, 'background'), beforeRerun.background, 'one row, not two');
+    assert.deepEqual(artworkRows(raw, 'logo'), beforeRerun.logo, 'one row, not two');
+
+    const filesAfterRerun = await readdir(artworkDir);
+    assert.deepEqual(filesAfterRerun, filesBeforeRerun, 'one file per image, not two');
+  });
+});
+
 /** Every outcome in one batch, so the crash resumes the whole flow rather than one branch of it. */
 const CRASH_FILENAMES = [MOVIE, SUBTITLE, GIBBERISH, SLOW, REPACK];
 
@@ -739,14 +1106,17 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   const plugin = createDoublePlugin({ now: () => clock.now() });
 
   // The dying process's fetch queue dies with it, and that matters:
-  // `createHostFetch` serialises per hostname, and a request that never
-  // settles never releases its hostname's slot. A restart that reused this
-  // queue would wedge on the first request it made.
+  // `createHostFetch` serialises per hostname, so the request that hangs
+  // below holds its hostname's only slot until `queue.ts`'s thirty-second
+  // timeout aborts it and releases it -- far longer than this test, or a
+  // restart, is willing to wait. So the restart below builds its own queue,
+  // exactly as a real restarted process would.
   const dying = createHost({
     raw,
     db,
     fetch: createHostFetch({ fetch: hangOnFirstRequest(service.fetch) }),
     downloads: unusedDownloads,
+    artworkDir: unusedArtworkDir,
     now: () => clock.now(),
   });
   dying.register(plugin);
@@ -777,6 +1147,7 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
     db,
     fetch: createHostFetch({ fetch: service.fetch }),
     downloads: unusedDownloads,
+    artworkDir: unusedArtworkDir,
     now: () => clock.now(),
   });
   restarted.register(plugin);

@@ -1,9 +1,54 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import type { ArtworkStore } from '../../src/artwork/store.ts';
+import { createArtworkStore } from '../../src/artwork/store.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createMediaWriter } from '../../src/media/writer.ts';
+import { gifBytes } from '../support/gif.ts';
+
+/** An `ArtworkStore` that fails loudly if a test that attaches no artwork somehow reaches it. */
+const unusedArtwork: ArtworkStore = {
+  put: async () => { throw new Error('artwork.put: not used by this test'); },
+  remove: async () => { throw new Error('artwork.remove: not used by this test'); },
+};
+
+/** One entry per call to the log function a real `createArtworkStore` was built with. */
+interface LoggedCall {
+  message: string;
+  detail: Readonly<Record<string, unknown>> | undefined;
+}
+
+/**
+ * A minimal, valid GIF: `image-size` reads width and height straight out of
+ * the logical screen descriptor (bytes 6-9), with no CRC or pixel data
+ * needed -- probed directly against `image-size` before this file was
+ * written. Far cheaper than constructing a PNG, which does need a valid CRC
+ * per chunk.
+ */
+
+/**
+ * A real `ArtworkStore` backed by a fresh temp directory, removed afterward
+ * so a test that attaches artwork does not leave files behind. Real, rather
+ * than a fake that skips the filesystem: these tests are exactly the ones
+ * that need to prove the row and the cached file agree. `logs` collects
+ * every call the store's `log` made, for the one test that needs to see one.
+ */
+async function withArtworkStore(
+  run: (artwork: ArtworkStore, dir: string, logs: LoggedCall[]) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-writer-artwork-'));
+  const logs: LoggedCall[] = [];
+  try {
+    await run(createArtworkStore(dir, (message, detail) => logs.push({ message, detail })), dir, logs);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 /** A row read back from `media_item`, narrowed the same way `migrate.test.ts` does. */
 function readMediaItem(raw: DatabaseSync, id: number) {
@@ -61,7 +106,7 @@ function insertRssItem(raw: DatabaseSync, feedId: number, at: number): number {
 test('claiming an unheld provider ref keeps the caller and drops nothing', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   const id = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   const claim = await writer.claimProviderRef(id, 'tmdb', 'ref-1');
@@ -76,7 +121,7 @@ test('claiming an unheld provider ref keeps the caller and drops nothing', async
 test('claiming a held provider ref keeps the holder and reports the caller as dropped', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   const holderId = await writer.createMediaItem({ pluginId: 'alpha', title: 'first', releaseDate: null, description: null });
   const first = await writer.claimProviderRef(holderId, 'tmdb', 'shared-ref');
@@ -101,7 +146,7 @@ test('claiming a held provider ref keeps the holder and reports the caller as dr
 test('a non-unique sqlite failure is not mistaken for a lost race', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   // A legitimate holder for (tmdb, ref-1) -- so that if the mutation this
   // test targets (catching every ERR_SQLITE_ERROR, not just 2067) were
@@ -129,7 +174,7 @@ test('a non-unique sqlite failure is not mistaken for a lost race', async () => 
 test('two unclaimed items do not collide, because NULL refs are distinct in SQLite', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   const first = await writer.createMediaItem({ pluginId: 'alpha', title: 'one', releaseDate: null, description: null });
   const second = await writer.createMediaItem({ pluginId: 'alpha', title: 'two', releaseDate: null, description: null });
@@ -152,7 +197,7 @@ test('relinkRssItem repoints the item and bumps updated_at', async () => {
   assert.ok(before);
   assert.equal(before.updated_at, 500);
 
-  const writer = createMediaWriter(db, () => 999);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
   await writer.relinkRssItem(itemId, mediaItemId);
@@ -172,7 +217,7 @@ test('relinkRssItem(id, null) unlinks and bumps updated_at', async () => {
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 500);
 
-  const writer = createMediaWriter(db, () => 999);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   await writer.relinkRssItem(itemId, mediaItemId);
 
@@ -187,7 +232,7 @@ test('relinkRssItem(id, null) unlinks and bumps updated_at', async () => {
 test('relinkRssItem on an rss item that does not exist throws', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   await assert.rejects(() => writer.relinkRssItem(999_999, null));
 });
@@ -196,7 +241,7 @@ test('updateMediaItem replaces title, release date and description, and bumps up
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   let at = 1000;
-  const writer = createMediaWriter(db, () => at);
+  const writer = createMediaWriter(db, () => at, unusedArtwork);
 
   const mediaItemId = await writer.createMediaItem({
     pluginId: 'alpha',
@@ -225,7 +270,7 @@ test('updateMediaItem replaces title, release date and description, and bumps up
 test('updateMediaItem leaves plugin_id, provider and provider_ref untouched', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   const mediaItemId = await writer.createMediaItem({
     pluginId: 'alpha',
@@ -254,7 +299,7 @@ test('updateMediaItem leaves plugin_id, provider and provider_ref untouched', as
 test('updateMediaItem on an id that does not exist throws rather than silently doing nothing', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   await assert.rejects(() => writer.updateMediaItem(999_999, {
     title: 'nope',
@@ -266,7 +311,7 @@ test('updateMediaItem on an id that does not exist throws rather than silently d
 test('creating an item, linking, unlinking with null, then dropping it succeeds', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 0);
@@ -292,7 +337,7 @@ test('setResolution records refused and unresolved as different states', async (
   migrateHost(raw);
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 0);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   await writer.setResolution(itemId, 'refused', null);
   const refused = readRssItem(raw, itemId);
@@ -313,7 +358,7 @@ test('setResolution records refused and unresolved as different states', async (
 test('upsertPerson returns the same id for a repeated providerRef', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   const firstId = await writer.upsertPerson({ name: 'Ada', providerRef: 'p-1' });
   const secondId = await writer.upsertPerson({ name: 'Ada Lovelace', providerRef: 'p-1' });
@@ -328,7 +373,7 @@ test('upsertPerson returns the same id for a repeated providerRef', async () => 
 test('dropMediaItem removes the loser and leaves the keeper', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
   const keeperId = await writer.createMediaItem({ pluginId: 'alpha', title: 'keeper', releaseDate: null, description: null });
   await writer.claimProviderRef(keeperId, 'tmdb', 'shared-ref');
@@ -363,7 +408,7 @@ test('attachRole is idempotent: the same part attached twice is one row, with th
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   let at = 1000;
-  const writer = createMediaWriter(db, () => at);
+  const writer = createMediaWriter(db, () => at, unusedArtwork);
 
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   const personId = await writer.upsertPerson({ name: 'Ada', providerRef: 'p-1' });
@@ -395,37 +440,161 @@ test('attachRole is idempotent: the same part attached twice is one row, with th
   assert.equal(cast.createdAt, 1000, 'created_at belongs to the first write: this is the same row seen again');
 });
 
-test('attachPoster and attachBackground are idempotent on their url', async () => {
-  const { raw, db } = openTestDatabase();
-  migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000);
+test('attaching a poster stores the row with the measured width and height', async () => {
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
-  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
-  const url = 'https://images.test/poster.jpg';
+    // The caller supplies no width or height at all -- `ImageInit` has none
+    // to give. Whatever lands in the row must be what the bytes measure to.
+    await writer.attachPoster(mediaItemId, {
+      title: 'front', language: 'en', url: 'https://images.test/poster.gif', bytes: gifBytes(300, 450),
+    });
 
-  await writer.attachPoster(mediaItemId, { title: null, language: null, url, width: 300, height: 450 });
-  await writer.attachPoster(mediaItemId, { title: 'front', language: 'en', url, width: 600, height: 900 });
-  const posters = raw.prepare('SELECT title, language, url, width, height FROM poster ORDER BY id')
-    .all().map((row) => ({
-      title: row['title'], language: row['language'], url: row['url'],
-      width: row['width'], height: row['height'],
-    }));
-  assert.deepEqual(posters, [{ title: 'front', language: 'en', url, width: 600, height: 900 }]);
+    const row = raw.prepare('SELECT title, language, url, width, height, path FROM poster WHERE media_item_id = ?')
+      .get(mediaItemId) as { title: unknown; language: unknown; url: unknown; width: unknown; height: unknown; path: unknown };
+    assert.ok(row);
+    assert.equal(row.title, 'front');
+    assert.equal(row.language, 'en');
+    assert.equal(row.width, 300);
+    assert.equal(row.height, 450);
+    assert.equal(typeof row.path, 'string', 'a cached file path must be recorded');
+  });
+});
 
-  // A second image for the same item is a second row: the key is the url, not
-  // the item, or an item could only ever hold one poster.
-  await writer.attachPoster(mediaItemId, { title: null, language: null, url: `${url}?v=2`, width: 300, height: 450 });
-  assert.equal(raw.prepare('SELECT id FROM poster').all().length, 2);
+test('attaching a logo stores a row, which slice A had no way to do', async () => {
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
-  const bgUrl = 'https://images.test/bg.jpg';
-  await writer.attachBackground(mediaItemId, { title: null, description: null, language: null, url: bgUrl, width: 1920, height: 1080 });
-  await writer.attachBackground(mediaItemId, { title: 'wide', description: 'a grid', language: 'en', url: bgUrl, width: 3840, height: 2160 });
-  const backgrounds = raw.prepare('SELECT title, description, language, url, width, height FROM background ORDER BY id')
-    .all().map((row) => ({
-      title: row['title'], description: row['description'], language: row['language'],
-      url: row['url'], width: row['width'], height: row['height'],
-    }));
-  assert.deepEqual(backgrounds, [
-    { title: 'wide', description: 'a grid', language: 'en', url: bgUrl, width: 3840, height: 2160 },
-  ]);
+    await writer.attachLogo(mediaItemId, {
+      title: null, language: null, url: 'https://images.test/logo.gif', bytes: gifBytes(512, 128),
+    });
+
+    const row = raw.prepare('SELECT url, width, height, path FROM logo WHERE media_item_id = ?')
+      .get(mediaItemId) as { url: unknown; width: unknown; height: unknown; path: unknown };
+    assert.ok(row, 'attachLogo must have written a row -- slice A left this table with no writer at all');
+    assert.equal(row.url, 'https://images.test/logo.gif');
+    assert.equal(row.width, 512);
+    assert.equal(row.height, 128);
+    assert.equal(typeof row.path, 'string');
+  });
+});
+
+test('attaching the same url twice leaves one row and one file', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+    const url = 'https://images.test/poster.gif';
+
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    // Crash recovery re-runs a handler that already ran once; a second
+    // attach of the same url must be the same row and the same file, not a
+    // second of either.
+    await writer.attachPoster(mediaItemId, { title: 'front', language: 'en', url, bytes: gifBytes(300, 450) });
+
+    const rows = raw.prepare('SELECT title, language FROM poster WHERE media_item_id = ?')
+      .all(mediaItemId) as { title: unknown; language: unknown }[];
+    assert.equal(rows.length, 1, 'a re-attach of the same url must be the same row, not a second one');
+    assert.equal(rows[0]?.title, 'front', 'the second attach must correct the row, not be discarded');
+
+    const files = await readdir(dir);
+    assert.equal(files.length, 1, 'a re-attach of the same url must be the same cached file, not a second one');
+  });
+});
+
+test('dropping a media item deletes its artwork rows and their files', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url: 'https://images.test/poster.gif', bytes: gifBytes(300, 450) });
+    await writer.attachBackground(mediaItemId, { title: null, language: null, url: 'https://images.test/bg.gif', bytes: gifBytes(1920, 1080) });
+    await writer.attachLogo(mediaItemId, { title: null, language: null, url: 'https://images.test/logo.gif', bytes: gifBytes(512, 128) });
+    assert.equal((await readdir(dir)).length, 3, 'three cached files must exist before the drop');
+
+    await writer.dropMediaItem(mediaItemId);
+
+    assert.equal(raw.prepare('SELECT id FROM poster WHERE media_item_id = ?').all(mediaItemId).length, 0);
+    assert.equal(raw.prepare('SELECT id FROM background WHERE media_item_id = ?').all(mediaItemId).length, 0);
+    assert.equal(raw.prepare('SELECT id FROM logo WHERE media_item_id = ?').all(mediaItemId).length, 0);
+    assert.equal(readMediaItem(raw, mediaItemId), undefined, 'the media item itself must be gone');
+
+    // An orphaned file leaks; an orphaned row is worse, because something
+    // will try to serve it. This is the leak-avoiding half of that trade.
+    assert.equal((await readdir(dir)).length, 0, 'the cached files must be unlinked along with their rows');
+  });
+});
+
+test('the same url on two different media items gets two files, and dropping one leaves the other intact', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const itemA = await writer.createMediaItem({ pluginId: 'alpha', title: 'a', releaseDate: null, description: null });
+    const itemB = await writer.createMediaItem({ pluginId: 'alpha', title: 'b', releaseDate: null, description: null });
+
+    // A series poster, or a studio placeholder, can legitimately back two
+    // media items at once. The path must key on (mediaItemId, url), matching
+    // the (media_item_id, url) unique index exactly -- keying on the url
+    // alone would collide the two items onto one file, and dropping either
+    // one would unlink the file the other's row still names.
+    const url = 'https://images.test/shared-poster.gif';
+    await writer.attachPoster(itemA, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    await writer.attachPoster(itemB, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    assert.equal((await readdir(dir)).length, 2, 'two media items sharing a url must produce two files');
+
+    const pathOf = (mediaItemId: number) => (
+      raw.prepare('SELECT path FROM poster WHERE media_item_id = ?').get(mediaItemId) as { path: unknown }
+    ).path;
+    const pathA = pathOf(itemA);
+    const pathB = pathOf(itemB);
+    assert.notEqual(pathA, pathB, 'two different media items sharing a url must not share a path');
+
+    await writer.dropMediaItem(itemA);
+
+    assert.equal(raw.prepare('SELECT id FROM poster WHERE media_item_id = ?').all(itemA).length, 0);
+    assert.ok(readMediaItem(raw, itemB), 'item B\'s row must be untouched by dropping item A');
+    const stillPosterB = raw.prepare('SELECT path FROM poster WHERE media_item_id = ?').get(itemB) as { path: unknown };
+    assert.equal(stillPosterB.path, pathB, 'item B\'s poster row must be untouched');
+
+    const filesAfter = await readdir(dir);
+    assert.equal(filesAfter.length, 1, 'only item A\'s file must be gone');
+    assert.ok(typeof pathB === 'string' && filesAfter.includes(pathB.slice(dir.length + 1)),
+      'item B\'s file must still exist on disk after dropping item A');
+  });
+});
+
+test('a portrait image and a landscape image are stored as given, not reclassified', async () => {
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+
+    // A landscape image attached as a poster, and a portrait image attached
+    // as a background. The caller chose the method; measuring only supplies
+    // dimensions, it never moves an image between tables the way
+    // packages/core/src/media/classify.ts's classifyArtwork does.
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url: 'https://images.test/wide.gif', bytes: gifBytes(1920, 1080) });
+    await writer.attachBackground(mediaItemId, { title: null, language: null, url: 'https://images.test/tall.gif', bytes: gifBytes(300, 450) });
+
+    const poster = raw.prepare('SELECT width, height FROM poster WHERE media_item_id = ?')
+      .get(mediaItemId) as { width: unknown; height: unknown };
+    assert.equal(poster.width, 1920);
+    assert.equal(poster.height, 1080);
+
+    const background = raw.prepare('SELECT width, height FROM background WHERE media_item_id = ?')
+      .get(mediaItemId) as { width: unknown; height: unknown };
+    assert.equal(background.width, 300);
+    assert.equal(background.height, 450);
+  });
 });

@@ -34,21 +34,22 @@ export interface MediaItemUpdate {
   description: string | null;
 }
 
-export interface PosterInit {
+/**
+ * What a caller hands `attachPoster`, `attachBackground` and `attachLogo`.
+ *
+ * `width` and `height` are not here: `MediaWriter` measures the bytes itself
+ * and caches them beside the row (see `createArtworkStore` in
+ * `@pickarr/host`), so a caller cannot supply a dimension that disagrees
+ * with the file it came with. `background`'s old `description` field has no
+ * home here and stays unwritten -- no caller ever filled it.
+ */
+export interface ImageInit {
+  /** Where it came from, kept so a re-fetch is possible. */
+  url: string;
   title: string | null;
   language: string | null;
-  url: string;
-  width: number;
-  height: number;
-}
-
-export interface BackgroundInit {
-  title: string | null;
-  description: string | null;
-  language: string | null;
-  url: string;
-  width: number;
-  height: number;
+  /** Measured by the writer; never supplied. */
+  bytes: Uint8Array;
 }
 
 export interface PersonInit {
@@ -118,15 +119,20 @@ export interface MediaWriter {
 
   /**
    * Attaches a poster, keyed on its url: attaching the same url twice leaves
-   * one row, so a handler re-run by crash recovery does not double-write.
+   * one row and one cached file, so a handler re-run by crash recovery does
+   * not double-write or double-fetch.
    *
-   * Nothing calls this yet. The image slice is where posters are fetched and
-   * chosen; the method is here because a media item's artwork is a shared row
-   * and shared rows have one writer.
+   * The writer measures the bytes, so a caller cannot supply a wrong width or
+   * height -- it cannot supply one at all. Artwork is a shared row and now a
+   * shared file, and both have one writer for the same reason: a row and a
+   * file written by different hands can disagree, and 1.x needed a repair
+   * script because they did.
    */
-  attachPoster(mediaItemId: number, poster: PosterInit): Promise<void>;
-  /** As `attachPoster`, for a backdrop. Also uncalled until the image slice. */
-  attachBackground(mediaItemId: number, background: BackgroundInit): Promise<void>;
+  attachPoster(mediaItemId: number, poster: ImageInit): Promise<void>;
+  /** As `attachPoster`, for a backdrop. */
+  attachBackground(mediaItemId: number, background: ImageInit): Promise<void>;
+  /** As `attachPoster`, for a logo -- the artwork slot slice A left with no writer. */
+  attachLogo(mediaItemId: number, logo: ImageInit): Promise<void>;
   upsertPerson(person: PersonInit): Promise<number>;
   /**
    * Attaches one person's part in one item, keyed on

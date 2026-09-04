@@ -167,14 +167,45 @@ CREATE TABLE jobs (
 CREATE INDEX jobs_ready ON jobs (run_at, id) WHERE state = 'ready';
 `;
 
-const HOST_MIGRATIONS: readonly Migration[] = [{ version: 1, up: (db) => db.exec(INITIAL_SCHEMA) }];
+/**
+ * `guid`, `download_type`'s new default and `poll_interval_s` back the feed
+ * reader; the `path` columns back the artwork writer that follows it. Every
+ * `ADD COLUMN ... NOT NULL` carries a `DEFAULT`, since SQLite refuses that
+ * combination outright on a table that may already hold rows — the defaults
+ * exist to make the statement legal, not because they are values later rows
+ * should inherit silently.
+ */
+const MIGRATION_2 = `
+ALTER TABLE rss_item ADD COLUMN guid TEXT;
+CREATE UNIQUE INDEX rss_item_feed_guid ON rss_item (feed_id, guid);
+
+ALTER TABLE rss_feed ADD COLUMN download_type   TEXT    NOT NULL DEFAULT 'torrent';
+ALTER TABLE rss_feed ADD COLUMN poll_interval_s INTEGER NOT NULL DEFAULT 900;
+
+ALTER TABLE poster     ADD COLUMN path TEXT;
+ALTER TABLE background ADD COLUMN path TEXT;
+ALTER TABLE logo       ADD COLUMN path TEXT;
+CREATE UNIQUE INDEX logo_media_item_url ON logo (media_item_id, url);
+`;
+
+/**
+ * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
+ * only version 1) rather than a synthetic list, so it can seed a row on the
+ * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
+ */
+export const HOST_MIGRATIONS: readonly Migration[] = [
+  { version: 1, up: (db) => db.exec(INITIAL_SCHEMA) },
+  { version: 2, up: (db) => db.exec(MIGRATION_2) },
+];
 
 /**
  * Applies the host's own migrations, tracked in `host_migrations` — a
  * separate table and a separate version space from `plugin_migrations`, so a
  * plugin's version 1 and the host's version 1 never collide.
+ *
+ * Exported for tests: `migrateHost` is this with the real migration list.
  */
-export function migrateHost(raw: DatabaseSync): void {
+export function migrateHostWith(raw: DatabaseSync, list: readonly Migration[]): void {
   raw.exec(`
     CREATE TABLE IF NOT EXISTS host_migrations (
       version    INTEGER PRIMARY KEY,
@@ -189,11 +220,31 @@ export function migrateHost(raw: DatabaseSync): void {
 
   const record = raw.prepare('INSERT INTO host_migrations (version, applied_at) VALUES (?, ?)');
 
-  for (const migration of HOST_MIGRATIONS.toSorted((a, b) => a.version - b.version)) {
+  for (const migration of list.toSorted((a, b) => a.version - b.version)) {
     if (applied.has(migration.version)) continue;
-    migration.up(raw);
-    record.run(migration.version, Date.now());
+    // The migration and the version row are one transaction, so a throw mid-
+    // migration leaves no trace. SQLite's DDL autocommits, so without this a
+    // crash between `up()` and `record.run()` would leave the schema applied
+    // and the version unrecorded — the next boot would then re-run `up()`
+    // straight into "table already exists".
+    raw.exec('SAVEPOINT host_migration');
+    try {
+      migration.up(raw);
+      record.run(migration.version, Date.now());
+    } catch (err) {
+      // `ROLLBACK TO` undoes the work but leaves the savepoint on the stack;
+      // `RELEASE` is what pops it, so the connection is not left inside a
+      // transaction that nothing will ever close.
+      raw.exec('ROLLBACK TO host_migration');
+      raw.exec('RELEASE host_migration');
+      throw err;
+    }
+    raw.exec('RELEASE host_migration');
   }
+}
+
+export function migrateHost(raw: DatabaseSync): void {
+  migrateHostWith(raw, HOST_MIGRATIONS);
 }
 
 const PLUGIN_MIGRATIONS = `

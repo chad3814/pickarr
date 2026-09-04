@@ -23,11 +23,18 @@ const lookup: JobHandler = async (job, ctx) => {
     await ctx.media.dropMediaItem(claim.dropped);
     await ctx.media.relinkRssItem(rssItemId, claim.kept);
   }
+  // Never actually executed -- see the comment below -- so these bytes need
+  // not be a real image; the point is that `ImageInit` takes bytes and no
+  // caller-supplied width or height.
+  const bytes = new Uint8Array([0]);
   await ctx.media.attachPoster(claim.kept, {
-    title: null, language: null, url: 'https://example.com/poster.jpg', width: 300, height: 450,
+    title: null, language: null, url: 'https://example.com/poster.jpg', bytes,
   });
   await ctx.media.attachBackground(claim.kept, {
-    title: null, description: null, language: null, url: 'https://example.com/bg.jpg', width: 1920, height: 1080,
+    title: null, language: null, url: 'https://example.com/bg.jpg', bytes,
+  });
+  await ctx.media.attachLogo(claim.kept, {
+    title: null, language: null, url: 'https://example.com/logo.jpg', bytes,
   });
   const personId = await ctx.media.upsertPerson({ name: 'Someone', providerRef: 'p1' });
   await ctx.media.attachRole(claim.kept, { personId, role: 'cast', name: null, billingOrder: 0 });

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { migrateHost, migratePlugin } from '../../src/db/migrate.ts';
+import { HOST_MIGRATIONS, migrateHost, migrateHostWith, migratePlugin } from '../../src/db/migrate.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -11,6 +11,16 @@ function tableNames(raw: DatabaseSync): Set<string> {
     raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()
       .map((r) => String((r as { name: unknown }).name)),
   );
+}
+
+/**
+ * Same rows as `tableNames`, but as an array: the atomicity test below filters
+ * the result, and `Set` has no `.filter`. Kept local rather than exported
+ * from `migrate.ts` — its private `tableNames` stays private.
+ */
+function tableNamesFor(raw: DatabaseSync): string[] {
+  return raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()
+    .map((r) => String((r as { name: unknown }).name));
 }
 
 /** The `(plugin_id, version)` pairs recorded as applied, or `[]` when the table is absent. */
@@ -107,4 +117,85 @@ test('a plugin migration that throws part way leaves neither its tables nor its 
 
   assert.equal(tableNames(raw).has('eps_first'), false, 'the half-applied table must be rolled back');
   assert.deepEqual(appliedVersions(raw), []);
+});
+
+test('a host migration that throws leaves no trace of itself', () => {
+  const raw = new DatabaseSync(':memory:');
+  const boom: Migration[] = [
+    { version: 1, up: (db) => db.exec('CREATE TABLE kept (id INTEGER PRIMARY KEY)') },
+    { version: 2, up: (db) => {
+      db.exec('CREATE TABLE half_done (id INTEGER PRIMARY KEY)');
+      throw new Error('migration 2 failed');
+    } },
+  ];
+  assert.throws(() => migrateHostWith(raw, boom), /migration 2 failed/);
+
+  // Version 1 stands. Version 2 left neither its table nor its version row,
+  // so the next boot re-runs it rather than skipping it as applied.
+  assert.deepEqual(tableNamesFor(raw).filter((n) => n === 'kept' || n === 'half_done'), ['kept']);
+  const versions = raw.prepare('SELECT version FROM host_migrations ORDER BY version').all();
+  assert.deepEqual(versions.map((r) => Number((r as { version: unknown }).version)), [1]);
+
+  // `ROLLBACK TO` undoes the savepoint's work but leaves it on the stack; a
+  // throw that skips the matching `RELEASE` would leave the connection
+  // inside a transaction nothing will ever close, and the next statement
+  // that tries to open one (a fresh `BEGIN`, or another host migration on
+  // the next boot) would fail. `isTransaction` is `node:sqlite`'s own name
+  // for this, confirmed by probe: it is `false` before any `SAVEPOINT` and
+  // stays `true` after a bare `ROLLBACK TO` with no `RELEASE`.
+  assert.equal(raw.isTransaction, false);
+});
+
+test('a migration to version 2 backfills its new NOT NULL columns onto an existing rss_feed row', () => {
+  const { raw } = openTestDatabase();
+  // Stop after version 1, so `rss_feed` exists without `download_type` or
+  // `poll_interval_s` yet — the shape a real database has the moment before
+  // this migration runs, and the only shape on which `ADD COLUMN ... NOT
+  // NULL` even needs a `DEFAULT` to be legal.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version === 1));
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 1, 1)
+  `).run();
+
+  // Picks up only version 2: version 1 is already recorded as applied.
+  migrateHost(raw);
+
+  const row = raw.prepare('SELECT download_type, poll_interval_s FROM rss_feed').get() as {
+    download_type: unknown;
+    poll_interval_s: unknown;
+  };
+  assert.deepEqual(
+    { download_type: String(row.download_type), poll_interval_s: Number(row.poll_interval_s) },
+    { download_type: 'torrent', poll_interval_s: 900 },
+  );
+});
+
+test('two pre-existing rss_item rows with no guid do not collide under the new unique index', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version === 1));
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 1, 1)
+  `).run();
+  // Two rows on the same feed, written before `guid` existed. If SQLite
+  // treated NULLs as equal in a unique index, the second insert below would
+  // have collided with the first the moment the index was created.
+  for (const filename of ['a.mkv', 'b.mkv']) {
+    raw.prepare(`
+      INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+      VALUES (1, ?, 'https://example.com/' || ?, 1, 1, 'torrent', '1080p')
+    `).run(filename, filename);
+  }
+
+  migrateHost(raw);
+
+  const rows = raw.prepare('SELECT filename, guid FROM rss_item ORDER BY filename').all() as {
+    filename: unknown;
+    guid: unknown;
+  }[];
+  assert.deepEqual(
+    rows.map((r) => ({ filename: String(r.filename), guid: r.guid })),
+    [{ filename: 'a.mkv', guid: null }, { filename: 'b.mkv', guid: null }],
+  );
 });
