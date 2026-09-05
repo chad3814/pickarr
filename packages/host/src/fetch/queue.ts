@@ -1,4 +1,6 @@
 import type { HostFetch } from '@pickarr/contract';
+import { createBoundedQueue, isValidLimit } from '../util/bounded-queue.ts';
+import type { BoundedQueue } from '../util/bounded-queue.ts';
 
 /**
  * `createHostFetch`'s actual return shape: `HostFetch`'s two methods plus
@@ -33,28 +35,23 @@ export interface FetchLimits {
 }
 
 /**
- * A hostname's concurrency budget: `running` counts requests currently
- * inside `task()`, capped at `limit`; `waiting` holds a resolver per
- * request that arrived once the cap was already hit, in arrival order.
- */
-interface HostQueue {
-  running: number;
-  limit: number;
-  waiting: Array<() => void>;
-}
-
-/**
- * A limit of 0 or below is not "disable this host" -- it is `q.running >=
- * q.limit` (e.g. `0 >= 0`) true before any request has ever run, so the
- * very first request queues behind a slot nothing will ever grant. Nothing
- * later would observe that: no error, no timeout, just a promise that never
- * settles. Reject it here, at construction, loudly and by name, rather than
- * clamp it -- clamping would silently substitute behaviour nobody asked for,
- * and rather than let it surface invisibly whenever the first request to
- * that hostname happens to be made.
+ * A limit of 0 or below is not "disable this host" -- handed to
+ * `createBoundedQueue`, it would make `running >= limit` true before any
+ * request to that hostname has ever run, so the very first one queues
+ * behind a slot nothing will ever grant. Nothing later would observe that:
+ * no error, no timeout, just a promise that never settles.
+ * `createBoundedQueue` rejects a bad limit too, but only once a hostname's
+ * first request builds its queue, and only by value. Checking here, at
+ * `createHostFetch` construction, rejects it immediately and names which
+ * config key -- `'default'` or the hostname -- is at fault, rather than
+ * let a bad value surface invisibly whenever that hostname's first request
+ * happens to be made.
  */
 function assertValidLimit(name: string, value: number): void {
-  if (!Number.isInteger(value) || value < 1) {
+  // `isValidLimit` rather than a second copy of the comparison: the rule is
+  // the queue's, and only the message is this layer's, which is what names
+  // the offending config key for whoever has to fix it.
+  if (!isValidLimit(value)) {
     throw new Error(`fetch limit for '${name}' must be an integer of at least 1, got ${value}`);
   }
 }
@@ -119,35 +116,23 @@ export function createHostFetch(
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   assertValidTimeout(timeoutMs);
 
-  const queues = new Map<string, HostQueue>();
+  // One `BoundedQueue` per hostname, built lazily on that hostname's first
+  // request so a hostname never mentioned in `deps.limits` never gets an
+  // entry it doesn't need.
+  const queues = new Map<string, BoundedQueue>();
 
-  function queueFor(hostname: string): HostQueue {
+  function queueFor(hostname: string): BoundedQueue {
     const existing = queues.get(hostname);
     if (existing) return existing;
 
     const limit = deps.limits?.perHost?.[hostname] ?? deps.limits?.default ?? 1;
-    const created: HostQueue = { running: 0, limit, waiting: [] };
+    const created = createBoundedQueue(limit);
     queues.set(hostname, created);
     return created;
   }
 
-  async function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
-    const q = queueFor(hostname);
-    if (q.running >= q.limit) {
-      await new Promise<void>((resolve) => { q.waiting.push(resolve); });
-    }
-    q.running += 1;
-    try {
-      return await task();
-    } finally {
-      // Runs whether `task` resolved or rejected. Drop either half of this
-      // and a rejected request leaves its slot permanently occupied: every
-      // later request to that hostname either queues past the real limit
-      // (skip the decrement) or waits on a wake that never comes (skip the
-      // shift) -- the queue is wedged forever, silently.
-      q.running -= 1;
-      q.waiting.shift()?.();
-    }
+  function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
+    return queueFor(hostname).run(task);
   }
 
   /**
@@ -164,11 +149,11 @@ export function createHostFetch(
    * cancels a real request (undici aborts the socket and errors a body
    * already streaming), so a timed-out fetch stops costing anything. The
    * race is what makes this *reject* rather than hang if the `fetch` it was
-   * handed ignores the signal -- and rejecting is what runs `enqueue`'s
-   * `finally`, releasing the hostname slot. A caller's own signal is
-   * composed with the timeout rather than replaced by it, so passing one
-   * cannot silently opt out of the timeout and the timeout cannot silently
-   * discard it.
+   * handed ignores the signal -- and rejecting is what lets the hostname's
+   * `BoundedQueue.run` release the slot, in its own `finally`. A caller's
+   * own signal is composed with the timeout rather than replaced by it, so
+   * passing one cannot silently opt out of the timeout and the timeout
+   * cannot silently discard it.
    */
   async function timed<T>(
     url: string,
