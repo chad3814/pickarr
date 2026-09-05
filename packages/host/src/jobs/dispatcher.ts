@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { JobRecord } from '@pickarr/contract';
+import type { JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
 import { createBoundedQueue } from '../util/bounded-queue.ts';
+import { runJob } from './run-job.ts';
 
 /**
  * The two native timer pairs the dispatcher needs, injected so a test can
@@ -19,6 +20,18 @@ export interface DispatcherOptions {
   timers: Timers;
   /** Max jobs executing at once. Defaults to DEFAULT_CONCURRENCY. */
   concurrency?: number;
+  /**
+   * Passed straight through to `run-job.ts`'s `runJob` for every job this
+   * dispatcher runs, and used here too: the one place left where a claim's
+   * own thrown no-op (`run-job.ts`'s `WHERE state = 'ready'` guard) would
+   * otherwise vanish silently is `dispatch`'s own `catch` below, and this is
+   * what it logs through instead of swallowing.
+   */
+  log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
+  /** Passed straight through to `run-job.ts`'s `runJob`, for its abort-grace wait. */
+  sleep: (ms: number) => Promise<void>;
+  /** Passed straight through to `run-job.ts`'s `runJob`, for its per-job timeout race. */
+  abortSignal: (ms: number) => AbortSignal;
 }
 
 export const DEFAULT_CONCURRENCY = 8;
@@ -33,7 +46,6 @@ export const DEFAULT_CONCURRENCY = 8;
 export const MAX_TIMER_MS = 60_000;
 export const SAFETY_INTERVAL_MS = 60_000;
 
-/** This task's scheduling half only. Task 5 supplies the real per-job lifecycle. */
 export interface Dispatcher {
   /**
    * Re-derives the single timeout from the earliest ready, not-yet-queued
@@ -43,26 +55,75 @@ export interface Dispatcher {
    * that re-arms on every write does not thrash a still-valid timer.
    */
   rearm(): void;
-  /** Clears the timer and the safety interval. Does not wait on anything in flight. */
+  /**
+   * Sweeps every row a crash left `running` -- there is one process, so a
+   * `running` row at this call is by definition one it crashed mid-handler,
+   * and Task 3's `started_at` means it was genuinely tried, not merely
+   * claimed and abandoned. A row already at its last permitted attempt goes
+   * to `dead` rather than `ready` -- a job kind that reliably kills the
+   * process must not be readied on every boot -- and everything else goes
+   * back to `ready` with `run_at` recomputed from the backoff curve, so a
+   * crash loop backs off instead of spinning. Then arms the timer and
+   * starts the safety interval. Returns how many rows the sweep touched,
+   * ready or dead, the same count `Runner.recover` returns today.
+   *
+   * `handlers` and `ctxFor` are exactly `Runner.runOnce`'s two arguments --
+   * deliberately, since that is what lets a future `Runner`-shaped adapter
+   * present the old surface while this dispatcher does the work underneath.
+   * They are what this dispatcher uses, from here on, to route a due row to
+   * the plugin that owns it: closing the real `runJob` (`./run-job.ts`)
+   * over its own dependencies, the row's own handler and its plugin's
+   * context. That wiring cannot live in `dispatch` below on its own,
+   * because `JobRecord` -- the only per-job shape anything downstream of
+   * the claim ever sees -- carries no plugin id; only the raw row does.
+   */
+  start(
+    handlers: (pluginId: string, kind: string) => JobHandler | undefined,
+    ctxFor: (pluginId: string) => PluginContext,
+  ): number;
+  /**
+   * Clears the timer and the safety interval and returns -- it does not
+   * drain. A handler already in flight is abandoned deliberately: its row
+   * stays `running`, and the next `start()` sweeps it. Waiting here for a
+   * handler that may be hung would reintroduce the exact coupling this
+   * whole slice removes; the durable `jobs` row, not this method, is what
+   * makes abandoning it safe.
+   */
   stop(): void;
+  /** Resolves once nothing dispatched is still running or waiting for a slot. */
+  idle(): Promise<void>;
 }
 
-/** The columns `fire` needs to hand a row to the injected runner as a `JobRecord`. */
+/** The columns `fire` needs to hand a row to `start`'s handler lookup and to the real `runJob` as a `JobRecord`. */
 interface DueRow {
   id: number;
+  pluginId: string;
   kind: string;
   payloadJson: string;
   attempts: number;
 }
 
 function readDueRow(row: unknown): DueRow {
-  const r = row as { id: unknown; kind: unknown; payload_json: unknown; attempts: unknown };
+  const r = row as { id: unknown; plugin_id: unknown; kind: unknown; payload_json: unknown; attempts: unknown };
   return {
     id: Number(r.id),
+    pluginId: String(r.plugin_id),
     kind: String(r.kind),
     payloadJson: String(r.payload_json),
     attempts: Number(r.attempts),
   };
+}
+
+/** A `running` row read back by the sweep, narrowed the same way `readDueRow` is. */
+interface RunningRow {
+  id: number;
+  attempts: number;
+  maxAttempts: number;
+}
+
+function readRunningRow(row: unknown): RunningRow {
+  const r = row as { id: unknown; attempts: unknown; max_attempts: unknown };
+  return { id: Number(r.id), attempts: Number(r.attempts), maxAttempts: Number(r.max_attempts) };
 }
 
 /**
@@ -76,32 +137,19 @@ function excludeClause(ids: readonly number[]): { clause: string; values: number
   return { clause: `AND id NOT IN (${ids.map(() => '?').join(',')})`, values: [...ids] };
 }
 
-export function createDispatcher(
-  raw: DatabaseSync,
-  /**
-   * Whatever runs one job -- a stub in this task's own tests; in production,
-   * `runJob` from `./run-job.ts` closed over its own dependencies, handler
-   * lookup and plugin context at `start()` time, adapted to this narrower
-   * shape rather than widening this slot to match its own. **Requirement on
-   * any implementation passed here:** the row must be claimed
-   * (`state = 'running'`) as the first synchronous act, before this
-   * function's first `await`. `./run-job.ts`'s `runJob` satisfies this by
-   * making the claim its first statement, before calling the handler.
-   *
-   * `dispatch` below removes `job.id` from the in-memory queued set the
-   * instant the bounded queue grants this call a slot -- not when it
-   * resolves -- because that is the moment a synchronous claim would
-   * already have flipped the row out of `ready`, letting the database's own
-   * `WHERE state = 'ready'` filter take over duty from the in-memory set
-   * from then on. An implementation that claims the row only after its own
-   * first `await` opens a window where the set has already forgotten the
-   * id but the row is still `ready`: a fire (or the safety interval)
-   * landing in that window dispatches the same row a second time -- the
-   * exact bug the queued set exists to prevent.
-   */
-  runJob: (job: JobRecord) => Promise<void>,
-  opts: DispatcherOptions,
-): Dispatcher {
+/**
+ * Exponential, capped at a minute -- the same curve `run-job.ts`'s own copy
+ * applies to a handler's failure. Duplicated rather than imported for the
+ * same reason that copy gives for not importing `host.ts`'s: `host.ts` sits
+ * above this module, so importing from it would point the dependency the
+ * wrong way, and `runner.ts` -- the third copy -- is on its way out per the
+ * plan's Task 12. One curve, three copies, until then.
+ */
+function backoffMs(attempts: number): number {
+  return Math.min(1000 * 2 ** (attempts - 1), 60_000);
+}
+
+export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Dispatcher {
   const concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY;
   const queue = createBoundedQueue(concurrency);
 
@@ -125,6 +173,17 @@ export function createDispatcher(
    * handle for one still counting down.
    */
   let timerLive = false;
+  let intervalHandle: unknown;
+
+  /**
+   * Built by `start`, from the `handlers`/`ctxFor` it is given -- `undefined`
+   * until then. Nothing can dispatch a job before `start` runs: `fire` is
+   * only ever reached through the timer or the safety interval, and both are
+   * armed exclusively inside `start`. So the only way `dispatch` below could
+   * ever find this still `undefined` is something bypassing that lifecycle
+   * entirely, which is a bug worth a clear throw rather than a silent no-op.
+   */
+  let runClaimedJob: ((pluginId: string, job: JobRecord) => Promise<void>) | undefined;
 
   /**
    * The earliest `run_at` among ready rows not already queued. Queued ids
@@ -173,21 +232,35 @@ export function createDispatcher(
     const job: JobRecord = { id: row.id, kind: row.kind, payload, attempts: row.attempts };
     // Neither awaited nor its rejection allowed to propagate: `fire` awaits
     // nothing (the queue worker owns the wait), and an uncaught rejection
-    // here -- from a stub in tests, or a bug -- must not become an
-    // unhandled rejection that could take the process down.
+    // here must not become an unhandled rejection that could take the
+    // process down.
     void queue.run(async () => {
       // The worker has now taken the job -- it is what frees this id for a
       // later fire to consider again, should the row ever return to `ready`.
+      // This is also the precondition documented on `runClaimedJob` above:
+      // whatever runs from here on must claim the row (state = 'running')
+      // as its own first synchronous act, before its own first `await`, or
+      // a fire landing in the gap this line just opened dispatches the same
+      // row a second time.
       queuedIds.delete(row.id);
-      await runJob(job);
-    }).catch(() => {});
+      if (!runClaimedJob) {
+        throw new Error(`dispatcher: job id ${row.id} fired before start() wired a handler`);
+      }
+      await runClaimedJob(row.pluginId, job);
+    }).catch((err: unknown) => {
+      // Surfaces what would otherwise disappear here silently -- most
+      // notably the claim guard's own throw (`run-job.ts`'s
+      // `WHERE state = 'ready'` no-op detection) on a row claimed twice: a
+      // detected no-op is only worth detecting if something reports it.
+      opts.log('dispatcher: job run failed', { jobId: row.id, pluginId: row.pluginId, err });
+    });
   }
 
   function fire(): void {
     const now = opts.now();
     const { clause, values } = excludeClause([...queuedIds]);
     const rows = raw.prepare(`
-      SELECT id, kind, payload_json, attempts FROM jobs
+      SELECT id, plugin_id, kind, payload_json, attempts FROM jobs
        WHERE state = 'ready' AND run_at <= ? ${clause}
        ORDER BY run_at, id LIMIT ?
     `).all(now, ...values, concurrency);
@@ -207,18 +280,92 @@ export function createDispatcher(
     rearm();
   }
 
-  const intervalHandle = opts.timers.setInterval(rearm, SAFETY_INTERVAL_MS);
-  rearm();
+  /**
+   * The crash-recovery sweep. Every `running` row here was genuinely
+   * started (Task 3 stamps `started_at` only then) by a process that is no
+   * longer running it -- there is exactly one, and it is this one, alive
+   * right now. Attempts are left untouched either way: the crashed attempt
+   * already consumed one, in the same statement that claimed the row.
+   */
+  function sweep(): number {
+    const now = opts.now();
+    const rows = raw.prepare("SELECT id, attempts, max_attempts FROM jobs WHERE state = 'running'").all();
+    let count = 0;
+    for (const row of rows) {
+      const { id, attempts, maxAttempts } = readRunningRow(row);
+      if (attempts >= maxAttempts) {
+        // Dead-lettering, not readying: readying a row with nothing left to
+        // retry would hand the same crash back to every future restart, and
+        // the host would never finish starting. The message names the
+        // crash specifically -- a rejected handler leaves its own message
+        // in `last_error`, and a crash is a different diagnosis.
+        raw.prepare("UPDATE jobs SET state = 'dead', last_error = ?, updated_at = ? WHERE id = ?")
+          .run('process crashed while this job was running, on its last permitted attempt', now, id);
+      } else {
+        // Backed off, not immediate: `run_at` is recomputed from the same
+        // curve a rejected handler's own retry uses, so a job kind that
+        // crashes the process backs off across restarts instead of being
+        // readied -- and re-crashing -- the instant the host comes back up.
+        // `started_at` is cleared: this row is not running anything right
+        // now, and a `ready` row with a stale `started_at` would misreport
+        // that.
+        const runAt = now + backoffMs(attempts);
+        raw.prepare("UPDATE jobs SET state = 'ready', run_at = ?, started_at = NULL, updated_at = ? WHERE id = ?")
+          .run(runAt, now, id);
+      }
+      count += 1;
+    }
+    return count;
+  }
 
   return {
     rearm,
+    start(handlers, ctxFor) {
+      runClaimedJob = async (pluginId, job) => {
+        const handler = handlers(pluginId, job.kind);
+        if (!handler) {
+          // The same visible dead-letter `Runner.runOnce` writes for a job
+          // kind nothing has registered -- a job that vanishes on an
+          // unhandled kind is one nobody can diagnose.
+          raw.prepare("UPDATE jobs SET state = 'dead', last_error = ?, updated_at = ? WHERE id = ?")
+            .run(`no handler for job kind "${job.kind}" registered by plugin "${pluginId}"`, opts.now(), job.id);
+          return;
+        }
+        const ctx = ctxFor(pluginId);
+        await runJob({ raw, now: opts.now, log: opts.log, sleep: opts.sleep, abortSignal: opts.abortSignal }, job, handler, ctx);
+      };
+
+      const swept = sweep();
+
+      // Idempotent against a second `start()` call: clear whatever an
+      // earlier call armed rather than leak a second timer or interval
+      // alongside it.
+      if (timeoutHandle !== undefined) {
+        opts.timers.clearTimeout(timeoutHandle);
+        timeoutHandle = undefined;
+      }
+      timerLive = false;
+      if (intervalHandle !== undefined) {
+        opts.timers.clearInterval(intervalHandle);
+      }
+      intervalHandle = opts.timers.setInterval(rearm, SAFETY_INTERVAL_MS);
+      rearm();
+
+      return swept;
+    },
     stop(): void {
       if (timeoutHandle !== undefined) {
         opts.timers.clearTimeout(timeoutHandle);
         timeoutHandle = undefined;
       }
       timerLive = false;
-      opts.timers.clearInterval(intervalHandle);
+      if (intervalHandle !== undefined) {
+        opts.timers.clearInterval(intervalHandle);
+        intervalHandle = undefined;
+      }
+    },
+    idle(): Promise<void> {
+      return queue.idle();
     },
   };
 }
