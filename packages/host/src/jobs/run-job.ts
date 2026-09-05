@@ -53,6 +53,14 @@ export async function runJob(
     now: () => number;
     log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
     sleep: (ms: number) => Promise<void>;
+    /**
+     * Almost always `AbortSignal.timeout` itself. Injected, not called
+     * directly, because it is the one seam a test could otherwise only
+     * reach by monkey-patching the global -- which reaches every consumer
+     * of `AbortSignal.timeout` in the process, not just this call, and
+     * cannot assert what `ms` this function actually asked for.
+     */
+    abortSignal: (ms: number) => AbortSignal;
   },
   job: JobRecord,
   handler: JobHandler,
@@ -114,7 +122,7 @@ export async function runJob(
     }
   }
 
-  const signal = AbortSignal.timeout(JOB_TIMEOUT_MS);
+  const signal = deps.abortSignal(JOB_TIMEOUT_MS);
   const running = makeQPromise(handler(claimedJob, ctx, signal));
 
   signal.addEventListener('abort', () => {
@@ -124,7 +132,15 @@ export async function runJob(
     void (async () => {
       await deps.sleep(ABORT_GRACE_MS);
       // Called, not read: `isPending` is a function, and the function value
-      // itself is always truthy, which would time out every job.
+      // itself is always truthy. This is quieter than it sounds -- a timer-
+      // based `sleep` never observes it at all, and the `WHERE state =
+      // 'running'` guard on `failRow` absorbs it for any job that has
+      // already completed by the time this runs. The one real window is a
+      // single microtask hop wide: the tick where `isPending()` has already
+      // flipped to `false` but `completeRow`'s write has not yet landed, so
+      // the row is still `running` and the guard still matches. A handler
+      // that happens to settle inside that hop, right as its own timeout
+      // fires, gets marked failed despite having succeeded.
       if (running.isPending()) failRow(new Error('job exceeded 5 minutes'));
     })().catch((err: unknown) => deps.log('job timeout handler failed', { err }));
   }, { once: true });

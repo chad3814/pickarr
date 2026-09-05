@@ -5,7 +5,7 @@ import type { JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createRunner } from '../../src/jobs/runner.ts';
-import { runJob } from '../../src/jobs/run-job.ts';
+import { runJob, JOB_TIMEOUT_MS, ABORT_GRACE_MS } from '../../src/jobs/run-job.ts';
 
 /**
  * A `PluginContext` whose capabilities all reject if called, the same shape
@@ -52,6 +52,9 @@ function readJob(raw: DatabaseSync, id: number) {
 /** A `sleep` that resolves on the next microtask, for every test that does not itself control it. */
 const noopSleep = (_ms: number): Promise<void> => Promise.resolve();
 
+/** A real signal, for every test that never fires it and needs no fake. */
+const realAbortSignal = (ms: number): AbortSignal => AbortSignal.timeout(ms);
+
 const noopLog = (): void => {};
 
 /** The default a `let` releaser starts from, before a test's promise assigns its resolver. */
@@ -66,6 +69,20 @@ const boom: JobHandler = async () => { throw new Error('handler boom'); };
 /** Lets pending microtasks run, without waiting on any real time. */
 function tick(): Promise<void> {
   return new Promise((resolve) => { setImmediate(resolve); });
+}
+
+/**
+ * Advances exactly one raw microtask tick -- `await undefined` rather than
+ * `await Promise.resolve()` or a `queueMicrotask`-backed promise, both of
+ * which cost more than one tick to observe from the awaiting side and would
+ * let the very race this exists to catch resolve itself before the next
+ * line runs. Unlike `tick()`'s full drain via `setImmediate`, this pins the
+ * single-tick-wide window between `isPending()` flipping to `false` and
+ * `completeRow`'s write landing -- measured directly against this file's
+ * own `runJob`, not assumed.
+ */
+function hop(): Promise<void> {
+  return Promise.resolve();
 }
 
 /** Seeds one `ready` row via the real `enqueue`, and the stale pre-claim `JobRecord` the dispatcher would hand `runJob`. */
@@ -93,7 +110,7 @@ test('the worker marks the row running and stamps started_at before calling the 
     seenStartedAt = row.started_at;
   };
 
-  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, handler, fakeCtx);
+  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal }, job, handler, fakeCtx);
 
   assert.equal(seenState, 'running', 'the row must already be running when the handler is called');
   assert.equal(seenStartedAt, now);
@@ -108,7 +125,7 @@ test('the worker increments attempts, because reaching a worker is a try', async
   let seen: JobRecord | undefined;
   const handler: JobHandler = async (record) => { seen = record; };
 
-  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, handler, fakeCtx);
+  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal }, job, handler, fakeCtx);
 
   assert.ok(seen, 'handler was never invoked');
   assert.equal(seen.attempts, 1, 'the handler sees the freshly claimed count, "1 on the first run"');
@@ -121,26 +138,45 @@ test('a handler that resolves completes its row', async () => {
   const now = 1000;
   const { id, job } = seedJob(raw, now, 'greet', 5);
 
-  // The abort signal outlives a handler that finished quickly -- nothing
-  // cancels it just because `running` already settled -- so this test also
-  // controls it and fires it late, after completion, standing in for its
-  // real five-minute-later firing. `isPending()` must read `false` by then;
-  // reading the property itself instead (always truthy, since it is a
-  // function) would fail this job long after it already succeeded.
-  const originalTimeout = AbortSignal.timeout;
+  // The abort signal fires while the handler is still running, standing in
+  // for its real five-minute-later firing against a handler that happens to
+  // finish around the same time -- the actual race, not just "long after".
   const controller = new AbortController();
-  AbortSignal.timeout = () => controller.signal;
+  const abortSignal = (_ms: number): AbortSignal => controller.signal;
 
-  try {
-    await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, resolves, fakeCtx);
-    assert.equal(readJob(raw, id).state, 'done');
+  let releaseHandler: () => void = noop;
+  const late = new Promise<void>((resolve) => { releaseHandler = resolve; });
+  const handler: JobHandler = async () => { await late; };
 
-    controller.abort();
-    await tick();
-    assert.equal(readJob(raw, id).state, 'done', 'a signal firing after completion must not touch the row');
-  } finally {
-    AbortSignal.timeout = originalTimeout;
-  }
+  let releaseSleep: () => void = noop;
+  const sleep = (_ms: number): Promise<void> => new Promise((resolve) => { releaseSleep = resolve; });
+
+  const done = runJob({ raw, now: () => now, log: noopLog, sleep, abortSignal }, job, handler, fakeCtx);
+
+  // The grace sleep is pending by the time `abort` returns; held here
+  // rather than released immediately.
+  controller.abort();
+  await tick();
+
+  // Release the handler, then let exactly one microtask hop pass before
+  // releasing the grace sleep -- the narrow window where `isPending()`
+  // has already flipped to `false` but `completeRow`'s write has not yet
+  // landed, so the row is still `running` and the guard would still
+  // match. A correct call to `isPending()` reads `false` here and never
+  // calls `failRow`, so the row still reaches `done`. A mutant that reads
+  // the property instead (always truthy, since it is a function) calls
+  // `failRow` inside exactly this window, while the guard still matches,
+  // and the failure sticks even though the job succeeded.
+  releaseHandler();
+  await hop();
+  releaseSleep();
+
+  await done;
+  assert.equal(
+    readJob(raw, id).state,
+    'done',
+    'a handler that succeeds during the grace window must not be marked failed by a stale pending check',
+  );
 });
 
 test('a handler that rejects fails its row and reschedules with backoff', async () => {
@@ -149,7 +185,7 @@ test('a handler that rejects fails its row and reschedules with backoff', async 
   const now = 1000;
   const { id, job } = seedJob(raw, now, 'boom', 5);
 
-  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, boom, fakeCtx);
+  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal }, job, boom, fakeCtx);
 
   const row = readJob(raw, id);
   assert.equal(row.state, 'ready');
@@ -164,7 +200,7 @@ test('a handler at its last attempt is dead-lettered rather than rescheduled', a
   const now = 1000;
   const { id, job } = seedJob(raw, now, 'boom', 1);
 
-  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, boom, fakeCtx);
+  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal }, job, boom, fakeCtx);
 
   const row = readJob(raw, id);
   assert.equal(row.state, 'dead');
@@ -179,12 +215,11 @@ test('a handler still pending past the timeout plus grace has its row failed', a
   const { id, job } = seedJob(raw, now, 'stuck', 5);
 
   // `AbortSignal.timeout`'s own delay is real wall-clock time with no seam
-  // this module exposes, so the test takes over the global directly: a
-  // signal this test controls, aborted on command, rather than one waited
-  // five real minutes for.
-  const originalTimeout = AbortSignal.timeout;
+  // this module exposes globally -- so the test injects a signal it
+  // controls directly, aborted on command, rather than one waited five
+  // real minutes for.
   const controller = new AbortController();
-  AbortSignal.timeout = () => controller.signal;
+  const abortSignal = (_ms: number): AbortSignal => controller.signal;
 
   let releaseSleep: () => void = noop;
   const sleep = (_ms: number): Promise<void> => new Promise((resolve) => { releaseSleep = resolve; });
@@ -193,23 +228,19 @@ test('a handler still pending past the timeout plus grace has its row failed', a
   const hang = new Promise<void>(() => {});
   const handler: JobHandler = async () => { await hang; };
 
-  try {
-    void runJob({ raw, now: () => now, log: noopLog, sleep }, job, handler, fakeCtx);
+  void runJob({ raw, now: () => now, log: noopLog, sleep, abortSignal }, job, handler, fakeCtx);
 
-    // Dispatching `abort` runs its listeners synchronously, so the grace
-    // sleep is already pending by the time this returns.
-    controller.abort();
-    await tick();
-    releaseSleep();
-    await tick();
-    await tick();
+  // Dispatching `abort` runs its listeners synchronously, so the grace
+  // sleep is already pending by the time this returns.
+  controller.abort();
+  await tick();
+  releaseSleep();
+  await tick();
+  await tick();
 
-    const row = readJob(raw, id);
-    assert.equal(row.state, 'ready');
-    assert.match(String(row.last_error), /exceeded 5 minutes/);
-  } finally {
-    AbortSignal.timeout = originalTimeout;
-  }
+  const row = readJob(raw, id);
+  assert.equal(row.state, 'ready');
+  assert.match(String(row.last_error), /exceeded 5 minutes/);
 });
 
 test('a handler that settles after its timeout does not overwrite the failed row', async () => {
@@ -218,9 +249,8 @@ test('a handler that settles after its timeout does not overwrite the failed row
   const now = 1000;
   const { id, job } = seedJob(raw, now, 'stuck', 5);
 
-  const originalTimeout = AbortSignal.timeout;
   const controller = new AbortController();
-  AbortSignal.timeout = () => controller.signal;
+  const abortSignal = (_ms: number): AbortSignal => controller.signal;
 
   let releaseSleep: () => void = noop;
   const sleep = (_ms: number): Promise<void> => new Promise((resolve) => { releaseSleep = resolve; });
@@ -229,29 +259,25 @@ test('a handler that settles after its timeout does not overwrite the failed row
   const late = new Promise<void>((resolve) => { releaseHandler = resolve; });
   const handler: JobHandler = async () => { await late; };
 
-  try {
-    const done = runJob({ raw, now: () => now, log: noopLog, sleep }, job, handler, fakeCtx);
+  const done = runJob({ raw, now: () => now, log: noopLog, sleep, abortSignal }, job, handler, fakeCtx);
 
-    controller.abort();
-    await tick();
-    releaseSleep();
-    await tick();
-    await tick();
+  controller.abort();
+  await tick();
+  releaseSleep();
+  await tick();
+  await tick();
 
-    // The conditional-update guard's precondition: the timeout must have
-    // already written its verdict before the handler is allowed to settle.
-    const timedOut = readJob(raw, id);
-    assert.equal(timedOut.state, 'ready', 'sanity: the timeout must already have failed the row');
+  // The conditional-update guard's precondition: the timeout must have
+  // already written its verdict before the handler is allowed to settle.
+  const timedOut = readJob(raw, id);
+  assert.equal(timedOut.state, 'ready', 'sanity: the timeout must already have failed the row');
 
-    releaseHandler();
-    await done;
+  releaseHandler();
+  await done;
 
-    const after = readJob(raw, id);
-    assert.equal(after.state, 'ready', 'a late settle must not flip the row to done');
-    assert.match(String(after.last_error), /exceeded 5 minutes/, "the timeout's verdict must remain, not be overwritten");
-  } finally {
-    AbortSignal.timeout = originalTimeout;
-  }
+  const after = readJob(raw, id);
+  assert.equal(after.state, 'ready', 'a late settle must not flip the row to done');
+  assert.match(String(after.last_error), /exceeded 5 minutes/, "the timeout's verdict must remain, not be overwritten");
 });
 
 test('a handler is given an AbortSignal', async () => {
@@ -263,7 +289,7 @@ test('a handler is given an AbortSignal', async () => {
   let seenSignal: AbortSignal | undefined;
   const handler: JobHandler = async (_record, _ctx, signal) => { seenSignal = signal; };
 
-  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, handler, fakeCtx);
+  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal }, job, handler, fakeCtx);
 
   assert.ok(seenSignal instanceof AbortSignal, 'the handler must receive a real AbortSignal');
 });
@@ -274,31 +300,94 @@ test('a second claim on an already-claimed row is a detectable no-op, not a doub
   const now = 1000;
   const { id, job } = seedJob(raw, now, 'stuck', 5);
 
-  const originalTimeout = AbortSignal.timeout;
   const controller = new AbortController();
-  AbortSignal.timeout = () => controller.signal;
+  const abortSignal = (_ms: number): AbortSignal => controller.signal;
 
   // Never settles -- keeps the row `running` so a second claim has
   // something to collide with.
   const hang = new Promise<void>(() => {});
   const handler: JobHandler = async () => { await hang; };
 
-  try {
-    // The first claim succeeds and leaves the row `running`.
-    void runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, handler, fakeCtx);
-    await tick();
-    assert.equal(readJob(raw, id).state, 'running', 'sanity: the first claim must have landed');
+  // The first claim succeeds and leaves the row `running`.
+  void runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal }, job, handler, fakeCtx);
+  await tick();
+  assert.equal(readJob(raw, id).state, 'running', 'sanity: the first claim must have landed');
 
-    // A second claim against the same stale `JobRecord` -- standing in for
-    // whatever future bug would hand `runJob` the same row twice -- must not
-    // match the claim's `WHERE state = 'ready'` guard, and must not touch
-    // `attempts` again.
-    await assert.rejects(
-      runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep }, job, resolves, fakeCtx),
-      /has no ready row to claim/,
-    );
-    assert.equal(readJob(raw, id).attempts, 1, 'a second claim must not double-increment attempts');
-  } finally {
-    AbortSignal.timeout = originalTimeout;
-  }
+  // A second claim against the same stale `JobRecord` -- standing in for
+  // whatever future bug would hand `runJob` the same row twice -- must not
+  // match the claim's `WHERE state = 'ready'` guard, and must not touch
+  // `attempts` again.
+  await assert.rejects(
+    runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal }, job, resolves, fakeCtx),
+    /has no ready row to claim/,
+  );
+  assert.equal(readJob(raw, id).attempts, 1, 'a second claim must not double-increment attempts');
+});
+
+test('the timeout signal is created with JOB_TIMEOUT_MS, and the grace wait is ABORT_GRACE_MS', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  const { job } = seedJob(raw, now, 'stuck', 5);
+
+  let seenTimeoutMs: number | undefined;
+  const controller = new AbortController();
+  const abortSignal = (ms: number): AbortSignal => { seenTimeoutMs = ms; return controller.signal; };
+
+  let seenSleepMs: number | undefined;
+  const sleep = (ms: number): Promise<void> => { seenSleepMs = ms; return Promise.resolve(); };
+
+  // Never settles -- keeps the signal listener the only thing exercised.
+  const hang = new Promise<void>(() => {});
+  const handler: JobHandler = async () => { await hang; };
+
+  void runJob({ raw, now: () => now, log: noopLog, sleep, abortSignal }, job, handler, fakeCtx);
+
+  // The signal is created before `runJob`'s first `await`, so its `ms`
+  // argument is already captured by the time this returns. Asserted against
+  // the literal, not the imported `JOB_TIMEOUT_MS` -- comparing a captured
+  // value to the very constant `runJob` itself read would still pass if
+  // that constant were mutated, since both sides would read the same
+  // (wrong) number. `assert.equal(JOB_TIMEOUT_MS, 300_000)` alongside pins
+  // the exported constant to the same literal, so a mutation to either one
+  // is still caught.
+  assert.equal(seenTimeoutMs, 300_000, 'the signal must be created with a five-minute timeout');
+  assert.equal(JOB_TIMEOUT_MS, 300_000, 'the exported constant itself must still be five minutes');
+
+  controller.abort();
+  await tick();
+
+  assert.equal(seenSleepMs, 2_000, 'the grace wait must be asked for exactly two seconds');
+  assert.equal(ABORT_GRACE_MS, 2_000, 'the exported constant itself must still be two seconds');
+});
+
+test("a grace wait that rejects is logged, not left an unhandled rejection", async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  const { job } = seedJob(raw, now, 'stuck', 5);
+
+  const controller = new AbortController();
+  const abortSignal = (_ms: number): AbortSignal => controller.signal;
+
+  const sleepFailure = new Error('sleep exploded');
+  const sleep = (_ms: number): Promise<void> => Promise.reject(sleepFailure);
+
+  let seenMessage: string | undefined;
+  let seenDetail: Readonly<Record<string, unknown>> | undefined;
+  const log = (message: string, detail?: Readonly<Record<string, unknown>>): void => {
+    seenMessage = message;
+    seenDetail = detail;
+  };
+
+  // Never settles -- the grace wait is the only thing this test exercises.
+  const hang = new Promise<void>(() => {});
+  const handler: JobHandler = async () => { await hang; };
+
+  void runJob({ raw, now: () => now, log, sleep, abortSignal }, job, handler, fakeCtx);
+  controller.abort();
+  await tick();
+
+  assert.equal(seenMessage, 'job timeout handler failed', 'a rejecting grace wait must be caught and logged, not left unhandled');
+  assert.equal(seenDetail?.err, sleepFailure, 'the log must carry the actual rejection');
 });
