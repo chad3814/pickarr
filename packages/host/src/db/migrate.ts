@@ -189,6 +189,19 @@ CREATE UNIQUE INDEX logo_media_item_url ON logo (media_item_id, url);
 `;
 
 /**
+ * `started_at` is stamped by the queue worker at the moment a job actually
+ * begins, not when it is dispatched -- so a row that has never run has none.
+ * It is nullable on purpose: a job dispatched but not yet started stays
+ * `ready` with a null `started_at`, so a crash charges it no attempt for a
+ * try that never happened. No new `state` value is needed -- `running`
+ * already exists alongside `ready`, `done` and `dead`, and it is exactly
+ * this state.
+ */
+const MIGRATION_3 = `
+ALTER TABLE jobs ADD COLUMN started_at INTEGER;
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -196,6 +209,7 @@ CREATE UNIQUE INDEX logo_media_item_url ON logo (media_item_id, url);
 export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 1, up: (db) => db.exec(INITIAL_SCHEMA) },
   { version: 2, up: (db) => db.exec(MIGRATION_2) },
+  { version: 3, up: (db) => db.exec(MIGRATION_3) },
 ];
 
 /**

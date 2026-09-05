@@ -220,6 +220,12 @@ export const jobs = sqliteTable('jobs', {
   lastError: text('last_error'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  // Stamped by the queue worker at the moment a job actually begins, not when
+  // it is dispatched -- so a row that has never run has none. Nullable on
+  // purpose: a job dispatched but not yet started stays `ready` with a null
+  // `started_at`, so a crash charges it no attempt for a try that never
+  // happened.
+  startedAt: integer('started_at'),
 }, (t) => [
   // The claim query's own predicate: `WHERE state = 'ready' AND run_at <= :now
   // ORDER BY run_at, id`. Partial on state so the index stays proportional to

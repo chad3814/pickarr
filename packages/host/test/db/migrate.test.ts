@@ -199,3 +199,26 @@ test('two pre-existing rss_item rows with no guid do not collide under the new u
     [{ filename: 'a.mkv', guid: null }, { filename: 'b.mkv', guid: null }],
   );
 });
+
+test('a migration to version 3 adds started_at to a populated jobs table', () => {
+  const { raw } = openTestDatabase();
+  // Stop after version 2, so `jobs` exists without `started_at` yet -- the
+  // shape a real database has the moment before this migration runs.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 2));
+  raw.prepare(`
+    INSERT INTO jobs (plugin_id, kind, payload_json, max_attempts, run_at, state, created_at, updated_at)
+    VALUES ('alpha', 'index', '{}', 3, 1, 'ready', 1, 1)
+  `).run();
+
+  // Picks up only version 3: versions 1 and 2 are already recorded as applied.
+  migrateHost(raw);
+
+  const row = raw.prepare('SELECT state, started_at FROM jobs').get() as {
+    state: unknown;
+    started_at: unknown;
+  };
+  assert.deepEqual(
+    { state: String(row.state), started_at: row.started_at },
+    { state: 'ready', started_at: null },
+  );
+});
