@@ -89,6 +89,14 @@ function readLastError(raw: DatabaseSync, id: number): string | null {
   return value === null ? null : String(value);
 }
 
+/** The `jobs.started_at` column for one row. */
+function readStartedAt(raw: DatabaseSync, id: number): number | null {
+  const row = raw.prepare('SELECT started_at FROM jobs WHERE id = ?').get(id);
+  assert.ok(row, `job ${id} has no row`);
+  const value = (row as { started_at: unknown }).started_at;
+  return value === null ? null : Number(value);
+}
+
 /** Lets pending microtasks -- including a bounded queue's own wake-up chaining -- run. */
 function tick(): Promise<void> {
   return new Promise((resolve) => { setImmediate(resolve); });
@@ -428,6 +436,13 @@ test('start returns a crashed running row to ready without losing its attempt', 
   assert.equal(readState(raw, id), 'running');
   assert.equal(readAttempts(raw, id), 1);
 
+  // `Runner.runOnce` above predates `run-job.ts`'s `started_at` stamp (Task 3)
+  // and never sets it itself, so it is stamped here directly -- reproducing
+  // what the real claim path leaves behind -- giving the sweep below an
+  // actual `started_at` to prove it clears.
+  raw.prepare('UPDATE jobs SET started_at = ? WHERE id = ?').run(now, id);
+  assert.notEqual(readStartedAt(raw, id), null, 'fixture set up a running row with a started_at to clear');
+
   // A brand new dispatcher over the same database, standing in for the restart.
   const { timers } = createFakeTimers();
   const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
@@ -442,6 +457,9 @@ test('start returns a crashed running row to ready without losing its attempt', 
   // Backed off, not immediate: the curve is the same one a rejected
   // handler's own retry uses.
   assert.equal(readRunAt(raw, id), now + 1000);
+  // A ready row with a stale started_at would misreport that it is running
+  // something right now, when nothing is.
+  assert.equal(readStartedAt(raw, id), null, 'started_at is cleared on the row the sweep readied');
 
   gate.resolve();
   await stalled;
@@ -616,4 +634,50 @@ test('start wires the real runJob through the dispatcher, so a due job is claime
 
   assert.deepEqual(claims, [id], 'the handler ran exactly once');
   assert.deepEqual(logs, [], 'no second claim was ever attempted -- the row was claimed exactly once');
+});
+
+test('start dead-letters a job whose kind has no handler registered, naming the kind and plugin', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const id = runner.enqueue('alpha', { kind: 'mystery', payload: {} });
+  const { timers, setTimeoutCalls } = createFakeTimers();
+
+  // No handler answers for any kind -- the same shape a plugin that never
+  // registered a handler for this job's kind presents.
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => undefined, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+  await dispatcher.idle();
+
+  assert.equal(readState(raw, id), 'dead', 'a job nobody can run must not vanish silently as ready or running');
+  const lastError = String(readLastError(raw, id));
+  assert.match(lastError, /mystery/, 'last_error should name the unhandled kind');
+  assert.match(lastError, /alpha/, 'last_error should name the plugin that owns the row');
+});
+
+test('start called twice does not leak a second timer or interval', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  insertReadyJob(raw, now, now + 500);
+  const { timers, setTimeoutCalls, clearTimeoutCalls, setIntervalCalls, clearIntervalCalls } = createFakeTimers();
+
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(noHandlers, () => fakeCtx);
+  const firstTimeoutHandle = setTimeoutCalls[0]?.handle;
+  const firstIntervalHandle = setIntervalCalls[0]?.handle;
+
+  dispatcher.start(noHandlers, () => fakeCtx);
+
+  // A second start that skipped clearing would leave the first interval
+  // running forever alongside the second, firing rearm() twice on every
+  // tick with nothing left to notice the leak.
+  assert.equal(setIntervalCalls.length, 2, 'a second start armed its own interval');
+  assert.deepEqual(clearIntervalCalls, [firstIntervalHandle], 'the first interval was cleared before the second was armed');
+  assert.equal(setTimeoutCalls.length, 2, 'a second start re-armed its own timer');
+  assert.deepEqual(clearTimeoutCalls, [firstTimeoutHandle], 'the first timer was cleared before the second was armed');
 });
