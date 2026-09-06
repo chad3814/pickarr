@@ -89,6 +89,13 @@ export const rssItem = sqliteTable('rss_item', {
   // SQLite treats NULLs as distinct in a unique index, so those rows do not
   // collide with each other under `rss_item_feed_guid`.
   guid: text('guid'),
+  // Nullable, and never backfilled: set once `notifyNewRssItems` has handed
+  // this row to its owning plugin with no failure. A row with none is
+  // offered again on the next poll of its feed -- whether it predates this
+  // column or its feed simply had no registered plugin yet -- which is what
+  // lets a host with no plugin registered still poll safely instead of
+  // destroying every item's identity through the (feed_id, guid) dedup.
+  deliveredAt: integer('delivered_at'),
 }, (t) => [
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),

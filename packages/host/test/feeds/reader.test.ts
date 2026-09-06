@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { NotifyOutcome } from '../../src/host.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
-import { createFeedReader } from '../../src/feeds/reader.ts';
+import { createFeedReader, MAX_CATCHUP_PER_POLL } from '../../src/feeds/reader.ts';
 
 /** A log call captured for assertion, rather than a raw two-argument tuple, so a test can name the field it cares about. */
 interface LoggedCall {
@@ -84,6 +84,19 @@ function setup() {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   return { raw };
+}
+
+/**
+ * Writes an `rss_item` row directly, undelivered, bypassing `pollFeed`
+ * entirely -- the shape a real backlog has, whether left by a feed with no
+ * registered plugin or accumulated before `delivered_at` existed at all.
+ */
+function insertRawItem(raw: DatabaseSync, feedId: number, guid: string): number {
+  const result = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, guid, download_type, resolution, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'torrent', 'pending', 0, 0)
+  `).run(feedId, `${guid}.mkv`, `https://feed.example/${guid}`, guid);
+  return Number(result.lastInsertRowid);
 }
 
 function rowsFor(raw: DatabaseSync, feedId: number): { id: number; guid: string | null; downloadType: string }[] {
@@ -244,4 +257,104 @@ test('a plugin failure is logged rather than dropped', async () => {
   assert.ok(failureCall, 'a plugin failure must be logged, not silently dropped');
   assert.equal(failureCall.detail?.['pluginId'], 'alpha');
   assert.match(String(failureCall.detail?.['error']), /plugin exploded/);
+});
+
+test('an id reported unowned stays undelivered and is re-offered once it is no longer unowned', async () => {
+  const { raw } = setup();
+  const feedId = insertFeed(raw, 'https://feed.example/rss');
+  const xml = rssXml([{ title: 'one.mkv', link: 'https://feed.example/one', guid: 'guid-1' }]);
+  const fetchText = scriptedFetchText([xml, xml]);
+  const received: number[][] = [];
+  let calls = 0;
+  // First poll: the feed's plugin does not exist yet, so notify reports the
+  // whole batch unowned. Second poll: a plugin now owns it.
+  const notify = async (ids: readonly number[]) => {
+    received.push([...ids]);
+    calls += 1;
+    return calls === 1 ? { unowned: [...ids], failures: [] } : { unowned: [], failures: [] };
+  };
+  const reader = createFeedReader({ raw, fetchText, notify, now: () => 1000, log: noopLog });
+
+  const first = await reader.pollFeed(feedId);
+  assert.equal(first.inserted.length, 1);
+  const itemId = first.inserted[0];
+  assert.ok(itemId !== undefined);
+
+  const second = await reader.pollFeed(feedId);
+
+  assert.equal(second.inserted.length, 0, 'the feed has nothing new the second time');
+  assert.deepEqual(
+    received[1],
+    [itemId],
+    'an id left undelivered because it was unowned must be re-offered, not silently dropped forever',
+  );
+});
+
+test('a plugin failure leaves its whole batch undelivered, so every id in it is re-offered next poll', async () => {
+  const { raw } = setup();
+  const feedId = insertFeed(raw, 'https://feed.example/rss');
+  const xml = rssXml([{ title: 'one.mkv', link: 'https://feed.example/one', guid: 'guid-1' }]);
+  const fetchText = scriptedFetchText([xml, xml]);
+  const received: number[][] = [];
+  let calls = 0;
+  const notify = async (ids: readonly number[]) => {
+    received.push([...ids]);
+    calls += 1;
+    return calls === 1
+      ? { unowned: [], failures: [{ pluginId: 'alpha', error: new Error('boom') }] }
+      : { unowned: [], failures: [] };
+  };
+  const reader = createFeedReader({ raw, fetchText, notify, now: () => 1000, log: noopLog });
+
+  const first = await reader.pollFeed(feedId);
+  const itemId = first.inserted[0];
+  assert.ok(itemId !== undefined);
+
+  const second = await reader.pollFeed(feedId);
+
+  assert.equal(second.inserted.length, 0);
+  assert.deepEqual(
+    received[1],
+    [itemId],
+    'a batch the plugin threw on must not be marked delivered, so it is re-offered rather than lost',
+  );
+});
+
+test('a large undelivered backlog is capped per poll, oldest ids first, without starving a newly-inserted item', async () => {
+  const { raw } = setup();
+  const feedId = insertFeed(raw, 'https://feed.example/rss');
+  // A backlog bigger than the cap, written directly rather than through a
+  // poll: the shape a feed with no owner for a long time actually
+  // accumulates.
+  const backlogIds: number[] = [];
+  for (let i = 0; i < MAX_CATCHUP_PER_POLL + 10; i += 1) {
+    backlogIds.push(insertRawItem(raw, feedId, `old-${i}`));
+  }
+  const xml = rssXml([{ title: 'new.mkv', link: 'https://feed.example/new', guid: 'guid-new' }]);
+  const fetchText = scriptedFetchText([xml]);
+  const { notify, received } = recordingNotify();
+  const reader = createFeedReader({ raw, fetchText, notify, now: () => 1000, log: noopLog });
+
+  const result = await reader.pollFeed(feedId);
+
+  assert.equal(result.inserted.length, 1, 'the one new entry is always inserted');
+  const newId = result.inserted[0];
+  assert.ok(newId !== undefined);
+
+  assert.equal(received.length, 1);
+  const offered = received[0] ?? [];
+  assert.equal(
+    offered.length,
+    MAX_CATCHUP_PER_POLL + 1,
+    'the new id plus a catch-up batch capped at MAX_CATCHUP_PER_POLL, not the whole backlog',
+  );
+  assert.ok(offered.includes(newId), 'the newly-inserted id must always be included, never crowded out by the backlog');
+
+  const offeredBacklog = offered.filter((id) => id !== newId).toSorted((a, b) => a - b);
+  const expectedOldest = backlogIds.toSorted((a, b) => a - b).slice(0, MAX_CATCHUP_PER_POLL);
+  assert.deepEqual(
+    offeredBacklog,
+    expectedOldest,
+    'the oldest undelivered backlog ids are offered first, not an arbitrary or newest-first slice',
+  );
 });

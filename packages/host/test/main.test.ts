@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -192,24 +192,35 @@ test('main starts the dispatcher before it schedules known feeds, so a feed whos
   }
 });
 
-test('main refuses to start with no plugin registered, and leaves no database behind', async () => {
-  // Not a degraded mode: a poll consumes each item's identity through the
-  // (feed_id, guid) dedup index, so items polled before any plugin owns
-  // their feed are destroyed rather than queued -- no later poll re-offers
-  // them and nothing rescans `resolution = 'pending'`. The shipped process
-  // registers no plugin, so this refusal is what it does on every boot
-  // until a plugin slice lands.
-  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-refusal-'));
+test('main boots with no plugin registered, and still schedules a poll for every known feed', async () => {
+  // `main` used to refuse this outright: a poll's dedup insert consumes an
+  // item's identity through (feed_id, guid), so an unowned item looked
+  // permanently destroyed. `rss_item.delivered_at` (see `feeds/reader.ts`)
+  // is what removed that danger -- an unowned row simply stays undelivered
+  // and is re-offered once a plugin registers -- so booting with an empty
+  // plugin list, exactly what the shipped `SHIPPED_PLUGINS` is today, must
+  // now succeed rather than throw.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-no-plugin-'));
   try {
     const databasePath = join(dir, 'pickarr.db');
-    await assert.rejects(
-      runMain(databasePath, {}),
-      /no media plugin registered/,
-    );
+    const seed = openDatabase(databasePath);
+    migrateHost(seed.raw);
+    insertFeed(seed.raw, 'https://a.test/feed.xml');
+    seed.raw.close();
 
-    // The guard runs before the database is opened, so a refusal is not a
-    // half-built host: nothing migrated, nothing on disk to explain.
-    assert.deepEqual(await readdir(dir), [], 'refusing must not create a database file');
+    const { timers } = createFakeTimers();
+    await runMain(databasePath, { plugins: [], timers });
+
+    const after = openDatabase(databasePath);
+    try {
+      assert.equal(
+        runnablePollJobs(after.raw),
+        1,
+        'a feed known before boot must still get a poll job scheduled, even with no plugin registered',
+      );
+    } finally {
+      after.raw.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

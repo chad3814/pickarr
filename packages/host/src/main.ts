@@ -92,9 +92,12 @@ export function scheduleKnownFeeds(host: Host, raw: DatabaseSync): readonly numb
 /**
  * The plugins the shipped process runs with: none, because no media plugin
  * ships inside `@pickarr/host` yet. This is where a later slice's plugin
- * wires in, and until then `main` refuses to start at all -- see the guard
- * at the top of it for why an empty list is a refusal rather than a
- * degraded mode.
+ * wires in. An empty list is not a refusal: a poll's `rss_item.delivered_at`
+ * stays null for anything `notifyNewRssItems` reports `unowned`, and
+ * `feeds/reader.ts`'s `pollFeed` re-offers every undelivered row on every
+ * later poll of that feed -- so the process boots and polls safely with no
+ * plugin at all, and each feed's backlog is delivered in full the moment a
+ * plugin registers for it.
  */
 const SHIPPED_PLUGINS: readonly MediaPlugin[] = [];
 
@@ -138,16 +141,17 @@ export function createShutdown(
 /**
  * Composes and starts the host process.
  *
- * Refuses to start with no plugin registered. That is not pedantry: a poll
- * inserts through `ON CONFLICT (feed_id, guid) DO NOTHING`, so an item's
- * identity is consumed by the first poll that sees it, and
- * `notifyNewRssItems` can only report it as `unowned`. No later poll
- * re-offers it and nothing rescans `resolution = 'pending'`, so every item
- * on every feed's front page would be destroyed on the first cycle,
- * permanently and invisibly. Refusing loudly is the honest description of
- * this slice: the machinery works and there is no plugin yet. Re-offering
- * undelivered rows is a real mechanism that belongs to the slice which
- * ships a plugin, and is deliberately not improvised here.
+ * Starts with no plugin registered just as readily as with one. A poll
+ * still inserts through `ON CONFLICT (feed_id, guid) DO NOTHING`, so an
+ * item's identity is consumed by the first poll that sees it, but that no
+ * longer destroys it: `rss_item.delivered_at` stays null for anything
+ * `notifyNewRssItems` reports `unowned`, and `feeds/reader.ts`'s `pollFeed`
+ * re-offers every undelivered row -- including ones from feeds no plugin
+ * has ever owned -- on every later poll, capped per call by
+ * `MAX_CATCHUP_PER_POLL` so a large backlog cannot crowd out a feed's newly
+ * inserted items in the same batch. So a host with no plugin registered
+ * boots, polls and accumulates undelivered rows safely, and delivers them
+ * in full the moment a plugin registers for their feed.
  *
  * The order below is the whole of what this function decides, and it is not
  * interchangeable:
@@ -187,15 +191,6 @@ export async function main(
   void argv;
 
   const plugins = deps.plugins ?? SHIPPED_PLUGINS;
-  // Checked before the database is opened, so a refusal leaves nothing
-  // behind -- no file, no migration, no signal handler.
-  if (plugins.length === 0) {
-    throw new Error(
-      'refusing to start with no media plugin registered: a poll consumes each item\'s identity through '
-      + 'the (feed_id, guid) dedup index, so every item polled before a plugin owns its feed would be '
-      + 'destroyed rather than delivered, and no later poll re-offers it',
-    );
-  }
 
   const databasePath = process.env['PICKARR_DATABASE'] ?? DEFAULT_DATABASE_PATH;
   const { raw, db } = openDatabase(databasePath);

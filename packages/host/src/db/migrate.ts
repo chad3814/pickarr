@@ -202,6 +202,18 @@ ALTER TABLE jobs ADD COLUMN started_at INTEGER;
 `;
 
 /**
+ * Stamped once a poll's batch has been handed to `notifyNewRssItems` and
+ * came back with no failure for the plugin that owns it -- see
+ * `feeds/reader.ts`'s `pollFeed`. Nullable, and left off any `DEFAULT`: a
+ * row this predates simply has none, which is exactly what makes a poll
+ * re-offer it the moment a plugin exists to receive it, rather than
+ * treating "column just appeared" as "already delivered".
+ */
+const MIGRATION_4 = `
+ALTER TABLE rss_item ADD COLUMN delivered_at INTEGER;
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -210,6 +222,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 1, up: (db) => db.exec(INITIAL_SCHEMA) },
   { version: 2, up: (db) => db.exec(MIGRATION_2) },
   { version: 3, up: (db) => db.exec(MIGRATION_3) },
+  { version: 4, up: (db) => db.exec(MIGRATION_4) },
 ];
 
 /**

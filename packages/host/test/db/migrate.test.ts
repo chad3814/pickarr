@@ -222,3 +222,35 @@ test('a migration to version 3 adds started_at to a populated jobs table', () =>
     { state: 'ready', started_at: null },
   );
 });
+
+test('a migration to version 4 adds delivered_at to a populated rss_item table, leaving existing rows undelivered', () => {
+  const { raw } = openTestDatabase();
+  // Stop after version 3, so `rss_item` exists without `delivered_at` yet --
+  // the shape a real database has the moment before this migration runs.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 3));
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, guid, created_at, updated_at, download_type, resolution)
+    VALUES (1, 'a.mkv', 'https://example.com/a', 'guid-a', 1, 1, 'torrent', '1080p')
+  `).run();
+
+  // Picks up only version 4: versions 1 through 3 are already recorded as applied.
+  migrateHost(raw);
+
+  const row = raw.prepare('SELECT filename, delivered_at FROM rss_item').get() as {
+    filename: unknown;
+    delivered_at: unknown;
+  };
+  // The row survives the migration -- proving this was tested against a
+  // populated table, not an empty one -- and its new column is null rather
+  // than backfilled to some "already delivered" value, which is exactly
+  // what lets a pre-existing row be re-offered rather than treated as
+  // already handled.
+  assert.deepEqual(
+    { filename: String(row.filename), delivered_at: row.delivered_at },
+    { filename: 'a.mkv', delivered_at: null },
+  );
+});
