@@ -39,6 +39,9 @@ function fakeHost(overrides: Partial<Host>): Host {
     runOnce: async () => { throw new Error('runOnce: not used by this test'); },
     recover: () => 0,
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
+    start: () => 0,
+    stop: () => {},
+    idle: async () => {},
     ...overrides,
   };
 }

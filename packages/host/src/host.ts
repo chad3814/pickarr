@@ -6,8 +6,29 @@ import { migratePlugin } from './db/migrate.ts';
 import { createMediaWriter } from './media/writer.ts';
 import { createRunner } from './jobs/runner.ts';
 import type { Runner } from './jobs/runner.ts';
+import { createDispatcher } from './jobs/dispatcher.ts';
+import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
+
+/**
+ * Real `Timers`, wiring `Host.start()`'s dispatcher to Node's own timer
+ * functions. `setTimeout`/`setInterval` hand back whatever the runtime
+ * returns; the two `clear*` methods only ever receive that same value back,
+ * from this same pairing, so narrowing the opaque `unknown` handle here is
+ * recovering a type this code already knows, not asserting one it doesn't.
+ */
+const nodeTimers: Timers = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => { clearTimeout(handle as NodeJS.Timeout); },
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => { clearInterval(handle as NodeJS.Timeout); },
+};
+
+/** A real sleep, for `run-job.ts`'s abort-grace wait, mirroring `main.ts`'s own `defaultSleep` -- duplicated rather than imported since `main.ts` sits above this module. */
+function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
 
 /**
  * Exponential, capped at a minute. Not an override knob: `backoffMs` is a
@@ -76,10 +97,35 @@ export interface Host {
   /** Dispatches to the plugin owning the feed those items came from. */
   notifyNewRssItems(ids: readonly number[]): Promise<NotifyOutcome>;
   requestDownload(rssItemId: number): Promise<void>;
+  /**
+   * TEST ADAPTER, deleted in the task that removes the last caller. Claims
+   * and runs at most one due job — see `Runner.runOnce`'s own doc for why
+   * this is not simply `Host.start()` called once — so the 64 existing
+   * call sites keep working while they are migrated file by file.
+   * Production must call `start()`; a pump loop calling this would rebuild
+   * the coupling the dispatcher exists to remove.
+   */
   runOnce(): Promise<boolean>;
   recover(): number;
   /** Enqueues the first `poll` job for a feed. Idempotent per feed. */
   schedulePoll(feedId: number, runAt?: number): number;
+  /**
+   * Sweeps every row a crash left `running`, then arms the dispatcher's
+   * timer and safety interval so registered handlers run as their jobs
+   * come due. Idempotent: a second call clears whatever the first armed
+   * rather than leaking a second timer or interval alongside it. Returns
+   * how many rows the sweep touched, ready or dead — the same count
+   * `recover()` returns today.
+   */
+  start(): number;
+  /**
+   * Clears the timer and the safety interval and returns — it does not
+   * drain. A handler already in flight is abandoned deliberately: its row
+   * stays `running`, and the next `start()` sweeps it.
+   */
+  stop(): void;
+  /** Resolves once nothing dispatched by `start()` is still running or waiting for a slot. */
+  idle(): Promise<void>;
 }
 
 /** The `rss_feed` row an rss item belongs to names its owning plugin directly. */
@@ -113,6 +159,20 @@ export function createHost(deps: {
    * `createHost` with a real database path, not to the host itself.
    */
   artworkDir: string;
+  /**
+   * Overrides the dispatcher's own timers. Absent means real ones — a test
+   * that needs to advance the dispatcher deterministically (rather than
+   * wait on real wall time) supplies the same kind of fake `Timers`
+   * `dispatcher.test.ts` already builds for `createDispatcher` directly.
+   */
+  timers?: Timers;
+  /**
+   * Overrides the dispatcher's max jobs executing at once. Absent means
+   * `DEFAULT_CONCURRENCY`. A test that steps a chain of jobs one at a time
+   * — each enqueuing the next — sets this to `1` rather than relying on
+   * the dispatcher being serial by nature, which it is not.
+   */
+  concurrency?: number;
 }): Host {
   // Plugins are wired explicitly via `register`, never discovered, so this
   // map is the host's whole notion of "who exists" — an id absent here is an
@@ -140,6 +200,34 @@ export function createHost(deps: {
     console.log(`[${HOST_PLUGIN_ID}] ${message}`, detail ?? {});
   }
 
+  // The real dispatcher behind `start()`/`stop()`/`idle()` — a separate
+  // instance from the one `runner`'s own `runOnce()` builds fresh per call
+  // (see `runner.ts`): that one is scoped to claiming a single job and is
+  // discarded immediately after, while this one is meant to live for as
+  // long as the host runs, driving every registered handler as its jobs
+  // come due.
+  // Built as two shapes, not one object literal with `concurrency` always
+  // present: `exactOptionalPropertyTypes` is on, so an explicit
+  // `concurrency: undefined` is not the same thing as the property being
+  // absent, and `DispatcherOptions.concurrency` means the latter when it
+  // wants `createDispatcher`'s own default.
+  const dispatcherOpts = {
+    now: deps.now,
+    timers: deps.timers ?? nodeTimers,
+    log: hostLog,
+    sleep: realSleep,
+    abortSignal: (ms: number) => AbortSignal.timeout(ms),
+  };
+  const dispatcher = deps.concurrency === undefined
+    ? createDispatcher(deps.raw, dispatcherOpts)
+    : createDispatcher(deps.raw, { ...dispatcherOpts, concurrency: deps.concurrency });
+
+  // Whether `start()` has been called and not yet `stop()`ped. Gates
+  // `dispatcher.rearm()` on every enqueue below: rearming is meaningless —
+  // and, with real timers, actively harmful in a test that never calls
+  // `start()` — before the dispatcher has anything armed to begin with.
+  let started = false;
+
   // One instance shared by every plugin, because `MediaWriter` is
   // plugin-agnostic: ten of its eleven methods take no plugin id at all, and
   // the eleventh — `createMediaItem`, through `MediaItemInit.pluginId` —
@@ -162,7 +250,16 @@ export function createHost(deps: {
       // plugin this context was built for, so that plugin can never name
       // another plugin's id when it enqueues its own work.
       jobs: {
-        enqueue: async (job) => runner.enqueue(pluginId, job),
+        enqueue: async (job) => {
+          const id = runner.enqueue(pluginId, job);
+          // Only while the dispatcher is actually running: rearming is
+          // what lets a job a plugin enqueues mid-flight be noticed before
+          // the next safety-interval tick, but there is nothing to notice
+          // it before `start()`, and nothing should — with real timers —
+          // before a test ever calls it either.
+          if (started) dispatcher.rearm();
+          return id;
+        },
       },
       fetch: deps.fetch,
       downloads: deps.downloads,
@@ -315,9 +412,13 @@ export function createHost(deps: {
     // is an optional `number` with `exactOptionalPropertyTypes` on, so an
     // explicit `undefined` is not the same thing as the property being
     // absent.
-    return runAt === undefined
+    const id = runAt === undefined
       ? runner.enqueue(HOST_PLUGIN_ID, { kind: 'poll', payload: { feedId } })
       : runner.enqueue(HOST_PLUGIN_ID, { kind: 'poll', payload: { feedId }, runAt });
+    // Same reasoning as `ctxFor`'s own `jobs.enqueue`: only worth doing,
+    // and only safe to do with real timers, once `start()` has actually run.
+    if (started) dispatcher.rearm();
+    return id;
   }
 
   return {
@@ -362,6 +463,23 @@ export function createHost(deps: {
 
     recover() {
       return runner.recover();
+    },
+
+    start() {
+      started = true;
+      return dispatcher.start(
+        (pluginId, kind) => handlers.get(pluginId)?.get(kind),
+        (pluginId) => ctxFor(pluginId),
+      );
+    },
+
+    stop() {
+      started = false;
+      dispatcher.stop();
+    },
+
+    idle() {
+      return dispatcher.idle();
     },
   };
 }

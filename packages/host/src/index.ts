@@ -5,6 +5,11 @@ export type { FetchLimits, QueuedFetch } from './fetch/queue.ts';
 export { createHostFetch } from './fetch/queue.ts';
 export type { Host, NotifyOutcome } from './host.ts';
 export { createHost, DEFAULT_BACKOFF_MS, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from './host.ts';
+// `Timers` names the type of `createHost`'s own optional `timers` override
+// -- a caller supplying one (a test standing up the dispatcher's clock
+// deterministically, as `dispatcher.test.ts` already does for
+// `createDispatcher` directly) needs to name it from outside this package.
+export type { Timers } from './jobs/dispatcher.ts';
 export type { PollResult } from './feeds/reader.ts';
 export { createFeedReader } from './feeds/reader.ts';
 export type { Pump } from './main.ts';
