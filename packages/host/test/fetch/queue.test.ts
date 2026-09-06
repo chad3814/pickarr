@@ -95,11 +95,13 @@ test('a rejected request still releases its slot, so the next request to that ho
 });
 
 test('a request that never settles times out, rejects, and releases its hostname slot', async () => {
-  // The wedge this guards, and the reason it is the whole process rather
-  // than one feed: a hung request holds its hostname's only slot, and --
-  // the pump being serial -- the job claim and the pump loop with it, so
-  // nothing else ever runs and `SIGTERM` cannot even end it. `timeoutMs` is
-  // small only so the test need not wait the shipped thirty seconds.
+  // The wedge this guards: a hung request holds its hostname's only slot,
+  // and with it one of the dispatcher's concurrency slots, so nothing else
+  // for that hostname -- or in that slot -- ever runs again for as long as
+  // the process is up. `Host.stop()` no longer waits on it, so this does not
+  // keep `SIGTERM` from ending the process, only from ever using that slot
+  // again. `timeoutMs` is small only so the test need not wait the shipped
+  // thirty seconds.
   let calls = 0;
   const fetchFn: typeof globalThis.fetch = async (input) => {
     calls += 1;
@@ -125,14 +127,58 @@ test('a request that never settles times out, rejects, and releases its hostname
   assert.equal(calls, 2, 'the next request to the same hostname actually reached fetch');
 });
 
+test('a request spends its budget while waiting for its hostname slot, not only while running', async () => {
+  // The half of the wedge that lives in the queue rather than in the request.
+  // Both requests are asked for in the same tick; the first ignores its
+  // signal and never settles, so it holds the sole slot for the whole
+  // forty-millisecond budget. The second is woken the instant the first's own
+  // race gives the slot up -- which is exactly when the second's budget is
+  // spent too, since both were armed together.
+  //
+  // The second's fetch would answer in twenty milliseconds, comfortably
+  // inside a fresh budget and comfortably outside none at all. That is the
+  // discriminator: with the timeout armed inside the queued task -- where it
+  // was until this was measured -- the second request started a *new*
+  // forty-millisecond window on being woken and resolved happily at sixty
+  // milliseconds, having waited untimed. A waiter's wall clock was therefore
+  // `queue depth x timeoutMs` with nothing bounding the depth, which is how a
+  // request outlives `run-job.ts`'s five-minute job ceiling and settles
+  // against a row its own timeout has already failed and a later attempt has
+  // re-claimed.
+  //
+  // `calls` is asserted too, and it is 2 rather than 1 on purpose: the woken
+  // task does get its one attempt, because a fetch that can answer inside the
+  // same microtask drain should be allowed to. What it does not get is a
+  // second window to answer in.
+  let calls = 0;
+  const fetchFn: typeof globalThis.fetch = async (input) => {
+    calls += 1;
+    if (calls === 1) return new Promise<Response>(() => {});
+    await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
+    return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
+  };
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 40 });
+
+  const first = hostFetch.json<Echo>('http://a.example/hangs');
+  const second = hostFetch.json<Echo>('http://a.example/queued-behind-it');
+
+  await assert.rejects(first, /timed out after 40ms/);
+  await assert.rejects(
+    second,
+    /timed out after 40ms/,
+    'a request that spent its budget waiting must not be handed a fresh one',
+  );
+  assert.equal(calls, 2, 'the woken request got its one attempt, and no window to complete it in');
+});
+
 test('a response whose body never completes times out too, and releases its hostname slot', async () => {
   // The other half of the same wedge, and the one a race around `fetch`
   // alone does not cover: the headers arrive promptly, so the response
   // resolves and any timeout that only wrapped `fetch` has already settled
   // successfully -- and then the body read hangs forever, holding the
-  // hostname slot and (the pump being serial) the job claim with it. The
-  // body read has to be inside the timeout window, which is why `timed`
-  // calls `read` inside the race rather than after it.
+  // hostname slot and a dispatcher concurrency slot with it. The body read
+  // has to be inside the timeout window, which is why `timed` calls `read`
+  // inside the race rather than after it.
   let calls = 0;
   const fetchFn: typeof globalThis.fetch = async (input) => {
     calls += 1;

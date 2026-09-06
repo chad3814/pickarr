@@ -5,8 +5,8 @@ import type { JobHandler, PluginContext } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createRunner } from '../../src/jobs/runner.ts';
-import { createDispatcher, MAX_TIMER_MS, SAFETY_INTERVAL_MS } from '../../src/jobs/dispatcher.ts';
-import type { Timers } from '../../src/jobs/dispatcher.ts';
+import { createDispatcher, DEFAULT_CONCURRENCY, MAX_TIMER_MS, SAFETY_INTERVAL_MS } from '../../src/jobs/dispatcher.ts';
+import type { Dispatcher, Timers } from '../../src/jobs/dispatcher.ts';
 
 /** One `setTimeout`/`setInterval` call, as the fake `Timers` below records it. */
 interface TimerCall {
@@ -54,10 +54,25 @@ function createFakeTimers(): {
   return { timers, setTimeoutCalls, clearTimeoutCalls, setIntervalCalls, clearIntervalCalls };
 }
 
-/** Inserts a `ready` row directly, the way a real `enqueue` will once Task 7 wires one up. */
+/** Inserts a `ready` row directly, the way `Runner.enqueue` does. */
 function insertReadyJob(raw: DatabaseSync, now: number, runAt: number): number {
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 3 });
   return runner.enqueue('test-plugin', { kind: 'noop', payload: {}, runAt });
+}
+
+/**
+ * Inserts a `running` row directly, standing in for a claim a crashed
+ * process left behind -- without needing a handler that never resolves and
+ * a promise this file would otherwise have to keep alive across the sweep.
+ * `started_at` is set, the same way a real claim (`run-job.ts`'s) leaves it,
+ * so the sweep below has an actual value to prove it clears.
+ */
+function insertRunningJob(raw: DatabaseSync, opts: { attempts: number; maxAttempts: number; now: number }): number {
+  const result = raw.prepare(`
+    INSERT INTO jobs (plugin_id, kind, payload_json, attempts, max_attempts, run_at, state, started_at, last_error, created_at, updated_at)
+    VALUES ('alpha', 'stuck', '{}', ?, ?, ?, 'running', ?, NULL, ?, ?)
+  `).run(opts.attempts, opts.maxAttempts, opts.now, opts.now, opts.now, opts.now);
+  return Number(result.lastInsertRowid);
 }
 
 /** The `jobs.state` column for one row, read back with the `{ field: unknown }` narrowing this codebase uses throughout. */
@@ -109,6 +124,20 @@ function neverSettles(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+/** `neverSettles` with the rejecting half exposed too, for the late-settle tests below that need a handler to fail rather than succeed. */
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (err: Error) => void;
+}
+
+function deferred(): Deferred {
+  let resolve!: () => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 /** A `sleep` that resolves on the next microtask, for every test that does not itself control it. */
 const noopSleep = (_ms: number): Promise<void> => Promise.resolve();
 
@@ -116,6 +145,9 @@ const noopSleep = (_ms: number): Promise<void> => Promise.resolve();
 const realAbortSignal = (ms: number): AbortSignal => AbortSignal.timeout(ms);
 
 const noopLog = (): void => {};
+
+/** A handler that always rejects, for the one test below that needs a real rejection on the row before a crash. */
+const boom: JobHandler = async () => { throw new Error('handler boom'); };
 
 /**
  * A `PluginContext` whose capabilities all reject if called, the same shape
@@ -218,7 +250,17 @@ test('a delay beyond the clamp is capped rather than firing immediately', () => 
   dispatcher.start(noHandlers, () => fakeCtx);
 
   assert.equal(setTimeoutCalls.length, 1);
-  assert.equal(setTimeoutCalls[0]?.ms, MAX_TIMER_MS);
+  // Asserted against the literal, not the imported `MAX_TIMER_MS` -- comparing
+  // the observed delay to the very constant `rearm` itself read would still
+  // pass if that constant were mutated, since both sides would move together.
+  // Measured: `MAX_TIMER_MS = 2_147_483_648` -- the exact 32-bit overflow
+  // `dispatcher.ts`'s own doc says "fires immediately in Node rather than
+  // waiting ... a hot loop, not a late job" -- passed the whole host suite.
+  // `assert.equal(MAX_TIMER_MS, 60_000)` alongside pins the exported constant
+  // to the same literal, so a mutation to either one is still caught. Same
+  // idiom as `run-job.test.ts`'s `JOB_TIMEOUT_MS`/`ABORT_GRACE_MS` pair.
+  assert.equal(setTimeoutCalls[0]?.ms, 60_000, 'a far-future run_at must be clamped to one minute');
+  assert.equal(MAX_TIMER_MS, 60_000, 'the exported clamp itself must still be one minute');
 });
 
 test('firing dispatches due jobs oldest first, up to the concurrency', () => {
@@ -276,6 +318,44 @@ test('firing leaves jobs beyond the concurrency ready for the next fire', async 
 
   assert.equal(dispatched.length, 2, 'the row beyond the cap was never handed to the queue');
   assert.equal(readState(raw, third), 'ready', 'the row beyond the cap was never written to');
+});
+
+test('the default concurrency bounds the high direction: nine due rows dispatch exactly eight', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  const ids = Array.from({ length: 9 }, (_, i) => insertReadyJob(raw, now, 100 + i));
+  const ninth = ids.at(-1);
+  assert.ok(ninth !== undefined, 'the fixture must have inserted nine rows');
+  const { timers, setTimeoutCalls } = createFakeTimers();
+
+  // No `concurrency` override, deliberately: every other test here passes its
+  // own, so the shipped default had no importer at all -- not even a test --
+  // and the direction the cap exists for went unmeasured. Spec section 5 puts
+  // it plainly ("a pathological batch cannot open hundreds of sockets"), and
+  // measured, `DEFAULT_CONCURRENCY = 1000` passed the whole host suite, since
+  // only the low direction was covered.
+  const dispatched: number[] = [];
+  const handler: JobHandler = async (job) => { dispatched.push(job.id); };
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => handler, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+
+  // Every handler resolves at once, so a dispatcher that had handed all nine
+  // to the queue would, given enough microtask turns, get around to all nine:
+  // a bounded queue only delays work beyond its limit, it does not drop it.
+  // That is what makes this a test of the cap and not of the queue's own
+  // limit. The fake timers never fire on their own, so the re-arm that
+  // follows this fire cannot smuggle in a second batch either.
+  await Promise.all(Array.from({ length: 12 }, tick));
+
+  assert.equal(dispatched.length, 8, 'exactly the cap was dispatched, not the whole batch');
+  // The literal, then the constant -- the same pairing the clamp above uses,
+  // for the same reason.
+  assert.equal(DEFAULT_CONCURRENCY, 8, 'the exported default itself must still be eight');
+  assert.equal(readState(raw, ninth), 'ready', 'the row beyond the cap was never written to');
 });
 
 test('a job already queued is not dispatched twice by a later fire', async () => {
@@ -387,7 +467,12 @@ test('the safety interval re-derives the timeout', () => {
   dispatcher.start(noHandlers, () => fakeCtx);
   assert.equal(setTimeoutCalls.length, 0, 'nothing was ready at construction');
   assert.equal(setIntervalCalls.length, 1);
-  assert.equal(setIntervalCalls[0]?.ms, SAFETY_INTERVAL_MS);
+  // The literal, for the reason spelled out on the clamp above: measured,
+  // `SAFETY_INTERVAL_MS = 86_400_000` -- a day rather than a minute, so a lost
+  // timer costs a day of latency instead of a minute -- passed the whole host
+  // suite against the imported constant.
+  assert.equal(setIntervalCalls[0]?.ms, 60_000, 'the safety net must re-derive every minute');
+  assert.equal(SAFETY_INTERVAL_MS, 60_000, 'the exported interval itself must still be one minute');
 
   // A job appears without anyone telling the dispatcher directly -- the
   // interval is the safety net that notices anyway.
@@ -418,29 +503,14 @@ test('stop clears both the timer and the interval', () => {
   assert.deepEqual(clearIntervalCalls, [intervalHandle]);
 });
 
-test('start returns a crashed running row to ready without losing its attempt', async () => {
+test('start returns a crashed running row to ready without losing its attempt', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
-  const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
-
-  // A handler that never resolves, standing in for a process that crashed
-  // mid-handler -- the claim (and its attempt) is one statement, already
-  // consumed by the time this call is even in flight, so there is no
-  // window for this simulation to miss.
-  const gate = neverSettles();
-  const handler: JobHandler = async () => { await gate.promise; };
-  const stalled = runner.runOnce(() => handler, () => fakeCtx);
+  const id = insertRunningJob(raw, { attempts: 1, maxAttempts: 3, now });
 
   assert.equal(readState(raw, id), 'running');
   assert.equal(readAttempts(raw, id), 1);
-
-  // `Runner.runOnce` above predates `run-job.ts`'s `started_at` stamp (Task 3)
-  // and never sets it itself, so it is stamped here directly -- reproducing
-  // what the real claim path leaves behind -- giving the sweep below an
-  // actual `started_at` to prove it clears.
-  raw.prepare('UPDATE jobs SET started_at = ? WHERE id = ?').run(now, id);
   assert.notEqual(readStartedAt(raw, id), null, 'fixture set up a running row with a started_at to clear');
 
   // A brand new dispatcher over the same database, standing in for the restart.
@@ -460,23 +530,15 @@ test('start returns a crashed running row to ready without losing its attempt', 
   // A ready row with a stale started_at would misreport that it is running
   // something right now, when nothing is.
   assert.equal(readStartedAt(raw, id), null, 'started_at is cleared on the row the sweep readied');
-
-  gate.resolve();
-  await stalled;
 });
 
-test('start dead-letters a running row already at its last attempt', async () => {
+test('start dead-letters a running row already at its last attempt', () => {
   // The infinite-boot-loop guard: a job kind that kills the process must not
   // be readied on every start.
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 1 });
-  const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
-
-  const gate = neverSettles();
-  const handler: JobHandler = async () => { await gate.promise; };
-  const stalled = runner.runOnce(() => handler, () => fakeCtx);
+  const id = insertRunningJob(raw, { attempts: 1, maxAttempts: 1, now });
 
   assert.equal(readState(raw, id), 'running');
   assert.equal(readAttempts(raw, id), 1, '== max_attempts: nothing left to retry with');
@@ -492,9 +554,6 @@ test('start dead-letters a running row already at its last attempt', async () =>
     /crashed/,
     'a row dead because the process died has to say that is why',
   );
-
-  gate.resolve();
-  await stalled;
 });
 
 test('start arms the timer from the earliest ready job', () => {
@@ -511,17 +570,12 @@ test('start arms the timer from the earliest ready job', () => {
   assert.equal(setTimeoutCalls[0]?.ms, 750);
 });
 
-test('start returns how many rows it swept', async () => {
+test('start returns how many rows it swept', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
-  const gate = neverSettles();
-  const handler: JobHandler = async () => { await gate.promise; };
-  runner.enqueue('alpha', { kind: 'stuck-a', payload: {} });
-  runner.enqueue('alpha', { kind: 'stuck-b', payload: {} });
-  const stalledA = runner.runOnce(() => handler, () => fakeCtx);
-  const stalledB = runner.runOnce(() => handler, () => fakeCtx);
+  insertRunningJob(raw, { attempts: 1, maxAttempts: 3, now });
+  insertRunningJob(raw, { attempts: 1, maxAttempts: 3, now });
 
   // A third job, ready but never crashed, must not be counted by the sweep.
   insertReadyJob(raw, now, now + 500);
@@ -531,10 +585,6 @@ test('start returns how many rows it swept', async () => {
   const swept = dispatcher.start(noHandlers, () => fakeCtx);
 
   assert.equal(swept, 2);
-
-  gate.resolve();
-  await stalledA;
-  await stalledB;
 });
 
 test('stop does not wait for an in-flight handler', async () => {
@@ -640,7 +690,7 @@ test('start dead-letters a job whose kind has no handler registered, naming the 
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 3 });
   const id = runner.enqueue('alpha', { kind: 'mystery', payload: {} });
   const { timers, setTimeoutCalls } = createFakeTimers();
 
@@ -685,4 +735,286 @@ test('start called twice does not leak a second timer or interval', () => {
   assert.deepEqual(clearIntervalCalls, [firstIntervalHandle], 'the first interval was cleared before the second was armed');
   assert.equal(setTimeoutCalls.length, 2, 'a second start re-armed its own timer');
   assert.deepEqual(clearTimeoutCalls, [firstTimeoutHandle], 'the first timer was cleared before the second was armed');
+});
+
+/**
+ * The shared fixture for the two late-settle races below. One row, a
+ * dispatcher wired to the real `runJob`, a handler that hands each of its
+ * invocations back as a `Deferred` the test settles by hand, and an
+ * `abortSignal` seam that hands back a controller per attempt so a test can
+ * fire one attempt's five-minute timeout without waiting five minutes or
+ * touching `AbortSignal.timeout` globally.
+ *
+ * Deliberately at dispatcher level rather than `run-job.ts` level: the whole
+ * race needs the dispatcher's own timer to re-fire between the timeout's
+ * write and the orphan's, which is exactly what `runJob` alone cannot do and
+ * why five reviews of `run-job.ts` never saw this.
+ */
+function lateSettleFixture(): {
+  raw: DatabaseSync;
+  id: number;
+  gates: Deferred[];
+  controllers: AbortController[];
+  now: () => number;
+  setNow: (at: number) => void;
+  dispatcher: Dispatcher;
+  fireLatest: () => void;
+} {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  let now = 1000;
+  // `insertReadyJob`'s `defaultMaxAttempts` is 3, so attempt 1 is nowhere
+  // near the dead-letter branch -- the stale-closure retry is the path under
+  // test, not the dead-letter one.
+  const id = insertReadyJob(raw, now, now);
+  const { timers, setTimeoutCalls } = createFakeTimers();
+
+  const gates: Deferred[] = [];
+  const controllers: AbortController[] = [];
+  const handler: JobHandler = async () => {
+    const gate = deferred();
+    gates.push(gate);
+    await gate.promise;
+  };
+
+  const dispatcher = createDispatcher(raw, {
+    now: () => now,
+    timers,
+    log: noopLog,
+    sleep: noopSleep,
+    abortSignal: () => {
+      const controller = new AbortController();
+      controllers.push(controller);
+      return controller.signal;
+    },
+  });
+  dispatcher.start(() => handler, () => fakeCtx);
+
+  return {
+    raw,
+    id,
+    gates,
+    controllers,
+    now: () => now,
+    setNow: (at) => { now = at; },
+    dispatcher,
+    fireLatest: () => {
+      const fire = setTimeoutCalls.at(-1)?.fn;
+      assert.ok(fire, 'no timer was armed');
+      fire();
+    },
+  };
+}
+
+/**
+ * Drives the fixture to the state both races start from: attempt 1 claimed
+ * and hung, its own five minutes expired so the timeout has readied the row,
+ * and attempt 2 claimed off that readied row and hung in turn -- with
+ * attempt 1's handler still pending the whole time, because nothing can kill
+ * a JavaScript function mid-execution.
+ */
+async function reachSecondAttempt(f: ReturnType<typeof lateSettleFixture>): Promise<void> {
+  f.fireLatest();
+  assert.equal(readAttempts(f.raw, f.id), 1, 'attempt 1 claimed the row');
+  assert.equal(readState(f.raw, f.id), 'running');
+  assert.equal(f.gates.length, 1);
+
+  // Attempt 1's five minutes expire. `noopSleep` makes the two-second grace
+  // immediate, so the timeout's own `failRow` lands within a microtask.
+  f.controllers[0]?.abort();
+  await tick();
+  assert.equal(readState(f.raw, f.id), 'ready', 'the timeout returned the row for a retry');
+  assert.equal(readRunAt(f.raw, f.id), 2000, 'readied one backoff step out, per backoffMs(1)');
+
+  // The retry comes due and a second worker legitimately claims it. Attempt
+  // 1's handler has not settled and never will on its own.
+  f.setNow(readRunAt(f.raw, f.id));
+  f.dispatcher.rearm();
+  f.fireLatest();
+  assert.equal(readAttempts(f.raw, f.id), 2, 'attempt 2 claimed the same row');
+  assert.equal(readState(f.raw, f.id), 'running');
+  assert.equal(f.gates.length, 2, 'two handler invocations are live at once');
+}
+
+test('an orphaned handler that resolves cannot mark done a row a later attempt is still running', async () => {
+  const f = lateSettleFixture();
+  await reachSecondAttempt(f);
+
+  // Attempt 1's abandoned handler finally succeeds -- five minutes late, and
+  // about work whose row was failed and re-claimed since. Guarded on state
+  // alone this write matches (`running` is true again) and records the job
+  // `done` while attempt 2 is mid-flight, discarding attempt 2's real outcome.
+  f.gates[0]?.resolve();
+  await tick();
+  await tick();
+
+  assert.equal(readState(f.raw, f.id), 'running', 'the orphan must not decide a row it no longer owns');
+  assert.equal(readAttempts(f.raw, f.id), 2, 'and attempt 2 is still the one holding it');
+
+  // Attempt 2, the one that actually owns the row, still decides it.
+  f.gates[1]?.resolve();
+  await f.dispatcher.idle();
+  assert.equal(readState(f.raw, f.id), 'done');
+  assert.equal(readAttempts(f.raw, f.id), 2);
+});
+
+test('an orphaned handler that rejects cannot ready a row a later attempt is still running, so no third copy is dispatched', async () => {
+  const f = lateSettleFixture();
+  await reachSecondAttempt(f);
+
+  // The other direction, and the worse one: guarded on state alone, this
+  // `failRow` runs against attempt 1's stale closure (`attempts = 1`,
+  // nowhere near `max_attempts`), returns the row to `ready` with a fresh
+  // `run_at` while attempt 2 is still `running`, and the next fire finds a
+  // legitimately-`ready` row with no queued id to exclude it -- putting a
+  // THIRD copy of the same job in flight. Measured at three live
+  // invocations before the attempt guard was added.
+  f.gates[0]?.reject(new Error('orphan rejected five minutes late'));
+  await tick();
+  await tick();
+
+  assert.equal(readState(f.raw, f.id), 'running', 'the orphan must not ready a row attempt 2 still holds');
+  assert.equal(readAttempts(f.raw, f.id), 2);
+
+  // The moment a stale retry would have come due, driven the way the
+  // dispatcher's own timer would drive it.
+  f.setNow(4000);
+  f.dispatcher.rearm();
+  f.fireLatest();
+  assert.equal(f.gates.length, 2, 'no third concurrent copy of the job was dispatched');
+
+  f.gates[1]?.resolve();
+  await f.dispatcher.idle();
+  assert.equal(readState(f.raw, f.id), 'done');
+});
+
+test('a claim that finds no ready row is surfaced through the log rather than swallowed', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  // Oldest first, at a concurrency of one: the occupier is claimed and holds
+  // the sole slot, so the target is selected by a later fire and sits in the
+  // queue -- selected, queued, and not yet claimed. That waiting window is
+  // the only place a test can get between selection and the claim, because
+  // under the cap the worker claims inside `dispatch`'s own call stack.
+  const occupierId = insertReadyJob(raw, now, now - 1);
+  const targetId = insertReadyJob(raw, now, now);
+  const { timers, setTimeoutCalls } = createFakeTimers();
+
+  const occupierGate = neverSettles();
+  const handler: JobHandler = async (job) => {
+    if (job.id === occupierId) {
+      await occupierGate.promise;
+    }
+  };
+
+  const logs: { message: string; detail: Readonly<Record<string, unknown>> | undefined }[] = [];
+  const dispatcher = createDispatcher(raw, {
+    now: () => now,
+    timers,
+    concurrency: 1,
+    log: (message, detail) => { logs.push({ message, detail }); },
+    sleep: noopSleep,
+    abortSignal: realAbortSignal,
+  });
+  dispatcher.start(() => handler, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+
+  fire();
+  fire();
+  assert.equal(readState(raw, targetId), 'ready', 'the target is queued but not yet claimed');
+
+  // Something else settles the row while it waits. `run-job.ts`'s claim guard
+  // (`WHERE state = 'ready'`) turns that into a detected no-op and throws,
+  // and `dispatch`'s `catch` is the ONLY channel that surfaces it -- the
+  // ledger's own remedy for this plan required it to be surfaced rather than
+  // swallowed. Asserted positively, on presence and content: the sibling test
+  // above asserts `logs` is EMPTY, which would also hold if the log line were
+  // renamed, if `opts.log` were disconnected, or if the catch swallowed
+  // again. Measured: replacing the call with `void err;` typechecked and
+  // passed the whole host suite.
+  raw.prepare("UPDATE jobs SET state = 'done' WHERE id = ?").run(targetId);
+  occupierGate.resolve();
+  await dispatcher.idle();
+  // One extra hop past `idle()`, and it is load-bearing: the bounded queue
+  // frees its slot in `run`'s own `finally`, which runs BEFORE the task's
+  // rejection reaches `dispatch`'s `.catch`. So `idle()` resolves one
+  // microtask ahead of the log line, and asserting straight after it reads an
+  // empty array for a build that logs perfectly well.
+  await tick();
+
+  assert.equal(logs.length, 1, 'exactly one failure was reported: the target\'s claim');
+  const entry = logs[0];
+  assert.ok(entry, 'no log entry was recorded at all');
+  assert.equal(entry.message, 'dispatcher: job run failed');
+  assert.equal(entry.detail?.jobId, targetId, 'the report has to name which job failed');
+  assert.equal(entry.detail?.pluginId, 'test-plugin', 'and which plugin owns it');
+  assert.match(
+    String(entry.detail?.err),
+    /no ready row to claim/,
+    'the claim guard\'s own diagnosis has to reach the log, not just the fact that something failed',
+  );
+});
+
+test('the sweep replaces a stale rejection message rather than letting it explain a crash', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  let now = 1000;
+  // Two permitted attempts. The first rejects, so the row really does carry a
+  // rejection's message -- which is what makes the assertion below capable of
+  // failing at all. A job that had never rejected would have `last_error`
+  // NULL, and "the crash message is not the rejection's" would hold whatever
+  // the sweep wrote. The second attempt is the last permitted one, and this
+  // time the process dies mid-handler.
+  //
+  // Ported from `runner.test.ts`, where it pinned the now-removed
+  // `Runner.recover()`. The method is gone; the property outlives it, because
+  // `sweep` overwrites `last_error` on the rows it dead-letters -- and nothing
+  // else covers that overwrite. `start dead-letters a running row already at
+  // its last attempt` above builds its fixture with `last_error` NULL, so it
+  // would pass just as happily against a sweep that left a stale rejection in
+  // place to misexplain a crash.
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 2 });
+  const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
+
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  let currentHandler: JobHandler = boom;
+  dispatcher.start(() => currentHandler, () => fakeCtx);
+  const firstFire = setTimeoutCalls[0]?.fn;
+  assert.ok(firstFire, 'construction did not arm a timer');
+  firstFire();
+  await dispatcher.idle();
+  assert.equal(readLastError(raw, id), 'handler boom', 'attempt one left a real rejection message behind');
+
+  const hang = neverSettles();
+  currentHandler = async () => { await hang.promise; };
+  now = readRunAt(raw, id);
+  dispatcher.rearm();
+  const secondFire = setTimeoutCalls.at(-1)?.fn;
+  assert.ok(secondFire, 'rearm did not arm a timer for the retry');
+  secondFire();
+  assert.equal(readAttempts(raw, id), 2, 'the retry consumed the last permitted attempt');
+  assert.equal(readState(raw, id), 'running');
+
+  // The restart: a brand new dispatcher over the same database, whose sweep
+  // finds the row `running` with nothing left to retry.
+  const { timers: timers2 } = createFakeTimers();
+  const restarted = createDispatcher(raw, { now: () => now, timers: timers2, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  assert.equal(restarted.start(noHandlers, () => fakeCtx), 1);
+
+  assert.equal(readState(raw, id), 'dead');
+  // Not merely "some non-empty string": a crash and a rejection are different
+  // diagnoses, and the sweep sets this message specifically so a reader can
+  // tell which happened.
+  assert.notEqual(
+    readLastError(raw, id),
+    'handler boom',
+    'this row is dead because the process died, not because the handler threw',
+  );
+  assert.match(String(readLastError(raw, id)), /crashed/);
+
+  hang.resolve();
+  await dispatcher.idle();
 });

@@ -1,6 +1,7 @@
 /**
- * Runs the host as a process: jobs run because it is up, rather than because
- * a test called `runOnce`.
+ * Runs the host as a process: jobs run because it is up, driven by its own
+ * dispatcher, rather than because something outside it claimed one job at
+ * a time.
  *
  * Nothing here is a plugin's or a test's business but the host's own -- how
  * the database is opened, how a crash is recovered from, how the process
@@ -20,12 +21,10 @@ import { openDatabase } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
 import { createHost } from './host.ts';
 import type { Host } from './host.ts';
+import type { Timers } from './jobs/dispatcher.ts';
 
 /** `PICKARR_DATABASE`'s fallback -- the documented `/config` volume, exactly as 1.x's own default. */
 const DEFAULT_DATABASE_PATH = '/config/pickarr.db';
-
-/** How long the pump waits before asking again, once nothing was ready. */
-const DEFAULT_IDLE_MS = 1000;
 
 function log(message: string): void {
   console.log(`[host] ${message}`);
@@ -63,76 +62,6 @@ const downloadClientsNotWired: DownloadClients = {
   },
 };
 
-export interface Pump {
-  /** Lets the pump's current claim finish, then stops it from claiming another. */
-  stop(): void;
-  /** Resolves once the pump has actually stopped -- after any in-flight claim finishes. */
-  done: Promise<void>;
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/**
- * Claims jobs until stopped. Sleeps when nothing is ready. That is all it
- * does: recovering the jobs a crash left `running` is `main`'s job, done
- * before it schedules anything (see `main`), and not this function's --
- * doing it here hid the one ordering in the process that has to be right,
- * and made it unassertable from the call site.
- *
- * A rejected `runOnce` is caught and treated as "nothing claimed" rather
- * than left to end the pump: `Runner.runOnce` turns a rejected *handler*
- * into a backoff or a dead-letter row and resolves `true`/`false` for that
- * case, never rejecting on it. It is not guaranteed to never reject at
- * all, though -- its own claim guard (`run-job.ts`'s `runJob`, on a row
- * claimed twice) and its backoff wrapper's row lookup both throw on what
- * should be an unreachable state, and neither is caught inside `runOnce`
- * itself. A rejection reaching here is still a defect in whatever `Host`
- * this pump was given, either way. Nothing supervises this loop, so
- * letting that one rejection escape would turn one bad tick into an outage
- * no restart fixes -- a handler's own failure is the runner's business, not
- * the pump's.
- */
-export function startPump(
-  host: Host,
-  deps: { idleMs?: number; sleep?: (ms: number) => Promise<void> } = {},
-): Pump {
-  const idleMs = deps.idleMs ?? DEFAULT_IDLE_MS;
-  const sleep = deps.sleep ?? defaultSleep;
-  // A boxed flag, not a bare `let`: `stop()` below flips it from outside the
-  // loop, and a linter that only looks for a reassignment textually inside
-  // the loop body cannot see that -- `state.running` is read the same way
-  // regardless of which closure last wrote it.
-  const state = { running: true };
-
-  const done = (async () => {
-    while (state.running) {
-      let ranSomething: boolean;
-      try {
-        // eslint-disable-next-line no-await-in-loop -- claiming and running one job at a time is the whole of what the pump does; there is nothing here to parallelise it against
-        ranSomething = await host.runOnce();
-      } catch (err) {
-        console.error('[host] runOnce rejected; the pump keeps running', err);
-        ranSomething = false;
-      }
-      if (!ranSomething && state.running) {
-        // eslint-disable-next-line no-await-in-loop -- see above
-        await sleep(idleMs);
-      }
-    }
-  })();
-
-  return {
-    stop() {
-      state.running = false;
-    },
-    done,
-  };
-}
-
 /**
  * Schedules a `poll` job for every `rss_feed` row already on file, and
  * returns the feed ids it scheduled (in the order `sqlite` returns them --
@@ -140,11 +69,11 @@ export function startPump(
  * is idempotent per feed, so this is safe to call on every boot: a feed that
  * already has a poll job `ready` or `running` gets no second one.
  *
- * It is only safe AFTER `host.recover()`, though, and that is `main`'s
+ * It is only safe AFTER `host.start()`, though, and that is `main`'s
  * business, not this function's. A poll job a crash left `running` counts as
- * pending here, so this declines to schedule it -- and if `recover` then
- * dead-letters that same row (which it does when the crash consumed its last
- * permitted attempt), the feed is left with no poll job in any runnable
+ * pending here, so this declines to schedule it -- and if `start()`'s sweep
+ * then dead-letters that same row (which it does when the crash consumed its
+ * last permitted attempt), the feed is left with no poll job in any runnable
  * state and nothing re-creates one. See `main`.
  *
  * Pulled out of `main` and tested on its own: this loop is what makes a
@@ -170,6 +99,43 @@ export function scheduleKnownFeeds(host: Host, raw: DatabaseSync): readonly numb
 const SHIPPED_PLUGINS: readonly MediaPlugin[] = [];
 
 /**
+ * Builds the process's shutdown handler. `host.stop()` clears the
+ * dispatcher's timer and safety interval and returns without waiting on
+ * anything -- a handler already in flight is abandoned deliberately, its row
+ * left `running` for the next `start()` to sweep (see `Host.stop()`'s own
+ * doc) -- so there is nothing to `await` here at all: closing the database
+ * and exiting follow immediately, in the same synchronous turn.
+ *
+ * Idempotent against a second signal arriving mid-shutdown -- a `SIGTERM`
+ * landing while a `SIGINT` is already tearing down -- by closing over its
+ * own `shuttingDown` flag rather than relying on the caller to ask only
+ * once.
+ *
+ * Exported and tested directly, on the same reasoning as `scheduleKnownFeeds`
+ * above: the property under test is "returns without waiting even when a
+ * handler is hung", and routing that through a real `SIGINT` and a real
+ * hung handler would mean asserting that something never happens by waiting
+ * on real wall-clock time to *not* see it -- which this whole slice exists
+ * to stop doing.
+ */
+export function createShutdown(
+  host: Host,
+  raw: DatabaseSync,
+  deps: { exit?: (code: number) => void } = {},
+): (reason: string) => void {
+  const exit = deps.exit ?? process.exit;
+  let shuttingDown = false;
+  return (reason: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`${reason}, shutting down`);
+    host.stop();
+    raw.close();
+    exit(0);
+  };
+}
+
+/**
  * Composes and starts the host process.
  *
  * Refuses to start with no plugin registered. That is not pedantry: a poll
@@ -190,15 +156,16 @@ const SHIPPED_PLUGINS: readonly MediaPlugin[] = [];
  *    tables.
  * 2. `host.register(...)` for each plugin, before anything can poll, so no
  *    item is ever inserted while its feed's owner is absent.
- * 3. `host.recover()`, before `scheduleKnownFeeds`. A poll job a crash left
- *    `running` counts as pending to `schedulePoll`, which therefore declines
- *    to schedule a replacement; `recover` then dead-letters that very row if
- *    the crash used its last attempt, leaving the feed with nothing runnable
- *    and nothing to notice. Recovering first means `scheduleKnownFeeds` sees
- *    the true state and schedules a fresh cycle. `main.test.ts` fails if
- *    these two are swapped.
- * 4. `startPump`, last, so no job can be claimed before the state above is
- *    settled.
+ * 3. `host.start()`, before `scheduleKnownFeeds`. `start()` sweeps every row
+ *    a crash left `running` before it arms the dispatcher; `schedulePoll`
+ *    counts a poll job left `running` as pending and declines to schedule a
+ *    replacement, so scheduling first would leave a feed whose crashed poll
+ *    used its last attempt with nothing runnable and nothing to notice.
+ *    Sweeping first means `scheduleKnownFeeds` sees each row's true
+ *    post-sweep state and schedules a fresh cycle wherever the sweep
+ *    dead-lettered one. `main.test.ts` fails if these two are swapped.
+ * 4. The signal handlers, last, so nothing can be asked to stop before the
+ *    state above is settled.
  *
  * `argv` is accepted for parity with a conventional process entry point;
  * this slice has no argument surface beyond the `PICKARR_DATABASE`
@@ -207,13 +174,15 @@ const SHIPPED_PLUGINS: readonly MediaPlugin[] = [];
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the
- * slice that ships a plugin will, and `startPump` lets it assert the state
- * this function leaves behind without a real pump claiming jobs and
- * reaching the network mid-assertion.
+ * slice that ships a plugin will, and `timers` lets a test replace the
+ * dispatcher's real `setTimeout`/`setInterval` (`jobs/dispatcher.ts`'s own
+ * `Timers`) with a fake pair, so a test asserting the state `main` leaves
+ * behind never depends on a real timer firing -- or, left armed with real
+ * ones, on remembering to stop them again before the test ends.
  */
 export async function main(
   argv: readonly string[],
-  deps: { plugins?: readonly MediaPlugin[]; startPump?: (host: Host) => Pump } = {},
+  deps: { plugins?: readonly MediaPlugin[]; timers?: Timers } = {},
 ): Promise<void> {
   void argv;
 
@@ -235,39 +204,35 @@ export async function main(
   const artworkDir = resolveArtworkDir(databasePath);
   const fetch = createHostFetch({ fetch: globalThis.fetch });
 
-  const host = createHost({
-    raw,
-    db,
-    fetch,
-    downloads: downloadClientsNotWired,
-    now: () => Date.now(),
-    artworkDir,
-  });
+  // Two shapes, not one object literal with `timers` always present:
+  // `exactOptionalPropertyTypes` is on, so an explicit `timers: undefined`
+  // is not the same thing as the property being absent, and `createHost`'s
+  // own `timers?` means the latter when it wants its real default.
+  const host = deps.timers === undefined
+    ? createHost({
+      raw,
+      db,
+      fetch,
+      downloads: downloadClientsNotWired,
+      now: () => Date.now(),
+      artworkDir,
+    })
+    : createHost({
+      raw,
+      db,
+      fetch,
+      downloads: downloadClientsNotWired,
+      now: () => Date.now(),
+      artworkDir,
+      timers: deps.timers,
+    });
 
   for (const plugin of plugins) host.register(plugin);
 
-  const recovered = host.recover();
+  const recovered = host.start();
   const feedIds = scheduleKnownFeeds(host, raw);
 
-  const pump = (deps.startPump ?? startPump)(host);
-
-  // A second trigger during teardown -- a SIGTERM arriving while a SIGINT is
-  // already tearing down -- must not start a second drain.
-  let shuttingDown = false;
-  const shutdown = (reason: string): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    log(`${reason}, shutting down`);
-    pump.stop();
-    // `pump.done` never rejects -- `startPump` already turns a rejected
-    // `runOnce` into a logged, swallowed no-op -- so there is no failure
-    // branch here to mirror 1.x's `server.close().catch(...)` with.
-    void pump.done.then(() => {
-      raw.close();
-      process.exit(0);
-    });
-  };
-
+  const shutdown = createShutdown(host, raw);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       shutdown(`${signal} received`);

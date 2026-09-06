@@ -66,17 +66,15 @@ export interface Dispatcher {
    * back to `ready` with `run_at` recomputed from the backoff curve, so a
    * crash loop backs off instead of spinning. Then arms the timer and
    * starts the safety interval. Returns how many rows the sweep touched,
-   * ready or dead, the same count `Runner.recover` returns today.
+   * ready or dead.
    *
-   * `handlers` and `ctxFor` are exactly `Runner.runOnce`'s two arguments --
-   * deliberately, since that is what lets a future `Runner`-shaped adapter
-   * present the old surface while this dispatcher does the work underneath.
-   * They are what this dispatcher uses, from here on, to route a due row to
-   * the plugin that owns it: closing the real `runJob` (`./run-job.ts`)
-   * over its own dependencies, the row's own handler and its plugin's
-   * context. That wiring cannot live in `dispatch` below on its own,
-   * because `JobRecord` -- the only per-job shape anything downstream of
-   * the claim ever sees -- carries no plugin id; only the raw row does.
+   * `handlers` and `ctxFor` are what this dispatcher uses, from here on, to
+   * route a due row to the plugin that owns it: closing the real `runJob`
+   * (`./run-job.ts`) over its own dependencies, the row's own handler and
+   * its plugin's context. That wiring cannot live in `dispatch` below on
+   * its own, because `JobRecord` -- the only per-job shape anything
+   * downstream of the claim ever sees -- carries no plugin id; only the raw
+   * row does.
    */
   start(
     handlers: (pluginId: string, kind: string) => JobHandler | undefined,
@@ -89,9 +87,23 @@ export interface Dispatcher {
    * handler that may be hung would reintroduce the exact coupling this
    * whole slice removes; the durable `jobs` row, not this method, is what
    * makes abandoning it safe.
+   *
+   * It does not cancel work already handed to the bounded queue either,
+   * including tasks still waiting for a slot: those run, and claim their
+   * rows, after this returns. Safe as production uses it, because
+   * `main.ts`'s `createShutdown` calls `stop()`, closes the database and
+   * exits with no `await` between them, so Node never resumes a queued task.
+   * A future caller that stops without exiting would get claims against a
+   * closing database, and the queued-id set is not emptied here either.
    */
   stop(): void;
-  /** Resolves once nothing dispatched is still running or waiting for a slot. */
+  /**
+   * Resolves once nothing dispatched is still running or waiting for a slot.
+   *
+   * **A test affordance, and it must not be used for shutdown** -- see
+   * `stop()` above for why waiting on in-flight work is the coupling this
+   * slice exists to remove. No production caller exists.
+   */
   idle(): Promise<void>;
 }
 
@@ -233,6 +245,11 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
       // row a second time.
       queuedIds.delete(row.id);
       if (!runClaimedJob) {
+        // Unreachable by construction, and so covered by no test: `fire` is
+        // only ever reached through timers armed exclusively inside `start`,
+        // which assigns this first. Kept as a loud throw rather than dropped
+        // because the alternative to a clear message, if that ever stopped
+        // holding, is a silent no-op on a row nobody runs.
         throw new Error(`dispatcher: job id ${row.id} fired before start() wired a handler`);
       }
       await runClaimedJob(row.pluginId, job);
@@ -313,9 +330,9 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
       runClaimedJob = async (pluginId, job) => {
         const handler = handlers(pluginId, job.kind);
         if (!handler) {
-          // The same visible dead-letter `Runner.runOnce` writes for a job
-          // kind nothing has registered -- a job that vanishes on an
-          // unhandled kind is one nobody can diagnose.
+          // A visible dead-letter for a job kind nothing has registered --
+          // a job that vanishes on an unhandled kind is one nobody can
+          // diagnose.
           raw.prepare("UPDATE jobs SET state = 'dead', last_error = ?, updated_at = ? WHERE id = ?")
             .run(`no handler for job kind "${job.kind}" registered by plugin "${pluginId}"`, opts.now(), job.id);
           return;

@@ -8,9 +8,19 @@
 export interface BoundedQueue {
   /** Runs `task` when a slot is free. Rejects if `task` rejects. */
   run<T>(task: () => Promise<T>): Promise<T>;
-  /** How many are executing right now. */
+  /**
+   * How many are executing right now. A test affordance: no production caller
+   * exists in this repo, and the two consumers (`fetch/queue.ts` and
+   * `jobs/dispatcher.ts`) never read it. It is what lets a test assert on
+   * overlap directly rather than inferring concurrency from timing.
+   */
   active(): number;
-  /** Resolves when nothing is running or waiting. */
+  /**
+   * Resolves when nothing is running or waiting. **A test affordance too, and
+   * it must not be used for shutdown**: `Dispatcher.stop()` abandons in-flight
+   * work deliberately, and awaiting this instead would reintroduce the
+   * shutdown hang the job dispatcher exists to remove.
+   */
   idle(): Promise<void>;
 }
 

@@ -6,8 +6,8 @@
  * given, so an entry-point check living in `main.ts` -- a module
  * `index.ts` re-exports -- ended up inside `dist/index.js` too, reading
  * *that* bundle's `import.meta.main`: running the library face of the
- * package migrated a database, installed signal handlers and started a
- * pump. Keeping the check in a file nothing imports is what makes
+ * package migrated a database, installed signal handlers and started the
+ * dispatcher. Keeping the check in a file nothing imports is what makes
  * `import.meta.main` here mean what it says.
  *
  * The check is still worth making, rather than calling `main` unconditionally:
@@ -35,7 +35,7 @@ import { main } from './main.ts';
  * this whole function is never called. It is that when it IS called, it is
  * called from the one place where blocking costs nothing: deciding, during
  * module evaluation of the process entry point, whether to start at all.
- * Nothing is on the loop yet and no pump has begun. The fallback stays
+ * Nothing is on the loop yet and no dispatcher has started. The fallback stays
  * because the versions without `import.meta.main` are still ones this could
  * be run on; it is simply rare rather than routine.
  */

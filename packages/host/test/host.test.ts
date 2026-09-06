@@ -11,7 +11,9 @@ import type {
 import { openTestDatabase } from '../src/db/open.ts';
 import { migrateHost } from '../src/db/migrate.ts';
 import { createHost, HOST_PLUGIN_ID } from '../src/host.ts';
+import type { Host } from '../src/host.ts';
 import type { QueuedFetch } from '../src/fetch/queue.ts';
+import type { Timers } from '../src/jobs/dispatcher.ts';
 
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
 const unusedFetch: QueuedFetch = {
@@ -32,6 +34,60 @@ const EMPTY_RSS = '<?xml version="1.0"?><rss><channel></channel></rss>';
 function createClock(start: number): { now: () => number; set: (at: number) => void } {
   let value = start;
   return { now: () => value, set: (at) => { value = at; } };
+}
+
+/** One `setTimeout`/`setInterval` call, as the fake `Timers` below records it. */
+interface TimerCall {
+  handle: number;
+  ms: number;
+  fn: () => void;
+}
+
+/**
+ * A `Timers` whose every call is logged rather than actually scheduled, the
+ * same fake `dispatcher.test.ts` and `jobs/runner.test.ts` each build for
+ * `createDispatcher` -- duplicated here rather than imported, since no file
+ * in this package shares a test-support module with another. "Advancing the
+ * clock" in this file means invoking a logged `fn` directly, never waiting
+ * on real time.
+ */
+function createFakeTimers(): { timers: Timers; setTimeoutCalls: TimerCall[] } {
+  let nextHandle = 0;
+  const setTimeoutCalls: TimerCall[] = [];
+  const timers: Timers = {
+    setTimeout(fn, ms) {
+      const handle = ++nextHandle;
+      setTimeoutCalls.push({ handle, ms, fn });
+      return handle;
+    },
+    clearTimeout() {},
+    setInterval(_fn, _ms) {
+      const handle = ++nextHandle;
+      // No test here drives the safety interval directly, so its own call
+      // is recorded nowhere -- only its handle needs to exist, so `stop()`
+      // has something to clear.
+      return handle;
+    },
+    clearInterval() {},
+  };
+  return { timers, setTimeoutCalls };
+}
+
+/**
+ * Fires the most recently armed timer -- `Host.start()`'s dispatcher rearms
+ * on every enqueue and after every fire, so whichever entry is latest is the
+ * one standing for "whatever is next due" -- then waits for the dispatched
+ * job (and anything it enqueues) to finish. The replacement for
+ * `await host.runOnce()` throughout this file: where `runOnce()` returned
+ * a claimed-something boolean, this returns nothing, because what a test
+ * needs after it is never the fact that something ran but which row and in
+ * what state it was left -- an effect assertion, not a return value.
+ */
+async function runDue(host: Host, setTimeoutCalls: TimerCall[]): Promise<void> {
+  const fire = setTimeoutCalls.at(-1)?.fn;
+  assert.ok(fire, 'no timer was armed for a due job');
+  fire();
+  await host.idle();
 }
 
 /** A `DownloadClients` that fails loudly if a test never meant to submit anywhere. */
@@ -100,6 +156,7 @@ function makePlugin(overrides: Partial<MediaPlugin> & { id: string }): MediaPlug
 function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
+  const { timers, setTimeoutCalls } = createFakeTimers();
   const host = createHost({
     raw,
     db,
@@ -107,8 +164,9 @@ function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
     downloads: unusedDownloads,
     now: overrides?.now ?? (() => 1000),
     artworkDir: unusedArtworkDir,
+    timers,
   });
-  return { raw, db, host };
+  return { raw, db, host, setTimeoutCalls };
 }
 
 test('registering a plugin applies its migrations', () => {
@@ -154,7 +212,7 @@ test('new rss items are dispatched to the plugin owning their feed', async () =>
 });
 
 test('two plugins may register the same job kind without colliding', async () => {
-  const { raw, host } = setup();
+  const { raw, host, setTimeoutCalls } = setup();
 
   const alphaRuns: unknown[] = [];
   const betaRuns: unknown[] = [];
@@ -186,14 +244,21 @@ test('two plugins may register the same job kind without colliding', async () =>
   // Each onNewRssItems enqueues one job of kind "same" under its own plugin id.
   await host.notifyNewRssItems([a1, b1]);
 
-  assert.equal(await host.runOnce(), true);
-  assert.equal(await host.runOnce(), true);
-  assert.equal(await host.runOnce(), false, 'only two jobs were enqueued');
+  // Both rows are ready and due at the same `run_at`, and the default
+  // concurrency comfortably covers two -- one fire claims both in the same
+  // pass, no `concurrency: 1` needed: nothing here depends on one running
+  // before the other, only that each runs exactly once.
+  host.start();
+  await runDue(host, setTimeoutCalls);
 
   assert.equal(alphaRuns.length, 1, 'alpha\'s own "same" handler must run exactly once');
   assert.deepEqual(alphaRuns[0], { owner: 'alpha' });
   assert.equal(betaRuns.length, 1, 'beta\'s own "same" handler must run exactly once');
   assert.deepEqual(betaRuns[0], { owner: 'beta' });
+  // The effect `runOnce() === false` used to stand for: nothing else was
+  // ever enqueued, so nothing of this kind is left runnable.
+  const remaining = raw.prepare("SELECT COUNT(*) AS n FROM jobs WHERE kind = 'same' AND state = 'ready'").get();
+  assert.equal(Number((remaining as { n: unknown }).n), 0, 'only two jobs were enqueued');
 });
 
 test('a download request reaches the plugin owning that item\'s feed', async () => {
@@ -351,7 +416,7 @@ test('registering a plugin whose id is the reserved host id is refused', () => {
 });
 
 test('a poll job dispatches to the host handler, not to a plugin', async () => {
-  const { raw, host } = setup({ fetch: textFetch(async () => EMPTY_RSS) });
+  const { raw, host, setTimeoutCalls } = setup({ fetch: textFetch(async () => EMPTY_RSS) });
 
   // Alpha registers its own "poll" handler under its own plugin id. The
   // host's poll job runs under HOST_PLUGIN_ID, so this must never fire for
@@ -362,18 +427,32 @@ test('a poll job dispatches to the host handler, not to a plugin', async () => {
   const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
   host.schedulePoll(feedId);
 
-  assert.equal(await host.runOnce(), true);
+  host.start();
+  await runDue(host, setTimeoutCalls);
 
   assert.equal(alphaPollRuns.length, 0, 'alpha\'s own "poll" handler must never run for the host\'s job');
   // The host's own handler ran instead: a poll that dispatched nowhere
   // would leave no rescheduled job behind.
   const ready = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
   assert.equal(ready.length, 1, 'the host handler must have run and rescheduled the next poll');
+
+  // `Host.stop()` had no test in this file before this task -- nor did
+  // `start()` or `idle()`, all three backed by a real `Dispatcher` with real
+  // timers. Pinned here directly: stopping must mean an enqueue no longer
+  // rearms, until `start()` runs again.
+  host.stop();
+  const armedBeforeStop = setTimeoutCalls.length;
+  const otherFeedId = insertFeed(raw, 'alpha', 'https://a.test/other-feed');
+  host.schedulePoll(otherFeedId, 5000);
+  assert.equal(setTimeoutCalls.length, armedBeforeStop, 'a stopped host must not rearm on enqueue');
+
+  host.start();
+  assert.ok(setTimeoutCalls.length > armedBeforeStop, 'start() rearms once the dispatcher is running again');
 });
 
 test('a poll job re-enqueues itself at now plus the feed interval', async () => {
   const clock = createClock(1000);
-  const { raw, host } = setup({ fetch: textFetch(async () => EMPTY_RSS), now: clock.now });
+  const { raw, host, setTimeoutCalls } = setup({ fetch: textFetch(async () => EMPTY_RSS), now: clock.now });
 
   const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed', 300);
   host.schedulePoll(feedId, 1000);
@@ -384,7 +463,8 @@ test('a poll job re-enqueues itself at now plus the feed interval', async () => 
   // an immediate re-enqueue (or one anchored to the old run_at) would not
   // land on this number.
   clock.set(5000);
-  assert.equal(await host.runOnce(), true);
+  host.start();
+  await runDue(host, setTimeoutCalls);
 
   const ready = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
   assert.equal(ready.length, 1, 'exactly one rescheduled job must remain for this feed');
@@ -393,7 +473,7 @@ test('a poll job re-enqueues itself at now plus the feed interval', async () => 
 
 test('a poll whose re-enqueue is lost leaves its feed silent, and nothing in the host notices', async () => {
   let polls = 0;
-  const { raw, host } = setup({
+  const { raw, host, setTimeoutCalls } = setup({
     fetch: textFetch(async () => {
       polls += 1;
       return EMPTY_RSS;
@@ -403,27 +483,43 @@ test('a poll whose re-enqueue is lost leaves its feed silent, and nothing in the
   const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
   host.schedulePoll(feedId);
 
-  assert.equal(await host.runOnce(), true);
+  host.start();
+  await runDue(host, setTimeoutCalls);
   assert.equal(polls, 1, 'the feed polled once');
 
   // The negative the suite otherwise cannot see: every job here succeeds,
   // so only killing the re-enqueue shows what a lost one costs. The row the
   // handler wrote is deleted -- what a lost enqueue leaves behind -- and
-  // then the host is given every chance to notice: `recover`, and repeated
-  // claims. It has none. Nothing rescans `rss_feed` for a feed with no
-  // pending poll job, so this feed is never polled again for the life of
-  // the process and no log line says so. That absence is the finding, and
-  // asserting it here is what will fail loudly if a later slice adds the
-  // watchdog and forgets to say so.
+  // then the host is given every chance to notice: repeated `start()`s, whose
+  // crash sweep is the only recovery mechanism left, and repeated claims. It
+  // has none. Nothing rescans `rss_feed` for a feed with no pending poll job,
+  // so this feed is never polled again for the life of the process and no log
+  // line says so. That absence is the finding, and asserting it here is what
+  // will fail loudly if a later slice adds the watchdog and forgets to say so.
   const rescheduled = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
   assert.equal(rescheduled.length, 1, 'there is a re-enqueued job to lose');
   const lost = rescheduled[0];
   assert.ok(lost !== undefined);
   raw.prepare('DELETE FROM jobs WHERE id = ?').run(lost.id);
 
-  assert.equal(host.recover(), 0, 'recover cannot help: the row is gone, not left running');
-  assert.equal(await host.runOnce(), false, 'nothing is claimable');
-  assert.equal(await host.runOnce(), false, 'and nothing has appeared in the meantime');
+  // `runOnce() === false` had no return value to carry across to the
+  // dispatcher idiom; what is left to assert is that restarting the
+  // dispatcher over a database with nothing ready sweeps nothing and arms no
+  // new timer. Two separate, sequential checks -- "nothing is claimable" and
+  // "and nothing has appeared in the meantime" -- not a loop: each `await`
+  // here settles before the next assertion reads state the previous one
+  // could have changed, which a `for` loop's own `await` would only
+  // obscure behind an index.
+  const armedBeforeFirst = setTimeoutCalls.length;
+  assert.equal(host.start(), 0, 'nothing was left running to sweep');
+  assert.equal(setTimeoutCalls.length, armedBeforeFirst, 'nothing due means no new timer is armed');
+  await host.idle();
+
+  const armedBeforeSecond = setTimeoutCalls.length;
+  assert.equal(host.start(), 0, 'still nothing was left running to sweep');
+  assert.equal(setTimeoutCalls.length, armedBeforeSecond, 'still nothing due means no new timer is armed');
+  await host.idle();
+
   assert.equal(polls, 1, 'the feed was never polled again');
   assert.deepEqual(
     pollJobRows(raw).filter((r) => r.feedId === feedId && (r.state === 'ready' || r.state === 'running')),
@@ -434,40 +530,66 @@ test('a poll whose re-enqueue is lost leaves its feed silent, and nothing in the
 
 test('a poll re-run after a crash in its re-enqueue window leaves exactly one poll cycle', async () => {
   const clock = createClock(1000);
-  const { raw, host } = setup({ fetch: textFetch(async () => EMPTY_RSS), now: clock.now });
+  const { raw, host, setTimeoutCalls } = setup({ fetch: textFetch(async () => EMPTY_RSS), now: clock.now });
 
   const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed', 300);
   const firstJobId = host.schedulePoll(feedId, 1000);
 
-  assert.equal(await host.runOnce(), true);
+  host.start();
+  await runDue(host, setTimeoutCalls);
   const rescheduled = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
   assert.equal(rescheduled.length, 1, 'the first run rescheduled once');
 
-  // The crash window: the handler's re-enqueue and the runner's
-  // `state = 'done'` write are separate autocommit statements, so a process
-  // death between them leaves the ORIGINAL job `running` with its
-  // replacement already on file. `recover` then hands the original back and
-  // it runs a second time -- legitimately, and the handler must be
-  // idempotent across that. A bare `runner.enqueue` is not: it would create
-  // a second self-perpetuating cycle, permanently doubling this feed's poll
-  // rate, and every later crash would double it again.
+  // The crash window: the handler's re-enqueue and its `state = 'done'`
+  // write are separate autocommit statements, so a process death between
+  // them leaves the ORIGINAL job `running` with its replacement already on
+  // file. The next `start()`'s crash sweep hands the original back and it
+  // runs a second time -- legitimately, and the handler must be idempotent
+  // across that. A bare `runner.enqueue` is not: it would create a second
+  // self-perpetuating cycle, permanently doubling this feed's poll rate, and
+  // every later crash would double it again.
   raw.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(firstJobId);
-  assert.equal(host.recover(), 1);
+
+  // `start()`'s own sweep is the whole of crash recovery now, and it is
+  // idempotent, so calling it on a live host is exactly what a restart does
+  // to a database in this state. The sweep recomputes `run_at` from the
+  // backoff curve rather than leaving it where it was, so a crash loop backs
+  // off across restarts -- pinned here because this is the only place the live
+  // sweep's arithmetic is checked through a `Host` rather than against
+  // `createDispatcher` directly.
+  assert.equal(host.start(), 1, 'the sweep handed the crashed row back');
+  const swept = pollJobRows(raw).find((r) => r.id === firstJobId);
+  assert.equal(swept?.state, 'ready');
+  assert.equal(swept?.runAt, 1000 + 1000, 'readied one backoff step out, per backoffMs(1)');
+
+  // Then the clock moves to meet the readied row, which a real timer would
+  // have waited out on its own.
   clock.set(6000);
-  assert.equal(await host.runOnce(), true, 'the recovered job is claimed and re-run');
+  await runDue(host, setTimeoutCalls);
 
   const ready = pollJobRows(raw).filter((r) => r.feedId === feedId && r.state === 'ready');
   assert.equal(ready.length, 1, 'a re-run must not add a second cycle for one feed');
   assert.equal(ready[0]?.id, rescheduled[0]?.id, 'and the surviving cycle is the one the first run created');
+  // The effect `runOnce() === true` used to stand for: the recovered row was
+  // actually claimed and re-run to completion, not merely left `ready`.
+  const firstJob = pollJobRows(raw).find((r) => r.id === firstJobId);
+  assert.equal(firstJob?.state, 'done', 'the recovered job must have been claimed and re-run to completion');
+  assert.equal(firstJob?.attempts, 2, 'a second claim consumes a second attempt');
 });
 
 test('a poll job that throws is retried rather than dead-lettered on its first attempt', async () => {
-  const { raw, host } = setup({ fetch: textFetch(async () => { throw new Error('network down'); }) });
+  // `run_at` below comes from `run-job.ts`'s own fixed retry curve
+  // (`backoff.ts`), not an injectable one: `Host` gives its `Runner` no
+  // `backoffMs` of its own, so every real retry through `Host.start()`
+  // shares this one curve, rather than the injectable one `runner.test.ts`
+  // exercises on its own, undecorated `Runner`.
+  const { raw, host, setTimeoutCalls } = setup({ fetch: textFetch(async () => { throw new Error('network down'); }) });
 
   const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
   host.schedulePoll(feedId);
 
-  assert.equal(await host.runOnce(), true);
+  host.start();
+  await runDue(host, setTimeoutCalls);
 
   const rows = pollJobRows(raw).filter((r) => r.feedId === feedId);
   // Exactly the original job: a reschedule computed before the throw (rather
@@ -475,10 +597,15 @@ test('a poll job that throws is retried rather than dead-lettered on its first a
   assert.equal(rows.length, 1, 'a failed poll must not also have rescheduled a next one');
   assert.equal(rows[0]?.state, 'ready', 'a first failure must retry through backoff, not dead-letter');
   assert.equal(rows[0]?.attempts, 1);
+  // 2000 is now (1000) plus 1000 -- `backoffMs(1)` from
+  // `../src/jobs/backoff.ts` -- hardcoded rather than computed by calling
+  // that function: computing it here would let a broken curve cancel itself
+  // out against this same assertion.
+  assert.equal(rows[0]?.runAt, 2000, 'run_at must be the failure time plus the first backoff step');
 });
 
 test('a poll for a feed that no longer exists stops rescheduling instead of looping', async () => {
-  const { raw, host } = setup();
+  const { raw, host, setTimeoutCalls } = setup();
 
   const feedId = insertFeed(raw, 'alpha', 'https://a.test/feed');
   host.schedulePoll(feedId);
@@ -487,7 +614,8 @@ test('a poll for a feed that no longer exists stops rescheduling instead of loop
   // `fetch` is `unusedFetch` here: a correct implementation reads the feed
   // row before polling and never reaches the network at all for a feed
   // that is gone.
-  assert.equal(await host.runOnce(), true);
+  host.start();
+  await runDue(host, setTimeoutCalls);
 
   const rows = pollJobRows(raw).filter((r) => r.feedId === feedId);
   assert.equal(rows.length, 1, 'no new job was created for a deleted feed');

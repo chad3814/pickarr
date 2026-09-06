@@ -24,7 +24,10 @@ function readClaimedRow(row: Record<string, unknown>): { attempts: number; maxAt
 /**
  * One job's lifecycle: claim the row, race the handler against a five-minute
  * abort, and write the outcome back so a handler that settles after its own
- * timeout cannot undo what the timeout already decided.
+ * timeout cannot undo what the timeout already decided -- nor decide anything
+ * about a later attempt that has since re-claimed the same row. See the
+ * comment on `completeRow`/`failRow` below for why the second half needs the
+ * claimed `attempts` and not just `state = 'running'`.
  *
  * **The claim is this function's first synchronous act, before its own first
  * `await`.** This is a requirement documented on `createDispatcher`'s
@@ -60,8 +63,8 @@ export async function runJob(
   // before this line leaves the row exactly as it was, `ready` at its
   // original `run_at`, charged no attempt for a try that never happened.
   //
-  // Conditional on `state = 'ready'` for the same reason `completeRow` and
-  // `failRow` below are conditional on `state = 'running'`: nothing today
+  // Conditional on `state = 'ready'` for the same family of reasons
+  // `completeRow` and `failRow` below guard on state and attempt: nothing today
   // can call this twice for the same row (the dispatcher's synchronous
   // claim keeps its in-memory queued-id set and this statement in lockstep),
   // but if that ever stopped holding, an unconditional `UPDATE` would
@@ -85,12 +88,34 @@ export async function runJob(
   // claimed count keeps that promise.
   const claimedJob: JobRecord = { ...job, attempts };
 
+  // Every outcome write below is conditional on BOTH `state = 'running'` and
+  // `attempts = <the count this claim consumed>`, and the attempt half is the
+  // load-bearing one across invocations.
+  //
+  // The state alone is enough within one `runJob`: there is exactly one claim
+  // here, so `await running` resuming long after the timeout finds a row the
+  // timeout already moved out of `running`, and the write no-ops.
+  //
+  // It is NOT enough once the dispatcher is in the frame. The timeout path
+  // returns this row to `ready` at `now + backoffMs(attempts)`; the
+  // dispatcher's timer picks it up a second later and a second worker
+  // legitimately claims it back to `running`. This handler is still pending
+  // -- nothing can kill it -- so a `state = 'running'` test would match
+  // again, while every value in this closure (`attempts`, `maxAttempts`, and
+  // the handler's own outcome) describes an attempt that is over. Measured
+  // both ways: a late resolve marked the row `done` while attempt 2 was
+  // mid-flight, and a late reject readied it under attempt 1's stale count,
+  // putting a third copy of the same job in flight. The dispatcher's
+  // queued-id set cannot see either, because the row is legitimately `ready`
+  // with nothing queued for it at that moment.
+  //
+  // `attempts` is the discriminator because the claim above is the only
+  // statement in the codebase that writes it, one increment per attempt, so
+  // two attempts can never share a value. (`started_at` reads more naturally
+  // but two claims in the same millisecond would collide.)
   function completeRow(): void {
-    // Conditional on `state = 'running'`: `await running` below resumes
-    // whenever the handler finally settles, even long after the timeout, and
-    // would otherwise overwrite the row the timeout already failed.
-    deps.raw.prepare("UPDATE jobs SET state = 'done', updated_at = ? WHERE id = ? AND state = 'running'")
-      .run(deps.now(), job.id);
+    deps.raw.prepare("UPDATE jobs SET state = 'done', updated_at = ? WHERE id = ? AND state = 'running' AND attempts = ?")
+      .run(deps.now(), job.id, attempts);
   }
 
   function failRow(err: unknown): void {
@@ -99,14 +124,13 @@ export async function runJob(
     if (attempts >= maxAttempts) {
       // Dead-lettering leaves the row rather than deleting it, with
       // `last_error` set -- a job that vanishes on failure is one nobody can
-      // diagnose. Also conditional on `state = 'running'`, for the same
-      // late-settle reason as `completeRow`.
-      deps.raw.prepare("UPDATE jobs SET state = 'dead', last_error = ?, updated_at = ? WHERE id = ? AND state = 'running'")
-        .run(message, failedAt, job.id);
+      // diagnose.
+      deps.raw.prepare("UPDATE jobs SET state = 'dead', last_error = ?, updated_at = ? WHERE id = ? AND state = 'running' AND attempts = ?")
+        .run(message, failedAt, job.id, attempts);
     } else {
       const runAt = failedAt + backoffMs(attempts);
-      deps.raw.prepare("UPDATE jobs SET state = 'ready', run_at = ?, last_error = ?, updated_at = ? WHERE id = ? AND state = 'running'")
-        .run(runAt, message, failedAt, job.id);
+      deps.raw.prepare("UPDATE jobs SET state = 'ready', run_at = ?, last_error = ?, updated_at = ? WHERE id = ? AND state = 'running' AND attempts = ?")
+        .run(runAt, message, failedAt, job.id, attempts);
     }
   }
 
@@ -121,8 +145,8 @@ export async function runJob(
       await deps.sleep(ABORT_GRACE_MS);
       // Called, not read: `isPending` is a function, and the function value
       // itself is always truthy. This is quieter than it sounds -- a timer-
-      // based `sleep` never observes it at all, and the `WHERE state =
-      // 'running'` guard on `failRow` absorbs it for any job that has
+      // based `sleep` never observes it at all, and `failRow`'s own
+      // state-and-attempt guard absorbs it for any job that has
       // already completed by the time this runs. The one real window is a
       // single microtask hop wide: the tick where `isPending()` has already
       // flipped to `false` but `completeRow`'s write has not yet landed, so

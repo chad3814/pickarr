@@ -89,7 +89,7 @@ function hop(): Promise<void> {
 function seedJob(
   raw: DatabaseSync, now: number, kind: string, defaultMaxAttempts: number,
 ): { id: number; job: JobRecord } {
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts });
   const id = runner.enqueue('alpha', { kind, payload: { name: 'ada' } });
   // The dispatcher reads this row *before* any claim, so its own copy of
   // `attempts` is always the pre-claim count -- 0 for a fresh job.

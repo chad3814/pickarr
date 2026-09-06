@@ -7,7 +7,6 @@ import { createMediaWriter } from './media/writer.ts';
 import { createRunner } from './jobs/runner.ts';
 import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
-import { backoffMs } from './jobs/backoff.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -26,20 +25,14 @@ const nodeTimers: Timers = {
   clearInterval: (handle) => { clearInterval(handle as NodeJS.Timeout); },
 };
 
-/** A real sleep, for `run-job.ts`'s abort-grace wait, mirroring `main.ts`'s own `defaultSleep` -- duplicated rather than imported since `main.ts` sits above this module. */
+/**
+ * A real sleep, for `run-job.ts`'s abort-grace wait. The only one in the
+ * package: `main.ts` had a `defaultSleep` twin while the pump existed, and it
+ * went with the pump, so there is nothing left to mirror or import.
+ */
 function realSleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
-
-/**
- * `Runner.runOnce()`'s default `backoffMs`, the same exponential-capped
- * curve `dispatcher.ts`'s crash sweep and `run-job.ts`'s own retry use --
- * one curve, `packages/host/src/jobs/backoff.ts`, re-exported under this
- * name since it predates that extraction. Not an override knob: `backoffMs`
- * is a pure function of `attempts`, so a test controls retry timing through
- * the `now` this host is built with, not by tuning this curve.
- */
-export const DEFAULT_BACKOFF_MS = backoffMs;
 
 /** How many times a job may fail before it dead-letters. */
 export const DEFAULT_MAX_ATTEMPTS = 5;
@@ -101,16 +94,6 @@ export interface Host {
   /** Dispatches to the plugin owning the feed those items came from. */
   notifyNewRssItems(ids: readonly number[]): Promise<NotifyOutcome>;
   requestDownload(rssItemId: number): Promise<void>;
-  /**
-   * TEST ADAPTER, deleted in the task that removes the last caller. Claims
-   * and runs at most one due job — see `Runner.runOnce`'s own doc for why
-   * this is not simply `Host.start()` called once — so the 64 existing
-   * call sites keep working while they are migrated file by file.
-   * Production must call `start()`; a pump loop calling this would rebuild
-   * the coupling the dispatcher exists to remove.
-   */
-  runOnce(): Promise<boolean>;
-  recover(): number;
   /** Enqueues the first `poll` job for a feed. Idempotent per feed. */
   schedulePoll(feedId: number, runAt?: number): number;
   /**
@@ -118,8 +101,7 @@ export interface Host {
    * timer and safety interval so registered handlers run as their jobs
    * come due. Idempotent: a second call clears whatever the first armed
    * rather than leaking a second timer or interval alongside it. Returns
-   * how many rows the sweep touched, ready or dead — the same count
-   * `recover()` returns today.
+   * how many rows the sweep touched, ready or dead.
    */
   start(): number;
   /**
@@ -128,7 +110,16 @@ export interface Host {
    * stays `running`, and the next `start()` sweeps it.
    */
   stop(): void;
-  /** Resolves once nothing dispatched by `start()` is still running or waiting for a slot. */
+  /**
+   * Resolves once nothing dispatched by `start()` is still running or waiting
+   * for a slot.
+   *
+   * **A test affordance, and it must not be used for shutdown.** Waiting on
+   * in-flight work is precisely the coupling this slice removes: `stop()`
+   * abandons a handler and lets the next `start()` sweep its row. Production
+   * has no caller (`main.ts` calls `stop()`, never this), and
+   * `main.test.ts`'s shutdown test asserts that stays true.
+   */
   idle(): Promise<void>;
 }
 
@@ -191,7 +182,6 @@ export function createHost(deps: {
 
   const runner: Runner = createRunner(deps.raw, {
     now: deps.now,
-    backoffMs: DEFAULT_BACKOFF_MS,
     defaultMaxAttempts: DEFAULT_MAX_ATTEMPTS,
   });
 
@@ -204,12 +194,9 @@ export function createHost(deps: {
     console.log(`[${HOST_PLUGIN_ID}] ${message}`, detail ?? {});
   }
 
-  // The real dispatcher behind `start()`/`stop()`/`idle()` — a separate
-  // instance from the one `runner`'s own `runOnce()` builds fresh per call
-  // (see `runner.ts`): that one is scoped to claiming a single job and is
-  // discarded immediately after, while this one is meant to live for as
-  // long as the host runs, driving every registered handler as its jobs
-  // come due.
+  // The real dispatcher behind `start()`/`stop()`/`idle()`, meant to live
+  // for as long as the host runs, driving every registered handler as its
+  // jobs come due.
   // Built as two shapes, not one object literal with `concurrency` always
   // present: `exactOptionalPropertyTypes` is on, so an explicit
   // `concurrency: undefined` is not the same thing as the property being
@@ -353,8 +340,9 @@ export function createHost(deps: {
   // A bare enqueue is not idempotent, and this handler can legitimately run
   // twice: the enqueue and the runner's `state = 'done'` write are separate
   // autocommit statements, so a process death between them leaves this job
-  // `running`, `recover` readies it, and the re-run would enqueue a SECOND
-  // self-perpetuating cycle -- doubling that feed's poll rate permanently.
+  // `running`, the next `start()`'s crash sweep readies it, and the re-run
+  // would enqueue a SECOND self-perpetuating cycle -- doubling that feed's
+  // poll rate permanently.
   // `job.id` is excluded from the guard's scan because this job is itself
   // `running` while its own handler executes; without that exclusion the
   // guard would find it, decline to schedule anything, and silence the feed.
@@ -456,17 +444,6 @@ export function createHost(deps: {
         throw new Error(`rss item id ${rssItemId} belongs to a feed whose plugin is not registered`);
       }
       await plugin.onDownloadRequest(rssItemId, ctxFor(plugin.id));
-    },
-
-    runOnce() {
-      return runner.runOnce(
-        (pluginId, kind) => handlers.get(pluginId)?.get(kind),
-        (pluginId) => ctxFor(pluginId),
-      );
-    },
-
-    recover() {
-      return runner.recover();
     },
 
     start() {
