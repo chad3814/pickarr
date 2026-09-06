@@ -1,16 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaPlugin } from '@pickarr/contract';
+import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
 import type { Host } from '../src/host.ts';
-import { DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from '../src/host.ts';
+import { createHost, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from '../src/host.ts';
 import { migrateHost } from '../src/db/migrate.ts';
 import { openDatabase, openTestDatabase } from '../src/db/open.ts';
-import type { Pump } from '../src/main.ts';
-import { main, resolveArtworkDir, scheduleKnownFeeds, startPump } from '../src/main.ts';
+import type { QueuedFetch } from '../src/fetch/queue.ts';
+import type { Timers } from '../src/jobs/dispatcher.ts';
+import { createShutdown, main, resolveArtworkDir, scheduleKnownFeeds } from '../src/main.ts';
 
 /** The plugin id every feed row below names, so `main` can register an owner for it. */
 const OWNER_ID = 'double';
@@ -24,30 +25,27 @@ function insertFeed(raw: DatabaseSync, url: string): number {
   return Number(result.lastInsertRowid);
 }
 
-/**
- * A `Host` whose every method fails loudly if a test never meant to reach
- * it. `recover` defaults to a harmless no-op rather than throwing: it is a
- * one-statement `UPDATE` no pump test cares about either way, and a
- * "throws if unused" default would only make every test override a call it
- * has no opinion on.
- */
+/** A `Host` whose every method fails loudly if a test never meant to reach it. */
 function fakeHost(overrides: Partial<Host>): Host {
   return {
     register: () => { throw new Error('register: not used by this test'); },
     notifyNewRssItems: async () => { throw new Error('notifyNewRssItems: not used by this test'); },
     requestDownload: async () => { throw new Error('requestDownload: not used by this test'); },
-    runOnce: async () => { throw new Error('runOnce: not used by this test'); },
-    recover: () => 0,
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
+    // Throwing, not a no-op: a no-op default here would let a test pass
+    // while `main`'s real `start()`/`stop()` calls go unexercised -- see
+    // `createShutdown`'s own tests below, which override exactly the two
+    // methods each needs and nothing else.
+    start: () => { throw new Error('start: not used by this test'); },
+    stop: () => { throw new Error('stop: not used by this test'); },
+    idle: async () => { throw new Error('idle: not used by this test'); },
     ...overrides,
   };
 }
 
 /**
  * A complete `MediaPlugin` owning `OWNER_ID`'s feeds, with no migrations and
- * no reachable entry point: the tests below hand `main` a stub pump, so
- * nothing is ever polled and no plugin method can run. What it is for is
- * `main`'s refusal to start without one.
+ * no reachable entry point beyond what a given test overrides.
  */
 const ownerPlugin: MediaPlugin = {
   id: OWNER_ID,
@@ -59,9 +57,47 @@ const ownerPlugin: MediaPlugin = {
   onDownloadRequest: async () => { throw new Error('onDownloadRequest: not used by this test'); },
 };
 
-/** A `Pump` that never claims anything, so a test can inspect exactly the state `main` left behind. */
-function stubPump(): Pump {
-  return { stop: () => {}, done: Promise.resolve() };
+/** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
+const unusedFetch: QueuedFetch = {
+  json: async () => { throw new Error('fetch.json: not used by this test'); },
+  bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
+  text: async () => { throw new Error('fetch.text: not used by this test'); },
+};
+
+/** A `DownloadClients` that fails loudly if a test never meant to submit anywhere. */
+const unusedDownloads: DownloadClients = {
+  submit: async () => { throw new Error('downloads.submit: not used by this test'); },
+};
+
+/** No test in this file writes artwork, so this directory is never created or read. */
+const unusedArtworkDir = '/nonexistent/pickarr-main-test-artwork-unused';
+
+/**
+ * A `Timers` whose every call is logged rather than actually scheduled, the
+ * same fake `host.test.ts`, `dispatcher.test.ts` and `jobs/runner.test.ts`
+ * each build for their own use -- duplicated here rather than imported,
+ * since no file in this package shares a test-support module with another.
+ * Real timers are never armed by a test that supplies this: `main`'s own
+ * tests below run under `node --test` with no `--test-force-exit`, so a
+ * real `setInterval` left running past a test's own assertions would hang
+ * the whole suite, not merely that one test.
+ */
+function createFakeTimers(): { timers: Timers; setTimeoutCalls: { fn: () => void }[] } {
+  let nextHandle = 0;
+  const setTimeoutCalls: { handle: number; fn: () => void }[] = [];
+  const timers: Timers = {
+    setTimeout(fn) {
+      const handle = ++nextHandle;
+      setTimeoutCalls.push({ handle, fn });
+      return handle;
+    },
+    clearTimeout() {},
+    setInterval() {
+      return ++nextHandle;
+    },
+    clearInterval() {},
+  };
+  return { timers, setTimeoutCalls };
 }
 
 /**
@@ -89,77 +125,31 @@ function runnablePollJobs(raw: DatabaseSync): number {
   return Number((row as { n: unknown }).n);
 }
 
-test('the pump runs ready jobs until none remain, then sleeps', async () => {
-  let calls = 0;
-  async function runOnce(): Promise<boolean> {
-    calls += 1;
-    // Ready for the first three claims, idle, one more job arrives, idle
-    // again -- so the test can tell "sleeps once, then stops for good" (a
-    // pump that exits the loop when nothing is ready) apart from the real
-    // contract, which keeps polling.
-    return calls === 1 || calls === 2 || calls === 3 || calls === 5;
-  }
-  const sleepCalls: number[] = [];
-  const pump = startPump(fakeHost({ runOnce }), {
-    idleMs: 42,
-    sleep: async (ms) => {
-      sleepCalls.push(ms);
-      if (sleepCalls.length >= 2) pump.stop();
-    },
-  });
-  await pump.done;
+/** Inserts a `ready` job of any kind directly, the same way a row this host did not create might arrive. */
+function insertRawJob(raw: DatabaseSync, pluginId: string, kind: string, payloadJson: string, runAt: number): number {
+  const result = raw.prepare(`
+    INSERT INTO jobs (plugin_id, kind, payload_json, attempts, max_attempts, run_at, state, created_at, updated_at)
+    VALUES (?, ?, ?, 0, ?, ?, 'ready', 0, 0)
+  `).run(pluginId, kind, payloadJson, DEFAULT_MAX_ATTEMPTS, runAt);
+  return Number(result.lastInsertRowid);
+}
 
-  assert.equal(calls, 6, 'kept claiming across a second idle period rather than stopping after the first');
-  assert.deepEqual(sleepCalls, [42, 42], 'slept once per empty claim, not merely once ever');
-});
+function readJob(raw: DatabaseSync, id: number): { state: string; attempts: number } {
+  const row = raw.prepare('SELECT state, attempts FROM jobs WHERE id = ?').get(id) as { state: unknown; attempts: unknown };
+  return { state: String(row.state), attempts: Number(row.attempts) };
+}
 
-test('stopping the pump lets the in-flight job finish before done resolves', async () => {
-  let resolveRunOnce: ((ready: boolean) => void) | undefined;
-  let finished = false;
-  function runOnce(): Promise<boolean> {
-    return new Promise((resolve) => {
-      resolveRunOnce = (ready) => {
-        finished = true;
-        resolve(ready);
-      };
-    });
-  }
-  const pump = startPump(fakeHost({ runOnce }), { idleMs: 1, sleep: async () => {} });
-
-  assert.ok(resolveRunOnce !== undefined, 'the first claim is already in flight');
-  pump.stop();
-
-  let doneSettled = false;
-  void pump.done.then(() => { doneSettled = true; });
-
-  // Give `done` every chance to resolve early and wrongly, before the
-  // in-flight job it is supposed to be draining has actually finished.
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.equal(finished, false, 'the in-flight job has not finished yet');
-  assert.equal(doneSettled, false, 'done must not resolve while the claimed job is still in flight');
-
-  const resolve = resolveRunOnce;
-  assert.ok(resolve !== undefined);
-  resolve(true);
-  await pump.done;
-
-  assert.equal(finished, true, 'the in-flight job ran to completion');
-  assert.equal(doneSettled, true);
-});
-
-test('main recovers before it schedules, so a feed whose poll crashed on its last attempt still has a runnable job', async () => {
+test('main starts the dispatcher before it schedules known feeds, so a feed whose poll crashed on its last attempt still has a runnable job', async () => {
   // The silent feed-stop this exists to catch, and it is an ORDERING
   // defect, not a missing call: `schedulePoll` counts a poll job left
-  // `running` as pending and declines to replace it, and `recover`
+  // `running` as pending and declines to replace it, and `start()`'s sweep
   // dead-letters that same row because the crash consumed its last
   // permitted attempt. Schedule first and the feed ends up with no poll job
-  // in any runnable state, forever, with nothing to notice. Recover first
-  // and it gets a fresh cycle. Measured both ways: 0 jobs against 1.
+  // in any runnable state, forever, with nothing to notice. Start first and
+  // it gets a fresh cycle. Measured both ways: 0 jobs against 1.
   //
   // A real `Host` over a real database file, not a `fakeHost`: the defect
-  // lives in how `recover` and `schedulePoll` see each other's rows, which
+  // lives in how the sweep and `schedulePoll` see each other's rows, which
   // is precisely what a fake cannot show.
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-ordering-'));
   try {
@@ -174,22 +164,19 @@ test('main recovers before it schedules, so a feed whose poll crashed on its las
     assert.equal(runnablePollJobs(seed.raw), 1, 'the crashed job starts out looking runnable');
     seed.raw.close();
 
-    const started: Host[] = [];
-    await runMain(databasePath, {
-      plugins: [ownerPlugin],
-      startPump: (host) => {
-        started.push(host);
-        return stubPump();
-      },
-    });
-    assert.equal(started.length, 1, 'main started the pump exactly once, last');
+    // A fake `Timers`, not real ones: `main` arms the dispatcher for real
+    // through `host.start()` now, and this test only cares what state that
+    // leaves in the database the instant `main` returns -- not about a real
+    // `setInterval` outliving the test and hanging the suite.
+    const { timers } = createFakeTimers();
+    await runMain(databasePath, { plugins: [ownerPlugin], timers });
 
     const after = openDatabase(databasePath);
     try {
       assert.equal(
         runnablePollJobs(after.raw),
         1,
-        'the feed must still have a poll job something will claim; 0 here means main scheduled before it recovered',
+        'the feed must still have a poll job something will claim; 0 here means main scheduled before it started the dispatcher',
       );
       // Specifically a NEW cycle, not the crashed row still sitting there:
       // the dead-lettered original must remain visible for diagnosis.
@@ -205,54 +192,117 @@ test('main recovers before it schedules, so a feed whose poll crashed on its las
   }
 });
 
-test('main refuses to start with no plugin registered, and leaves no database behind', async () => {
-  // Not a degraded mode: a poll consumes each item's identity through the
-  // (feed_id, guid) dedup index, so items polled before any plugin owns
-  // their feed are destroyed rather than queued -- no later poll re-offers
-  // them and nothing rescans `resolution = 'pending'`. The shipped process
-  // registers no plugin, so this refusal is what it does on every boot
-  // until a plugin slice lands.
-  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-refusal-'));
+test('main boots with no plugin registered, and still schedules a poll for every known feed', async () => {
+  // `main` used to refuse this outright: a poll's dedup insert consumes an
+  // item's identity through (feed_id, guid), so an unowned item looked
+  // permanently destroyed. `rss_item.delivered_at` (see `feeds/reader.ts`)
+  // is what removed that danger -- an unowned row simply stays undelivered
+  // and is re-offered once a plugin registers -- so booting with an empty
+  // plugin list, exactly what the shipped `SHIPPED_PLUGINS` is today, must
+  // now succeed rather than throw.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-no-plugin-'));
   try {
     const databasePath = join(dir, 'pickarr.db');
-    await assert.rejects(
-      runMain(databasePath, {
-        startPump: () => { throw new Error('startPump: must never be reached with no plugin registered'); },
-      }),
-      /no media plugin registered/,
-    );
+    const seed = openDatabase(databasePath);
+    migrateHost(seed.raw);
+    insertFeed(seed.raw, 'https://a.test/feed.xml');
+    seed.raw.close();
 
-    // The guard runs before the database is opened, so a refusal is not a
-    // half-built host: nothing migrated, nothing on disk to explain.
-    assert.deepEqual(await readdir(dir), [], 'refusing must not create a database file');
+    const { timers } = createFakeTimers();
+    await runMain(databasePath, { plugins: [], timers });
+
+    const after = openDatabase(databasePath);
+    try {
+      assert.equal(
+        runnablePollJobs(after.raw),
+        1,
+        'a feed known before boot must still get a poll job scheduled, even with no plugin registered',
+      );
+    } finally {
+      after.raw.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('the pump keeps running after a job throws', async () => {
-  let calls = 0;
-  async function runOnce(): Promise<boolean> {
-    calls += 1;
-    if (calls === 2) throw new Error('boom: a handler failed');
-    // Ready, throws (itself a sleep, since a rejection counts as nothing
-    // claimed), ready again, idle, ready again, idle -- so a rejected claim
-    // is shown not merely to be survived but to leave the pump claiming
-    // normally on every call after it.
-    return calls === 1 || calls === 3 || calls === 5;
-  }
-  const sleepCalls: number[] = [];
-  const pump = startPump(fakeHost({ runOnce }), {
-    idleMs: 7,
-    sleep: async (ms) => {
-      sleepCalls.push(ms);
-      if (sleepCalls.length >= 3) pump.stop();
+test('a job whose handler rejects does not stop the host from running the next one', async () => {
+  // The pump-era analogue of this test drove a scripted `runOnce` through a
+  // rejection and back; there is no pump left to drive, so this drives a
+  // real `Host` the same way `main` builds one, with two jobs of its own
+  // plugin's kinds due in the same batch -- one whose handler always
+  // throws, one that always succeeds.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const host = createHost({
+    raw,
+    db,
+    fetch: unusedFetch,
+    downloads: unusedDownloads,
+    now: () => 1000,
+    artworkDir: unusedArtworkDir,
+    timers,
+  });
+
+  const okRuns: unknown[] = [];
+  host.register({
+    ...ownerPlugin,
+    jobs: {
+      boom: async () => { throw new Error('handler exploded'); },
+      ok: async (job) => { okRuns.push(job.payload); },
     },
   });
-  await pump.done;
 
-  assert.equal(calls, 6, 'claimed again after a rejected runOnce, rather than stopping on it');
-  assert.deepEqual(sleepCalls, [7, 7, 7], 'the throw itself, plus the two real idle periods around it');
+  const boomId = insertRawJob(raw, OWNER_ID, 'boom', '{}', 1000);
+  insertRawJob(raw, OWNER_ID, 'ok', JSON.stringify({ marker: true }), 1000);
+
+  host.start();
+  const fire = setTimeoutCalls.at(-1)?.fn;
+  assert.ok(fire, 'no timer was armed for the due jobs');
+  fire();
+  await host.idle();
+
+  assert.deepEqual(okRuns, [{ marker: true }], 'the ok job ran to completion despite the boom job rejecting in the same batch');
+  const boom = readJob(raw, boomId);
+  assert.equal(boom.state, 'ready', 'a rejecting handler is retried through backoff, not left running or lost, and the host keeps going');
+  assert.equal(boom.attempts, 1);
+});
+
+test('createShutdown stops the host, closes the database and exits exactly once, even if a second signal lands mid-shutdown', () => {
+  const { raw } = openTestDatabase();
+  let stopped = 0;
+  const host = fakeHost({ stop: () => { stopped += 1; } });
+  const exitCalls: number[] = [];
+  const shutdown = createShutdown(host, raw, { exit: (code) => { exitCalls.push(code); } });
+
+  shutdown('SIGINT received');
+  shutdown('SIGTERM received');
+
+  assert.equal(stopped, 1, 'stop must run exactly once even though shutdown was asked for twice');
+  assert.deepEqual(exitCalls, [0], 'exit must run exactly once, with the process\'s own success code');
+  assert.throws(() => raw.prepare('SELECT 1').get(), 'the database must actually be closed, not merely stopped');
+});
+
+test('createShutdown exits without waiting for a hung idle(), which the pump it replaces could never have passed', () => {
+  // `Host.stop()` is typed `(): void` and `createShutdown` never calls
+  // `idle()` at all -- proven here by handing it an `idle` that would hang
+  // the process forever if it were ever reached. A mutation that awaited
+  // `host.idle()` before exiting would have to hang the same way and fail
+  // this assertion, never reaching it.
+  const { raw } = openTestDatabase();
+  let idleCalls = 0;
+  const host = fakeHost({
+    stop: () => {},
+    idle: () => { idleCalls += 1; return new Promise<void>(() => {}); },
+  });
+  const exitCalls: number[] = [];
+  const shutdown = createShutdown(host, raw, { exit: (code) => { exitCalls.push(code); } });
+
+  shutdown('SIGINT received');
+
+  assert.deepEqual(exitCalls, [0], 'shutdown must already have exited by the time this synchronous line runs');
+  assert.equal(idleCalls, 0, 'a prompt shutdown never touches idle() in the first place');
 });
 
 test('resolveArtworkDir defaults to artwork/ beside the database file', () => {

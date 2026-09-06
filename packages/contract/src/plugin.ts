@@ -28,7 +28,13 @@ export interface PluginContext {
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }
 
-export type JobHandler = (job: JobRecord, ctx: PluginContext) => Promise<void>;
+/**
+ * `signal` is optional so every handler written before the dispatcher
+ * existed remains a valid `JobHandler` untouched. The dispatcher passes a
+ * real one, tied to its five-minute per-job ceiling; a handler that ignores
+ * it still runs, it just cannot be asked to unwind early.
+ */
+export type JobHandler = (job: JobRecord, ctx: PluginContext, signal?: AbortSignal) => Promise<void>;
 
 /**
  * A media plugin.

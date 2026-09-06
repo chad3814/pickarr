@@ -89,6 +89,13 @@ export const rssItem = sqliteTable('rss_item', {
   // SQLite treats NULLs as distinct in a unique index, so those rows do not
   // collide with each other under `rss_item_feed_guid`.
   guid: text('guid'),
+  // Nullable, and never backfilled: set once `notifyNewRssItems` has handed
+  // this row to its owning plugin with no failure. A row with none is
+  // offered again on the next poll of its feed -- whether it predates this
+  // column or its feed simply had no registered plugin yet -- which is what
+  // lets a host with no plugin registered still poll safely instead of
+  // destroying every item's identity through the (feed_id, guid) dedup.
+  deliveredAt: integer('delivered_at'),
 }, (t) => [
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),
@@ -220,6 +227,12 @@ export const jobs = sqliteTable('jobs', {
   lastError: text('last_error'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  // Stamped by the queue worker at the moment a job actually begins, not when
+  // it is dispatched -- so a row that has never run has none. Nullable on
+  // purpose: a job dispatched but not yet started stays `ready` with a null
+  // `started_at`, so a crash charges it no attempt for a try that never
+  // happened.
+  startedAt: integer('started_at'),
 }, (t) => [
   // The claim query's own predicate: `WHERE state = 'ready' AND run_at <= :now
   // ORDER BY run_at, id`. Partial on state so the index stays proportional to

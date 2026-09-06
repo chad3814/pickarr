@@ -1,13 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { drizzle } from 'drizzle-orm/node-sqlite';
-import { defineRelations, sql } from 'drizzle-orm';
-import type { JobEnqueue, JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
-import * as schema from '../db/schema.ts';
+import type { JobEnqueue } from '@pickarr/contract';
 
 export interface RunnerOptions {
-  /** Injected clock, so backoff is testable without waiting on wall time. */
+  /** Injected clock, so an inserted row's `created_at`/`run_at` are testable without waiting on wall time. */
   now: () => number;
-  backoffMs: (attempts: number) => number;
   defaultMaxAttempts: number;
 }
 
@@ -21,41 +17,9 @@ export interface Runner {
    * would force one of those facts to give way.
    */
   enqueue(pluginId: string, job: JobEnqueue): number;
-  /** Claims and runs at most one job. Returns false when none was ready. */
-  runOnce(
-    handlers: (pluginId: string, kind: string) => JobHandler | undefined,
-    ctxFor: (pluginId: string) => PluginContext,
-  ): Promise<boolean>;
-  /**
-   * Returns jobs left `running` by a crashed process to `ready` — except a
-   * job already at its last permitted attempt, which goes to `dead` instead:
-   * `runOnce`'s dead-letter check lives in the `catch` for a *rejected*
-   * handler, which a process that crashes outright never reaches, so
-   * without this a job kind that reliably kills the process would be
-   * readied again on every restart and the host would never finish starting.
-   * Returns how many rows were touched, ready or dead.
-   */
-  recover(): number;
-}
-
-/** The columns named in the claim statement's `RETURNING` clause. */
-interface ClaimedRow {
-  id: number;
-  plugin_id: string;
-  kind: string;
-  payload_json: string;
-  attempts: number;
-  max_attempts: number;
 }
 
 export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
-  // A local Drizzle handle over the same raw connection, not a new database —
-  // `{ client: raw }` is the form that shares it. Wired with `relations` the
-  // same way `open.ts` wires every handle it hands out, so the claim below is
-  // not the one unwired handle in the module; `db.all<T>(sql\`…\`)` does not
-  // itself need the schema, but nothing here depends on it being absent.
-  const db = drizzle({ client: raw, relations: defineRelations(schema) });
-
   return {
     enqueue(pluginId, job) {
       const now = opts.now();
@@ -67,105 +31,6 @@ export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
         VALUES (?, ?, ?, 0, ?, ?, 'ready', NULL, ?, ?)
       `).run(pluginId, job.kind, payloadJson, maxAttempts, runAt, now, now);
       return Number(result.lastInsertRowid);
-    },
-
-    async runOnce(handlers, ctxFor) {
-      const now = opts.now();
-
-      // The claim is one statement, so two workers can never take the same
-      // job even though this is single-process today: the row a second caller
-      // could see is already `running` by the time its own `UPDATE` runs.
-      //
-      // The attempt is consumed by that same statement, and `RETURNING` reads
-      // the incremented value back. It has to be one statement and not two: a
-      // handler that crashes the process must already have consumed an
-      // attempt, or crash recovery (`recover`) hands the row back to `ready`
-      // with its count untouched and a job kind that reliably kills the
-      // process is readied again on every restart, forever. A separate
-      // increment leaves a window — however narrow — in which a crash lands
-      // between the two and reopens exactly that loop.
-      const claimed = db.all<ClaimedRow>(sql`
-        UPDATE jobs SET state = 'running', attempts = attempts + 1, updated_at = ${now}
-         WHERE id = (SELECT id FROM jobs
-                      WHERE state = 'ready' AND run_at <= ${now}
-                      ORDER BY run_at, id LIMIT 1)
-        RETURNING id, plugin_id, kind, payload_json, attempts, max_attempts
-      `);
-      const row = claimed.at(0);
-      if (!row) return false;
-      const attempts = row.attempts;
-
-      const pluginId = row.plugin_id;
-      const handler = handlers(pluginId, row.kind);
-      if (!handler) {
-        // An unhandled job kind is a visible dead-letter row, not a job that
-        // silently vanishes because no method existed to catch it.
-        raw.prepare('UPDATE jobs SET state = ?, last_error = ?, updated_at = ? WHERE id = ?')
-          .run('dead', `no handler for job kind "${row.kind}" registered by plugin "${pluginId}"`, now, row.id);
-        return true;
-      }
-
-      // `payload` stays `unknown` all the way out — the contract makes no
-      // promise about its shape, so nothing here narrows it further.
-      const payload: unknown = JSON.parse(row.payload_json);
-      const record: JobRecord = { id: row.id, kind: row.kind, payload, attempts };
-      const ctx = ctxFor(pluginId);
-
-      try {
-        await handler(record, ctx);
-        // The clock is re-read after the handler, not reused from the claim.
-        // Everything below records what happened *after* an await of unbounded
-        // length, and the claim's `now` is only when the work started.
-        raw.prepare('UPDATE jobs SET state = ?, updated_at = ? WHERE id = ?')
-          .run('done', opts.now(), row.id);
-      } catch (err) {
-        // The failure time, not the claim time. Backoff measured from the
-        // claim is no backoff at all for a handler slower than its own curve,
-        // and slow handlers are designed for: a handler holds its claim while
-        // the per-hostname fetch queue makes it wait, so anything queued
-        // behind a slow host outlives the 60s cap routinely and would then
-        // retry instantly, over and over, until it dead-lettered.
-        const failedAt = opts.now();
-        const message = err instanceof Error ? err.message : String(err);
-        if (attempts >= row.max_attempts) {
-          // Dead-lettering means the row stays, with `last_error` set, rather
-          // than being deleted — a job that vanishes on failure is a job
-          // nobody can diagnose.
-          raw.prepare('UPDATE jobs SET state = ?, last_error = ?, updated_at = ? WHERE id = ?')
-            .run('dead', message, failedAt, row.id);
-        } else {
-          const runAt = failedAt + opts.backoffMs(attempts);
-          raw.prepare('UPDATE jobs SET state = ?, run_at = ?, last_error = ?, updated_at = ? WHERE id = ?')
-            .run('ready', runAt, message, failedAt, row.id);
-        }
-      }
-      return true;
-    },
-
-    recover() {
-      const now = opts.now();
-      // Attempts are left untouched either way: the crashed attempt already
-      // consumed one, in the same statement that claimed the row. A row already at
-      // `max_attempts` does not get another try — it goes straight to
-      // `dead` — because readying it just hands the same crash back to the
-      // next restart.
-      //
-      // `last_error` is overwritten, not appended to, on the rows going
-      // dead: a rejected handler leaves a stack trace there, but a crashed
-      // process leaves nothing, and that is a different diagnosis. The crash
-      // message is the more specific, more current fact about why the row
-      // is dead *now* — a stale rejection message from an earlier attempt
-      // would only mislead whoever reads it next.
-      const result = raw.prepare(`
-        UPDATE jobs
-           SET state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END,
-               last_error = CASE WHEN attempts >= max_attempts
-                 THEN 'process crashed while this job was running, on its last permitted attempt'
-                 ELSE last_error END,
-               updated_at = ?
-         WHERE state = ?
-      `).run(now, 'running');
-      return Number(result.changes);
     },
   };
 }

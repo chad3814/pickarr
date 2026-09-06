@@ -23,6 +23,7 @@ import { migrateHost, migratePlugin } from '../../src/db/migrate.ts';
 import { createHostFetch } from '../../src/fetch/queue.ts';
 import { createHost, DEFAULT_MAX_ATTEMPTS } from '../../src/host.ts';
 import type { Host } from '../../src/host.ts';
+import type { Timers } from '../../src/jobs/dispatcher.ts';
 import {
   createDoublePlugin,
   createFakeParserService,
@@ -106,12 +107,78 @@ function script(
   return { batch: new Map(entries.map((entry) => [entry.name, entry])), polls: new Map(polls) };
 }
 
+/** One `setTimeout`/`setInterval` call, as the fake `Timers` below records it. */
+interface TimerCall {
+  handle: number;
+  ms: number;
+  fn: () => void;
+}
+
+/**
+ * A `Timers` whose every call is logged rather than actually scheduled, the
+ * same fake `dispatcher.test.ts`, `jobs/runner.test.ts` and `host.test.ts`
+ * each build for `createDispatcher` -- duplicated here rather than imported,
+ * since no file in this package shares a test-support module with another.
+ * "Advancing the clock" in this file means invoking a logged `fn` directly,
+ * never waiting on real time.
+ */
+function createFakeTimers(): { timers: Timers; setTimeoutCalls: TimerCall[] } {
+  let nextHandle = 0;
+  const setTimeoutCalls: TimerCall[] = [];
+  const timers: Timers = {
+    setTimeout(fn, ms) {
+      const handle = ++nextHandle;
+      setTimeoutCalls.push({ handle, ms, fn });
+      return handle;
+    },
+    clearTimeout() {},
+    setInterval(_fn, _ms) {
+      const handle = ++nextHandle;
+      // No test here drives the safety interval directly, so its own call
+      // is recorded nowhere -- only its handle needs to exist, so `stop()`
+      // has something to clear.
+      return handle;
+    },
+    clearInterval() {},
+  };
+  return { timers, setTimeoutCalls };
+}
+
+/**
+ * Fires the most recently armed timer without waiting for what it dispatches
+ * to finish -- for the one test in this file (`images on different hosts are
+ * fetched in parallel`) that needs to inspect a handler mid-flight, before
+ * its own awaited fetches resolve. Every other call site wants `runDue`
+ * below, which also waits.
+ */
+function fireLatest(setTimeoutCalls: readonly TimerCall[]): void {
+  const fire = setTimeoutCalls.at(-1)?.fn;
+  assert.ok(fire, 'no timer was armed for a due job');
+  fire();
+}
+
+/**
+ * Fires the most recently armed timer -- `Host.start()`'s dispatcher rearms
+ * on every enqueue and after every fire, so whichever entry is latest is the
+ * one standing for "whatever is next due" -- then waits for the dispatched
+ * job (and anything it enqueues) to finish. The replacement for
+ * `await host.runOnce()` throughout this file: where `runOnce()` returned a
+ * claimed-something boolean, this returns nothing, because what a test needs
+ * after it is never the fact that something ran but which row and in what
+ * state it was left -- an effect assertion, not a return value.
+ */
+async function runDue(host: Host, setTimeoutCalls: readonly TimerCall[]): Promise<void> {
+  fireLatest(setTimeoutCalls);
+  await host.idle();
+}
+
 interface Harness {
   raw: DatabaseSync;
   host: Host;
   clock: Clock;
   service: FakeParserService;
   plugin: MediaPlugin;
+  setTimeoutCalls: TimerCall[];
 }
 
 /**
@@ -147,6 +214,7 @@ function setup(
   const clock = createClock();
   const service = createFakeParserService(parserScript);
   const plugin = createDoublePlugin({ now: () => clock.now() });
+  const { timers, setTimeoutCalls } = createFakeTimers();
   const host = createHost({
     raw,
     db,
@@ -161,9 +229,10 @@ function setup(
     downloads: unusedDownloads,
     artworkDir: opts.artworkDir ?? unusedArtworkDir,
     now: () => clock.now(),
+    timers,
   });
   host.register(plugin);
-  return { raw, host, clock, service, plugin };
+  return { raw, host, clock, service, plugin, setTimeoutCalls };
 }
 
 /** One feed owned by the double, and one rss item per filename, in order. */
@@ -354,14 +423,23 @@ function nextDueAt(raw: DatabaseSync): number | undefined {
  * is due rather than sleeping. Deterministic on purpose: the crash test
  * compares two runs row for row, which only holds if both moved the clock the
  * same way.
+ *
+ * Assumes `host.start()` has already armed a timer. Each iteration fires
+ * whichever timer is currently latest -- the dispatcher rearms after every
+ * fire and every enqueue, so that is always "whatever is next due" -- and
+ * waits for it (and anything it enqueues) to finish, before checking whether
+ * anything is still ready. A ready row already due at the current clock
+ * value needs no clock movement, only another fire; one still in the future
+ * needs the clock moved to meet it, which is what a real timer would have
+ * waited out on its own.
  */
-async function runToCompletion(host: Host, clock: Clock, raw: DatabaseSync): Promise<void> {
+async function runToCompletion(host: Host, clock: Clock, raw: DatabaseSync, setTimeoutCalls: readonly TimerCall[]): Promise<void> {
   for (let guard = 0; guard < 50; guard += 1) {
-    // eslint-disable-next-line no-await-in-loop -- a queue drains one job at a time; claiming one at a time is the whole of what `runOnce` offers
-    if (await host.runOnce()) continue;
+    // eslint-disable-next-line no-await-in-loop -- each wave must finish before the next fire is chosen, since a handler may enqueue what the next wave needs to see
+    await runDue(host, setTimeoutCalls);
     const due = nextDueAt(raw);
     if (due === undefined) return;
-    clock.set(due);
+    if (due > clock.now()) clock.set(due);
   }
   throw new Error('runToCompletion: the queue never drained');
 }
@@ -489,7 +567,7 @@ test('a resolved entry writes the media item, its provider ref, its people, and 
     description: 'A film about a grid.',
     people: [ADA, GRACE],
   });
-  const { raw, host, service } = setup(script([grid]));
+  const { raw, host, service, setTimeoutCalls } = setup(script([grid]));
   const ids = given(raw, [MOVIE]);
   const itemId = only(ids, 'rss item');
 
@@ -500,8 +578,10 @@ test('a resolved entry writes the media item, its provider ref, its people, and 
   // chasing the wrong cause.
   assert.deepEqual(outcome.failures, []);
 
-  assert.equal(await host.runOnce(), true, 'the lookup job must be ready to run');
-  assert.equal(await host.runOnce(), false, 'a resolved entry leaves nothing queued');
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  // "a resolved entry leaves nothing queued" is what the `only(jobs(raw), ...)`
+  // below proves: it throws if a second job exists.
 
   // The double asked the service about the filename, not the row id.
   assert.deepEqual(service.batchRequests, [[MOVIE]]);
@@ -552,7 +632,7 @@ test('a refused entry is terminal: resolution refused, no retry enqueued, no med
   // A refusal is a successful identification of a non-media file. Retrying it
   // forever, or surfacing it as a failure, are both wrong.
   const refusal = 'subtitle track, not media';
-  const { raw, host, service } = setup(script([refusedEntry(SUBTITLE, { lookupId: 'lk-srt', refusal })]));
+  const { raw, host, service, setTimeoutCalls } = setup(script([refusedEntry(SUBTITLE, { lookupId: 'lk-srt', refusal })]));
   const ids = given(raw, [SUBTITLE]);
   const itemId = only(ids, 'rss item');
 
@@ -560,8 +640,10 @@ test('a refused entry is terminal: resolution refused, no retry enqueued, no med
   assert.deepEqual(outcome.unowned, []);
   assert.deepEqual(outcome.failures, []);
 
-  assert.equal(await host.runOnce(), true);
-  assert.equal(await host.runOnce(), false, 'a refusal must not enqueue a retry');
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  // "a refusal must not enqueue a retry" is what the `only(jobs(raw), ...)`
+  // below proves: it throws if a second job exists.
 
   const item = rssItemState(raw, itemId);
   assert.equal(item.resolution, 'refused', 'a refusal is not an unresolved item');
@@ -584,7 +666,7 @@ test('a refused entry is terminal: resolution refused, no retry enqueued, no med
 });
 
 test('an unresolved entry records resolution unresolved and does not enqueue a retry', async () => {
-  const { raw, host } = setup(script([unresolvedEntry(GIBBERISH, { lookupId: 'lk-zzz' })]));
+  const { raw, host, setTimeoutCalls } = setup(script([unresolvedEntry(GIBBERISH, { lookupId: 'lk-zzz' })]));
   const ids = given(raw, [GIBBERISH]);
   const itemId = only(ids, 'rss item');
 
@@ -592,8 +674,10 @@ test('an unresolved entry records resolution unresolved and does not enqueue a r
   assert.deepEqual(outcome.unowned, []);
   assert.deepEqual(outcome.failures, []);
 
-  assert.equal(await host.runOnce(), true);
-  assert.equal(await host.runOnce(), false, 'an unresolved item is retried on request, not on a timer');
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  // "an unresolved item is retried on request, not on a timer" is what the
+  // `only(jobs(raw), ...)` below proves: it throws if a second job exists.
 
   const item = rssItemState(raw, itemId);
   assert.equal(item.resolution, 'unresolved', 'a name the service did not recognise is not a refusal');
@@ -611,7 +695,7 @@ test('an unresolved entry records resolution unresolved and does not enqueue a r
 test('a partial entry enqueues a poll job carrying its lookupId, and its siblings proceed immediately', async () => {
   const first = movieEntry('first.2001.1080p.mkv', '1', 'First');
   const last = movieEntry('last.2003.1080p.mkv', '3', 'Last');
-  const { raw, host, service } = setup(script([first, partialEntry(SLOW, { lookupId: 'lk-slow' }), last]));
+  const { raw, host, service, setTimeoutCalls } = setup(script([first, partialEntry(SLOW, { lookupId: 'lk-slow' }), last]));
   const ids = given(raw, [first.name, SLOW, last.name]);
   const firstId = ids.at(0);
   const slowId = ids.at(1);
@@ -626,7 +710,8 @@ test('a partial entry enqueues a poll job carrying its lookupId, and its sibling
 
   // The lookup only. Nothing drains the poll, so what the lookup left behind
   // stays visible.
-  assert.equal(await host.runOnce(), true);
+  host.start();
+  await runDue(host, setTimeoutCalls);
   assert.deepEqual(service.batchRequests, [[first.name, SLOW, last.name]]);
 
   // Half one: the entries either side of the slow one are already finished.
@@ -654,7 +739,7 @@ test('the poll job completes the item once the fake service answers', async () =
   // The service says "not yet" one more time before it answers at all, so the
   // poll has to be able to enqueue its own successor.
   const answer = movieEntry(SLOW, 'slow', 'The Long Wait');
-  const { raw, host, clock, service } = setup(script(
+  const { raw, host, clock, service, setTimeoutCalls } = setup(script(
     [partialEntry(SLOW, { lookupId: 'lk-slow' })],
     [['lk-slow', [partialEntry(SLOW, { lookupId: 'lk-slow' }), answer]]],
   ));
@@ -665,7 +750,8 @@ test('the poll job completes the item once the fake service answers', async () =
   assert.deepEqual(outcome.unowned, []);
   assert.deepEqual(outcome.failures, []);
 
-  await runToCompletion(host, clock, raw);
+  host.start();
+  await runToCompletion(host, clock, raw, setTimeoutCalls);
 
   assert.deepEqual(service.pollRequests, ['lk-slow', 'lk-slow'], 'the first poll was answered "not yet"');
 
@@ -712,7 +798,7 @@ test('two rss items resolving to one provider ref end up sharing one media item'
     // which the duplicate is observable at all.
     people: [ADA, GRACE],
   });
-  const { raw, host } = setup(script([original, repack]));
+  const { raw, host, setTimeoutCalls } = setup(script([original, repack]));
   const ids = given(raw, [MOVIE, REPACK]);
   const firstId = ids.at(0);
   const secondId = ids.at(1);
@@ -723,8 +809,13 @@ test('two rss items resolving to one provider ref end up sharing one media item'
   assert.deepEqual(outcome.unowned, []);
   assert.deepEqual(outcome.failures, []);
 
-  assert.equal(await host.runOnce(), true);
-  assert.equal(await host.runOnce(), false);
+  host.start();
+  await runDue(host, setTimeoutCalls);
+
+  // One lookup job, and it finished -- the effect `runOnce() === false`
+  // used to stand for: nothing else was left to claim after it.
+  const job = only(jobs(raw), 'job');
+  assert.equal(job.state, 'done');
 
   // One survivor: whichever item claimed the reference first. `only` is what
   // says the loser was deleted rather than merely left unclaimed -- an
@@ -788,14 +879,20 @@ test('a resolved entry gets its poster, background and logo attached', async () 
       { role: 'background', url: BACKGROUND_URL, title: null, language: null },
       { role: 'logo', url: LOGO_URL, title: null, language: null },
     ]);
-    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const { raw, host, setTimeoutCalls } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
     const ids = given(raw, [MOVIE]);
 
     const outcome = await host.notifyNewRssItems(ids);
     assert.deepEqual(outcome.failures, []);
-    assert.equal(await host.runOnce(), true, 'the lookup job must run');
-    assert.equal(await host.runOnce(), true, 'the artwork job it scheduled must run');
-    assert.equal(await host.runOnce(), false, 'nothing else must be queued');
+    host.start();
+    await runDue(host, setTimeoutCalls); // the lookup job, which schedules the artwork job
+    await runDue(host, setTimeoutCalls); // the artwork job it scheduled
+
+    // The effect `runOnce() === false` used to stand for: nothing else was
+    // left queued after the two jobs above.
+    const finishedJobs = jobs(raw);
+    assert.equal(finishedJobs.length, 2, 'only the lookup and the artwork job were ever created');
+    assert.ok(finishedJobs.every((job) => job.state === 'done'), 'nothing must be left ready or running');
 
     const media = only(mediaItems(raw), 'media item');
 
@@ -831,13 +928,14 @@ test('artwork runs as its own job, so a failed image does not undo a resolved it
     const grid = movieWithImages(MOVIE, '512', 'The Grid', [
       { role: 'poster', url: POSTER_URL, title: null, language: null },
     ]);
-    const { raw, host, clock } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const { raw, host, clock, setTimeoutCalls } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
     const ids = given(raw, [MOVIE]);
     const itemId = only(ids, 'rss item');
 
     const outcome = await host.notifyNewRssItems(ids);
     assert.deepEqual(outcome.failures, []);
-    await runToCompletion(host, clock, raw);
+    host.start();
+    await runToCompletion(host, clock, raw, setTimeoutCalls);
 
     // The lookup's own work is untouched: a media item, claimed and resolved.
     const media = only(mediaItems(raw), 'media item');
@@ -864,18 +962,20 @@ test('images on different hosts are fetched in parallel', async () => {
       { role: 'poster', url: POSTER_URL, title: null, language: null },
       { role: 'background', url: BACKGROUND_URL, title: null, language: null },
     ]);
-    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: gated.fetch });
+    const { raw, host, setTimeoutCalls } = setup(script([grid]), { artworkDir, imagesFetch: gated.fetch });
     const ids = given(raw, [MOVIE]);
 
     const outcome = await host.notifyNewRssItems(ids);
     assert.deepEqual(outcome.failures, []);
-    assert.equal(await host.runOnce(), true, 'the lookup job must run');
+    host.start();
+    await runDue(host, setTimeoutCalls); // the lookup job, which schedules the artwork job
 
-    // Started, not awaited: both hosts' requests should already be in flight
-    // by the time this settles, and neither request in this test ever
-    // resolves on its own -- a serialised implementation would leave the
-    // second one never made at all.
-    const artworkRun = host.runOnce();
+    // Fired, not awaited via `idle()`: both hosts' requests should already be
+    // in flight by the time this settles, and neither request in this test
+    // ever resolves on its own -- a serialised implementation would leave the
+    // second one never made at all. `host.idle()` is awaited further down,
+    // only once both requests have been released.
+    fireLatest(setTimeoutCalls);
     await flush();
 
     assert.equal(gated.inFlight(POSTER_URL), 1, 'the poster request must already be in flight');
@@ -887,7 +987,8 @@ test('images on different hosts are fetched in parallel', async () => {
 
     gated.release(POSTER_URL);
     gated.release(BACKGROUND_URL);
-    assert.equal(await artworkRun, true, 'the artwork job must complete once both requests are released');
+    await host.idle();
+    assert.equal(only(jobs(raw).filter((job) => job.kind === 'artwork'), 'artwork job').state, 'done', 'the artwork job must complete once both requests are released');
 
     assert.equal(only(artworkRows(raw, 'poster'), 'poster row').width, 300);
     assert.equal(only(artworkRows(raw, 'background'), 'background row').width, 1920);
@@ -906,16 +1007,20 @@ test('an image the service offers but the host cannot measure leaves the other t
       { role: 'background', url: BACKGROUND_URL, title: null, language: null },
       { role: 'logo', url: LOGO_URL, title: null, language: null },
     ]);
-    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const { raw, host, setTimeoutCalls } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
     const ids = given(raw, [MOVIE]);
 
     const outcome = await host.notifyNewRssItems(ids);
     assert.deepEqual(outcome.failures, []);
-    assert.equal(await host.runOnce(), true, 'the lookup job must run');
-    // The artwork job itself still "runs" -- `runOnce` only reports whether a
-    // job was claimed, not whether its handler succeeded -- but it fails,
-    // because the logo could not be measured.
-    assert.equal(await host.runOnce(), true, 'the artwork job attempt runs, even though it will fail overall');
+    host.start();
+    await runDue(host, setTimeoutCalls); // the lookup job, which schedules the artwork job
+    // The artwork job itself still "runs" -- the effect below is state, not
+    // whether it was merely claimed -- but it fails overall, because the
+    // logo could not be measured.
+    await runDue(host, setTimeoutCalls);
+    const artworkJob = only(jobs(raw).filter((job) => job.kind === 'artwork'), 'artwork job');
+    assert.equal(artworkJob.state, 'ready', 'the failed attempt must retry rather than dead-letter on its first try');
+    assert.equal(artworkJob.attempts, 1, 'the attempt was charged even though the handler failed overall');
 
     assert.equal(only(artworkRows(raw, 'poster'), 'poster row').width, 300);
     assert.equal(only(artworkRows(raw, 'background'), 'background row').width, 1920);
@@ -935,12 +1040,13 @@ test('re-running the artwork job attaches nothing new', async () => {
       { role: 'background', url: BACKGROUND_URL, title: null, language: null },
       { role: 'logo', url: LOGO_URL, title: null, language: null },
     ]);
-    const { raw, host } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
+    const { raw, host, setTimeoutCalls } = setup(script([grid]), { artworkDir, imagesFetch: images.fetch });
     const ids = given(raw, [MOVIE]);
 
     await host.notifyNewRssItems(ids);
-    assert.equal(await host.runOnce(), true, 'the lookup job must run');
-    assert.equal(await host.runOnce(), true, 'the artwork job must run');
+    host.start();
+    await runDue(host, setTimeoutCalls); // the lookup job, which schedules the artwork job
+    await runDue(host, setTimeoutCalls); // the artwork job
 
     const beforeRerun = {
       poster: artworkRows(raw, 'poster'),
@@ -950,12 +1056,18 @@ test('re-running the artwork job attaches nothing new', async () => {
     const filesBeforeRerun = await readdir(artworkDir);
     assert.equal(filesBeforeRerun.length, 3);
 
-    // Back to `ready`, exactly the state `recover` leaves a job the process
+    // Back to `ready`, exactly the state the crash sweep leaves a job the process
     // died holding -- see the crash test below -- and run the very same
     // payload through the very same handler a second time.
     const artworkJob = only(jobs(raw).filter((job) => job.kind === 'artwork'), 'artwork job');
     raw.prepare("UPDATE jobs SET state = 'ready' WHERE id = ?").run(artworkJob.id);
-    assert.equal(await host.runOnce(), true, 'the re-run must claim the same job');
+    // The row was flipped back to `ready` by a raw write, not through
+    // anything that would have called `dispatcher.rearm()` on its own --
+    // `host.start()` again is what notices it, the same re-arm-by-restart
+    // pattern `host.test.ts`'s own crash-recovery tests use.
+    host.start();
+    await runDue(host, setTimeoutCalls);
+    assert.equal(only(jobs(raw).filter((job) => job.kind === 'artwork'), 'artwork job').state, 'done', 'the re-run must claim the same job');
 
     assert.deepEqual(artworkRows(raw, 'poster'), beforeRerun.poster, 'one row, not two');
     assert.deepEqual(artworkRows(raw, 'background'), beforeRerun.background, 'one row, not two');
@@ -1039,6 +1151,37 @@ function snapshot(raw: DatabaseSync): Record<string, Row[]> {
   };
 }
 
+/**
+ * The wall-clock columns `withoutClocks` drops. Named once rather than
+ * repeated, so a table gaining another timestamp is a one-line change.
+ */
+const CLOCK_COLUMNS = new Set(['created_at', 'updated_at', 'run_at', 'started_at']);
+
+/**
+ * A `snapshot` with every wall-clock column dropped, for the crash test alone.
+ *
+ * The crash sweep readies its row one backoff step out rather than leaving
+ * `run_at` where it was, so the crashed run resumes a second behind the clean
+ * one and every timestamp written after that point is shifted by exactly that
+ * step. Which values shifted is not recoverable from the values themselves --
+ * a pre-crash `updated_at` of 1000 and a post-crash one of 1000 are the same
+ * number -- so the comparison drops them and the shift is asserted directly
+ * instead, in the two places it is legible: the readied row's own `run_at`,
+ * and the finished job's offset from the clean run's. What must still match
+ * row for row, ids included, is everything the flow *wrote*.
+ *
+ * Used nowhere else: every other caller of `snapshot` compares two runs of one
+ * host on one clock, where the timestamps are load-bearing and identical.
+ */
+function withoutClocks(snap: Record<string, Row[]>): Record<string, Row[]> {
+  return Object.fromEntries(Object.entries(snap).map(([table, rows]) => [
+    table,
+    rows.map((row) => Object.fromEntries(
+      Object.entries(row).filter(([column]) => !CLOCK_COLUMNS.has(column)),
+    )),
+  ]));
+}
+
 function lookupAttempts(raw: DatabaseSync): number {
   return only(jobs(raw).filter((job) => job.kind === 'lookup'), 'lookup job').attempts;
 }
@@ -1059,13 +1202,14 @@ test('a handler that runs to completion twice does not double-write', async () =
     description: 'A film about a grid.',
     people: [ADA, GRACE],
   });
-  const { raw, host } = setup(script([grid]));
+  const { raw, host, setTimeoutCalls } = setup(script([grid]));
   const ids = given(raw, [MOVIE]);
 
   const outcome = await host.notifyNewRssItems(ids);
   assert.deepEqual(outcome.unowned, []);
   assert.deepEqual(outcome.failures, []);
-  assert.equal(await host.runOnce(), true, 'the lookup must run the first time');
+  host.start();
+  await runDue(host, setTimeoutCalls);
   assert.equal(only(jobs(raw), 'job').state, 'done', 'the first run must finish, not hang');
 
   const afterFirstRun = snapshot(raw);
@@ -1074,11 +1218,16 @@ test('a handler that runs to completion twice does not double-write', async () =
   assert.equal(mediaItems(raw).length, 1);
   assert.equal(roles(raw).length, 2);
 
-  // Back to `ready`, which is exactly the state `recover` leaves a job the
-  // process died holding, and run the same payload through the same handler.
+  // Back to `ready`, which is exactly the state the crash sweep leaves a job
+  // the process died holding, and run the same payload through the same handler.
   const job = only(jobs(raw), 'job');
   raw.prepare("UPDATE jobs SET state = 'ready' WHERE id = ?").run(job.id);
-  assert.equal(await host.runOnce(), true, 'the re-run must claim the same job');
+  // The row was flipped back to `ready` by a raw write, not through anything
+  // that would have called `dispatcher.rearm()` on its own -- `host.start()`
+  // again is what notices it.
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  assert.equal(only(jobs(raw), 'job').state, 'done', 'the re-run must claim the same job');
 
   // `snapshot` leaves `jobs.attempts` out, which is the one column a second
   // run legitimately moves. Everything the handler wrote must be untouched:
@@ -1096,7 +1245,8 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   const cleanOutcome = await clean.host.notifyNewRssItems(cleanIds);
   assert.deepEqual(cleanOutcome.unowned, []);
   assert.deepEqual(cleanOutcome.failures, []);
-  await runToCompletion(clean.host, clean.clock, clean.raw);
+  clean.host.start();
+  await runToCompletion(clean.host, clean.clock, clean.raw, clean.setTimeoutCalls);
 
   // The run that dies: its own database, the same script, the same clock.
   const service = createFakeParserService(crashScript());
@@ -1111,6 +1261,7 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   // timeout aborts it and releases it -- far longer than this test, or a
   // restart, is willing to wait. So the restart below builds its own queue,
   // exactly as a real restarted process would.
+  const dyingTimers = createFakeTimers();
   const dying = createHost({
     raw,
     db,
@@ -1118,6 +1269,7 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
     downloads: unusedDownloads,
     artworkDir: unusedArtworkDir,
     now: () => clock.now(),
+    timers: dyingTimers.timers,
   });
   dying.register(plugin);
   const ids = given(raw, CRASH_FILENAMES);
@@ -1127,21 +1279,24 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   assert.deepEqual(outcome.failures, []);
 
   // Claims the lookup and starts the handler, which hangs on the batch request
-  // and never returns. The promise is deliberately dropped: this is the
-  // process going away mid-handler, not a rejection the runner could catch.
-  void dying.runOnce();
+  // and never returns. `idle()` is deliberately never awaited here: this is
+  // the process going away mid-handler, not a rejection the dispatcher could
+  // catch, so nothing waits for the hung handler to settle.
+  dying.start();
+  fireLatest(dyingTimers.setTimeoutCalls);
   await flush();
 
   const claimed = only(jobs(raw), 'job');
   assert.equal(claimed.state, 'running');
   // One attempt consumed, by the claim, before the handler ran. Deliberately
   // below `DEFAULT_MAX_ATTEMPTS`: a job crashing on its last permitted attempt
-  // is dead-lettered by `recover` instead, which would prove the opposite of
+  // is dead-lettered by the sweep instead, which would prove the opposite of
   // what this test is about.
   assert.equal(claimed.attempts, 1);
   assert.ok(claimed.attempts < DEFAULT_MAX_ATTEMPTS);
 
   // The restart: a new host over the same database, with its own fetch queue.
+  const restartedTimers = createFakeTimers();
   const restarted = createHost({
     raw,
     db,
@@ -1149,20 +1304,55 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
     downloads: unusedDownloads,
     artworkDir: unusedArtworkDir,
     now: () => clock.now(),
+    timers: restartedTimers.timers,
   });
   restarted.register(plugin);
   // Re-applying the plugin's migrations on restart runs none of them.
   assert.equal(migratePlugin(raw, DOUBLE_ID, plugin.migrations), 0, 'a restart must not re-run a migration');
 
-  // A row left `running` belongs to nobody until `recover` hands it back.
-  assert.equal(await restarted.runOnce(), false, 'a job left running is not claimable');
-  assert.equal(restarted.recover(), 1);
-  await runToCompletion(restarted, clock, raw);
+  // A row left `running` belongs to nobody until the next `start()`'s crash
+  // sweep hands it back, and that sweep is now the only recovery path there
+  // is -- so this is the branch's one end-to-end run of
+  // `crash -> start() sweep -> completion` through a real `Host` over a real
+  // plugin. Both integration crash tests previously routed around it, through
+  // a standalone `recover()` that production never called, which left the
+  // composed path measured only by dispatcher unit tests.
+  const stillRunning = only(jobs(raw), 'job');
+  assert.equal(stillRunning.state, 'running', 'merely constructing a fresh host must not claim a row left running');
+  assert.equal(restarted.start(), 1, 'the sweep is what hands a crashed row back');
+  // `run-job.ts`'s claim is what stamps `started_at`, and `dying.start()`
+  // above is what made this row's claim reach it -- the sweep must clear it
+  // on the row it readies, or a `ready` row would misreport itself as
+  // already started.
+  const recovered = only(rowsOf(raw, 'SELECT started_at, run_at, state FROM jobs'), 'job');
+  assert.equal(readIntegerOrNull(recovered, 'started_at'), null, 'a recovered ready row must not still claim to be running');
+  assert.equal(String(recovered.state), 'ready');
+  // The sweep backs the readied row off rather than leaving `run_at` where it
+  // was, so a job kind that kills the process backs off across restarts
+  // instead of re-crashing the instant the host comes back up. One attempt was
+  // consumed, so this is `backoffMs(1)` past the sweep's own `now` -- still
+  // `START`, since nothing has moved the clock since the crash.
+  assert.equal(readIntegerOrNull(recovered, 'run_at'), START + 1000, 'the sweep readied it one backoff step out');
+  // `runToCompletion` jumps the clock to meet whatever is next due, which is
+  // what carries the readied row past its own backoff.
+  await runToCompletion(restarted, clock, raw, restartedTimers.setTimeoutCalls);
 
-  assert.deepEqual(snapshot(raw), snapshot(clean.raw));
+  assert.deepEqual(withoutClocks(snapshot(raw)), withoutClocks(snapshot(clean.raw)));
 
-  // The one legitimate difference, asserted rather than ignored: the crashed
-  // attempt was consumed, which is why `recover` must not reset the count.
+  // The legitimate differences, asserted rather than ignored. First, the
+  // crashed attempt was consumed, which is why the sweep must not reset the
+  // count.
   assert.equal(lookupAttempts(raw), 2);
   assert.equal(lookupAttempts(clean.raw), 1);
+
+  // Second, the whole crashed run finished exactly one backoff step behind
+  // the clean one -- no more, which is what says the sweep's backoff is the
+  // only clock difference the crash introduced.
+  const crashedLookup = only(rowsOf(raw, "SELECT updated_at FROM jobs WHERE kind = 'lookup'"), 'lookup job');
+  const cleanLookup = only(rowsOf(clean.raw, "SELECT updated_at FROM jobs WHERE kind = 'lookup'"), 'lookup job');
+  assert.equal(
+    readInteger(crashedLookup, 'updated_at') - readInteger(cleanLookup, 'updated_at'),
+    1000,
+    'the crash cost exactly backoffMs(1), and nothing else drifted',
+  );
 });

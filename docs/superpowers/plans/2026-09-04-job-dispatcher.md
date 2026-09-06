@@ -463,26 +463,89 @@ git commit -m "Put the dispatcher behind the runner's shape, so the existing sui
 
 ---
 
-### Tasks 8, 9, 10: Migrate the job-driving tests
+### Task 8: Migrate `runner.test.ts` to the dispatcher idiom
 
-Three tasks, one per file, in this order. Each is the same shape, so each carries its own steps rather than referring to a sibling.
+**Files:**
+- Modify: `packages/host/test/jobs/runner.test.ts` (18 `runOnce` call sites)
 
-**Task 8 — `packages/host/test/jobs/runner.test.ts` (18 call sites)**
-**Task 9 — `packages/host/test/host.test.ts` (12 call sites)**
-**Task 10 — `packages/host/test/double/flow.test.ts` (26 call sites)**
+**Interfaces:**
+- Consumes: `Host.start(handlers, ctxFor)`, `Host.stop()`, `Host.idle()`, the injected `Timers`, and — for now — the temporary `runOnce()` adapter.
+- Produces: nothing. This task moves a test file from one idiom to the other.
 
-For each file:
+- [ ] **Step 1: Record the file's test count and run it green.** Report the number; it is the baseline your own change is measured against.
 
-- [ ] **Step 1: Record the file's test count and run it green.**
-- [ ] **Step 2: Replace each `await host.runOnce()` with the dispatcher idiom** — advance the injected timer to fire, then `await host.idle()`. Where a test asserted `runOnce()` returned `true` or `false`, assert the observable instead: a row's state, a handler's call count, a job's `run_at`. **A test that asserted a return value should now assert an effect**, which is stronger.
-- [ ] **Step 3: Where a test steps through a chain one job at a time, set `concurrency: 1`** rather than relying on the dispatcher being serial by nature. Say in your report which tests needed it — a test needing serial execution is telling you something about the code it covers.
-- [ ] **Step 4: Run the file green, then the full suite.**
-- [ ] **Step 5: Prove nothing was weakened** — pick the three tests in the file whose assertions changed most and mutate the code each covers, confirming each still fails. Report them by name.
-- [ ] **Step 6: Commit**
+- [ ] **Step 2: Replace each `await host.runOnce()` with the dispatcher idiom** — advance the injected timer to fire, then `await host.idle()`. Where a test asserted `runOnce()` returned `true` or `false`, **assert the observable instead**: a row's state, a handler's call count, a job's `run_at`. A test that asserted a return value should now assert an effect, which is strictly stronger.
+
+- [ ] **Step 3: Run both idioms against the same assertions once, and this is time-limited.** The adapter bypasses `Dispatcher` entirely, so `runOnce` passing proves only that the *adapter* preserves behaviour. Pick at least one test in this file, drive it **both** ways — old `runOnce`, then advance-timer-plus-`idle` — against identical assertions, and confirm they agree. Task 12 deletes the adapter and closes this window permanently, so the comparison is possible only while both exist. Report which test you used and what you observed.
+
+- [ ] **Step 4: Where a test steps through a chain one job at a time, set `concurrency: 1`** rather than relying on the dispatcher being serial by nature. Say in your report which tests needed it — a test that needs serial execution is telling you something about the code it covers.
+
+- [ ] **Step 5: Run the file green, then the full suite.**
+
+- [ ] **Step 6: Prove nothing was weakened.** Pick the three tests whose assertions changed most, mutate the code each covers, and confirm each still fails. Report them by name with counts. If a migrated test can no longer fail, that is a finding — seven unpinned spots have already been found on this plan.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add packages/host
-git commit -m "Drive <file>'s jobs by advancing the clock rather than by claiming one at a time"
+git commit -m "Drive runner.test.ts's jobs by advancing the clock rather than by claiming one at a time" -- packages/host/test/jobs/runner.test.ts
+```
+
+---
+
+### Task 9: Migrate `host.test.ts` to the dispatcher idiom
+
+**Files:**
+- Modify: `packages/host/test/host.test.ts` (12 `runOnce` call sites)
+
+**Interfaces:**
+- Consumes: `Host.start(handlers, ctxFor)`, `Host.stop()`, `Host.idle()`, the injected `Timers`, and — for now — the temporary `runOnce()` adapter.
+- Produces: nothing. This task moves a test file from one idiom to the other.
+
+- [ ] **Step 1: Record the file's test count and run it green.** Report the number; it is the baseline your own change is measured against.
+
+- [ ] **Step 2: Replace each `await host.runOnce()` with the dispatcher idiom** — advance the injected timer to fire, then `await host.idle()`. Where a test asserted `runOnce()` returned `true` or `false`, **assert the observable instead**: a row's state, a handler's call count, a job's `run_at`. A test that asserted a return value should now assert an effect, which is strictly stronger.
+
+- [ ] **Step 3: Run both idioms against the same assertions once, and this is time-limited.** The adapter bypasses `Dispatcher` entirely, so `runOnce` passing proves only that the *adapter* preserves behaviour. Pick at least one test in this file, drive it **both** ways — old `runOnce`, then advance-timer-plus-`idle` — against identical assertions, and confirm they agree. Task 12 deletes the adapter and closes this window permanently, so the comparison is possible only while both exist. Report which test you used and what you observed.
+
+- [ ] **Step 4: Where a test steps through a chain one job at a time, set `concurrency: 1`** rather than relying on the dispatcher being serial by nature. Say in your report which tests needed it — a test that needs serial execution is telling you something about the code it covers.
+
+- [ ] **Step 5: Run the file green, then the full suite.**
+
+- [ ] **Step 6: Prove nothing was weakened.** Pick the three tests whose assertions changed most, mutate the code each covers, and confirm each still fails. Report them by name with counts. If a migrated test can no longer fail, that is a finding — several unpinned spots have already been found on this plan.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git commit -m "Drive host.test.ts's jobs by advancing the clock rather than by claiming one at a time" -- packages/host/test/host.test.ts
+```
+
+---
+
+### Task 10: Migrate `flow.test.ts` to the dispatcher idiom
+
+**Files:**
+- Modify: `packages/host/test/double/flow.test.ts` (26 `runOnce` call sites)
+
+**Interfaces:**
+- Consumes: `Host.start(handlers, ctxFor)`, `Host.stop()`, `Host.idle()`, the injected `Timers`, and — for now — the temporary `runOnce()` adapter.
+- Produces: nothing. This task moves a test file from one idiom to the other.
+
+- [ ] **Step 1: Record the file's test count and run it green.** Report the number; it is the baseline your own change is measured against.
+
+- [ ] **Step 2: Replace each `await host.runOnce()` with the dispatcher idiom** — advance the injected timer to fire, then `await host.idle()`. Where a test asserted `runOnce()` returned `true` or `false`, **assert the observable instead**: a row's state, a handler's call count, a job's `run_at`. A test that asserted a return value should now assert an effect, which is strictly stronger.
+
+- [ ] **Step 3: Run both idioms against the same assertions once, and this is time-limited.** The adapter bypasses `Dispatcher` entirely, so `runOnce` passing proves only that the *adapter* preserves behaviour. Pick at least one test in this file, drive it **both** ways — old `runOnce`, then advance-timer-plus-`idle` — against identical assertions, and confirm they agree. Task 12 deletes the adapter and closes this window permanently, so the comparison is possible only while both exist. Report which test you used and what you observed.
+
+- [ ] **Step 4: Where a test steps through a chain one job at a time, set `concurrency: 1`** rather than relying on the dispatcher being serial by nature. Say in your report which tests needed it — a test that needs serial execution is telling you something about the code it covers.
+
+- [ ] **Step 5: Run the file green, then the full suite.**
+
+- [ ] **Step 6: Prove nothing was weakened.** Pick the three tests whose assertions changed most, mutate the code each covers, and confirm each still fails. Report them by name with counts. If a migrated test can no longer fail, that is a finding — several unpinned spots have already been found on this plan.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git commit -m "Drive flow.test.ts's jobs by advancing the clock rather than by claiming one at a time" -- packages/host/test/double/flow.test.ts
 ```
 
 ---

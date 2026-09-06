@@ -10,6 +10,21 @@ export interface PollResult {
   skipped: number;
 }
 
+/**
+ * How many previously-undelivered rows one poll re-offers alongside its
+ * freshly-inserted ones. Every newly-inserted id is always included, in
+ * full, however many there are -- this cap bounds only the catch-up on top
+ * of that, so a feed that piled up a large backlog while unowned (no
+ * registered plugin, or a plugin that kept rejecting) hands its owner a
+ * bounded batch each cycle instead of every undelivered row it has ever
+ * seen in one call. 500 is comfortably above a normal feed's per-poll new-
+ * item count, so the ordinary path never notices it, while still retiring a
+ * large backlog over a handful of poll cycles rather than never. Chosen
+ * ids are the oldest undelivered ones first, so a backlog drains front-to-
+ * back rather than starving its oldest rows indefinitely.
+ */
+export const MAX_CATCHUP_PER_POLL = 500;
+
 /** The columns a poll needs from `rss_feed`, narrowed once per call rather than re-read per entry. */
 interface FeedRow {
   url: string;
@@ -64,6 +79,23 @@ export function createFeedReader(deps: {
     RETURNING id
   `);
 
+  // Undelivered rows for one feed, oldest id first, over-fetched by however
+  // many rows this same poll just inserted: a fresh insert also has a null
+  // `delivered_at`, so it appears in this result set alongside true
+  // backlog -- over-fetching by `inserted.length` and filtering those ids
+  // back out below guarantees at least `MAX_CATCHUP_PER_POLL` genuinely
+  // separate catch-up ids survive, rather than the cap being silently eaten
+  // by the very rows `inserted` already covers.
+  const undelivered = deps.raw.prepare(`
+    SELECT id FROM rss_item WHERE feed_id = ? AND delivered_at IS NULL ORDER BY id ASC LIMIT ?
+  `);
+
+  // Marks one row delivered. A loop over single-row updates, not one
+  // dynamic `IN (...)` statement: the ids marked in one call are already
+  // bounded by `inserted.length + MAX_CATCHUP_PER_POLL`, so there is no
+  // batch here large enough for that to matter.
+  const markDelivered = deps.raw.prepare('UPDATE rss_item SET delivered_at = ? WHERE id = ?');
+
   return {
     async pollFeed(feedId) {
       const feed = feedRow(deps.raw, feedId);
@@ -88,10 +120,20 @@ export function createFeedReader(deps: {
         inserted.push(Number((row as { id: unknown }).id));
       }
 
+      // Every newly-inserted id is offered in full, always; catch-up on top
+      // of that is capped. See `MAX_CATCHUP_PER_POLL`'s own doc for why a
+      // cap that let a backlog crowd out new items would be its own bug.
+      const insertedSet = new Set(inserted);
+      const catchup = undelivered.all(feedId, MAX_CATCHUP_PER_POLL + inserted.length)
+        .map((row) => Number((row as { id: unknown }).id))
+        .filter((id) => !insertedSet.has(id))
+        .slice(0, MAX_CATCHUP_PER_POLL);
+      const offered = [...inserted, ...catchup];
+
       // Always called, even with an empty list: a quiet feed still reports
       // "nothing new" rather than skipping the call, so a caller watching
       // `notify` can tell "polled, found nothing" from "never polled".
-      const outcome = await deps.notify(inserted);
+      const outcome = await deps.notify(offered);
 
       // Both halves of `NotifyOutcome` are read, neither behind the other:
       // a feed naming an unregistered plugin and a plugin that threw are
@@ -102,6 +144,21 @@ export function createFeedReader(deps: {
       }
       for (const failure of outcome.failures) {
         deps.log('plugin failed on new items', { feedId, pluginId: failure.pluginId, error: String(failure.error) });
+      }
+
+      // A feed names exactly one plugin, so `failures` here is all-or-
+      // nothing for this whole batch: a non-empty `failures` means that one
+      // plugin threw on it, and marking anything delivered would lose the
+      // rows it never actually finished handling -- they are re-offered
+      // next poll instead. Otherwise every offered id is delivered except
+      // the ones reported `unowned`, which stay undelivered so they are
+      // re-offered the moment a plugin exists to receive them.
+      if (outcome.failures.length === 0) {
+        const unownedSet = new Set(outcome.unowned);
+        for (const id of offered) {
+          if (unownedSet.has(id)) continue;
+          markDelivered.run(at, id);
+        }
       }
 
       return { inserted, skipped };

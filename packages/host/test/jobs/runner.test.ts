@@ -4,12 +4,14 @@ import type { JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createRunner } from '../../src/jobs/runner.ts';
+import { createDispatcher } from '../../src/jobs/dispatcher.ts';
+import type { Timers } from '../../src/jobs/dispatcher.ts';
 
 /**
  * A `PluginContext` whose capabilities all reject if called. No test here
- * exercises a plugin's own writes — `runOnce` only needs *some* context to
- * hand a handler — so a capability firing at all means a test reached further
- * than intended.
+ * exercises a plugin's own writes — a job here only ever needs *some*
+ * context to hand a handler — so a capability firing at all means a test
+ * reached further than intended.
  */
 const fakeCtx: PluginContext = {
   db: undefined,
@@ -49,23 +51,75 @@ function readJob(raw: ReturnType<typeof openTestDatabase>['raw'], id: number) {
 /** Shared by every test whose handler must throw; none of them reads the message. */
 const boom: JobHandler = async () => { throw new Error('handler boom'); };
 
-/** The default `release` a `let` starts from, before a test's promise assigns its resolver. */
-const noop = () => {};
+/** One `setTimeout`/`setInterval` call, as the fake `Timers` below records it. */
+interface TimerCall {
+  handle: number;
+  ms: number;
+  fn: () => void;
+}
+
+/**
+ * A `Timers` whose every call is logged rather than actually scheduled, the
+ * same fake `dispatcher.test.ts` builds for `createDispatcher` directly —
+ * duplicated here rather than imported, since neither file shares a
+ * test-support module with the other. "Advancing the clock" in this file
+ * means invoking a logged `fn` directly, never waiting on real time.
+ */
+function createFakeTimers(): { timers: Timers; setTimeoutCalls: TimerCall[] } {
+  let nextHandle = 0;
+  const setTimeoutCalls: TimerCall[] = [];
+  const timers: Timers = {
+    setTimeout(fn, ms) {
+      const handle = ++nextHandle;
+      setTimeoutCalls.push({ handle, ms, fn });
+      return handle;
+    },
+    clearTimeout() {},
+    setInterval(_fn, _ms) {
+      const handle = ++nextHandle;
+      // No test here drives the safety interval directly, so its own call
+      // is recorded nowhere — only its handle needs to exist, so `stop()`
+      // has something to clear.
+      return handle;
+    },
+    clearInterval() {},
+  };
+  return { timers, setTimeoutCalls };
+}
+
+/** A `sleep` no test here ever waits on: nothing in this file drives a handler past its timeout. */
+const noopSleep = (_ms: number): Promise<void> => Promise.resolve();
+
+/** A real signal, for every test that never fires it and needs no fake. */
+const realAbortSignal = (ms: number): AbortSignal => AbortSignal.timeout(ms);
+
+const noopLog = (): void => {};
 
 test('a ready job is claimed, run, and marked done', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 3 });
 
   const id = runner.enqueue('alpha', { kind: 'greet', payload: { name: 'ada' } });
   assert.equal(typeof id, 'number');
 
   let seen: JobRecord | undefined;
   const handler: JobHandler = async (job) => { seen = job; };
-  const ran = await runner.runOnce(() => handler, () => fakeCtx);
 
-  assert.equal(ran, true);
+  // Driven directly through `createDispatcher`, the same object
+  // `Host.start()`/`stop()`/`idle()` wrap, rather than through `Host`
+  // itself: this file, like `dispatcher.test.ts`, needs no plugin
+  // registration, no fetch queue and no download clients — only a raw
+  // database and the dispatcher's own methods.
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => handler, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer for the due job');
+  fire();
+  await dispatcher.idle();
+
   assert.ok(seen, 'handler was never invoked');
   assert.equal(seen.id, id);
   assert.equal(seen.kind, 'greet');
@@ -80,31 +134,56 @@ test('a job whose run_at is in the future is not claimed', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 3 });
 
-  runner.enqueue('alpha', { kind: 'greet', payload: {}, runAt: now + 10_000 });
+  const id = runner.enqueue('alpha', { kind: 'greet', payload: {}, runAt: now + 10_000 });
 
-  // `boom` stands in for "must not run": nothing due means `runOnce` never
-  // gets far enough to call it.
-  const ran = await runner.runOnce(() => boom, () => fakeCtx);
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => boom, () => fakeCtx);
 
-  assert.equal(ran, false);
+  // `boom` stands in for "must not run": `fire` re-checks `run_at <= now()`
+  // against the clock, not against the fact that a timer callback ran, so
+  // invoking it here — as if 10 real seconds had somehow already elapsed —
+  // still finds nothing due. If it ever dispatched anyway, `boom` throwing
+  // would move the row out of `ready` and the assertions below would catch it.
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+  await dispatcher.idle();
+
+  const row = readJob(raw, id);
+  assert.equal(row.state, 'ready', 'a job not yet due must not be claimed');
+  assert.equal(row.attempts, 0);
 });
 
 test('a throwing handler is retried with backoff written to run_at', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: (attempts) => attempts * 5000, defaultMaxAttempts: 5 });
+  // A rejected handler retries through `run-job.ts`'s own `failRow`, which
+  // always uses `../../src/jobs/backoff.ts`'s fixed curve, the one every
+  // retry path in this package shares — `RunnerOptions` has no `backoffMs`
+  // of its own to inject one.
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 5 });
 
   const id = runner.enqueue('alpha', { kind: 'boom', payload: {} });
-  const ran = await runner.runOnce(() => boom, () => fakeCtx);
 
-  assert.equal(ran, true);
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => boom, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+  await dispatcher.idle();
+
   const row = readJob(raw, id);
   assert.equal(row.state, 'ready');
   // Read back from the row, not from elapsed time: the clock is injected.
-  assert.equal(row.run_at, now + 5000);
+  // 1000 is `backoffMs(1)` from `../../src/jobs/backoff.ts`, hardcoded
+  // rather than computed by calling that function: computing it here would
+  // let a broken curve cancel itself out against this same assertion.
+  assert.equal(row.run_at, now + 1000);
   assert.equal(row.attempts, 1);
   assert.equal(row.last_error, 'handler boom');
 });
@@ -113,7 +192,7 @@ test('backoff is measured from when the handler failed, not from when the job wa
   const { raw } = openTestDatabase();
   migrateHost(raw);
   let now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 5000, defaultMaxAttempts: 5 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 5 });
 
   const id = runner.enqueue('alpha', { kind: 'slow', payload: {} });
 
@@ -125,14 +204,23 @@ test('backoff is measured from when the handler failed, not from when the job wa
     now += 30_000;
     throw new Error('handler boom');
   };
-  assert.equal(await runner.runOnce(() => slow, () => fakeCtx), true);
+
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => slow, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+  await dispatcher.idle();
 
   const row = readJob(raw, id);
   assert.equal(row.state, 'ready');
-  // 31_000 is when it failed. Offsetting from the claim would give 6_000,
-  // already in the past — a handler slower than its curve would retry with no
-  // delay at all, and one much slower would retry instantly until it died.
-  assert.equal(row.run_at, 36_000, 'run_at is the failure time plus the backoff');
+  // 31_000 is when it failed. Offsetting from the claim would give 2_000,
+  // already in the past — a handler slower than its curve would retry with
+  // no delay at all, and one much slower would retry instantly until it
+  // died. 1000 is `backoffMs(1)`, hardcoded for the same reason as the test
+  // above: computing it here would let a broken curve cancel itself out.
+  assert.equal(row.run_at, 31_000 + 1000, 'run_at is the failure time plus the backoff');
   assert.equal(row.updated_at, 31_000, 'the row was written when the handler failed, not when it was claimed');
 });
 
@@ -140,17 +228,33 @@ test('a handler that always throws reaches dead after max_attempts, and its row 
   const { raw } = openTestDatabase();
   migrateHost(raw);
   let now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 2 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 2 });
 
   const id = runner.enqueue('alpha', { kind: 'boom', payload: {} });
 
-  const first = await runner.runOnce(() => boom, () => fakeCtx);
-  assert.equal(first, true);
-  assert.equal(readJob(raw, id).state, 'ready', 'first failure retries, it does not dead-letter yet');
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => boom, () => fakeCtx);
+  const firstFire = setTimeoutCalls[0]?.fn;
+  assert.ok(firstFire, 'construction did not arm a timer');
+  firstFire();
+  await dispatcher.idle();
 
-  now += 1;
-  const second = await runner.runOnce(() => boom, () => fakeCtx);
-  assert.equal(second, true);
+  const afterFirst = readJob(raw, id);
+  assert.equal(afterFirst.state, 'ready', 'first failure retries, it does not dead-letter yet');
+  assert.equal(afterFirst.attempts, 1);
+
+  // Advance the clock to (at least) the backoff the first failure wrote,
+  // then re-derive the timer from the now-due row rather than assume the
+  // dispatcher rearmed on its own — nothing here calls `rearm` except this
+  // test, since a real host's safety interval is what would do it in
+  // production.
+  now = Number(afterFirst.run_at);
+  dispatcher.rearm();
+  const secondFire = setTimeoutCalls.at(-1)?.fn;
+  assert.ok(secondFire, 'rearm did not arm a timer for the retry');
+  secondFire();
+  await dispatcher.idle();
 
   const row = readJob(raw, id);
   assert.equal(row.state, 'dead');
@@ -162,7 +266,7 @@ test('the claim and the attempt increment are one statement, not two', async () 
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 3 });
 
   // Every UPDATE to `jobs`, recorded as it lands. A process can be killed
   // between two statements but not inside one, so "how many writes did the
@@ -188,153 +292,52 @@ test('the claim and the attempt increment are one statement, not two', async () 
         return { state: audited.state, attempts: audited.attempts };
       });
   };
-  assert.equal(await runner.runOnce(() => handler, () => fakeCtx), true);
+
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => handler, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+  await dispatcher.idle();
 
   // One write, carrying both facts. Two writes — `running` with the old
-  // count, then the count — is the window a crash slips through: `recover`
-  // would read `attempts` as unconsumed, ready the row, and hand the same
-  // process-killing job back on every restart.
+  // count, then the count — is the window a crash slips through: the next
+  // `start()`'s crash sweep would read `attempts` as unconsumed, ready the
+  // row, and hand the same process-killing job back on every restart.
   assert.deepEqual(duringHandler, [{ state: 'running', attempts: 1 }]);
-});
-
-test('recover returns a job left running to ready', async () => {
-  const { raw } = openTestDatabase();
-  migrateHost(raw);
-  const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
-
-  const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
-
-  // A handler that never resolves, standing in for a process that crashed
-  // mid-handler. Calling `runOnce` without awaiting it runs the claim — which
-  // is one statement, so there is no point between taking the row and
-  // consuming its attempt for this simulation to miss — and then leaves the
-  // row `running` forever, which is what a crashed process leaves behind.
-  let release = noop;
-  const hang = new Promise<void>((resolve) => { release = resolve; });
-  const handler: JobHandler = async () => { await hang; };
-  const stalled = runner.runOnce(() => handler, () => fakeCtx);
-
-  const stuck = readJob(raw, id);
-  assert.equal(stuck.state, 'running');
-  assert.equal(stuck.attempts, 1);
-
-  // Simulate the restart: a brand new runner over the same database.
-  const restarted = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
-  const recovered = restarted.recover();
-  assert.equal(recovered, 1);
-
-  const row = readJob(raw, id);
-  assert.equal(row.state, 'ready');
-  // The crashed attempt already consumed a try; recovering it must not reset
-  // that count, or a handler that crashes the process retries forever.
-  assert.equal(row.attempts, 1);
-
-  release();
-  await stalled;
-});
-
-test('recover dead-letters a job that crashed on its last permitted attempt, rather than readying it', async () => {
-  const { raw } = openTestDatabase();
-  migrateHost(raw);
-  const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 1 });
-
-  const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
-
-  // Same crash simulation as the test above, but `defaultMaxAttempts` is 1,
-  // so the one attempt this claim consumes is also the last permitted one.
-  let release = noop;
-  const hang = new Promise<void>((resolve) => { release = resolve; });
-  const handler: JobHandler = async () => { await hang; };
-  const stalled = runner.runOnce(() => handler, () => fakeCtx);
-
-  const stuck = readJob(raw, id);
-  assert.equal(stuck.state, 'running');
-  assert.equal(stuck.attempts, 1); // == max_attempts: nothing left to retry with
-
-  const restarted = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 1 });
-  const recovered = restarted.recover();
-  assert.equal(recovered, 1);
-
-  const row = readJob(raw, id);
-  // Readying this row again would hand the same crash back to the next
-  // restart, forever - it has to dead-letter instead.
-  assert.equal(row.state, 'dead');
-  assert.equal(row.attempts, 1);
-  // Not merely "some non-empty string": a crash and a rejection are different
-  // diagnoses, and `recover` sets this message specifically so a reader can
-  // tell which happened. Any other non-empty literal would satisfy a length
-  // check and satisfy nobody reading the row.
-  assert.match(
-    String(row.last_error),
-    /crashed/,
-    'a row dead because the process died has to say that is why',
-  );
-
-  release();
-  await stalled;
-});
-
-test('recover replaces a stale rejection message rather than letting it explain a crash', async () => {
-  const { raw } = openTestDatabase();
-  migrateHost(raw);
-  const now = 1000;
-  const options = { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 2 };
-  const runner = createRunner(raw, options);
-
-  const id = runner.enqueue('alpha', { kind: 'stuck', payload: {} });
-
-  // Attempt one rejects, so the row really does carry a rejection's message —
-  // which is what makes the assertion below capable of failing. A job that had
-  // never rejected would have `last_error` NULL, and "the crash message is not
-  // the rejection's" would hold whatever `recover` wrote.
-  assert.equal(await runner.runOnce(() => boom, () => fakeCtx), true);
-  assert.equal(readJob(raw, id).last_error, 'handler boom');
-
-  // Attempt two is the last permitted one, and this time the process dies.
-  let release = noop;
-  const hang = new Promise<void>((resolve) => { release = resolve; });
-  const handler: JobHandler = async () => { await hang; };
-  const stalled = runner.runOnce(() => handler, () => fakeCtx);
-  assert.equal(readJob(raw, id).attempts, 2);
-
-  assert.equal(createRunner(raw, options).recover(), 1);
-
-  const row = readJob(raw, id);
-  assert.equal(row.state, 'dead');
-  assert.notEqual(
-    row.last_error,
-    'handler boom',
-    'this row is dead because the process died, not because the handler threw',
-  );
-  assert.match(String(row.last_error), /crashed/);
-
-  release();
-  await stalled;
 });
 
 test('a job whose kind has no handler goes dead rather than silently vanishing', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 3 });
 
   const id = runner.enqueue('alpha', { kind: 'mystery', payload: {} });
-  const ran = await runner.runOnce(() => undefined, () => fakeCtx);
 
-  assert.equal(ran, true);
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(() => undefined, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+  await dispatcher.idle();
+
   const row = readJob(raw, id);
   assert.equal(row.state, 'dead');
   assert.equal(typeof row.last_error, 'string');
   assert.ok(String(row.last_error).includes('mystery'), 'last_error should name the unhandled kind');
+  // Never claimed: a kind nobody will ever register a handler for gains
+  // nothing from an attempt charged against it.
+  assert.equal(row.attempts, 0, 'an unhandled kind must not be charged an attempt it never ran');
 });
 
 test('claiming takes the earliest run_at, then the lowest id', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const now = 1000;
-  const runner = createRunner(raw, { now: () => now, backoffMs: () => 0, defaultMaxAttempts: 3 });
+  const runner = createRunner(raw, { now: () => now, defaultMaxAttempts: 3 });
 
   const late = runner.enqueue('alpha', { kind: 'k', payload: {}, runAt: now });
   const earlyLowerId = runner.enqueue('alpha', { kind: 'k', payload: {}, runAt: now - 100 });
@@ -344,9 +347,24 @@ test('claiming takes the earliest run_at, then the lowest id', async () => {
   const order: number[] = [];
   const handler: JobHandler = async (job) => { order.push(job.id); };
 
-  assert.equal(await runner.runOnce(() => handler, () => fakeCtx), true);
-  assert.equal(await runner.runOnce(() => handler, () => fakeCtx), true);
-  assert.equal(await runner.runOnce(() => handler, () => fakeCtx), true);
+  // `concurrency: 1`: all three rows are already due, so with the
+  // dispatcher's own default concurrency a single fire would claim all
+  // three in one pass — proving the same `ORDER BY run_at, id` but not the
+  // one-at-a-time claiming three sequential `runOnce` calls exercised.
+  // Forcing one slot is what makes each of the three `fire` calls below
+  // land on exactly the next row in claim order, each queued behind the
+  // last until its own slot frees.
+  const { timers, setTimeoutCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, {
+    now: () => now, timers, concurrency: 1, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal,
+  });
+  dispatcher.start(() => handler, () => fakeCtx);
+  const fire = setTimeoutCalls[0]?.fn;
+  assert.ok(fire, 'construction did not arm a timer');
+  fire();
+  fire();
+  fire();
+  await dispatcher.idle();
 
   assert.deepEqual(order, [earlyLowerId, earlyHigherId, late]);
 });

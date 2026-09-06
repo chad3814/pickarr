@@ -1,4 +1,6 @@
 import type { HostFetch } from '@pickarr/contract';
+import { createBoundedQueue, isValidLimit } from '../util/bounded-queue.ts';
+import type { BoundedQueue } from '../util/bounded-queue.ts';
 
 /**
  * `createHostFetch`'s actual return shape: `HostFetch`'s two methods plus
@@ -33,28 +35,23 @@ export interface FetchLimits {
 }
 
 /**
- * A hostname's concurrency budget: `running` counts requests currently
- * inside `task()`, capped at `limit`; `waiting` holds a resolver per
- * request that arrived once the cap was already hit, in arrival order.
- */
-interface HostQueue {
-  running: number;
-  limit: number;
-  waiting: Array<() => void>;
-}
-
-/**
- * A limit of 0 or below is not "disable this host" -- it is `q.running >=
- * q.limit` (e.g. `0 >= 0`) true before any request has ever run, so the
- * very first request queues behind a slot nothing will ever grant. Nothing
- * later would observe that: no error, no timeout, just a promise that never
- * settles. Reject it here, at construction, loudly and by name, rather than
- * clamp it -- clamping would silently substitute behaviour nobody asked for,
- * and rather than let it surface invisibly whenever the first request to
- * that hostname happens to be made.
+ * A limit of 0 or below is not "disable this host" -- handed to
+ * `createBoundedQueue`, it would make `running >= limit` true before any
+ * request to that hostname has ever run, so the very first one queues
+ * behind a slot nothing will ever grant. Nothing later would observe that:
+ * no error, no timeout, just a promise that never settles.
+ * `createBoundedQueue` rejects a bad limit too, but only once a hostname's
+ * first request builds its queue, and only by value. Checking here, at
+ * `createHostFetch` construction, rejects it immediately and names which
+ * config key -- `'default'` or the hostname -- is at fault, rather than
+ * let a bad value surface invisibly whenever that hostname's first request
+ * happens to be made.
  */
 function assertValidLimit(name: string, value: number): void {
-  if (!Number.isInteger(value) || value < 1) {
+  // `isValidLimit` rather than a second copy of the comparison: the rule is
+  // the queue's, and only the message is this layer's, which is what names
+  // the offending config key for whoever has to fix it.
+  if (!isValidLimit(value)) {
     throw new Error(`fetch limit for '${name}' must be an integer of at least 1, got ${value}`);
   }
 }
@@ -88,13 +85,18 @@ function assertValidTimeout(value: number): void {
  * How long one request may take before it is aborted -- 1.x's own number
  * (`FETCH_TIMEOUT_MS` in `packages/core/src/feeds/fetch-feed.ts`), applied
  * here rather than at each call site so that every caller of
- * `json`/`bytes`/`text` gets it without having to remember to.
+ * `json`/`bytes`/`text` gets it without having to remember to. Measured from
+ * the call, not from the moment a hostname slot is granted, so the time spent
+ * queued counts against it too -- see `fetched` below for why that is where
+ * the signal is armed.
  *
- * A request that never settles is the one failure nothing above this can
- * survive: it holds its hostname's only queue slot forever, and because the
- * pump runs one job at a time it holds that job's claim and the pump's own
- * loop with it -- so no job of any kind runs again, and `Pump.done` never
- * resolves, which means even `SIGTERM` cannot end the process.
+ * Without it, a request that never settles is the one failure nothing above
+ * this can survive: it would hold its hostname's own queue slot, and with it
+ * one of the dispatcher's concurrency slots (`jobs/dispatcher.ts`), for as
+ * long as the process runs. `Host.stop()` abandons an in-flight handler
+ * rather than waiting on it, so a hang here no longer keeps
+ * `SIGINT`/`SIGTERM` from ending the process -- it would only starve that
+ * one slot of ever running anything else.
  */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -119,62 +121,84 @@ export function createHostFetch(
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   assertValidTimeout(timeoutMs);
 
-  const queues = new Map<string, HostQueue>();
+  // One `BoundedQueue` per hostname, built lazily on that hostname's first
+  // request so a hostname never mentioned in `deps.limits` never gets an
+  // entry it doesn't need.
+  const queues = new Map<string, BoundedQueue>();
 
-  function queueFor(hostname: string): HostQueue {
+  function queueFor(hostname: string): BoundedQueue {
     const existing = queues.get(hostname);
     if (existing) return existing;
 
     const limit = deps.limits?.perHost?.[hostname] ?? deps.limits?.default ?? 1;
-    const created: HostQueue = { running: 0, limit, waiting: [] };
+    const created = createBoundedQueue(limit);
     queues.set(hostname, created);
     return created;
   }
 
-  async function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
-    const q = queueFor(hostname);
-    if (q.running >= q.limit) {
-      await new Promise<void>((resolve) => { q.waiting.push(resolve); });
-    }
-    q.running += 1;
-    try {
-      return await task();
-    } finally {
-      // Runs whether `task` resolved or rejected. Drop either half of this
-      // and a rejected request leaves its slot permanently occupied: every
-      // later request to that hostname either queues past the real limit
-      // (skip the decrement) or waits on a wake that never comes (skip the
-      // shift) -- the queue is wedged forever, silently.
-      q.running -= 1;
-      q.waiting.shift()?.();
-    }
+  function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
+    return queueFor(hostname).run(task);
   }
 
   /**
-   * One request, under the timeout, from the call to `fetch` through reading
-   * its body -- the body is inside the window deliberately, matching 1.x,
-   * where the signal stays live across `await response.text()`: a host that
-   * answers with headers and then stalls the stream wedges a slot exactly as
-   * one that never answers at all. `read` is called INSIDE the race for that
-   * reason, and `queue.test.ts`'s stalled-body test fails if it is moved
-   * outside -- otherwise the race settles on the response and the body read
-   * hangs on afterwards, still holding the slot and the job claim.
+   * One request, under the timeout, from the moment it is asked for through
+   * reading its body -- the body is inside the window deliberately, matching
+   * 1.x, where the signal stays live across `await response.text()`: a host
+   * that answers with headers and then stalls the stream wedges a slot
+   * exactly as one that never answers at all. `read` is called INSIDE the
+   * race for that reason, and `queue.test.ts`'s stalled-body test fails if it
+   * is moved outside -- otherwise the race settles on the response and the
+   * body read hangs on afterwards, still holding the slot and the job claim.
    *
-   * Two mechanisms, and both are load-bearing. The composed signal is what
-   * cancels a real request (undici aborts the socket and errors a body
-   * already streaming), so a timed-out fetch stops costing anything. The
-   * race is what makes this *reject* rather than hang if the `fetch` it was
-   * handed ignores the signal -- and rejecting is what runs `enqueue`'s
-   * `finally`, releasing the hostname slot. A caller's own signal is
-   * composed with the timeout rather than replaced by it, so passing one
-   * cannot silently opt out of the timeout and the timeout cannot silently
-   * discard it.
+   * **The timeout is armed here, before `enqueue`, not inside the queued
+   * task.** Armed inside -- where it was until this was measured -- a
+   * request's clock only started once its hostname's slot was granted, so a
+   * waiter's wall clock was `its own budget + however long everyone ahead of
+   * it took`. Each task ahead does release within `timeoutMs` (the race
+   * below is what guarantees that), so the old bound was not unbounded; it
+   * was `(queue position) x timeoutMs`, and nothing bounds the depth -- one
+   * handler may ask for as many images from one CDN as it likes. At the
+   * default limit of one, ten hung requests ahead of it are enough for the
+   * eleventh to outlive `run-job.ts`'s five-minute job ceiling and settle
+   * against a row its own timeout has already failed. Armed here, the
+   * deadline is independent of
+   * queue position and `timeoutMs` means what its name says: how long one
+   * request may take, measured from when it was asked for.
+   *
+   * The cost is taken deliberately: under a burst deep enough to exhaust the
+   * budget, a request that spent it waiting is rejected rather than served
+   * late, and its job retries on `backoff.ts`'s curve -- the mechanism the
+   * jobs subsystem already has for exactly this. The rejected alternative was
+   * a second, separate budget for the wait, which bounds the same thing with
+   * another constant nothing configures.
+   *
+   * Three mechanisms, all load-bearing:
+   *
+   * - **The composed signal** cancels a real request (undici aborts the
+   *   socket and errors a body already streaming), so a timed-out fetch stops
+   *   costing anything. A caller's own signal is composed with the timeout
+   *   rather than replaced by it, so passing one cannot silently opt out of
+   *   the timeout and the timeout cannot silently discard it.
+   * - **The race** is what makes this *reject* rather than hang if the
+   *   `fetch` it was handed ignores the signal -- and rejecting is what lets
+   *   the hostname's `BoundedQueue.run` release the slot, in its own
+   *   `finally`. It races `onTimeout`, whose listener was attached before the
+   *   wait, so a task woken at the moment its own budget expires rejects then
+   *   rather than starting a fresh window.
+   * - **The `timeout.aborted` short-circuit** covers the case where the
+   *   budget was spent entirely on waiting: handing back the already-rejected
+   *   `onTimeout` settles the task and frees the slot without spending a real
+   *   request on an answer whose caller gave up `timeoutMs` ago. It is not
+   *   redundant with the race -- `addEventListener('abort')` on an
+   *   already-aborted signal never fires, so a task that reached the race
+   *   this late would sit on a `fetch` that may never settle.
    */
-  async function timed<T>(
+  async function fetched<T>(
     url: string,
     init: RequestInit | undefined,
     read: (res: Response) => Promise<T>,
   ): Promise<T> {
+    const hostname = new URL(url).hostname;
     const timeout = AbortSignal.timeout(timeoutMs);
     const callerSignal = init?.signal ?? undefined;
     const signal = callerSignal === undefined ? timeout : AbortSignal.any([callerSignal, timeout]);
@@ -188,7 +212,7 @@ export function createHostFetch(
       }, { once: true, signal: settled.signal });
     });
     try {
-      return await Promise.race([
+      return await enqueue(hostname, () => (timeout.aborted ? onTimeout : Promise.race([
         (async () => {
           const res = await deps.fetch(url, { ...init, signal });
           if (!res.ok) {
@@ -197,15 +221,10 @@ export function createHostFetch(
           return read(res);
         })(),
         onTimeout,
-      ]);
+      ])));
     } finally {
       settled.abort();
     }
-  }
-
-  function fetched<T>(url: string, init: RequestInit | undefined, read: (res: Response) => Promise<T>): Promise<T> {
-    const hostname = new URL(url).hostname;
-    return enqueue(hostname, () => timed(url, init, read));
   }
 
   return {
