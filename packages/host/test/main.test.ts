@@ -39,9 +39,14 @@ function fakeHost(overrides: Partial<Host>): Host {
     runOnce: async () => { throw new Error('runOnce: not used by this test'); },
     recover: () => 0,
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
-    start: () => 0,
-    stop: () => {},
-    idle: async () => {},
+    // Throwing, not a no-op: `main.ts` calls none of these today, so a
+    // no-op default looks harmless -- but Task 11 wires `main` to call a
+    // real `start()`/`stop()`, and `start: () => 0` would then silently
+    // satisfy that call and even produce a plausible "0 job(s) recovered"
+    // log line for a `main` that never touched a real dispatcher at all.
+    start: () => { throw new Error('start: not used by this test'); },
+    stop: () => { throw new Error('stop: not used by this test'); },
+    idle: async () => { throw new Error('idle: not used by this test'); },
     ...overrides,
   };
 }

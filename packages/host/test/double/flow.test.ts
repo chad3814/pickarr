@@ -1157,6 +1157,12 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   // A row left `running` belongs to nobody until `recover` hands it back.
   assert.equal(await restarted.runOnce(), false, 'a job left running is not claimable');
   assert.equal(restarted.recover(), 1);
+  // `run-job.ts`'s claim is what stamps `started_at`, and `runOnce` (via
+  // Task 7) is what makes this row's claim reach it -- `recover` must
+  // clear it on the row it readies, or a `ready` row would misreport
+  // itself as already started.
+  const recovered = only(rowsOf(raw, 'SELECT started_at FROM jobs'), 'job');
+  assert.equal(readIntegerOrNull(recovered, 'started_at'), null, 'a recovered ready row must not still claim to be running');
   await runToCompletion(restarted, clock, raw);
 
   assert.deepEqual(snapshot(raw), snapshot(clean.raw));

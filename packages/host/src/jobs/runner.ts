@@ -122,8 +122,15 @@ function readMaxAttempts(raw: DatabaseSync, jobId: number): number {
  * The claim itself, the timeout race, and the abort grace are untouched:
  * they are `run-job.ts`'s, reused rather than re-implemented, and none of
  * them reads `backoffMs`.
+ *
+ * Exported, and tested on its own (`runner-adapter.test.ts`), the same way
+ * `main.ts`'s `resolveArtworkDir` is: the two properties this doc claims --
+ * settling rather than rethrowing, and never overwriting a row something
+ * else already moved out of `running` -- are both fully absorbed by
+ * `run-job.ts`'s own guards once wired through `runOnce`, so neither is
+ * observable from there. A direct call is the only way to pin either.
  */
-function wrapHandlerForBackoff(raw: DatabaseSync, opts: RunnerOptions, handler: JobHandler): JobHandler {
+export function wrapHandlerForBackoff(raw: DatabaseSync, opts: RunnerOptions, handler: JobHandler): JobHandler {
   return async (job: JobRecord, ctx: PluginContext, signal?: AbortSignal) => {
     try {
       await handler(job, ctx, signal);
@@ -213,12 +220,22 @@ export function createRunner(raw: DatabaseSync, opts: RunnerOptions): Runner {
       // message is the more specific, more current fact about why the row
       // is dead *now* — a stale rejection message from an earlier attempt
       // would only mislead whoever reads it next.
+      //
+      // `started_at` is cleared on the row going back to `ready`, the same
+      // way `dispatcher.ts`'s own crash sweep clears it: `run-job.ts`'s
+      // claim is what stamps that column, and this path is now reachable
+      // through it (via `runOnce`), where before Task 7 it never was — a
+      // `ready` row with a stale `started_at` would misreport that it is
+      // running. Left alone on the row going to `dead`: there, it is
+      // diagnostic history of when the crashed attempt began, not a claim
+      // about the present.
       const result = raw.prepare(`
         UPDATE jobs
            SET state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END,
                last_error = CASE WHEN attempts >= max_attempts
                  THEN 'process crashed while this job was running, on its last permitted attempt'
                  ELSE last_error END,
+               started_at = CASE WHEN attempts >= max_attempts THEN started_at ELSE NULL END,
                updated_at = ?
          WHERE state = ?
       `).run(now, 'running');

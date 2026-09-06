@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
 import { createBoundedQueue } from '../util/bounded-queue.ts';
 import { runJob } from './run-job.ts';
+import { backoffMs } from './backoff.ts';
 
 /**
  * The two native timer pairs the dispatcher needs, injected so a test can
@@ -135,18 +136,6 @@ function readRunningRow(row: unknown): RunningRow {
 function excludeClause(ids: readonly number[]): { clause: string; values: number[] } {
   if (ids.length === 0) return { clause: '', values: [] };
   return { clause: `AND id NOT IN (${ids.map(() => '?').join(',')})`, values: [...ids] };
-}
-
-/**
- * Exponential, capped at a minute -- the same curve `run-job.ts`'s own copy
- * applies to a handler's failure. Duplicated rather than imported for the
- * same reason that copy gives for not importing `host.ts`'s: `host.ts` sits
- * above this module, so importing from it would point the dependency the
- * wrong way, and `runner.ts` -- the third copy -- is on its way out per the
- * plan's Task 12. One curve, three copies, until then.
- */
-function backoffMs(attempts: number): number {
-  return Math.min(1000 * 2 ** (attempts - 1), 60_000);
 }
 
 export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Dispatcher {

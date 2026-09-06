@@ -84,10 +84,14 @@ function defaultSleep(ms: number): Promise<void> {
  * and made it unassertable from the call site.
  *
  * A rejected `runOnce` is caught and treated as "nothing claimed" rather
- * than left to end the pump: `Runner.runOnce` already turns a rejected
- * handler into a backoff or a dead-letter row and resolves `true`/`false`
- * either way, never rejecting, so a rejection reaching here is a defect in
- * whatever `Host` this pump was given. Nothing supervises this loop, so
+ * than left to end the pump: `Runner.runOnce` turns a rejected *handler*
+ * into a backoff or a dead-letter row and resolves `true`/`false` for that
+ * case, never rejecting on it. It is not guaranteed to never reject at
+ * all, though -- its own claim guard (`run-job.ts`'s `runJob`, on a row
+ * claimed twice) and its backoff wrapper's row lookup both throw on what
+ * should be an unreachable state, and neither is caught inside `runOnce`
+ * itself. A rejection reaching here is still a defect in whatever `Host`
+ * this pump was given, either way. Nothing supervises this loop, so
  * letting that one rejection escape would turn one bad tick into an outage
  * no restart fixes -- a handler's own failure is the runner's business, not
  * the pump's.

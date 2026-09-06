@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
 import { makeQPromise } from './qpromise.ts';
+import { backoffMs } from './backoff.ts';
 
 /**
  * How long a handler may run before the dispatcher gives up on it and fails
@@ -14,19 +15,6 @@ export const JOB_TIMEOUT_MS = 300_000;
  * before the timeout stops waiting and fails the row anyway.
  */
 export const ABORT_GRACE_MS = 2_000;
-
-/**
- * Exponential, capped at a minute -- the same curve `host.ts`'s
- * `DEFAULT_BACKOFF_MS` applies through `runner.ts` today. Kept as its own
- * copy rather than imported: `host.ts` sits above this module in the
- * dependency graph (it will compose `runJob` at `start()` time once Task 6
- * wires it in), so importing from it here would point the dependency the
- * wrong way. `runner.ts` itself is on its way out per the plan's Task 12,
- * so there will be exactly one copy of this curve once it goes.
- */
-function backoffMs(attempts: number): number {
-  return Math.min(1000 * 2 ** (attempts - 1), 60_000);
-}
 
 /** The claim's `RETURNING` columns, narrowed from `unknown` rather than asserted. */
 function readClaimedRow(row: Record<string, unknown>): { attempts: number; maxAttempts: number } {

@@ -7,6 +7,7 @@ import { createMediaWriter } from './media/writer.ts';
 import { createRunner } from './jobs/runner.ts';
 import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
+import { backoffMs } from './jobs/backoff.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -31,11 +32,14 @@ function realSleep(ms: number): Promise<void> {
 }
 
 /**
- * Exponential, capped at a minute. Not an override knob: `backoffMs` is a
- * pure function of `attempts`, so a test controls retry timing through the
- * `now` this host is built with, not by tuning this curve.
+ * `Runner.runOnce()`'s default `backoffMs`, the same exponential-capped
+ * curve `dispatcher.ts`'s crash sweep and `run-job.ts`'s own retry use --
+ * one curve, `packages/host/src/jobs/backoff.ts`, re-exported under this
+ * name since it predates that extraction. Not an override knob: `backoffMs`
+ * is a pure function of `attempts`, so a test controls retry timing through
+ * the `now` this host is built with, not by tuning this curve.
  */
-export const DEFAULT_BACKOFF_MS = (attempts: number): number => Math.min(1000 * 2 ** (attempts - 1), 60_000);
+export const DEFAULT_BACKOFF_MS = backoffMs;
 
 /** How many times a job may fail before it dead-letters. */
 export const DEFAULT_MAX_ATTEMPTS = 5;

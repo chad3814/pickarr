@@ -657,6 +657,11 @@ test('start dead-letters a job whose kind has no handler registered, naming the 
   const lastError = String(readLastError(raw, id));
   assert.match(lastError, /mystery/, 'last_error should name the unhandled kind');
   assert.match(lastError, /alpha/, 'last_error should name the plugin that owns the row');
+  // Never claimed: a kind nobody will ever register a handler for gains
+  // nothing from an attempt charged against it, so this goes straight from
+  // `ready` to `dead` without `run-job.ts`'s claim ever touching it.
+  assert.equal(readAttempts(raw, id), 0, 'an unhandled kind must not be charged an attempt it never ran');
+  assert.equal(readStartedAt(raw, id), null, 'an unhandled kind was never started');
 });
 
 test('start called twice does not leak a second timer or interval', () => {
