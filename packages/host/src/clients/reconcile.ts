@@ -201,6 +201,19 @@ function refCandidates(deps: ReconcileDeps, filename: string): string[] {
  * Two or more candidates recover nothing and are only logged: an ambiguous
  * match resolved arbitrarily could attach the wrong job's ref to this row,
  * which is worse than leaving it for a human to look at.
+ *
+ * Ambiguity runs both ways, so this resolves in two passes. "Exactly one
+ * candidate for this row" is not enough on its own: two rows whose
+ * `rss_item.filename` is the same -- the same release picked twice, or two
+ * feeds carrying it -- each see the same single client job, and each would
+ * claim it. Attaching one job to two rows is wrong on its face, and it does
+ * not even fail quietly: `client_ref`'s partial unique index would reject
+ * the second write with SQLITE_CONSTRAINT_UNIQUE, and that throw would
+ * escape `walkSnapshot` and abandon the rest of the tick -- the queue walk,
+ * the history walk, everything after. One pair of same-named downloads
+ * would stop reconciling that client entirely, on every tick, until someone
+ * noticed. So a ref claimed by more than one row is dropped and logged, the
+ * same way a row with more than one candidate is.
  */
 function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
   if (!deps.snapshot.complete) return;
@@ -208,6 +221,9 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
   const candidateRows = rowsForClient(deps.raw, deps.clientId)
     .filter((row) => row.status === 'submitting' && row.clientRef === null);
 
+  // First pass: which row wants which ref, for the rows whose match is
+  // unambiguous from their own side.
+  const claims: Array<{ row: DownloadRow; ref: string }> = [];
   for (const row of candidateRows) {
     const filename = filenameForItem(deps.raw, row.rssItemId);
     const matches = refCandidates(deps, filename);
@@ -221,8 +237,26 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
 
     const [only] = matches;
     if (only === undefined) continue;
+    claims.push({ row, ref: only });
+  }
 
-    if (setRef(deps.raw, row, only, deps.now)) {
+  // Second pass: drop any ref two rows both claim. Counted before anything
+  // is written, so the decision does not depend on which row happened to be
+  // read first.
+  const claimCounts = new Map<string, number>();
+  for (const claim of claims) {
+    claimCounts.set(claim.ref, (claimCounts.get(claim.ref) ?? 0) + 1);
+  }
+
+  for (const claim of claims) {
+    const claimants = claimCounts.get(claim.ref) ?? 0;
+    if (claimants > 1) {
+      deps.log('ref claimed by more than one download', {
+        rowId: claim.row.id, ref: claim.ref, claimants,
+      });
+      continue;
+    }
+    if (setRef(deps.raw, claim.row, claim.ref, deps.now)) {
       result.recovered += 1;
     }
   }

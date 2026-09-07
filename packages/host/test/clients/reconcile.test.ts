@@ -43,6 +43,24 @@ function seedRssItem(raw: DatabaseSync, name: string): number {
   return Number(result.lastInsertRowid);
 }
 
+/**
+ * Inserts an `rss_item` with a caller-chosen filename on a fresh feed, for
+ * the one case `seedRssItem` cannot express: two items whose `filename`
+ * matches while their feeds differ, because `rss_feed.url` is unique.
+ */
+function seedRssItemOnNewFeed(raw: DatabaseSync, feedName: string, filename: string): number {
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at)
+    VALUES ('alpha', ?, ?, 1, 1)
+  `).run(feedName, `https://example.test/${feedName}`);
+  const feedId = Number((raw.prepare('SELECT id FROM rss_feed WHERE name = ?').get(feedName) as { id: unknown }).id);
+  const result = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    VALUES (?, ?, ?, 1, 1, 'torrent', '1080p')
+  `).run(feedId, filename, `https://example.test/${feedName}/${filename}`);
+  return Number(result.lastInsertRowid);
+}
+
 /** Inserts one `torrent_download` row and returns its id. */
 function insertTorrentRow(
   raw: DatabaseSync,
@@ -287,6 +305,34 @@ test('two matching entries recover nothing and write nothing', () => {
   assert.deepEqual(result, { advanced: 0, completed: 0, failed: 0, untracked: 2, recovered: 0 });
   assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), null);
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitting');
+});
+
+test('one client job claimed by two same-named downloads recovers neither', () => {
+  // Ambiguity from the job's side, which "exactly one candidate for this
+  // row" does not catch: two rows whose rss_item.filename is the same each
+  // see the same single queue entry and each would claim it. Attaching one
+  // job to two rows is wrong on its face -- and it would not fail quietly,
+  // because `client_ref`'s partial unique index rejects the second write and
+  // that throw would escape walkSnapshot and abandon the rest of the tick.
+  const raw = setup();
+  // Two rss_items sharing a filename but on different feeds -- `rss_feed.url`
+  // is unique, so the shared helper cannot seed this shape. The duplicate
+  // filename is the whole point: it is what makes one client job match both.
+  const firstItem = seedRssItem(raw, 'movie');
+  const secondItem = seedRssItemOnNewFeed(raw, 'second-feed', 'movie.mkv');
+  const clientId = seedClient(raw);
+  const firstId = insertTorrentRow(raw, { rssItemId: firstItem, downloadClientId: clientId, clientRef: null, status: 'submitting' });
+  const secondId = insertTorrentRow(raw, { rssItemId: secondItem, downloadClientId: clientId, clientRef: null, status: 'submitting' });
+
+  const result = walkSnapshot(deps(raw, clientId, {
+    snapshot: { ...emptySnapshot, queue: [queueEntry({ ref: 'ref-shared', name: 'movie.mkv' })] },
+  }));
+
+  assert.equal(result.recovered, 0, 'neither row may claim a job both match');
+  assert.equal(readColumn(raw, 'torrent_download', firstId, 'client_ref'), null);
+  assert.equal(readColumn(raw, 'torrent_download', secondId, 'client_ref'), null);
+  assert.equal(readColumn(raw, 'torrent_download', firstId, 'status'), 'submitting');
+  assert.equal(readColumn(raw, 'torrent_download', secondId, 'status'), 'submitting');
 });
 
 test('an incomplete snapshot recovers nothing, even on a single clean match', () => {
