@@ -74,7 +74,8 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile } from '@pickarr/contract';
-import { ownerPluginId, PluginNotRegisteredError } from '../host.ts';
+import { ownerPluginId } from '../db/owner.ts';
+import { PluginNotRegisteredError } from '../errors.ts';
 import { mapClientPath } from './paths.ts';
 import { redactUrl } from './redact.ts';
 import { markDelivered, markReclaimed, rowsForClient } from './rows.ts';

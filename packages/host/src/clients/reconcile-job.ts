@@ -40,7 +40,7 @@
 import { stat } from 'node:fs/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile, JobHandler, JobQueue, JobRecord } from '@pickarr/contract';
-import { HOST_PLUGIN_ID } from '../host.ts';
+import { HOST_PLUGIN_ID } from '../host-id.ts';
 import { pendingJobId, readPayloadNumber } from '../jobs/pending.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import { readClientConfig } from './config.ts';

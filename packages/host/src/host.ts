@@ -12,6 +12,13 @@ import { createFeedReader } from './feeds/reader.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
 import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
 import { createReconcileHandler, scheduleReconcile as scheduleReconcileJob } from './clients/reconcile-job.ts';
+import { HOST_PLUGIN_ID } from './host-id.ts';
+import { PluginNotRegisteredError } from './errors.ts';
+import { ownerPluginId } from './db/owner.ts';
+
+export { HOST_PLUGIN_ID };
+export { PluginNotRegisteredError };
+export { ownerPluginId };
 
 /**
  * Real `Timers`, wiring `Host.start()`'s dispatcher to Node's own timer
@@ -39,15 +46,6 @@ function realSleep(ms: number): Promise<void> {
 /** How many times a job may fail before it dead-letters. */
 export const DEFAULT_MAX_ATTEMPTS = 5;
 
-/**
- * The host's own plugin id. `jobs.plugin_id` is `NOT NULL` and handlers are
- * keyed by `(pluginId, kind)`, so a job the host itself owns still needs a
- * plugin id to dispatch on — this is the one no plugin may claim. `register`
- * refuses it outright, so a plugin can never silently capture the host's own
- * handlers. It declares no tables, so `migratePlugin`'s `<pluginId>_` prefix
- * rule never applies to it — nothing ever calls `migratePlugin` with this id.
- */
-export const HOST_PLUGIN_ID = 'host';
 
 /**
  * Narrows a `poll` job's `unknown` payload rather than casting it, so a
@@ -82,24 +80,6 @@ export interface NotifyOutcome {
   failures: readonly { pluginId: string; error: unknown }[];
 }
 
-/**
- * Thrown by `Host.deliverToPlugin` when `pluginId` names no plugin this host
- * currently has registered -- the same condition `requestDownload`'s own
- * throw describes in prose ("belongs to a feed whose plugin is not
- * registered"), given a distinct type here rather than left as a generic
- * `Error` because `deliverCompleted` (`clients/deliver.ts`) must tell this
- * one failure apart from every other way a plugin's `onDownloadedFile` can
- * reject: this one means "nobody owns this file", which it reports as
- * `unowned` and retries, the same shape `notifyNewRssItems`'s own `unowned`
- * gives an rss item whose feed names no registered plugin, rather than
- * folding it into an undifferentiated failure count.
- */
-export class PluginNotRegisteredError extends Error {
-  constructor(pluginId: string) {
-    super(`plugin "${pluginId}" is not registered`);
-    this.name = 'PluginNotRegisteredError';
-  }
-}
 
 export interface Host {
   /** Applies the plugin's migrations and registers its handlers. */
@@ -160,21 +140,18 @@ export interface Host {
   idle(): Promise<void>;
 }
 
+
 /**
- * The `rss_feed` row an rss item belongs to names its owning plugin
- * directly. Exported so `clients/deliver.ts`'s `deliverCompleted` can reuse
- * this exact query for its own step 3 ("find the owning plugin id") rather
- * than a second copy of it -- `notifyNewRssItems` and `requestDownload`
- * below already share it for the same reason.
+ * The host's own log channel -- a corrupt row, a feed lookup failure, an
+ * unlink that failed for a reason other than the file already being gone,
+ * and the host's own job-scanning code all surface through the same channel
+ * a plugin's `ctx.log` would use.
+ *
+ * Module scope: it captures nothing from `createHost`, so declaring it
+ * inside would rebuild the same closure on every call for no reason.
  */
-export function ownerPluginId(raw: DatabaseSync, rssItemId: number): string | undefined {
-  const row = raw.prepare(`
-    SELECT rss_feed.plugin_id AS plugin_id
-      FROM rss_item JOIN rss_feed ON rss_feed.id = rss_item.feed_id
-     WHERE rss_item.id = ?
-  `).get(rssItemId);
-  if (!row) return undefined;
-  return String((row as { plugin_id: unknown }).plugin_id);
+function hostLog(message: string, detail?: Readonly<Record<string, unknown>>): void {
+  console.log(`[${HOST_PLUGIN_ID}] ${message}`, detail ?? {});
 }
 
 export function createHost(deps: {
@@ -233,9 +210,6 @@ export function createHost(deps: {
   // and an unlink that failed for a reason other than the file already
   // being gone all surface through the same channel a plugin's own
   // `ctx.log` would use.
-  function hostLog(message: string, detail?: Readonly<Record<string, unknown>>): void {
-    console.log(`[${HOST_PLUGIN_ID}] ${message}`, detail ?? {});
-  }
 
   // The real dispatcher behind `start()`/`stop()`/`idle()`, meant to live
   // for as long as the host runs, driving every registered handler as its
