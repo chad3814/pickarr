@@ -225,6 +225,63 @@ UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet';
 `;
 
 /**
+ * `implementation` names the product behind an already-existing client
+ * ('qbittorrent' | 'sabnzbd'), distinct from `download_client.type` (the
+ * transport, 'torrent' | 'nzb', which this migration leaves untouched).
+ * `DEFAULT 'qbittorrent'` exists only to make `ADD COLUMN ... NOT NULL`
+ * legal on a populated table -- nothing in this tree writes a
+ * download_client row yet (the seed script arrives in a later task), so no
+ * real row has actually inherited this default silently.
+ *
+ * `torrent_download` and `nzb_download` are one table per client type,
+ * recording what the host submitted and what the client confirmed. A row is
+ * written *before* the client is called, so a submission that dies between
+ * request and response leaves evidence rather than nothing -- hence
+ * `client_ref` is nullable, and `status`/`attempts`/`last_error` describe an
+ * attempt rather than only a confirmed result.
+ *
+ * The unique index on (download_client_id, client_ref) is partial (`WHERE
+ * client_ref IS NOT NULL`) so many unconfirmed rows -- every one with a null
+ * `client_ref` -- can coexist while no two rows claim the same confirmed
+ * job. SQLite already treats NULLs as distinct in a unique index, so the
+ * partial form states that intent rather than changing the behavior.
+ */
+const MIGRATION_6 = `
+ALTER TABLE download_client ADD COLUMN implementation TEXT NOT NULL DEFAULT 'qbittorrent';
+
+CREATE TABLE torrent_download (
+  id                 INTEGER PRIMARY KEY,
+  rss_item_id        INTEGER NOT NULL REFERENCES rss_item (id),
+  download_client_id INTEGER NOT NULL REFERENCES download_client (id),
+  infohash           TEXT,
+  client_ref         TEXT,
+  status             TEXT    NOT NULL,
+  attempts           INTEGER NOT NULL DEFAULT 0,
+  last_error         TEXT,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX torrent_download_client_ref
+  ON torrent_download (download_client_id, client_ref) WHERE client_ref IS NOT NULL;
+CREATE INDEX torrent_download_item ON torrent_download (rss_item_id);
+
+CREATE TABLE nzb_download (
+  id                 INTEGER PRIMARY KEY,
+  rss_item_id        INTEGER NOT NULL REFERENCES rss_item (id),
+  download_client_id INTEGER NOT NULL REFERENCES download_client (id),
+  client_ref         TEXT,
+  status             TEXT    NOT NULL,
+  attempts           INTEGER NOT NULL DEFAULT 0,
+  last_error         TEXT,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX nzb_download_client_ref
+  ON nzb_download (download_client_id, client_ref) WHERE client_ref IS NOT NULL;
+CREATE INDEX nzb_download_item ON nzb_download (rss_item_id);
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -235,6 +292,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 3, up: (db) => db.exec(MIGRATION_3) },
   { version: 4, up: (db) => db.exec(MIGRATION_4) },
   { version: 5, up: (db) => db.exec(MIGRATION_5) },
+  { version: 6, up: (db) => db.exec(MIGRATION_6) },
 ];
 
 /**

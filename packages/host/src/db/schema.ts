@@ -18,6 +18,12 @@ export const downloadClient = sqliteTable('download_client', {
   importMode: text('import_mode').notNull(),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  // The product behind this client ('qbittorrent' | 'sabnzbd'), distinct
+  // from `type` above (the transport, 'torrent' | 'nzb'). Defaulted only so
+  // the column was legal to add to a table that may already hold rows --
+  // nothing in this tree writes a download_client row yet, so no row has
+  // actually inherited this default silently.
+  implementation: text('implementation').notNull().default('qbittorrent'),
 }, (t) => [
   // A feed names a client by this, so two clients answering to the same name
   // would make that reference ambiguous.
@@ -100,6 +106,56 @@ export const rssItem = sqliteTable('rss_item', {
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),
   uniqueIndex('rss_item_feed_guid').on(t.feedId, t.guid),
+]);
+
+/**
+ * One row per pick submitted to a torrent client, recording what the host
+ * submitted and what the client confirmed. A row is written *before* the
+ * client is called, so a submission that dies between request and response
+ * leaves evidence rather than nothing.
+ */
+export const torrentDownload = sqliteTable('torrent_download', {
+  id: integer('id').primaryKey(),
+  rssItemId: integer('rss_item_id').notNull().references(() => rssItem.id),
+  downloadClientId: integer('download_client_id').notNull().references(() => downloadClient.id),
+  infohash: text('infohash'),
+  // Nullable: null from the moment the row is written until the client
+  // confirms the submission. See the unique index below for why that null
+  // is not treated as "unclaimed and interchangeable with any other".
+  clientRef: text('client_ref'),
+  status: text('status').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => [
+  // Partial, not total: many unconfirmed rows (client_ref IS NULL) must be
+  // free to coexist so a crashed submission can be retried rather than
+  // colliding with its own earlier, unconfirmed attempt. SQLite already
+  // treats NULLs as distinct in a unique index; the WHERE states that
+  // intent rather than changing the behavior.
+  uniqueIndex('torrent_download_client_ref')
+    .on(t.downloadClientId, t.clientRef)
+    .where(sql`${t.clientRef} is not null`),
+  index('torrent_download_item').on(t.rssItemId),
+]);
+
+/** Same shape as `torrent_download`, minus `infohash` -- an nzb has no equivalent identifier to record before submission. */
+export const nzbDownload = sqliteTable('nzb_download', {
+  id: integer('id').primaryKey(),
+  rssItemId: integer('rss_item_id').notNull().references(() => rssItem.id),
+  downloadClientId: integer('download_client_id').notNull().references(() => downloadClient.id),
+  clientRef: text('client_ref'),
+  status: text('status').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => [
+  uniqueIndex('nzb_download_client_ref')
+    .on(t.downloadClientId, t.clientRef)
+    .where(sql`${t.clientRef} is not null`),
+  index('nzb_download_item').on(t.rssItemId),
 ]);
 
 export const person = sqliteTable('person', {
