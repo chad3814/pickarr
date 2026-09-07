@@ -19,23 +19,25 @@
  * poll, rather than terminal.
  *
  * This module runs a ref-recovery pass (below), then step 1 (queue) and
- * step 3 (history) of the full reconcile pass, given a snapshot already
- * fetched. The absence sweep is Task 9's, and delivering a `completed` row
- * to its plugin is Task 10's -- each of those runs in the same function,
- * around this walk, once its task lands.
+ * step 3 (history) of the full reconcile pass, then an absence sweep, given
+ * a snapshot already fetched. Delivering a `completed` row to its plugin is
+ * Task 10's -- it runs in the same function, around this walk, once that
+ * task lands.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { redactUrl } from './redact.ts';
-import { advanceStatus, failRow, rowByRef, rowsForClient, setProgress, setRef, setStoragePath } from './rows.ts';
+import {
+  advanceStatus, failRow, rowByRef, rowsForClient, setAbsent, setProgress, setRef, setStoragePath,
+} from './rows.ts';
 import type { DownloadRow } from './rows.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
 
 /**
- * Only the fields this task actually produces. `absent` (Task 9) joins this
- * type as its pass lands in the same function; a reviewer seeing a type that
- * will grow again is expected here, not a sign this was left unfinished.
- * `delivered` and `reclaimed` belong to Task 10's own `deliverCompleted`, a
- * separate function with a separate result -- they never join this type.
+ * Only the fields this task and Task 9's absence sweep produce. `delivered`
+ * and `reclaimed` belong to Task 10's own `deliverCompleted`, a separate
+ * function with a separate result -- they never join this type; a reviewer
+ * seeing a type that will grow once more is expected here, not a sign this
+ * was left unfinished.
  */
 export interface ReconcileResult {
   advanced: number;
@@ -43,6 +45,7 @@ export interface ReconcileResult {
   failed: number;
   untracked: number;
   recovered: number;
+  absent: number;
 }
 
 /**
@@ -262,6 +265,83 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
   }
 }
 
+/** `delivered` and `failed` are where a row's life in this slice ends; an absence observation about either would say nothing anyone acts on, so neither is ever swept. */
+const TERMINAL_STATUSES: ReadonlySet<DownloadRow['status']> = new Set(['delivered', 'failed']);
+
+/**
+ * Every ref `snapshot` accounts for, queue and history alike -- the set a
+ * row's own `client_ref` is checked against to decide whether the client
+ * still claims to hold it. Built from both collections because a job can
+ * move from queue to history between one poll and the next; either one
+ * mentioning a ref is enough to call a row holding it accounted for.
+ */
+function accountedForRefs(snapshot: ClientSnapshot): Set<string> {
+  const refs = new Set<string>();
+  for (const entry of snapshot.queue) refs.add(entry.ref);
+  for (const entry of snapshot.history) refs.add(entry.ref);
+  return refs;
+}
+
+/**
+ * Records, for every non-terminal row this client owns, whether the
+ * client's own account still includes it -- **never** what that means.
+ *
+ * Absence is an observation, never a verdict. 1.x arrived at that the hard
+ * way: it once wrote a `disappeared-from-client` failure the moment a row
+ * dropped out of a snapshot, and then had to build a whole recovery path
+ * (`RECOVERABLE_FAILURE` in `packages/core/src/pipeline/reconcile.ts`) for
+ * the rows its own verdict had stranded -- that module's comment now reads
+ * "absence is an observation now, never a verdict". Starting from the
+ * observation instead costs one nullable column, `absent_since`, and this
+ * function never fails a row for holding one: it only stamps a row the
+ * first time it is missed and clears the stamp the moment the row is seen
+ * again, so a later slice can decide with a history rather than a single
+ * reading.
+ *
+ * Runs only when `snapshot.complete`, for the same reason `recoverRefs`
+ * does and `ClientSnapshot.complete`'s own doc comment states: a row
+ * missing from a partial picture is indistinguishable from one on a page
+ * that failed to load, so nothing here may read that absence as
+ * meaningful. An incomplete snapshot neither stamps nor clears anything,
+ * and `result.absent` stays zero.
+ *
+ * A row already stamped keeps its original stamp: the stamp records when
+ * the row was *first* missed, and overwriting it on a later tick would
+ * erase the only thing that makes a duration computable later. A row the
+ * snapshot does account for has its stamp cleared, if it had one.
+ *
+ * `result.absent` counts every eligible row that ends this pass stamped,
+ * not only the ones newly stamped by it, so it answers "how much does this
+ * client not have" rather than "how much changed this tick".
+ *
+ * Rows are re-read from the database rather than reused from an earlier
+ * pass, so a row the walk above just advanced -- to `downloading`, to
+ * `completed`, to `failed` -- is swept against the status it holds *now*,
+ * not the one it held when this tick started.
+ */
+function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
+  if (!deps.snapshot.complete) return;
+
+  const refs = accountedForRefs(deps.snapshot);
+
+  for (const row of rowsForClient(deps.raw, deps.clientId)) {
+    if (TERMINAL_STATUSES.has(row.status)) continue;
+    if (row.clientRef === null) continue;
+
+    if (refs.has(row.clientRef)) {
+      if (row.absentSince !== null) {
+        setAbsent(deps.raw, row, null, deps.now);
+      }
+      continue;
+    }
+
+    if (row.absentSince === null) {
+      setAbsent(deps.raw, row, deps.now, deps.now);
+    }
+    result.absent += 1;
+  }
+}
+
 /**
  * Walks `deps.snapshot`'s queue and history, entry by entry, and advances
  * every row it can identify against what the client just reported. See the
@@ -269,10 +349,13 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
  * own rows.
  *
  * Ref recovery runs first, so a row it recovers a ref for is picked up by
- * this same walk on this same tick, rather than waiting a poll longer.
+ * this same walk on this same tick, rather than waiting a poll longer. The
+ * absence sweep runs last, after every write the walk itself makes, so it
+ * sees each row's final status for this tick rather than the one it read
+ * it at.
  */
 export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
-  const result: ReconcileResult = { advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0 };
+  const result: ReconcileResult = { advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0 };
 
   recoverRefs(deps, result);
 
@@ -282,6 +365,8 @@ export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   for (const entry of deps.snapshot.history) {
     walkHistoryEntry(deps, result, entry);
   }
+
+  sweepAbsent(deps, result);
 
   return result;
 }
