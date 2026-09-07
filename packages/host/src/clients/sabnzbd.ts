@@ -14,15 +14,23 @@ export interface SubmitResult {
 }
 
 /**
- * The shape `addurl` answers with on success. `nzo_ids` is typed as
- * `string[]` -- not `unknown[]` or `unknown` -- specifically so that
- * `noUncheckedIndexedAccess` turns indexing it into the compiler's own
- * reminder that the array might be empty: `nzo_ids[0]` is `string |
- * undefined`, not `string`, and `submit` below has to look at that
- * `undefined` rather than assert past it.
+ * The shape `addurl` answers with -- both shapes, because SABnzbd answers a
+ * rejection with HTTP 200 and a body saying otherwise: `{ status: false,
+ * error: '...' }`, no `nzo_ids` at all. `fetch.json<T>` is an unchecked
+ * cast, so declaring `nzo_ids` as always-present would not make it present;
+ * it would only move the failure from a named refusal here to a bare
+ * `TypeError` on a missing property. 1.x learned this in production
+ * (`packages/core/src/clients/sabnzbd.ts` checks `status !== true` before it
+ * reads any id) and this adapter follows it.
+ *
+ * Every field is therefore optional, and `nzo_ids`'s element type stays
+ * `string` so `noUncheckedIndexedAccess` still makes `nzo_ids?.[0]` a
+ * `string | undefined` that `submit` has to look at rather than assert past.
  */
 interface AddUrlResponse {
-  nzo_ids: string[];
+  status?: boolean;
+  error?: string;
+  nzo_ids?: string[];
 }
 
 /**
@@ -65,13 +73,29 @@ export function createSabnzbdClient(
     async submit(link: string, name: string): Promise<SubmitResult> {
       const url = buildAddUrlUrl(config, link, name);
       const body = await fetch.json<AddUrlResponse>(url);
-      const first = body.nzo_ids[0];
-      if (first === undefined) {
+
+      if (body.status !== true) {
+        // SABnzbd rejects with HTTP 200 and `status: false`, so nothing in
+        // the transport notices; this is the only place the rejection can be
+        // turned into a real failure. `error` is SABnzbd's own wording and
+        // routinely quotes back the request it rejected -- a request whose
+        // query string is ours, api key included -- so it goes through
+        // `redactUrl` exactly like a url would.
+        const reason = body.error === undefined || body.error === ''
+          ? 'no reason given'
+          : redactUrl(body.error);
+        throw new Error(`sabnzbd client ${config.id} rejected the submission: ${reason}`);
+      }
+
+      const first = body.nzo_ids?.[0];
+      if (first === undefined || first === '') {
         // A submission with no id is unrecognisable later -- nothing could
         // ever match a downloads row back to a job in SABnzbd's queue or
         // history. Writing '' as the ref would not fail loudly here; it
         // would instead record a row that looks submitted and can never be
-        // reconciled, which is worse than refusing outright.
+        // reconciled, which is worse than refusing outright. An empty-string
+        // id is refused for the same reason as a missing one: it is not a
+        // reference to anything, and 1.x rejects it too.
         throw new Error(
           `sabnzbd client ${config.id} submitted ${redactUrl(url)} but got no nzo id back`,
         );

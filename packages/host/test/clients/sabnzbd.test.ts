@@ -41,6 +41,7 @@ function fakeQueuedFetch(handler: (url: string, init?: RequestInit) => Promise<u
 test('submitting returns the first nzo id as the reference', async () => {
   const config = makeConfig({ id: 7 });
   const fetch = fakeQueuedFetch(async () => ({
+    status: true,
     nzo_ids: ['SABnzbd_nzo_abc123', 'SABnzbd_nzo_should_be_ignored'],
   }));
   const client = createSabnzbdClient(config, fetch);
@@ -56,7 +57,7 @@ test('an empty nzo_ids array is a failure, not an empty reference', async () => 
   // Writing '' as the ref would not fail loudly here; it would instead
   // record a row that looks submitted and can never be reconciled.
   const config = makeConfig({ id: 9 });
-  const fetch = fakeQueuedFetch(async () => ({ nzo_ids: [] }));
+  const fetch = fakeQueuedFetch(async () => ({ status: true, nzo_ids: [] }));
   const client = createSabnzbdClient(config, fetch);
 
   await assert.rejects(
@@ -64,6 +65,71 @@ test('an empty nzo_ids array is a failure, not an empty reference', async () => 
     (err: unknown) => err instanceof Error
       && err.message.includes('no nzo id back')
       && err.message.includes('9'),
+  );
+});
+
+test('a rejection answered with HTTP 200 is still a failure', async () => {
+  // SABnzbd refuses a submission with a 200 and `status: false` -- nothing in
+  // the transport sees a problem, so this adapter is the only place it can
+  // become one. Before this check the body had no `nzo_ids` at all and the
+  // adapter died on a bare `TypeError` reading index 0 of undefined, which
+  // names neither the client nor the reason.
+  const config = makeConfig({ id: 11 });
+  const fetch = fakeQueuedFetch(async () => ({ status: false, error: 'API Key Incorrect' }));
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.submit('http://example.com/one.nzb', 'One Show'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('rejected the submission')
+      && err.message.includes('API Key Incorrect')
+      && err.message.includes('11'),
+  );
+});
+
+test("a rejection reason quoting the request back has the api key stripped from it", async () => {
+  // SABnzbd's `error` text routinely quotes the request it rejected, and that
+  // request's query string is ours -- api key included. The reason is passed
+  // through the same redaction a url would get, so echoing SABnzbd's wording
+  // does not become a way to launder the key into a log.
+  const config = makeConfig({ id: 12, apiKey: 'not-a-real-key' });
+  const fetch = fakeQueuedFetch(async (url) => ({
+    status: false,
+    error: `could not process ${url}`,
+  }));
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.submit('http://example.com/one.nzb', 'One Show'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('rejected the submission')
+      && !err.message.includes('not-a-real-key')
+      && err.message.includes('apikey=***'),
+  );
+});
+
+test('a rejection with no reason still names the client', async () => {
+  const config = makeConfig({ id: 13 });
+  const fetch = fakeQueuedFetch(async () => ({ status: false }));
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.submit('http://example.com/one.nzb', 'One Show'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('no reason given')
+      && err.message.includes('13'),
+  );
+});
+
+test('an empty-string nzo id is refused like a missing one', async () => {
+  // `''` is not a reference to anything; 1.x rejects it for the same reason.
+  const config = makeConfig({ id: 14 });
+  const fetch = fakeQueuedFetch(async () => ({ status: true, nzo_ids: [''] }));
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.submit('http://example.com/one.nzb', 'One Show'),
+    (err: unknown) => err instanceof Error && err.message.includes('no nzo id back'),
   );
 });
 
@@ -76,7 +142,7 @@ test('the api key travels in the query and never in an error message', async () 
     // "no nzo id" refusal), which is the one error this adapter builds
     // itself rather than getting from `createHostFetch`'s already-redacted
     // failure paths.
-    return { nzo_ids: [] };
+    return { status: true, nzo_ids: [] };
   });
   const client = createSabnzbdClient(config, fetch);
 
@@ -100,7 +166,7 @@ test('the category and display name are sent as the client sees them', async () 
   let capturedUrl = '';
   const fetch = fakeQueuedFetch(async (url) => {
     capturedUrl = url;
-    return { nzo_ids: ['SABnzbd_nzo_1'] };
+    return { status: true, nzo_ids: ['SABnzbd_nzo_1'] };
   });
   const client = createSabnzbdClient(config, fetch);
 
@@ -130,7 +196,7 @@ function trackingFetch() {
     max = Math.max(max, active);
     await new Promise<void>((resolve) => pending.push(resolve));
     active -= 1;
-    return new Response(JSON.stringify({ nzo_ids: ['SABnzbd_nzo_queued'] }), { status: 200 });
+    return new Response(JSON.stringify({ status: true, nzo_ids: ['SABnzbd_nzo_queued'] }), { status: 200 });
   };
 
   return {
