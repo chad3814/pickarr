@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHostFetch } from '../../src/fetch/queue.ts';
+import { createHostFetch, FetchFailedError } from '../../src/fetch/queue.ts';
 
 /**
  * A shape `json<T>` can decode straight off a stubbed `Response`: every fake
@@ -48,6 +48,14 @@ function trackingFetch() {
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+/**
+ * A stand-in `fetch` that always answers 401, for the tests that check what
+ * a caller can learn from a rejected request's `status`. Module scope,
+ * rather than declared inside its test: it captures nothing from either
+ * test that uses it.
+ */
+const unauthorizedFetch: typeof globalThis.fetch = async () => new Response('', { status: 401, statusText: 'Unauthorized' });
 
 test('two requests to one hostname do not overlap at the default limit of one', async () => {
   const track = trackingFetch();
@@ -281,6 +289,23 @@ test('a non-2xx response rejects rather than returning a body', async () => {
   const hostFetch = createHostFetch({ fetch: fetchFn });
 
   await assert.rejects(hostFetch.json<Echo>('http://a.example/missing'), /404/);
+});
+
+test('a non-2xx response carries the numeric status, not just prose about it', async () => {
+  // An adapter that needs to tell 401/403 apart from any other failure (a
+  // bearer-auth qBittorrent client, say) must not have to pattern-match this
+  // module's own message text to do it -- that breaks the moment the message
+  // is reworded, as it already was once when redaction went in.
+  const hostFetch = createHostFetch({ fetch: unauthorizedFetch });
+
+  await assert.rejects(
+    hostFetch.json('http://a.example/secure'),
+    (error: unknown) => {
+      assert.ok(error instanceof FetchFailedError);
+      assert.equal(error.status, 401);
+      return true;
+    },
+  );
 });
 
 test('the queue names a failing url without its credential', async () => {

@@ -21,6 +21,25 @@ export interface QueuedFetch extends HostFetch {
 }
 
 /**
+ * Thrown by `fetched` below for any non-2xx response, carrying the numeric
+ * `status` alongside the message. Without this, telling a 401 or 403 apart
+ * from any other failure meant pattern-matching this class's own message
+ * text (`failed: 401 Unauthorized`) -- which breaks the moment that text is
+ * reworded, and it already was once this slice, when `redactUrl` went in.
+ * Subclassing `Error` rather than a plain object keeps every existing
+ * `instanceof Error`/message-matching test passing unchanged.
+ */
+export class FetchFailedError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'FetchFailedError';
+    this.status = status;
+  }
+}
+
+/**
  * The concurrency budget `createHostFetch` enforces per hostname. `default`
  * applies to any hostname without its own entry in `perHost`; both are
  * counts of requests allowed to run at once, not a rate. Never exported from
@@ -217,7 +236,7 @@ export function createHostFetch(
         (async () => {
           const res = await deps.fetch(url, { ...init, signal });
           if (!res.ok) {
-            throw new Error(`fetch ${redactUrl(url)} failed: ${res.status} ${res.statusText}`);
+            throw new FetchFailedError(`fetch ${redactUrl(url)} failed: ${res.status} ${res.statusText}`, res.status);
           }
           return read(res);
         })(),
