@@ -298,6 +298,16 @@ async function assertBlankCategorySendsNoFilter(configured: string): Promise<voi
     'https://qbt.example.com/api/v2/torrents/info',
     `configured category ${JSON.stringify(configured)} must not be sent as a literal filter`,
   );
+  // The add matters more than the lookup here: a literal `category=None` on
+  // the way out files the torrent under a category of that name, creating one
+  // on a server that had none. The lookup normalises the response too, so it
+  // would still match and nothing would fail -- the only trace would be a
+  // junk category in someone's qBittorrent.
+  assert.equal(
+    String(calls[0]?.init?.body),
+    'urls=https%3A%2F%2Fexample.com%2Fsome.torrent&rename=Some+Movie',
+    `configured category ${JSON.stringify(configured)} must not be sent in the add body either`,
+  );
 }
 
 test('a category of "" or the literal text \'None\' means no category, not a category so named', async () => {

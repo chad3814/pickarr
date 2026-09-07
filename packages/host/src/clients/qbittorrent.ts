@@ -238,7 +238,24 @@ export function createQbittorrentClient(
 
       const url = `${config.baseUrl}${TORRENTS_ADD_PATH}`;
       const headers = bearerHeaders(config);
-      const body = new URLSearchParams({ urls: link, category: config.category, rename: name });
+      // Normalised on the way *out*, not only on the way back: sending
+      // `category=None` would ask qBittorrent to file this torrent under a
+      // category literally named "None", creating one on a server that had
+      // none. The lookup would still find it -- it normalises the response's
+      // category too -- so nothing here would fail, and the only evidence
+      // would be a junk category appearing in someone's qBittorrent. Where a
+      // value is *sent* matters more than where it is compared.
+      //
+      // Built in one expression so the parameter order stays `urls`,
+      // `category`, `rename` whether or not a category is sent. The order has
+      // no effect on the server, but the tests assert the body as a literal
+      // string, which is what makes those assertions non-circular.
+      const addCategory = normalizeCategory(config.category);
+      const body = new URLSearchParams({
+        urls: link,
+        ...(addCategory === null ? {} : { category: addCategory }),
+        rename: name,
+      });
 
       await guardAuthFailure(
         config,
