@@ -64,13 +64,14 @@ function insertTorrentRow(
     status?: string;
     storagePath?: string | null;
     deliveredAt?: number | null;
+    reclaimedAt?: number | null;
   },
 ): number {
   const status = params.status ?? 'completed';
   const result = raw.prepare(`
     INSERT INTO torrent_download
-      (rss_item_id, download_client_id, client_ref, status, storage_path, delivered_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 1, 1)
+      (rss_item_id, download_client_id, client_ref, status, storage_path, delivered_at, reclaimed_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
   `).run(
     params.rssItemId,
     params.downloadClientId,
@@ -78,6 +79,7 @@ function insertTorrentRow(
     status,
     params.storagePath ?? null,
     params.deliveredAt ?? null,
+    params.reclaimedAt ?? null,
   );
   return Number(result.lastInsertRowid);
 }
@@ -250,12 +252,14 @@ test('a delivered row is reclaimed when the adapter can reclaim', async () => {
 
   const removedRefs: string[] = [];
   const result = await deliverCompleted(baseDeps(raw, clientId, {
+    now: 900,
     remove: async (ref) => { removedRefs.push(ref); },
   }));
 
   assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0 });
   assert.deepEqual(removedRefs, ['ref-1']);
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), 900, 'the mark is what makes the next pass skip this row');
 });
 
 test('a client with no remove reclaims nothing', async () => {
@@ -272,4 +276,65 @@ test('a client with no remove reclaims nothing', async () => {
 
   assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), null);
+});
+
+test('a delivered row is reclaimed exactly once, however many passes follow -- the defect this task fixes', async () => {
+  // Without `reclaimed_at` gating the query, this row would be offered to
+  // `remove` again on every single pass forever: a SABnzbd client with 500
+  // delivered downloads would issue 500 delete requests a minute,
+  // indefinitely. A single-pass test cannot see that at all -- this is the
+  // test that actually proves the fix.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'delivered', deliveredAt: 500,
+  });
+
+  const removedRefs: string[] = [];
+  const deps = baseDeps(raw, clientId, {
+    now: 900,
+    remove: async (ref) => { removedRefs.push(ref); },
+  });
+
+  const first = await deliverCompleted(deps);
+  const second = await deliverCompleted(deps);
+
+  assert.equal(removedRefs.length, 1, 'remove must be called exactly once across both passes');
+  assert.deepEqual(removedRefs, ['ref-1']);
+  assert.equal(first.reclaimed, 1, 'the first pass performs the reclaim');
+  assert.equal(second.reclaimed, 0, 'the second pass finds nothing left to reclaim');
+  assert.equal(readColumn(raw, id, 'status'), 'delivered');
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
+});
+
+test('a remove that throws leaves the row unreclaimed, and the next pass retries it', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'delivered', deliveredAt: 500,
+  });
+
+  let calls = 0;
+  const deps = baseDeps(raw, clientId, {
+    now: 900,
+    remove: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('client unreachable');
+    },
+  });
+
+  // Reclaim has no per-row catch (unlike `deliverOne`'s delivery path), so a
+  // throwing `remove` rejects the whole pass -- what matters for this
+  // defect is that the row was never marked, not that the pass reported a
+  // clean result.
+  await assert.rejects(() => deliverCompleted(deps), /client unreachable/);
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), null, 'the row stays unmarked -- remove never confirmed success');
+
+  const second = await deliverCompleted(deps);
+  assert.equal(calls, 2, 'the row must be retried on the next pass, the same shape delivery already has');
+  assert.equal(second.reclaimed, 1);
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
 });

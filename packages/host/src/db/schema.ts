@@ -147,6 +147,13 @@ export const torrentDownload = sqliteTable('torrent_download', {
   // exists -- two columns, one name, two tables, two unrelated facts.
   // Nullable: unset until landing is observed.
   deliveredAt: integer('delivered_at'),
+  // Stamped once `deps.remove` has been called for this row and succeeded,
+  // so a reconcile pass reclaims a download once rather than on every tick
+  // for the rest of its existence. Nullable, with no default: no row before
+  // this column had this fact measured, and a guessed value would assert
+  // history the column has no way to know. See `clients/deliver.ts`'s module
+  // doc for what happens without it.
+  reclaimedAt: integer('reclaimed_at'),
 }, (t) => [
   // Partial, not total: many unconfirmed rows (client_ref IS NULL) must be
   // free to coexist so a crashed submission can be retried rather than
@@ -181,6 +188,8 @@ export const nzbDownload = sqliteTable('nzb_download', {
   absentSince: integer('absent_since'),
   // See `torrentDownload.deliveredAt`.
   deliveredAt: integer('delivered_at'),
+  // See `torrentDownload.reclaimedAt`.
+  reclaimedAt: integer('reclaimed_at'),
 }, (t) => [
   uniqueIndex('nzb_download_client_ref')
     .on(t.downloadClientId, t.clientRef)

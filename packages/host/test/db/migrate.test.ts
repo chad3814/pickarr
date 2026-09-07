@@ -470,6 +470,53 @@ test('the new columns are nullable, so an existing row needs no back-filled gues
   );
 });
 
+test('a migration to version 8 adds reclaimed_at to both download tables', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedDownloadTarget(raw);
+
+  raw.prepare(`
+    INSERT INTO torrent_download (rss_item_id, download_client_id, status, reclaimed_at, created_at, updated_at)
+    VALUES (1, 1, 'delivered', 200, 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO nzb_download (rss_item_id, download_client_id, status, reclaimed_at, created_at, updated_at)
+    VALUES (1, 1, 'delivered', 400, 1, 1)
+  `).run();
+
+  const torrentRow = raw.prepare('SELECT reclaimed_at FROM torrent_download').get() as { reclaimed_at: unknown };
+  assert.equal(Number(torrentRow.reclaimed_at), 200);
+
+  const nzbRow = raw.prepare('SELECT reclaimed_at FROM nzb_download').get() as { reclaimed_at: unknown };
+  assert.equal(Number(nzbRow.reclaimed_at), 400);
+});
+
+test('reclaimed_at is nullable, so a row that predates it needs no back-filled guess', () => {
+  const { raw } = openTestDatabase();
+  // Stop after version 7, so torrent_download and nzb_download exist without
+  // reclaimed_at yet -- the shape a real database has the moment before this
+  // migration runs.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 7));
+  seedDownloadTarget(raw);
+  raw.prepare(`
+    INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
+    VALUES (1, 1, 'delivered', 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO nzb_download (rss_item_id, download_client_id, status, created_at, updated_at)
+    VALUES (1, 1, 'delivered', 1, 1)
+  `).run();
+
+  // Picks up only version 8: versions 1 through 7 are already recorded as applied.
+  migrateHost(raw);
+
+  const torrentRow = raw.prepare('SELECT reclaimed_at FROM torrent_download').get() as { reclaimed_at: unknown };
+  assert.equal(torrentRow.reclaimed_at, null);
+
+  const nzbRow = raw.prepare('SELECT reclaimed_at FROM nzb_download').get() as { reclaimed_at: unknown };
+  assert.equal(nzbRow.reclaimed_at, null);
+});
+
 test('both download tables carry a status index', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);

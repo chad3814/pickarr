@@ -27,6 +27,12 @@
  * be sure nothing else moved that row in between, so the write has to name
  * the state it still expects and say whether that expectation held.
  *
+ * `markReclaimed` is the same shape with a second condition added: it
+ * guards `WHERE id = ? AND status = 'delivered' AND reclaimed_at IS NULL`,
+ * because reclaiming has two preconditions rather than one -- still
+ * `delivered`, and not already reclaimed by some earlier pass or a
+ * concurrent caller.
+ *
  * `setProgress`, `setStoragePath` and `setAbsent` are observations, not
  * transitions: what a client reports about a download's progress, path or
  * presence is true regardless of which status the row happens to be in, so
@@ -56,6 +62,7 @@ export interface DownloadRow {
   storagePath: string | null;
   absentSince: number | null;
   deliveredAt: number | null;
+  reclaimedAt: number | null;
 }
 
 /**
@@ -65,7 +72,7 @@ export interface DownloadRow {
  * touches only the two download tables, which do not have those columns.
  */
 const SELECT_COLUMNS =
-  'id, rss_item_id, download_client_id, client_ref, status, storage_path, absent_since, delivered_at';
+  'id, rss_item_id, download_client_id, client_ref, status, storage_path, absent_since, delivered_at, reclaimed_at';
 
 /**
  * Narrows one raw row into a `DownloadRow`, the same idiom `clients/config.ts`'s
@@ -81,6 +88,7 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
   const storagePath = (raw as { storage_path: unknown }).storage_path;
   const absentSince = (raw as { absent_since: unknown }).absent_since;
   const deliveredAt = (raw as { delivered_at: unknown }).delivered_at;
+  const reclaimedAt = (raw as { reclaimed_at: unknown }).reclaimed_at;
   const statusValue = String((raw as { status: unknown }).status);
   if (!isDownloadStatus(statusValue)) {
     throw new Error(`${table} row ${id} has unknown status ${JSON.stringify(statusValue)}`);
@@ -95,6 +103,7 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
     storagePath: storagePath === null || storagePath === undefined ? null : String(storagePath),
     absentSince: absentSince === null || absentSince === undefined ? null : Number(absentSince),
     deliveredAt: deliveredAt === null || deliveredAt === undefined ? null : Number(deliveredAt),
+    reclaimedAt: reclaimedAt === null || reclaimedAt === undefined ? null : Number(reclaimedAt),
   };
 }
 
@@ -236,6 +245,27 @@ export function markDelivered(raw: DatabaseSync, row: DownloadRow, at: number): 
     : raw.prepare(
       "UPDATE nzb_download SET status = 'delivered', delivered_at = ?, updated_at = ? WHERE id = ? AND status = ?",
     ).run(at, at, row.id, row.status);
+  return result.changes > 0;
+}
+
+/**
+ * Marks `row` reclaimed at `at`, applying only if it is still `delivered`
+ * and has not already been reclaimed -- the same guard shape as
+ * `markDelivered`, with a second condition added because this transition has
+ * two preconditions rather than one: a row that is not `delivered` has
+ * nothing to reclaim, and a row `reclaimed_at` already names must not be
+ * reclaimed a second time. That second guard is the whole fix for the
+ * defect this column exists to close -- see `clients/deliver.ts`'s module
+ * doc and `db/migrate.ts`'s migration 8 comment for what happens without it.
+ */
+export function markReclaimed(raw: DatabaseSync, row: DownloadRow, at: number): boolean {
+  const result = row.table === 'torrent_download'
+    ? raw.prepare(
+      "UPDATE torrent_download SET reclaimed_at = ?, updated_at = ? WHERE id = ? AND status = 'delivered' AND reclaimed_at IS NULL",
+    ).run(at, at, row.id)
+    : raw.prepare(
+      "UPDATE nzb_download SET reclaimed_at = ?, updated_at = ? WHERE id = ? AND status = 'delivered' AND reclaimed_at IS NULL",
+    ).run(at, at, row.id);
   return result.changes > 0;
 }
 

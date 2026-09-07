@@ -7,6 +7,7 @@ import {
   advanceStatus,
   failRow,
   markDelivered,
+  markReclaimed,
   rowByRef,
   rowsForClient,
   setAbsent,
@@ -55,13 +56,19 @@ function seedRssItem(raw: DatabaseSync, name: string): number {
 /** Inserts one `torrent_download` row and returns its id. */
 function insertTorrentRow(
   raw: DatabaseSync,
-  params: { rssItemId: number; downloadClientId: number; clientRef?: string | null; status?: string },
+  params: {
+    rssItemId: number;
+    downloadClientId: number;
+    clientRef?: string | null;
+    status?: string;
+    reclaimedAt?: number | null;
+  },
 ): number {
   const status = params.status ?? 'submitting';
   const result = raw.prepare(`
-    INSERT INTO torrent_download (rss_item_id, download_client_id, client_ref, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 1, 1)
-  `).run(params.rssItemId, params.downloadClientId, params.clientRef ?? null, status);
+    INSERT INTO torrent_download (rss_item_id, download_client_id, client_ref, status, reclaimed_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 1, 1)
+  `).run(params.rssItemId, params.downloadClientId, params.clientRef ?? null, status, params.reclaimedAt ?? null);
   return Number(result.lastInsertRowid);
 }
 
@@ -111,7 +118,7 @@ test('an advance from the wrong state changes nothing and says so', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const applied = advanceStatus(raw, row, 'downloading', 'completed', 500);
@@ -128,7 +135,7 @@ test('an advance from the expected state applies and says so', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const applied = advanceStatus(raw, row, 'downloading', 'completed', 500);
@@ -149,7 +156,7 @@ test('recording progress does not move the status', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   setProgress(raw, row, 42, 500);
@@ -165,7 +172,7 @@ test('clearing absence writes null rather than leaving the stamp', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   setAbsent(raw, row, 900, 900);
@@ -194,7 +201,7 @@ test('a row from each table is advanced in its own table', () => {
 
   const torrentRow: DownloadRow = {
     id: torrentId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const applied = advanceStatus(raw, torrentRow, 'downloading', 'completed', 500);
@@ -211,7 +218,7 @@ test('setStoragePath records the client\'s path without moving the status', () =
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   setStoragePath(raw, row, '/downloads/movie.mkv', 700);
@@ -227,7 +234,7 @@ test('markDelivered applies only from the status the row was read with, and repo
   const staleId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const staleRow: DownloadRow = {
     id: staleId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const staleApplied = markDelivered(raw, staleRow, 900);
@@ -239,7 +246,7 @@ test('markDelivered applies only from the status the row was read with, and repo
   const freshId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
   const freshRow: DownloadRow = {
     id: freshId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const freshApplied = markDelivered(raw, freshRow, 900);
@@ -249,6 +256,53 @@ test('markDelivered applies only from the status the row was read with, and repo
   assert.equal(readColumn(raw, 'torrent_download', freshId, 'delivered_at'), 900);
 });
 
+test('markReclaimed applies once and refuses a row already marked', () => {
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'delivered',
+  });
+  const row: DownloadRow = {
+    id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
+    clientRef: 'ref-1', status: 'delivered', storagePath: null, absentSince: null, deliveredAt: 500, reclaimedAt: null,
+  };
+
+  const firstApplied = markReclaimed(raw, row, 900);
+
+  assert.equal(firstApplied, true);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'reclaimed_at'), 900);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 900);
+
+  // Same row, called again: reclaimed_at is no longer null, so the guard
+  // must refuse it -- this is the whole fix for a delivered row's `remove`
+  // being called forever.
+  const secondApplied = markReclaimed(raw, row, 1200);
+
+  assert.equal(secondApplied, false, 'a row already reclaimed must not be reclaimed again');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'reclaimed_at'), 900, 'the original stamp must survive');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 900, 'a refused write must not move updated_at');
+});
+
+test('markReclaimed refuses a row that is not delivered', () => {
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'completed',
+  });
+  const row: DownloadRow = {
+    id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
+    clientRef: 'ref-1', status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
+  };
+
+  const applied = markReclaimed(raw, row, 900);
+
+  assert.equal(applied, false, 'a row that is not delivered has nothing to reclaim');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'reclaimed_at'), null);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'completed');
+});
+
 test('failRow applies only from the status the row was read with, and reports which happened', () => {
   const raw = setup();
   const itemId = seedRssItem(raw, 'a');
@@ -256,7 +310,7 @@ test('failRow applies only from the status the row was read with, and reports wh
   const staleId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const staleRow: DownloadRow = {
     id: staleId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const staleApplied = failRow(raw, staleRow, 'client unreachable', 900);
@@ -267,7 +321,7 @@ test('failRow applies only from the status the row was read with, and reports wh
 
   const freshRow: DownloadRow = {
     id: staleId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const freshApplied = failRow(raw, freshRow, 'client unreachable', 900);
@@ -284,7 +338,7 @@ test('setRef applies only from the status the row was read with, and reports whi
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const staleRow: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitting', storagePath: null, absentSince: null, deliveredAt: null,
+    clientRef: null, status: 'submitting', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null,
   };
 
   const staleApplied = setRef(raw, staleRow, 'ref-1', 900);

@@ -53,20 +53,30 @@
  * `deliverOne` below recognizes that specific type rather than treating
  * every rejection alike.
  *
- * **Reclaim runs second, and only for `delivered` rows.** If `deps.remove`
- * is present, it is called once per delivered row and counted. `remove` is
- * *absent* for qBittorrent: qBittorrent's `/torrents/delete` stops a
- * torrent's seed and abandons its ratio whether or not `deleteFiles` is
- * set, and there is no "forget this job but keep seeding" call to make
- * instead. Making `remove` optional -- rather than a boolean flag some
- * config could set wrong -- is what makes calling it for a client that
- * cannot safely support it impossible to write, not merely discouraged.
+ * **Reclaim runs second, and only for `delivered` rows `reclaimed_at` has
+ * not already marked.** If `deps.remove` is present, it is called for each
+ * such row, and only once `remove` returns does `markReclaimed` (`rows.ts`)
+ * stamp it -- `remove` first, then the mark. A `remove` that throws leaves
+ * the row unmarked, so the next tick retries it: the same at-least-once
+ * shape `deliverOne`'s own steps 1-4 already have, and for the same reason
+ * -- a client that could not confirm forgetting a job is a bug to keep
+ * nudging, not a row to give up on. `reclaimed_at` is what turns "once per
+ * pass" into "once per download": without the filter and the stamp, this
+ * step would re-select every `delivered` row on every pass and call
+ * `remove` for each all over again, forever -- see `db/migrate.ts`'s
+ * migration 8 comment for the growth that produces. `remove` is *absent*
+ * for qBittorrent: qBittorrent's `/torrents/delete` stops a torrent's seed
+ * and abandons its ratio whether or not `deleteFiles` is set, and there is
+ * no "forget this job but keep seeding" call to make instead. Making
+ * `remove` optional -- rather than a boolean flag some config could set
+ * wrong -- is what makes calling it for a client that cannot safely support
+ * it impossible to write, not merely discouraged.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile } from '@pickarr/contract';
 import { ownerPluginId, PluginNotRegisteredError } from '../host.ts';
 import { mapClientPath } from './paths.ts';
-import { markDelivered, rowsForClient } from './rows.ts';
+import { markDelivered, markReclaimed, rowsForClient } from './rows.ts';
 import type { DownloadRow } from './rows.ts';
 
 export interface DeliverDeps {
@@ -90,7 +100,12 @@ export interface DeliverDeps {
 export interface DeliverResult {
   /** Rows newly advanced `completed` -> `delivered` this pass. */
   delivered: number;
-  /** Delivered rows `deps.remove` was called for this pass. */
+  /**
+   * Delivered rows newly marked reclaimed this pass -- `deps.remove`
+   * succeeded for the row *and* `markReclaimed`'s guard applied. A row
+   * `remove` was called for but that a concurrent write already marked
+   * reclaimed does not count here: that is not this pass's reclaim.
+   */
   reclaimed: number;
   /** Completed rows whose plugin is not registered, retried next pass rather than counted as a generic failure. */
   unowned: number;
@@ -163,8 +178,14 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
  * Reclaims `rows` one at a time -- the same recursive shape as
  * `deliverRows`, for the same reason: a `for` loop awaiting `remove` in its
  * body is not a candidate for parallelising either.
+ *
+ * `remove` runs first, and `markReclaimed` only once it returns: see the
+ * module doc's "Reclaim runs second" section for why that order, and not
+ * the reverse, is what keeps a throwing `remove` retried next tick instead
+ * of silently forgotten.
  */
 async function reclaimRows(
+  deps: DeliverDeps,
   remove: (ref: string) => Promise<void>,
   result: DeliverResult,
   rows: readonly DownloadRow[],
@@ -173,9 +194,11 @@ async function reclaimRows(
   if (row === undefined) return;
   if (row.clientRef !== null) {
     await remove(row.clientRef);
-    result.reclaimed += 1;
+    if (markReclaimed(deps.raw, row, deps.now)) {
+      result.reclaimed += 1;
+    }
   }
-  await reclaimRows(remove, result, rest);
+  await reclaimRows(deps, remove, result, rest);
 }
 
 /**
@@ -199,9 +222,12 @@ export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult
   if (remove !== undefined) {
     // Re-read rather than reuse `completedRows`: a row this same pass just
     // delivered is now `delivered` and eligible for reclaim in the same
-    // tick, not one tick later.
-    const deliveredRows = rowsForClient(deps.raw, deps.clientId).filter((row) => row.status === 'delivered');
-    await reclaimRows(remove, result, deliveredRows);
+    // tick, not one tick later. `reclaimedAt === null` is what keeps this a
+    // once-per-download reclaim rather than a once-per-tick one -- see the
+    // module doc and `db/migrate.ts`'s migration 8 comment.
+    const deliveredRows = rowsForClient(deps.raw, deps.clientId)
+      .filter((row) => row.status === 'delivered' && row.reclaimedAt === null);
+    await reclaimRows(deps, remove, result, deliveredRows);
   }
 
   return result;
