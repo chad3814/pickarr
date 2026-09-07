@@ -1,3 +1,4 @@
+export { createDownloadClients } from './clients/downloads.ts';
 export type { HostDb } from './db/open.ts';
 export { openDatabase, openTestDatabase } from './db/open.ts';
 export { migrateHost, migratePlugin } from './db/migrate.ts';

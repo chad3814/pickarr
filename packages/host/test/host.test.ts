@@ -290,9 +290,9 @@ test('a plugin submitting a download reaches the injected client and reads back 
   migrateHost(raw);
 
   // A recording client rather than the throwing one every other test here
-  // uses: `DownloadClients` has no implementation in `src` yet, so this is
-  // the only thing that says `ctx.downloads.submit` is wired through to the
-  // host's own dependency at all.
+  // uses: this is what proves `ctx.downloads.submit` is wired through to
+  // whichever `DownloadClients` the host was constructed with, independent
+  // of which implementation `main.ts` wires in production.
   const submitted: DownloadSubmission[] = [];
   const downloads: DownloadClients = {
     submit: async (submission) => {
@@ -310,6 +310,9 @@ test('a plugin submitting a download reaches the injected client and reads back 
     id: 'alpha',
     onDownloadRequest: async (rssItemId, ctx) => {
       const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: 7 });
+      if (reference === null) {
+        throw new Error('test double: expected a reference, got null');
+      }
       references.push(reference.toUpperCase());
     },
   }));
