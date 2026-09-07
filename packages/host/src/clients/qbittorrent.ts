@@ -227,6 +227,15 @@ function createAuthHeadersResolver(
  * written down for a real category. One is a value worth folding away
  * before comparing; the other is a category name like any other,
  * indistinguishable from a real one at this layer.
+ *
+ * Also deliberately not merged with `snapshot.ts`'s
+ * `normalizeClientCategory`, the read-side counterpart this function's own
+ * callers pair with when comparing against a response entry. That one
+ * takes `string | null | undefined` because a client's response may omit
+ * the field entirely; this one takes plain `string` because `config.
+ * category` is a config value that is always present -- adding
+ * `undefined` handling here would be handling a case this path cannot
+ * produce.
  */
 function normalizeCategory(category: string): string | null {
   return category === '' || category === 'None' ? null : category;
