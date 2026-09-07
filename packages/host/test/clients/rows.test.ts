@@ -168,12 +168,18 @@ test('clearing absence writes null rather than leaving the stamp', () => {
     clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null,
   };
 
-  setAbsent(raw, row, 900);
+  setAbsent(raw, row, 900, 900);
   assert.equal(readColumn(raw, 'torrent_download', id, 'absent_since'), 900, 'setup: the row must read absent first');
 
-  setAbsent(raw, row, null);
+  setAbsent(raw, row, null, 1200);
 
   assert.equal(readColumn(raw, 'torrent_download', id, 'absent_since'), null);
+  // A clear is a change, so it moves `updated_at` exactly as a stamp does.
+  // With the value and the clock folded into one argument, `updated_at`
+  // would advance or not depending on which value was being written, and a
+  // row that went absent and came back would report the stamp's time as the
+  // last thing that happened to it.
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 1200);
 });
 
 test('a row from each table is advanced in its own table', () => {

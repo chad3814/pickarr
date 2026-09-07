@@ -196,28 +196,30 @@ export function setStoragePath(raw: DatabaseSync, row: DownloadRow, storagePath:
 }
 
 /**
- * Sets `row`'s `absent_since` to `at`, or clears it when `at` is `null`. An
- * observation: never touches `status`.
+ * Sets `row`'s `absent_since` to `absentSince`, or clears it when that is
+ * `null`. An observation: never touches `status`.
  *
- * `updated_at` only moves when `at` is a real timestamp -- there is no
- * second "now" parameter to stamp it with when clearing, and `updated_at`
- * is `NOT NULL`, so writing the same `null` into it is not an option. A
- * clear leaves `updated_at` exactly as the row's last real observation left
- * it, rather than lying about when the row was last touched.
+ * The value and the clock are separate parameters so that **both** stamping
+ * and clearing move `updated_at`. Folding them into one argument would make
+ * `updated_at` advance or not depending on the *value* being written, which
+ * is a surprise in a function whose job is to record one -- and it would
+ * leave a row that went absent and came back reporting the stamp's time as
+ * the last thing that happened to it. A clear is a change; a column called
+ * `updated_at` that skips some changes is answering a different question
+ * than its name asks.
  */
-export function setAbsent(raw: DatabaseSync, row: DownloadRow, at: number | null): void {
-  if (at === null) {
-    if (row.table === 'torrent_download') {
-      raw.prepare('UPDATE torrent_download SET absent_since = NULL WHERE id = ?').run(row.id);
-    } else {
-      raw.prepare('UPDATE nzb_download SET absent_since = NULL WHERE id = ?').run(row.id);
-    }
-    return;
-  }
+export function setAbsent(
+  raw: DatabaseSync,
+  row: DownloadRow,
+  absentSince: number | null,
+  at: number,
+): void {
   if (row.table === 'torrent_download') {
-    raw.prepare('UPDATE torrent_download SET absent_since = ?, updated_at = ? WHERE id = ?').run(at, at, row.id);
+    raw.prepare('UPDATE torrent_download SET absent_since = ?, updated_at = ? WHERE id = ?')
+      .run(absentSince, at, row.id);
   } else {
-    raw.prepare('UPDATE nzb_download SET absent_since = ?, updated_at = ? WHERE id = ?').run(at, at, row.id);
+    raw.prepare('UPDATE nzb_download SET absent_since = ?, updated_at = ? WHERE id = ?')
+      .run(absentSince, at, row.id);
   }
 }
 
