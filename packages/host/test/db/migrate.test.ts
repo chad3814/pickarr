@@ -254,3 +254,21 @@ test('a migration to version 4 adds delivered_at to a populated rss_item table, 
     { filename: 'a.mkv', delivered_at: null },
   );
 });
+
+test('migrating renames an existing feed from usenet to nzb', () => {
+  const { raw } = openTestDatabase();
+  // Stop after version 4, so `download_type` already exists and can hold the
+  // pre-rename value -- the shape a real database has the moment before this
+  // migration runs.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 4));
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, download_type, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 'usenet', 1, 1)
+  `).run();
+
+  // Picks up only version 5: versions 1 through 4 are already recorded as applied.
+  migrateHost(raw);
+
+  const row = raw.prepare('SELECT download_type FROM rss_feed').get() as { download_type: unknown };
+  assert.equal(String(row.download_type), 'nzb');
+});

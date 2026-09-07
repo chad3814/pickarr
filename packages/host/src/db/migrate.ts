@@ -214,6 +214,17 @@ ALTER TABLE rss_item ADD COLUMN delivered_at INTEGER;
 `;
 
 /**
+ * Renames `rss_feed.download_type`'s `'usenet'` value to `'nzb'`, so a feed's
+ * type reads the same word as `download_client.type` for the same transport
+ * -- the two columns are compared directly starting next slice, and one
+ * concept spelled two ways on two tables is how they drift apart. The
+ * column's default stays `'torrent'`; only this value is renamed.
+ */
+const MIGRATION_5 = `
+UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet';
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -223,6 +234,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 2, up: (db) => db.exec(MIGRATION_2) },
   { version: 3, up: (db) => db.exec(MIGRATION_3) },
   { version: 4, up: (db) => db.exec(MIGRATION_4) },
+  { version: 5, up: (db) => db.exec(MIGRATION_5) },
 ];
 
 /**

@@ -42,7 +42,7 @@ export const rssFeed = sqliteTable('rss_feed', {
   // Nullable: absent means picks from this feed go to the host's default
   // client rather than a specific one.
   downloadClientId: integer('download_client_id').references(() => downloadClient.id),
-  // 'torrent' | 'usenet'. Defaulted so the column was legal to add to a table
+  // 'torrent' | 'nzb'. Defaulted so the column was legal to add to a table
   // that may already hold rows; existing feeds inherit 'torrent'.
   downloadType: text('download_type').notNull().default('torrent'),
   pollIntervalS: integer('poll_interval_s').notNull().default(900),
