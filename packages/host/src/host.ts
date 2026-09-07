@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { DownloadClients, JobHandler, MediaPlugin, PluginContext } from '@pickarr/contract';
+import type { DownloadClients, DownloadedFile, JobHandler, MediaPlugin, PluginContext } from '@pickarr/contract';
 import { createArtworkStore } from './artwork/store.ts';
 import type { HostDb } from './db/open.ts';
 import { migratePlugin } from './db/migrate.ts';
@@ -88,12 +88,42 @@ export interface NotifyOutcome {
   failures: readonly { pluginId: string; error: unknown }[];
 }
 
+/**
+ * Thrown by `Host.deliverToPlugin` when `pluginId` names no plugin this host
+ * currently has registered -- the same condition `requestDownload`'s own
+ * throw describes in prose ("belongs to a feed whose plugin is not
+ * registered"), given a distinct type here rather than left as a generic
+ * `Error` because `deliverCompleted` (`clients/deliver.ts`) must tell this
+ * one failure apart from every other way a plugin's `onDownloadedFile` can
+ * reject: this one means "nobody owns this file", which it reports as
+ * `unowned` and retries, the same shape `notifyNewRssItems`'s own `unowned`
+ * gives an rss item whose feed names no registered plugin, rather than
+ * folding it into an undifferentiated failure count.
+ */
+export class PluginNotRegisteredError extends Error {
+  constructor(pluginId: string) {
+    super(`plugin "${pluginId}" is not registered`);
+    this.name = 'PluginNotRegisteredError';
+  }
+}
+
 export interface Host {
   /** Applies the plugin's migrations and registers its handlers. */
   register(plugin: MediaPlugin): void;
   /** Dispatches to the plugin owning the feed those items came from. */
   notifyNewRssItems(ids: readonly number[]): Promise<NotifyOutcome>;
   requestDownload(rssItemId: number): Promise<void>;
+  /**
+   * Delivers `file` to the plugin `pluginId` names, calling its
+   * `onDownloadedFile`. The shape Task 10's `deliverCompleted`
+   * (`clients/deliver.ts`) expects for its own `deliver` dependency --
+   * built here, rather than by whoever wires `deliverCompleted` up,
+   * because only this closure holds the registered `plugins` map and
+   * `ctxFor`. Throws `PluginNotRegisteredError` for a `pluginId` naming no
+   * registered plugin, rather than silently doing nothing, so a caller can
+   * tell that failure apart from the plugin's own handler rejecting.
+   */
+  deliverToPlugin(pluginId: string, file: DownloadedFile): Promise<void>;
   /** Enqueues the first `poll` job for a feed. Idempotent per feed. */
   schedulePoll(feedId: number, runAt?: number): number;
   /**
@@ -123,8 +153,14 @@ export interface Host {
   idle(): Promise<void>;
 }
 
-/** The `rss_feed` row an rss item belongs to names its owning plugin directly. */
-function ownerPluginId(raw: DatabaseSync, rssItemId: number): string | undefined {
+/**
+ * The `rss_feed` row an rss item belongs to names its owning plugin
+ * directly. Exported so `clients/deliver.ts`'s `deliverCompleted` can reuse
+ * this exact query for its own step 3 ("find the owning plugin id") rather
+ * than a second copy of it -- `notifyNewRssItems` and `requestDownload`
+ * below already share it for the same reason.
+ */
+export function ownerPluginId(raw: DatabaseSync, rssItemId: number): string | undefined {
   const row = raw.prepare(`
     SELECT rss_feed.plugin_id AS plugin_id
       FROM rss_item JOIN rss_feed ON rss_feed.id = rss_item.feed_id
@@ -444,6 +480,14 @@ export function createHost(deps: {
         throw new Error(`rss item id ${rssItemId} belongs to a feed whose plugin is not registered`);
       }
       await plugin.onDownloadRequest(rssItemId, ctxFor(plugin.id));
+    },
+
+    async deliverToPlugin(pluginId, file) {
+      const plugin = plugins.get(pluginId);
+      if (!plugin) {
+        throw new PluginNotRegisteredError(pluginId);
+      }
+      await plugin.onDownloadedFile(file, ctxFor(plugin.id));
     },
 
     start() {
