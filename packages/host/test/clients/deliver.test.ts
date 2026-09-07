@@ -135,7 +135,7 @@ test('a completed row is delivered to the plugin owning its feed', async () => {
     deliver: async (pluginId, file) => { deliverCalls.push({ pluginId, file }); },
   }));
 
-  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0 });
+  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0 });
   // The path passed to `stat` and to `deliver` is the *mapped* one, never
   // the client's own stored path.
   assert.deepEqual(statCalls, ['/media/movie.mkv']);
@@ -237,8 +237,8 @@ test('a row whose plugin is not registered is reported unowned and retried', asy
   const second = await deliverCompleted(deps);
 
   assert.equal(calls, 2, 'an unowned row must be retried every pass');
-  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1 });
-  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1 });
+  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0 });
+  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'completed');
 });
 
@@ -256,7 +256,7 @@ test('a delivered row is reclaimed when the adapter can reclaim', async () => {
     remove: async (ref) => { removedRefs.push(ref); },
   }));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0 });
   assert.deepEqual(removedRefs, ['ref-1']);
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), 900, 'the mark is what makes the next pass skip this row');
@@ -274,7 +274,7 @@ test('a client with no remove reclaims nothing', async () => {
 
   const result = await deliverCompleted(baseDeps(raw, clientId));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), null);
 });
@@ -326,15 +326,53 @@ test('a remove that throws leaves the row unreclaimed, and the next pass retries
     },
   });
 
-  // Reclaim has no per-row catch (unlike `deliverOne`'s delivery path), so a
-  // throwing `remove` rejects the whole pass -- what matters for this
-  // defect is that the row was never marked, not that the pass reported a
-  // clean result.
-  await assert.rejects(() => deliverCompleted(deps), /client unreachable/);
+  // A failing `remove` is caught per row, so the pass reports it and keeps
+  // going rather than rejecting -- the same shape `deliverOne` already
+  // applies to a plugin that throws.
+  const first = await deliverCompleted(deps);
+  assert.equal(first.reclaimed, 0);
+  assert.equal(first.reclaimFailures, 1, 'the failure is reported, not only logged');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), null, 'the row stays unmarked -- remove never confirmed success');
 
   const second = await deliverCompleted(deps);
   assert.equal(calls, 2, 'the row must be retried on the next pass, the same shape delivery already has');
   assert.equal(second.reclaimed, 1);
+  assert.equal(second.reclaimFailures, 0);
   assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
+});
+
+test('one ref the client will not delete does not starve the rows behind it', async () => {
+  // The reason reclaim is caught per row rather than per pass. Without it,
+  // the first bad ref rejects the whole pass, and because the next tick reads
+  // the same rows in the same order it stops at the same one -- so a single
+  // permanently-undeletable job blocks reclaim for every row behind it,
+  // forever, while `reclaimed: 0` looks indistinguishable from "nothing left
+  // to reclaim".
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const poisonItem = seedRssItem(raw, 'poison', 'alpha');
+  const goodItem = seedRssItem(raw, 'good', 'alpha');
+  const poisonId = insertTorrentRow(raw, {
+    rssItemId: poisonItem, downloadClientId: clientId, clientRef: 'ref-poison', status: 'delivered', deliveredAt: 500,
+  });
+  const goodId = insertTorrentRow(raw, {
+    rssItemId: goodItem, downloadClientId: clientId, clientRef: 'ref-good', status: 'delivered', deliveredAt: 500,
+  });
+
+  const asked: string[] = [];
+  const deps = baseDeps(raw, clientId, {
+    now: 900,
+    remove: async (ref: string) => {
+      asked.push(ref);
+      if (ref === 'ref-poison') throw new Error('will never delete this one');
+    },
+  });
+
+  const result = await deliverCompleted(deps);
+
+  assert.deepEqual(asked, ['ref-poison', 'ref-good'], 'the good row must still be asked for');
+  assert.equal(result.reclaimed, 1);
+  assert.equal(result.reclaimFailures, 1);
+  assert.equal(readColumn(raw, poisonId, 'reclaimed_at'), null);
+  assert.equal(readColumn(raw, goodId, 'reclaimed_at'), 900, 'the row behind the poison one is reclaimed');
 });

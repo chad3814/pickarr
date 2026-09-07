@@ -76,6 +76,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile } from '@pickarr/contract';
 import { ownerPluginId, PluginNotRegisteredError } from '../host.ts';
 import { mapClientPath } from './paths.ts';
+import { redactUrl } from './redact.ts';
 import { markDelivered, markReclaimed, rowsForClient } from './rows.ts';
 import type { DownloadRow } from './rows.ts';
 
@@ -109,6 +110,13 @@ export interface DeliverResult {
   reclaimed: number;
   /** Completed rows whose plugin is not registered, retried next pass rather than counted as a generic failure. */
   unowned: number;
+  /**
+   * Delivered rows whose `remove` threw this pass. They stay unmarked, so a
+   * later tick retries them -- but the number is reported rather than only
+   * logged, because a client refusing every delete looks identical to a
+   * client with nothing left to reclaim if all you have is `reclaimed: 0`.
+   */
+  reclaimFailures: number;
 }
 
 /**
@@ -193,9 +201,24 @@ async function reclaimRows(
   const [row, ...rest] = rows;
   if (row === undefined) return;
   if (row.clientRef !== null) {
-    await remove(row.clientRef);
-    if (markReclaimed(deps.raw, row, deps.now)) {
-      result.reclaimed += 1;
+    // Caught per row, not per pass. One ref the client will not delete --
+    // already gone, or malformed, or a permission the client lost -- would
+    // otherwise reject this whole pass and starve every row behind it in the
+    // list, forever: the next tick reads the same rows in the same order and
+    // stops at the same one. A poison row must cost its own reclaim and
+    // nothing else's, which is the same reasoning `deliverOne` already
+    // applies to a plugin that throws.
+    try {
+      await remove(row.clientRef);
+      if (markReclaimed(deps.raw, row, deps.now)) {
+        result.reclaimed += 1;
+      }
+    } catch (error) {
+      result.reclaimFailures += 1;
+      deps.log('reclaim failed, leaving the download for the next tick', {
+        rowId: row.id,
+        reason: error instanceof Error ? redactUrl(error.message) : String(error),
+      });
     }
   }
   await reclaimRows(deps, remove, result, rest);
@@ -207,7 +230,7 @@ async function reclaimRows(
  * See the module doc for the full ordering and its reasoning.
  */
 export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult> {
-  const result: DeliverResult = { delivered: 0, reclaimed: 0, unowned: 0 };
+  const result: DeliverResult = { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0 };
 
   // Both `status === 'completed'` and `deliveredAt === null` are checked,
   // even though `markDelivered` never sets one without the other -- stating
