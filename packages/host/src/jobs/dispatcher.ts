@@ -59,8 +59,9 @@ export interface Dispatcher {
   /**
    * Sweeps every row a crash left `running` -- there is one process, so a
    * `running` row at this call is by definition one it crashed mid-handler,
-   * and Task 3's `started_at` means it was genuinely tried, not merely
-   * claimed and abandoned. A row already at its last permitted attempt goes
+   * and `runJob`'s claim stamping `started_at` (`run-job.ts`) means it was
+   * genuinely tried, not merely claimed and abandoned. A row already at its
+   * last permitted attempt goes
    * to `dead` rather than `ready` -- a job kind that reliably kills the
    * process must not be readied on every boot -- and everything else goes
    * back to `ready` with `run_at` recomputed from the backoff curve, so a
@@ -288,8 +289,9 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
 
   /**
    * The crash-recovery sweep. Every `running` row here was genuinely
-   * started (Task 3 stamps `started_at` only then) by a process that is no
-   * longer running it -- there is exactly one, and it is this one, alive
+   * started (`runJob`'s claim, in `run-job.ts`, stamps `started_at` only
+   * then) by a process that is no longer running it -- there is exactly
+   * one, and it is this one, alive
    * right now. Attempts are left untouched either way: the crashed attempt
    * already consumed one, in the same statement that claimed the row.
    */

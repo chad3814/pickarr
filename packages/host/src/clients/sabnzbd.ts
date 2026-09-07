@@ -42,6 +42,20 @@ function buildAddUrlUrl(config: SabnzbdConfig, link: string, name: string): stri
   const query = new URLSearchParams();
   query.set('mode', 'addurl');
   query.set('name', link);
+  // Sent exactly as configured, never normalised -- unlike qBittorrent's
+  // adapter, which folds `''` and the literal `'None'` to "no category"
+  // before sending or comparing (see `qbittorrent.ts`'s `normalizeCategory`
+  // for its own reasoning, and why the two adapters disagree on purpose). A
+  // qBittorrent config can accidentally hold the text `'None'`, which is not
+  // a real category name there; SABnzbd has no such accident to guard
+  // against on the way *out* -- `config.category` here is whatever an
+  // operator configured, and `"None"` is not a spelling qBittorrent's
+  // config form or this one would produce by accident. SABnzbd's own use of
+  // `"None"` is on the way *back*: it is the literal text the server itself
+  // answers with for a queue slot that has no category (1.x's
+  // `readCategory`, `packages/core/src/clients/sabnzbd.ts`, ~line 296) --
+  // this adapter never reads a slot's category back at all, so that
+  // reasoning has nothing to apply to here.
   query.set('cat', config.category);
   query.set('nzbname', name);
   query.set('apikey', config.apiKey);

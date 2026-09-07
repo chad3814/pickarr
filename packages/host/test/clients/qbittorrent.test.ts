@@ -85,6 +85,36 @@ test('a magnet link yields its infohash without any lookup', async () => {
   );
 });
 
+test('an add answering HTTP 200 with the body "Fails." is refused, not recorded as submitted', async () => {
+  // qBittorrent answers a refused add (a bad save path, a disk error, an
+  // unparseable link) with HTTP 200 and this exact body. On the magnet
+  // path there is no lookup afterwards to catch that, so the body itself is
+  // the only evidence left that the add did not actually take.
+  const config = makeConfig({ id: 30 });
+  const fetch = fakeQueuedFetch(async () => 'Fails.');
+  const client = createQbittorrentClient(config, fetch);
+
+  await assert.rejects(
+    client.submit(MAGNET, 'Some Show'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('30')
+      && err.message.includes('/api/v2/torrents/add'),
+  );
+});
+
+test('an add answering with an unexpected body still succeeds', async () => {
+  // Only the exact refusal marker is treated as a failure. A body this
+  // adapter has never seen -- an unfamiliar wording from a future server
+  // version -- must not start failing every submission.
+  const config = makeConfig({ id: 31 });
+  const fetch = fakeQueuedFetch(async () => 'Queued.');
+  const client = createQbittorrentClient(config, fetch);
+
+  const result = await client.submit(MAGNET, 'Some Show');
+
+  assert.deepEqual(result, { ref: '0123456789abcdef0123456789abcdef01234567' });
+});
+
 test('an infohash is read case-insensitively and stored lowercase', async () => {
   // A magnet may spell the hash in either case. Two spellings of one hash
   // would be two distinct values to the unique index on
@@ -120,6 +150,16 @@ test('a link that is not a magnet yields null from infohashFromMagnet', () => {
     null,
   );
   assert.equal(infohashFromMagnet('not a magnet at all'), null);
+});
+
+test('an all-zero magnet hash yields null from infohashFromMagnet, agreeing with findRegisteredRef', () => {
+  // `infohashFromMagnet` and `findRegisteredRef`'s own `isZeroHash` answer
+  // the same question -- "does this hash identify a real torrent" -- and
+  // must agree. A hash of all zeros identifies nothing yet.
+  assert.equal(
+    infohashFromMagnet('magnet:?xt=urn:btih:0000000000000000000000000000000000000000&dn=Zero'),
+    null,
+  );
 });
 
 test('a rejected bearer header names the minimum version', async () => {
@@ -250,6 +290,30 @@ test('an all-zero infohash is treated as unresolved, not as a reference', async 
 
   assert.equal(threw, false, 'an all-zero hash must not be recorded as an error');
   assert.deepEqual(result, { ref: null });
+});
+
+test('a base32 magnet this adapter cannot parse issues the add and then the lookup, yielding null when it does not match', async () => {
+  // `infohashFromMagnet` returns `null` for a base32 `btih` magnet on
+  // purpose (it is not a v1 hex magnet), and `submit` routes that `null`
+  // into the same name-keyed lookup a `.torrent` url uses -- no test
+  // before this one drove a non-v1 magnet through `submit` at all. Two
+  // requests (the add, then the lookup) is the proof the lookup actually
+  // ran, and `{ ref: null }` is what a lookup that has not matched yet
+  // legitimately returns.
+  const base32Magnet = 'magnet:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&dn=Base32Show';
+  const config = makeConfig({ id: 16, category: 'movies' });
+  const { fetch, calls } = fakeQbittorrentFetch({
+    text: async () => 'Ok.',
+    json: async () => [],
+  });
+  const client = createQbittorrentClient(config, fetch);
+
+  const result = await client.submit(base32Magnet, 'Base32 Show');
+
+  assert.deepEqual(result, { ref: null });
+  assert.equal(calls.length, 2, 'the add and the lookup should each run exactly once');
+  assert.equal(calls[0]?.kind, 'text');
+  assert.equal(calls[1]?.kind, 'json');
 });
 
 test('a lookup matches on category so another client\'s torrents are ignored', async () => {

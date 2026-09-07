@@ -127,6 +127,39 @@ test('a submitted torrent gets a row with its infohash and the returned ref', as
   assert.deepEqual({ ...row }, { infohash: MAGNET_HASH, client_ref: MAGNET_HASH, status: 'submitted' });
 });
 
+test('a resubmit that collides with an already-recorded ref gets a message naming the item and client', async () => {
+  // The second submission's row hits the partial unique index on
+  // (download_client_id, client_ref) once the same magnet's ref is written
+  // against a client that already holds it. Left unhandled, `last_error`
+  // would read SQLite's raw `UNIQUE constraint failed: ...` message,
+  // naming neither the item nor the client.
+  const raw = setup();
+  const clientId = seedClient(raw, { name: 'QBTResubmit', apiKey: 'key-1b', category: 'movies' });
+  const feedId = seedFeed(raw, { downloadType: 'torrent', downloadClientId: clientId });
+  const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
+
+  const fetch = fakeFetch({ text: async () => 'Ok.' });
+  const clients = createDownloadClients({ raw, fetch, now: () => 5500, log: noLog });
+
+  const firstRef = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
+  assert.equal(firstRef, MAGNET_HASH);
+
+  await assert.rejects(
+    clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
+    (err: unknown) => err instanceof Error
+      && err.message.includes(`rss item ${itemId}`)
+      && err.message.includes(`download client ${clientId}`)
+      && !err.message.includes('UNIQUE constraint failed'),
+  );
+
+  const rows = raw.prepare(
+    'SELECT status, last_error FROM torrent_download WHERE rss_item_id = ? ORDER BY id',
+  ).all(itemId) as Array<{ status: unknown; last_error: unknown }>;
+  assert.equal(rows.length, 2, 'the resubmit must have inserted its own row');
+  assert.equal(rows[1]?.status, 'failed');
+  assert.ok(typeof rows[1]?.last_error === 'string' && (rows[1].last_error as string).includes(`rss item ${itemId}`));
+});
+
 test('the row exists before the client is called', async () => {
   const raw = setup();
   const clientId = seedClient(raw, {
@@ -235,6 +268,40 @@ test('a submission naming a client the feed does not use is refused', async () =
 
   const row = raw.prepare('SELECT COUNT(*) AS n FROM torrent_download WHERE rss_item_id = ?').get(itemId);
   assert.equal(Number((row as { n: unknown }).n), 0, 'a refused submission must write no row');
+});
+
+test('a download_client type/implementation mismatch is refused before any request is made', async () => {
+  // `readClientConfig` and `selectClientForFeed` are each tested elsewhere
+  // against a bare `DatabaseSync`, which cannot issue a request at all --
+  // a guarantee by construction there, but not a test that drives a
+  // mismatch through `createDownloadClients` itself with a fetch double
+  // that would notice a request if one were made. This client's own type
+  // ('nzb') and implementation ('qbittorrent') disagree; the feed names it
+  // explicitly and shares its type, so `selectClientForFeed` accepts the
+  // choice and `readClientConfig` is the one that refuses.
+  const raw = setup();
+  const clientId = seedClient(raw, {
+    name: 'Mismatched', type: 'nzb', implementation: 'qbittorrent', apiKey: 'key-8', category: 'movies',
+  });
+  const feedId = seedFeed(raw, { downloadType: 'nzb', downloadClientId: clientId });
+  const itemId = seedRssItem(raw, feedId, { link: 'https://example.test/y.torrent', filename: 'Y', downloadType: 'nzb' });
+
+  let requests = 0;
+  const fetch = fakeFetch({
+    json: async () => { requests += 1; throw new Error('must not be called'); },
+    text: async () => { requests += 1; throw new Error('must not be called'); },
+  });
+  const clients = createDownloadClients({ raw, fetch, now: () => 4500, log: noLog });
+
+  await assert.rejects(
+    clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
+    (err: unknown) => err instanceof Error
+      && err.message.includes(`client ${clientId}`)
+      && err.message.includes('qbittorrent')
+      && err.message.includes('cannot work'),
+  );
+
+  assert.equal(requests, 0, 'a type mismatch must be refused before any request is made');
 });
 
 test('an nzb feed writes to nzb_download and never to torrent_download', async () => {

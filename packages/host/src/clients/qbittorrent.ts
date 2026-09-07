@@ -23,17 +23,42 @@ const LOGIN_PATH = '/api/v2/auth/login';
  * parameter comes first. Deliberately narrow: a base32 `btih` (32
  * characters, not hex) and a v2 `btmh` magnet both fail to match, on
  * purpose -- `infohashFromMagnet` returns `null` for either, and `submit`
- * below refuses rather than passing a non-infohash value on as if it were
- * one. The trailing `(?![0-9a-fA-F])` stops a 41st hex character from being
- * silently dropped instead of making the match fail.
+ * below falls through to `findRegisteredRef`'s lookup rather than passing a
+ * non-infohash value on as if it were one. The trailing `(?![0-9a-fA-F])`
+ * stops a 41st hex character from being silently dropped instead of making
+ * the match fail.
  */
 const MAGNET_BTIH_PATTERN = /[?&]xt=urn:btih:([0-9a-fA-F]{40})(?![0-9a-fA-F])/i;
 
 /**
+ * True for a hash that is all zeros, at any length -- qBittorrent pads a
+ * torrent's hash with zeros while its metadata is still arriving, and the
+ * padding width is not a value this adapter should have to know. A hash
+ * this shape identifies nothing yet; treating it as a hash of any other
+ * value would record a reference this torrent does not actually have.
+ * Used by both `infohashFromMagnet` below and `findRegisteredRef` further
+ * down, so the two agree on the one question they'd otherwise answer
+ * separately and could answer differently.
+ */
+function isZeroHash(hash: string): boolean {
+  return hash !== '' && /^0+$/.test(hash);
+}
+
+/**
  * The infohash from a magnet link, or `null` when the link is not a v1
  * hex-encoded magnet -- including a base32 `btih` or a v2 `btmh` magnet,
- * neither of which this returns a value for. Callers must not treat `null`
- * as "close enough": `submit` below refuses rather than guessing.
+ * neither of which this returns a value for -- or when the hex it did match
+ * is all zeros. Callers must not treat `null` as "close enough": `submit`
+ * below does not guess at a reference for it, it falls through to
+ * `findRegisteredRef`'s name-keyed lookup instead, the same path a
+ * `.torrent` url always takes.
+ *
+ * The all-zero check agrees with `findRegisteredRef`'s own `isZeroHash`
+ * below on purpose -- both answer the same question, "does this hash
+ * identify a real torrent", and a magnet padded with zeros (unusual, but
+ * not forbidden by the spec) identifies nothing yet for exactly the same
+ * reason a zeroed `/torrents/info` entry does not: qBittorrent has not
+ * received this torrent's metadata.
  */
 export function infohashFromMagnet(link: string): string | null {
   if (!link.toLowerCase().startsWith('magnet:')) return null;
@@ -45,7 +70,8 @@ export function infohashFromMagnet(link: string): string | null {
   // two spellings of one hash are two distinct values to the unique index on
   // (download_client_id, client_ref) -- storing whichever case the link
   // happened to use would let the same torrent be recorded twice.
-  return hash.toLowerCase();
+  const lowered = hash.toLowerCase();
+  return isZeroHash(lowered) ? null : lowered;
 }
 
 /**
@@ -150,9 +176,10 @@ async function login(
  * retry on a stale cookie here, unlike 1.x's `cookieRequest`
  * (`packages/core/src/clients/qbittorrent.ts`), which re-logs-in once
  * because its client is long-lived and a session can expire on the
- * server's own schedule hours into that lifetime. `createDownloadClients`
- * (Task 10) builds a fresh adapter per submission, so a client instance
- * here lives exactly one submit and cannot outlive the cookie it obtains
+ * server's own schedule hours into that lifetime. `createDownloadClients`'s
+ * `submit` method (`clients/downloads.ts`) builds a fresh adapter per
+ * submission, so a client instance here lives exactly one submit and cannot
+ * outlive the cookie it obtains
  * within it -- there is no "session expired an hour in" case for a retry to
  * exist for, and a retry loop would be unreachable through any real path.
  * Whoever later caches a client instance across submissions is what
@@ -187,20 +214,22 @@ function createAuthHeadersResolver(
  * would never match even though both mean the same absence. Normalising
  * both to `null` before anything compares is what makes every later
  * comparison a single, honest null check.
+ *
+ * This is deliberately not what `sabnzbd.ts`'s `buildAddUrlUrl` does with
+ * its own `config.category` -- that one is sent as-is, unnormalised, and
+ * that is correct too (see the comment on its `cat` parameter). The two
+ * disagree because the value each is guarding against disagrees: here,
+ * `'None'` is a *configured* value this codebase chose to store, a
+ * spelling any category-shaped field could pick up by accident; SABnzbd's
+ * own `"None"` (1.x's `readCategory`, `packages/core/src/clients/
+ * sabnzbd.ts`, ~line 296) is the *server's* vocabulary for "no category" on
+ * a queue slot, never a name a maintainer or a config form would have
+ * written down for a real category. One is a value worth folding away
+ * before comparing; the other is a category name like any other,
+ * indistinguishable from a real one at this layer.
  */
 function normalizeCategory(category: string): string | null {
   return category === '' || category === 'None' ? null : category;
-}
-
-/**
- * True for a hash that is all zeros, at any length -- qBittorrent pads a
- * torrent's hash with zeros while its metadata is still arriving, and the
- * padding width is not a value this adapter should have to know. A hash
- * this shape identifies nothing yet; treating it as a hash of any other
- * value would record a reference this torrent does not actually have.
- */
-function isZeroHash(hash: string): boolean {
-  return hash !== '' && /^0+$/.test(hash);
 }
 
 /**
@@ -283,17 +312,22 @@ async function guardAuthFailure<T>(
  * does not have), which leaves name as the only field left to distinguish
  * with.
  *
- * Matching on name here does **not** repeat 1.x's own warning about doing
- * exactly that. 1.x's comment above its `TORRENTS_INFO_PATH` lookup says a
- * name-keyed lookup "would miss intermittently depending on swarm speed",
- * and the reason it gives is magnets: qBittorrent has no metadata for a
- * magnet at add time and reports the infohash as the *name* until it
- * arrives, so the name this adapter sent and the name the server reports
- * can disagree for a while. A `.torrent` file carries its own metadata, so
- * qBittorrent already knows the real name at add time -- the trap is
- * specific to magnets, and `createQbittorrentClient`'s magnet path (above)
- * performs no lookup at all, so it never meets this code either. Name
- * matching is sound exactly where it is used here.
+ * Matching on name here is sound for a `.torrent` url, but that is not the
+ * only link that reaches this lookup. 1.x's comment above its own
+ * `TORRENTS_INFO_PATH` lookup says a name-keyed lookup "would miss
+ * intermittently depending on swarm speed", and the reason it gives is
+ * magnets: qBittorrent has no metadata for a magnet at add time and
+ * reports the infohash as the *name* until it arrives, so the name this
+ * adapter sent and the name the server reports can disagree for a while. A
+ * `.torrent` file carries its own metadata, so qBittorrent already knows
+ * the real name at add time, which is why the trap does not apply there --
+ * but `infohashFromMagnet` returns `null` for a magnet it cannot parse (a
+ * base32 `btih`, or a v2 `btmh`), and `submit` below routes that `null`
+ * straight into this same lookup, on the very name qBittorrent will keep
+ * reporting until metadata arrives. This function does not tell the two
+ * cases apart -- it cannot, from a name-and-category lookup alone -- so an
+ * unmatched magnet is exactly why an unmatched lookup below answers `null`
+ * rather than an error: it may simply be too soon.
  *
  * Returns `null`, not an error, for either of two readings that look like
  * failures and are not:
@@ -336,6 +370,30 @@ async function findRegisteredRef(
   // spellings of one hash are two distinct values to the unique index on
   // (download_client_id, client_ref).
   return hash.toLowerCase();
+}
+
+/**
+ * True only for qBittorrent's own refusal marker on `/torrents/add`: the
+ * literal text `Fails.`, with or without the trailing period, compared
+ * trimmed and case-insensitively so trailing whitespace or a differently
+ * cased server build cannot hide it. Every other body -- including an
+ * empty one, and one this adapter has never seen -- is treated as success.
+ * Requiring the body equal `Ok.` instead would fail closed: a server
+ * version that answers with wording this adapter does not recognise would
+ * then refuse every submission, not only the ones qBittorrent itself
+ * refused.
+ *
+ * 1.x discards this same body (`packages/core/src/clients/qbittorrent.ts`,
+ * `addUrl`) and gets away with it, because 1.x always runs a tag lookup
+ * afterwards -- an add it can never confirm just stays unconfirmed, never
+ * recorded as submitted. The magnet path below deliberately skips that
+ * lookup (see `createQbittorrentClient`'s own comment), which is exactly
+ * why this body is the only evidence of a refusal left to check -- and
+ * checking it costs nothing extra, since it is already in hand.
+ */
+function isAddRefusalBody(body: string): boolean {
+  const normalized = body.trim().toLowerCase();
+  return normalized === 'fails.' || normalized === 'fails';
 }
 
 /**
@@ -395,12 +453,23 @@ export function createQbittorrentClient(
         rename: name,
       });
 
-      await guardAuthFailure(
+      const addBody = await guardAuthFailure(
         config,
         TORRENTS_ADD_PATH,
         headers,
         () => fetch.text(url, { method: 'POST', headers, body }),
       );
+
+      // qBittorrent answers a refused add with HTTP 200, same as its
+      // login trap (see `login` above) -- a bad save path, a disk error,
+      // or a link it could not parse all come back this way. On the
+      // magnet path there is no lookup afterwards to catch that (see
+      // `isAddRefusalBody`), so this is the only chance to refuse before
+      // the caller records a reference this client does not actually
+      // hold.
+      if (isAddRefusalBody(addBody)) {
+        throw new Error(`qbittorrent client ${config.id} refused the add on ${TORRENTS_ADD_PATH}`);
+      }
 
       if (infohash !== null) {
         return { ref: infohash };

@@ -52,8 +52,9 @@ function feedRow(raw: DatabaseSync, feedId: number): FeedRow {
  * would never use. The concrete function a caller wires up here still runs
  * through `createHostFetch`'s own per-hostname queue (see `queue.ts`'s
  * `text` method) -- a feed's host is paced exactly like a plugin's `json`
- * or `bytes` call to that same host, not exempted from the budget Task 2
- * built just because this caller cannot use `HostFetch` itself.
+ * or `bytes` call to that same host, not exempted from that same
+ * per-hostname budget just because this caller cannot use `HostFetch`
+ * itself.
  *
  * `notify` rather than `Host.notifyNewRssItems` bound in: the same function
  * shape, so a test can stub it directly without building a whole `Host`.

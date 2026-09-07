@@ -14,7 +14,7 @@ import { redactUrl } from '../clients/redact.ts';
  * `text` -- and reaching it costs nothing extra, because it runs through
  * this same instance's `enqueue`, so a feed's host shares its per-hostname
  * budget with any `json`/`bytes` call to that same host, rather than being
- * exempt from the limit Task 2 built.
+ * exempt from the per-hostname concurrency limit this module builds.
  */
 export interface QueuedFetch extends HostFetch {
   text(url: string, init?: RequestInit): Promise<string>;

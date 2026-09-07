@@ -26,6 +26,28 @@ import { createSabnzbdClient } from './sabnzbd.ts';
 import { selectClientForFeed } from './select.ts';
 import type { SubmitResult } from './types.ts';
 
+/** SQLite's own code for a UNIQUE constraint failure -- verified against `node:sqlite`. */
+const SQLITE_CONSTRAINT_UNIQUE = 2067;
+
+/**
+ * `node:sqlite` throws a plain `Error` carrying `code: 'ERR_SQLITE_ERROR'`
+ * and SQLite's own numeric `errcode`, neither part of `@types/node`'s
+ * declared `Error` shape, so this is a runtime check rather than something
+ * the compiler already knows. Checking `code` alone would not do: a generic
+ * logic error surfaces with the same `code` but a different `errcode`, and
+ * treating that as a lost race would misreport a real bug as a duplicate
+ * reference. Mirrors `media/writer.ts`'s own `isUniqueConstraintViolation`
+ * -- the same guard, kept here rather than imported, since that one is not
+ * exported and pulling in the media module for a two-line SQLite check
+ * would be the wrong dependency for this one to take on.
+ */
+function isUniqueConstraintViolation(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as { code?: unknown }).code;
+  const errcode = (err as { errcode?: unknown }).errcode;
+  return code === 'ERR_SQLITE_ERROR' && errcode === SQLITE_CONSTRAINT_UNIQUE;
+}
+
 /** The columns `createDownloadClients` needs off one `rss_item` row. */
 interface DownloadItem {
   id: number;
@@ -230,10 +252,29 @@ export function createDownloadClients(deps: {
         }
         return result.ref;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        // A second submission of an item whose first attempt already
+        // recorded a ref hits the partial unique index on
+        // (download_client_id, client_ref) -- `plan.markSubmitted`'s own
+        // `UPDATE`, above. Left as SQLite's raw message, `last_error` would
+        // read `UNIQUE constraint failed: torrent_download.download_
+        // client_id, torrent_download.client_ref`, naming neither the item
+        // nor the client. Replaced with a new error (rather than just a
+        // different `message` written to this row) so the same clear
+        // wording also reaches `jobs.last_error` once this rethrows into
+        // `run-job.ts` -- the raw SQLite message would otherwise still get
+        // there unchanged.
+        const failure = isUniqueConstraintViolation(err)
+          ? new Error(
+            `rss item ${submission.rssItemId} could not be recorded against download client ` +
+            `${submission.downloadClientId}: this client already has a recorded download using ` +
+            'the same reference',
+            { cause: err },
+          )
+          : err;
+        const message = failure instanceof Error ? failure.message : String(failure);
         plan.markFailed(raw, rowId, redactUrl(message), now());
         log('download submission failed', logDetail);
-        throw err;
+        throw failure;
       }
     },
   };
