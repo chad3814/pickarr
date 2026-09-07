@@ -1,6 +1,7 @@
 import type { HostFetch } from '@pickarr/contract';
 import { createBoundedQueue, isValidLimit } from '../util/bounded-queue.ts';
 import type { BoundedQueue } from '../util/bounded-queue.ts';
+import { redactUrl } from '../clients/redact.ts';
 
 /**
  * `createHostFetch`'s actual return shape: `HostFetch`'s two methods plus
@@ -208,7 +209,7 @@ export function createHostFetch(
     const settled = new AbortController();
     const onTimeout = new Promise<never>((_resolve, reject) => {
       timeout.addEventListener('abort', () => {
-        reject(new Error(`fetch ${url} timed out after ${timeoutMs}ms`));
+        reject(new Error(`fetch ${redactUrl(url)} timed out after ${timeoutMs}ms`));
       }, { once: true, signal: settled.signal });
     });
     try {
@@ -216,7 +217,7 @@ export function createHostFetch(
         (async () => {
           const res = await deps.fetch(url, { ...init, signal });
           if (!res.ok) {
-            throw new Error(`fetch ${url} failed: ${res.status} ${res.statusText}`);
+            throw new Error(`fetch ${redactUrl(url)} failed: ${res.status} ${res.statusText}`);
           }
           return read(res);
         })(),

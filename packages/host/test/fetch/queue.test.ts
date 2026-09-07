@@ -283,6 +283,31 @@ test('a non-2xx response rejects rather than returning a body', async () => {
   await assert.rejects(hostFetch.json<Echo>('http://a.example/missing'), /404/);
 });
 
+test('the queue names a failing url without its credential', async () => {
+  // The regression test for the live leak: SABnzbd's api key travels as
+  // `?apikey=`, so a failing request against a url bearing one must not put
+  // that key -- or the string it was set to -- into the error message. The
+  // parameter's name staying visible (as `apikey=***`) is fine and expected;
+  // only the value itself, `not-a-real-key`, must be gone.
+  const secret = 'not-a-real-key';
+  const hostFetch = createHostFetch({
+    fetch: async () => new Response('', { status: 401, statusText: 'Unauthorized' }),
+  });
+
+  await assert.rejects(
+    hostFetch.json(`http://a.example/api?apikey=${secret}&mode=addurl`),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(
+        !error.message.includes(secret),
+        `error message must not contain the credential value, got: ${error.message}`,
+      );
+      assert.match(error.message, /apikey=\*\*\*/, 'the parameter name should stay visible, with its value redacted');
+      return true;
+    },
+  );
+});
+
 test('the limit is keyed by hostname, so two hosts proceed in parallel', async () => {
   const track = trackingFetch();
   const hostFetch = createHostFetch({ fetch: track.fetchFn });
