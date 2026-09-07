@@ -77,6 +77,26 @@ export function scheduleKnownFeeds(host: Host, raw: DatabaseSync): readonly numb
 }
 
 /**
+ * Schedules a `reconcile` job for every `download_client` row already on
+ * file, and returns the client ids it scheduled -- the same shape and the
+ * same reasoning as `scheduleKnownFeeds`, one job kind over, and equally
+ * only safe AFTER `host.start()`.
+ *
+ * Each client's `host.scheduleReconcile` call is independent -- it checks
+ * and creates a job for one client id, touching no row any other client's
+ * call would -- so this fires all of them at once with `Promise.all` rather
+ * than an `await` inside a `for` loop: there is no ordering between clients
+ * for a loop's own sequencing to preserve, and awaiting one at a time would
+ * only make booting with many clients slower for no correctness gained.
+ */
+export async function scheduleKnownDownloadClients(host: Host, raw: DatabaseSync): Promise<readonly number[]> {
+  const clientIds = raw.prepare('SELECT id FROM download_client').all()
+    .map((row) => Number((row as { id: unknown }).id));
+  await Promise.all(clientIds.map((clientId) => host.scheduleReconcile(clientId)));
+  return clientIds;
+}
+
+/**
  * The plugins the shipped process runs with: none, because no media plugin
  * ships inside `@pickarr/host` yet. This is where a later slice's plugin
  * wires in. An empty list is not a refusal: a poll's `rss_item.delivered_at`
@@ -147,14 +167,16 @@ export function createShutdown(
  *    tables.
  * 2. `host.register(...)` for each plugin, before anything can poll, so no
  *    item is ever inserted while its feed's owner is absent.
- * 3. `host.start()`, before `scheduleKnownFeeds`. `start()` sweeps every row
- *    a crash left `running` before it arms the dispatcher; `schedulePoll`
- *    counts a poll job left `running` as pending and declines to schedule a
- *    replacement, so scheduling first would leave a feed whose crashed poll
- *    used its last attempt with nothing runnable and nothing to notice.
- *    Sweeping first means `scheduleKnownFeeds` sees each row's true
- *    post-sweep state and schedules a fresh cycle wherever the sweep
- *    dead-lettered one. `main.test.ts` fails if these two are swapped.
+ * 3. `host.start()`, before `scheduleKnownFeeds` and
+ *    `scheduleKnownDownloadClients`. `start()` sweeps every row a crash
+ *    left `running` before it arms the dispatcher; `schedulePoll` and
+ *    `scheduleReconcile` each count their own job left `running` as pending
+ *    and decline to schedule a replacement, so scheduling first would leave
+ *    a feed or client whose crashed cycle used its last attempt with
+ *    nothing runnable and nothing to notice. Sweeping first means both
+ *    scheduling calls see each row's true post-sweep state and schedule a
+ *    fresh cycle wherever the sweep dead-lettered one. `main.test.ts` fails
+ *    if these are reordered.
  * 4. The signal handlers, last, so nothing can be asked to stop before the
  *    state above is settled.
  *
@@ -214,6 +236,7 @@ export async function main(
 
   const recovered = host.start();
   const feedIds = scheduleKnownFeeds(host, raw);
+  const clientIds = await scheduleKnownDownloadClients(host, raw);
 
   const shutdown = createShutdown(host, raw);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
@@ -224,6 +247,7 @@ export async function main(
 
   log(
     `running: database ${databasePath}, artwork ${artworkDir}, `
-    + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled`,
+    + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
+    + `${clientIds.length} download client(s) scheduled`,
   );
 }

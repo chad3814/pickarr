@@ -10,6 +10,8 @@ import { createDispatcher } from './jobs/dispatcher.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
+import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
+import { createReconcileHandler, scheduleReconcile as scheduleReconcileJob } from './clients/reconcile-job.ts';
 
 /**
  * Real `Timers`, wiring `Host.start()`'s dispatcher to Node's own timer
@@ -47,29 +49,21 @@ export const DEFAULT_MAX_ATTEMPTS = 5;
  */
 export const HOST_PLUGIN_ID = 'host';
 
-/** Narrows a `poll` job's `unknown` payload rather than casting it, so a malformed row fails loudly instead of coercing silently. */
+/**
+ * Narrows a `poll` job's `unknown` payload rather than casting it, so a
+ * malformed row fails loudly instead of coercing silently. Built on
+ * `jobs/pending.ts`'s `readPayloadNumber`, the non-throwing reader a scan
+ * over rows that are not the one being run (`pendingJobId`, same module)
+ * also uses -- throwing here is right precisely because this payload IS the
+ * job under execution, and a bad one should fail loudly and dead-letter,
+ * which would be wrong for a scan over every OTHER row.
+ */
 function readPollPayload(payload: unknown): { feedId: number } {
-  const feedId = tryReadPollFeedId(payload);
+  const feedId = readPayloadNumber(payload, 'feedId');
   if (feedId === undefined) {
     throw new Error(`poll job payload is not shaped like { feedId: number }: ${JSON.stringify(payload)}`);
   }
   return { feedId };
-}
-
-/**
- * The non-throwing twin of `readPollPayload`, for a scan over rows that are
- * not the one being run. `readPollPayload` throwing is right inside the
- * handler, where the payload IS the job under execution and a bad one
- * should fail loudly and dead-letter. It is wrong here: a scan that throws
- * on the first unparseable row it meets would let one corrupt job poison
- * every other feed's scheduling, including feeds with nothing wrong at all.
- * Returns `undefined` for anything not shaped like `{ feedId: number }`,
- * rather than coercing it into one.
- */
-function tryReadPollFeedId(payload: unknown): number | undefined {
-  if (typeof payload !== 'object' || payload === null) return undefined;
-  const feedId = (payload as { feedId: unknown }).feedId;
-  return typeof feedId === 'number' ? feedId : undefined;
 }
 
 /**
@@ -126,6 +120,19 @@ export interface Host {
   deliverToPlugin(pluginId: string, file: DownloadedFile): Promise<void>;
   /** Enqueues the first `poll` job for a feed. Idempotent per feed. */
   schedulePoll(feedId: number, runAt?: number): number;
+  /**
+   * Enqueues the first `reconcile` job for a download client. Idempotent
+   * per client, the same shape as `schedulePoll` -- a client that already
+   * has a `reconcile` job `ready` or `running` gets no second one.
+   *
+   * A `Promise`, unlike `schedulePoll`: this delegates to
+   * `clients/reconcile-job.ts`'s own exported `scheduleReconcile`, whose
+   * `jobs` parameter is the contract's `JobQueue` -- `PluginContext.jobs`,
+   * the same shape a plugin's own `ctx.jobs.enqueue` is -- and that
+   * interface's `enqueue` is async, so there is no synchronous id to hand
+   * back the moment this needs to actually create a row.
+   */
+  scheduleReconcile(clientId: number, runAt?: number): Promise<number>;
   /**
    * Sweeps every row a crash left `running`, then arms the dispatcher's
    * timer and safety interval so registered handlers run as their jobs
@@ -296,6 +303,20 @@ export function createHost(deps: {
     };
   }
 
+  // A named function, not only an inline method on the returned object:
+  // `reconcileHandler` below (built by `createReconcileHandler`) needs this
+  // exact dispatch for its own `deliver` dependency, and closing over a
+  // second copy of it would let the two drift apart from a single edit
+  // landing in only one -- the same reasoning `notifyNewRssItems`, just
+  // below, is already hoisted for.
+  async function deliverToPlugin(pluginId: string, file: DownloadedFile): Promise<void> {
+    const plugin = plugins.get(pluginId);
+    if (!plugin) {
+      throw new PluginNotRegisteredError(pluginId);
+    }
+    await plugin.onDownloadedFile(file, ctxFor(plugin.id));
+  }
+
   // A named function, not an inline method on the returned object: the feed
   // reader built below needs the very same dispatch this host promises
   // through `Host.notifyNewRssItems`, and closing over a second copy of it
@@ -390,40 +411,23 @@ export function createHost(deps: {
     const seconds = Number((row as { poll_interval_s: unknown }).poll_interval_s);
     enqueuePollUnlessPending(feedId, deps.now() + seconds * 1000, job.id);
   };
-  handlers.set(HOST_PLUGIN_ID, new Map([['poll', pollHandler]]));
 
-  /**
-   * The id of a `poll` job already `ready` or `running` for this feed, so no
-   * caller ever starts a second concurrent cycle. Uses `tryReadPollFeedId`,
-   * not `readPollPayload`: this scans every OTHER pending poll job looking
-   * for a match, and one unrelated row with a payload nothing understands is
-   * not a reason to fail the whole scan -- it is simply not the feed being
-   * looked for. Still logged, though: a payload nothing here can read means
-   * something wrote a row this host never would have.
-   *
-   * `exceptJobId` is for the one caller that is itself a running poll job for
-   * this feed and must not count as its own reason not to reschedule.
-   */
-  function pendingPollJobId(feedId: number, exceptJobId?: number): number | undefined {
-    const rows = deps.raw.prepare(`
-      SELECT id, payload_json FROM jobs WHERE plugin_id = ? AND kind = 'poll' AND state IN ('ready', 'running')
-    `).all(HOST_PLUGIN_ID);
-    for (const row of rows) {
-      const id = Number((row as { id: unknown }).id);
-      if (id === exceptJobId) continue;
-      const payloadJson = String((row as { payload_json: unknown }).payload_json);
-      const payload: unknown = JSON.parse(payloadJson);
-      const otherFeedId = tryReadPollFeedId(payload);
-      if (otherFeedId === undefined) {
-        hostLog('poll job payload is not shaped like { feedId: number }, skipping it', { jobId: id, payload: payloadJson });
-        continue;
-      }
-      if (otherFeedId === feedId) {
-        return id;
-      }
-    }
-    return undefined;
-  }
+  // `reconcile-job.ts`'s own factory, built once here and registered the
+  // same way `pollHandler` is: one job kind, one handler, under this host's
+  // own reserved plugin id. `deliverToPlugin` above is exactly the
+  // `deliver` dependency `createReconcileHandler` asks for -- the same
+  // function `Host.deliverToPlugin` exposes to a caller outside this
+  // module, reused rather than re-implemented so a plugin lookup edit here
+  // reaches both.
+  const reconcileHandler: JobHandler = createReconcileHandler({
+    raw: deps.raw,
+    fetch: deps.fetch,
+    now: deps.now,
+    log: hostLog,
+    deliver: deliverToPlugin,
+  });
+
+  handlers.set(HOST_PLUGIN_ID, new Map([['poll', pollHandler], ['reconcile', reconcileHandler]]));
 
   /**
    * The single place a `poll` job is created: returns the pending job's id if
@@ -431,9 +435,13 @@ export function createHost(deps: {
    * `schedulePoll` on the way in and `pollHandler`'s own reschedule -- go
    * through here, so neither can create a duplicate cycle the other would
    * then honour forever.
+   *
+   * The pending check itself is `jobs/pending.ts`'s `pendingJobId`, shared
+   * with `reconcile-job.ts`'s own reconcile cycle -- see that module's doc
+   * comment for why the scan is single-sourced rather than copied.
    */
   function enqueuePollUnlessPending(feedId: number, runAt: number | undefined, exceptJobId: number | undefined): number {
-    const existing = pendingPollJobId(feedId, exceptJobId);
+    const existing = pendingJobId(deps.raw, HOST_PLUGIN_ID, 'poll', 'feedId', feedId, exceptJobId, hostLog);
     if (existing !== undefined) return existing;
     // Built as two shapes, not one object literal with `runAt` always
     // present: `runAt` is `number | undefined` here, but `JobEnqueue.runAt`
@@ -473,6 +481,16 @@ export function createHost(deps: {
       return enqueuePollUnlessPending(feedId, runAt, undefined);
     },
 
+    scheduleReconcile(clientId, runAt) {
+      // `ctxFor(HOST_PLUGIN_ID).jobs` is exactly the `JobQueue`
+      // `scheduleReconcile` asks for: the same `enqueue` a plugin's own
+      // `ctx.jobs.enqueue` is, scoped to this host's own reserved id, and
+      // already wired to rearm the dispatcher on every enqueue. No
+      // `exceptJobId`, for the same reason `schedulePoll` passes none: an
+      // outside caller is not itself a reconcile job.
+      return scheduleReconcileJob(deps.raw, ctxFor(HOST_PLUGIN_ID).jobs, clientId, runAt, undefined, hostLog);
+    },
+
     async requestDownload(rssItemId) {
       const pluginId = ownerPluginId(deps.raw, rssItemId);
       const plugin = pluginId !== undefined ? plugins.get(pluginId) : undefined;
@@ -482,13 +500,7 @@ export function createHost(deps: {
       await plugin.onDownloadRequest(rssItemId, ctxFor(plugin.id));
     },
 
-    async deliverToPlugin(pluginId, file) {
-      const plugin = plugins.get(pluginId);
-      if (!plugin) {
-        throw new PluginNotRegisteredError(pluginId);
-      }
-      await plugin.onDownloadedFile(file, ctxFor(plugin.id));
-    },
+    deliverToPlugin,
 
     start() {
       started = true;
