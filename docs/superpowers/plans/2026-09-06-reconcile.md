@@ -21,7 +21,7 @@
 - Pickarr 1.x (`packages/core`, `plugin-api`, `plugin-scenes`, `web`, `e2e`) is deployed and **must not be modified**. Read it freely — it is the reference for every client behaviour here — but never edit it and never import from it.
 - A comment false about the code beside it is a defect equal to a wrong line of code.
 - Baseline at the start: **1691** tests fail 0; lint exit 0 with exactly **124** warnings, **0** in `packages/contract` and `packages/host`.
-- **Commits are unsigned this run** (the signing agent is locked). Use `git -c commit.gpgsign=false commit -m "..." -- <paths>`, never a config change, and `git add -- <paths>` first.
+- **Commit signed, and `git add -- <paths>` first** (`git commit -- <paths>` alone does not stage untracked files). Never edit `commit.gpgsign` or any other git config. Tasks 1-4 were committed unsigned while the signing agent was locked overnight and were re-signed afterwards in one `git rebase --exec` pass; that flag must not appear in any remaining task.
 
 ---
 
@@ -76,7 +76,7 @@ test('both download tables carry a status index', () => {});
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Give a download row somewhere to record what the client says about it" -- packages
+git add -- packages && git commit -m "Give a download row somewhere to record what the client says about it" -- packages
 ```
 
 ---
@@ -124,7 +124,7 @@ test('a real category is returned unchanged', () => {
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Name what one poll of a download client returns" -- packages
+git add -- packages && git commit -m "Name what one poll of a download client returns" -- packages
 ```
 
 ---
@@ -195,7 +195,7 @@ test('remove asks the client to delete the job and its files', () => {});
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Poll everything SABnzbd holds, and say whether that was all of it" -- packages
+git add -- packages && git commit -m "Poll everything SABnzbd holds, and say whether that was all of it" -- packages
 ```
 
 ---
@@ -267,7 +267,7 @@ test('the adapter exposes no remove, so a torrent is never dropped', () => {
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Read a torrent's state without ever concluding it failed by surprise" -- packages
+git add -- packages && git commit -m "Read a torrent's state without ever concluding it failed by surprise" -- packages
 ```
 
 ---
@@ -307,7 +307,7 @@ test("another client's mapping is not applied", () => {});
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Translate a client's path with the most specific mapping, not the first" -- packages
+git add -- packages && git commit -m "Translate a client's path with the most specific mapping, not the first" -- packages
 ```
 
 ---
@@ -372,7 +372,7 @@ test('a row from each table is advanced in its own table', () => {
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Move a download row only from the state it was expected to be in" -- packages
+git add -- packages && git commit -m "Move a download row only from the state it was expected to be in" -- packages
 ```
 
 ---
@@ -439,7 +439,7 @@ test('a delivered row is left alone by every arm', () => {});
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Reconcile what the client holds against what we believe, client first" -- packages
+git add -- packages && git commit -m "Reconcile what the client holds against what we believe, client first" -- packages
 ```
 
 ---
@@ -491,7 +491,7 @@ test('a row that already has a ref is not touched by recovery', () => {});
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Recover a lost reference only when the client can prove which job it is" -- packages
+git add -- packages && git commit -m "Recover a lost reference only when the client can prove which job it is" -- packages
 ```
 
 ---
@@ -542,7 +542,7 @@ test('a row with no ref is never swept', () => {});
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Record that a client no longer has a download, without deciding what it means" -- packages
+git add -- packages && git commit -m "Record that a client no longer has a download, without deciding what it means" -- packages
 ```
 
 ---
@@ -610,7 +610,7 @@ test('a client with no remove reclaims nothing', () => {
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Tell a plugin its file landed, and only then let the client forget it" -- packages
+git add -- packages && git commit -m "Tell a plugin its file landed, and only then let the client forget it" -- packages
 ```
 
 ---
@@ -667,7 +667,7 @@ test('a client whose row is gone does not re-enqueue', () => {
 - [ ] **Step 6: Run the full gate, then commit**
 
 ```bash
-git add -- packages && git -c commit.gpgsign=false commit -m "Poll every configured client on a timer the dispatcher already owns" -- packages
+git add -- packages && git commit -m "Poll every configured client on a timer the dispatcher already owns" -- packages
 ```
 
 ---
