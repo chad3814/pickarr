@@ -1,7 +1,7 @@
-import type { QbittorrentBearerConfig } from './config.ts';
+import type { QbittorrentBearerConfig, QbittorrentLoginConfig } from './config.ts';
 import { FetchFailedError } from '../fetch/queue.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
-import { redactHeaders } from './redact.ts';
+import { redactFormBody, redactHeaders } from './redact.ts';
 import type { SubmitResult } from './types.ts';
 
 /**
@@ -15,6 +15,7 @@ export const API_KEY_MIN_VERSION = '5.2.0';
 
 const TORRENTS_ADD_PATH = '/api/v2/torrents/add';
 const TORRENTS_INFO_PATH = '/api/v2/torrents/info';
+const LOGIN_PATH = '/api/v2/auth/login';
 
 /**
  * Matches `xt=urn:btih:<40 hex chars>` in a magnet link's query, the way
@@ -56,6 +57,122 @@ export function infohashFromMagnet(link: string): string | null {
  */
 function bearerHeaders(config: QbittorrentBearerConfig): Record<string, string> {
   return { Authorization: `Bearer ${config.apiKey}` };
+}
+
+/**
+ * The `SID=...` pair from a login response, or `null` when the response
+ * carried none. `getSetCookie()` is the only correct reader here:
+ * `Headers.get('set-cookie')` folds every cookie in a response into one
+ * comma-joined string that cannot be split back apart safely, because a
+ * cookie's own value may itself contain a comma. Matches 1.x's own
+ * `readSidCookie` (`packages/core/src/clients/qbittorrent.ts`), which this
+ * file does not import from -- 1.x is deployed and not to be touched, so
+ * the same small function is written again here rather than shared.
+ *
+ * Only the `name=value` pair is kept: the attributes (`Path`, `HttpOnly`)
+ * describe how a browser should store the cookie and are not part of what a
+ * `Cookie` request header carries back.
+ */
+function readSidCookie(response: Response): string | null {
+  for (const candidate of response.headers.getSetCookie()) {
+    const pair = (candidate.split(';', 1)[0] ?? '').trim();
+    if (pair.startsWith('SID=') && pair.length > 'SID='.length) return pair;
+  }
+  return null;
+}
+
+/**
+ * Logs in once and returns the `SID` cookie pair every later request
+ * replays. **The only request in this adapter outside the fetch queue**,
+ * and deliberately so: `QueuedFetch`'s methods (`json`/`bytes`/`text`) hand
+ * back only a parsed body, never the `Response` itself, so no caller of
+ * `fetch` can reach `Set-Cookie` -- the one place the `SID` cookie lives.
+ * `loginFetch` is therefore a bare `fetch`, unpaced by `createHostFetch`'s
+ * per-hostname concurrency budget and untimed by its timeout; every request
+ * after this one -- the add, and for a `.torrent` url, the lookup that
+ * follows it -- replays the cookie this returns through `fetch`, the queue,
+ * like everything else in this slice.
+ *
+ * qBittorrent answers a **wrong username or password with HTTP 200** and
+ * the body `Fails.`, so the absence of the `SID` cookie -- never the
+ * response's status -- is what says the login failed (matches 1.x's own
+ * comment on this trap, on `cookieRequest`'s `login` in
+ * `packages/core/src/clients/qbittorrent.ts`). The body is never read: it
+ * is the server's own text, and the message below says everything useful
+ * about the failure without it.
+ */
+async function login(
+  config: QbittorrentLoginConfig,
+  loginFetch: typeof globalThis.fetch,
+): Promise<string> {
+  const body = new URLSearchParams({ username: config.username, password: config.password });
+  const response = await loginFetch(`${config.baseUrl}${LOGIN_PATH}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+
+  if (!response.ok) {
+    // The body *sent*, not the body received: this is the request this
+    // process built, so redacting it before it can reach a message is this
+    // file's job -- unlike the response body above, which is never read at
+    // all. `redactFormBody` keeps `config.password` out of this message the
+    // same way `redactHeaders` keeps a bearer token out of
+    // `guardAuthFailure`'s.
+    throw new Error(
+      `qbittorrent client ${config.id} login failed with HTTP ${response.status} ` +
+      `${response.statusText}, POSTing ${redactFormBody(body.toString())} to ${LOGIN_PATH}`,
+    );
+  }
+
+  const sid = readSidCookie(response);
+  if (sid === null) {
+    throw new Error(
+      `qbittorrent client ${config.id} logged in but received no SID cookie, which is how ` +
+      'qbittorrent reports a username or password it will not accept',
+    );
+  }
+  return sid;
+}
+
+/**
+ * Builds the function `submit` and `findRegisteredRef` both call for a
+ * request's auth headers, deciding once, at creation, which of the two
+ * strategies this config uses -- never re-decided per request. A bearer
+ * config's headers never change, so the returned function always answers
+ * the same value; a login config's do, exactly once, which is what `cached`
+ * below exists for.
+ *
+ * `cached` is scoped to this one call, which is scoped to one
+ * `createQbittorrentClient` -- one client instance, one login, no matter
+ * how many requests a single submission ends up needing (the add, and for
+ * a `.torrent` url, the lookup afterwards too). There is deliberately no
+ * retry on a stale cookie here, unlike 1.x's `cookieRequest`
+ * (`packages/core/src/clients/qbittorrent.ts`), which re-logs-in once
+ * because its client is long-lived and a session can expire on the
+ * server's own schedule hours into that lifetime. `createDownloadClients`
+ * (Task 10) builds a fresh adapter per submission, so a client instance
+ * here lives exactly one submit and cannot outlive the cookie it obtains
+ * within it -- there is no "session expired an hour in" case for a retry to
+ * exist for, and a retry loop would be unreachable through any real path.
+ * Whoever later caches a client instance across submissions is what
+ * invalidates that assumption, and is what would need to add a retry here
+ * to match.
+ */
+function createAuthHeadersResolver(
+  config: QbittorrentBearerConfig | QbittorrentLoginConfig,
+  loginFetch: typeof globalThis.fetch,
+): () => Promise<Record<string, string>> {
+  if (config.kind === 'qbittorrent-bearer') {
+    const headers = bearerHeaders(config);
+    return () => Promise.resolve(headers);
+  }
+
+  let cached: Promise<string> | undefined;
+  return async () => {
+    cached ??= login(config, loginFetch);
+    return { Cookie: await cached };
+  };
 }
 
 /**
@@ -109,7 +226,7 @@ interface TorrentInfoEntry {
  * naming the add.
  */
 async function guardAuthFailure<T>(
-  config: QbittorrentBearerConfig,
+  config: QbittorrentBearerConfig | QbittorrentLoginConfig,
   path: string,
   headers: Record<string, string>,
   task: () => Promise<T>,
@@ -118,19 +235,34 @@ async function guardAuthFailure<T>(
     return await task();
   } catch (err) {
     if (err instanceof FetchFailedError && (err.status === 401 || err.status === 403)) {
-      // Matches 1.x's `keyRequest` intent: an operator on 5.0 or 5.1 has
-      // a plausible-looking key the server has no concept of, so naming
-      // the minimum version is the only useful thing a bare 401/403
-      // could be turned into. `headers` goes through `redactHeaders`
-      // even here, where the value sent is not secret information this
-      // process didn't already choose to send -- so a later edit adding
-      // a second header to this request cannot accidentally start
-      // leaking it through this message.
+      if (config.kind === 'qbittorrent-bearer') {
+        // Matches 1.x's `keyRequest` intent: an operator on 5.0 or 5.1 has
+        // a plausible-looking key the server has no concept of, so naming
+        // the minimum version is the only useful thing a bare 401/403
+        // could be turned into. `headers` goes through `redactHeaders`
+        // even here, where the value sent is not secret information this
+        // process didn't already choose to send -- so a later edit adding
+        // a second header to this request cannot accidentally start
+        // leaking it through this message.
+        throw new Error(
+          `qbittorrent client ${config.id} refused the api key on ${path} ` +
+          `(HTTP ${err.status}), sent as ${JSON.stringify(redactHeaders(headers))}; api key ` +
+          `authentication needs qBittorrent ${API_KEY_MIN_VERSION} (WebAPI 2.14.1) or newer -- ` +
+          'an older server rejects the header no matter how valid the key is',
+          { cause: err },
+        );
+      }
+      // The login strategy's session cookie has stopped being accepted --
+      // expired, or revoked server-side. `headers` here is `{ Cookie:
+      // <sid> }`, a session token rather than the username/password
+      // `login` guards, but it is still not named in this message: there
+      // is nothing a maintainer needs from its value, only from the fact
+      // that it was refused. No retry: see `createAuthHeadersResolver`
+      // for why a fresh login here could only ever run once more against
+      // a client instance already past its one submission.
       throw new Error(
-        `qbittorrent client ${config.id} refused the api key on ${path} ` +
-        `(HTTP ${err.status}), sent as ${JSON.stringify(redactHeaders(headers))}; api key ` +
-        `authentication needs qBittorrent ${API_KEY_MIN_VERSION} (WebAPI 2.14.1) or newer -- ` +
-        'an older server rejects the header no matter how valid the key is',
+        `qbittorrent client ${config.id} was refused on ${path} (HTTP ${err.status}); the ` +
+        'session cookie this client logged in with is no longer accepted',
         { cause: err },
       );
     }
@@ -175,15 +307,16 @@ async function guardAuthFailure<T>(
  *   is treated exactly like no match at all.
  */
 async function findRegisteredRef(
-  config: QbittorrentBearerConfig,
+  config: QbittorrentBearerConfig | QbittorrentLoginConfig,
   fetch: QueuedFetch,
   name: string,
+  authHeaders: () => Promise<Record<string, string>>,
 ): Promise<string | null> {
   const category = normalizeCategory(config.category);
   const url = category === null
     ? `${config.baseUrl}${TORRENTS_INFO_PATH}`
     : `${config.baseUrl}${TORRENTS_INFO_PATH}?category=${encodeURIComponent(category)}`;
-  const headers = bearerHeaders(config);
+  const headers = await authHeaders();
 
   const torrents = await guardAuthFailure(
     config,
@@ -206,10 +339,10 @@ async function findRegisteredRef(
 }
 
 /**
- * qBittorrent's adapter, bearer-auth branch only. `/torrents/add` answers
- * with a bare body and no identifier at all -- unlike SABnzbd's `addurl`,
- * there is nothing here to key a reference on. A magnet link solves that
- * for free: it already carries the infohash, and that infohash *is*
+ * qBittorrent's adapter, either auth strategy. `/torrents/add` answers with
+ * a bare body and no identifier at all -- unlike SABnzbd's `addurl`, there
+ * is nothing here to key a reference on. A magnet link solves that for
+ * free: it already carries the infohash, and that infohash *is*
  * qBittorrent's own reference, so a magnet submission is one request and
  * needs no lookup afterwards. A `.torrent` url carries no hash of its own
  * to read, so its `submit` falls through to `findRegisteredRef` above
@@ -224,20 +357,25 @@ async function findRegisteredRef(
  * See `findRegisteredRef` for why that same trap does not apply to the
  * `.torrent` path's own name-keyed lookup.
  *
- * Takes `QbittorrentBearerConfig` only. The login strategy
- * (`QbittorrentLoginConfig`) is a second, separate branch this function does
- * not implement -- Task 8 widens the parameter type to add it.
+ * `loginFetch` defaults to the real, global `fetch` and is only ever given
+ * anything else by a test: it is the one escape from `fetch: QueuedFetch`
+ * this function needs, so `login` (via `createAuthHeadersResolver`) can
+ * reach a login response's headers, which `QueuedFetch` cannot expose. See
+ * `login` for why that request has to bypass the queue in the first place.
  */
 export function createQbittorrentClient(
-  config: QbittorrentBearerConfig,
+  config: QbittorrentBearerConfig | QbittorrentLoginConfig,
   fetch: QueuedFetch,
+  loginFetch: typeof globalThis.fetch = globalThis.fetch,
 ): { submit(link: string, name: string): Promise<SubmitResult> } {
+  const authHeaders = createAuthHeadersResolver(config, loginFetch);
+
   return {
     async submit(link: string, name: string): Promise<SubmitResult> {
       const infohash = infohashFromMagnet(link);
 
       const url = `${config.baseUrl}${TORRENTS_ADD_PATH}`;
-      const headers = bearerHeaders(config);
+      const headers = await authHeaders();
       // Normalised on the way *out*, not only on the way back: sending
       // `category=None` would ask qBittorrent to file this torrent under a
       // category literally named "None", creating one on a server that had
@@ -268,7 +406,7 @@ export function createQbittorrentClient(
         return { ref: infohash };
       }
 
-      const ref = await findRegisteredRef(config, fetch, name);
+      const ref = await findRegisteredRef(config, fetch, name, authHeaders);
       return { ref };
     },
   };

@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { QbittorrentBearerConfig } from '../../src/clients/config.ts';
+import type { QbittorrentBearerConfig, QbittorrentLoginConfig } from '../../src/clients/config.ts';
 import { createQbittorrentClient, infohashFromMagnet } from '../../src/clients/qbittorrent.ts';
-import { FetchFailedError } from '../../src/fetch/queue.ts';
+import { createHostFetch, FetchFailedError } from '../../src/fetch/queue.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
 
 function makeConfig(overrides: Partial<QbittorrentBearerConfig> = {}): QbittorrentBearerConfig {
@@ -14,6 +14,23 @@ function makeConfig(overrides: Partial<QbittorrentBearerConfig> = {}): Qbittorre
     category: 'tv',
     ...overrides,
   };
+}
+
+function makeLoginConfig(overrides: Partial<QbittorrentLoginConfig> = {}): QbittorrentLoginConfig {
+  return {
+    kind: 'qbittorrent-login',
+    id: 20,
+    baseUrl: 'https://qbt.example.com',
+    username: 'admin',
+    password: 's3cret-placeholder',
+    category: 'tv',
+    ...overrides,
+  };
+}
+
+/** Lets pending microtasks (including a queue's own wake-up chaining) run. */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /**
@@ -316,4 +333,148 @@ test('a category of "" or the literal text \'None\' means no category, not a cat
   // filter -- doing so would ask the server for torrents in a category
   // literally named "None" or "" instead of torrents that have none.
   await Promise.all(['', 'None'].map((configured) => assertBlankCategorySendsNoFilter(configured)));
+});
+
+test('a successful login carries the SID cookie into the next request', async () => {
+  const config = makeLoginConfig({ id: 20 });
+  const setCookie = new Headers();
+  setCookie.append('set-cookie', 'SID=abc123; Path=/; HttpOnly');
+  let loginCalls = 0;
+  const loginFetch: typeof globalThis.fetch = async (url, init) => {
+    loginCalls += 1;
+    assert.equal(String(url), 'https://qbt.example.com/api/v2/auth/login');
+    assert.equal(init?.method, 'POST');
+    return new Response('Ok.', { status: 200, headers: setCookie });
+  };
+  let addHeaders: RequestInit['headers'];
+  const fetch = fakeQueuedFetch(async (_url, init) => {
+    addHeaders = init?.headers;
+    return 'Ok.';
+  });
+  const client = createQbittorrentClient(config, fetch, loginFetch);
+
+  const result = await client.submit(MAGNET, 'Some Show');
+
+  assert.equal(loginCalls, 1, 'exactly one login should have happened');
+  assert.deepEqual(addHeaders, { Cookie: 'SID=abc123' });
+  assert.deepEqual(result, { ref: '0123456789abcdef0123456789abcdef01234567' });
+});
+
+/**
+ * A login response with no Set-Cookie at all, and a 200 -- the trap:
+ * qBittorrent answers a wrong username or password this way, and a
+ * `res.ok` check alone would read it as success. Module scope, rather than
+ * declared inside its test: it captures nothing from either test that uses
+ * it.
+ */
+const refusalLoginFetch: typeof globalThis.fetch = async () => new Response('Fails.', { status: 200 });
+
+/**
+ * A login response that failed outright (not a refusal-by-absent-cookie),
+ * for the test that proves the request body sent gets redacted before it
+ * can reach that failure's message. Module scope for the same reason as
+ * `refusalLoginFetch` above.
+ */
+const serverErrorLoginFetch: typeof globalThis.fetch = async () => new Response('nope', { status: 500, statusText: 'Server Error' });
+
+test('a login answering 200 with a refusal body is a failure', async () => {
+  const config = makeLoginConfig({ id: 21 });
+  const fetch = fakeQueuedFetch(async () => 'Ok.');
+  const client = createQbittorrentClient(config, fetch, refusalLoginFetch);
+
+  await assert.rejects(
+    client.submit(MAGNET, 'Some Show'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('21')
+      && err.message.includes('username or password it will not accept'),
+  );
+});
+
+test('the password never appears in an error message', async () => {
+  const config = makeLoginConfig({ id: 22, password: 's3cret-placeholder' });
+  const fetch = fakeQueuedFetch(async () => 'Ok.');
+  const client = createQbittorrentClient(config, fetch, serverErrorLoginFetch);
+
+  await assert.rejects(
+    client.submit(MAGNET, 'Some Show'),
+    (err: unknown) => err instanceof Error
+      && !err.message.includes('s3cret-placeholder')
+      && err.message.includes('22'),
+  );
+});
+
+test('the cookie is read with getSetCookie, so a comma in a value survives', async () => {
+  // Two Set-Cookie headers, the first with a comma inside its own value.
+  // `Headers.get('set-cookie')` would fold both into one comma-joined
+  // string that cannot be split back apart safely; `getSetCookie()` keeps
+  // them as two separate strings.
+  const config = makeLoginConfig({ id: 23 });
+  const setCookie = new Headers();
+  setCookie.append('set-cookie', 'CSRF=abc,def; Path=/');
+  setCookie.append('set-cookie', 'SID=987654; Path=/; HttpOnly');
+  const loginFetch: typeof globalThis.fetch = async () => new Response('Ok.', { status: 200, headers: setCookie });
+  let addHeaders: RequestInit['headers'];
+  const fetch = fakeQueuedFetch(async (_url, init) => {
+    addHeaders = init?.headers;
+    return 'Ok.';
+  });
+  const client = createQbittorrentClient(config, fetch, loginFetch);
+
+  await client.submit(MAGNET, 'Some Show');
+
+  assert.deepEqual(addHeaders, { Cookie: 'SID=987654' });
+});
+
+test('only the login bypasses the queue; the add goes through it', async () => {
+  // An occupant request holds the real per-hostname queue's sole slot for
+  // 'shared.example.com'. The login (a bare fetch) must complete anyway --
+  // proof it never asked the queue for a slot -- while the add (through
+  // `fetch.text`, the real queue) must wait for the occupant to release it.
+  // Asserted entirely by counting calls and checking settledness, never by
+  // elapsed time.
+  const config = makeLoginConfig({ id: 24, baseUrl: 'https://shared.example.com' });
+
+  // Both the occupant and the add end up sharing this one raw fetch, since
+  // they share one `QueuedFetch` (deliberately, so they contend for the
+  // same hostname slot) -- routed by url so only the occupant's own request
+  // hangs on `release`; the add answers immediately once the queue lets it
+  // through.
+  let releaseOccupant: (() => void) | undefined;
+  const rawFetch: typeof globalThis.fetch = async (input) => {
+    if (String(input).endsWith('/occupy')) {
+      await new Promise<void>((resolve) => { releaseOccupant = resolve; });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response('Ok.', { status: 200 });
+  };
+  const fetch = createHostFetch({ fetch: rawFetch });
+  const occupant = fetch.json('https://shared.example.com/occupy');
+  await tick();
+  assert.ok(releaseOccupant, 'the occupant must have claimed the hostname slot');
+
+  let loginCalls = 0;
+  const loginFetch: typeof globalThis.fetch = async () => {
+    loginCalls += 1;
+    const setCookie = new Headers();
+    setCookie.append('set-cookie', 'SID=abc123; Path=/');
+    return new Response('Ok.', { status: 200, headers: setCookie });
+  };
+  const client = createQbittorrentClient(config, fetch, loginFetch);
+
+  const submitPromise = client.submit(MAGNET, 'Some Show');
+  await tick();
+
+  assert.equal(loginCalls, 1, 'the login must complete without waiting on the occupied hostname slot');
+
+  let submitSettled = false;
+  void submitPromise.then(() => { submitSettled = true; }, () => { submitSettled = true; });
+  await tick();
+  assert.equal(submitSettled, false, 'the add must wait for the hostname queue slot the occupant holds');
+
+  const release = releaseOccupant;
+  assert.ok(release, 'the occupant fetch must have started');
+  release();
+  await occupant;
+  await submitPromise;
+  assert.equal(submitSettled, true, 'the add must complete once the hostname slot is released');
 });
