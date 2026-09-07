@@ -102,6 +102,31 @@ test('an add answering HTTP 200 with the body "Fails." is refused, not recorded 
   );
 });
 
+test('a .torrent url whose add answers "Fails." is refused before any lookup', async () => {
+  // The counterpart to the magnet case above. The refusal check sits before
+  // `submit` branches on the infohash, so it covers this path by
+  // construction -- but "by construction" is exactly what a later edit can
+  // undo by moving the check inside the magnet branch, and only a test on
+  // this path would notice. Asserting one request also pins that the refusal
+  // happens *before* the lookup: a refused add must not be followed by a
+  // lookup for a torrent the client never took.
+  const config = makeConfig({ id: 32 });
+  let calls = 0;
+  const fetch = fakeQueuedFetch(async () => {
+    calls += 1;
+    return 'Fails.';
+  });
+  const client = createQbittorrentClient(config, fetch);
+
+  await assert.rejects(
+    client.submit('https://example.com/some.torrent', 'Some Movie'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('32')
+      && err.message.includes('/api/v2/torrents/add'),
+  );
+  assert.equal(calls, 1, 'a refused add must not be followed by a lookup');
+});
+
 test('an add answering with an unexpected body still succeeds', async () => {
   // Only the exact refusal marker is treated as a failure. A body this
   // adapter has never seen -- an unfamiliar wording from a future server

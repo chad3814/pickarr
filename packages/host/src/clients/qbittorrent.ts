@@ -399,21 +399,27 @@ function isAddRefusalBody(body: string): boolean {
 /**
  * qBittorrent's adapter, either auth strategy. `/torrents/add` answers with
  * a bare body and no identifier at all -- unlike SABnzbd's `addurl`, there
- * is nothing here to key a reference on. A magnet link solves that for
+ * is nothing here to key a reference on. A **v1 hex** magnet solves that for
  * free: it already carries the infohash, and that infohash *is*
- * qBittorrent's own reference, so a magnet submission is one request and
- * needs no lookup afterwards. A `.torrent` url carries no hash of its own
- * to read, so its `submit` falls through to `findRegisteredRef` above
- * instead.
+ * qBittorrent's own reference, so such a submission is one request and needs
+ * no lookup afterwards.
+ *
+ * Everything else falls through to `findRegisteredRef` above and takes two:
+ * a `.torrent` url, which carries no hash of its own to read -- and also any
+ * magnet this adapter cannot read a hash out of, which `infohashFromMagnet`
+ * reports as `null` (a base32 `btih`, a v2 `btmh`, an all-zero hash). "A
+ * magnet is one request" is therefore true of the magnets we can parse, not
+ * of magnets; the distinction is `infohashFromMagnet`'s return value, never
+ * the `magnet:` scheme.
  *
  * This sidesteps a race 1.x's `addUrl` has to handle
  * (`packages/core/src/clients/qbittorrent.ts`, around its own
  * `TORRENTS_INFO_PATH` lookup): qBittorrent has no metadata at add time and
  * reports the infohash as the *name* until metadata arrives, so a
  * name-keyed (or even tag-keyed) lookup can miss depending on swarm speed.
- * Reading the hash from the link itself never touches that lookup at all.
- * See `findRegisteredRef` for why that same trap does not apply to the
- * `.torrent` path's own name-keyed lookup.
+ * Reading the hash from the link itself never touches that lookup at all --
+ * when there is a hash to read. See `findRegisteredRef` for why that same
+ * trap does not apply to the `.torrent` path's own name-keyed lookup.
  *
  * `loginFetch` defaults to the real, global `fetch` and is only ever given
  * anything else by a test: it is the one escape from `fetch: QueuedFetch`

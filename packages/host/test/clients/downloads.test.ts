@@ -158,6 +158,12 @@ test('a resubmit that collides with an already-recorded ref gets a message namin
   assert.equal(rows.length, 2, 'the resubmit must have inserted its own row');
   assert.equal(rows[1]?.status, 'failed');
   assert.ok(typeof rows[1]?.last_error === 'string' && (rows[1].last_error as string).includes(`rss item ${itemId}`));
+  // The first row must be untouched. A collision is the *second* attempt's
+  // failure, and the download the first attempt really did register is still
+  // registered -- so a resubmit that rewrote or cleared row one would lose
+  // the only record of the reference the client actually holds.
+  assert.equal(rows[0]?.status, 'submitted', 'the original row must survive a colliding resubmit');
+  assert.equal(rows[0]?.last_error, null, 'the original row must not inherit the resubmit\'s error');
 });
 
 test('the row exists before the client is called', async () => {
