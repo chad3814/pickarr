@@ -344,6 +344,56 @@ test('a status this client does not enumerate reads as failed, not in-progress',
 
   assert.equal(snapshot.history.length, 1);
   assert.equal(snapshot.history[0]?.outcome, 'failed');
+  // The guess is reported, not just made. `historyOutcome`'s comment argues
+  // that a wrong `failed` is the safer error because it is "visible
+  // immediately" -- which is only true if something names the status that
+  // caused it. Without this, a status SABnzbd adds later turns into
+  // unexplained failed downloads and nothing points at the list to extend.
+  assert.deepEqual(snapshot.unreadable, ['quarantined']);
+});
+
+test('a status this client does enumerate is never reported unreadable', async () => {
+  // The other half: `unreadable` has to stay empty in the ordinary case, or
+  // a caller learns to ignore it and it stops being a signal at all.
+  const config = makeConfig({ id: 24 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return {
+      history: {
+        noofslots: 2,
+        slots: [
+          { nzo_id: 'SABnzbd_nzo_ok1', name: 'Done.Job', category: 'tv', status: 'Completed', storage: '/done/a' },
+          { nzo_id: 'SABnzbd_nzo_ok2', name: 'Unpacking.Job', category: 'tv', status: 'Extracting' },
+        ],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.unreadable, []);
+});
+
+test('one unreadable status reported by many slots is named once', async () => {
+  const config = makeConfig({ id: 25 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return {
+      history: {
+        noofslots: 2,
+        slots: [
+          { nzo_id: 'SABnzbd_nzo_q1', name: 'A', category: 'tv', status: 'quarantined' },
+          { nzo_id: 'SABnzbd_nzo_q2', name: 'B', category: 'tv', status: 'quarantined' },
+        ],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.unreadable, ['quarantined']);
 });
 
 test('history is paged until noofslots is satisfied', async () => {

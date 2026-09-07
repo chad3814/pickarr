@@ -49,6 +49,29 @@ export interface ClientSnapshot {
   queue: ClientQueueEntry[];
   history: ClientHistoryEntry[];
   complete: boolean;
+  /**
+   * Every status or state value the adapter could not interpret, one entry
+   * per distinct value, empty when it understood all of them.
+   *
+   * This exists because the two adapters guess differently about an
+   * unrecognised value and one of those guesses is expensive: SABnzbd's
+   * unknown *history* status reads as `failed` (see `historyOutcome` in
+   * `sabnzbd.ts` for why that is the right guess), which turns a download
+   * into a failure on the strength of a label this codebase has never seen.
+   * Its comment claims that mistake is "visible immediately" -- and it only
+   * is if something says so. This is that something: the caller logs these,
+   * so a status SABnzbd added after this code was written shows up as a
+   * named value to add to a list rather than as unexplained failures.
+   *
+   * Reported rather than logged here on purpose. An adapter in this package
+   * does not own a logger -- `console` use is confined to `bin.ts`,
+   * `main.ts` and `host.ts`'s default -- and threading one in to warn would
+   * put process-wide mutable "already warned" state inside a client, which
+   * is what forces 1.x to export a test-only reset hatch
+   * (`resetQbittorrentWarningsForTests`). Returning the values keeps the
+   * adapter pure and makes this testable without a console spy.
+   */
+  unreadable: string[];
 }
 
 /**

@@ -133,6 +133,21 @@ function historyOutcome(status: string): 'completed' | 'failed' | 'in-progress' 
 }
 
 /**
+ * Whether this status is one of the ones enumerated above, in any bucket.
+ * Separate from `historyOutcome` because the two answer different
+ * questions: that one says what to *do* with a slot, this one says whether
+ * the answer was informed. A status reaching the `failed` default is
+ * reported through `ClientSnapshot.unreadable` so the guess is visible as a
+ * named value rather than as unexplained failures -- see that field's own
+ * comment.
+ */
+function isRecognizedStatus(status: string): boolean {
+  return status === 'completed'
+    || TERMINAL_FAILURE_STATUSES.has(status)
+    || IN_PROGRESS_STATUSES.has(status);
+}
+
+/**
  * One `queue` slot as SABnzbd's `mode=queue` answers it. Every field
  * optional for the same reason `AddUrlResponse`'s are: `fetch.json<T>` is
  * an unchecked cast, so declaring a field always-present would not make it
@@ -256,10 +271,14 @@ function toQueueEntry(slot: QueueSlot): ClientQueueEntry | null {
  * only ever populated for a `completed` outcome and `failMessage` only for
  * a `failed` one, matching `ClientHistoryEntry`'s own doc comment.
  */
-function toHistoryEntry(slot: HistorySlot): ClientHistoryEntry | null {
+function toHistoryEntry(
+  slot: HistorySlot,
+  unreadable: Set<string>,
+): ClientHistoryEntry | null {
   const ref = slot.nzo_id;
   if (ref === undefined || ref === '') return null;
   const status = (slot.status ?? '').toLowerCase();
+  if (!isRecognizedStatus(status)) unreadable.add(status);
   const outcome = historyOutcome(status);
   const storage = slot.storage;
   const failMessage = slot.fail_message;
@@ -415,12 +434,21 @@ export function createSabnzbdClient(
       const queueComplete = typeof queueNoofslots === 'number' && queueSlots.length >= queueNoofslots;
 
       const history: ClientHistoryEntry[] = [];
+      // Collected in a set so a status appears once however many slots carry
+      // it, and sorted on the way out so a caller's log line is stable rather
+      // than ordered by whichever slot happened to arrive first.
+      const unreadable = new Set<string>();
       for (const slot of historySlots) {
-        const entry = toHistoryEntry(slot);
+        const entry = toHistoryEntry(slot, unreadable);
         if (entry !== null) history.push(entry);
       }
 
-      return { queue, history, complete: queueComplete && historyComplete };
+      return {
+        queue,
+        history,
+        complete: queueComplete && historyComplete,
+        unreadable: [...unreadable].toSorted(),
+      };
     },
 
     async remove(ref: string): Promise<void> {
