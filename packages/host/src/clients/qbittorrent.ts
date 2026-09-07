@@ -2,6 +2,8 @@ import type { QbittorrentBearerConfig, QbittorrentLoginConfig } from './config.t
 import { FetchFailedError } from '../fetch/queue.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import { redactFormBody, redactHeaders } from './redact.ts';
+import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
+import { normalizeClientCategory } from './snapshot.ts';
 import type { SubmitResult } from './types.ts';
 
 /**
@@ -242,17 +244,21 @@ function normalizeCategory(category: string): string | null {
 }
 
 /**
- * The one field `findRegisteredRef` reads off each `/torrents/info` entry,
- * plus the two it matches on. Every field optional, matching
- * `sabnzbd.ts`'s `AddUrlResponse`: `fetch.json<T>` is an unchecked cast, so
- * declaring a field always-present would not make it present, only move a
- * malformed entry's failure from a value this function already checks to a
- * bare `TypeError` reading past it.
+ * One `/torrents/info` entry, covering both readers that hit this endpoint:
+ * `findRegisteredRef` reads only `hash`, `name` and `category`; `snapshot`
+ * below also reads `state`, `progress` and `content_path`. Every field
+ * optional, matching `sabnzbd.ts`'s `AddUrlResponse`: `fetch.json<T>` is an
+ * unchecked cast, so declaring a field always-present would not make it
+ * present, only move a malformed entry's failure from a value this function
+ * already checks to a bare `TypeError` reading past it.
  */
 interface TorrentInfoEntry {
   hash?: string;
   name?: string;
   category?: string;
+  state?: string;
+  progress?: number;
+  content_path?: string;
 }
 
 /**
@@ -406,6 +412,106 @@ function isAddRefusalBody(body: string): boolean {
 }
 
 /**
+ * Every `/torrents/info` state this adapter recognises, keyed to which list
+ * a `ClientSnapshot` entry lands in. Copied verbatim from the design spec.
+ *
+ * `uploading` and every other `*UP` state read as `completed`, not `queue`:
+ * they mean the download itself is finished and qBittorrent has moved on to
+ * seeding. A seeding torrent never leaves that state on its own, so reading
+ * it as still-queued would leave the row `downloading` forever.
+ */
+const STATE_READING: Record<string, 'queue' | 'completed' | 'failed'> = {
+  downloading: 'queue', metaDL: 'queue', stalledDL: 'queue', queuedDL: 'queue',
+  forcedDL: 'queue', allocating: 'queue', checkingDL: 'queue',
+  checkingResumeData: 'queue', moving: 'queue', pausedDL: 'queue', stoppedDL: 'queue',
+  uploading: 'completed', stalledUP: 'completed', queuedUP: 'completed',
+  forcedUP: 'completed', checkingUP: 'completed', pausedUP: 'completed',
+  stoppedUP: 'completed',
+  error: 'failed', missingFiles: 'failed',
+};
+
+/**
+ * Reads one torrent's `state`, adding it to `unreadable` first if
+ * `STATE_READING` does not enumerate it -- `unreadable` is a `Set`, so a
+ * state carried by many torrents in one poll is still named once (see
+ * `ClientSnapshot.unreadable`'s own doc comment for why this is reported
+ * rather than logged).
+ *
+ * An unrecognised state reads as `queue`, the opposite default from
+ * `sabnzbd.ts`'s `historyOutcome`, and both are right for the endpoint each
+ * reads. `sabnzbd.ts`'s history holds only jobs that have already left the
+ * queue, so an unrecognised status there is most likely a terminal one its
+ * own list hasn't caught up with -- which is why it defaults to `failed`.
+ * `/torrents/info` instead spans a torrent's *whole* lifecycle, including
+ * one actively downloading, so an unrecognised state here is most likely
+ * still in progress -- and `queue` is the one reading that concludes
+ * nothing: it neither completes a row nor fails one, so a torrent read
+ * under a state this table has not caught up with yet just keeps polling
+ * as still-active instead of being declared done or failed on a guess.
+ * Neither default is a mistake copied from the other.
+ */
+function readState(state: string, unreadable: Set<string>): 'queue' | 'completed' | 'failed' {
+  const known = STATE_READING[state];
+  if (known === undefined) {
+    unreadable.add(state);
+    return 'queue';
+  }
+  return known;
+}
+
+/** One `/torrents/info` entry, sorted into the list `readState` says it belongs in, or dropped. */
+type ClassifiedTorrent =
+  | { kind: 'queue'; entry: ClientQueueEntry }
+  | { kind: 'history'; entry: ClientHistoryEntry }
+  | { kind: 'skip' };
+
+/**
+ * Converts one `/torrents/info` entry to the queue or history entry
+ * `readState` says it belongs in, or `{ kind: 'skip' }` for the same
+ * unmatchable-reference reason `findRegisteredRef` treats a missing or
+ * all-zero hash as no match: nothing later could ever match such an entry
+ * back to a submitted row.
+ *
+ * `percentage` is `progress * 100`: qBittorrent reports `progress` as
+ * `0..1`, but `ClientQueueEntry.percentage` is out of 100 like every other
+ * adapter's.
+ */
+function classifyTorrent(raw: TorrentInfoEntry, unreadable: Set<string>): ClassifiedTorrent {
+  const hash = raw.hash;
+  if (hash === undefined || hash === '' || isZeroHash(hash)) return { kind: 'skip' };
+  const ref = hash.toLowerCase();
+  const name = raw.name ?? '';
+  const category = normalizeClientCategory(raw.category);
+  const reading = readState(raw.state ?? '', unreadable);
+
+  if (reading === 'queue') {
+    return {
+      kind: 'queue',
+      entry: { ref, name, percentage: (raw.progress ?? 0) * 100, category },
+    };
+  }
+
+  const contentPath = raw.content_path;
+  return {
+    kind: 'history',
+    entry: {
+      ref,
+      name,
+      category,
+      outcome: reading,
+      storagePath: reading === 'completed' && contentPath !== undefined && contentPath !== ''
+        ? contentPath
+        : null,
+      // qBittorrent's `/torrents/info` carries no message field for a
+      // failed torrent to report here -- see `ClientHistoryEntry`'s own
+      // doc comment for why a `failed` entry with no message is not
+      // itself a sign that something else went wrong.
+      failMessage: null,
+    },
+  };
+}
+
+/**
  * qBittorrent's adapter, either auth strategy. `/torrents/add` answers with
  * a bare body and no identifier at all -- unlike SABnzbd's `addurl`, there
  * is nothing here to key a reference on. A **v1 hex** magnet solves that for
@@ -435,12 +541,23 @@ function isAddRefusalBody(body: string): boolean {
  * this function needs, so `login` (via `createAuthHeadersResolver`) can
  * reach a login response's headers, which `QueuedFetch` cannot expose. See
  * `login` for why that request has to bypass the queue in the first place.
+ *
+ * Also carries `snapshot`, one unfiltered `/torrents/info` call read by
+ * `classifyTorrent`/`readState` above -- unlike `submit`, it needs no second
+ * request the way a `.torrent` url's lookup does, so there is no equivalent
+ * race to sidestep here. It gains no `remove`: qBittorrent's delete stops
+ * the seed and abandons the ratio whether or not `deleteFiles` is set, and
+ * leaving the method off entirely is what makes writing that call
+ * impossible rather than merely discouraged.
  */
 export function createQbittorrentClient(
   config: QbittorrentBearerConfig | QbittorrentLoginConfig,
   fetch: QueuedFetch,
   loginFetch: typeof globalThis.fetch = globalThis.fetch,
-): { submit(link: string, name: string): Promise<SubmitResult> } {
+): {
+  submit(link: string, name: string): Promise<SubmitResult>;
+  snapshot(): Promise<ClientSnapshot>;
+} {
   const authHeaders = createAuthHeadersResolver(config, loginFetch);
 
   return {
@@ -492,6 +609,43 @@ export function createQbittorrentClient(
 
       const ref = await findRegisteredRef(config, fetch, name, authHeaders);
       return { ref };
+    },
+
+    async snapshot(): Promise<ClientSnapshot> {
+      const headers = await authHeaders();
+      const url = `${config.baseUrl}${TORRENTS_INFO_PATH}`;
+      const torrents = await guardAuthFailure(
+        config,
+        TORRENTS_INFO_PATH,
+        headers,
+        () => fetch.json<TorrentInfoEntry[]>(url, { headers }),
+      );
+
+      const queue: ClientQueueEntry[] = [];
+      const history: ClientHistoryEntry[] = [];
+      // Collected in a set for the same reason as `sabnzbd.ts`'s own
+      // `unreadable`: a state carried by many torrents in one poll is still
+      // named once, and sorted on the way out so the order is stable rather
+      // than dependent on which torrent happened to be listed first.
+      const unreadable = new Set<string>();
+      for (const raw of torrents) {
+        const classified = classifyTorrent(raw, unreadable);
+        if (classified.kind === 'queue') queue.push(classified.entry);
+        else if (classified.kind === 'history') history.push(classified.entry);
+      }
+
+      return {
+        queue,
+        history,
+        // Always true: this is one unfiltered request that either returns
+        // every torrent the server holds or throws -- unlike SABnzbd's
+        // history, there is no paging here that could leave part of the
+        // picture missing (see `sabnzbd.ts`'s own `snapshot`). This is not
+        // an oversight; there is no case in which this endpoint shape could
+        // produce anything else.
+        complete: true,
+        unreadable: [...unreadable].toSorted(),
+      };
     },
   };
 }
