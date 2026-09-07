@@ -107,8 +107,12 @@ which is the other half of why the tables differ.
 **`client_ref` is nullable and that is the point.** A row is written *before*
 the client is called, so a submission that crashes between the request and the
 response leaves evidence rather than nothing. A unique index on
-`(download_client_id, client_ref)` where `client_ref IS NOT NULL` keeps two rows
-from claiming one job — the same partial-index shape 1.x uses.
+`(download_client_id, client_ref)` keeps two rows from claiming one job, and the
+many rows still waiting on an answer coexist because SQLite exempts NULL from a
+unique constraint. The `WHERE client_ref IS NOT NULL` clause — the same partial
+shape 1.x uses — is therefore an intent marker and an index-size saving, not the
+mechanism: dropping it changes no insert's outcome. Implementation found this
+worth stating, because the reason it is safe is not the reason it looks safe.
 
 **Status is deliberately three values, not a state machine.** `submitting` is
 written first, `submitted` when a ref comes back, `failed` when the client

@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
 import { makeQPromise } from './qpromise.ts';
 import { backoffMs } from './backoff.ts';
+import { redactUrl } from '../clients/redact.ts';
 
 /**
  * How long a handler may run before the dispatcher gives up on it and fails
@@ -120,7 +121,15 @@ export async function runJob(
 
   function failRow(err: unknown): void {
     const failedAt = deps.now();
-    const message = err instanceof Error ? err.message : String(err);
+    // Redacted before it reaches the column, not merely trusted to already
+    // be safe. Every throw site in this slice redacts at its own source --
+    // `clients/downloads.ts` does, before its own `markFailed` write, and
+    // rethrows the already-redacted result -- so nothing observed today
+    // actually carries a credential this far. But `last_error` is written
+    // here, once, for every handler this dispatcher will ever run, present
+    // or future; redacting here makes that safe by construction rather than
+    // safe only for as long as every caller remembers to.
+    const message = redactUrl(err instanceof Error ? err.message : String(err));
     if (attempts >= maxAttempts) {
       // Dead-lettering leaves the row rather than deleting it, with
       // `last_error` set -- a job that vanishes on failure is one nobody can

@@ -1,6 +1,7 @@
 import type { HostFetch } from '@pickarr/contract';
 import { createBoundedQueue, isValidLimit } from '../util/bounded-queue.ts';
 import type { BoundedQueue } from '../util/bounded-queue.ts';
+import { redactUrl } from '../clients/redact.ts';
 
 /**
  * `createHostFetch`'s actual return shape: `HostFetch`'s two methods plus
@@ -13,10 +14,29 @@ import type { BoundedQueue } from '../util/bounded-queue.ts';
  * `text` -- and reaching it costs nothing extra, because it runs through
  * this same instance's `enqueue`, so a feed's host shares its per-hostname
  * budget with any `json`/`bytes` call to that same host, rather than being
- * exempt from the limit Task 2 built.
+ * exempt from the per-hostname concurrency limit this module builds.
  */
 export interface QueuedFetch extends HostFetch {
   text(url: string, init?: RequestInit): Promise<string>;
+}
+
+/**
+ * Thrown by `fetched` below for any non-2xx response, carrying the numeric
+ * `status` alongside the message. Without this, telling a 401 or 403 apart
+ * from any other failure meant pattern-matching this class's own message
+ * text (`failed: 401 Unauthorized`) -- which breaks the moment that text is
+ * reworded, and it already was once this slice, when `redactUrl` went in.
+ * Subclassing `Error` rather than a plain object keeps every existing
+ * `instanceof Error`/message-matching test passing unchanged.
+ */
+export class FetchFailedError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'FetchFailedError';
+    this.status = status;
+  }
 }
 
 /**
@@ -208,7 +228,7 @@ export function createHostFetch(
     const settled = new AbortController();
     const onTimeout = new Promise<never>((_resolve, reject) => {
       timeout.addEventListener('abort', () => {
-        reject(new Error(`fetch ${url} timed out after ${timeoutMs}ms`));
+        reject(new Error(`fetch ${redactUrl(url)} timed out after ${timeoutMs}ms`));
       }, { once: true, signal: settled.signal });
     });
     try {
@@ -216,7 +236,7 @@ export function createHostFetch(
         (async () => {
           const res = await deps.fetch(url, { ...init, signal });
           if (!res.ok) {
-            throw new Error(`fetch ${url} failed: ${res.status} ${res.statusText}`);
+            throw new FetchFailedError(`fetch ${redactUrl(url)} failed: ${res.status} ${res.statusText}`, res.status);
           }
           return read(res);
         })(),

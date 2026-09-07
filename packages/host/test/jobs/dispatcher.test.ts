@@ -370,7 +370,8 @@ test('a job already queued is not dispatched twice by a later fire', async () =>
   const calls: number[] = [];
   // The real worker claims the row (state = 'running') as its own first
   // synchronous act, before this handler ever runs -- so nothing here needs
-  // to write that state itself, unlike Task 4's own stub.
+  // to write that state itself, unlike a stub that sets it directly to
+  // simulate a claim.
   const handler: JobHandler = async (job) => {
     calls.push(job.id);
     if (job.id === occupierId) {

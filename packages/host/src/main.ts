@@ -15,7 +15,8 @@
  */
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
+import type { MediaPlugin } from '@pickarr/contract';
+import { createDownloadClients } from './clients/downloads.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
@@ -47,20 +48,6 @@ function log(message: string): void {
 export function resolveArtworkDir(databasePath: string): string {
   return join(dirname(databasePath), 'artwork');
 }
-
-/**
- * No download client is wired to the host process in this slice. See
- * `DownloadClients`'s own doc comment in `@pickarr/contract`: "the clients
- * themselves ... are a later slice." `onDownloadRequest` is still a required
- * plugin entry point, so this exists to fail loudly, by name, the moment
- * anything actually calls it, rather than let a plugin's `ctx.downloads.submit`
- * hang or throw something unrelated.
- */
-const downloadClientsNotWired: DownloadClients = {
-  submit: async () => {
-    throw new Error('download clients are not wired to the host process in this slice');
-  },
-};
 
 /**
  * Schedules a `poll` job for every `rss_feed` row already on file, and
@@ -198,6 +185,7 @@ export async function main(
 
   const artworkDir = resolveArtworkDir(databasePath);
   const fetch = createHostFetch({ fetch: globalThis.fetch });
+  const downloads = createDownloadClients({ raw, fetch, now: () => Date.now(), log });
 
   // Two shapes, not one object literal with `timers` always present:
   // `exactOptionalPropertyTypes` is on, so an explicit `timers: undefined`
@@ -208,7 +196,7 @@ export async function main(
       raw,
       db,
       fetch,
-      downloads: downloadClientsNotWired,
+      downloads,
       now: () => Date.now(),
       artworkDir,
     })
@@ -216,7 +204,7 @@ export async function main(
       raw,
       db,
       fetch,
-      downloads: downloadClientsNotWired,
+      downloads,
       now: () => Date.now(),
       artworkDir,
       timers: deps.timers,

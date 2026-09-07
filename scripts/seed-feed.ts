@@ -9,7 +9,7 @@
  *     --name="Example feed" --url=https://example.test/feed.xml \
  *     --type=torrent --interval=900
  *
- * `--type` is `torrent` or `usenet` (default `torrent`); `--interval` is the
+ * `--type` is `torrent` or `nzb` (default `torrent`); `--interval` is the
  * poll interval in seconds (default 900, `rss_feed.poll_interval_s`'s own
  * default).
  *
@@ -32,7 +32,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { migrateHost } from '../packages/host/src/db/migrate.ts';
 import { openDatabase } from '../packages/host/src/db/open.ts';
 
-type DownloadType = 'torrent' | 'usenet';
+type DownloadType = 'torrent' | 'nzb';
 
 interface Options {
   databasePath: string;
@@ -44,13 +44,13 @@ interface Options {
 }
 
 function isDownloadType(value: string): value is DownloadType {
-  return value === 'torrent' || value === 'usenet';
+  return value === 'torrent' || value === 'nzb';
 }
 
 function usage(): never {
   throw new Error(
     'Usage: npm run seed-feed -- --database=<path> --plugin=<id> --name=<name> --url=<url> ' +
-      '[--type=torrent|usenet] [--interval=<seconds>]',
+      '[--type=torrent|nzb] [--interval=<seconds>]',
   );
 }
 
@@ -81,7 +81,7 @@ function parseArgs(argv: readonly string[]): Options {
     usage();
   }
   if (downloadType !== undefined && !isDownloadType(downloadType)) {
-    throw new Error(`--type must be "torrent" or "usenet", got "${downloadType}"`);
+    throw new Error(`--type must be "torrent" or "nzb", got "${downloadType}"`);
   }
   if (!Number.isInteger(pollIntervalS) || pollIntervalS <= 0) {
     throw new Error(`--interval must be a positive integer of seconds, got "${pollIntervalS}"`);

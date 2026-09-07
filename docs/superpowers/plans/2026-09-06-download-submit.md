@@ -204,19 +204,27 @@ Three things and their reasons:
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-test('a migration to version 5 adds implementation to a populated download_client row', () => {});
+test('a migration to version 6 adds implementation to a populated download_client row', () => {});
 test('two unconfirmed downloads for one client coexist', () => {
-  // Both rows have a null client_ref. If the unique index were total, the
-  // second insert would fail and a crashed submission would block the retry.
+  // Both rows have a null client_ref, which is the shape a submission has
+  // between the request and the client's answer. This is the property the
+  // write path depends on -- but note it holds because SQLite exempts NULL
+  // from a unique constraint, NOT because the index is partial, so this
+  // test cannot distinguish the partial index from a total one.
+});
+test('the client_ref index is partial', () => {
+  // The `WHERE` clause changes no insert's outcome, so nothing behavioural
+  // can pin it. Read it back from `sqlite_master` instead, and name the test
+  // for what it is: a drift guard on a deliberate intent marker.
 });
 test('two downloads cannot claim the same client_ref', () => {});
 ```
 
 - [ ] **Step 2: Run and confirm failure.**
-- [ ] **Step 3: Add migration 5 and mirror both tables in `schema.ts`.** `schema.test.ts` compares every column's name, type and nullability and every index's columns and uniqueness against the DDL, and will fail until they match. **That failure is the test working** — do not weaken the comparison.
+- [ ] **Step 3: Add migration 6 and mirror both tables in `schema.ts`.** `schema.test.ts` compares every column's name, type and nullability and every index's columns and uniqueness against the DDL, and will fail until they match. **That failure is the test working** — do not weaken the comparison.
 - [ ] **Step 4: Run and confirm the tests pass.**
 - [ ] **Step 5: Prove the tests can fail**
-  - make the unique index total (drop the `WHERE`) → the coexist test must fail
+  - make the unique index total (drop the `WHERE`) → the partial-index test must fail. It will **not** break the coexist test: NULLs are distinct in a unique index either way, so no insert changes outcome. An earlier draft of this plan asked for the coexist test here and was wrong.
   - omit `infohash` from `schema.ts` only → a `schema.test.ts` test must fail
   - drop `implementation`'s `DEFAULT` → the populated-row test must fail
 - [ ] **Step 6: Run the full gate, then commit**

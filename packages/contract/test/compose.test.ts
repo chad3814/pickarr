@@ -51,11 +51,11 @@ const fixture: MediaPlugin = {
   },
   onDownloadedFile: async () => {},
   onDownloadRequest: async (rssItemId, ctx: PluginContext) => {
-    // The client's own reference must be a real string, not `void` behind an
-    // ignored await — `.toUpperCase()` only compiles if `submit` kept its
-    // promised return type.
+    // The client's own reference must be read, not `void` behind an ignored
+    // await — the null check below only compiles if `submit` kept its
+    // promised `string | null` return type.
     const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: 1 });
-    ctx.log('submitted download', { reference: reference.toUpperCase() });
+    ctx.log('submitted download', { reference: reference === null ? null : reference.toUpperCase() });
   },
 };
 

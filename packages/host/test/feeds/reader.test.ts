@@ -212,7 +212,7 @@ test('an entry whose guid is absent is identified by its link', async () => {
 
 test('a row carries the feed download_type, since an entry does not name one', async () => {
   const { raw } = setup();
-  const feedId = insertFeed(raw, 'https://feed.example/rss', 'usenet');
+  const feedId = insertFeed(raw, 'https://feed.example/rss', 'nzb');
   const xml = rssXml([{ title: 'one.mkv', link: 'https://feed.example/one', guid: 'guid-1' }]);
   const fetchText = scriptedFetchText([xml]);
   const { notify } = recordingNotify();
@@ -222,7 +222,7 @@ test('a row carries the feed download_type, since an entry does not name one', a
 
   const rows = rowsFor(raw, feedId);
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.downloadType, 'usenet', "the row's download_type comes from the feed, not from the entry");
+  assert.equal(rows[0]?.downloadType, 'nzb', "the row's download_type comes from the feed, not from the entry");
 });
 
 test('unowned ids are logged rather than dropped', async () => {

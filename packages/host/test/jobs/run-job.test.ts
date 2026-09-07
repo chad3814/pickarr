@@ -194,6 +194,27 @@ test('a handler that rejects fails its row and reschedules with backoff', async 
   assert.equal(row.run_at, now + 1000);
 });
 
+test('a handler error carrying an api key in its message is redacted before it reaches last_error', async () => {
+  // `downloads.ts` redacts before writing its own table, then rethrows the
+  // unredacted error, which lands here unredacted unless this file also
+  // redacts at the point of persistence -- see `failRow`'s own comment.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 1000;
+  const secret = 'not-a-real-key';
+  const leaky: JobHandler = async () => {
+    throw new Error(`sabnzbd rejected https://sab.example.com/api?mode=addurl&apikey=${secret}&output=json`);
+  };
+  const { id, job } = seedJob(raw, now, 'leaky', 5);
+
+  await runJob({ raw, now: () => now, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal }, job, leaky, fakeCtx);
+
+  const row = readJob(raw, id);
+  assert.equal(row.state, 'ready');
+  assert.ok(typeof row.last_error === 'string');
+  assert.ok(!(row.last_error as string).includes(secret), 'the api key must not appear in last_error');
+});
+
 test('a handler at its last attempt is dead-lettered rather than rescheduled', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);

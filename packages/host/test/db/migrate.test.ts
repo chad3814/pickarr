@@ -254,3 +254,139 @@ test('a migration to version 4 adds delivered_at to a populated rss_item table, 
     { filename: 'a.mkv', delivered_at: null },
   );
 });
+
+test('migrating renames an existing feed from usenet to nzb', () => {
+  const { raw } = openTestDatabase();
+  // Stop after version 4, so `download_type` already exists and can hold the
+  // pre-rename value -- the shape a real database has the moment before this
+  // migration runs.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 4));
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, download_type, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 'usenet', 1, 1)
+  `).run();
+
+  // Picks up only version 5: versions 1 through 4 are already recorded as applied.
+  migrateHost(raw);
+
+  const row = raw.prepare('SELECT download_type FROM rss_feed').get() as { download_type: unknown };
+  assert.equal(String(row.download_type), 'nzb');
+});
+
+/**
+ * A download_client row plus the rss_feed/rss_item row a torrent_download
+ * row must reference -- `open.ts` turns `PRAGMA foreign_keys` on, so both
+ * are needed before any insert into torrent_download or nzb_download can
+ * succeed. Every row after the client is id 1, which is all callers below need.
+ */
+function seedDownloadTarget(raw: DatabaseSync): void {
+  raw.prepare(`
+    INSERT INTO download_client (name, type, url, category, import_mode, created_at, updated_at)
+    VALUES ('Client', 'torrent', 'https://example.com', 'movies', 'copy', 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    VALUES (1, 'a.mkv', 'https://example.com/a', 1, 1, 'torrent', '1080p')
+  `).run();
+}
+
+test('a migration to version 6 adds implementation to a populated download_client row', () => {
+  const { raw } = openTestDatabase();
+  // Stop after version 5, so download_client exists without
+  // `implementation` yet -- the shape a real database has the moment before
+  // this migration runs, and the only shape on which `ADD COLUMN ... NOT
+  // NULL` even needs a `DEFAULT` to be legal.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 5));
+  raw.prepare(`
+    INSERT INTO download_client (name, type, url, category, import_mode, created_at, updated_at)
+    VALUES ('Client', 'torrent', 'https://example.com', 'movies', 'copy', 1, 1)
+  `).run();
+
+  // Picks up only version 6: versions 1 through 5 are already recorded as applied.
+  migrateHost(raw);
+
+  const row = raw.prepare('SELECT name, implementation FROM download_client').get() as {
+    name: unknown;
+    implementation: unknown;
+  };
+  // The row survives the migration -- proving this ran against a populated
+  // table -- and the new column reads the default that makes `ADD COLUMN
+  // ... NOT NULL` legal, not some value backfilled with real intent.
+  assert.deepEqual(
+    { name: String(row.name), implementation: String(row.implementation) },
+    { name: 'Client', implementation: 'qbittorrent' },
+  );
+});
+
+test('two unconfirmed downloads for one client coexist', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedDownloadTarget(raw);
+
+  // Both rows have a null client_ref -- the shape a submission has the moment
+  // after the request is made but before the client confirms it. Two of them
+  // must be able to sit in the table at once, or a submission that died
+  // waiting for an answer would block its own retry.
+  //
+  // This holds because SQLite exempts NULL from a unique constraint, NOT
+  // because the index is partial, so this test passes against a total index
+  // too. That is not a weakness: the coexistence is the property the write
+  // path depends on, and it is worth pinning on its own terms. The `WHERE`
+  // clause gets its own test below.
+  const insert = raw.prepare(`
+    INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
+    VALUES (1, 1, 'pending', 1, 1)
+  `);
+  insert.run();
+  insert.run();
+
+  const count = raw.prepare('SELECT COUNT(*) AS n FROM torrent_download').get() as { n: unknown };
+  assert.equal(Number(count.n), 2);
+});
+
+test('the client_ref index is partial on both download tables', () => {
+  // A drift guard, and named as one. Dropping `WHERE client_ref IS NOT NULL`
+  // changes no insert's outcome -- NULLs are distinct in a unique index either
+  // way -- so nothing behavioural can pin the clause down, and a test that
+  // claimed to would be measuring nothing. Reading it back from
+  // `sqlite_master` is honest about what it checks: that a deliberate intent
+  // marker, and the index-size saving that comes with it, are still there.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  for (const name of ['torrent_download_client_ref', 'nzb_download_client_ref']) {
+    const index = raw.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+    ).get(name) as { sql: unknown } | undefined;
+    assert.ok(index, `expected an index named ${name}`);
+    assert.match(String(index.sql), /WHERE client_ref IS NOT NULL/, `${name} should be partial`);
+  }
+});
+
+test('two downloads cannot claim the same client_ref', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedDownloadTarget(raw);
+
+  const insert = raw.prepare(`
+    INSERT INTO torrent_download (rss_item_id, download_client_id, client_ref, status, created_at, updated_at)
+    VALUES (1, 1, 'confirmed-1', 'pending', 1, 1)
+  `);
+  insert.run();
+
+  assert.throws(
+    () => insert.run(),
+    (err: unknown) => {
+      const code = (err as { code?: unknown }).code;
+      // 2067 is SQLite's own SQLITE_CONSTRAINT_UNIQUE -- proof that the
+      // unique index on (download_client_id, client_ref) fired, not merely
+      // that some insert threw for some reason.
+      const errcode = (err as { errcode?: unknown }).errcode;
+      return code === 'ERR_SQLITE_ERROR' && errcode === 2067;
+    },
+  );
+});
