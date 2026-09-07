@@ -327,12 +327,16 @@ test('two unconfirmed downloads for one client coexist', () => {
   migrateHost(raw);
   seedDownloadTarget(raw);
 
-  // Both rows have a null client_ref -- the shape a submission has the
-  // moment after the request is made but before the client confirms it.
-  // SQLite exempts NULL from a unique constraint whether or not it is
-  // partial, so this insert pair would succeed even against a total index
-  // -- it is the assertion below on the index's own recorded SQL, not this
-  // one, that actually distinguishes a partial index from a total one.
+  // Both rows have a null client_ref -- the shape a submission has the moment
+  // after the request is made but before the client confirms it. Two of them
+  // must be able to sit in the table at once, or a submission that died
+  // waiting for an answer would block its own retry.
+  //
+  // This holds because SQLite exempts NULL from a unique constraint, NOT
+  // because the index is partial, so this test passes against a total index
+  // too. That is not a weakness: the coexistence is the property the write
+  // path depends on, and it is worth pinning on its own terms. The `WHERE`
+  // clause gets its own test below.
   const insert = raw.prepare(`
     INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
     VALUES (1, 1, 'pending', 1, 1)
@@ -342,15 +346,25 @@ test('two unconfirmed downloads for one client coexist', () => {
 
   const count = raw.prepare('SELECT COUNT(*) AS n FROM torrent_download').get() as { n: unknown };
   assert.equal(Number(count.n), 2);
+});
 
-  // The insert pair above cannot tell a partial index from a total one --
-  // SQLite treats NULL as distinct in a unique index either way. This is
-  // the check that actually pins the partial form down: it fails the
-  // moment the `WHERE` clause is dropped from the DDL.
-  const index = raw.prepare(
-    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'torrent_download_client_ref'",
-  ).get() as { sql: unknown };
-  assert.match(String(index.sql), /WHERE client_ref IS NOT NULL/);
+test('the client_ref index is partial on both download tables', () => {
+  // A drift guard, and named as one. Dropping `WHERE client_ref IS NOT NULL`
+  // changes no insert's outcome -- NULLs are distinct in a unique index either
+  // way -- so nothing behavioural can pin the clause down, and a test that
+  // claimed to would be measuring nothing. Reading it back from
+  // `sqlite_master` is honest about what it checks: that a deliberate intent
+  // marker, and the index-size saving that comes with it, are still there.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  for (const name of ['torrent_download_client_ref', 'nzb_download_client_ref']) {
+    const index = raw.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+    ).get(name) as { sql: unknown } | undefined;
+    assert.ok(index, `expected an index named ${name}`);
+    assert.match(String(index.sql), /WHERE client_ref IS NOT NULL/, `${name} should be partial`);
+  }
 });
 
 test('two downloads cannot claim the same client_ref', () => {
