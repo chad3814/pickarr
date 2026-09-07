@@ -4,9 +4,9 @@
  * generates either from the other. There is no drizzle config in this repo
  * and no script runs `drizzle-kit`, so these tests are what keeps the two in
  * step: the table set; every column's name, SQL type and nullability; and
- * every index's table, column list (in order) and uniqueness. They do not
- * compare foreign-key targets or a partial index's `WHERE` condition, so
- * those two could still drift unnoticed.
+ * every index's table, column list (in order) and uniqueness; and every
+ * column's default. They do not compare foreign-key targets or a partial
+ * index's `WHERE` condition, so those two could still drift unnoticed.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,13 +22,37 @@ interface ColumnInfo {
   name: string;
   type: string;
   notNull: boolean;
+  /** `dflt_value` as SQL literal text, or `null` for a column with no default. */
+  defaultSql: string | null;
 }
 
 function ddlColumns(raw: ReturnType<typeof openTestDatabase>['raw'], table: string): ColumnInfo[] {
   return raw.prepare(`PRAGMA table_info(${table})`).all().map((r) => {
-    const row = r as { name: unknown; type: unknown; notnull: unknown };
-    return { name: String(row.name), type: String(row.type), notNull: Number(row.notnull) === 1 };
+    const row = r as { name: unknown; type: unknown; notnull: unknown; dflt_value: unknown };
+    return {
+      name: String(row.name),
+      type: String(row.type),
+      notNull: Number(row.notnull) === 1,
+      defaultSql: row.dflt_value === null || row.dflt_value === undefined ? null : String(row.dflt_value),
+    };
   });
+}
+
+/**
+ * The two sides spell a default differently, so neither can be compared raw:
+ * `PRAGMA table_info` hands back the *SQL literal text*, quotes included
+ * (`'torrent'`, `0`), while Drizzle's `.default` is the bare JS value
+ * (`'torrent'`, `0`). Stripping one surrounding quote pair and comparing as
+ * strings is enough for every default this schema actually uses -- all of
+ * them string or integer literals. A default that were an expression
+ * (`CURRENT_TIMESTAMP`, or anything built as raw sql) would need more than
+ * this, and there are none; adding one means extending this function rather
+ * than trusting it.
+ */
+function normalizeDefault(literal: string): string {
+  return literal.length >= 2 && literal.startsWith("'") && literal.endsWith("'")
+    ? literal.slice(1, -1)
+    : literal;
 }
 
 /** An index by name: the table it is on, its columns in order, and whether it is unique. */
@@ -107,7 +131,7 @@ test('the schema declares exactly the tables the migration creates', () => {
   assert.deepEqual([...declaredTables().keys()].toSorted(), created);
 });
 
-test('every schema column matches the migration DDL by name, type and nullability', () => {
+test('every schema column matches the migration DDL by name, type, nullability and default', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
 
@@ -130,6 +154,23 @@ test('every schema column matches the migration DDL by name, type and nullabilit
       // declared, so a disagreement here would be SQLite's and not ours.
       if (!column.primary && actual.notNull !== column.notNull) {
         disagreements.push(`${name}.${column.name}: DDL notNull=${actual.notNull}, schema.ts notNull=${column.notNull}`);
+      }
+      // `primary` is skipped here for the same reason as above but a
+      // different mechanism: Drizzle reports `hasDefault === true` for every
+      // `INTEGER PRIMARY KEY` (the rowid alias supplies one) with no value
+      // to go with it, while the DDL declares none -- a disagreement that
+      // exists in neither file.
+      if (!column.primary) {
+        const declaredDefault = column.hasDefault && column.default !== undefined
+          ? String(column.default)
+          : null;
+        const ddlDefault = actual.defaultSql === null ? null : normalizeDefault(actual.defaultSql);
+        if (declaredDefault !== ddlDefault) {
+          disagreements.push(
+            `${name}.${column.name}: DDL default=${JSON.stringify(ddlDefault)}, `
+            + `schema.ts default=${JSON.stringify(declaredDefault)}`,
+          );
+        }
       }
     }
 
