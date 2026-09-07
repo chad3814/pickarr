@@ -1,17 +1,7 @@
 import type { SabnzbdConfig } from './config.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import { redactUrl } from './redact.ts';
-
-/**
- * What one submission gave back: the reference this client's own history
- * later answers questions about. For SABnzbd that reference is an
- * `nzo_id`; the field is named `ref` rather than `nzoId` so a caller that
- * also submits to qBittorrent (whose reference is a torrent hash) can treat
- * both clients' results the same way.
- */
-export interface SubmitResult {
-  ref: string;
-}
+import type { SubmitResult } from './types.ts';
 
 /**
  * The shape `addurl` answers with -- both shapes, because SABnzbd answers a
