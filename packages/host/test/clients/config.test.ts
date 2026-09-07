@@ -164,6 +164,44 @@ test('an unknown implementation is refused, naming only the value', () => {
   );
 });
 
+test('a blank credential is refused exactly as a missing one is', () => {
+  // `''` is what a blank form field saves as, and for a credential it means
+  // the same as absent: neither authenticates anything. Without the fold,
+  // this row reads as a valid bearer config and fails later against the real
+  // client, with the client's own opaque 401 standing in for "you did not
+  // configure an api key".
+  const raw = setup();
+  const blankKey = seedClient(raw, {
+    name: 'Blank Key', type: 'torrent', implementation: 'qbittorrent', apiKey: '',
+  });
+  assert.throws(
+    () => readClientConfig(raw, blankKey),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('neither an api key')
+      && err.message.includes(String(blankKey)),
+  );
+
+  // The same for the login strategy: a username with a blank password is not
+  // a usable pair, so it must not read as `qbittorrent-login`.
+  const blankPassword = seedClient(raw, {
+    name: 'Blank Password', type: 'torrent', implementation: 'qbittorrent',
+    username: 'login-user-1', password: '',
+  });
+  assert.throws(
+    () => readClientConfig(raw, blankPassword),
+    (err: unknown) => err instanceof Error && err.message.includes('neither an api key'),
+  );
+
+  // And for sabnzbd, whose only strategy is a key.
+  const blankSabnzbd = seedClient(raw, {
+    name: 'Blank Sabnzbd', type: 'nzb', implementation: 'sabnzbd', apiKey: '',
+  });
+  assert.throws(
+    () => readClientConfig(raw, blankSabnzbd),
+    (err: unknown) => err instanceof Error && err.message.includes('no api key'),
+  );
+});
+
 test('a refusal message contains no credential', () => {
   // Build a row with a recognisable secret, trigger each refusal, and assert
   // the secret appears in none of the messages.

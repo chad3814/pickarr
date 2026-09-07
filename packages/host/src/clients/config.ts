@@ -58,10 +58,14 @@ function isImplementation(value: string): value is Implementation {
  * `feeds/reader.ts`'s `feedRow` uses, so nothing here assumes the database
  * handed back a `SomeRow`-shaped value it never actually validated.
  *
- * `apiKey`, `username` and `password` stay `string | null`: the column is
- * nullable, and collapsing an absent credential to `''` here would make a
- * client with no credential at all indistinguishable from one whose
- * credential happens to be empty.
+ * `apiKey`, `username` and `password` are normalised the other way: the
+ * columns are nullable, and an empty string is folded to `null` because for
+ * a credential the two mean the same thing -- neither can authenticate
+ * anything. `''` is what a blank form field saves as, so without this fold
+ * a client configured with an empty api key would read as a perfectly valid
+ * bearer config and then fail on every request with the client's own opaque
+ * 401 -- exactly the failure-far-from-its-cause this function exists to
+ * prevent.
  */
 interface ClientRow {
   id: number;
@@ -73,6 +77,17 @@ interface ClientRow {
   username: string | null;
   password: string | null;
   category: string;
+}
+
+/**
+ * Normalises one credential column. An absent credential and a blank one are
+ * the same fact -- neither authenticates anything -- so both arrive as
+ * `null` and every "has one" check downstream is a single null check.
+ */
+function credential(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  return text === '' ? null : text;
 }
 
 function readRow(raw: DatabaseSync, clientId: number): ClientRow {
@@ -91,9 +106,9 @@ function readRow(raw: DatabaseSync, clientId: number): ClientRow {
     type: String((row as { type: unknown }).type),
     implementation: String((row as { implementation: unknown }).implementation),
     baseUrl: String((row as { url: unknown }).url),
-    apiKey: apiKey === null ? null : String(apiKey),
-    username: username === null ? null : String(username),
-    password: password === null ? null : String(password),
+    apiKey: credential(apiKey),
+    username: credential(username),
+    password: credential(password),
     category: String((row as { category: unknown }).category),
   };
 }
