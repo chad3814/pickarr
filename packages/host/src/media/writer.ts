@@ -161,6 +161,21 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
         // second drop of that id must move the tombstone forward -- both its
         // owner and its time -- rather than abort on the primary key and take
         // the whole deletion down with it.
+        //
+        // Moving the *owner* forward is a real loss when the two drops
+        // belong to two different plugins: the first plugin's tombstone
+        // becomes the second's, so a client of the first that had not polled
+        // in between never learns its item was deleted, and nothing can tell
+        // it later because the live row is gone. Measured through this method
+        // and `deletionsSince`; the owner half is pinned by the reused-id
+        // test in `test/media/writer.test.ts`. Every alternative with one
+        // row per id is worse: keeping the older tombstone loses the *second*
+        // plugin's deletion instead, and the plain INSERT aborts on the
+        // primary key (errcode 1555), rolling this savepoint back so that no
+        // deletion is recorded and the duplicate row stays alive -- which is
+        // the bug the upsert was added to fix. So this stands; the read API
+        // spec's §8 records it as a known gap rather than a decision to be
+        // re-derived here.
         raw.prepare(`
           INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
           SELECT id, plugin_id, ? FROM media_item WHERE id = ?

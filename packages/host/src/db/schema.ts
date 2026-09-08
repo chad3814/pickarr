@@ -138,6 +138,15 @@ export const rssItem = sqliteTable('rss_item', {
  * row it names is gone, which is the entire point, so a reference would be
  * unsatisfiable by construction.
  *
+ * That is only "forward" **within one plugin**. When the reused id is taken
+ * by a *different* plugin the upsert moves `pluginId` too, so the first
+ * plugin's tombstone becomes the second's, and a client of the first that
+ * had not polled inside that window never learns its item was deleted --
+ * nor can it later, since the live row is gone. Not theoretical:
+ * `test/media/writer.test.ts` asserts the re-tombstoned row names the second
+ * owner. It is still the least-bad shape available with one row per id; the
+ * read API spec's §8 records the trade and what closing it would take.
+ *
  * `pluginId` is copied onto the tombstone rather than looked up: by the time
  * anyone reads it there is nothing left on `media_item` to join to, and a
  * client syncing one media type must not be handed another plugin's

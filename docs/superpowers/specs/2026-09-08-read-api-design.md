@@ -96,10 +96,25 @@ form says the same thing in a single comparison instead of relying on the
 planner noticing the repetition.
 
 Strictly `>`, never `>=`: the cursor row has already been served. The index
-tests assert the plan contains **`SEARCH`**, not merely that the index is
-named, because a name-only assertion passes against both forms — which is
-exactly how the wrong predicate survived being written down here as though it
-were correct.
+tests assert **the columns the seek itself names** — the plan must read
+`SEARCH media_item USING INDEX media_item_sync (plugin_id=? AND updated_at>?)`
+and not merely contain the index's name, and not merely contain `SEARCH`.
+That took three iterations, and the middle one is recorded here because it is
+the belief that let the slow form survive being written down in this section
+as correct:
+
+1. **The index is named.** Insufficient: `SCAN t USING COVERING INDEX t_u`
+   names the index while reading the whole of it, which is exactly how the
+   `OR` predicate hid.
+2. **The plan says `SEARCH`.** Also insufficient, and this is what this
+   section originally mandated. For a query with a leading equality the `OR`
+   form still plans as `SEARCH media_item USING INDEX media_item_sync
+   (plugin_id=?)` — a genuine seek, of the *plugin*, followed by a walk of
+   every one of that plugin's rows, measured at 9.84 ms per page against
+   0.18 ms.
+3. **The seek names its columns.** The cursor's column has to appear inside
+   the parentheses, because that fragment is the only part of the plan the
+   two predicate forms differ on.
 
 **Deletes get tombstones, in a savepoint that already exists.** `media_item`
 rows really are deleted: `MediaWriter.dropMediaItem` removes one along with its
@@ -159,7 +174,12 @@ the highest rowid out again once its row is deleted, measured against
 is an upsert (`ON CONFLICT (media_item_id) DO UPDATE`) that moves the
 tombstone's owner and time forward. A plain INSERT would abort on the key and
 take the whole second deletion down with it, leaving the loser of that claim
-alive. `plugin_id` is copied onto the tombstone because the row it names is
+alive. "Forward" is only forward **within one plugin**: when the reused id is
+taken by a *different* plugin, moving the owner forward is what overwrites the
+first plugin's record of its own deletion. See §8 — the trade is real and this
+is still the least-bad side of it.
+
+`plugin_id` is copied onto the tombstone because the row it names is
 gone by the time anyone reads it, and a client syncing one media type must not
 be told about another's deletions.
 
@@ -205,11 +225,15 @@ it, not because the schema does — see §4.
 
 The sync indexes exist because every cursor query orders by
 `(updated_at, id)` and filters by plugin. **A test asserts each index is
-*sought*, not merely named**, via `EXPLAIN QUERY PLAN` against the query text
-the code itself exports — reconcile shipped two status indexes that no query
-ever used, and nothing noticed until a reviewer measured a 153 ms tick. `SCAN …
-USING INDEX …` names an index while reading all of it, so `SEARCH` is what the
-assertion looks for; see §2's row-value predicate for the form that earns it.
+*sought*, and asserts which columns that seek names**, via
+`EXPLAIN QUERY PLAN` against the query text the code itself exports —
+reconcile shipped two status indexes that no query ever used, and nothing
+noticed until a reviewer measured a 153 ms tick. Neither weaker assertion
+holds: `SCAN … USING INDEX …` names an index while reading all of it, and a
+bare `SEARCH` is satisfied by a seek of the leading `plugin_id` followed by a
+walk of everything behind it. So the assertion looks for the seek's own
+column list — `(plugin_id=? AND updated_at>?)`. See §2 for the three
+iterations that got there and the row-value predicate that earns the seek.
 
 ## 4. `MediaReader`
 
@@ -307,6 +331,20 @@ kind is a 404, not an empty 200. A row whose `path` is null — recorded but nev
 fetched — is also a 404: there are no bytes, and a zero-length 200 would cache as
 though there were.
 
+**A missing `type` is a 400, and a non-GET is a 405.** Both routes that need a
+`type` to name a plugin — `/api/media` and `/api/deletions` — answer
+`400 { error: 'a type query parameter is required' }` when it is absent *or*
+empty. That is deliberately not the 404 a well-formed unknown type gets: a
+request with no type is malformed and every poll will repeat it until the
+client is fixed, while `?type=tv` on a host that serves no tv plugin is a
+well-formed question with a real answer (`404 unknown media type: tv`). And
+because the API is read-only, the method is checked *before* the path: any
+method but GET is `405 { error: 'method not allowed' }`, on a known route and
+an unknown one alike, `HEAD /api/health` included. A router that matched only
+paths would answer a POST with a page of data, which is not something this API
+should ever appear to accept. All of the above measured against the running
+server, not read off the code.
+
 **Every response is JSON except artwork.** Errors are
 `{ error: <message> }` with a status, and **no error carries a path, a url or a
 query string** — the redaction rules from slice C apply to anything this server
@@ -335,10 +373,17 @@ The properties worth pinning, each because it fails silently:
 3. **A deleted item reaches the client.** `dropMediaItem`, then a `/deletions`
    page carrying its id — and the tombstone is in the same savepoint, so a
    forced failure mid-drop leaves neither the deletion nor the tombstone.
-4. **A plugin cannot read another plugin's media item.** By id and by external
-   reference, both null rather than an error.
-5. **Each sync index is used**, by `EXPLAIN QUERY PLAN` against the exported
-   query builder — not a restated lookalike.
+4. **A plugin cannot read another plugin's rows.** A media item by id and by
+   *provider* reference — `mediaItemByProviderRef`, the name §4 explains;
+   `external_reference` is a different table and is deliberately not
+   consulted — both `null` rather than an error. And an rss item or a
+   download reached through another plugin's feed, both `[]` rather than an
+   error, for the same reason: "not yours" and "not there" must stay one
+   answer.
+5. **Each sync index is *sought*, by the columns its seek names**, via
+   `EXPLAIN QUERY PLAN` against the exported query builder — not a restated
+   lookalike, and neither "an index is named" nor a bare `SEARCH`, both of
+   which the slow predicate satisfies. See §2.
 6. **Artwork's content type comes from the bytes.** A png served as
    `image/png` and a jpeg as `image/jpeg` from the same `.bin` suffix.
 7. **A null artwork path is a 404**, not a zero-length 200.
@@ -360,6 +405,29 @@ The properties worth pinning, each because it fails silently:
   to know the oldest cursor any client still holds, and no client registers
   itself. One row per deleted media item is small; the decision to prune belongs
   with whatever first tracks clients.
+- **A media item id reused across plugins erases the first plugin's unread
+  deletion.** There is one tombstone row per `media_item_id`, and
+  `dropMediaItem`'s upsert sets `plugin_id = excluded.plugin_id`. So: alpha's
+  item 1 is dropped and tombstoned to alpha; SQLite hands id 1 back to the next
+  `createMediaItem`, which is beta's; beta drops it. Alpha's tombstone is now
+  beta's, `/api/deletions` for alpha's media type stops reporting id 1, and an
+  alpha client that had not polled inside that window never learns item 1 was
+  deleted — and cannot ever, because the live row is gone, so nothing in its
+  media-item stream corrects the record either. Reproduced against
+  `node:sqlite` with the real writer and the real `deletionsSince`, and the
+  owner half of it is already pinned by a test — `test/media/writer.test.ts`
+  asserts the re-tombstoned row names the *second* plugin.
+
+  It is nonetheless the least-bad option available with one row per id, which
+  is why the code is not changed: keeping the older tombstone loses *beta's*
+  deletion instead, and a plain INSERT aborts on the primary key (errcode
+  1555) and rolls the whole second deletion back, so no deletion is recorded
+  at all and the duplicate row stays alive — which is the bug the upsert was
+  added to fix. Closing it properly means a tombstone keyed on
+  `(plugin_id, media_item_id)`, or ids that are never handed out twice, and
+  both are larger than this slice. The exposure needs a cross-plugin reuse to
+  open at all, since SQLite only hands an id back when the row deleted was the
+  highest one.
 - **`updated_at` is a wall clock.** A clock moved backwards can hide a row from a
   cursor that has already passed its new timestamp. Nothing in the host uses a
   monotonic sequence today, and adding one is a bigger change than this slice;

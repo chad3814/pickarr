@@ -373,6 +373,14 @@ ALTER TABLE nzb_download ADD COLUMN reclaimed_at INTEGER;
  * `REFERENCES media_item (id)` either -- the row it names is gone, which is
  * the entire point, so a reference would be unsatisfiable by construction.
  *
+ * **"Forward" is only forward within one plugin.** An id reused by a
+ * *different* plugin moves `plugin_id` too, so the first plugin's tombstone
+ * becomes the second's and the first plugin's clients never learn their item
+ * was deleted -- `test/media/writer.test.ts` pins exactly that, asserting
+ * the re-tombstoned row names the second owner. It is a known and accepted
+ * consequence of one row per id, recorded in the read API spec's §8, and
+ * this paragraph should not be read as denying it.
+ *
  * `plugin_id` is copied onto the tombstone rather than looked up: by the
  * time anyone reads it there is nothing left on `media_item` to join to, and
  * a client syncing one media type must not be handed another plugin's

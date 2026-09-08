@@ -25,9 +25,11 @@
  * keeps that from becoming a way to get a path echoed back.
  *
  * **Unauthenticated.** Loopback binding is the whole of the protection (see
- * the plan's §8): anything that can reach the port can read every media
- * item, feed item and download. A reverse proxy or a container publishing
- * this port exposes the library, and auth is a later slice's.
+ * the *spec's* §8 Consequences -- the plan has no numbered sections, and the
+ * §5 and §6 cited further down this file are the spec's too): anything that
+ * can reach the port can read every media item, feed item and download. A
+ * reverse proxy or a container publishing this port exposes the library, and
+ * auth is a later slice's.
  */
 import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
