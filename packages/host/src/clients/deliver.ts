@@ -78,8 +78,13 @@ import { ownerPluginId } from '../db/owner.ts';
 import { PluginNotRegisteredError } from '../errors.ts';
 import { mapClientPath } from './paths.ts';
 import { redactUrl } from './redact.ts';
-import { markDelivered, markReclaimed, rowsForClient } from './rows.ts';
-import type { DownloadRow } from './rows.ts';
+import {
+  markDelivered, markReclaimed, rowsForClientByStatus, unreclaimedRowsForClient,
+} from './rows.ts';
+import type { DownloadRow, DownloadStatus } from './rows.ts';
+
+/** The one status a row must hold to be delivered, for the query that narrows the read. */
+const DELIVERABLE_STATUSES: readonly DownloadStatus[] = ['completed'];
 
 export interface DeliverDeps {
   raw: DatabaseSync;
@@ -233,12 +238,15 @@ async function reclaimRows(
 export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult> {
   const result: DeliverResult = { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0 };
 
-  // Both `status === 'completed'` and `deliveredAt === null` are checked,
-  // even though `markDelivered` never sets one without the other -- stating
-  // both is what the module doc's own wording promises, and a future writer
-  // of `delivered_at` that broke that pairing would be caught here rather
-  // than silently redelivering, or silently skipping, a row.
-  const completedRows = rowsForClient(deps.raw, deps.clientId)
+  // `status` is narrowed in SQL -- see `rows.ts`'s `rowsForClientByStatus`
+  // for why reading every row this client ever had, then filtering, cost
+  // 153 ms of blocked event loop per tick at 20,000 finished rows. Both
+  // `status === 'completed'` and `deliveredAt === null` are then checked
+  // here, even though `markDelivered` never sets one without the other --
+  // stating both is what the module doc's own wording promises, and a future
+  // writer of `delivered_at` that broke that pairing would be caught here
+  // rather than silently redelivering, or silently skipping, a row.
+  const completedRows = rowsForClientByStatus(deps.raw, deps.clientId, DELIVERABLE_STATUSES)
     .filter((row) => row.status === 'completed' && row.storagePath !== null && row.deliveredAt === null);
   await deliverRows(deps, result, completedRows);
 
@@ -249,7 +257,14 @@ export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult
     // tick, not one tick later. `reclaimedAt === null` is what keeps this a
     // once-per-download reclaim rather than a once-per-tick one -- see the
     // module doc and `db/migrate.ts`'s migration 8 comment.
-    const deliveredRows = rowsForClient(deps.raw, deps.clientId)
+    // `reclaimed_at IS NULL` is in the SQL as well as restated here, unlike
+    // the `completed` read above: `delivered` is where a row stops moving, so
+    // every download this client has ever finished stays in that status
+    // forever with `reclaimed_at` set. Narrowing on status alone would leave
+    // this read growing with lifetime history, which is the whole thing the
+    // narrowing was for -- see `rows.ts`'s `unreclaimedRowsForClient` for the
+    // measurement.
+    const deliveredRows = unreclaimedRowsForClient(deps.raw, deps.clientId)
       .filter((row) => row.status === 'delivered' && row.reclaimedAt === null);
     await reclaimRows(deps, remove, result, deliveredRows);
   }

@@ -164,8 +164,14 @@ export const torrentDownload = sqliteTable('torrent_download', {
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('torrent_download_item').on(t.rssItemId),
-  // Serves the reconcile pass's own query: every row not yet in a terminal
-  // status, which neither index above can answer.
+  // Serves `clients/rows.ts`'s `rowsForClientByStatus` -- the reconcile
+  // tick's only read shape, asked for non-terminal statuses by the absence
+  // sweep, `completed` by delivery, `delivered` by reclaim and `submitting`
+  // by ref recovery. Neither index above can answer any of those:
+  // `..._client_ref` is partial and keyed on the wrong column first, and
+  // `..._item` is keyed on the item. `rows.test.ts` asserts the query plan
+  // reaches this index, since a `status` predicate dropped from the SQL and
+  // done in JavaScript instead looks identical from every other angle.
   index('torrent_download_status').on(t.status),
 ]);
 
@@ -195,6 +201,8 @@ export const nzbDownload = sqliteTable('nzb_download', {
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('nzb_download_item').on(t.rssItemId),
+  // See `torrentDownload`'s own `..._status` comment: the same query reads
+  // both tables, so both need the index.
   index('nzb_download_status').on(t.status),
 ]);
 

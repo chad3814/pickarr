@@ -9,11 +9,14 @@ import {
   markDelivered,
   markReclaimed,
   rowByRef,
-  rowsForClient,
+  rowsForClientByStatus,
+  rowsForClientByStatusSql,
   setAbsent,
   setProgress,
   setRef,
   setStoragePath,
+  unreclaimedRowsForClient,
+  unreclaimedRowsForClientSql,
 } from '../../src/clients/rows.ts';
 import type { DownloadRow } from '../../src/clients/rows.ts';
 
@@ -354,7 +357,7 @@ test('setRef applies only from the status the row was read with, and reports whi
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitted', 'setRef must not move status');
 });
 
-test('rowsForClient reads rows from both tables, tagged with which table each came from', () => {
+test('rowsForClientByStatus reads rows from both tables, tagged with which table each came from', () => {
   const raw = setup();
   const itemId = seedRssItem(raw, 'a');
   const clientId = seedClient(raw);
@@ -364,7 +367,7 @@ test('rowsForClient reads rows from both tables, tagged with which table each ca
   // A row on a different client must not show up in this client's list.
   insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: otherClientId, status: 'downloading' });
 
-  const rows = rowsForClient(raw, clientId);
+  const rows = rowsForClientByStatus(raw, clientId, ['submitted', 'downloading']);
 
   assert.deepEqual(
     rows.map((row) => ({ id: row.id, table: row.table, status: row.status })).toSorted((a, b) => a.id - b.id),
@@ -373,4 +376,112 @@ test('rowsForClient reads rows from both tables, tagged with which table each ca
       { id: nzbId, table: 'nzb_download', status: 'submitted' },
     ].toSorted((a, b) => a.id - b.id),
   );
+});
+
+test('rowsForClientByStatus returns only the statuses asked for', () => {
+  // The whole point of the SQL predicate: a client's finished history must
+  // not come back at all, rather than come back and be filtered afterwards.
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const liveId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
+  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'failed' });
+  insertNzbRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+
+  const rows = rowsForClientByStatus(raw, clientId, ['completed']);
+
+  assert.deepEqual(rows.map((row) => ({ id: row.id, table: row.table, status: row.status })), [
+    { id: liveId, table: 'torrent_download', status: 'completed' },
+  ]);
+});
+
+test('rowsForClientByStatus returns rows in id order, which is the order deliveries are promised in', () => {
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  // Inserted so that reading through the status index -- which orders by
+  // status value first -- would interleave them differently from id order.
+  const first = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitting' });
+  const second = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
+  const third = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitting' });
+  const fourth = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
+
+  const rows = rowsForClientByStatus(raw, clientId, ['submitting', 'submitted', 'downloading', 'completed']);
+
+  assert.deepEqual(rows.map((row) => row.id), [first, second, third, fourth]);
+});
+
+test('rowsForClientByStatus asked for no statuses returns nothing, and does not build an invalid query', () => {
+  // `IN ()` is not valid SQLite, so the empty case is answered without a
+  // query at all -- and `[]` is the correct answer, not a degenerate one: no
+  // row's status is a member of the empty set.
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
+
+  assert.deepEqual(rowsForClientByStatus(raw, clientId, []), []);
+});
+
+test('rowsForClientByStatus is served by the status index on both tables, not by a table scan', () => {
+  // The measurement this query exists for: without the status predicate the
+  // plan is `SCAN torrent_download`, one full pass over every row this client
+  // has ever had, on every tick -- 153 ms of blocked event loop at 20,000
+  // finished rows, because `node:sqlite` is synchronous. Asserting the plan
+  // rather than a duration is what keeps that from silently regressing:
+  // migration 7 added `torrent_download_status`/`nzb_download_status` for
+  // this query and nothing used them until now.
+  const raw = setup();
+
+  for (const table of ['torrent_download', 'nzb_download'] as const) {
+    // The statement the module itself builds, not one restated here: a plan
+    // assertion against a lookalike would prove nothing about this query.
+    const plan = raw.prepare(`EXPLAIN QUERY PLAN ${rowsForClientByStatusSql(table, 2)}`)
+      .all(1, 'completed', 'downloading')
+      .map((step) => String((step as { detail: unknown }).detail))
+      .join('\n');
+
+    assert.match(plan, new RegExp(`USING INDEX ${table}_status`), `${table} must be searched through its status index`);
+    assert.doesNotMatch(plan, new RegExp(`SCAN ${table}`), `${table} must not be scanned`);
+  }
+});
+
+test('unreclaimedRowsForClient returns only delivered rows nothing has reclaimed yet', () => {
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const otherClientId = seedClient(raw, { name: 'Other' });
+  const pendingId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+  const pendingNzbId = insertNzbRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+  const reclaimedId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+  raw.prepare('UPDATE torrent_download SET reclaimed_at = ? WHERE id = ?').run(700, reclaimedId);
+  // Neither a row on another client nor one that never reached `delivered`.
+  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: otherClientId, status: 'delivered' });
+  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
+
+  const rows = unreclaimedRowsForClient(raw, clientId);
+
+  assert.deepEqual(rows.map((row) => ({ id: row.id, table: row.table })), [
+    { id: pendingId, table: 'torrent_download' },
+    { id: pendingNzbId, table: 'nzb_download' },
+  ]);
+});
+
+test('unreclaimedRowsForClient is served by the status index too, not by a table scan', () => {
+  // A `delivered` row stays `delivered` forever, so this read is the one that
+  // would keep growing with lifetime history if only `status` were narrowed:
+  // 20,000 already-reclaimed rows measured 18-32 ms as a status-only select
+  // against 1.8 ms with `reclaimed_at IS NULL` stated in SQL.
+  const raw = setup();
+
+  for (const table of ['torrent_download', 'nzb_download'] as const) {
+    const plan = raw.prepare(`EXPLAIN QUERY PLAN ${unreclaimedRowsForClientSql(table)}`)
+      .all(1)
+      .map((step) => String((step as { detail: unknown }).detail))
+      .join('\n');
+
+    assert.match(plan, new RegExp(`USING INDEX ${table}_status`), `${table} must be searched through its status index`);
+    assert.doesNotMatch(plan, new RegExp(`SCAN ${table}`), `${table} must not be scanned`);
+  }
 });

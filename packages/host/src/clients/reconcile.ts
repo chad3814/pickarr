@@ -27,10 +27,10 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { redactUrl } from './redact.ts';
 import {
-  advanceStatus, failRow, heldRefs, rowByRef, rowsForClient, setAbsent, setProgress, setRef,
-  setStoragePath,
+  DOWNLOAD_STATUSES, advanceStatus, failRow, heldRefs, rowByRef, rowsForClientByStatus, setAbsent,
+  setProgress, setRef, setStoragePath,
 } from './rows.ts';
-import type { DownloadRow } from './rows.ts';
+import type { DownloadRow, DownloadStatus } from './rows.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
 
 /**
@@ -224,6 +224,16 @@ function refCandidates(
 }
 
 /**
+ * The only status a null `client_ref` can be recovered for: a row still
+ * `submitting` has an unresolved add or a submission whose response was
+ * lost. Narrowed in SQL rather than after the read, so the query is served
+ * by `..._status` and costs one row per unconfirmed submission instead of
+ * one per download this client has ever had. See
+ * `rows.ts`'s `rowsForClientByStatus` for the measurement.
+ */
+const RECOVERABLE_STATUSES: readonly DownloadStatus[] = ['submitting'];
+
+/**
  * Recovers the `client_ref` 1.x used to restore with its per-installation
  * label marker -- dropped deliberately from 2.0 (see the module doc's linked
  * spec) -- with the replacement slice C's own §10 named: category and name.
@@ -273,8 +283,8 @@ function refCandidates(
 function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
   if (!deps.snapshot.complete) return;
 
-  const candidateRows = rowsForClient(deps.raw, deps.clientId)
-    .filter((row) => row.status === 'submitting' && row.clientRef === null);
+  const candidateRows = rowsForClientByStatus(deps.raw, deps.clientId, RECOVERABLE_STATUSES)
+    .filter((row) => row.clientRef === null);
   // Nothing to recover means nothing to look up: the held-ref read is
   // skipped entirely rather than run for every tick of a client with no
   // unconfirmed submissions, which is almost every tick.
@@ -344,6 +354,16 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
 const TERMINAL_STATUSES: ReadonlySet<DownloadRow['status']> = new Set(['delivered', 'failed']);
 
 /**
+ * The statuses the sweep below actually reads, for the query that narrows
+ * it. Derived from `DOWNLOAD_STATUSES` and `TERMINAL_STATUSES` rather than
+ * written out, so the two can never disagree: a seventh status added to
+ * `rows.ts` is swept unless it is also named terminal, which is the safe
+ * direction -- the alternative silently stops sweeping it.
+ */
+const SWEPT_STATUSES: readonly DownloadStatus[] =
+  DOWNLOAD_STATUSES.filter((status) => !TERMINAL_STATUSES.has(status));
+
+/**
  * Every ref `snapshot` accounts for, queue and history alike -- the set a
  * row's own `client_ref` is checked against to decide whether the client
  * still claims to hold it. Built from both collections because a job can
@@ -399,7 +419,12 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
 
   const refs = accountedForRefs(deps.snapshot);
 
-  for (const row of rowsForClient(deps.raw, deps.clientId)) {
+  for (const row of rowsForClientByStatus(deps.raw, deps.clientId, SWEPT_STATUSES)) {
+    // Restated after the query, not instead of it: the SQL is what makes the
+    // read proportional to live rows, and this is the same "state both"
+    // discipline `deliver.ts`'s own filter comment describes -- a future
+    // change to either list is caught here rather than silently sweeping a
+    // terminal row.
     if (TERMINAL_STATUSES.has(row.status)) continue;
     if (row.clientRef === null) continue;
 
