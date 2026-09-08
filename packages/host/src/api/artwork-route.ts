@@ -66,8 +66,27 @@ export type ArtworkKind = 'poster' | 'background' | 'logo';
  * this" is not a claim about the rows this query will meet. A media item
  * whose only rows of a kind are null-path is still a 404, now because no row
  * matches rather than because the matched row had nothing to serve.
+ *
+ * **Exported for the same reason `reads.ts` exports `SYNC_QUERIES`.** These
+ * three sat outside that record, so they sat outside the "every exported
+ * query needs a plan expectation" assertion the plan test makes -- and
+ * nothing measured them at all. They are not in `SYNC_QUERIES` itself
+ * because that record is keyed by the `reads.ts` function that runs each
+ * statement and these three have no function there -- and putting them in
+ * it would make `reads.ts` import this module, which its own doc says it
+ * does not do ("nothing else from the project"). No cycle either way; the
+ * two modules simply do not know about each other. So they get the same
+ * test one file over instead, with its own completeness assertion over
+ * these three keys. Measured, and the three do not agree:
+ * each seeks `(media_item_id=?)`, but `poster` and `background` then sort a
+ * temp B-tree for `ORDER BY id` while `logo` does not -- `logo_media_item`
+ * is a plain index on `media_item_id` alone, so its entries already end in
+ * the rowid, where the other two have only the `UNIQUE (media_item_id, url)`
+ * index and come back in url order. Both shapes are bounded by one item's
+ * rows either way; the test pins which is which, so `logo_media_item` is not
+ * mistaken for a redundant prefix of the unique index and dropped.
  */
-const ARTWORK_QUERY: Record<ArtworkKind, string> = {
+export const ARTWORK_QUERY: Record<ArtworkKind, string> = {
   poster:
     'SELECT path FROM poster WHERE media_item_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
   background:

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
-import { readArtwork, sniffImageType } from '../../src/api/artwork-route.ts';
+import { ARTWORK_QUERY, readArtwork, sniffImageType } from '../../src/api/artwork-route.ts';
 
 function setup(): DatabaseSync {
   const { raw } = openTestDatabase();
@@ -256,4 +256,71 @@ test('sniffImageType recognises gif, webp and avif, and falls through short file
   assert.equal(sniffImageType(Uint8Array.from([0x00, 0x01])), 'application/octet-stream');
   // Empty: the degenerate case every `matches` length check must survive.
   assert.equal(sniffImageType(Uint8Array.from([])), 'application/octet-stream');
+});
+
+/**
+ * The plan assertion `SYNC_QUERIES` gets, for the three queries that sat
+ * outside it.
+ *
+ * Nothing measured these before: all three are bounded by one media item's
+ * rows, so nothing was wrong -- but "nothing is wrong" was a reading of the
+ * SQL, not a measurement of it, and the whole reason `reads.ts` exports its
+ * query text is that reading SQL is how slice D shipped two indexes no query
+ * used. The same rule applies here: the seek is asserted **by the column it
+ * names**, not by the word `SEARCH` and not by the index's name, because
+ * `SCAN <table> USING INDEX <index>` satisfies both of the weaker forms
+ * while reading the table's index end to end.
+ *
+ * The `tempBTrees` count is part of the assertion rather than a detail: the
+ * three kinds genuinely differ, and the difference is which index each has.
+ * `logo` carries `logo_media_item` on `(media_item_id)` alone, whose entries
+ * end in the rowid, so `ORDER BY id` is free; `poster` and `background` have
+ * only `UNIQUE (media_item_id, url)`, whose entries come back in url order,
+ * so each sorts one item's rows. Pinning that is what stops
+ * `logo_media_item` from looking like a redundant prefix of the unique index
+ * and being dropped.
+ */
+test('every artwork query seeks its media item by id, and only the two without a rowid-tailed index sort', () => {
+  const raw = setup();
+
+  const checks: Record<keyof typeof ARTWORK_QUERY, { seek: string; tempBTrees: number }> = {
+    poster: {
+      seek: 'SEARCH poster USING INDEX poster_media_item_url (media_item_id=?)',
+      tempBTrees: 1,
+    },
+    background: {
+      seek: 'SEARCH background USING INDEX background_media_item_url (media_item_id=?)',
+      tempBTrees: 1,
+    },
+    logo: {
+      // `logo_media_item`, not `logo_media_item_url`: the plain index's
+      // entries are `(media_item_id, rowid)`, which is this query's order.
+      seek: 'SEARCH logo USING INDEX logo_media_item (media_item_id=?)',
+      tempBTrees: 0,
+    },
+  };
+
+  assert.deepEqual(
+    Object.keys(checks).toSorted(),
+    Object.keys(ARTWORK_QUERY).toSorted(),
+    'every artwork query needs a plan expectation, and every expectation an artwork query',
+  );
+
+  for (const [kind, check] of Object.entries(checks)) {
+    const sql = ARTWORK_QUERY[kind as keyof typeof ARTWORK_QUERY];
+    const steps = raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(1)
+      .map((step) => String((step as { detail: unknown }).detail));
+    const plan = steps.join('\n');
+
+    assert.ok(
+      plan.includes(check.seek),
+      `${kind} must seek by the column it filters on: ${check.seek}\n${plan}`,
+    );
+    assert.ok(!plan.includes(`SCAN ${kind}`), `${kind} must not be scanned end to end\n${plan}`);
+    assert.equal(
+      steps.filter((step) => step.includes('USE TEMP B-TREE')).length,
+      check.tempBTrees,
+      `${kind} must sort exactly ${check.tempBTrees} time(s)\n${plan}`,
+    );
+  }
 });
