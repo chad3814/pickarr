@@ -546,6 +546,11 @@ function unusedMediaCall(name: string): () => never {
   return () => { throw new Error(`ctx.media.${name}: not used by this test`); };
 }
 
+/** The same, for `ctx.read` -- whose methods return promises, so these reject rather than throw synchronously. */
+function unusedReadCall(name: string): () => Promise<never> {
+  return async () => { throw new Error(`ctx.read.${name}: not used by this test`); };
+}
+
 /**
  * A `PluginContext` whose every member fails loudly except `jobs`, which is
  * all this handler actually uses -- it passes `ctx.jobs` to
@@ -568,6 +573,12 @@ function fakeContext(jobs: JobQueue): PluginContext {
       upsertPerson: unusedMediaCall('upsertPerson'),
       attachRole: unusedMediaCall('attachRole'),
       setResolution: unusedMediaCall('setResolution'),
+    },
+    read: {
+      mediaItem: unusedReadCall('mediaItem'),
+      mediaItemByProviderRef: unusedReadCall('mediaItemByProviderRef'),
+      rssItemsFor: unusedReadCall('rssItemsFor'),
+      downloadsFor: unusedReadCall('downloadsFor'),
     },
     jobs,
     fetch: {

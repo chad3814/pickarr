@@ -1,7 +1,7 @@
 import type { DownloadClients } from './downloads.ts';
 import type { HostFetch } from './fetch.ts';
 import type { JobQueue, JobRecord } from './jobs.ts';
-import type { MediaWriter } from './media.ts';
+import type { MediaReader, MediaWriter } from './media.ts';
 import type { Migration } from './migrations.ts';
 
 export type MediaType = 'tv' | 'movie' | 'xxx' | 'book';
@@ -22,6 +22,14 @@ export interface PluginContext {
    */
   db: unknown;
   media: MediaWriter;
+  /**
+   * The typed way to read the shared rows, scoped to this plugin: the host
+   * builds one per plugin, closed over its id, so a plugin cannot read
+   * another's media items. `media` is deliberately *not* renamed to `write`
+   * alongside it -- every plugin, the test double and the flow tests name it,
+   * and the churn would buy nothing.
+   */
+  read: MediaReader;
   jobs: JobQueue;
   fetch: HostFetch;
   downloads: DownloadClients;

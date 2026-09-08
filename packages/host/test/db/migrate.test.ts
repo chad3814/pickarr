@@ -649,6 +649,11 @@ test('a tombstone cannot be written twice for one media item', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
 
+  // What the constraint guarantees, not what `dropMediaItem` does: that
+  // writer inserts with `ON CONFLICT (media_item_id) DO UPDATE`, so a media
+  // item id SQLite handed out a second time moves this row forward instead
+  // of tripping the key. The constraint is what makes one row per id the
+  // only possibility for either of them.
   const insert = raw.prepare(`
     INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
     VALUES (1, 'alpha', 100)

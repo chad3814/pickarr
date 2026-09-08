@@ -140,11 +140,33 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       // failed row delete after the unlink leaves a row pointing at nothing,
       // which is worse, because something will try to serve it.
       const paths = artworkPaths(mediaItemId);
-      // One savepoint for the three artwork tables and the media item row:
-      // a crash between them must not leave, say, the poster rows gone but
-      // the media item row (and thus its background/logo rows) still there.
+      const at = now();
+      // One savepoint for the three artwork tables, the media item row and
+      // the tombstone that records its deletion: a crash between them must
+      // not leave, say, the poster rows gone but the media item row (and thus
+      // its background/logo rows) still there -- and must not leave a
+      // tombstone standing over a row that is still present, which would
+      // tell every syncing client an item was deleted that is not.
       raw.exec('SAVEPOINT drop_media_item');
       try {
+        // The tombstone first, and reading `plugin_id` off the live row is
+        // the reason: after the DELETE below there is nothing left to read it
+        // from, and nothing to join a tombstone to either -- which is why
+        // `deleted_media_item` carries its own copy of the owner.
+        //
+        // `ON CONFLICT` rather than a plain INSERT because a media item id is
+        // reusable: SQLite hands the highest rowid back once its row is gone
+        // (measured, not assumed), and the dedup path drops exactly the newest
+        // row, so the very next `createMediaItem` takes the dropped id. The
+        // second drop of that id must move the tombstone forward -- both its
+        // owner and its time -- rather than abort on the primary key and take
+        // the whole deletion down with it.
+        raw.prepare(`
+          INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
+          SELECT id, plugin_id, ? FROM media_item WHERE id = ?
+          ON CONFLICT (media_item_id) DO UPDATE
+            SET plugin_id = excluded.plugin_id, deleted_at = excluded.deleted_at
+        `).run(at, mediaItemId);
         raw.prepare('DELETE FROM poster WHERE media_item_id = ?').run(mediaItemId);
         raw.prepare('DELETE FROM background WHERE media_item_id = ?').run(mediaItemId);
         raw.prepare('DELETE FROM logo WHERE media_item_id = ?').run(mediaItemId);

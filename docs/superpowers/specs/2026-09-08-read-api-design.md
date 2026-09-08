@@ -152,11 +152,16 @@ CREATE INDEX deleted_media_item_at ON deleted_media_item (deleted_at, media_item
 CREATE INDEX media_item_sync    ON media_item (plugin_id, updated_at, id);
 ```
 
-`media_item_id` is the primary key rather than a surrogate: a media item is
-deleted once, and a second tombstone for the same id would mean the id was
-reused, which `INTEGER PRIMARY KEY` does not do. `plugin_id` is copied onto the
-tombstone because the row it names is gone by the time anyone reads it, and a
-client syncing one media type must not be told about another's deletions.
+`media_item_id` is the primary key rather than a surrogate: one tombstone per
+id is the whole truth there is to record. An id *can* be reused — SQLite hands
+the highest rowid out again once its row is deleted, measured against
+`node:sqlite`, and the dedup path drops exactly the newest row — so the write
+is an upsert (`ON CONFLICT (media_item_id) DO UPDATE`) that moves the
+tombstone's owner and time forward. A plain INSERT would abort on the key and
+take the whole second deletion down with it, leaving the loser of that claim
+alive. `plugin_id` is copied onto the tombstone because the row it names is
+gone by the time anyone reads it, and a client syncing one media type must not
+be told about another's deletions.
 
 `rss_item` gets **no new `(updated_at, id)` index**: `rss_item_updated` has
 covered exactly those columns since migration 1, byte for byte, and the read

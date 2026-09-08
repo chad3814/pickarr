@@ -364,11 +364,14 @@ ALTER TABLE nzb_download ADD COLUMN reclaimed_at INTEGER;
  * live rows can say so once the row is gone.
  *
  * `media_item_id` is the primary key, not a surrogate `id` with its own
- * foreign key: an item is deleted once, and a second tombstone for one id
- * would mean a reused rowid, which `INTEGER PRIMARY KEY` does not produce.
- * It is deliberately not a `REFERENCES media_item (id)` either -- the row it
- * names is gone, which is the entire point, so a reference would be
- * unsatisfiable by construction.
+ * foreign key: one tombstone per id is the whole truth there is to record.
+ * An id *can* come back -- SQLite hands the highest rowid out again once its
+ * row is deleted, measured against `node:sqlite` -- so the second deletion
+ * of a reused id moves this row forward instead of adding a second, which is
+ * why `MediaWriter.dropMediaItem` writes it with `ON CONFLICT DO UPDATE`
+ * rather than a plain INSERT. It is deliberately not a
+ * `REFERENCES media_item (id)` either -- the row it names is gone, which is
+ * the entire point, so a reference would be unsatisfiable by construction.
  *
  * `plugin_id` is copied onto the tombstone rather than looked up: by the
  * time anyone reads it there is nothing left on `media_item` to join to, and

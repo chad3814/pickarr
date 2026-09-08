@@ -1,8 +1,11 @@
 /**
  * Every read the API answers, as SQL against the shared tables. Imports
- * `./cursor.ts` and nothing else from the project -- in particular nothing
- * from `host.ts`, so no route added on top of this can pull `src/api` into a
- * cycle back through the registry.
+ * `./cursor.ts` and, for the shapes it returns, types from
+ * `@pickarr/contract` -- and nothing else from the project. In particular
+ * nothing from `host.ts`, so no route added on top of this can pull
+ * `src/api` into a cycle back through the registry, and nothing from
+ * `../media/`, which is the direction the dependency runs: `MediaReader`
+ * wraps these functions, not the other way round.
  *
  * **The keyset predicate is what this module is for.** Each paged read walks
  * `(updated_at, id)` forward with SQLite's *row-value* comparison
@@ -66,72 +69,24 @@
  * `DOWNLOADS_SINCE` for why that triple is a total order and the pair is not.
  *
  * Synchronous, because `node:sqlite` is. Wrapping these in `async` would
- * promise a yield that never happens and buy nothing.
+ * promise a yield that never happens and buy nothing. `MediaReader`
+ * (`../media/reader.ts`) does hand a plugin promises over four of them, but
+ * that is a decision about matching `MediaWriter`'s shape at the contract
+ * boundary, not about these queries.
  */
 import type { DatabaseSync } from 'node:sqlite';
+import type { DownloadRead, MediaItemRead, RssItemRead, Transport } from '@pickarr/contract';
 import type { Cursor, UnionCursor } from './cursor.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from './cursor.ts';
 
 /**
- * Which of the two download tables a row came from, and which kind of thing
- * an rss item is fetched as. A union, not an enum: `erasableSyntaxOnly` is on
- * and these two values are the whole vocabulary a *client* is ever handed.
- * The columns behind them are TEXT and one of them can still hold a third
- * value -- see `downloadTypeOf` for which, and for what happens to it.
+ * The read shapes live in `@pickarr/contract`, beside `MediaReader`, because
+ * a plugin holding one of these objects must be able to name its type
+ * without depending on the host. Re-exported here so that a caller of these
+ * queries names the shape where the query that builds it lives, rather than
+ * reaching into the contract for a value the host produced.
  */
-export type Transport = 'torrent' | 'nzb';
-
-/** A media item as a client sees it. The spec's §4 shape. */
-export interface MediaItemRead {
-  id: number;
-  title: string;
-  releaseDate: string | null;
-  description: string | null;
-  provider: string | null;
-  providerRef: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-/**
- * An rss item as a client sees it. No `updatedAt`: the column exists and is
- * what the page is ordered by, but it is the *cursor's* business rather than
- * a fact about the item, and the cursor already carries it.
- */
-export interface RssItemRead {
-  id: number;
-  feedId: number;
-  filename: string;
-  link: string;
-  mediaItemId: number | null;
-  resolution: string;
-  resolutionDetail: string | null;
-  downloadType: Transport;
-  deliveredAt: number | null;
-}
-
-/**
- * A download as a client sees it, from either table. `status` is `string`
- * rather than the host's own union: the vocabulary is the host's and will
- * grow, and a client pinned to today's values would break on the next one.
- *
- * `infohash` exists on `torrent_download` alone and reads `null` for an nzb
- * row -- one shape for both transports, rather than a field that is present
- * or absent depending on which table answered.
- */
-export interface DownloadRead {
-  id: number;
-  rssItemId: number;
-  downloadClientId: number;
-  transport: Transport;
-  status: string;
-  clientRef: string | null;
-  infohash: string | null;
-  percentage: number | null;
-  absentSince: number | null;
-  deliveredAt: number | null;
-  lastError: string | null;
-}
+export type { DownloadRead, MediaItemRead, RssItemRead, Transport };
 
 /**
  * One page of a paged read.

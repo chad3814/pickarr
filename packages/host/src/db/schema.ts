@@ -128,10 +128,14 @@ export const rssItem = sqliteTable('rss_item', {
  * live rows can say so once the row is gone.
  *
  * `mediaItemId` is the primary key, not a surrogate `id` with its own
- * foreign key: an item is deleted once, and a second tombstone for one id
- * would mean a reused rowid, which `INTEGER PRIMARY KEY` does not produce.
- * It is deliberately not a reference to `media_item` either -- the row it
- * names is gone, which is the entire point, so a reference would be
+ * foreign key: one tombstone per id is the whole truth there is to record.
+ * An id *can* come back -- SQLite hands the highest rowid out again once its
+ * row is deleted, measured against `node:sqlite`, and the dedup path drops
+ * exactly the newest row -- so the second deletion of a reused id must move
+ * this row's `pluginId` and `deletedAt` forward rather than sit beside a
+ * stale twin. `MediaWriter.dropMediaItem` writes it as an upsert for that
+ * reason. It is deliberately not a reference to `media_item` either -- the
+ * row it names is gone, which is the entire point, so a reference would be
  * unsatisfiable by construction.
  *
  * `pluginId` is copied onto the tombstone rather than looked up: by the time

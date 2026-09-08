@@ -170,6 +170,12 @@ const fakeCtx: PluginContext = {
     attachRole: async () => { throw new Error('media.attachRole: not used by this test'); },
     setResolution: async () => { throw new Error('media.setResolution: not used by this test'); },
   },
+  read: {
+    mediaItem: async () => { throw new Error('read.mediaItem: not used by this test'); },
+    mediaItemByProviderRef: async () => { throw new Error('read.mediaItemByProviderRef: not used by this test'); },
+    rssItemsFor: async () => { throw new Error('read.rssItemsFor: not used by this test'); },
+    downloadsFor: async () => { throw new Error('read.downloadsFor: not used by this test'); },
+  },
   jobs: { enqueue: async () => { throw new Error('jobs.enqueue: not used by this test'); } },
   fetch: {
     json: async () => { throw new Error('fetch.json: not used by this test'); },

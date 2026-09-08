@@ -111,10 +111,13 @@ export function decodeCursor(raw: string | undefined): Cursor | null {
  * it is the shape of a later bug -- a downloads cursor handed to the media
  * route would decode without complaint and page from the wrong key.
  *
- * `transport` is spelled as a literal union here rather than imported from
- * `reads.ts`: `reads.ts` imports this module, so importing back would be a
- * cycle. The two declarations are structurally identical, which is what makes
- * a `Transport` assignable to this field.
+ * `transport` is spelled as a literal union here rather than imported. The
+ * original reason was a cycle -- the union lived in `reads.ts`, which imports
+ * this module -- and Task 4 moved it to `@pickarr/contract`, which imports
+ * nothing from the host, so that reason is gone. The restatement stays for
+ * the one this module's own doc gives: it imports nothing at all, and a
+ * cursor is a string. The two declarations are structurally identical, which
+ * is what makes a `Transport` assignable to this field.
  */
 export interface UnionCursor {
   updatedAt: number;

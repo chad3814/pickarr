@@ -598,3 +598,128 @@ test('a portrait image and a landscape image are stored as given, not reclassifi
     assert.equal(background.height, 450);
   });
 });
+
+/** The tombstone row for one media item, column by column. */
+function readTombstone(raw: DatabaseSync, mediaItemId: number) {
+  const row = raw.prepare(
+    'SELECT media_item_id, plugin_id, deleted_at FROM deleted_media_item WHERE media_item_id = ?',
+  ).get(mediaItemId);
+  return row as { media_item_id: unknown; plugin_id: unknown; deleted_at: unknown } | undefined;
+}
+
+/**
+ * A poster row with no cached file, inserted directly so a test can watch the
+ * artwork deletes roll back. `path` is null on purpose: `artworkPaths` skips
+ * null paths, so nothing here ever reaches `artwork.remove` and the loud
+ * `unusedArtwork` store stays appropriate.
+ */
+function insertPathlessPoster(raw: DatabaseSync, mediaItemId: number, url: string): number {
+  const result = raw.prepare(`
+    INSERT INTO poster (media_item_id, title, language, url, width, height, path, created_at)
+    VALUES (?, NULL, NULL, ?, 300, 450, NULL, 0)
+  `).run(mediaItemId, url);
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * A trigger that aborts every delete of one media item row, so the DELETE
+ * inside `dropMediaItem`'s savepoint fails with SQLITE_CONSTRAINT_TRIGGER
+ * (1811) after the tombstone has already been written. The same device
+ * `claimProviderRef`'s non-unique-failure test uses, on the other verb.
+ */
+function guardAgainstDeleting(raw: DatabaseSync, mediaItemId: number): void {
+  raw.exec(`
+    CREATE TRIGGER guard_drop BEFORE DELETE ON media_item WHEN OLD.id = ${mediaItemId}
+    BEGIN
+      SELECT RAISE(ABORT, 'synthetic delete failure for this test');
+    END;
+  `);
+}
+
+test('dropping a media item writes a tombstone naming its plugin', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 4321, unusedArtwork);
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+
+  await writer.dropMediaItem(mediaItemId);
+
+  assert.equal(readMediaItem(raw, mediaItemId), undefined, 'the media item must be gone');
+  const tombstone = readTombstone(raw, mediaItemId);
+  assert.ok(tombstone, 'a deletion no live row can express must leave a tombstone');
+  assert.equal(tombstone.media_item_id, mediaItemId);
+  // Copied off the row before it was deleted: there is nothing left to join
+  // to afterwards, which is why the tombstone carries its own copy.
+  assert.equal(tombstone.plugin_id, 'alpha');
+  assert.equal(tombstone.deleted_at, 4321, 'deleted_at comes from the injected clock, like every other write here');
+});
+
+test('a drop that fails leaves neither the deletion nor the tombstone', async () => {
+  // Force a failure inside the savepoint and assert both the media item and
+  // the tombstone are absent. This is what putting it in the savepoint buys.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 4321, unusedArtwork);
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  const posterId = insertPathlessPoster(raw, mediaItemId, 'https://images.test/poster.gif');
+  guardAgainstDeleting(raw, mediaItemId);
+
+  await assert.rejects(() => writer.dropMediaItem(mediaItemId));
+
+  assert.ok(readMediaItem(raw, mediaItemId), 'the media item must survive a drop that failed');
+  assert.ok(
+    raw.prepare('SELECT id FROM poster WHERE id = ?').get(posterId),
+    'the artwork delete must have rolled back too -- one savepoint covers all four',
+  );
+  assert.equal(
+    readTombstone(raw, mediaItemId),
+    undefined,
+    'a tombstone that outlived the rollback would tell every client an item was deleted that is still there',
+  );
+});
+
+test('a drop whose tombstone cannot be written deletes nothing', async () => {
+  // The other half of "together or not at all": the tombstone insert is
+  // inside the savepoint, so a tombstone that cannot be written takes the
+  // deletion down with it rather than leaving a deleted row nothing records.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => 4321, unusedArtwork);
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  raw.exec(`
+    CREATE TRIGGER guard_tombstone BEFORE INSERT ON deleted_media_item
+    BEGIN
+      SELECT RAISE(ABORT, 'synthetic tombstone failure for this test');
+    END;
+  `);
+
+  await assert.rejects(() => writer.dropMediaItem(mediaItemId));
+
+  assert.ok(readMediaItem(raw, mediaItemId), 'the media item must survive a tombstone that could not be written');
+});
+
+test('a media item id reused after a drop is tombstoned again, not collided with', async () => {
+  // SQLite reuses the highest rowid once its row is deleted -- measured, not
+  // assumed -- and the dedup path drops exactly the newest row, so the very
+  // next createMediaItem takes the dropped id back. A plain INSERT would hit
+  // `deleted_media_item`'s primary key and abort the whole second drop,
+  // leaving the loser of that claim alive.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  let clock = 1000;
+  const writer = createMediaWriter(db, () => clock, unusedArtwork);
+
+  const first = await writer.createMediaItem({ pluginId: 'alpha', title: 'first', releaseDate: null, description: null });
+  await writer.dropMediaItem(first);
+
+  clock = 2000;
+  const second = await writer.createMediaItem({ pluginId: 'beta', title: 'second', releaseDate: null, description: null });
+  assert.equal(second, first, 'this test is only meaningful while SQLite hands the dropped rowid back');
+  await writer.dropMediaItem(second);
+
+  assert.equal(readMediaItem(raw, second), undefined, 'the second drop must have deleted the row');
+  const tombstone = readTombstone(raw, second);
+  assert.ok(tombstone, 'the reused id must be tombstoned again');
+  assert.equal(tombstone.plugin_id, 'beta', 'the tombstone must name the second owner, not the first');
+  assert.equal(tombstone.deleted_at, 2000, 'and carry the second deletion\'s time, so a client sees it move');
+});

@@ -4,6 +4,7 @@ import { createArtworkStore } from './artwork/store.ts';
 import type { HostDb } from './db/open.ts';
 import { migratePlugin } from './db/migrate.ts';
 import { createMediaWriter } from './media/writer.ts';
+import { createMediaReader } from './media/reader.ts';
 import { createRunner } from './jobs/runner.ts';
 import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
@@ -247,6 +248,12 @@ export function createHost(deps: {
     return {
       db: deps.raw,
       media,
+      // A reader per plugin, unlike the one shared `media` above, and for the
+      // opposite reason: every read it answers about a media item is filtered
+      // by the plugin id it closes over, so a plugin never gets to name one.
+      // Built here rather than hoisted out of `ctxFor` because the id is the
+      // whole point -- one shared reader could only be scoped to nobody.
+      read: createMediaReader(deps.raw, pluginId),
       // `Runner.enqueue` is sync and takes a `pluginId`; `JobQueue.enqueue` is
       // async and takes none. This adapter is the seam: it closes over the
       // plugin this context was built for, so that plugin can never name
