@@ -283,11 +283,21 @@ GET /api/health                          → { ok: true, version }
 GET /api/media?type=<t>&since=<cursor>   → { items, cursor, done }
 GET /api/rss-items?since=<cursor>        → { items, cursor, done }
 GET /api/downloads?since=<cursor>        → { items, cursor, done }
-GET /api/deletions?since=<cursor>        → { ids, cursor, done }
+GET /api/deletions?type=<t>&since=<cursor> → { ids, cursor, done }
 GET /api/artwork/:kind/:mediaItemId      → bytes
 ```
 
-A cursor is an opaque string the client echoes back — `<updatedAt>.<id>`, encoded
+`/api/deletions` takes a `type` for the same reason `/api/media` does, and it
+has to: a tombstone carries the `plugin_id` that owned the deleted row
+precisely because there is no `media_item` left to join to, and §4 above is
+explicit that one media type's client must not be handed another's deletions.
+This route was first written here without a `type`, which left it with no
+plugin id to pass `deletionsSince` and no way to scope what it answered.
+Corrected during Task 6, which is where the two halves met.
+
+A cursor is an opaque string the client echoes back — `<updatedAt>.<id>`, or
+`<updatedAt>.<transport>.<id>` on `/api/downloads`, whose two tables are two
+separate rowid spaces (see §2's fork on the union cursor) — encoded
 so a client cannot be tempted to construct one. `done: true` means the page
 reached the end of what exists now, which is the client's signal to stop paging
 and start polling. Page size is fixed and stated in one constant.
