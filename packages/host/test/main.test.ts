@@ -400,9 +400,9 @@ test('main starts the server after the host and closes it before stopping', asyn
   // built is exactly the evidence that `start()` came first -- and a
   // `createReadServer` call moved above it reverses the two entries below.
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-server-'));
-  const previousPort = process.env['PICKARR_PORT'];
+  const previousPort = process.env['PICKARR_READ_API_PORT'];
   try {
-    delete process.env['PICKARR_PORT'];
+    delete process.env['PICKARR_READ_API_PORT'];
     const databasePath = join(dir, 'pickarr.db');
     const seed = openDatabase(databasePath);
     migrateHost(seed.raw);
@@ -443,7 +443,7 @@ test('main starts the server after the host and closes it before stopping', asyn
     assert.equal(built.length, 1, 'exactly one listener, not one per plugin or per feed');
     const serverDeps = built[0];
     assert.ok(serverDeps, 'the server was built with deps main composed');
-    assert.equal(serverDeps.port, DEFAULT_PORT, 'the documented default, with PICKARR_PORT unset');
+    assert.equal(serverDeps.port, DEFAULT_PORT, 'the documented default, with PICKARR_READ_API_PORT unset');
     assert.equal(
       serverDeps.pluginIdForType('movie'),
       OWNER_ID,
@@ -451,8 +451,8 @@ test('main starts the server after the host and closes it before stopping', asyn
     );
     assert.equal(serverDeps.pluginIdForType('book'), undefined, 'and answers nothing for a type no plugin claims');
   } finally {
-    if (previousPort === undefined) delete process.env['PICKARR_PORT'];
-    else process.env['PICKARR_PORT'] = previousPort;
+    if (previousPort === undefined) delete process.env['PICKARR_READ_API_PORT'];
+    else process.env['PICKARR_READ_API_PORT'] = previousPort;
     await rm(dir, { recursive: true, force: true });
   }
 
@@ -476,7 +476,7 @@ test('main starts the server after the host and closes it before stopping', asyn
   );
 });
 
-test('resolveReadPort reads PICKARR_PORT, defaults to 8787, and refuses anything that is not a port', () => {
+test('resolveReadPort reads PICKARR_READ_API_PORT, defaults to 8787, and refuses anything that is not a port', () => {
   // Taken as an argument rather than read from `process.env` inside, so this
   // asserts the precedence without mutating the environment every other test
   // in this process shares.
@@ -490,7 +490,7 @@ test('resolveReadPort reads PICKARR_PORT, defaults to 8787, and refuses anything
   // 1.x's own `resolveServerPort` uses -- reads '80abc' as 80 and would
   // silently listen on a port nobody asked for.
   for (const bad of ['0', '65536', 'eight', '80abc', '-1', '8.5', ' 80', '0x50']) {
-    assert.throws(() => resolveReadPort(bad), /PICKARR_PORT/, `${bad} must be refused, not coerced`);
+    assert.throws(() => resolveReadPort(bad), /PICKARR_READ_API_PORT/, `${bad} must be refused, not coerced`);
   }
 });
 

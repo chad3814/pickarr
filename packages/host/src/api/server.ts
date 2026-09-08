@@ -40,7 +40,7 @@ import { decodeCursor, decodeUnionCursor } from './cursor.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
 
 /**
- * The port the shipped process listens on when `PICKARR_PORT` says nothing.
+ * The port the shipped process listens on when `PICKARR_READ_API_PORT` says nothing.
  * 8787 rather than 1.x's 8080 so a 2.0 host and a 1.x install can run on one
  * machine without either having to be told a port.
  */

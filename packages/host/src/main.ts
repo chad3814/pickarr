@@ -170,7 +170,13 @@ export function createPluginIdForType(
 const PORT_DIGITS = /^\d+$/;
 
 /**
- * The port the read API listens on: `PICKARR_PORT` when set to one, and
+ * Deliberately **not** `PICKARR_PORT`: 1.x reads that variable for its own
+ * server (`packages/core/src/config/load.ts`), and 1.x is still running. One
+ * name for two servers means either they fight for a port or 2.0 silently
+ * takes the one 1.x was configured with -- and the whole point of the
+ * `pickarr-2` branch is that both run side by side until 2.0 reaches parity.
+ *
+ * The port the read API listens on: `PICKARR_READ_API_PORT` when set to one, and
  * `DEFAULT_PORT` otherwise.
  *
  * Takes the variable's value rather than reading `process.env` itself, so it
@@ -185,14 +191,14 @@ const PORT_DIGITS = /^\d+$/;
 export function resolveReadPort(configured: string | undefined): number {
   if (configured === undefined || configured === '') return DEFAULT_PORT;
   if (!PORT_DIGITS.test(configured)) {
-    throw new Error(`PICKARR_PORT is not a port number: ${configured}`);
+    throw new Error(`PICKARR_READ_API_PORT is not a port number: ${configured}`);
   }
   const port = Number(configured);
   // 0 is excluded deliberately, even though `listen(0)` is legal and is what
   // every test binds: a *process* told to listen on an arbitrary free port
   // would answer on an address nothing could be configured to poll.
   if (port < 1 || port > 65535) {
-    throw new Error(`PICKARR_PORT is not a port number: ${configured}`);
+    throw new Error(`PICKARR_READ_API_PORT is not a port number: ${configured}`);
   }
   return port;
 }
@@ -289,7 +295,7 @@ export function createShutdown(
  *
  * `argv` is accepted for parity with a conventional process entry point;
  * this slice has no argument surface beyond the `PICKARR_DATABASE` and
- * `PICKARR_PORT` environment variables (there is deliberately no config
+ * `PICKARR_READ_API_PORT` environment variables (there is deliberately no config
  * surface yet, see the plan's §1.2), so nothing here reads it.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
@@ -322,7 +328,7 @@ export async function main(
   // claiming one media type is a configuration error, and the earliest
   // possible refusal is the one that touches least on its way out.
   const pluginIdForType = createPluginIdForType(plugins);
-  const port = resolveReadPort(process.env['PICKARR_PORT']);
+  const port = resolveReadPort(process.env['PICKARR_READ_API_PORT']);
 
   const databasePath = process.env['PICKARR_DATABASE'] ?? DEFAULT_DATABASE_PATH;
   const { raw, db } = openDatabase(databasePath);

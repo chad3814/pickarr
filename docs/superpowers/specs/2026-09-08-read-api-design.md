@@ -315,7 +315,7 @@ writes, and a download row's `last_error` is already redacted at rest.
 ## 6. Where it runs
 
 `main.ts` starts the server after `host.start()` and stops it before
-`host.stop()`. Port from `PICKARR_PORT`, default 8787, **bound to `127.0.0.1`**.
+`host.stop()`. Port from `PICKARR_READ_API_PORT`, default 8787, **bound to `127.0.0.1`**.
 
 Shutdown closes the listener and does not wait for in-flight requests to drain,
 matching what the dispatcher already does with in-flight jobs: a read that is
