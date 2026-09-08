@@ -30,6 +30,18 @@
  * can reach the port can read every media item, feed item and download. A
  * reverse proxy or a container publishing this port exposes the library, and
  * auth is a later slice's.
+ *
+ * **And "the library" is the wrong mental image of what that costs.**
+ * `/api/rss-items` serves `RssItemRead.link` unredacted, which for a private
+ * tracker or indexer *is* a credential -- it carries the passkey. So the
+ * exposure is every private-indexer download url this host has seen, plus
+ * every download's `clientRef`, `infohash` and `lastError`, plus artwork
+ * bytes for any media item id, plus every media item of every type: `?type=`
+ * is how a caller picks a plugin, not a check on which one it may have. The
+ * `MediaReader` scoping in `../media/reader.ts` is a boundary between
+ * plugins inside the process and says nothing about this socket. Spec §8
+ * lists all of it; it is repeated here because "read every media item" reads
+ * as bibliographic and is not.
  */
 import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -295,6 +307,10 @@ async function answerFor(deps: ReadServerDeps, request: IncomingMessage): Promis
     // The union pair, not the plain one: `id` is a per-table rowid, so a
     // two-part cursor cannot say which table's row was already served. See
     // `UnionCursor`.
+    //
+    // Not type-scoped either, for the reason `/api/rss-items` gives: a
+    // download hangs off an rss item, which hangs off a feed, and a feed's
+    // `plugin_id` is who polls it. Every client syncs one download stream.
     return json(200, downloadsSince(deps.raw, decodeUnionCursor(since(searchParams))));
   }
 
@@ -314,6 +330,14 @@ async function answerFor(deps: ReadServerDeps, request: IncomingMessage): Promis
   }
 
   if (pathname.startsWith('/api/artwork/')) {
+    // No `type`, and no ownership check on the media item id: an accepted
+    // consequence rather than an omission, and spec §5 records it. Scoping
+    // it would confine nobody -- artwork is not on `MediaReader` at all, and
+    // `ctx.db` is the raw connection -- and over HTTP no route here is a
+    // confidentiality boundary, since a caller picks the `type` on the two
+    // routes that take one. What it adds is a 404-versus-200 existence
+    // oracle by integer id, which `/api/media?type=<each of four>` already
+    // answers outright.
     const ifNoneMatch = request.headers['if-none-match'];
     return artworkAnswer(deps.raw, pathname, ifNoneMatch);
   }
