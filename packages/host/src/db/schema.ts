@@ -72,6 +72,9 @@ export const mediaItem = sqliteTable('media_item', {
   // The dedup's whole basis. Nullable while a lookup is outstanding, and
   // SQLite treats NULLs as distinct, so unclaimed rows do not collide.
   uniqueIndex('media_item_provider_ref').on(t.provider, t.providerRef),
+  // Every cursor query in the read API's sync slice orders by
+  // (updated_at, id) filtered by plugin, so plugin_id leads.
+  index('media_item_sync').on(t.pluginId, t.updatedAt, t.id),
 ]);
 
 export const rssItem = sqliteTable('rss_item', {
@@ -106,6 +109,36 @@ export const rssItem = sqliteTable('rss_item', {
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),
   uniqueIndex('rss_item_feed_guid').on(t.feedId, t.guid),
+  // Same columns as rss_item_updated, above -- that index serves the client's
+  // update flow; this one is the read API's own sync cursor, named for that
+  // caller so a later change to one is not mistaken for touching the other.
+  index('rss_item_sync').on(t.updatedAt, t.id),
+]);
+
+/**
+ * Records that a media item was deleted, since no query over `media_item`'s
+ * live rows can say so once the row is gone.
+ *
+ * `mediaItemId` is the primary key, not a surrogate `id` with its own
+ * foreign key: an item is deleted once, and a second tombstone for one id
+ * would mean a reused rowid, which `INTEGER PRIMARY KEY` does not produce.
+ * It is deliberately not a reference to `media_item` either -- the row it
+ * names is gone, which is the entire point, so a reference would be
+ * unsatisfiable by construction.
+ *
+ * `pluginId` is copied onto the tombstone rather than looked up: by the time
+ * anyone reads it there is nothing left on `media_item` to join to, and a
+ * client syncing one media type must not be handed another plugin's
+ * deletions.
+ */
+export const deletedMediaItem = sqliteTable('deleted_media_item', {
+  mediaItemId: integer('media_item_id').primaryKey(),
+  pluginId: text('plugin_id').notNull(),
+  deletedAt: integer('deleted_at').notNull(),
+}, (t) => [
+  // The read API's cursor over tombstones orders by (deleted_at, id), same
+  // shape as media_item_sync and rss_item_sync above.
+  index('deleted_media_item_at').on(t.deletedAt, t.mediaItemId),
 ]);
 
 /**

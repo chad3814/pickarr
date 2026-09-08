@@ -353,6 +353,38 @@ ALTER TABLE nzb_download ADD COLUMN reclaimed_at INTEGER;
 `;
 
 /**
+ * Records that a media item was deleted, since no query over `media_item`'s
+ * live rows can say so once the row is gone.
+ *
+ * `media_item_id` is the primary key, not a surrogate `id` with its own
+ * foreign key: an item is deleted once, and a second tombstone for one id
+ * would mean a reused rowid, which `INTEGER PRIMARY KEY` does not produce.
+ * It is deliberately not a `REFERENCES media_item (id)` either -- the row it
+ * names is gone, which is the entire point, so a reference would be
+ * unsatisfiable by construction.
+ *
+ * `plugin_id` is copied onto the tombstone rather than looked up: by the
+ * time anyone reads it there is nothing left on `media_item` to join to, and
+ * a client syncing one media type must not be handed another plugin's
+ * deletions.
+ *
+ * The three indexes exist because every cursor query in this slice orders by
+ * `(updated_at, id)` and filters by plugin -- `media_item_sync` and
+ * `rss_item_sync` serve that on their own tables, and
+ * `deleted_media_item_at` serves the same shape on tombstones.
+ */
+const MIGRATION_9 = `
+CREATE TABLE deleted_media_item (
+  media_item_id INTEGER PRIMARY KEY,
+  plugin_id     TEXT    NOT NULL,
+  deleted_at    INTEGER NOT NULL
+);
+CREATE INDEX deleted_media_item_at ON deleted_media_item (deleted_at, media_item_id);
+CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
+CREATE INDEX rss_item_sync         ON rss_item (updated_at, id);
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -366,6 +398,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 6, up: (db) => db.exec(MIGRATION_6) },
   { version: 7, up: (db) => db.exec(MIGRATION_7) },
   { version: 8, up: (db) => db.exec(MIGRATION_8) },
+  { version: 9, up: (db) => db.exec(MIGRATION_9) },
 ];
 
 /**

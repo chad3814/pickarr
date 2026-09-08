@@ -517,6 +517,66 @@ test('reclaimed_at is nullable, so a row that predates it needs no back-filled g
   assert.equal(nzbRow.reclaimed_at, null);
 });
 
+test('a migration to version 9 adds the tombstone table and the sync indexes', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  assert.ok(tableNames(raw).has('deleted_media_item'), 'missing deleted_media_item');
+
+  for (const [indexName, table] of [
+    ['deleted_media_item_at', 'deleted_media_item'],
+    ['media_item_sync', 'media_item'],
+    ['rss_item_sync', 'rss_item'],
+  ] as const) {
+    const index = raw.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+    ).get(indexName) as { sql: unknown } | undefined;
+    assert.ok(index, `expected an index named ${indexName} on ${table}`);
+  }
+});
+
+test('a tombstone cannot be written twice for one media item', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const insert = raw.prepare(`
+    INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
+    VALUES (1, 'alpha', 100)
+  `);
+  insert.run();
+
+  assert.throws(
+    () => insert.run(),
+    (err: unknown) => {
+      const code = (err as { code?: unknown }).code;
+      // 1555 is SQLite's own SQLITE_CONSTRAINT_PRIMARYKEY -- proof that the
+      // primary key on media_item_id fired, not merely that some insert
+      // threw for some reason.
+      const errcode = (err as { errcode?: unknown }).errcode;
+      return code === 'ERR_SQLITE_ERROR' && errcode === 1555;
+    },
+  );
+});
+
+test('the tombstone keeps its own plugin_id, because the row it names is gone', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  raw.prepare(`
+    INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
+    VALUES (1, 'alpha', 100)
+  `).run();
+
+  // No media_item row exists at id 1 -- there is nothing left to join to, so
+  // plugin_id must read back from the tombstone's own column.
+  const row = raw.prepare('SELECT plugin_id, deleted_at FROM deleted_media_item WHERE media_item_id = 1')
+    .get() as { plugin_id: unknown; deleted_at: unknown };
+  assert.deepEqual(
+    { plugin_id: String(row.plugin_id), deleted_at: Number(row.deleted_at) },
+    { plugin_id: 'alpha', deleted_at: 100 },
+  );
+});
+
 test('both download tables carry a status index', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
