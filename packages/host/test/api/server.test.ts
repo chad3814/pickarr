@@ -82,6 +82,91 @@ async function getAll(
   }));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * One paged response split into the three parts the paging tests assert
+ * over: the row array (`items`, or `ids` on `/api/deletions`, whose page
+ * carries ids and nothing else), the opaque cursor, and `done`.
+ *
+ * Read back through checks rather than a cast, so a route that answered a
+ * different shape fails here, by name, instead of somewhere downstream. The
+ * rows stay `unknown` because each route keys its rows differently -- see
+ * `rowId` and `downloadKey`.
+ */
+interface ReadPage {
+  rows: unknown[];
+  cursor: string | null;
+  done: boolean;
+}
+
+async function pageFrom(server: ReadServer, path: string): Promise<ReadPage> {
+  const response = await get(server, path);
+  assert.equal(response.status, 200, `${path} must answer a page`);
+  const body: unknown = JSON.parse(await response.text());
+  if (!isRecord(body)) throw new Error(`${path} answered something that is not a json object`);
+  const rows = body.items ?? body.ids;
+  if (!Array.isArray(rows)) throw new Error(`${path} answered neither an items nor an ids array`);
+  const { cursor, done } = body;
+  if (cursor !== null && typeof cursor !== 'string') throw new Error(`${path} answered a non-string cursor`);
+  if (typeof done !== 'boolean') throw new Error(`${path} answered a non-boolean done`);
+  return { rows, cursor, done };
+}
+
+/** `id` off one row of a page. Every item-bearing route carries one. */
+function rowId(row: unknown): string {
+  if (!isRecord(row) || typeof row.id !== 'number') throw new Error('a page row must carry a numeric id');
+  return String(row.id);
+}
+
+/**
+ * `transport#id` -- the only thing that names a download row across both
+ * tables, since `id` on its own is a per-table rowid.
+ */
+function downloadKey(row: unknown): string {
+  if (!isRecord(row) || typeof row.transport !== 'string') throw new Error('a download row must carry a transport');
+  return `${row.transport}#${rowId(row)}`;
+}
+
+/** A deletions page carries bare ids, so there is no row to read a field off. */
+function deletionKey(value: unknown): string {
+  if (typeof value !== 'number') throw new Error('a deletions page must carry numbers');
+  return String(value);
+}
+
+/**
+ * Asserts that `second` really is the continuation of `first`: the two pages
+ * share no row, and the run of keys across both is exactly `expected`.
+ *
+ * This is the assertion the round-trip tests exist for. Asserting each
+ * page's returned cursor *value* -- which is all three of these routes used
+ * to be checked for -- passes against a route that never reads a cursor back
+ * in, and such a route serves page one forever.
+ */
+function continues(
+  first: ReadPage,
+  second: ReadPage,
+  keyOf: (row: unknown) => string,
+  expected: readonly string[],
+): void {
+  const firstKeys = first.rows.map(keyOf);
+  const secondKeys = second.rows.map(keyOf);
+  assert.equal(first.done, false, 'page 1 must be full, or there is no second page to page to');
+  assert.equal(first.cursor === null, false, 'a full page must hand back a cursor to go on with');
+  assert.equal(secondKeys.length > 0, true, 'page 2 must carry rows rather than come back empty');
+  assert.notDeepEqual(secondKeys, firstKeys, 'page 2 must not be page 1 served over again');
+  const onPageOne = new Set(firstKeys);
+  assert.deepEqual(
+    secondKeys.filter((key) => onPageOne.has(key)),
+    [],
+    'no row may be served on both pages',
+  );
+  assert.deepEqual([...firstKeys, ...secondKeys], expected, 'the two pages are the whole stream, in order');
+  assert.equal(second.done, true, 'and page 2 is the end of it');
+}
+
 /** The one mapping most tests need: `movie` is `alpha`'s, and no other type exists. */
 function moviesOnly(type: string): string | undefined {
   return type === 'movie' ? 'alpha' : undefined;
@@ -513,6 +598,98 @@ test('rss items, downloads and deletions each page their own stream', async () =
     const foreign = await get(server, '/api/deletions?type=book');
     assert.equal(foreign.status, 404, 'and an unknown type is refused there exactly as it is on /api/media');
     assert.deepEqual(JSON.parse(await foreign.text()), { error: 'unknown media type: book' });
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * `PAGE_SIZE + 1` rows so page 1 is full (`done: false`) and page 2 has
+ * exactly one row on it. A fixture smaller than a page returns everything at
+ * once, which is what let three routes go untested for cursor forwarding
+ * while still asserting the cursor value they handed back.
+ */
+const OVER_ONE_PAGE = PAGE_SIZE + 1;
+
+test('the rss items cursor pages forward when a client sends it back', async () => {
+  assert.equal(PAGE_SIZE, 200, 'the counts below are written for a page size of 200');
+  const raw = setup();
+  const feedId = seedFeed(raw, 'https://feeds.test/paging.xml');
+  const expected: string[] = [];
+  for (let index = 1; index <= OVER_ONE_PAGE; index += 1) {
+    expected.push(String(seedRssItem(raw, feedId, 1000 + index, `Item.${index}.mkv`)));
+  }
+
+  const { server } = await start(raw, moviesOnly);
+  try {
+    const first = await pageFrom(server, '/api/rss-items');
+    // The round trip a real client makes. This route decodes a two-part
+    // cursor; handing its own cursor to `decodeUnionCursor` used to typecheck
+    // (`UnionCursor` was structurally a `Cursor`), and every cursor the route
+    // issued then decoded to `null` -- so a client past 200 rss items never
+    // advanced, with nothing anywhere reporting it.
+    const second = await pageFrom(server, `/api/rss-items?since=${encodeURIComponent(first.cursor ?? '')}`);
+    continues(first, second, rowId, expected);
+  } finally {
+    await server.close();
+  }
+});
+
+test('the downloads cursor pages forward across both tables when a client sends it back', async () => {
+  assert.equal(PAGE_SIZE, 200, 'the counts below are written for a page size of 200');
+  const raw = setup();
+  const feedId = seedFeed(raw, 'https://feeds.test/downloads.xml');
+  const rssItemId = seedRssItem(raw, feedId, 100, 'Paged.Movie.1080p.mkv');
+  const clientId = seedClient(raw, 'paging');
+
+  // Interleaved by `updated_at`, one transport either side of every step, so
+  // the page boundary falls between two rows from *different* tables -- which
+  // is the boundary a cursor that forgot its transport gets wrong. Every
+  // `updated_at` is distinct, so the expected order is fixed by time alone.
+  const expected: string[] = [];
+  for (let index = 1; index <= 100; index += 1) {
+    expected.push(`torrent#${seedTorrentDownload(raw, rssItemId, clientId, 1000 + 2 * index, `ref-t${index}`)}`);
+    expected.push(`nzb#${seedNzbDownload(raw, rssItemId, clientId, 1001 + 2 * index, `ref-n${index}`)}`);
+  }
+  // The one row past the page boundary, newer than all 200 before it.
+  expected.push(`torrent#${seedTorrentDownload(raw, rssItemId, clientId, 1000 + 2 * 101, 'ref-t101')}`);
+  assert.equal(expected.length, OVER_ONE_PAGE, 'the fixture must be exactly one row past a page');
+
+  const { server } = await start(raw, moviesOnly);
+  try {
+    const first = await pageFrom(server, '/api/downloads');
+    const second = await pageFrom(server, `/api/downloads?since=${encodeURIComponent(first.cursor ?? '')}`);
+    continues(first, second, downloadKey, expected);
+  } finally {
+    await server.close();
+  }
+});
+
+test('the deletions cursor pages forward when a client sends it back', async () => {
+  assert.equal(PAGE_SIZE, 200, 'the counts below are written for a page size of 200');
+  const raw = setup();
+  // No `media_item` rows: a tombstone deliberately holds no reference to one,
+  // because the row it names is gone. `media_item_id` is the tombstone's own
+  // primary key, so the ids are named here rather than read back.
+  const expected: string[] = [];
+  const insert = raw.prepare(
+    'INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at) VALUES (?, ?, ?)',
+  );
+  for (let id = 1; id <= OVER_ONE_PAGE; id += 1) {
+    insert.run(id, 'alpha', 1000 + id);
+    expected.push(String(id));
+  }
+  // Another plugin's tombstone, newest of all: it belongs on neither page.
+  insert.run(OVER_ONE_PAGE + 1, 'beta', 99999);
+
+  const { server } = await start(raw, moviesOnly);
+  try {
+    const first = await pageFrom(server, '/api/deletions?type=movie');
+    const second = await pageFrom(
+      server,
+      `/api/deletions?type=movie&since=${encodeURIComponent(first.cursor ?? '')}`,
+    );
+    continues(first, second, deletionKey, expected);
   } finally {
     await server.close();
   }

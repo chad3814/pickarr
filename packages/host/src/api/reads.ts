@@ -475,7 +475,10 @@ function downloadTypeOf(id: number, value: unknown): Transport {
  *
  * `K` is `Cursor` for a single-table read and `UnionCursor` for the download
  * union, so a reader that produces one kind of key cannot be paged with the
- * other kind of cursor by mistake.
+ * other kind of cursor by mistake -- and that is now a claim the compiler
+ * enforces in both directions rather than an intention, because
+ * `Cursor.keyedBy` and `UnionCursor.keyedBy` make the two key types mutually
+ * unassignable. Structurally, a `UnionCursor` used to be a `Cursor`.
  */
 interface Keyed<T, K> {
   readonly item: T;

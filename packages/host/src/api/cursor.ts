@@ -7,6 +7,11 @@
  * `(updatedAt, id)`; `UnionCursor` keys the download union by
  * `(updatedAt, transport, id)`, because `id` alone is a per-table rowid and
  * so not a key across two tables. See `UnionCursor` for the whole argument.
+ *
+ * **And the compiler keeps them apart, both ways round.** Each carries a
+ * `keyedBy` tag naming its own key, because structurally a `UnionCursor` is
+ * a `Cursor` with an extra field and so was assignable to one. See `keyedBy`
+ * on `Cursor` for the route that compiled and served page 1 forever.
  */
 
 /**
@@ -18,6 +23,32 @@
 export interface Cursor {
   updatedAt: number;
   id: number;
+  /**
+   * The key this cursor is a boundary on, as a tag no two cursor types
+   * share. Nothing reads it; it exists so the two types are not assignable
+   * to one another.
+   *
+   * Structural typing gave that away in one direction and kept it in the
+   * other, which is worse than giving it away in both -- it invites the
+   * belief that the compiler is watching. A `UnionCursor` has `updatedAt`
+   * and `id` and so *was* a `Cursor`, which is how
+   * `rssItemsSince(raw, decodeUnionCursor(since(params)))` typechecked: it
+   * compiled, and then every cursor that route handed a client came back as
+   * a three-part string, decoded to `null` on the plain decoder, and served
+   * page 1 again -- so a client past `PAGE_SIZE` rss items never advanced,
+   * with nothing anywhere reporting it. The reverse mix-up was already
+   * refused, only because `Cursor` happens to have no `transport`.
+   *
+   * With a differing `keyedBy` on each, neither direction compiles.
+   *
+   * **Optional, and set by nothing.** It is a compile-time tag and has no
+   * business existing at runtime: a required field would have to be written
+   * at every construction site and would turn up in the object a decoder
+   * returns, where it is a field no client asked for. `readonly` so nothing
+   * can write it, optional so nothing has to -- a caller that only
+   * round-trips the opaque string never learns it is here.
+   */
+  readonly keyedBy?: 'updatedAt, id';
 }
 
 /**
@@ -109,7 +140,10 @@ export function decodeCursor(raw: string | undefined): Cursor | null {
  * `exactOptionalPropertyTypes` makes an optional field awkward at every
  * construction site, and a cursor whose meaning depends on which route issued
  * it is the shape of a later bug -- a downloads cursor handed to the media
- * route would decode without complaint and page from the wrong key.
+ * route would decode without complaint and page from the wrong key. That is
+ * an argument about an optional field carrying *data*, and not about
+ * `keyedBy` below, which nothing ever writes or reads: an optional field no
+ * construction site sets costs no construction site anything.
  *
  * `transport` is spelled as a literal union here rather than imported. The
  * original reason was a cycle -- the union lived in `reads.ts`, which imports
@@ -123,6 +157,13 @@ export interface UnionCursor {
   updatedAt: number;
   transport: 'nzb' | 'torrent';
   id: number;
+  /**
+   * This union's own key, named differently from `Cursor`'s so the two types
+   * are mutually unassignable rather than one-way. See `Cursor.keyedBy` for
+   * the mix-up that compiled without it, and for why the tag is optional and
+   * never set.
+   */
+  readonly keyedBy?: 'updatedAt, transport, id';
 }
 
 /** See `encodeCursor` for why base64url is opacity and not protection. */
