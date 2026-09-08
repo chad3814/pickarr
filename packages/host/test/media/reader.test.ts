@@ -151,6 +151,40 @@ test('a reader reaches an item\'s rss items and their downloads', async () => {
   }]);
 });
 
+test('a reader answers empty for another plugin\'s rss items and downloads, by an id it never gave out', async () => {
+  // Task 4b's gap: `rssItemsFor` and `downloadsFor` used to take a bare id
+  // and filter by nothing else, so a plugin handing back an id it was never
+  // given -- any integer -- read another plugin's releases and downloads
+  // through this reader. A real second plugin, with a real feed and a real
+  // item, is seeded here rather than a nonexistent id, which would pass
+  // even against no filter at all.
+  const raw = setup();
+  const mediaItemId = seedMediaItem(raw, 'alpha', 'Fight Club', 'tmdb', '550');
+  const theirFeedId = seedFeed(raw, 'beta', 'https://example.com/their-feed');
+  // Beta's rss item points at the *same* media item id alpha holds, so the
+  // isolation being tested is the feed's ownership, not the media item's.
+  const theirItemId = seedRssItem(raw, theirFeedId, 'theirs.mkv', mediaItemId);
+  const clientId = seedClient(raw, 'qbit');
+  seedTorrentDownload(raw, theirItemId, clientId, 'their-ref');
+
+  const reader = createMediaReader(raw, 'alpha');
+
+  assert.deepEqual(await reader.rssItemsFor(mediaItemId), []);
+  assert.deepEqual(await reader.downloadsFor(theirItemId), []);
+
+  // The same reader, asked as beta, still sees them -- so the emptiness
+  // above is scoping, not a reader that answers empty to everything.
+  const theirReader = createMediaReader(raw, 'beta');
+  assert.deepEqual(
+    (await theirReader.rssItemsFor(mediaItemId)).map((item) => item.id),
+    [theirItemId],
+  );
+  assert.deepEqual(
+    (await theirReader.downloadsFor(theirItemId)).map((row) => row.clientRef),
+    ['their-ref'],
+  );
+});
+
 /** A `QueuedFetch` that fails loudly: nothing in this file polls a feed. */
 const unusedFetch: QueuedFetch = {
   json: async () => { throw new Error('fetch.json: not used by this test'); },

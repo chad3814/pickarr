@@ -52,11 +52,16 @@ function seedMediaItem(raw: DatabaseSync, pluginId: string, updatedAt: number, t
   return Number(info.lastInsertRowid);
 }
 
-/** `rss_feed_url` is unique, so every feed a test seeds needs its own url. */
-function seedFeed(raw: DatabaseSync, url: string): number {
+/**
+ * `rss_feed_url` is unique, so every feed a test seeds needs its own url.
+ * `pluginId` defaults to `'alpha'`, the plugin every existing call site
+ * seeds for, so only the tests that actually need a second plugin's feed
+ * have to name one.
+ */
+function seedFeed(raw: DatabaseSync, url: string, pluginId = 'alpha'): number {
   const info = raw.prepare(
-    "INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('alpha', 'Feed', ?, 1, 1)",
-  ).run(url);
+    'INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES (?, ?, ?, 1, 1)',
+  ).run(pluginId, `Feed (${pluginId})`, url);
   return Number(info.lastInsertRowid);
 }
 
@@ -328,7 +333,7 @@ test('downloads from both tables interleave by updated_at, not by table', () => 
   assert.deepEqual(page.items.map((row) => row.infohash), [null, 'abc123']);
 
   // The per-item read spans both tables in the same order.
-  assert.deepEqual(downloadsForRssItem(raw, itemId).map((row) => row.transport), ['nzb', 'torrent']);
+  assert.deepEqual(downloadsForRssItem(raw, itemId, 'alpha').map((row) => row.transport), ['nzb', 'torrent']);
 });
 
 test('every sync query seeks its index rather than scanning it', () => {
@@ -430,16 +435,35 @@ test('every sync query seeks its index rather than scanning it', () => {
       why: 'either index on media_item answers this; a scan does not',
     },
     rssItemsForMediaItem: {
-      args: [1],
-      mustMatch: ['SEARCH rss_item USING INDEX rss_item_media_item (media_item_id=?)'],
-      mustNotMatch: ['USE TEMP B-TREE', 'SCAN rss_item'],
-      why: "migration 10's index on media_item_id; its entries carry the rowid, so `ORDER BY id` needs no sort on top",
+      args: [1, 'alpha'],
+      // `(media_item_id=?)` is migration 10's index, unchanged by the
+      // ownership join added in task 4b; the join adds exactly one more
+      // seek, of `rss_feed` by its rowid, once per row the first seek
+      // already narrowed to. Neither table is scanned.
+      mustMatch: [
+        'SEARCH rss_item USING INDEX rss_item_media_item (media_item_id=?)',
+        'SEARCH rss_feed USING INTEGER PRIMARY KEY (rowid=?)',
+      ],
+      mustNotMatch: ['USE TEMP B-TREE', 'SCAN rss_item', 'SCAN rss_feed'],
+      why: "migration 10's index on media_item_id; its entries carry the rowid, so `ORDER BY id` needs no sort on top, and the ownership join costs one more rowid seek rather than a scan",
     },
     downloadsForRssItem: {
-      args: [1, 1],
-      mustMatch: ['USING INDEX torrent_download_item', 'USING INDEX nzb_download_item'],
-      mustNotMatch: [],
-      why: 'both per-item indexes exist and are used; the union still sorts, as downloadsSince does',
+      args: [1, 1, 'alpha'],
+      // Each branch's own per-item seek, plus the ownership join added in
+      // task 4b: one rowid seek into `rss_item`, then one into `rss_feed`.
+      // `SCAN download` (the union's own derived-table scan) and
+      // `USE TEMP B-TREE FOR ORDER BY` are the pre-existing union-sorting
+      // cost `downloadsSince` already pays, not this join's -- which is why
+      // this read stays in `compound` rather than gaining a blanket
+      // `SCAN`/`SEARCH` check like a single-table read.
+      mustMatch: [
+        'SEARCH torrent_download USING INDEX torrent_download_item (rss_item_id=?)',
+        'SEARCH nzb_download USING INDEX nzb_download_item (rss_item_id=?)',
+        'SEARCH rss_item USING INTEGER PRIMARY KEY (rowid=?)',
+        'SEARCH rss_feed USING INTEGER PRIMARY KEY (rowid=?)',
+      ],
+      mustNotMatch: ['SCAN torrent_download', 'SCAN nzb_download', 'SCAN rss_item', 'SCAN rss_feed'],
+      why: 'both per-item indexes exist and are used; the ownership join costs one rowid seek per table, not a scan; the union still sorts, as downloadsSince does',
     },
   };
 
@@ -568,8 +592,68 @@ test('an rss item page reads back its shape and pages by updated_at', () => {
   assert.deepEqual(rssItemsSince(raw, resume(page.cursor)).items.map((item) => item.id), [3]);
 
   // Only this media item's rss items, and only when asked for it.
-  assert.deepEqual(rssItemsForMediaItem(raw, mediaId).map((item) => item.id), [1]);
-  assert.deepEqual(rssItemsForMediaItem(raw, 404), []);
+  assert.deepEqual(rssItemsForMediaItem(raw, mediaId, 'alpha').map((item) => item.id), [1]);
+  assert.deepEqual(rssItemsForMediaItem(raw, 404, 'alpha'), []);
+});
+
+test('rssItemsForMediaItem and downloadsForRssItem see only the plugin that owns the feed', () => {
+  // Task 4b's gap: both functions used to take a bare id and filter by
+  // nothing else, so a plugin that supplied an id it was never given --
+  // any integer -- read another plugin's rss items and downloads. A real
+  // second plugin, with a real feed and a real item, is seeded here rather
+  // than a nonexistent id, which would pass even with no filter at all --
+  // it would just find no row anywhere.
+  const raw = setup();
+  const mediaId = seedMediaItem(raw, 'alpha', 5, 'Alpha item');
+
+  const alphaFeed = seedFeed(raw, 'https://example.com/alpha-feed', 'alpha');
+  const alphaItemId = seedRssItem(raw, alphaFeed, 100, 'alpha.mkv', mediaId);
+
+  // A second plugin's feed, carrying an rss item that happens to point at
+  // the *same* media item id, and a download on that item.
+  const betaFeed = seedFeed(raw, 'https://example.com/beta-feed', 'beta');
+  const betaItemId = seedRssItem(raw, betaFeed, 200, 'beta.mkv', mediaId);
+  const clientId = seedClient(raw, 'Client');
+  seedTorrentDownload(raw, betaItemId, clientId, 300, 'beta-ref', 'beefbeef');
+
+  // Alpha's own read still works.
+  assert.deepEqual(
+    rssItemsForMediaItem(raw, mediaId, 'alpha').map((item) => item.id),
+    [alphaItemId],
+  );
+
+  // Alpha asking for beta's rss item id directly -- the shape of the attack
+  // this closes -- reads back nothing, not beta's row.
+  assert.deepEqual(rssItemsForMediaItem(raw, mediaId, 'alpha'), [
+    {
+      id: alphaItemId,
+      feedId: alphaFeed,
+      filename: 'alpha.mkv',
+      link: 'https://example.com/alpha.mkv',
+      mediaItemId: mediaId,
+      resolution: '1080p',
+      resolutionDetail: 'x264',
+      downloadType: 'torrent',
+      deliveredAt: null,
+    },
+  ]);
+
+  // Beta sees its own item under the same media item id -- ownership is the
+  // feed's, not the media item's, and alpha's presence does not hide beta's.
+  assert.deepEqual(
+    rssItemsForMediaItem(raw, mediaId, 'beta').map((item) => item.id),
+    [betaItemId],
+  );
+
+  // Alpha has no download at all; beta's is reachable only through beta.
+  assert.deepEqual(downloadsForRssItem(raw, betaItemId, 'alpha'), []);
+  assert.deepEqual(downloadsForRssItem(raw, betaItemId, 'beta').map((row) => row.clientRef), [
+    'beta-ref',
+  ]);
+
+  // And an id that names nothing at all still reads back empty, not a throw.
+  assert.deepEqual(rssItemsForMediaItem(raw, mediaId, 'gamma'), []);
+  assert.deepEqual(downloadsForRssItem(raw, betaItemId, 'gamma'), []);
 });
 
 test('an rss item whose download_type is neither transport is refused rather than guessed', () => {
@@ -594,7 +678,7 @@ test('an rss item whose download_type is neither transport is refused rather tha
   // through it either.
   assert.throws(() => rssItemsSince(raw, null), /rss item 1 has unknown download type "usenet"/);
   assert.throws(
-    () => rssItemsForMediaItem(raw, mediaId),
+    () => rssItemsForMediaItem(raw, mediaId, 'alpha'),
     /rss item 1 has unknown download type "usenet"/,
   );
 
@@ -618,7 +702,7 @@ test('a download page carries only the columns the read shape names, both transp
   seedNzbDownload(raw, itemId, clientId, 200, 'ref-n1');
   seedTorrentDownload(raw, otherItemId, clientId, 300, 'ref-t2', 'def456');
 
-  assert.deepEqual(downloadsForRssItem(raw, itemId), [
+  assert.deepEqual(downloadsForRssItem(raw, itemId, 'alpha'), [
     {
       id: 1,
       rssItemId: 1,

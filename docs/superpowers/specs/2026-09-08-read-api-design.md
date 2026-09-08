@@ -253,11 +253,21 @@ contract. Querying it would be dead code that looks like coverage, so it is
 deliberately not consulted, and the method is named for the fact it actually
 looks up.
 
-**A plugin sees only its own media items.** `mediaItem` and
-`mediaItemByProviderRef` filter on the calling plugin's id, the way
-`MediaWriter` already scopes its writes. A plugin that could read another's
-items would be reading a schema it has never seen, and the `None`-category class
-of bug says what happens when one subsystem interprets another's vocabulary.
+**A plugin sees only its own.** `mediaItem` and `mediaItemByProviderRef` filter
+on the calling plugin's id directly, the way `MediaWriter` already scopes its
+writes. `rssItemsFor` and `downloadsFor` take an id rather than a plugin id,
+but ownership is still checked, one join further on: an rss item belongs to a
+feed and a feed names its plugin (`rss_item.feed_id -> rss_feed.plugin_id`,
+the join `db/owner.ts`'s `ownerPluginId` already uses), and a download
+belongs to an rss item. An id belonging to another plugin's feed reads back
+`[]`, not that plugin's releases -- a plugin that could read another's items
+would be reading a schema it has never seen, and the `None`-category class of
+bug says what happens when one subsystem interprets another's vocabulary.
+
+That leaves one asymmetry, and it is `MediaWriter`'s, not `MediaReader`'s:
+`ctx.media.setResolution` and `ctx.media.dropMediaItem` still take any id and
+act on it regardless of who wrote the row. Scoping the writer the same way is
+a later slice's change.
 
 `downloadsFor` reads both download tables and tags each row with its
 `transport`, the same shape `DownloadRow.table` already carries internally.

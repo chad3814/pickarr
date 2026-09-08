@@ -16,13 +16,25 @@
  * someone else reads `null`, exactly as one that does not exist does; see
  * `mediaItemById` for why those two are one answer.
  *
- * `rssItemsFor` and `downloadsFor` are **not** scoped: an rss item and a
- * download are reached from an id the caller already holds, and the shared
- * tables carry no plugin column to filter them by -- ownership lives on
- * `rss_feed`, a join away. That is the same reach `ctx.media.setResolution`
- * and `ctx.media.dropMediaItem` already have over any id, and it is recorded
- * here rather than implied: what keeps a plugin on its own side is
- * convention and explicit wiring, not enforcement.
+ * **All four methods are scoped, `rssItemsFor` and `downloadsFor` included.**
+ * An rss item and a download are reached from an id the caller already
+ * holds -- a media item id, an rss item id -- rather than from `pluginId`
+ * directly, but ownership is still reachable: an rss item belongs to a feed
+ * and a feed names its plugin, and a download belongs to an rss item, so
+ * `rssItemsForMediaItem`/`downloadsForRssItem` join through `rss_feed` to
+ * the same `plugin_id` check `mediaItem` makes directly. An id belonging to
+ * another plugin's feed reads `[]`, the same "not yours" answer `mediaItem`
+ * gives as `null` for the same reason: there is no id a plugin holds, gotten
+ * honestly from one of its own scoped reads, that this closes off. It is
+ * only the id an id-guessing caller invents that now finds nothing.
+ *
+ * **`MediaWriter` remains unscoped.** `ctx.media.setResolution` and
+ * `ctx.media.dropMediaItem` still take any id and act on it regardless of
+ * who wrote the row underneath -- that asymmetry between what a plugin can
+ * read and what it can change is real and outlives this file. Scoping the
+ * writer the same way is a later slice's change, not this one's: a read
+ * side honest about ownership is worth having on its own, and closing the
+ * gap from the read direction first does not make the write side worse.
  *
  * Every method is `async` over a synchronous query, because `node:sqlite` is
  * synchronous and `MediaReader` promises anyway -- see the interface for why.
@@ -47,11 +59,11 @@ export function createMediaReader(raw: DatabaseSync, pluginId: string): MediaRea
     },
 
     async rssItemsFor(mediaItemId: number): Promise<RssItemRead[]> {
-      return rssItemsForMediaItem(raw, mediaItemId);
+      return rssItemsForMediaItem(raw, mediaItemId, pluginId);
     },
 
     async downloadsFor(rssItemId: number): Promise<DownloadRead[]> {
-      return downloadsForRssItem(raw, rssItemId);
+      return downloadsForRssItem(raw, rssItemId, pluginId);
     },
   };
 }

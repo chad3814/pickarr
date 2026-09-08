@@ -184,6 +184,23 @@ function unionKeyset(transport: Transport): string {
   return `(updated_at, '${transport}', id) > (?, ?, ?)`;
 }
 
+/**
+ * Prefixes each column in a comma-separated list with a table alias. Needed
+ * wherever a query joins to `rss_item`/`rss_feed` for the ownership check
+ * `RSS_ITEMS_FOR_MEDIA_ITEM` and `DOWNLOADS_FOR_RSS_ITEM` both add: both
+ * joined tables carry an `id` (and `rss_item` an `updated_at`), so the bare
+ * column list that works for a single-table `SELECT` becomes ambiguous the
+ * moment the join is added, and SQLite refuses to run it. Table names are
+ * never interpolated from anything but the module's own literals here, same
+ * as `TORRENT_DOWNLOAD_SELECT`/`NZB_DOWNLOAD_SELECT` above.
+ */
+function qualify(alias: string, columns: string): string {
+  return columns
+    .split(', ')
+    .map((column) => `${alias}.${column}`)
+    .join(', ');
+}
+
 const MEDIA_ITEM_COLUMNS =
   'id, title, release_date, description, provider, provider_ref, created_at, updated_at';
 
@@ -238,19 +255,36 @@ const RSS_ITEMS_SINCE = `
  * media item, and id order is discovery order, which does not reshuffle
  * itself the moment one of the rows is touched.
  *
- * Served by `rss_item_media_item`, migration 10's index on exactly
- * `media_item_id`. Before it existed this query was a bare `SCAN rss_item`,
- * reading the whole table for one item's handful of rows -- and
- * `MediaReader.rssItemsFor` calls it once per media item, so a plugin walking
- * its library scanned `rss_item` once per item in it.
+ * `media_item_id = ?` is served by `rss_item_media_item`, migration 10's
+ * index on exactly that column. Before it existed this query was a bare
+ * `SCAN rss_item`, reading the whole table for one item's handful of rows --
+ * and `MediaReader.rssItemsFor` calls it once per media item, so a plugin
+ * walking its library scanned `rss_item` once per item in it.
  *
  * `ORDER BY id` needs no sort on top of that index: an index entry carries the
  * rowid as its tail, so the matches for one `media_item_id` come back in
  * rowid order already. The index test asserts both -- `SEARCH`, and no temp
  * B-tree.
+ *
+ * **The join to `rss_feed` is the ownership check**, the same
+ * `rss_item.feed_id -> rss_feed.plugin_id` path `db/owner.ts`'s
+ * `ownerPluginId` uses, and it is preferred here over joining on
+ * `media_item.plugin_id` through `rss_item.media_item_id`: that column is
+ * nullable, so an rss item not yet linked to a media item would silently
+ * fail that join and read as "not yours" when the true answer is "not
+ * linked yet" -- a different fact told the same way. `rss_feed.plugin_id` is
+ * never null. Measured: the join adds one row-id seek
+ * (`SEARCH rss_feed USING INTEGER PRIMARY KEY (rowid=?)`) after the existing
+ * `rss_item_media_item` seek, once per matching row -- it does not turn the
+ * index seek into a scan, because `media_item_id` still narrows to a
+ * handful of rows before the join ever runs.
  */
 const RSS_ITEMS_FOR_MEDIA_ITEM = `
-  SELECT ${RSS_ITEM_COLUMNS} FROM rss_item WHERE media_item_id = ? ORDER BY id
+  SELECT ${qualify('rss_item', RSS_ITEM_COLUMNS)}
+    FROM rss_item
+    JOIN rss_feed ON rss_feed.id = rss_item.feed_id
+   WHERE rss_item.media_item_id = ? AND rss_feed.plugin_id = ?
+   ORDER BY rss_item.id
 `;
 
 const DOWNLOAD_COLUMNS =
@@ -310,16 +344,36 @@ ${NZB_DOWNLOAD_SELECT}
  * Same order as `DOWNLOADS_SINCE`, so the two reads agree about what "oldest
  * change first" means for one rss item's downloads. Not paged, so no cursor
  * and no keyset -- an rss item's downloads are one per client at most.
+ *
+ * **Ownership is checked the same way as `RSS_ITEMS_FOR_MEDIA_ITEM`, one join
+ * further on:** a download belongs to an rss item (`rss_item_id`, bound
+ * once per branch and already the seek each per-item index above serves),
+ * and the rss item belongs to a feed, and the feed names the plugin. The
+ * derived table is aliased `download` so its columns can be qualified --
+ * once joined to `rss_item`, the bare column list is ambiguous on `id` and
+ * `updated_at`, both of which `rss_item` also has.
+ *
+ * Measured: the join adds two more row-id seeks after each branch's existing
+ * `SEARCH torrent_download USING INDEX torrent_download_item (rss_item_id=?)`
+ * / `SEARCH nzb_download USING INDEX nzb_download_item (rss_item_id=?)` --
+ * `SEARCH rss_item USING INTEGER PRIMARY KEY (rowid=?)` then
+ * `SEARCH rss_feed USING INTEGER PRIMARY KEY (rowid=?)`. The union's own
+ * `SCAN download` and `USE TEMP B-TREE FOR ORDER BY` are unchanged from
+ * before this join existed -- neither is the join's cost, and both are the
+ * same union-sorting cost `DOWNLOADS_SINCE` already pays.
  */
 const DOWNLOADS_FOR_RSS_ITEM = `
-  SELECT ${DOWNLOAD_COLUMNS} FROM (
+  SELECT ${qualify('download', DOWNLOAD_COLUMNS)} FROM (
 ${TORRENT_DOWNLOAD_SELECT}
      WHERE rss_item_id = ?
     UNION ALL
 ${NZB_DOWNLOAD_SELECT}
      WHERE rss_item_id = ?
-  )
-  ORDER BY updated_at, transport, id
+  ) AS download
+  JOIN rss_item ON rss_item.id = download.rss_item_id
+  JOIN rss_feed ON rss_feed.id = rss_item.feed_id
+ WHERE rss_feed.plugin_id = ?
+ ORDER BY download.updated_at, download.transport, download.id
 `;
 
 const DELETIONS_SINCE = `
@@ -631,14 +685,38 @@ export function mediaItemByProviderRef(
   return row === undefined ? null : toMediaItemRead(row).item;
 }
 
-/** Every rss item pointing at this media item, in discovery order. */
-export function rssItemsForMediaItem(raw: DatabaseSync, mediaItemId: number): RssItemRead[] {
-  return raw.prepare(RSS_ITEMS_FOR_MEDIA_ITEM).all(mediaItemId)
+/**
+ * Every rss item pointing at this media item, in discovery order --
+ * restricted to the feeds `pluginId` owns.
+ *
+ * `mediaItemId` is an id `MediaReader.rssItemsFor` hands straight through
+ * from its caller, and a plugin has no way to name another plugin's id
+ * *except* by guessing an integer -- `mediaItem`/`mediaItemByProviderRef`
+ * never return one that is not its own. `pluginId` closes that gap: an id
+ * belonging to another plugin's feed now reads as `[]`, the same "not
+ * yours" answer `mediaItemById` gives, rather than as that plugin's actual
+ * releases. A plugin using an id its own scoped read gave it sees no
+ * difference at all.
+ */
+export function rssItemsForMediaItem(
+  raw: DatabaseSync,
+  mediaItemId: number,
+  pluginId: string,
+): RssItemRead[] {
+  return raw.prepare(RSS_ITEMS_FOR_MEDIA_ITEM).all(mediaItemId, pluginId)
     .map((row) => toRssItemRead(row).item);
 }
 
-/** Every download for this rss item, from both tables, oldest change first. */
-export function downloadsForRssItem(raw: DatabaseSync, rssItemId: number): DownloadRead[] {
-  return raw.prepare(DOWNLOADS_FOR_RSS_ITEM).all(rssItemId, rssItemId)
+/**
+ * Every download for this rss item, from both tables, oldest change first --
+ * restricted to the feeds `pluginId` owns, for the same reason and the same
+ * way as `rssItemsForMediaItem`.
+ */
+export function downloadsForRssItem(
+  raw: DatabaseSync,
+  rssItemId: number,
+  pluginId: string,
+): DownloadRead[] {
+  return raw.prepare(DOWNLOADS_FOR_RSS_ITEM).all(rssItemId, rssItemId, pluginId)
     .map((row) => toDownloadRead(row).item);
 }
