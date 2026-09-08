@@ -233,7 +233,20 @@ const MEDIA_ITEM_BY_ID = `
   SELECT ${MEDIA_ITEM_COLUMNS} FROM media_item WHERE plugin_id = ? AND id = ?
 `;
 
-const MEDIA_ITEM_BY_REFERENCE = `
+/**
+ * Keyed on `media_item.provider`/`provider_ref` -- the pair
+ * `media_item_provider_ref` dedups on, and the pair `MediaWriter` writes.
+ *
+ * **The `external_reference` table is deliberately not consulted.** It exists
+ * (migration 1, declared in `schema.ts`, unique on
+ * `(media_item_id, provider)`) and **has no writer at all**: nothing in this
+ * tree inserts a row into it, and slice A's spec records it as unreachable
+ * through the contract. Joining it here would read a table that is always
+ * empty -- dead code that looks like coverage, and a second answer to one
+ * question the moment something does start writing it. When it acquires a
+ * writer, that is the change that should decide what a second lookup means.
+ */
+const MEDIA_ITEM_BY_PROVIDER_REF = `
   SELECT ${MEDIA_ITEM_COLUMNS} FROM media_item
    WHERE plugin_id = ? AND provider = ? AND provider_ref = ?
 `;
@@ -368,7 +381,7 @@ export const SYNC_QUERIES: Readonly<Record<string, string>> = Object.freeze({
   downloadsSince: DOWNLOADS_SINCE,
   deletionsSince: DELETIONS_SINCE,
   mediaItemById: MEDIA_ITEM_BY_ID,
-  mediaItemByReference: MEDIA_ITEM_BY_REFERENCE,
+  mediaItemByProviderRef: MEDIA_ITEM_BY_PROVIDER_REF,
   rssItemsForMediaItem: RSS_ITEMS_FOR_MEDIA_ITEM,
   downloadsForRssItem: DOWNLOADS_FOR_RSS_ITEM,
 });
@@ -631,14 +644,24 @@ export function mediaItemById(raw: DatabaseSync, pluginId: string, id: number): 
   return row === undefined ? null : toMediaItemRead(row).item;
 }
 
-/** See `mediaItemById` for why a foreign item is `null` rather than a throw. */
-export function mediaItemByReference(
+/**
+ * The media item this plugin holds under `(provider, providerRef)`.
+ *
+ * Named for the columns it reads, not for the `external_reference` table it
+ * does not -- see `MEDIA_ITEM_BY_PROVIDER_REF` for why that table is left
+ * alone. The spec's `MediaReader` first called this
+ * `mediaItemByExternalReference`, which pointed at the wrong table; the name
+ * now says which fact is being looked up.
+ *
+ * See `mediaItemById` for why a foreign item is `null` rather than a throw.
+ */
+export function mediaItemByProviderRef(
   raw: DatabaseSync,
   pluginId: string,
   provider: string,
   ref: string,
 ): MediaItemRead | null {
-  const row = raw.prepare(MEDIA_ITEM_BY_REFERENCE).get(pluginId, provider, ref);
+  const row = raw.prepare(MEDIA_ITEM_BY_PROVIDER_REF).get(pluginId, provider, ref);
   return row === undefined ? null : toMediaItemRead(row).item;
 }
 

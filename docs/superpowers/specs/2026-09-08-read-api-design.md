@@ -228,7 +228,7 @@ export interface DownloadRead {
 
 export interface MediaReader {
   mediaItem(id: number): Promise<MediaItemRead | null>;
-  mediaItemByExternalReference(provider: string, ref: string): Promise<MediaItemRead | null>;
+  mediaItemByProviderRef(provider: string, ref: string): Promise<MediaItemRead | null>;
   rssItemsFor(mediaItemId: number): Promise<RssItemRead[]>;
   downloadsFor(rssItemId: number): Promise<DownloadRead[]>;
 }
@@ -238,8 +238,18 @@ Reaches `PluginContext` as **`read`**, beside the existing `media` writer.
 `media` is not renamed: every plugin, the test double and the flow tests all
 name it, and a rename would churn every one of them to no benefit.
 
+`mediaItemByProviderRef` was called `mediaItemByExternalReference` in the first
+draft of this section, and the name was wrong in a way that mattered: it points
+at the `external_reference` table, and this reads `media_item.provider` /
+`media_item.provider_ref` — the pair `media_item_provider_ref` dedups on and
+the pair `MediaWriter` writes. `external_reference` exists (migration 1) and
+**has no writer at all**; slice A's spec records it as unreachable through the
+contract. Querying it would be dead code that looks like coverage, so it is
+deliberately not consulted, and the method is named for the fact it actually
+looks up.
+
 **A plugin sees only its own media items.** `mediaItem` and
-`mediaItemByExternalReference` filter on the calling plugin's id, the way
+`mediaItemByProviderRef` filter on the calling plugin's id, the way
 `MediaWriter` already scopes its writes. A plugin that could read another's
 items would be reading a schema it has never seen, and the `None`-category class
 of bug says what happens when one subsystem interprets another's vocabulary.

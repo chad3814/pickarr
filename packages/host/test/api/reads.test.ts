@@ -17,7 +17,7 @@ import {
   downloadsForRssItem,
   downloadsSince,
   mediaItemById,
-  mediaItemByReference,
+  mediaItemByProviderRef,
   mediaItemsSince,
   rssItemsForMediaItem,
   rssItemsSince,
@@ -281,9 +281,9 @@ test('a plugin sees only its own media items', () => {
   // Null, not a throw: "not yours" and "not there" are one answer, because
   // distinguishing them would report the other plugin's contents.
   assert.equal(mediaItemById(raw, 'alpha', 2), null);
-  assert.equal(mediaItemByReference(raw, 'alpha', 'tmdb', '99'), null);
+  assert.equal(mediaItemByProviderRef(raw, 'alpha', 'tmdb', '99'), null);
   assert.equal(mediaItemById(raw, 'beta', 2)?.title, 'Beta one');
-  assert.equal(mediaItemByReference(raw, 'beta', 'tmdb', '99')?.id, 2);
+  assert.equal(mediaItemByProviderRef(raw, 'beta', 'tmdb', '99')?.id, 2);
 });
 
 test('a deletion page carries only this plugin\'s tombstones', () => {
@@ -400,7 +400,7 @@ test('every sync query seeks its index rather than scanning it', () => {
       mustNotMatch: ['SCAN media_item'],
       why: 'the rowid is the id, so this is a single-row seek and needs no secondary index',
     },
-    mediaItemByReference: {
+    mediaItemByProviderRef: {
       args: ['alpha', 'tmdb', '99'],
       // Which index SQLite picks between `media_item_provider_ref` and
       // `media_item_sync` depends on row counts, and both are correct. What
@@ -491,8 +491,18 @@ test('a media item reads back every column the read shape names', () => {
     updatedAt: 30,
   });
   assert.equal(mediaItemById(raw, 'alpha', 404), null);
-  assert.deepEqual(mediaItemByReference(raw, 'alpha', 'tmdb', '550')?.title, 'Fight Club');
-  assert.equal(mediaItemByReference(raw, 'alpha', 'tmdb', 'nothing'), null);
+  assert.deepEqual(mediaItemByProviderRef(raw, 'alpha', 'tmdb', '550')?.title, 'Fight Club');
+  assert.equal(mediaItemByProviderRef(raw, 'alpha', 'tmdb', 'nothing'), null);
+
+  // The lookup reads `media_item`'s own provider columns and **not** the
+  // separate `external_reference` table, which has no writer anywhere in this
+  // tree. Pinned rather than left to the name: a row there must not answer
+  // this query, because consulting a table nothing writes would be dead code
+  // that looked like coverage.
+  raw.prepare(
+    "INSERT INTO external_reference (media_item_id, provider, ref, created_at) VALUES (2, 'tmdb', '777', 1)",
+  ).run();
+  assert.equal(mediaItemByProviderRef(raw, 'alpha', 'tmdb', '777'), null);
 });
 
 test('an rss item page reads back its shape and pages by updated_at', () => {
