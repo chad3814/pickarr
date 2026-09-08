@@ -11,7 +11,17 @@ import { migrateHost } from '../src/db/migrate.ts';
 import { openDatabase, openTestDatabase } from '../src/db/open.ts';
 import type { QueuedFetch } from '../src/fetch/queue.ts';
 import type { Timers } from '../src/jobs/dispatcher.ts';
-import { createShutdown, main, resolveArtworkDir, scheduleKnownFeeds } from '../src/main.ts';
+import type { ReadServer, ReadServerDeps } from '../src/api/server.ts';
+import { DEFAULT_PORT } from '../src/api/server.ts';
+import {
+  createPluginIdForType,
+  createShutdown,
+  formatLogDetail,
+  main,
+  resolveArtworkDir,
+  resolveReadPort,
+  scheduleKnownFeeds,
+} from '../src/main.ts';
 
 /** The plugin id every feed row below names, so `main` can register an owner for it. */
 const OWNER_ID = 'double';
@@ -23,6 +33,23 @@ function insertFeed(raw: DatabaseSync, url: string): number {
     VALUES (?, 'feed', ?, 900, 0, 0)
   `).run(OWNER_ID, url);
   return Number(result.lastInsertRowid);
+}
+
+/**
+ * A `ReadServer` that records nothing but its own closing, on an address no
+ * test connects to: every test in this file replaces the real
+ * `createReadServer`, so nothing here ever binds a socket. `packages/host/test/api/server.test.ts`
+ * is where the real listener is exercised, on a kernel-assigned port.
+ */
+function fakeServer(onClose: () => void): ReadServer {
+  return {
+    host: '127.0.0.1',
+    port: 0,
+    family: 'IPv4',
+    close: async () => {
+      onClose();
+    },
+  };
 }
 
 /** A `Host` whose every method fails loudly if a test never meant to reach it. */
@@ -171,7 +198,13 @@ test('main starts the dispatcher before it schedules known feeds, so a feed whos
     // leaves in the database the instant `main` returns -- not about a real
     // `setInterval` outliving the test and hanging the suite.
     const { timers } = createFakeTimers();
-    await runMain(databasePath, { plugins: [ownerPlugin], timers });
+    // `createReadServer` replaced, as every test running `main` must: the
+    // real one binds a real port and `main` hands back no way to close it.
+    await runMain(databasePath, {
+      plugins: [ownerPlugin],
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
 
     const after = openDatabase(databasePath);
     try {
@@ -211,7 +244,11 @@ test('main boots with no plugin registered, and still schedules a poll for every
     seed.raw.close();
 
     const { timers } = createFakeTimers();
-    await runMain(databasePath, { plugins: [], timers });
+    await runMain(databasePath, {
+      plugins: [],
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
 
     const after = openDatabase(databasePath);
     try {
@@ -274,13 +311,15 @@ test('a job whose handler rejects does not stop the host from running the next o
 test('createShutdown stops the host, closes the database and exits exactly once, even if a second signal lands mid-shutdown', () => {
   const { raw } = openTestDatabase();
   let stopped = 0;
+  let closed = 0;
   const host = fakeHost({ stop: () => { stopped += 1; } });
   const exitCalls: number[] = [];
-  const shutdown = createShutdown(host, raw, { exit: (code) => { exitCalls.push(code); } });
+  const shutdown = createShutdown(host, raw, fakeServer(() => { closed += 1; }), { exit: (code) => { exitCalls.push(code); } });
 
   shutdown('SIGINT received');
   shutdown('SIGTERM received');
 
+  assert.equal(closed, 1, 'the listener is closed exactly once too, not once per signal');
   assert.equal(stopped, 1, 'stop must run exactly once even though shutdown was asked for twice');
   assert.deepEqual(exitCalls, [0], 'exit must run exactly once, with the process\'s own success code');
   assert.throws(() => raw.prepare('SELECT 1').get(), 'the database must actually be closed, not merely stopped');
@@ -292,6 +331,10 @@ test('createShutdown exits without waiting for a hung idle(), which the pump it 
   // the process forever if it were ever reached. A mutation that awaited
   // `host.idle()` before exiting would have to hang the same way and fail
   // this assertion, never reaching it.
+  //
+  // The same goes for the listener, one layer out: `close()` here never
+  // settles, so a `createShutdown` that awaited it would never reach the
+  // exit either.
   const { raw } = openTestDatabase();
   let idleCalls = 0;
   const host = fakeHost({
@@ -299,7 +342,13 @@ test('createShutdown exits without waiting for a hung idle(), which the pump it 
     idle: () => { idleCalls += 1; return new Promise<void>(() => {}); },
   });
   const exitCalls: number[] = [];
-  const shutdown = createShutdown(host, raw, { exit: (code) => { exitCalls.push(code); } });
+  const neverCloses: ReadServer = {
+    host: '127.0.0.1',
+    port: 0,
+    family: 'IPv4',
+    close: () => new Promise<void>(() => {}),
+  };
+  const shutdown = createShutdown(host, raw, neverCloses, { exit: (code) => { exitCalls.push(code); } });
 
   shutdown('SIGINT received');
 
@@ -338,4 +387,150 @@ test('scheduleKnownFeeds schedules a poll for every rss_feed row, and none when 
 
   assert.deepEqual(result, [idA, idB], 'returns every feed id it scheduled');
   assert.deepEqual(scheduled, [idA, idB], 'called schedulePoll once per feed row');
+});
+
+test('main starts the server after the host and closes it before stopping', async () => {
+  // Two orderings, one property, and both halves fail the same way: silently,
+  // in production only.
+  //
+  // **Started after `host.start()`.** The socket must not answer a read
+  // before the crash sweep has run and the dispatcher is armed. `start()` is
+  // the only thing in this process that arms the dispatcher's safety
+  // interval, so a `setInterval` already recorded by the time the server is
+  // built is exactly the evidence that `start()` came first -- and a
+  // `createReadServer` call moved above it reverses the two entries below.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-server-'));
+  const previousPort = process.env['PICKARR_PORT'];
+  try {
+    delete process.env['PICKARR_PORT'];
+    const databasePath = join(dir, 'pickarr.db');
+    const seed = openDatabase(databasePath);
+    migrateHost(seed.raw);
+    insertFeed(seed.raw, 'https://a.test/feed.xml');
+    seed.raw.close();
+
+    const order: string[] = [];
+    const { timers } = createFakeTimers();
+    const recording: Timers = {
+      setTimeout: (fn, ms) => timers.setTimeout(fn, ms),
+      clearTimeout: (handle) => { timers.clearTimeout(handle); },
+      setInterval: (fn, ms) => {
+        order.push('host started');
+        return timers.setInterval(fn, ms);
+      },
+      clearInterval: (handle) => { timers.clearInterval(handle); },
+    };
+
+    // The one test seam that keeps this from binding a real socket: `main`'s
+    // own `createReadServer` would take a port, and a port written down in a
+    // test is a port two tests can fight over.
+    const built: ReadServerDeps[] = [];
+    await runMain(databasePath, {
+      plugins: [ownerPlugin],
+      timers: recording,
+      createReadServer: async (serverDeps) => {
+        order.push('server listening');
+        built.push(serverDeps);
+        return fakeServer(() => {});
+      },
+    });
+
+    assert.deepEqual(
+      order,
+      ['host started', 'server listening'],
+      'the listener opens only once the host is running; reversed here means main serves reads over an unswept database',
+    );
+    assert.equal(built.length, 1, 'exactly one listener, not one per plugin or per feed');
+    const serverDeps = built[0];
+    assert.ok(serverDeps, 'the server was built with deps main composed');
+    assert.equal(serverDeps.port, DEFAULT_PORT, 'the documented default, with PICKARR_PORT unset');
+    assert.equal(
+      serverDeps.pluginIdForType('movie'),
+      OWNER_ID,
+      'the type mapping is built from main\'s own plugin list, which is what keeps src/api off host.ts',
+    );
+    assert.equal(serverDeps.pluginIdForType('book'), undefined, 'and answers nothing for a type no plugin claims');
+  } finally {
+    if (previousPort === undefined) delete process.env['PICKARR_PORT'];
+    else process.env['PICKARR_PORT'] = previousPort;
+    await rm(dir, { recursive: true, force: true });
+  }
+
+  // **Closed before stopping.** `createShutdown` is the whole of the process's
+  // teardown, and it is exercised directly here for the same reason its own
+  // two tests are: driving this through a real signal would run the real
+  // `process.exit` and take the test runner with it.
+  const { raw } = openTestDatabase();
+  const teardown: string[] = [];
+  const host = fakeHost({ stop: () => { teardown.push('host stopped'); } });
+  const shutdown = createShutdown(host, raw, fakeServer(() => { teardown.push('listener closed'); }), {
+    exit: () => { teardown.push('exited'); },
+  });
+
+  shutdown('SIGTERM received');
+
+  assert.deepEqual(
+    teardown,
+    ['listener closed', 'host stopped', 'exited'],
+    'the listener stops first, so no read is accepted against a host that has already been told to stop',
+  );
+});
+
+test('resolveReadPort reads PICKARR_PORT, defaults to 8787, and refuses anything that is not a port', () => {
+  // Taken as an argument rather than read from `process.env` inside, so this
+  // asserts the precedence without mutating the environment every other test
+  // in this process shares.
+  assert.equal(resolveReadPort(undefined), DEFAULT_PORT, 'unset means the documented default');
+  assert.equal(resolveReadPort(''), DEFAULT_PORT, 'and an empty variable is an unset one');
+  assert.equal(resolveReadPort('9999'), 9999);
+  assert.equal(resolveReadPort('1'), 1);
+  assert.equal(resolveReadPort('65535'), 65535);
+
+  // Refused loudly at boot rather than coerced: `Number.parseInt` -- which
+  // 1.x's own `resolveServerPort` uses -- reads '80abc' as 80 and would
+  // silently listen on a port nobody asked for.
+  for (const bad of ['0', '65536', 'eight', '80abc', '-1', '8.5', ' 80', '0x50']) {
+    assert.throws(() => resolveReadPort(bad), /PICKARR_PORT/, `${bad} must be refused, not coerced`);
+  }
+});
+
+test('createPluginIdForType maps each plugin\'s media type, and refuses two plugins claiming one', () => {
+  const movies: MediaPlugin = { ...ownerPlugin, id: 'movies', mediaType: 'movie' };
+  const shows: MediaPlugin = { ...ownerPlugin, id: 'shows', mediaType: 'tv' };
+
+  const typeToPlugin = createPluginIdForType([movies, shows]);
+  assert.equal(typeToPlugin('movie'), 'movies');
+  assert.equal(typeToPlugin('tv'), 'shows');
+  assert.equal(typeToPlugin('book'), undefined, 'a type nothing claims has no id, which the route answers 404 for');
+  assert.equal(createPluginIdForType([])('movie'), undefined, 'and a host with no plugins claims no type at all');
+
+  // Refused at construction, not resolved per request: with two plugins on
+  // one type there is no right answer, and picking either would route a whole
+  // media type's reads to whichever happened to be registered first -- a
+  // configuration error that would present as one plugin's library being
+  // empty.
+  assert.throws(
+    () => createPluginIdForType([movies, { ...shows, mediaType: 'movie' }]),
+    /movie/,
+    'the throw names the contested type',
+  );
+});
+
+test('formatLogDetail writes key=value pairs, and cannot spill an object it is handed', () => {
+  assert.equal(
+    formatLogDetail({ route: '/api/media', error: 'https://sab.test/api?apikey=***' }),
+    'route=/api/media error=https://sab.test/api?apikey=***',
+    'the read server\'s own failure line, already redacted by the time it arrives',
+  );
+  assert.equal(formatLogDetail({}), '', 'an empty record adds nothing');
+
+  // The property that makes this safe to hand any record: `String` of an
+  // object is `[object Object]`, so a row or a config logged by mistake
+  // cannot reach the console as its contents. This is the rule about never
+  // logging an object, enforced by the formatter rather than by remembering.
+  assert.equal(
+    formatLogDetail({ row: { title: 'A Secret Title', apiKey: 'SECRET-KEY-9' } }),
+    'row=[object Object]',
+    'a row hands over nothing, not even its keys',
+  );
 });

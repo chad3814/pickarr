@@ -16,6 +16,8 @@
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MediaPlugin } from '@pickarr/contract';
+import type { ReadServer, ReadServerDeps } from './api/server.ts';
+import { DEFAULT_PORT, createReadServer } from './api/server.ts';
 import { createDownloadClients } from './clients/downloads.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase } from './db/open.ts';
@@ -27,8 +29,27 @@ import type { Timers } from './jobs/dispatcher.ts';
 /** `PICKARR_DATABASE`'s fallback -- the documented `/config` volume, exactly as 1.x's own default. */
 const DEFAULT_DATABASE_PATH = '/config/pickarr.db';
 
-function log(message: string): void {
-  console.log(`[host] ${message}`);
+/**
+ * A log line's structured half, as `key=value` pairs.
+ *
+ * Every value goes through `String`, and that is the safety property rather
+ * than a formatting preference: `String` of a row, a config or any other
+ * object is `[object Object]`, so a caller that broke the rule against
+ * logging one could not spill its contents through here even by accident.
+ * Only strings pass through this today -- `api/server.ts`'s failure line,
+ * whose `error` has already been through `redactUrl`.
+ *
+ * Exported for its own test, because the claim above is the whole reason this
+ * is a function and not an inline template.
+ */
+export function formatLogDetail(detail: Readonly<Record<string, unknown>>): string {
+  return Object.entries(detail).map(([key, value]) => `${key}=${String(value)}`).join(' ');
+}
+
+/** The process's own log line, and the `log` the read server is given. */
+function log(message: string, detail?: Readonly<Record<string, unknown>>): void {
+  const suffix = detail === undefined ? '' : ` ${formatLogDetail(detail)}`;
+  console.log(`[host] ${message}${suffix}`);
 }
 
 /**
@@ -109,12 +130,88 @@ export async function scheduleKnownDownloadClients(host: Host, raw: DatabaseSync
 const SHIPPED_PLUGINS: readonly MediaPlugin[] = [];
 
 /**
+ * The `pluginIdForType` the read API's `/api/media` and `/api/deletions`
+ * routes resolve a `?type=` through: the plugin claiming that media type, or
+ * `undefined` for a type nothing claims (which those routes answer 404 for).
+ *
+ * A function built here and passed in, rather than the server reaching for
+ * the registry, and that is the whole point of its shape: `host.ts` owns the
+ * registry, and nothing under `src/api` may import `host.ts` without putting
+ * the read layer in a cycle with it. `main` already holds the plugin list, so
+ * it is the one place that can answer this without anyone importing anything.
+ *
+ * **Two plugins claiming one media type is refused here, loudly.** It is a
+ * configuration error with no correct resolution: picking either one would
+ * route every read of that type to whichever was listed first, and the other
+ * plugin's library would simply appear empty -- a silent, total failure of
+ * one plugin that looks like missing data rather than like a misconfiguration.
+ * Refusing at construction means the process does not start, which is the
+ * only outcome that gets it fixed. `Host.register` does not catch this: it
+ * refuses a duplicate plugin *id*, and two plugins with different ids can
+ * still name the same media type.
+ */
+export function createPluginIdForType(
+  plugins: readonly MediaPlugin[],
+): (type: string) => string | undefined {
+  const byType = new Map<string, string>();
+  for (const plugin of plugins) {
+    const claimed = byType.get(plugin.mediaType);
+    if (claimed !== undefined) {
+      throw new Error(
+        `two plugins claim media type "${plugin.mediaType}": "${claimed}" and "${plugin.id}"`,
+      );
+    }
+    byType.set(plugin.mediaType, plugin.id);
+  }
+  return (type: string): string | undefined => byType.get(type);
+}
+
+/** A port as an environment variable may spell one: digits only, so nothing is coerced. */
+const PORT_DIGITS = /^\d+$/;
+
+/**
+ * The port the read API listens on: `PICKARR_PORT` when set to one, and
+ * `DEFAULT_PORT` otherwise.
+ *
+ * Takes the variable's value rather than reading `process.env` itself, so it
+ * is testable without mutating the environment the whole process shares.
+ *
+ * Stricter than 1.x's `resolveServerPort` (`packages/core/src/config/load.ts`)
+ * on purpose: that one uses `Number.parseInt`, which reads `'80abc'` as 80 and
+ * `'0x50'` as 0, so a typo becomes a port nobody asked for and the process
+ * listens somewhere nothing polls. Digits only, and inside the range a
+ * listener can actually bind, or the process refuses to start.
+ */
+export function resolveReadPort(configured: string | undefined): number {
+  if (configured === undefined || configured === '') return DEFAULT_PORT;
+  if (!PORT_DIGITS.test(configured)) {
+    throw new Error(`PICKARR_PORT is not a port number: ${configured}`);
+  }
+  const port = Number(configured);
+  // 0 is excluded deliberately, even though `listen(0)` is legal and is what
+  // every test binds: a *process* told to listen on an arbitrary free port
+  // would answer on an address nothing could be configured to poll.
+  if (port < 1 || port > 65535) {
+    throw new Error(`PICKARR_PORT is not a port number: ${configured}`);
+  }
+  return port;
+}
+
+/**
  * Builds the process's shutdown handler. `host.stop()` clears the
  * dispatcher's timer and safety interval and returns without waiting on
  * anything -- a handler already in flight is abandoned deliberately, its row
  * left `running` for the next `start()` to sweep (see `Host.stop()`'s own
  * doc) -- so there is nothing to `await` here at all: closing the database
  * and exiting follow immediately, in the same synchronous turn.
+ *
+ * `server.close()` runs **first**, before `host.stop()`, so no read is
+ * accepted against a host that has already been told to stop. Its promise is
+ * deliberately not awaited, on exactly the same reasoning as `stop()`: the
+ * listener and every open connection are gone by the time `close()` yields,
+ * and what the promise is waiting for is nothing this process needs to see
+ * before exiting. An in-flight read is abandoned, which costs its client one
+ * retry.
  *
  * Idempotent against a second signal arriving mid-shutdown -- a `SIGTERM`
  * landing while a `SIGINT` is already tearing down -- by closing over its
@@ -131,6 +228,7 @@ const SHIPPED_PLUGINS: readonly MediaPlugin[] = [];
 export function createShutdown(
   host: Host,
   raw: DatabaseSync,
+  server: ReadServer,
   deps: { exit?: (code: number) => void } = {},
 ): (reason: string) => void {
   const exit = deps.exit ?? process.exit;
@@ -139,6 +237,10 @@ export function createShutdown(
     if (shuttingDown) return;
     shuttingDown = true;
     log(`${reason}, shutting down`);
+    // Not awaited, and the ordering still holds: `close()` stops the listener
+    // and drops open connections synchronously, before it returns the promise
+    // this is discarding.
+    void server.close();
     host.stop();
     raw.close();
     exit(0);
@@ -177,13 +279,18 @@ export function createShutdown(
  *    scheduling calls see each row's true post-sweep state and schedule a
  *    fresh cycle wherever the sweep dead-lettered one. `main.test.ts` fails
  *    if these are reordered.
- * 4. The signal handlers, last, so nothing can be asked to stop before the
+ * 4. `createReadServer`, after `host.start()`. The socket must not answer a
+ *    read against a database whose crashed rows have not been swept yet, and
+ *    it is opened after both scheduling calls as well, so nothing is served
+ *    until the process has finished deciding what it will do. `main.test.ts`
+ *    fails if the server is built before `start()`.
+ * 5. The signal handlers, last, so nothing can be asked to stop before the
  *    state above is settled.
  *
  * `argv` is accepted for parity with a conventional process entry point;
- * this slice has no argument surface beyond the `PICKARR_DATABASE`
- * environment variable (there is deliberately no config surface yet, see
- * the plan's §1.2), so nothing here reads it.
+ * this slice has no argument surface beyond the `PICKARR_DATABASE` and
+ * `PICKARR_PORT` environment variables (there is deliberately no config
+ * surface yet, see the plan's §1.2), so nothing here reads it.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the
@@ -192,14 +299,30 @@ export function createShutdown(
  * `Timers`) with a fake pair, so a test asserting the state `main` leaves
  * behind never depends on a real timer firing -- or, left armed with real
  * ones, on remembering to stop them again before the test ends.
+ *
+ * `createReadServer` is the third, and a test running `main` should supply
+ * it: the real one binds a real port, and `main` returns no handle to close
+ * it with, so a test that lets it bind leaves a listener behind for every
+ * later test to trip over. It is also the only way to observe *when* the
+ * server was built relative to `host.start()`, which is the ordering above.
  */
 export async function main(
   argv: readonly string[],
-  deps: { plugins?: readonly MediaPlugin[]; timers?: Timers } = {},
+  deps: {
+    plugins?: readonly MediaPlugin[];
+    timers?: Timers;
+    createReadServer?: (serverDeps: ReadServerDeps) => Promise<ReadServer>;
+  } = {},
 ): Promise<void> {
   void argv;
 
   const plugins = deps.plugins ?? SHIPPED_PLUGINS;
+
+  // Before the database is opened, before anything is migrated: two plugins
+  // claiming one media type is a configuration error, and the earliest
+  // possible refusal is the one that touches least on its way out.
+  const pluginIdForType = createPluginIdForType(plugins);
+  const port = resolveReadPort(process.env['PICKARR_PORT']);
 
   const databasePath = process.env['PICKARR_DATABASE'] ?? DEFAULT_DATABASE_PATH;
   const { raw, db } = openDatabase(databasePath);
@@ -238,7 +361,14 @@ export async function main(
   const feedIds = scheduleKnownFeeds(host, raw);
   const clientIds = await scheduleKnownDownloadClients(host, raw);
 
-  const shutdown = createShutdown(host, raw);
+  const server = await (deps.createReadServer ?? createReadServer)({
+    raw,
+    pluginIdForType,
+    port,
+    log,
+  });
+
+  const shutdown = createShutdown(host, raw, server);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       shutdown(`${signal} received`);
@@ -247,6 +377,7 @@ export async function main(
 
   log(
     `running: database ${databasePath}, artwork ${artworkDir}, `
+    + `read api on http://${server.host}:${server.port}, `
     + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
     + `${clientIds.length} download client(s) scheduled`,
   );
