@@ -80,15 +80,6 @@ import type { Cursor, UnionCursor } from './cursor.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from './cursor.ts';
 
 /**
- * The read shapes live in `@pickarr/contract`, beside `MediaReader`, because
- * a plugin holding one of these objects must be able to name its type
- * without depending on the host. Re-exported here so that a caller of these
- * queries names the shape where the query that builds it lives, rather than
- * reaching into the contract for a value the host produced.
- */
-export type { DownloadRead, MediaItemRead, RssItemRead, Transport };
-
-/**
  * One page of a paged read.
  *
  * `done` is `items.length < PAGE_SIZE` and nothing cleverer. A page of
@@ -164,9 +155,35 @@ const UPDATED_KEYSET = keyset('updated_at', 'id');
  *
  * The branch's own transport is interpolated as a literal rather than bound,
  * because it *is* a literal: each branch of the union selects
- * `'torrent' AS transport` or `'nzb' AS transport`, and the alias is not
- * visible to that branch's own `WHERE`. The value comes from `Transport`, a
- * module-private union of two words, never from anything a caller supplies.
+ * `'torrent' AS transport` or `'nzb' AS transport`, and this repeats that
+ * same word rather than referring to the alias.
+ *
+ * **Not because the alias is out of scope in the branch's own `WHERE` -- it
+ * is in scope.** SQLite resolves a result-column alias there, and the
+ * aliased spelling was measured rather than reasoned about: `DOWNLOADS_SINCE`
+ * itself, with each branch's middle term swapped from the literal to
+ * `transport`, returns the same 200 rows from no cursor and the same rows
+ * from a mid-stream one (where the alias has to resolve to each branch's own
+ * word to answer correctly), and plans identically --
+ * `SEARCH torrent_download USING INDEX torrent_download_sync (updated_at>?)`
+ * and the nzb equivalent, same temp B-tree for the union's sort. An earlier
+ * version of this comment asserted the alias was invisible here, which is
+ * exactly the sort of reason a later reader would trust when deciding
+ * whether this predicate may be rewritten. Two true reasons stand in its
+ * place, and neither is performance. Naming the alias would lean on an
+ * SQLite extension: standard SQL admits a result-column alias in `ORDER BY`,
+ * which is evaluated after the select list, and not in `WHERE`, which is
+ * evaluated before it. And repeating the literal keeps each branch's
+ * predicate legible on its own -- one self-contained row-value comparison,
+ * the same shape `keyset` builds -- rather than one whose middle term has to
+ * be resolved against the select list above it.
+ *
+ * What makes interpolating it safe is unchanged: `Transport` is
+ * `'torrent' | 'nzb'` and nothing else. It is declared in
+ * `@pickarr/contract` and exported to plugins -- not module-private, as this
+ * comment used to say -- but it is still a two-value literal union, and this
+ * function has exactly two call sites, both in `DOWNLOADS_SINCE` below and
+ * both passing a literal. Nothing a caller supplies reaches this text.
  *
  * The same row-value form as `keyset`, one component wider. The three
  * placeholders bind, in order: the cursor's time, its transport and its id.
@@ -174,11 +191,15 @@ const UPDATED_KEYSET = keyset('updated_at', 'id');
  * when the time matches and the cursor's transport sorts before this
  * branch's, or when both match and the id is greater.
  *
- * Neither download table carries an index on `(updated_at, id)`, so this
- * branch scans whichever way it is written -- the row-value form is used here
- * for one predicate across the module rather than for a seek it cannot yet
- * get. An index that would make it seekable is a migration, and not this
- * change's.
+ * Both download tables **do** carry `(updated_at, id)`: `torrent_download_sync`
+ * and `nzb_download_sync`, added by migration 10 after this module was first
+ * written. So each branch seeks its own keyset rather than scanning, and the
+ * plan test asserts that per branch. This comment previously said neither
+ * index existed, that the branch therefore scanned whichever way it was
+ * written, and that adding one was not this change's -- all three were true
+ * when written and none of them survived migration 10, which is worse than
+ * merely stale: it argued against ever tightening the union's plan
+ * assertion, which is the assertion that now holds the indexes in place.
  */
 function unionKeyset(transport: Transport): string {
   return `(updated_at, '${transport}', id) > (?, ?, ?)`;
