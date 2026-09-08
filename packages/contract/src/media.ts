@@ -230,6 +230,13 @@ export interface DownloadRead {
  * Plain data, not Drizzle rows, for the same reason `MediaWriter` takes plain
  * data -- a typed row would couple every plugin to the host's migrations.
  *
+ * The intended way a plugin reads those rows, **not the only way** -- the
+ * caveat `MediaWriter` opens with applies here word for word:
+ * `PluginContext.db` is the same raw connection the shared tables live in,
+ * so a plugin can select any plugin's `media_item`, `rss_item` or download
+ * rows directly and the host does not stop it. The scoping below is a
+ * boundary this interface keeps, not one the host enforces on a plugin.
+ *
  * **Every method here is scoped to the calling plugin -- all four, not just
  * the two that name a media item.** The host builds one of these per plugin,
  * closed over that plugin's id, so a plugin cannot ask about another's.

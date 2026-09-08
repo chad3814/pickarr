@@ -57,8 +57,13 @@ function log(message: string, detail?: Readonly<Record<string, unknown>>): void 
  * in `packages/core/src/main.ts`, reproduced here rather than imported: host
  * production code must not depend on `@pickarr/core`, which this only
  * mirrors in shape. Unlike 1.x's version this takes no override argument --
- * there is deliberately no config surface in this slice (see the plan's
- * §1.2), so nothing could ever supply one.
+ * there is deliberately no config surface in 2.0 yet (slice B's spec,
+ * `docs/superpowers/specs/2026-09-03-feed-reader-artwork-design.md` §1.1:
+ * 1.x's `PICKARR_CONFIG` json is not ported, feeds are seeded rows), so
+ * nothing could ever supply one. Cited as the spec, because no plan in this
+ * repo has numbered sections -- slice B's plan has an unnumbered
+ * `## Global Constraints` and references the *spec's* §1.2 itself, which is
+ * the exclusions list and says nothing about config.
  *
  * Exported, and tested on its own: this is the only thing standing between
  * artwork landing in the cache location `createArtworkStore` (via
@@ -295,8 +300,9 @@ export function createShutdown(
  *
  * `argv` is accepted for parity with a conventional process entry point;
  * this slice has no argument surface beyond the `PICKARR_DATABASE` and
- * `PICKARR_READ_API_PORT` environment variables (there is deliberately no config
- * surface yet, see the plan's §1.2), so nothing here reads it.
+ * `PICKARR_READ_API_PORT` environment variables (there is deliberately no
+ * config surface yet -- slice B's spec §1.1, cited in full on
+ * `resolveArtworkDir` above), so nothing here reads it.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the

@@ -4,6 +4,14 @@
  * The test double did exactly that, and slice A's spec recorded why: until
  * this existed, every plugin improvised a reader.
  *
+ * **For these four questions, and the double still hand-writes one that is
+ * not among them.** `test/double/plugin.ts`'s `readRssItems` looks up
+ * filenames by rss item id, and `rssItemsFor` reaches rss items only
+ * *through* a media item -- which those items do not have yet, that being
+ * what the double is about to decide. So it stays on `ctx.db`, honestly and
+ * with its reason written down beside it. Closing that case is a fifth
+ * method, not a fix to any of these four.
+ *
  * Four methods, each one call into `../api/reads.ts`. Deliberately no SQL of
  * its own: the HTTP layer and every plugin answer the same questions, and two
  * readers with their own queries would drift on precisely the questions that

@@ -32,8 +32,21 @@
  * index while reading all of it*, which is how it hid -- a plan assertion
  * looking only for the index's name passes against both forms. The row-value
  * form plans as `SEARCH rss_item USING INDEX rss_item_updated (updated_at>?)`,
- * a range seek straight to the page, which is why the plan test asserts
- * `SEARCH`.
+ * a range seek straight to the page.
+ *
+ * **What the plan test asserts is neither of those, and this paragraph used
+ * to say it was `SEARCH`.** That is the belief the whole three-iteration
+ * exercise repudiated, and it is stated correctly further down: the
+ * assertion is the *columns the seek itself names*. A bare `SEARCH` is
+ * enough here, on a query with no leading equality -- the `OR` form really
+ * does plan `SCAN rss_item` -- and is not enough on `mediaItemsSince`, where
+ * the same `OR` form plans `SEARCH media_item USING INDEX media_item_sync
+ * (plugin_id=?)`: a genuine seek of the plugin followed by a walk of every
+ * row it owns. Both plans re-measured against the query text this module
+ * exports. So a rule that held on this one read is not the rule, and the
+ * `SEARCH` sentence that stood here would have licensed loosening the
+ * assertion that catches the slow form. See "So the rule the plan test
+ * enforces is the *columns* in the seek" below.
  *
  * The mechanism, because it decides how *not* to fix it: the two `?` in the
  * `OR` form are distinct parameters, so nothing tells SQLite they hold the
@@ -303,8 +316,10 @@ const RSS_ITEMS_SINCE = `
  *
  * `ORDER BY id` needs no sort on top of that index: an index entry carries the
  * rowid as its tail, so the matches for one `media_item_id` come back in
- * rowid order already. The index test asserts both -- `SEARCH`, and no temp
- * B-tree.
+ * rowid order already. The index test asserts both, and asserts the seek by
+ * the column it names rather than by the word `SEARCH`:
+ * `SEARCH rss_item USING INDEX rss_item_media_item (media_item_id=?)`, plus
+ * no temp B-tree.
  *
  * **The join to `rss_feed` is the ownership check**, the same
  * `rss_item.feed_id -> rss_feed.plugin_id` path `db/owner.ts`'s
