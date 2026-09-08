@@ -116,7 +116,7 @@ lost ref. Slice C's §10 already named the consequence and the remedy: "Reconcil
 will have to match it on category and name, or leave it alone." That is what §5
 implements.
 
-## 3. Schema, migration 7
+## 3. Schema, migrations 7 and 8
 
 ```sql
 ALTER TABLE torrent_download ADD COLUMN storage_path TEXT;
@@ -150,6 +150,20 @@ subsystem last wrote it.
 The status indexes exist because reconcile's sweep and the future read API both
 filter on `status`, and both tables are expected to grow without bound.
 
+**Migration 8, added during implementation**, puts `reclaimed_at` on both tables:
+
+```sql
+ALTER TABLE torrent_download ADD COLUMN reclaimed_at INTEGER;
+ALTER TABLE nzb_download ADD COLUMN reclaimed_at INTEGER;
+```
+
+Without it, §5's step 6 read "call it, once" as once *per pass* and nothing carried
+the fact across passes, so every `delivered` row had `remove` called again every
+tick, forever, on a set that only grows. The reclaim read narrows on this column
+in SQL for the same reason the others narrow on `status`: a row stops moving at
+`delivered` and stays there, so a query that ignores it grows with the
+installation's whole history rather than with what is still live.
+
 ## 4. The client contract
 
 ```ts
@@ -179,6 +193,17 @@ export interface ClientSnapshot {
    * is absent.
    */
   complete: boolean;
+  /**
+   * Every status or state value the adapter could not interpret, one entry per
+   * distinct value, sorted, empty when it understood all of them. Added during
+   * implementation: the two adapters guess differently about an unrecognised
+   * value and SABnzbd's guess is `failed`, so without this a status SABnzbd
+   * adds after this code was written becomes unexplained failed downloads. The
+   * caller logs these; an adapter in this package owns no logger, and
+   * process-wide "already warned" state inside a client is what forces 1.x to
+   * export a test-only reset hatch.
+   */
+  unreadable: string[];
 }
 ```
 
@@ -224,7 +249,8 @@ One tick, per client, in this order:
    `onDownloadedFile`, and on return set `delivered_at` and status `delivered`.
    A throw leaves the row `completed` — so the next tick tries again — and logs.
 6. **Reclaim.** Every `delivered` row on a client whose adapter has `remove`:
-   call it, once. qBittorrent has no `remove`, so a torrent is never dropped and
+   call it, once **per download** — recorded by `reclaimed_at` (§3), not once per
+   pass. qBittorrent has no `remove`, so a torrent is never dropped and
    never stops seeding.
 
 Steps 5 and 6 are the two that touch the world outside the database, and both
