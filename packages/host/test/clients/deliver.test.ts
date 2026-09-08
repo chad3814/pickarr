@@ -137,7 +137,7 @@ test('a completed row is delivered to the plugin owning its feed', async () => {
     deliver: async (pluginId, file) => { deliverCalls.push({ pluginId, file }); },
   }));
 
-  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0 });
+  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
   // The path passed to `stat` and to `deliver` is the *mapped* one, never
   // the client's own stored path.
   assert.deepEqual(statCalls, ['/media/movie.mkv']);
@@ -239,9 +239,79 @@ test('a row whose plugin is not registered is reported unowned and retried', asy
   const second = await deliverCompleted(deps);
 
   assert.equal(calls, 2, 'an unowned row must be retried every pass');
-  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0 });
-  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0 });
+  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'completed');
+});
+
+test('a completed row the client gave no path for is counted and logged on every pass, and never failed', async () => {
+  // `ClientHistoryEntry`'s own doc permits a `completed` entry with no
+  // `storagePath`, and both adapters emit null for a missing or empty field.
+  // The row used to be filtered out of the pass in silence: `sweepAbsent`
+  // clears its absence because its ref *is* accounted for, so across tick
+  // after tick it produced zero counters and zero log lines while sitting
+  // `completed` with `delivered_at` null. Three passes here, because one
+  // pass cannot tell "stuck" from "not yet".
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
+  });
+
+  const logs: { message: string; detail?: Readonly<Record<string, unknown>> }[] = [];
+  // `stat` and `deliver` are the loud unused doubles: reaching either would
+  // mean this row was treated as deliverable after all.
+  const deps = baseDeps(raw, clientId, {
+    log: (message, detail) => { logs.push(detail === undefined ? { message } : { message, detail }); },
+  });
+
+  const passes = [await deliverCompleted(deps), await deliverCompleted(deps), await deliverCompleted(deps)];
+
+  for (const pass of passes) {
+    assert.deepEqual(pass, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 1 });
+  }
+  assert.deepEqual(logs, [
+    { message: 'download client reported this download completed with no storage path, nothing to deliver', detail: { rowId: id } },
+    { message: 'download client reported this download completed with no storage path, nothing to deliver', detail: { rowId: id } },
+    { message: 'download client reported this download completed with no storage path, nothing to deliver', detail: { rowId: id } },
+  ]);
+  // Not failed, and not delivered: a path the client reports later, or a
+  // corrected mapping, still works -- the same reasoning a missing file gets.
+  assert.equal(readColumn(raw, id, 'status'), 'completed');
+  assert.equal(readColumn(raw, id, 'delivered_at'), null);
+  assert.equal(readColumn(raw, id, 'last_error'), null);
+  assert.equal(readColumn(raw, id, 'storage_path'), null);
+});
+
+test('a path the client supplies later is delivered, with no un-failing needed', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/media');
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
+  });
+
+  const deliverCalls: DownloadedFile[] = [];
+  const deps = baseDeps(raw, clientId, {
+    stat: async () => ({ sizeBytes: 8 }),
+    deliver: async (_pluginId, file) => { deliverCalls.push(file); },
+  });
+
+  const first = await deliverCompleted(deps);
+  assert.equal(first.undeliverable, 1);
+  assert.deepEqual(deliverCalls, []);
+
+  // What a later poll's `setStoragePath` writes -- the row was left in a
+  // state that write is still legal against.
+  raw.prepare('UPDATE torrent_download SET storage_path = ? WHERE id = ?').run('/downloads/movie.mkv', id);
+
+  const second = await deliverCompleted(deps);
+  assert.deepEqual(second, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(deliverCalls, [{ path: '/media/movie.mkv', sizeBytes: 8, downloadClientId: clientId }]);
+  assert.equal(readColumn(raw, id, 'status'), 'delivered');
+  assert.equal(readColumn(raw, id, 'delivered_at'), 1000);
 });
 
 test('a delivered row is reclaimed when the adapter can reclaim', async () => {
@@ -258,7 +328,7 @@ test('a delivered row is reclaimed when the adapter can reclaim', async () => {
     remove: async (ref) => { removedRefs.push(ref); },
   }));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
   assert.deepEqual(removedRefs, ['ref-1']);
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), 900, 'the mark is what makes the next pass skip this row');
@@ -276,7 +346,7 @@ test('a client with no remove reclaims nothing', async () => {
 
   const result = await deliverCompleted(baseDeps(raw, clientId));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), null);
 });

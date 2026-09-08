@@ -11,7 +11,8 @@
  * that owns it. What the plugin does with them is the plugin's business.
  *
  * **Ordering, and why each step is where it is.** For every `completed` row
- * with a `storage_path` and no `delivered_at`:
+ * with a `storage_path` and no `delivered_at` (one without a path is
+ * counted and logged instead -- see below):
  *
  * 1. `mapClientPath` the stored path -- the stored value is the *client's
  *    own* path, and the mapping is applied on demand, never stored, because
@@ -39,6 +40,20 @@
  * one -- because a `filepath_mapping` row corrected later takes effect on
  * the very next tick with nothing needing to be un-failed. Failing the row
  * here would trade a self-healing condition for a permanent one.
+ *
+ * **A `completed` row the client gave no path for counts `undeliverable`
+ * and is retried.** `ClientHistoryEntry`'s own doc comment permits a
+ * `completed` entry that omits `storagePath`, and both adapters emit `null`
+ * for a field that is missing or empty, so this is a state the client
+ * actually produces rather than a defensive branch. There is nothing to map
+ * and nothing to `stat`, so nothing is delivered -- but the row is not
+ * failed either, for the same reason a missing file is not: a path the
+ * client reports on a later poll, or a corrected mapping, still works.
+ * Counting and logging it is the whole of the fix. Before, the row was
+ * filtered out of this pass silently: it sat `completed` with `delivered_at`
+ * null across every tick, producing no counter and no log line, while §9 of
+ * this slice's design names three "sits `completed` and is retried every
+ * tick" cases and counts or logs every other one.
  *
  * **A row whose plugin is not registered counts `unowned` and is retried,**
  * the same shape `notifyNewRssItems` (`host.ts`) already reports for an rss
@@ -123,6 +138,34 @@ export interface DeliverResult {
    * client with nothing left to reclaim if all you have is `reclaimed: 0`.
    */
   reclaimFailures: number;
+  /**
+   * Completed rows the client reported no `storage_path` for, so there was
+   * nothing to map, stat or hand to a plugin. They stay `completed` and are
+   * offered again next pass; the number exists because the alternative was
+   * silence -- see the module doc's own paragraph on this. Counted every
+   * pass, not once: this answers "how many completed downloads can this
+   * client not tell me where to find", which is a standing condition rather
+   * than an event.
+   */
+  undeliverable: number;
+}
+
+/**
+ * Counts and logs every row in `rows` the client gave no `storage_path`
+ * for. At module scope, closing over nothing from the pass that calls it.
+ *
+ * Only the row id is logged, never the row: a `DownloadRow` carries a
+ * client-supplied path and a client ref, and this package's rule is that a
+ * message names the discriminant and nothing else.
+ */
+function reportUndeliverable(deps: DeliverDeps, result: DeliverResult, rows: readonly DownloadRow[]): void {
+  for (const row of rows) {
+    if (row.storagePath !== null) continue;
+    result.undeliverable += 1;
+    deps.log('download client reported this download completed with no storage path, nothing to deliver', {
+      rowId: row.id,
+    });
+  }
 }
 
 /**
@@ -146,9 +189,13 @@ async function deliverRows(deps: DeliverDeps, result: DeliverResult, rows: reado
 /** Delivers one `completed` row, per the module doc's numbered steps. */
 async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: DownloadRow): Promise<void> {
   const storagePath = row.storagePath;
-  // Unreachable given `deliverCompleted`'s own filter below, but the type
-  // is `string | null` regardless of what a caller has already checked, and
-  // a row with nothing to map or stat has nothing this function can do.
+  // `deliverCompleted` counts and logs a null-path row through
+  // `reportUndeliverable` and never passes it here, so nothing reaches this
+  // in practice -- but "in practice" is a claim about a caller, and the type
+  // is `string | null` whatever that caller has already checked. This
+  // comment used to call the branch unreachable *given the filter*, which
+  // was true only because the filter discarded those rows in silence: that
+  // silence was the defect, not the reason this branch was safe.
   if (storagePath === null) return;
 
   try {
@@ -236,7 +283,9 @@ async function reclaimRows(
  * See the module doc for the full ordering and its reasoning.
  */
 export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult> {
-  const result: DeliverResult = { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0 };
+  const result: DeliverResult = {
+    delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0,
+  };
 
   // `status` is narrowed in SQL -- see `rows.ts`'s `rowsForClientByStatus`
   // for why reading every row this client ever had, then filtering, cost
@@ -247,8 +296,13 @@ export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult
   // writer of `delivered_at` that broke that pairing would be caught here
   // rather than silently redelivering, or silently skipping, a row.
   const completedRows = rowsForClientByStatus(deps.raw, deps.clientId, DELIVERABLE_STATUSES)
-    .filter((row) => row.status === 'completed' && row.storagePath !== null && row.deliveredAt === null);
-  await deliverRows(deps, result, completedRows);
+    .filter((row) => row.status === 'completed' && row.deliveredAt === null);
+  // `storagePath === null` is reported before anything is delivered, rather
+  // than dropped by the filter above: a completed row the client cannot
+  // place is a standing condition someone has to be able to see. See the
+  // module doc.
+  reportUndeliverable(deps, result, completedRows);
+  await deliverRows(deps, result, completedRows.filter((row) => row.storagePath !== null));
 
   const remove = deps.remove;
   if (remove !== undefined) {
