@@ -621,6 +621,28 @@ export function createQbittorrentClient(
         () => fetch.json<TorrentInfoEntry[]>(url, { headers }),
       );
 
+      // `fetch.json<T>` is an unchecked cast, so the top-level shape needs
+      // the same treatment every field of `TorrentInfoEntry` already gets
+      // and for the same stated reason: declaring it an array would not make
+      // it one, it would only move the failure to a bare `TypeError`
+      // iterating past it. `{"error":"Forbidden"}` at HTTP 200 is the shape
+      // a reverse proxy in front of qBittorrent routinely answers with --
+      // nothing in the transport notices a 200, so this is the only place
+      // it can be caught -- and five ticks of an unguarded `for...of` over
+      // it dead-letters the client's whole reconcile cycle until a restart.
+      //
+      // Reported `complete: false` with empty lists, never an empty client:
+      // that pair is what tells the walk "do not conclude absence from
+      // this", which is exactly what `sabnzbd.ts`'s own failed-queue path
+      // does with a queue call that did not answer. Concluding absence here
+      // would stamp `absent_since` on every row this client actually holds.
+      // Not `unreadable` either -- that list is for a *status or state*
+      // value the adapter could not interpret, one entry per named value,
+      // and a body that is not a list of torrents has no such value in it.
+      if (!Array.isArray(torrents)) {
+        return { queue: [], history: [], complete: false, unreadable: [] };
+      }
+
       const queue: ClientQueueEntry[] = [];
       const history: ClientHistoryEntry[] = [];
       // Collected in a set for the same reason as `sabnzbd.ts`'s own
@@ -637,12 +659,12 @@ export function createQbittorrentClient(
       return {
         queue,
         history,
-        // Always true: this is one unfiltered request that either returns
-        // every torrent the server holds or throws -- unlike SABnzbd's
-        // history, there is no paging here that could leave part of the
-        // picture missing (see `sabnzbd.ts`'s own `snapshot`). This is not
-        // an oversight; there is no case in which this endpoint shape could
-        // produce anything else.
+        // True for every body that is actually a list of torrents: this is
+        // one unfiltered request, so unlike SABnzbd's history there is no
+        // paging that could leave part of the picture missing (see
+        // `sabnzbd.ts`'s own `snapshot`). The one way this endpoint can
+        // answer without answering -- a 200 whose body is not a list at all
+        // -- returned `complete: false` above, before reaching here.
         complete: true,
         unreadable: [...unreadable].toSorted(),
       };

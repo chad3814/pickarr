@@ -11,7 +11,8 @@
  * that owns it. What the plugin does with them is the plugin's business.
  *
  * **Ordering, and why each step is where it is.** For every `completed` row
- * with a `storage_path` and no `delivered_at`:
+ * with a `storage_path` and no `delivered_at` (one without a path is
+ * counted and logged instead -- see below):
  *
  * 1. `mapClientPath` the stored path -- the stored value is the *client's
  *    own* path, and the mapping is applied on demand, never stored, because
@@ -40,6 +41,20 @@
  * the very next tick with nothing needing to be un-failed. Failing the row
  * here would trade a self-healing condition for a permanent one.
  *
+ * **A `completed` row the client gave no path for counts `undeliverable`
+ * and is retried.** `ClientHistoryEntry`'s own doc comment permits a
+ * `completed` entry that omits `storagePath`, and both adapters emit `null`
+ * for a field that is missing or empty, so this is a state the client
+ * actually produces rather than a defensive branch. There is nothing to map
+ * and nothing to `stat`, so nothing is delivered -- but the row is not
+ * failed either, for the same reason a missing file is not: a path the
+ * client reports on a later poll, or a corrected mapping, still works.
+ * Counting and logging it is the whole of the fix. Before, the row was
+ * filtered out of this pass silently: it sat `completed` with `delivered_at`
+ * null across every tick, producing no counter and no log line, while §9 of
+ * this slice's design names three "sits `completed` and is retried every
+ * tick" cases and counts or logs every other one.
+ *
  * **A row whose plugin is not registered counts `unowned` and is retried,**
  * the same shape `notifyNewRssItems` (`host.ts`) already reports for an rss
  * item whose feed names no registered plugin. `ownerPluginId` itself can
@@ -67,10 +82,16 @@
  * migration 8 comment for the growth that produces. `remove` is *absent*
  * for qBittorrent: qBittorrent's `/torrents/delete` stops a torrent's seed
  * and abandons its ratio whether or not `deleteFiles` is set, and there is
- * no "forget this job but keep seeding" call to make instead. Making
- * `remove` optional -- rather than a boolean flag some config could set
- * wrong -- is what makes calling it for a client that cannot safely support
- * it impossible to write, not merely discouraged.
+ * no "forget this job but keep seeding" call to make instead.
+ *
+ * Optionality here is what makes *this* function's "if `deps.remove` is
+ * present" the whole of the decision, rather than a flag some config could
+ * set wrong. It is not, on its own, what makes reclaiming a torrent
+ * impossible to write: an optional member is still a member, and the
+ * composition that decides which client gets a `remove` lives one layer up.
+ * `reconcile-job.ts`'s `ReconcileAdapter` is where that is enforced -- a
+ * union discriminated on the client's transport, whose torrent arm has no
+ * `remove` field for anyone to fill in. See its own doc comment.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile } from '@pickarr/contract';
@@ -78,8 +99,13 @@ import { ownerPluginId } from '../db/owner.ts';
 import { PluginNotRegisteredError } from '../errors.ts';
 import { mapClientPath } from './paths.ts';
 import { redactUrl } from './redact.ts';
-import { markDelivered, markReclaimed, rowsForClient } from './rows.ts';
-import type { DownloadRow } from './rows.ts';
+import {
+  markDelivered, markReclaimed, rowsForClientByStatus, unreclaimedRowsForClient,
+} from './rows.ts';
+import type { DownloadRow, DownloadStatus } from './rows.ts';
+
+/** The one status a row must hold to be delivered, for the query that narrows the read. */
+const DELIVERABLE_STATUSES: readonly DownloadStatus[] = ['completed'];
 
 export interface DeliverDeps {
   raw: DatabaseSync;
@@ -118,6 +144,34 @@ export interface DeliverResult {
    * client with nothing left to reclaim if all you have is `reclaimed: 0`.
    */
   reclaimFailures: number;
+  /**
+   * Completed rows the client reported no `storage_path` for, so there was
+   * nothing to map, stat or hand to a plugin. They stay `completed` and are
+   * offered again next pass; the number exists because the alternative was
+   * silence -- see the module doc's own paragraph on this. Counted every
+   * pass, not once: this answers "how many completed downloads can this
+   * client not tell me where to find", which is a standing condition rather
+   * than an event.
+   */
+  undeliverable: number;
+}
+
+/**
+ * Counts and logs every row in `rows` the client gave no `storage_path`
+ * for. At module scope, closing over nothing from the pass that calls it.
+ *
+ * Only the row id is logged, never the row: a `DownloadRow` carries a
+ * client-supplied path and a client ref, and this package's rule is that a
+ * message names the discriminant and nothing else.
+ */
+function reportUndeliverable(deps: DeliverDeps, result: DeliverResult, rows: readonly DownloadRow[]): void {
+  for (const row of rows) {
+    if (row.storagePath !== null) continue;
+    result.undeliverable += 1;
+    deps.log('download client reported this download completed with no storage path, nothing to deliver', {
+      rowId: row.id,
+    });
+  }
 }
 
 /**
@@ -141,9 +195,13 @@ async function deliverRows(deps: DeliverDeps, result: DeliverResult, rows: reado
 /** Delivers one `completed` row, per the module doc's numbered steps. */
 async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: DownloadRow): Promise<void> {
   const storagePath = row.storagePath;
-  // Unreachable given `deliverCompleted`'s own filter below, but the type
-  // is `string | null` regardless of what a caller has already checked, and
-  // a row with nothing to map or stat has nothing this function can do.
+  // `deliverCompleted` counts and logs a null-path row through
+  // `reportUndeliverable` and never passes it here, so nothing reaches this
+  // in practice -- but "in practice" is a claim about a caller, and the type
+  // is `string | null` whatever that caller has already checked. This
+  // comment used to call the branch unreachable *given the filter*, which
+  // was true only because the filter discarded those rows in silence: that
+  // silence was the defect, not the reason this branch was safe.
   if (storagePath === null) return;
 
   try {
@@ -176,9 +234,18 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
     // Every other throw from steps 1-4, including `stat` finding nothing
     // there: logged, and the row stays `completed` for the next tick. See
     // the module doc for why this never calls `failRow`.
+    //
+    // `redactUrl`, matching `reclaimRows` below. Defence in depth rather
+    // than a live leak: nothing that reaches this catch holds a credential
+    // today -- steps 1-4 are two sqlite reads, `deps.stat`, and the
+    // plugin's own `onDownloadedFile` -- so there is no url with an api key
+    // in it for a message here to carry. The point is that the two catches
+    // in one file no longer differ in a way a reader has to check, and a
+    // later step that does build a url (a plugin handed the client's base
+    // url, say) cannot leak through the one that was left raw.
     deps.log('failed to deliver a completed download, leaving it completed for the next tick', {
       rowId: row.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: error instanceof Error ? redactUrl(error.message) : String(error),
     });
   }
 }
@@ -231,16 +298,26 @@ async function reclaimRows(
  * See the module doc for the full ordering and its reasoning.
  */
 export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult> {
-  const result: DeliverResult = { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0 };
+  const result: DeliverResult = {
+    delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0,
+  };
 
-  // Both `status === 'completed'` and `deliveredAt === null` are checked,
-  // even though `markDelivered` never sets one without the other -- stating
-  // both is what the module doc's own wording promises, and a future writer
-  // of `delivered_at` that broke that pairing would be caught here rather
-  // than silently redelivering, or silently skipping, a row.
-  const completedRows = rowsForClient(deps.raw, deps.clientId)
-    .filter((row) => row.status === 'completed' && row.storagePath !== null && row.deliveredAt === null);
-  await deliverRows(deps, result, completedRows);
+  // `status` is narrowed in SQL -- see `rows.ts`'s `rowsForClientByStatus`
+  // for why reading every row this client ever had, then filtering, cost
+  // 153 ms of blocked event loop per tick at 20,000 finished rows. Both
+  // `status === 'completed'` and `deliveredAt === null` are then checked
+  // here, even though `markDelivered` never sets one without the other --
+  // stating both is what the module doc's own wording promises, and a future
+  // writer of `delivered_at` that broke that pairing would be caught here
+  // rather than silently redelivering, or silently skipping, a row.
+  const completedRows = rowsForClientByStatus(deps.raw, deps.clientId, DELIVERABLE_STATUSES)
+    .filter((row) => row.status === 'completed' && row.deliveredAt === null);
+  // `storagePath === null` is reported before anything is delivered, rather
+  // than dropped by the filter above: a completed row the client cannot
+  // place is a standing condition someone has to be able to see. See the
+  // module doc.
+  reportUndeliverable(deps, result, completedRows);
+  await deliverRows(deps, result, completedRows.filter((row) => row.storagePath !== null));
 
   const remove = deps.remove;
   if (remove !== undefined) {
@@ -249,7 +326,14 @@ export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult
     // tick, not one tick later. `reclaimedAt === null` is what keeps this a
     // once-per-download reclaim rather than a once-per-tick one -- see the
     // module doc and `db/migrate.ts`'s migration 8 comment.
-    const deliveredRows = rowsForClient(deps.raw, deps.clientId)
+    // `reclaimed_at IS NULL` is in the SQL as well as restated here, unlike
+    // the `completed` read above: `delivered` is where a row stops moving, so
+    // every download this client has ever finished stays in that status
+    // forever with `reclaimed_at` set. Narrowing on status alone would leave
+    // this read growing with lifetime history, which is the whole thing the
+    // narrowing was for -- see `rows.ts`'s `unreclaimedRowsForClient` for the
+    // measurement.
+    const deliveredRows = unreclaimedRowsForClient(deps.raw, deps.clientId)
       .filter((row) => row.status === 'delivered' && row.reclaimedAt === null);
     await reclaimRows(deps, remove, result, deliveredRows);
   }

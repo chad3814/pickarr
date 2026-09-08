@@ -18,26 +18,32 @@
  * not exist at all**. A wrong verdict is then recoverable on the very next
  * poll, rather than terminal.
  *
- * This module runs a ref-recovery pass (below), then step 1 (queue) and
- * step 3 (history) of the full reconcile pass, then an absence sweep, given
- * a snapshot already fetched. Delivering a `completed` row to its plugin is
- * Task 10's -- it runs in the same function, around this walk, once that
- * task lands.
+ * This module runs a ref-recovery pass (below), then the queue walk and the
+ * history walk of the full reconcile pass, then an absence sweep, given a
+ * snapshot already fetched. Delivering a `completed` row to its plugin is
+ * not here and not in this function: `deliver.ts`'s `deliverCompleted` does
+ * it, and `reconcile-job.ts`'s handler calls it after `walkSnapshot`
+ * returns. Nothing in this module awaits anything, which is the practical
+ * reason the two are separate -- delivery calls a plugin and a filesystem,
+ * and this walk is a run of synchronous sqlite writes.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { redactUrl } from './redact.ts';
 import {
-  advanceStatus, failRow, rowByRef, rowsForClient, setAbsent, setProgress, setRef, setStoragePath,
+  DOWNLOAD_STATUSES, advanceStatus, failRow, heldRefs, rowByRef, rowsForClientByStatus, setAbsent,
+  setProgress, setRef, setStoragePath,
 } from './rows.ts';
-import type { DownloadRow } from './rows.ts';
+import type { DownloadRow, DownloadStatus } from './rows.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
 
 /**
- * Only the fields this task and Task 9's absence sweep produce. `delivered`
- * and `reclaimed` belong to Task 10's own `deliverCompleted`, a separate
- * function with a separate result -- they never join this type; a reviewer
- * seeing a type that will grow once more is expected here, not a sign this
- * was left unfinished.
+ * What one `walkSnapshot` pass did: only the counters the walk and the
+ * absence sweep in this module produce. `delivered`, `reclaimed`,
+ * `unowned`, `reclaimFailures` and `undeliverable` belong to `deliver.ts`'s
+ * `DeliverResult` -- a separate function, a separate pass, a separate
+ * result -- and never join this type. `reconcile-job.ts`'s
+ * `logTickSummary` is what puts the two side by side on one line, which is
+ * the only place a tick is described as a whole.
  */
 export interface ReconcileResult {
   advanced: number;
@@ -46,6 +52,20 @@ export interface ReconcileResult {
   untracked: number;
   recovered: number;
   absent: number;
+  /**
+   * Candidate refs recovery declined because a row on this client already
+   * holds them -- see `refCandidates`. Reported rather than only logged for
+   * the same reason `DeliverResult.reclaimFailures` is: a client whose every
+   * candidate is already claimed looks identical to a client with nothing to
+   * recover if all you have is `recovered: 0`.
+   */
+  refsAlreadyHeld: number;
+  /**
+   * Rows whose recovery write itself threw. The row keeps its null ref and
+   * the next tick tries again; every other row's recovery in the same pass
+   * still happened. See `recoverRefs`.
+   */
+  recoverFailures: number;
 }
 
 /**
@@ -81,6 +101,38 @@ const ADVANCES_TO_COMPLETED: ReadonlySet<DownloadRow['status']> =
   new Set(['submitting', 'submitted', 'downloading', 'failed']);
 
 /**
+ * Whether this row already records exactly the failure the client is
+ * reporting now -- same status, same reason.
+ *
+ * The `failed` arm's counterpart to `ADVANCES_TO_COMPLETED`, and the reason
+ * the two arms of `walkHistoryEntry` now read alike. The `completed` arm has
+ * always asked "is this row somewhere an advance to `completed` is a real
+ * transition from?" and skipped the write when it was not. The `failed` arm
+ * asked nothing: a failed history entry issued one `UPDATE` per tick against
+ * a row it had already failed, forever, at once per minute per client. That
+ * cost three things. `updated_at` was rewritten on every tick, so the column
+ * stopped answering "when did this row last change" for exactly the rows an
+ * operator is most likely to be looking at. `result.failed` reported a fresh
+ * failure every tick, so the count meant "failed rows the client still
+ * mentions" rather than "rows this tick failed" -- and with the summary line
+ * now logging it, that would have been a line printed forever about nothing
+ * happening. And the asymmetry itself was undocumented, which is what makes
+ * a reader assume it was reasoned about.
+ *
+ * **Not terminality.** A row already `failed` whose job the client later
+ * reports `completed` still advances -- `ADVANCES_TO_COMPLETED` includes
+ * `'failed'` deliberately, and that a wrong verdict stays recoverable is
+ * this module's whole headline property (see the module doc's account of
+ * 1.x's 2026-08-15 incident). This guard is narrower than that: it declines
+ * to rewrite a verdict with the one it already holds. A `failed` entry whose
+ * *reason* has changed is a new fact and is written, so a client that
+ * refines its own message still reaches `last_error`.
+ */
+function alreadyFailedForThisReason(row: DownloadRow, message: string): boolean {
+  return row.status === 'failed' && row.lastError === message;
+}
+
+/**
  * Handles one queue entry: an advance to `downloading` from `submitted` or
  * `submitting`, then a progress observation applied regardless -- unless the
  * row is `delivered`, which every arm of this walk leaves untouched because
@@ -113,7 +165,9 @@ function walkQueueEntry(
  * state **and from `failed`** -- the one arm that reaches a row 1.x's
  * row-first ordering could never have asked about again. `failed` fails the
  * row with the client's message, redacted, or a stated default when the
- * client gave none. `in-progress` is a transient post-processing state, not
+ * client gave none -- unless the row already carries that same failure, in
+ * which case there is nothing to record and it is left alone
+ * (`alreadyFailedForThisReason`). `in-progress` is a transient post-processing state, not
  * a verdict either way, so it does nothing at all: 1.x once read every such
  * status as terminal and failed an ordinary multi-part download while
  * SABnzbd was still unpacking it.
@@ -145,6 +199,10 @@ function walkHistoryEntry(
     }
     case 'failed': {
       const message = redactUrl(entry.failMessage ?? defaultFailMessage(deps.clientId));
+      // Guarded the same way the `completed` arm above is -- see
+      // `alreadyFailedForThisReason` for what the unguarded version cost and
+      // why this is not the same thing as making `failed` terminal.
+      if (alreadyFailedForThisReason(row, message)) return;
       if (failRow(deps.raw, row, message, deps.now)) {
         result.failed += 1;
       }
@@ -171,19 +229,52 @@ function filenameForItem(raw: DatabaseSync, rssItemId: number): string {
 
 /**
  * Every ref in `deps.snapshot` -- queue and history alike -- whose category
- * matches this client's and whose name matches `filename`. Both collections
- * are searched because a job can already be finished (in history) by the
- * time its ref is recovered.
+ * matches this client's and whose name matches `filename`, minus every ref
+ * `held` says a row on this client already has. Both collections are
+ * searched because a job can already be finished (in history) by the time
+ * its ref is recovered.
+ *
+ * The `held` exclusion is not an optimisation. A `(category, name)` match
+ * says nothing about who owns the job: a row already `downloading` under
+ * `nzo-1` and a second `submitting` row for the same `rss_item.filename`
+ * produce exactly one candidate each, and attaching `nzo-1` to the second
+ * row is a `client_ref` unique-index violation -- a throw that escapes
+ * `walkSnapshot` and abandons the rest of the tick, five ticks running,
+ * until the dispatcher dead-letters the job and the client has no reconcile
+ * at all. `recoverRefs`'s claim pass makes recovery a bijection *among
+ * candidates*; this makes it a bijection against the rows that are not
+ * candidates too, which is the other half of the same property.
+ *
+ * `alreadyHeld` is returned rather than silently dropped so the caller can
+ * count it: a row whose only candidate belongs to someone else is left
+ * `submitting` with a null ref forever, and "recovered nothing" is not a
+ * useful description of that.
  */
-function refCandidates(deps: ReconcileDeps, filename: string): string[] {
+function refCandidates(
+  deps: ReconcileDeps,
+  filename: string,
+  held: ReadonlySet<string>,
+): { refs: string[]; alreadyHeld: number } {
   const queueRefs = deps.snapshot.queue
     .filter((entry) => entry.category === deps.category && entry.name === filename)
     .map((entry) => entry.ref);
   const historyRefs = deps.snapshot.history
     .filter((entry) => entry.category === deps.category && entry.name === filename)
     .map((entry) => entry.ref);
-  return [...queueRefs, ...historyRefs];
+  const matches = [...queueRefs, ...historyRefs];
+  const refs = matches.filter((ref) => !held.has(ref));
+  return { refs, alreadyHeld: matches.length - refs.length };
 }
+
+/**
+ * The only status a null `client_ref` can be recovered for: a row still
+ * `submitting` has an unresolved add or a submission whose response was
+ * lost. Narrowed in SQL rather than after the read, so the query is served
+ * by `..._status` and costs one row per unconfirmed submission instead of
+ * one per download this client has ever had. See
+ * `rows.ts`'s `rowsForClientByStatus` for the measurement.
+ */
+const RECOVERABLE_STATUSES: readonly DownloadStatus[] = ['submitting'];
 
 /**
  * Recovers the `client_ref` 1.x used to restore with its per-installation
@@ -205,40 +296,67 @@ function refCandidates(deps: ReconcileDeps, filename: string): string[] {
  * match resolved arbitrarily could attach the wrong job's ref to this row,
  * which is worse than leaving it for a human to look at.
  *
- * Ambiguity runs both ways, so this resolves in two passes. "Exactly one
- * candidate for this row" is not enough on its own: two rows whose
- * `rss_item.filename` is the same -- the same release picked twice, or two
- * feeds carrying it -- each see the same single client job, and each would
- * claim it. Attaching one job to two rows is wrong on its face, and it does
- * not even fail quietly: `client_ref`'s partial unique index would reject
- * the second write with SQLITE_CONSTRAINT_UNIQUE, and that throw would
- * escape `walkSnapshot` and abandon the rest of the tick -- the queue walk,
- * the history walk, everything after. One pair of same-named downloads
- * would stop reconciling that client entirely, on every tick, until someone
- * noticed. So a ref claimed by more than one row is dropped and logged, the
- * same way a row with more than one candidate is.
+ * Ambiguity runs three ways, so this resolves in three steps.
+ *
+ * 1. **A candidate a non-candidate row already holds is not a candidate at
+ *    all.** `refCandidates` excludes every ref `heldRefs` reports, because a
+ *    `(category, name)` match says nothing about ownership: a row already
+ *    `downloading` under one ref and a `submitting` row for the same
+ *    `rss_item.filename` each see that one job. See `refCandidates`.
+ * 2. **"Exactly one candidate for this row" is not enough on its own.** Two
+ *    rows whose `rss_item.filename` is the same -- the same `rss_item`
+ *    requested twice, the same release picked twice, or two feeds carrying it
+ *    -- each see the same single client job, and each would claim it.
+ *    Attaching one job to two rows is wrong on its face. So a ref claimed by
+ *    more than one row is dropped and logged, the same way a row with more
+ *    than one candidate is, and the count is taken before anything is written
+ *    so the decision does not depend on which row happened to be read first.
+ * 3. **The write itself is caught per row.** Steps 1 and 2 close both routes
+ *    this codebase knows about into `client_ref`'s partial unique index, and
+ *    a violation there does not fail quietly: it throws
+ *    SQLITE_CONSTRAINT_UNIQUE out of `setRef`, and that throw would escape
+ *    `walkSnapshot` and abandon the rest of the tick -- the queue walk, the
+ *    history walk, everything after. Five consecutive ticks of that
+ *    dead-letters the reconcile job and the client stops being reconciled at
+ *    all until a restart. Whatever route a future change opens, it must cost
+ *    that row's recovery and nothing else's, which is the same reasoning
+ *    `deliver.ts`'s `deliverOne` and `reclaimRows` already apply to a plugin
+ *    and to a client that throw.
  */
 function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
   if (!deps.snapshot.complete) return;
 
-  const candidateRows = rowsForClient(deps.raw, deps.clientId)
-    .filter((row) => row.status === 'submitting' && row.clientRef === null);
+  const candidateRows = rowsForClientByStatus(deps.raw, deps.clientId, RECOVERABLE_STATUSES)
+    .filter((row) => row.clientRef === null);
+  // Nothing to recover means nothing to look up: the held-ref read is
+  // skipped entirely rather than run for every tick of a client with no
+  // unconfirmed submissions, which is almost every tick.
+  if (candidateRows.length === 0) return;
+
+  const held = heldRefs(deps.raw, deps.clientId);
 
   // First pass: which row wants which ref, for the rows whose match is
   // unambiguous from their own side.
   const claims: Array<{ row: DownloadRow; ref: string }> = [];
   for (const row of candidateRows) {
     const filename = filenameForItem(deps.raw, row.rssItemId);
-    const matches = refCandidates(deps, filename);
+    const { refs, alreadyHeld } = refCandidates(deps, filename, held);
 
-    if (matches.length > 1) {
+    if (alreadyHeld > 0) {
+      result.refsAlreadyHeld += alreadyHeld;
+      deps.log('ref recovery candidate is already held by another download', {
+        rowId: row.id, candidates: alreadyHeld, name: filename,
+      });
+    }
+
+    if (refs.length > 1) {
       deps.log('ambiguous ref recovery candidates', {
-        rowId: row.id, candidates: matches.length, name: filename,
+        rowId: row.id, candidates: refs.length, name: filename,
       });
       continue;
     }
 
-    const [only] = matches;
+    const [only] = refs;
     if (only === undefined) continue;
     claims.push({ row, ref: only });
   }
@@ -259,14 +377,46 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
       });
       continue;
     }
-    if (setRef(deps.raw, claim.row, claim.ref, deps.now)) {
-      result.recovered += 1;
+    // Caught per row -- see step 3 of this function's doc comment. Only the
+    // reason is logged, never the row or the snapshot entry.
+    try {
+      if (setRef(deps.raw, claim.row, claim.ref, deps.now)) {
+        result.recovered += 1;
+      }
+    } catch (error) {
+      result.recoverFailures += 1;
+      deps.log('ref recovery write failed, leaving the download unconfirmed for the next tick', {
+        rowId: claim.row.id,
+        reason: error instanceof Error ? redactUrl(error.message) : String(error),
+      });
     }
   }
 }
 
-/** `delivered` and `failed` are where a row's life in this slice ends; an absence observation about either would say nothing anyone acts on, so neither is ever swept. */
+/**
+ * The two statuses the absence sweep skips. Terminal *for the sweep's
+ * purposes* only -- an absence observation about either says nothing anyone
+ * acts on, so stamping one would cost a write and buy no decision.
+ *
+ * Neither is where a row's life ends, and `failed` emphatically is not:
+ * `ADVANCES_TO_COMPLETED` includes it on purpose, so a row this database
+ * failed is advanced the moment the client reports the job completed. That
+ * a wrong verdict stays recoverable is this module's headline property (see
+ * the module doc's account of 1.x's 2026-08-15 incident), and this set does
+ * not weaken it -- a `failed` row is reached through the snapshot's own
+ * entries, which is precisely the path that does not depend on any sweep.
+ */
 const TERMINAL_STATUSES: ReadonlySet<DownloadRow['status']> = new Set(['delivered', 'failed']);
+
+/**
+ * The statuses the sweep below actually reads, for the query that narrows
+ * it. Derived from `DOWNLOAD_STATUSES` and `TERMINAL_STATUSES` rather than
+ * written out, so the two can never disagree: a seventh status added to
+ * `rows.ts` is swept unless it is also named terminal, which is the safe
+ * direction -- the alternative silently stops sweeping it.
+ */
+const SWEPT_STATUSES: readonly DownloadStatus[] =
+  DOWNLOAD_STATUSES.filter((status) => !TERMINAL_STATUSES.has(status));
 
 /**
  * Every ref `snapshot` accounts for, queue and history alike -- the set a
@@ -324,7 +474,12 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
 
   const refs = accountedForRefs(deps.snapshot);
 
-  for (const row of rowsForClient(deps.raw, deps.clientId)) {
+  for (const row of rowsForClientByStatus(deps.raw, deps.clientId, SWEPT_STATUSES)) {
+    // Restated after the query, not instead of it: the SQL is what makes the
+    // read proportional to live rows, and this is the same "state both"
+    // discipline `deliver.ts`'s own filter comment describes -- a future
+    // change to either list is caught here rather than silently sweeping a
+    // terminal row.
     if (TERMINAL_STATUSES.has(row.status)) continue;
     if (row.clientRef === null) continue;
 
@@ -355,7 +510,10 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
  * it at.
  */
 export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
-  const result: ReconcileResult = { advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0 };
+  const result: ReconcileResult = {
+    advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0,
+  };
 
   recoverRefs(deps, result);
 

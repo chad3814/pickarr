@@ -45,7 +45,13 @@ import type { DatabaseSync } from 'node:sqlite';
 export type DownloadStatus =
   'submitting' | 'submitted' | 'downloading' | 'completed' | 'delivered' | 'failed';
 
-const DOWNLOAD_STATUSES: readonly DownloadStatus[] =
+/**
+ * Every status a download row may hold. Exported so a caller that wants
+ * "everything except X" can derive it from this list rather than restate it
+ * -- `reconcile.ts`'s absence sweep does exactly that, and a restated list
+ * is a list that drifts the day a seventh status is added.
+ */
+export const DOWNLOAD_STATUSES: readonly DownloadStatus[] =
   ['submitting', 'submitted', 'downloading', 'completed', 'delivered', 'failed'];
 
 function isDownloadStatus(value: string): value is DownloadStatus {
@@ -63,6 +69,18 @@ export interface DownloadRow {
   absentSince: number | null;
   deliveredAt: number | null;
   reclaimedAt: number | null;
+  /**
+   * The reason the row carries for its current state -- `failRow`'s own
+   * message when `status` is `failed`, and whatever an earlier failure left
+   * behind otherwise, since nothing clears it on the way back out.
+   *
+   * Read, not merely written, since `reconcile.ts`'s history walk decides on
+   * it: a `failed` history entry that names the reason this row already
+   * holds is a repeat of a verdict already recorded, and re-issuing the
+   * `UPDATE` would churn `updated_at` on every tick forever. That decision
+   * needs the current value, so it is part of the row.
+   */
+  lastError: string | null;
 }
 
 /**
@@ -70,9 +88,13 @@ export interface DownloadRow {
  * (torrent-only, and no function here needs it), never `attempts` (dead in
  * this slice), and never `api_key`/`username`/`password` -- this module
  * touches only the two download tables, which do not have those columns.
+ *
+ * `last_error` is here because it is read, not only written: see
+ * `DownloadRow.lastError`.
  */
 const SELECT_COLUMNS =
-  'id, rss_item_id, download_client_id, client_ref, status, storage_path, absent_since, delivered_at, reclaimed_at';
+  'id, rss_item_id, download_client_id, client_ref, status, storage_path, absent_since, delivered_at, '
+  + 'reclaimed_at, last_error';
 
 /**
  * Narrows one raw row into a `DownloadRow`, the same idiom `clients/config.ts`'s
@@ -89,6 +111,7 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
   const absentSince = (raw as { absent_since: unknown }).absent_since;
   const deliveredAt = (raw as { delivered_at: unknown }).delivered_at;
   const reclaimedAt = (raw as { reclaimed_at: unknown }).reclaimed_at;
+  const lastError = (raw as { last_error: unknown }).last_error;
   const statusValue = String((raw as { status: unknown }).status);
   if (!isDownloadStatus(statusValue)) {
     throw new Error(`${table} row ${id} has unknown status ${JSON.stringify(statusValue)}`);
@@ -104,17 +127,165 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
     absentSince: absentSince === null || absentSince === undefined ? null : Number(absentSince),
     deliveredAt: deliveredAt === null || deliveredAt === undefined ? null : Number(deliveredAt),
     reclaimedAt: reclaimedAt === null || reclaimedAt === undefined ? null : Number(reclaimedAt),
+    lastError: lastError === null || lastError === undefined ? null : String(lastError),
   };
 }
 
-/** Every row on `clientId`, tagged with which table it came from. */
-export function rowsForClient(raw: DatabaseSync, clientId: number): DownloadRow[] {
-  const torrentRows = raw.prepare(
-    `SELECT ${SELECT_COLUMNS} FROM torrent_download WHERE download_client_id = ?`,
-  ).all(clientId).map((row) => toRow(row, 'torrent_download'));
-  const nzbRows = raw.prepare(
-    `SELECT ${SELECT_COLUMNS} FROM nzb_download WHERE download_client_id = ?`,
-  ).all(clientId).map((row) => toRow(row, 'nzb_download'));
+/**
+ * The statement `rowsForClientByStatus` runs against one table, for
+ * `statusCount` placeholders.
+ *
+ * Exported so a test can put the *actual* query through
+ * `EXPLAIN QUERY PLAN`. A plan assertion against a string restated in the
+ * test proves what SQLite does with that string, not what this module asks
+ * it -- and the whole reason the assertion exists is that a dropped `status`
+ * predicate changes nothing an ordinary test can observe while turning every
+ * read back into a full scan.
+ *
+ * `table` picks between two literals through a comparison rather than being
+ * interpolated, even though its type is the two-member union: see this
+ * module's own doc for why that type is not what makes the interpolation
+ * safe. `statusCount` is a length, never a value, so nothing a caller holds
+ * reaches the text. A `statusCount` of 0 would build `IN ()`, which is not
+ * valid SQLite; `rowsForClientByStatus` answers that case before calling
+ * here.
+ */
+export function rowsForClientByStatusSql(table: DownloadRow['table'], statusCount: number): string {
+  const placeholders = Array.from({ length: statusCount }, () => '?').join(', ');
+  const tail = ` WHERE download_client_id = ? AND status IN (${placeholders}) ORDER BY id`;
+  return table === 'torrent_download'
+    ? `SELECT ${SELECT_COLUMNS} FROM torrent_download${tail}`
+    : `SELECT ${SELECT_COLUMNS} FROM nzb_download${tail}`;
+}
+
+/**
+ * Every row on `clientId` whose `status` is one of `statuses`, tagged with
+ * which table it came from, torrent rows first and each table in id order.
+ *
+ * **The status predicate is in SQL, and that is the point.** The function
+ * this replaced selected on `download_client_id` alone and left every
+ * caller to filter in JavaScript, so each of them read every row the client
+ * had ever had -- every `delivered`, every `failed` -- and narrowed it
+ * afterwards. A reconcile tick makes four such reads across two tables, so
+ * eight full scans, all materialised through `toRow`. Measured on that
+ * shape: 20,000 finished rows with nothing at all to do, one tick took
+ * 153 ms. `node:sqlite` is synchronous, so that is 153 ms in which nothing
+ * else in the process runs, once per client per minute, growing with
+ * lifetime history and never shrinking. This is also the query
+ * `torrent_download_status`/`nzb_download_status` were added for in
+ * migration 7 -- until it existed those indexes served nothing.
+ *
+ * `ORDER BY id` is stated rather than inherited from the index. Reading
+ * through `..._status` returns rows grouped by status *value*, and delivery
+ * order is documented as row order (`clients/deliver.ts`, and §9 of this
+ * slice's design). A single-status read gets that ordering from the index
+ * for nothing; a multi-status read pays a sort over the narrowed set, which
+ * is the only set anyone was going to look at.
+ *
+ * The placeholder list is built from `statuses.length` and never from its
+ * contents -- the same rule this module's own doc states for table names,
+ * for the same reason. An empty `statuses` is answered without a query at
+ * all: no row's status is a member of the empty set, so `[]` is the correct
+ * answer rather than a degenerate one, and `IN ()` is not valid SQLite
+ * anyway.
+ */
+export function rowsForClientByStatus(
+  raw: DatabaseSync,
+  clientId: number,
+  statuses: readonly DownloadStatus[],
+): DownloadRow[] {
+  if (statuses.length === 0) return [];
+  const torrentRows = raw.prepare(rowsForClientByStatusSql('torrent_download', statuses.length))
+    .all(clientId, ...statuses).map((row) => toRow(row, 'torrent_download'));
+  const nzbRows = raw.prepare(rowsForClientByStatusSql('nzb_download', statuses.length))
+    .all(clientId, ...statuses).map((row) => toRow(row, 'nzb_download'));
+  return [...torrentRows, ...nzbRows];
+}
+
+/**
+ * Adds every non-null `client_ref` in `rows` to `refs`. At module scope
+ * rather than nested inside `heldRefs`: it closes over nothing from that
+ * call, and a nested helper that could be hoisted is a lint warning this
+ * package keeps at zero.
+ */
+function collectRefs(rows: readonly unknown[], refs: Set<string>): void {
+  for (const row of rows) {
+    const ref = (row as { client_ref: unknown }).client_ref;
+    if (ref !== null && ref !== undefined) refs.add(String(ref));
+  }
+}
+
+/**
+ * Every `client_ref` a row on `clientId` already holds -- both tables, and
+ * every status, because a `delivered` row's ref is exactly as taken as a
+ * `downloading` one's.
+ *
+ * Both tables even though each has its own unique index, and the index is
+ * per-table: `rowByRef` looks a ref up in `torrent_download` first and
+ * `nzb_download` second, so a ref taken in either one is a ref nothing may
+ * attach to a row in the other -- doing it anyway would not violate a
+ * constraint, it would just make `rowByRef` answer with whichever table was
+ * asked first. This function answers "is this ref taken", not "would this
+ * write be rejected".
+ *
+ * Selects `client_ref` alone and states `client_ref IS NOT NULL`, which is
+ * what lets the *partial* unique index `(download_client_id, client_ref)`
+ * cover the read -- no table row is visited at all. Filtering the nulls out
+ * in JavaScript instead would leave the predicate unstated, the index
+ * unusable, and the read a full scan of every row this client has ever had.
+ */
+export function heldRefs(raw: DatabaseSync, clientId: number): Set<string> {
+  const refs = new Set<string>();
+  collectRefs(
+    raw.prepare(
+      'SELECT client_ref FROM torrent_download WHERE download_client_id = ? AND client_ref IS NOT NULL',
+    ).all(clientId),
+    refs,
+  );
+  collectRefs(
+    raw.prepare(
+      'SELECT client_ref FROM nzb_download WHERE download_client_id = ? AND client_ref IS NOT NULL',
+    ).all(clientId),
+    refs,
+  );
+  return refs;
+}
+
+/**
+ * The statement `unreclaimedRowsForClient` runs against one table.
+ * Exported for the same `EXPLAIN QUERY PLAN` reason as
+ * `rowsForClientByStatusSql`, and `table` picks between two literals the
+ * same way.
+ */
+export function unreclaimedRowsForClientSql(table: DownloadRow['table']): string {
+  const tail = " WHERE download_client_id = ? AND status = 'delivered' AND reclaimed_at IS NULL ORDER BY id";
+  return table === 'torrent_download'
+    ? `SELECT ${SELECT_COLUMNS} FROM torrent_download${tail}`
+    : `SELECT ${SELECT_COLUMNS} FROM nzb_download${tail}`;
+}
+
+/**
+ * Every `delivered` row on `clientId` that has not been reclaimed yet --
+ * the reclaim pass's read, and the one place `rowsForClientByStatus` is not
+ * enough.
+ *
+ * `delivered` is where a row stops moving, so every download a client ever
+ * finished is `delivered` forever, and `reclaimed_at` is set on essentially
+ * all of them. Narrowing on `status` alone therefore leaves exactly the
+ * defect that narrowing was for: measured on this schema, 20,000
+ * already-reclaimed rows cost 18-32 ms per read as a status-only select and
+ * 1.8 ms with `reclaimed_at IS NULL` stated in SQL, because the former
+ * materialises 20,000 `DownloadRow`s to throw all of them away. Both use
+ * the `..._status` index; the difference is what comes back through it.
+ *
+ * The predicate matches `markReclaimed`'s own second guard, which is not a
+ * coincidence: this selects the rows that write can still apply to.
+ */
+export function unreclaimedRowsForClient(raw: DatabaseSync, clientId: number): DownloadRow[] {
+  const torrentRows = raw.prepare(unreclaimedRowsForClientSql('torrent_download'))
+    .all(clientId).map((row) => toRow(row, 'torrent_download'));
+  const nzbRows = raw.prepare(unreclaimedRowsForClientSql('nzb_download'))
+    .all(clientId).map((row) => toRow(row, 'nzb_download'));
   return [...torrentRows, ...nzbRows];
 }
 

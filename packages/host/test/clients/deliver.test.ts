@@ -7,6 +7,8 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { PluginNotRegisteredError } from '../../src/host.ts';
 import { deliverCompleted } from '../../src/clients/deliver.ts';
 import type { DeliverDeps } from '../../src/clients/deliver.ts';
+import { createSabnzbdClient } from '../../src/clients/sabnzbd.ts';
+import type { QueuedFetch } from '../../src/fetch/queue.ts';
 
 function setup(): DatabaseSync {
   const { raw } = openTestDatabase();
@@ -135,7 +137,7 @@ test('a completed row is delivered to the plugin owning its feed', async () => {
     deliver: async (pluginId, file) => { deliverCalls.push({ pluginId, file }); },
   }));
 
-  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0 });
+  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
   // The path passed to `stat` and to `deliver` is the *mapped* one, never
   // the client's own stored path.
   assert.deepEqual(statCalls, ['/media/movie.mkv']);
@@ -237,9 +239,79 @@ test('a row whose plugin is not registered is reported unowned and retried', asy
   const second = await deliverCompleted(deps);
 
   assert.equal(calls, 2, 'an unowned row must be retried every pass');
-  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0 });
-  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0 });
+  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'completed');
+});
+
+test('a completed row the client gave no path for is counted and logged on every pass, and never failed', async () => {
+  // `ClientHistoryEntry`'s own doc permits a `completed` entry with no
+  // `storagePath`, and both adapters emit null for a missing or empty field.
+  // The row used to be filtered out of the pass in silence: `sweepAbsent`
+  // clears its absence because its ref *is* accounted for, so across tick
+  // after tick it produced zero counters and zero log lines while sitting
+  // `completed` with `delivered_at` null. Three passes here, because one
+  // pass cannot tell "stuck" from "not yet".
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
+  });
+
+  const logs: { message: string; detail?: Readonly<Record<string, unknown>> }[] = [];
+  // `stat` and `deliver` are the loud unused doubles: reaching either would
+  // mean this row was treated as deliverable after all.
+  const deps = baseDeps(raw, clientId, {
+    log: (message, detail) => { logs.push(detail === undefined ? { message } : { message, detail }); },
+  });
+
+  const passes = [await deliverCompleted(deps), await deliverCompleted(deps), await deliverCompleted(deps)];
+
+  for (const pass of passes) {
+    assert.deepEqual(pass, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 1 });
+  }
+  assert.deepEqual(logs, [
+    { message: 'download client reported this download completed with no storage path, nothing to deliver', detail: { rowId: id } },
+    { message: 'download client reported this download completed with no storage path, nothing to deliver', detail: { rowId: id } },
+    { message: 'download client reported this download completed with no storage path, nothing to deliver', detail: { rowId: id } },
+  ]);
+  // Not failed, and not delivered: a path the client reports later, or a
+  // corrected mapping, still works -- the same reasoning a missing file gets.
+  assert.equal(readColumn(raw, id, 'status'), 'completed');
+  assert.equal(readColumn(raw, id, 'delivered_at'), null);
+  assert.equal(readColumn(raw, id, 'last_error'), null);
+  assert.equal(readColumn(raw, id, 'storage_path'), null);
+});
+
+test('a path the client supplies later is delivered, with no un-failing needed', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/media');
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
+  });
+
+  const deliverCalls: DownloadedFile[] = [];
+  const deps = baseDeps(raw, clientId, {
+    stat: async () => ({ sizeBytes: 8 }),
+    deliver: async (_pluginId, file) => { deliverCalls.push(file); },
+  });
+
+  const first = await deliverCompleted(deps);
+  assert.equal(first.undeliverable, 1);
+  assert.deepEqual(deliverCalls, []);
+
+  // What a later poll's `setStoragePath` writes -- the row was left in a
+  // state that write is still legal against.
+  raw.prepare('UPDATE torrent_download SET storage_path = ? WHERE id = ?').run('/downloads/movie.mkv', id);
+
+  const second = await deliverCompleted(deps);
+  assert.deepEqual(second, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(deliverCalls, [{ path: '/media/movie.mkv', sizeBytes: 8, downloadClientId: clientId }]);
+  assert.equal(readColumn(raw, id, 'status'), 'delivered');
+  assert.equal(readColumn(raw, id, 'delivered_at'), 1000);
 });
 
 test('a delivered row is reclaimed when the adapter can reclaim', async () => {
@@ -256,7 +328,7 @@ test('a delivered row is reclaimed when the adapter can reclaim', async () => {
     remove: async (ref) => { removedRefs.push(ref); },
   }));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
   assert.deepEqual(removedRefs, ['ref-1']);
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), 900, 'the mark is what makes the next pass skip this row');
@@ -274,7 +346,7 @@ test('a client with no remove reclaims nothing', async () => {
 
   const result = await deliverCompleted(baseDeps(raw, clientId));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), null);
 });
@@ -341,6 +413,55 @@ test('a remove that throws leaves the row unreclaimed, and the next pass retries
   assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
 });
 
+test("a SABnzbd delete refused at HTTP 200 leaves the row unreclaimed, and the next pass retries it", async () => {
+  // The real adapter, not a hand-written `remove`: the defect was that
+  // `remove` read nothing out of the response, so a refusal answered with a
+  // 200 came back as success, `reclaimed_at` was stamped, the row was never
+  // offered again, and -- because the request carries `del_files=1` -- the
+  // files stayed on disk forever. Wiring the actual client in is what makes
+  // this test see that, rather than testing a double that agrees with it.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'SABnzbd_nzo_1',
+    status: 'delivered', deliveredAt: 500,
+  });
+
+  let calls = 0;
+  const fetch: QueuedFetch = {
+    async json<T>(): Promise<T> {
+      calls += 1;
+      // Refused on the first pass, accepted on the second: SABnzbd answers
+      // both with HTTP 200, which is the whole point.
+      const body: unknown = calls === 1
+        ? { status: false, error: 'API Key Incorrect' }
+        : { status: true };
+      return body as T;
+    },
+    bytes(): Promise<Uint8Array> { throw new Error('bytes is not used by this test'); },
+    text(): Promise<string> { throw new Error('text is not used by this test'); },
+  };
+  const sabnzbd = createSabnzbdClient({
+    kind: 'sabnzbd', id: 41, baseUrl: 'https://sab.example.com', apiKey: 'not-a-real-key', category: 'movies',
+  }, fetch);
+  const deps = baseDeps(raw, clientId, { now: 900, remove: (ref) => sabnzbd.remove(ref) });
+
+  const first = await deliverCompleted(deps);
+
+  assert.equal(first.reclaimed, 0, 'a refused delete is not a reclaim');
+  assert.equal(first.reclaimFailures, 1, 'the refusal is reported, not swallowed');
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), null, 'the row must stay unmarked -- the job is still in SABnzbd');
+  assert.equal(readColumn(raw, id, 'status'), 'delivered');
+
+  const second = await deliverCompleted(deps);
+
+  assert.equal(calls, 2, 'the row must be offered again, which the stamp would have prevented forever');
+  assert.equal(second.reclaimed, 1);
+  assert.equal(second.reclaimFailures, 0);
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
+});
+
 test('one ref the client will not delete does not starve the rows behind it', async () => {
   // The reason reclaim is caught per row rather than per pass. Without it,
   // the first bad ref rejects the whole pass, and because the next tick reads
@@ -375,4 +496,43 @@ test('one ref the client will not delete does not starve the rows behind it', as
   assert.equal(result.reclaimFailures, 1);
   assert.equal(readColumn(raw, poisonId, 'reclaimed_at'), null);
   assert.equal(readColumn(raw, goodId, 'reclaimed_at'), 900, 'the row behind the poison one is reclaimed');
+});
+
+test('a delivery failure\'s message is redacted, the same way a reclaim failure\'s already was', async () => {
+  // Defence in depth, not a live leak: the four steps `deliverOne` guards
+  // are two sqlite reads, `deps.stat` and the plugin's own
+  // `onDownloadedFile`, none of which is handed a url with a credential in
+  // it. This asserts the two catches in this file no longer differ -- a
+  // reader should not have to check which of them redacts, and a later step
+  // that does build a url cannot leak through the one that was left raw.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/media');
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
+  });
+
+  const lines: { message: string; detail: Readonly<Record<string, unknown>> | undefined }[] = [];
+  const result = await deliverCompleted(baseDeps(raw, clientId, {
+    stat: async () => ({ sizeBytes: 8 }),
+    deliver: async () => {
+      throw new Error('plugin refused: https://sab.example.com/api?apikey=super-secret&mode=queue');
+    },
+    log: (message, detail) => { lines.push({ message, detail }); },
+  }));
+
+  assert.equal(result.delivered, 0);
+  assert.deepEqual(
+    lines,
+    [{
+      message: 'failed to deliver a completed download, leaving it completed for the next tick',
+      detail: {
+        rowId: id,
+        error: 'plugin refused: https://sab.example.com/api?apikey=***&mode=queue',
+      },
+    }],
+    'the logged message must carry the redacted url, not the raw one',
+  );
+  assert.equal(readColumn(raw, id, 'status'), 'completed', 'the row is still retried next tick');
 });

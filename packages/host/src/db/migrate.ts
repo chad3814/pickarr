@@ -294,9 +294,10 @@ CREATE INDEX nzb_download_item ON nzb_download (rss_item_id);
  *
  * `storage_path` holds the *client's own* path, exactly as it reports it --
  * never the mapped path a `filepath_mapping` row would produce. That mapping
- * is derived on demand by a later task and never stored, because a stored
- * mapped path goes stale the moment a `filepath_mapping` row changes, and is
- * then a lie that outlived its cause.
+ * is derived on demand, by `clients/paths.ts`'s `mapClientPath` at the
+ * moment a row is delivered, and never stored: a stored mapped path goes
+ * stale the moment a `filepath_mapping` row changes, and is then a lie that
+ * outlived its cause.
  *
  * `delivered_at` here is not `rss_item.delivered_at`: that column is stamped
  * when slice A's poll hands an undelivered *new item* to its plugin, before
@@ -304,10 +305,16 @@ CREATE INDEX nzb_download_item ON nzb_download (rss_item_id);
  * confirmed has actually landed. Two columns, one name, two tables, two
  * unrelated facts.
  *
- * `torrent_download_status` and `nzb_download_status` exist for the
- * reconcile pass's own query: "every row not yet in a terminal state",
- * filtered by `status` -- a query the existing indexes on `client_ref` and
- * `rss_item_id` cannot serve.
+ * `torrent_download_status` and `nzb_download_status` serve
+ * `clients/rows.ts`'s `rowsForClientByStatus`, which is the one read shape
+ * every caller in the reconcile tick uses: the absence sweep asks for every
+ * non-terminal status, delivery asks for `completed`, reclaim asks for
+ * `delivered`, and ref recovery asks for `submitting`. Neither the
+ * `client_ref` index (partial, and keyed the wrong way round) nor the
+ * `rss_item_id` one can answer any of them, so without these two the whole
+ * tick reads every row the client has ever had. `rows.test.ts` asserts the
+ * plan actually uses them, because a dropped `status` predicate changes
+ * nothing else that a test can see.
  */
 const MIGRATION_7 = `
 ALTER TABLE torrent_download ADD COLUMN storage_path TEXT;

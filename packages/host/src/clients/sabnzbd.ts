@@ -6,6 +6,33 @@ import { redactUrl } from './redact.ts';
 import type { SubmitResult } from './types.ts';
 
 /**
+ * The two fields SABnzbd puts a refusal in, whichever call was refused:
+ * `status: false` and a human-readable `error`. Separate from
+ * `AddUrlResponse` because `addurl` is not the only call that can be
+ * refused at HTTP 200 -- `history&name=delete` is refused exactly the same
+ * way -- and reading that shape twice, once per call site, is how one of
+ * the two readings ends up missing.
+ */
+interface SabnzbdRefusal {
+  status?: boolean;
+  error?: string;
+}
+
+/**
+ * SABnzbd's own wording for a refusal, or a stated default when it gave
+ * none.
+ *
+ * `error` routinely quotes back the request it rejected -- a request whose
+ * query string is ours, api key included -- so it goes through `redactUrl`
+ * exactly like a url would. Every caller that builds a message from a
+ * refusal goes through here rather than reaching for `body.error`, so the
+ * redaction cannot be forgotten at one call site and remembered at another.
+ */
+function refusalReason(body: SabnzbdRefusal): string {
+  return body.error === undefined || body.error === '' ? 'no reason given' : redactUrl(body.error);
+}
+
+/**
  * The shape `addurl` answers with -- both shapes, because SABnzbd answers a
  * rejection with HTTP 200 and a body saying otherwise: `{ status: false,
  * error: '...' }`, no `nzo_ids` at all. `fetch.json<T>` is an unchecked
@@ -19,9 +46,7 @@ import type { SubmitResult } from './types.ts';
  * `string` so `noUncheckedIndexedAccess` still makes `nzo_ids?.[0]` a
  * `string | undefined` that `submit` has to look at rather than assert past.
  */
-interface AddUrlResponse {
-  status?: boolean;
-  error?: string;
+interface AddUrlResponse extends SabnzbdRefusal {
   nzo_ids?: string[];
 }
 
@@ -55,9 +80,12 @@ function buildAddUrlUrl(config: SabnzbdConfig, link: string, name: string): stri
   // config form or this one would produce by accident. SABnzbd's own use of
   // `"None"` is on the way *back*: it is the literal text the server itself
   // answers with for a queue slot that has no category (1.x's
-  // `readCategory`, `packages/core/src/clients/sabnzbd.ts`, ~line 296) --
-  // this adapter never reads a slot's category back at all, so that
-  // reasoning has nothing to apply to here.
+  // `readCategory`, `packages/core/src/clients/sabnzbd.ts`, ~line 296).
+  // This adapter does read a slot's category back -- `toQueueEntry` and
+  // `toHistoryEntry` both fold it through `normalizeClientCategory` -- and
+  // that fold is exactly where it belongs, on the read side. What this
+  // function must not do is normalise on the way *out*, which would file a
+  // download under a category no operator configured.
   query.set('cat', config.category);
   query.set('nzbname', name);
   query.set('apikey', config.apiKey);
@@ -116,8 +144,8 @@ const IN_PROGRESS_STATUSES = new Set([
  * status to `IN_PROGRESS_STATUSES`; a wrong "still working" has no such
  * feedback loop.
  *
- * `qbittorrent.ts` (Task 4) defaults the opposite way for an unrecognised
- * torrent *state* -- not a bug, a different endpoint shape. SABnzbd's
+ * `qbittorrent.ts`'s own `readState` defaults the opposite way for an
+ * unrecognised torrent *state* -- not a bug, a different endpoint shape. SABnzbd's
  * history holds only jobs that have already left the queue, so an
  * unrecognised status there is more likely a terminal one this list
  * hasn't caught up with. qBittorrent's `torrents/info` spans a torrent's
@@ -363,14 +391,16 @@ export function createSabnzbdClient(
       if (body.status !== true) {
         // SABnzbd rejects with HTTP 200 and `status: false`, so nothing in
         // the transport notices; this is the only place the rejection can be
-        // turned into a real failure. `error` is SABnzbd's own wording and
-        // routinely quotes back the request it rejected -- a request whose
-        // query string is ours, api key included -- so it goes through
-        // `redactUrl` exactly like a url would.
-        const reason = body.error === undefined || body.error === ''
-          ? 'no reason given'
-          : redactUrl(body.error);
-        throw new Error(`sabnzbd client ${config.id} rejected the submission: ${reason}`);
+        // turned into a real failure.
+        //
+        // `!== true`, not `=== false`, and the asymmetry with `remove` below
+        // is deliberate: what follows reads `nzo_ids[0]` and writes it to the
+        // database as this download's only handle on the job. A body that
+        // does not say it succeeded cannot be trusted to carry a real id, and
+        // a wrong ref is unrecoverable -- nothing later can match the row
+        // back to anything. `remove` has nothing to read back, so it can
+        // afford the opposite default.
+        throw new Error(`sabnzbd client ${config.id} rejected the submission: ${refusalReason(body)}`);
       }
 
       const first = body.nzo_ids?.[0];
@@ -455,7 +485,27 @@ export function createSabnzbdClient(
       // `del_files=1` is what reclaims the download directory; without it
       // SABnzbd forgets the job and leaves its files behind forever.
       const url = buildHistoryDeleteUrl(config, ref);
-      await fetch.json<unknown>(url);
+      const body = await fetch.json<SabnzbdRefusal>(url);
+
+      // The same HTTP-200 refusal `submit` above documents at length, on the
+      // call that had been reading nothing at all. Unchecked, a refused
+      // delete returned normally, `deliver.ts` stamped `reclaimed_at`, and
+      // the row was never offered again: the job stayed in SABnzbd's history
+      // and -- because this request carries `del_files=1` -- its files stayed
+      // on disk forever. 1.x does not check this either, but 1.x has no
+      // `reclaimed_at`, so its refusals were retried rather than recorded as
+      // done; the column is what turned a missing check into a permanent
+      // loss.
+      //
+      // `=== false`, not `!== true`, unlike `submit`: there is nothing to
+      // read out of a successful delete, so the only thing requiring an
+      // explicit success marker could buy is failing every delete against a
+      // version that answers one differently -- climbing `reclaimFailures`
+      // with nothing actually wrong. Refusing only on the marker SABnzbd
+      // documents leaves an unfamiliar body a success.
+      if (body.status === false) {
+        throw new Error(`sabnzbd client ${config.id} refused to delete the job: ${refusalReason(body)}`);
+      }
     },
   };
 }

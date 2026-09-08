@@ -481,6 +481,78 @@ test('a queue call that fails reports an incomplete snapshot, not an empty clien
   assert.equal(snapshot.history.length, 1, 'a page that did load must still be usable, not discarded');
 });
 
+test('a delete refused with HTTP 200 is still a failure', async () => {
+  // The trap this module documents at length for `submit`, on the call that
+  // was reading nothing at all. Unchecked, `deliver.ts` stamped
+  // `reclaimed_at`, never offered the row again, and -- because the request
+  // carries `del_files=1` -- the job's files stayed on disk forever.
+  const config = makeConfig({ id: 31 });
+  const fetch = fakeQueuedFetch(async () => ({ status: false, error: 'API Key Incorrect' }));
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.remove('SABnzbd_nzo_remove_me'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('refused to delete')
+      && err.message.includes('31')
+      && err.message.includes('API Key Incorrect'),
+  );
+});
+
+test('a refused delete has its reason redacted, the same reading a refused submission gets', async () => {
+  // Both call sites go through one `refusalReason`, so the redaction cannot
+  // be remembered at one and forgotten at the other. SABnzbd quotes the
+  // request it rejected back at you, api key included.
+  const config = makeConfig({ id: 33 });
+  const fetch = fakeQueuedFetch(async () => ({
+    status: false,
+    error: 'cannot delete https://sab.example.com/api?apikey=super-secret&mode=history',
+  }));
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.remove('SABnzbd_nzo_remove_me'),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('apikey=***')
+      && !err.message.includes('super-secret'),
+  );
+});
+
+test('a refused delete with no reason given says so rather than nothing', async () => {
+  const config = makeConfig({ id: 35 });
+  const fetch = fakeQueuedFetch(async () => ({ status: false }));
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.remove('SABnzbd_nzo_remove_me'),
+    (err: unknown) => err instanceof Error && err.message.includes('no reason given'),
+  );
+});
+
+test('a delete answered with a body this adapter does not recognise is a success', async () => {
+  // `=== false`, not `!== true`: there is nothing to read out of a
+  // successful delete, so requiring an explicit success marker could only
+  // buy failing every delete against a version that answers one
+  // differently -- `reclaimFailures` climbing with nothing actually wrong,
+  // and files never reclaimed. `submit` defaults the other way because it
+  // has to read an id back; see its own comment.
+  const config = makeConfig({ id: 37 });
+  const client = createSabnzbdClient(config, fakeQueuedFetch(async () => ({})));
+  const withOtherFields = createSabnzbdClient(
+    makeConfig({ id: 39 }),
+    fakeQueuedFetch(async () => ({ nzo_ids: [], error: '' })),
+  );
+
+  await assert.doesNotReject(
+    client.remove('SABnzbd_nzo_remove_me'),
+    'a body with no status marker at all must read as a successful delete',
+  );
+  await assert.doesNotReject(
+    withOtherFields.remove('SABnzbd_nzo_remove_me'),
+    'so must a body carrying other fields but no failure marker',
+  );
+});
+
 test('remove asks the client to delete the job and its files', async () => {
   const config = makeConfig({ id: 27, apiKey: 'not-a-real-key' });
   let capturedUrl = '';

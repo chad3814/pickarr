@@ -2,8 +2,9 @@
  * The `reconcile` job: one per download client, on a timer the dispatcher
  * already owns. The handler reads the client's config, builds its adapter,
  * fetches a snapshot, walks it (`reconcile.ts`), delivers whatever finished
- * (`deliver.ts`), and only then reschedules itself -- the same shape
- * `host.ts`'s own `poll` job already uses, for the same reasons.
+ * (`deliver.ts`), logs what the tick did (`logTickSummary`), and only then
+ * reschedules itself -- the same shape `host.ts`'s own `poll` job already
+ * uses, for the same reasons.
  *
  * **Rescheduling happens only after the whole tick resolves, never around a
  * throw.** A handler that reschedules unconditionally would give a failing
@@ -50,8 +51,9 @@ import { createSabnzbdClient } from './sabnzbd.ts';
 import { normalizeClientCategory } from './snapshot.ts';
 import type { ClientSnapshot } from './snapshot.ts';
 import { walkSnapshot } from './reconcile.ts';
+import type { ReconcileResult } from './reconcile.ts';
 import { deliverCompleted } from './deliver.ts';
-import type { DeliverDeps } from './deliver.ts';
+import type { DeliverDeps, DeliverResult } from './deliver.ts';
 
 /** How long after a tick resolves before the same client is reconciled again. */
 export const RECONCILE_INTERVAL_S = 60;
@@ -81,30 +83,65 @@ function clientRowExists(raw: DatabaseSync, clientId: number): boolean {
   return row !== undefined;
 }
 
-/** The two calls a reconcile tick needs from a client's adapter -- never `submit`, which this job never calls. */
-interface ReconcileAdapter {
-  snapshot(): Promise<ClientSnapshot>;
-  /** Absent for qBittorrent -- see `deliver.ts`'s own module doc for why removing a job from qBittorrent has no safe call to make. */
-  remove?(ref: string): Promise<void>;
-}
+/**
+ * The calls a reconcile tick needs from a client's adapter -- never
+ * `submit`, which this job never calls -- as a union discriminated on the
+ * client's transport (`config.ts`'s own `ClientType` spelling).
+ *
+ * **A union, not one interface with an optional `remove`.** The spec's §2
+ * rejects a `reclaimsFinishedJobs` boolean because "a flag would leave a
+ * method on the interface that must never be invoked, which is the shape of
+ * a future bug", and concludes "optionality makes the wrong call impossible
+ * to write". That holds of the *adapters*: `createQbittorrentClient`
+ * genuinely returns no `remove`, so there is nothing to call. It did not
+ * hold of this type. An optional `remove` is still a declared member here,
+ * so `remove: (ref) => client.remove(ref)` added to the torrent branch
+ * below type-checked, ran, and would have had Pickarr delete torrents --
+ * stopping the seed and abandoning the ratio, which §9 says never happens
+ * -- with every test still passing. The optionality handed the possibility
+ * straight back.
+ *
+ * With the arms split, the torrent arm has no `remove` field at all, so
+ * writing one into it is not a call nobody happens to make: it is an
+ * excess property on a discriminated union member, and it fails to
+ * compile. That is the difference between a rule and a convention.
+ */
+type ReconcileAdapter =
+  | {
+    transport: 'nzb';
+    snapshot(): Promise<ClientSnapshot>;
+    /** Present only on this arm -- an nzb client's history delete costs nothing but the history entry. */
+    remove(ref: string): Promise<void>;
+  }
+  | {
+    transport: 'torrent';
+    snapshot(): Promise<ClientSnapshot>;
+  };
 
 /**
  * Builds the adapter this tick talks to, from the config `readClientConfig`
  * already decided. Mirrors `clients/downloads.ts`'s own `buildPlan`: switch
  * on `config.kind`, not on `config.implementation` or `config.type`, since
  * `kind` is what already encodes the auth strategy a request needs.
+ *
+ * Exported for `reconcile-job.test.ts` alone. The composition this function
+ * performs -- which client kind ends up with a reclaim capability -- was
+ * the one thing no test covered: the adapter having no `remove`
+ * (`qbittorrent.test.ts`) and reclaim skipping a deps object without one
+ * (`deliver.test.ts`) were both asserted in isolation, and neither said
+ * anything about what happens here, in between them.
  */
-function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch): ReconcileAdapter {
+export function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch): ReconcileAdapter {
   const kind = config.kind;
   switch (kind) {
     case 'sabnzbd': {
       const client = createSabnzbdClient(config, fetch);
-      return { snapshot: () => client.snapshot(), remove: (ref: string) => client.remove(ref) };
+      return { transport: 'nzb', snapshot: () => client.snapshot(), remove: (ref: string) => client.remove(ref) };
     }
     case 'qbittorrent-bearer':
     case 'qbittorrent-login': {
       const client = createQbittorrentClient(config, fetch);
-      return { snapshot: () => client.snapshot() };
+      return { transport: 'torrent', snapshot: () => client.snapshot() };
     }
     default: {
       // Unreachable given today's three-member `ClientConfig['kind']` union
@@ -116,6 +153,59 @@ function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch): Reconc
       throw new Error(`download client has unknown kind ${JSON.stringify(String(impossible))}`);
     }
   }
+}
+
+/**
+ * Logs what one tick did, as a single line naming the client and every
+ * counter that is not zero.
+ *
+ * **Every non-zero counter, not all of them, and nothing at all when a tick
+ * did nothing.** Both `walkSnapshot` and `deliverCompleted` return their
+ * counts, and until this existed both returns were discarded: `advanced`,
+ * `completed`, `failed`, `untracked`, `recovered`, `absent`,
+ * `refsAlreadyHeld`, `recoverFailures`, `delivered`, `reclaimed`,
+ * `unowned`, `reclaimFailures` and `undeliverable` were all computed on
+ * every tick of every client and visible only to a test. `reclaimFailures`
+ * exists because "a client refusing every delete looks identical to a
+ * client with nothing left to reclaim if all you have is `reclaimed: 0`" --
+ * and nobody outside a test had `reclaimed: 0` either.
+ *
+ * Filtering to the non-zero ones is the choice worth arguing. A settled
+ * client ticks once a minute forever with nothing to report, so logging all
+ * thirteen every time -- twelve of them zero -- is a line an operator
+ * learns to skip, and a line nobody reads is worth no more than the silence
+ * it replaced. Omitting the zeros means the line's *length* carries
+ * information: a tick that says `{ clientId, advanced: 3 }` is a normal
+ * one, and a tick that mentions `reclaimFailures` at all is the whole of
+ * the signal that column was added for. A tick with nothing non-zero logs
+ * nothing, so a healthy installation stays quiet and this cannot become the
+ * noise that hides the tick that mattered.
+ *
+ * Counters and one id, never a config and never a row: `config` carries
+ * `apiKey`, `username` and `password`, and a `DownloadRow` carries a
+ * client-supplied path and a client ref. This is the same rule
+ * `deliver.ts`'s `reportUndeliverable` follows for the same reason.
+ */
+function logTickSummary(
+  log: (message: string, detail?: Readonly<Record<string, unknown>>) => void,
+  clientId: number,
+  walked: ReconcileResult,
+  delivery: DeliverResult,
+): void {
+  // Spread rather than named field by field, so a counter added to either
+  // result type is reported the day it is added. Naming them here is what
+  // let wave 1's own new counters go unlogged; a list restated in a second
+  // place is a list that drifts. The `Record<string, number>` annotation is
+  // load-bearing too: a future non-numeric field on either result fails to
+  // compile here rather than being silently stringified into a log line.
+  const counters: Record<string, number> = { ...walked, ...delivery };
+  const named: Record<string, number> = {};
+  for (const [name, value] of Object.entries(counters)) {
+    if (value !== 0) named[name] = value;
+  }
+  if (Object.keys(named).length === 0) return;
+
+  log('reconcile tick', { clientId, ...named });
 }
 
 /** `deliverCompleted`'s `stat` dependency, over the real filesystem. Hoisted to module scope: it closes over nothing from any handler's own call. */
@@ -199,7 +289,7 @@ export function createReconcileHandler(deps: {
       });
     }
 
-    walkSnapshot({
+    const walked = walkSnapshot({
       raw: deps.raw,
       clientId,
       category,
@@ -208,17 +298,28 @@ export function createReconcileHandler(deps: {
       log: deps.log,
     });
 
+    // Branched on the adapter's own discriminant, not on whether some
+    // `remove` happens to be present: `adapter.transport` is what decides
+    // whether this client has a reclaim capability at all, and on the
+    // `'torrent'` arm there is no `remove` to reach for even by mistake
+    // (see `ReconcileAdapter`).
+    //
     // Two shapes, not one object literal with `remove` always present:
     // `exactOptionalPropertyTypes` is on, and an explicit `remove: undefined`
-    // is not the same thing as the property being absent -- qBittorrent's
-    // adapter has no `remove` at all (see `buildReconcileAdapter`).
-    const deliverDeps: DeliverDeps = adapter.remove === undefined
+    // is not the same thing as the property being absent, which is what
+    // `deliverCompleted`'s own "if `deps.remove` is present" test reads.
+    const deliverDeps: DeliverDeps = adapter.transport === 'torrent'
       ? { raw: deps.raw, clientId, now: deps.now(), stat: statForDeliver, deliver: deps.deliver, log: deps.log }
       : {
         raw: deps.raw, clientId, now: deps.now(), stat: statForDeliver, deliver: deps.deliver,
         remove: adapter.remove, log: deps.log,
       };
-    await deliverCompleted(deliverDeps);
+    const delivery = await deliverCompleted(deliverDeps);
+
+    // One line per tick, after both passes have run, so a tick is described
+    // once rather than in two halves a reader has to pair up. See
+    // `logTickSummary` for why only the non-zero counters are named.
+    logTickSummary(deps.log, clientId, walked, delivery);
 
     // Reschedule only now that the whole tick has resolved -- see the
     // module doc for why a throw above must never reach this line.
