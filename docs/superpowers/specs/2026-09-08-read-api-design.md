@@ -67,6 +67,40 @@ construction site, and a cursor whose meaning depends on which route issued it
 is the shape of a later bug. The two things being paged genuinely have
 different keys.
 
+**The keyset predicate is a row-value comparison, not the `OR` form.** For a
+cursor `(t, i)` the predicate is
+
+```sql
+WHERE (updated_at, id) > (?, ?)
+```
+
+and **not** the equivalent-looking
+
+```sql
+WHERE (updated_at > ?) OR (updated_at = ? AND id > ?)
+```
+
+The two return exactly the same rows. Only the first can be turned into an
+index seek. The `OR` form plans as `SCAN rss_item USING INDEX rss_item_updated`
+— which *names* the index while reading the whole of it from entry one — so its
+cost grows with how far a client has paged: measured at 200,000 rows,
+0.30 / 4.02 / 7.85 ms per page at cursor depths 1,000 / 100,000 / 199,000,
+against a flat 0.20 ms for the row-value form. `node:sqlite` is synchronous, so
+that is blocked event loop, growing as the table does.
+
+The mechanism matters because it decides how not to repair it: the two `?` in
+the `OR` form are distinct parameters, so nothing tells SQLite they hold the
+same value and it cannot derive the `updated_at >= ?` range the disjunction
+implies. One numbered parameter used twice (`?1`) does seek, but the row-value
+form says the same thing in a single comparison instead of relying on the
+planner noticing the repetition.
+
+Strictly `>`, never `>=`: the cursor row has already been served. The index
+tests assert the plan contains **`SEARCH`**, not merely that the index is
+named, because a name-only assertion passes against both forms — which is
+exactly how the wrong predicate survived being written down here as though it
+were correct.
+
 **Deletes get tombstones, in a savepoint that already exists.** `media_item`
 rows really are deleted: `MediaWriter.dropMediaItem` removes one along with its
 poster, background and logo rows, inside `SAVEPOINT drop_media_item`. A client
@@ -132,10 +166,12 @@ that can only ever use one. A test asserts exactly one index covers those
 columns.
 
 The sync indexes exist because every cursor query orders by
-`(updated_at, id)` and filters by plugin. **A test asserts each index is used**,
-via `EXPLAIN QUERY PLAN` against the query builder the code itself exports —
-reconcile shipped two status indexes that no query ever used, and nothing noticed
-until a reviewer measured a 153 ms tick.
+`(updated_at, id)` and filters by plugin. **A test asserts each index is
+*sought*, not merely named**, via `EXPLAIN QUERY PLAN` against the query text
+the code itself exports — reconcile shipped two status indexes that no query
+ever used, and nothing noticed until a reviewer measured a 153 ms tick. `SCAN …
+USING INDEX …` names an index while reading all of it, so `SEARCH` is what the
+assertion looks for; see §2's row-value predicate for the form that earns it.
 
 ## 4. `MediaReader`
 

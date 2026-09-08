@@ -5,9 +5,9 @@
  * cycle back through the registry.
  *
  * **The keyset predicate is what this module is for.** Each paged read walks
- * `(updated_at, id)` forward with
+ * `(updated_at, id)` forward with SQLite's *row-value* comparison
  *
- *     WHERE (updated_at > ?) OR (updated_at = ? AND id > ?)
+ *     WHERE (updated_at, id) > (?, ?)
  *
  * and nothing else will do. `updated_at >= ?` re-serves the cursor's whole
  * millisecond on every poll, forever, and a bare `updated_at > ?` silently
@@ -17,6 +17,36 @@
  * written. The `id` tiebreak is what makes the page boundary exact when
  * several rows carry the same `updated_at`, which is the normal case for
  * anything written in one batch.
+ *
+ * **The row-value form, not the `OR` form it is equivalent to.** The obvious
+ * spelling of the same predicate is
+ *
+ *     WHERE (updated_at > ?) OR (updated_at = ? AND id > ?)
+ *
+ * which returns exactly the same rows and which SQLite **cannot seek** on: it
+ * plans as `SCAN rss_item USING INDEX rss_item_updated`, walking the index
+ * from entry one and discarding everything behind the cursor. That *names the
+ * index while reading all of it*, which is how it hid -- a plan assertion
+ * looking only for the index's name passes against both forms. The row-value
+ * form plans as `SEARCH rss_item USING INDEX rss_item_updated (updated_at>?)`,
+ * a range seek straight to the page, which is why the plan test asserts
+ * `SEARCH`.
+ *
+ * The mechanism, because it decides how *not* to fix it: the two `?` in the
+ * `OR` form are distinct parameters, so nothing tells SQLite they hold the
+ * same value, and it cannot derive the `updated_at >= ?` range constraint the
+ * disjunction implies. Spelling them as one numbered parameter
+ * (`updated_at > ?1 OR (updated_at = ?1 AND id > ?2)`) *does* seek, measured
+ * on this tree -- so the `OR` form is not inherently unseekable, only
+ * unseekable as written. The row-value form is preferred over that repair
+ * because it says the same thing in one comparison rather than relying on the
+ * planner noticing a repeated parameter.
+ *
+ * Measured at 200,000 `rss_item` rows: the `OR` form costs
+ * 0.30 / 4.02 / 7.85 ms per page at cursor depths 1,000 / 100,000 / 199,000,
+ * growing with how far a client has paged, while the row-value form is a flat
+ * 0.20 ms at all three. `node:sqlite` is synchronous, so that growth is
+ * blocked event loop.
  *
  * That holds for every read here that reads one table. `downloadsSince` pages
  * a **union** of two tables whose ids are separate rowid spaces, so
@@ -120,12 +150,13 @@ export interface Page<T> {
 /**
  * The cursor a caller who sent none stands at.
  *
- * Exact rather than approximate, and that matters: `id > 0` admits every
- * row, because these tables key on `INTEGER PRIMARY KEY` and SQLite never
- * hands out a rowid below 1. So `updated_at = 0 AND id > 0` still catches a
- * row stamped 0, and `updated_at > 0` catches all the rest. The one shape it
- * would miss is a negative `updated_at`, which nothing can write: every
- * value in these columns comes from a `now()` reading in milliseconds.
+ * Exact rather than approximate, and that matters: `(updated_at, id) > (0, 0)`
+ * admits every row, because these tables key on `INTEGER PRIMARY KEY` and
+ * SQLite never hands out a rowid below 1. So a row stamped `updated_at = 0`
+ * still compares greater on its `id`, and every later row compares greater on
+ * its time. The one shape it would miss is a negative `updated_at`, which
+ * nothing can write: every value in these columns comes from a `now()`
+ * reading in milliseconds.
  */
 const BEGINNING: Cursor = { updatedAt: 0, id: 0 };
 
@@ -147,13 +178,16 @@ const UNION_BEGINNING: UnionCursor = { updatedAt: 0, transport: 'nzb', id: 0 };
  * silently wrong. The download union has its own, `unionKeyset`, because its
  * key has three components rather than two.
  *
+ * A row-value comparison, for the reason the module doc gives: it is the only
+ * spelling of this predicate SQLite can turn into an index seek. Strictly
+ * `>`, never `>=` -- the cursor row itself has already been served.
+ *
  * Both arguments are module-private literals from the constants below, never
  * anything a caller supplies, so nothing a caller holds reaches this text.
- * The three placeholders bind, in order: the cursor's time, the cursor's
- * time again, and the cursor's id.
+ * The two placeholders bind, in order: the cursor's time and the cursor's id.
  */
 function keyset(timeColumn: string, idColumn: string): string {
-  return `(${timeColumn} > ?) OR (${timeColumn} = ? AND ${idColumn} > ?)`;
+  return `(${timeColumn}, ${idColumn}) > (?, ?)`;
 }
 
 const UPDATED_KEYSET = keyset('updated_at', 'id');
@@ -168,15 +202,20 @@ const UPDATED_KEYSET = keyset('updated_at', 'id');
  * visible to that branch's own `WHERE`. The value comes from `Transport`, a
  * module-private union of two words, never from anything a caller supplies.
  *
- * The five placeholders bind, in order: the cursor's time, its time again,
- * its transport, its transport again, and its id. Reading it aloud: a row is
- * ahead of the cursor when its time is later, or when the time matches and
- * the cursor's transport sorts before this branch's, or when both match and
- * the id is greater.
+ * The same row-value form as `keyset`, one component wider. The three
+ * placeholders bind, in order: the cursor's time, its transport and its id.
+ * Reading it aloud: a row is ahead of the cursor when its time is later, or
+ * when the time matches and the cursor's transport sorts before this
+ * branch's, or when both match and the id is greater.
+ *
+ * Neither download table carries an index on `(updated_at, id)`, so this
+ * branch scans whichever way it is written -- the row-value form is used here
+ * for one predicate across the module rather than for a seek it cannot yet
+ * get. An index that would make it seekable is a migration, and not this
+ * change's.
  */
 function unionKeyset(transport: Transport): string {
-  return `(updated_at > ?) OR (updated_at = ? AND `
-    + `(? < '${transport}' OR (? = '${transport}' AND id > ?)))`;
+  return `(updated_at, '${transport}', id) > (?, ?, ?)`;
 }
 
 const MEDIA_ITEM_COLUMNS =
@@ -508,8 +547,7 @@ export function mediaItemsSince(
   after: Cursor | null,
 ): Page<MediaItemRead> {
   const from = after ?? BEGINNING;
-  const rows = raw.prepare(MEDIA_ITEMS_SINCE)
-    .all(pluginId, from.updatedAt, from.updatedAt, from.id, PAGE_SIZE);
+  const rows = raw.prepare(MEDIA_ITEMS_SINCE).all(pluginId, from.updatedAt, from.id, PAGE_SIZE);
   return pageOf(rows.map(toMediaItemRead), after, encodeCursor);
 }
 
@@ -524,7 +562,7 @@ export function mediaItemsSince(
  */
 export function rssItemsSince(raw: DatabaseSync, after: Cursor | null): Page<RssItemRead> {
   const from = after ?? BEGINNING;
-  const rows = raw.prepare(RSS_ITEMS_SINCE).all(from.updatedAt, from.updatedAt, from.id, PAGE_SIZE);
+  const rows = raw.prepare(RSS_ITEMS_SINCE).all(from.updatedAt, from.id, PAGE_SIZE);
   return pageOf(rows.map(toRssItemRead), after, encodeCursor);
 }
 
@@ -539,14 +577,14 @@ export function rssItemsSince(raw: DatabaseSync, after: Cursor | null): Page<Rss
  * served. See `DOWNLOADS_SINCE` for the order this walks and the row that was
  * measured going missing without it.
  *
- * Each branch takes the cursor's three fields twice over, in the order
- * `unionKeyset` documents; the last binding is the page limit.
+ * Each branch takes the cursor's three fields, in the order `unionKeyset`
+ * documents; the last binding is the page limit.
  */
 export function downloadsSince(raw: DatabaseSync, after: UnionCursor | null): Page<DownloadRead> {
   const from = after ?? UNION_BEGINNING;
   const rows = raw.prepare(DOWNLOADS_SINCE).all(
-    from.updatedAt, from.updatedAt, from.transport, from.transport, from.id,
-    from.updatedAt, from.updatedAt, from.transport, from.transport, from.id,
+    from.updatedAt, from.transport, from.id,
+    from.updatedAt, from.transport, from.id,
     PAGE_SIZE,
   );
   return pageOf(rows.map(toDownloadRead), after, encodeUnionCursor);
@@ -564,8 +602,7 @@ export function deletionsSince(
   after: Cursor | null,
 ): Page<number> {
   const from = after ?? BEGINNING;
-  const rows = raw.prepare(DELETIONS_SINCE)
-    .all(pluginId, from.updatedAt, from.updatedAt, from.id, PAGE_SIZE);
+  const rows = raw.prepare(DELETIONS_SINCE).all(pluginId, from.updatedAt, from.id, PAGE_SIZE);
   return pageOf(rows.map(toDeletion), after, encodeCursor);
 }
 

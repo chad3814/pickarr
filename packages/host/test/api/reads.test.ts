@@ -331,11 +331,20 @@ test('downloads from both tables interleave by updated_at, not by table', () => 
   assert.deepEqual(downloadsForRssItem(raw, itemId).map((row) => row.transport), ['nzb', 'torrent']);
 });
 
-test('every sync query uses its index', () => {
+test('every sync query seeks its index rather than scanning it', () => {
   // `EXPLAIN QUERY PLAN` over the exported SQL, never a copy of it. Slice D
   // shipped two indexes no query used, and a plan assertion against a
   // restated lookalike would have passed just as happily -- it proves what
   // SQLite does with the test's string, not with the module's.
+  //
+  // **`SEARCH`, not merely the index's name.** `SCAN t USING COVERING INDEX
+  // t_u` names the index while reading the whole of it, which is exactly how
+  // the first draft of the keyset predicate hid: `(updated_at > ?) OR
+  // (updated_at = ? AND id > ?)` returns the right rows and cannot be sought
+  // on, costing 7.85 ms per page at a cursor 199,000 rows deep against a flat
+  // 0.20 ms for the row-value form. An assertion that only checked the name
+  // passed against both, because the scan is spelled `SCAN rss_item USING
+  // INDEX rss_item_updated`.
   const raw = setup();
 
   // Every exported query is checked, including the two that reach no index:
@@ -355,34 +364,39 @@ test('every sync query uses its index', () => {
 
   const checks: Readonly<Record<string, PlanCheck>> = {
     mediaItemsSince: {
-      args: ['alpha', 0, 0, 0, PAGE_SIZE],
-      mustMatch: ['USING INDEX media_item_sync'],
+      args: ['alpha', 0, 0, PAGE_SIZE],
+      mustMatch: ['SEARCH media_item USING INDEX media_item_sync'],
       mustNotMatch: ['USE TEMP B-TREE', 'SCAN media_item'],
       why: '`media_item_sync` leads with plugin_id, so it both narrows and supplies the (updated_at, id) order',
     },
     rssItemsSince: {
-      args: [0, 0, 0, PAGE_SIZE],
+      args: [0, 0, PAGE_SIZE],
       // `rss_item_updated` has existed since migration 1 and is the index
       // this query uses. Migration 9 deliberately adds no second one.
-      mustMatch: ['USING INDEX rss_item_updated'],
-      mustNotMatch: ['USE TEMP B-TREE'],
-      why: 'no plugin filter, so the index is walked in order rather than searched -- but it is walked, not sorted',
+      mustMatch: ['SEARCH rss_item USING', 'INDEX rss_item_updated (updated_at>?)'],
+      mustNotMatch: ['USE TEMP B-TREE', 'SCAN rss_item'],
+      why: 'the row-value keyset seeks straight to the cursor rather than walking the index from entry one',
     },
     deletionsSince: {
-      args: ['alpha', 0, 0, 0, PAGE_SIZE],
-      mustMatch: ['USING INDEX deleted_media_item_at'],
-      mustNotMatch: ['USE TEMP B-TREE'],
-      why: 'the index leads with deleted_at, so it supplies the order; plugin_id is filtered as rows come off it',
+      args: ['alpha', 0, 0, PAGE_SIZE],
+      mustMatch: ['SEARCH deleted_media_item USING', 'INDEX deleted_media_item_at (deleted_at>?)'],
+      mustNotMatch: ['USE TEMP B-TREE', 'SCAN deleted_media_item'],
+      why: 'the index leads with deleted_at, so it supplies both the seek and the order; plugin_id is filtered as rows come off it',
     },
     downloadsSince: {
-      args: [0, 0, 'nzb', 'nzb', 0, 0, 0, 'nzb', 'nzb', 0, PAGE_SIZE],
+      args: [0, 'nzb', 0, 0, 'nzb', 0, PAGE_SIZE],
       mustMatch: ['torrent_download', 'nzb_download'],
       mustNotMatch: [],
-      why: 'no index can order across two tables, so this one sorts. Both tables must at least be reached.',
+      // The one paged read with no `SEARCH` to assert, and the reason is a
+      // missing index rather than the predicate: neither download table has
+      // one on `(updated_at, id)`, so each branch scans however the keyset is
+      // written. Adding two is a migration, and deliberately not this
+      // change's -- recorded here so it is a known gap and not a silence.
+      why: 'no index can order across two tables, so this one sorts, and neither table indexes (updated_at, id) for the branch keyset to seek on. Both tables must at least be reached.',
     },
     mediaItemById: {
       args: ['alpha', 1],
-      mustMatch: ['USING INTEGER PRIMARY KEY'],
+      mustMatch: ['SEARCH media_item USING INTEGER PRIMARY KEY'],
       mustNotMatch: ['SCAN media_item'],
       why: 'the rowid is the id, so this is a single-row seek and needs no secondary index',
     },
@@ -391,7 +405,7 @@ test('every sync query uses its index', () => {
       // Which index SQLite picks between `media_item_provider_ref` and
       // `media_item_sync` depends on row counts, and both are correct. What
       // must never happen is a table scan.
-      mustMatch: ['USING INDEX media_item_'],
+      mustMatch: ['SEARCH media_item USING INDEX media_item_'],
       mustNotMatch: ['SCAN media_item'],
       why: 'either index on media_item answers this; a scan does not',
     },
