@@ -109,10 +109,13 @@ export const rssItem = sqliteTable('rss_item', {
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),
   uniqueIndex('rss_item_feed_guid').on(t.feedId, t.guid),
-  // Same columns as rss_item_updated, above -- that index serves the client's
-  // update flow; this one is the read API's own sync cursor, named for that
-  // caller so a later change to one is not mistaken for touching the other.
-  index('rss_item_sync').on(t.updatedAt, t.id),
+  // No second `(updated_at, id)` index for the read API's sync cursor:
+  // `rss_item_updated` above already is one, byte for byte. Migration 9's
+  // DDL originally created `rss_item_sync` alongside it, which SQLite would
+  // never have chosen -- two identical B-trees, both maintained on every
+  // `rss_item` write (a feed poll writes one per item, reconcile writes one
+  // per delivery) for a query that can only use one of them. The read API
+  // uses `rss_item_updated`.
 ]);
 
 /**

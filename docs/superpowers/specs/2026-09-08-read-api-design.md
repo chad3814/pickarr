@@ -99,7 +99,6 @@ CREATE TABLE deleted_media_item (
 CREATE INDEX deleted_media_item_at ON deleted_media_item (deleted_at, media_item_id);
 
 CREATE INDEX media_item_sync    ON media_item (plugin_id, updated_at, id);
-CREATE INDEX rss_item_sync      ON rss_item (updated_at, id);
 ```
 
 `media_item_id` is the primary key rather than a surrogate: a media item is
@@ -107,6 +106,13 @@ deleted once, and a second tombstone for the same id would mean the id was
 reused, which `INTEGER PRIMARY KEY` does not do. `plugin_id` is copied onto the
 tombstone because the row it names is gone by the time anyone reads it, and a
 client syncing one media type must not be told about another's deletions.
+
+`rss_item` gets **no new index**: `rss_item_updated` has covered
+`(updated_at, id)` since migration 1, byte for byte, and the read API uses it.
+An earlier draft of this spec created a second one under a different name —
+two identical B-trees, both maintained on every `rss_item` write, for a query
+that can only ever use one. A test asserts exactly one index covers those
+columns.
 
 The sync indexes exist because every cursor query orders by
 `(updated_at, id)` and filters by plugin. **A test asserts each index is used**,

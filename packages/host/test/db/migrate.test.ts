@@ -526,13 +526,34 @@ test('a migration to version 9 adds the tombstone table and the sync indexes', (
   for (const [indexName, table] of [
     ['deleted_media_item_at', 'deleted_media_item'],
     ['media_item_sync', 'media_item'],
-    ['rss_item_sync', 'rss_item'],
   ] as const) {
     const index = raw.prepare(
       "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
     ).get(indexName) as { sql: unknown } | undefined;
     assert.ok(index, `expected an index named ${indexName} on ${table}`);
   }
+});
+
+test('no second (updated_at, id) index is created on rss_item', () => {
+  // `rss_item_updated` has indexed exactly those columns in that order since
+  // migration 1. A second identical index would never be chosen by SQLite and
+  // would be maintained on every rss_item write for nothing -- a feed poll
+  // writes one row per item, reconcile writes one per delivery. Migration 9's
+  // first draft created one; this is what stops it coming back.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const rows = raw.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'rss_item'",
+  ).all().map((row) => String((row as { name: unknown }).name));
+
+  const onUpdatedAtAndId = rows.filter((name) => {
+    const sql = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(name);
+    const text = String((sql as { sql: unknown } | undefined)?.sql ?? '');
+    return /\(\s*updated_at\s*,\s*id\s*\)/.test(text);
+  });
+
+  assert.deepEqual(onUpdatedAtAndId, ['rss_item_updated'], 'exactly one index covers (updated_at, id)');
 });
 
 test('a tombstone cannot be written twice for one media item', () => {

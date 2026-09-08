@@ -381,7 +381,6 @@ CREATE TABLE deleted_media_item (
 );
 CREATE INDEX deleted_media_item_at ON deleted_media_item (deleted_at, media_item_id);
 CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
-CREATE INDEX rss_item_sync         ON rss_item (updated_at, id);
 `;
 
 /**
