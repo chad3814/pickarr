@@ -18,17 +18,18 @@
  * several rows carry the same `updated_at`, which is the normal case for
  * anything written in one batch.
  *
- * That holds for every read here that reads one table. It does **not** hold
- * for `downloadsSince`, which pages a union of two tables whose ids are
- * separate rowid spaces; see its own doc for the limit that follows and why
- * this module cannot lift it.
+ * That holds for every read here that reads one table. `downloadsSince` pages
+ * a **union** of two tables whose ids are separate rowid spaces, so
+ * `(updated_at, id)` is not a key there at all; it walks
+ * `(updated_at, transport, id)` with a `UnionCursor` instead. See
+ * `DOWNLOADS_SINCE` for why that triple is a total order and the pair is not.
  *
  * Synchronous, because `node:sqlite` is. Wrapping these in `async` would
  * promise a yield that never happens and buy nothing.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { Cursor } from './cursor.ts';
-import { PAGE_SIZE, encodeCursor } from './cursor.ts';
+import type { Cursor, UnionCursor } from './cursor.ts';
+import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from './cursor.ts';
 
 /**
  * Which of the two download tables a row came from, and which kind of thing
@@ -99,8 +100,10 @@ export interface DownloadRead {
  * because telling those two apart would need another query; one extra poll
  * is cheaper than stopping a row early.
  *
- * `cursor` is the last item's `(updatedAt, id)`, encoded. On an **empty**
- * page it is the caller's own cursor handed straight back -- not `null`.
+ * `cursor` is the last item's own key, encoded -- `(updatedAt, id)` for a
+ * single-table read, `(updatedAt, transport, id)` for the download union. On
+ * an **empty** page it is the caller's own cursor handed straight back -- not
+ * `null`.
  * `null` there would send a caught-up polling client back to the beginning
  * on every single poll, re-reading the whole table once a tick and never
  * noticing, since every row it re-read is a row it already had. `null` is
@@ -127,11 +130,22 @@ export interface Page<T> {
 const BEGINNING: Cursor = { updatedAt: 0, id: 0 };
 
 /**
+ * The same, for the download union, and exact for the same reasons plus one
+ * more: `'nzb'` is the *lower* of the two transports under SQLite's default
+ * BINARY collation (`'nzb' < 'torrent'`), so `(0, 'nzb', 0)` sits below every
+ * row either table can hold. Naming `'torrent'` here instead would hide every
+ * `nzb_download` row stamped `updated_at = 0` from a caller who sent no
+ * cursor.
+ */
+const UNION_BEGINNING: UnionCursor = { updatedAt: 0, transport: 'nzb', id: 0 };
+
+/**
  * The keyset predicate, for a table's own `(time, id)` column pair. Written
- * once so that the five places it appears in the SQL below are all the same
- * predicate rather than five chances to get it wrong -- and so a change that
- * breaks it breaks every read at once instead of leaving four correct and
- * one silently wrong.
+ * once so that the three places it appears in the SQL below are all the same
+ * predicate rather than three chances to get it wrong -- and so a change that
+ * breaks it breaks every read at once instead of leaving two correct and one
+ * silently wrong. The download union has its own, `unionKeyset`, because its
+ * key has three components rather than two.
  *
  * Both arguments are module-private literals from the constants below, never
  * anything a caller supplies, so nothing a caller holds reaches this text.
@@ -143,6 +157,27 @@ function keyset(timeColumn: string, idColumn: string): string {
 }
 
 const UPDATED_KEYSET = keyset('updated_at', 'id');
+
+/**
+ * The same predicate for one branch of the download union, over
+ * `(updated_at, transport, id)`.
+ *
+ * The branch's own transport is interpolated as a literal rather than bound,
+ * because it *is* a literal: each branch of the union selects
+ * `'torrent' AS transport` or `'nzb' AS transport`, and the alias is not
+ * visible to that branch's own `WHERE`. The value comes from `Transport`, a
+ * module-private union of two words, never from anything a caller supplies.
+ *
+ * The five placeholders bind, in order: the cursor's time, its time again,
+ * its transport, its transport again, and its id. Reading it aloud: a row is
+ * ahead of the cursor when its time is later, or when the time matches and
+ * the cursor's transport sorts before this branch's, or when both match and
+ * the id is greater.
+ */
+function unionKeyset(transport: Transport): string {
+  return `(updated_at > ?) OR (updated_at = ? AND `
+    + `(? < '${transport}' OR (? = '${transport}' AND id > ?)))`;
+}
 
 const MEDIA_ITEM_COLUMNS =
   'id, title, release_date, description, provider, provider_ref, created_at, updated_at';
@@ -224,25 +259,36 @@ const NZB_DOWNLOAD_SELECT = `
  * a cursor over that order skips rows the moment the second table's oldest
  * row is older than the first table's newest.
  *
- * `transport` is the last `ORDER BY` term so the order is fully determined
- * rather than left to whatever the sorter happens to do. It does **not**
- * make the cursor able to separate two rows that share an `(updated_at, id)`
- * pair -- `Cursor` has two fields, and `id` is a per-table rowid, so a
- * torrent row and an nzb row can hold the same pair. See this module's
- * `downloadsSince` for what that costs.
+ * **`transport` is the second `ORDER BY` term, not the last, and that is the
+ * whole point.** `(updated_at, id)` is not a key across this union: `id` is a
+ * per-table rowid, so a `torrent_download` row and an `nzb_download` row can
+ * carry the same pair exactly. Ordering `(updated_at, id, transport)` and
+ * paging on `(updated_at, id)` therefore *skips* a row whenever a page
+ * boundary falls between two such rows -- the cursor names the pair, and the
+ * next page's `id > ?` drops the one that was not served. Measured: 400 rows
+ * across the two tables, 399 ever served, `torrent#101` never.
+ *
+ * `(updated_at, transport, id)` is a genuine total order, because `transport`
+ * is constant within each branch and the two values are disjoint, so no two
+ * rows in the union can share the triple. `UnionCursor` carries all three.
  */
 const DOWNLOADS_SINCE = `
   SELECT ${DOWNLOAD_COLUMNS} FROM (
 ${TORRENT_DOWNLOAD_SELECT}
-     WHERE ${UPDATED_KEYSET}
+     WHERE ${unionKeyset('torrent')}
     UNION ALL
 ${NZB_DOWNLOAD_SELECT}
-     WHERE ${UPDATED_KEYSET}
+     WHERE ${unionKeyset('nzb')}
   )
-  ORDER BY updated_at, id, transport
+  ORDER BY updated_at, transport, id
   LIMIT ?
 `;
 
+/**
+ * Same order as `DOWNLOADS_SINCE`, so the two reads agree about what "oldest
+ * change first" means for one rss item's downloads. Not paged, so no cursor
+ * and no keyset -- an rss item's downloads are one per client at most.
+ */
 const DOWNLOADS_FOR_RSS_ITEM = `
   SELECT ${DOWNLOAD_COLUMNS} FROM (
 ${TORRENT_DOWNLOAD_SELECT}
@@ -251,7 +297,7 @@ ${TORRENT_DOWNLOAD_SELECT}
 ${NZB_DOWNLOAD_SELECT}
      WHERE rss_item_id = ?
   )
-  ORDER BY updated_at, id, transport
+  ORDER BY updated_at, transport, id
 `;
 
 const DELETIONS_SINCE = `
@@ -337,16 +383,20 @@ function downloadTypeOf(id: number, value: unknown): Transport {
 }
 
 /**
- * An item together with the `(updatedAt, id)` pair it is ordered by. The two
- * are carried separately because `RssItemRead` and `DownloadRead` do not
- * expose `updatedAt` -- the page still has to know it to build the cursor.
+ * An item together with the key it is ordered by. The two are carried
+ * separately because `RssItemRead` and `DownloadRead` do not expose
+ * `updatedAt` -- the page still has to know it to build the cursor.
+ *
+ * `K` is `Cursor` for a single-table read and `UnionCursor` for the download
+ * union, so a reader that produces one kind of key cannot be paged with the
+ * other kind of cursor by mistake.
  */
-interface Keyed<T> {
+interface Keyed<T, K> {
   readonly item: T;
-  readonly key: Cursor;
+  readonly key: K;
 }
 
-function toMediaItemRead(row: unknown): Keyed<MediaItemRead> {
+function toMediaItemRead(row: unknown): Keyed<MediaItemRead, Cursor> {
   const id = asNumber((row as { id: unknown }).id);
   const updatedAt = asNumber((row as { updated_at: unknown }).updated_at);
   return {
@@ -364,7 +414,7 @@ function toMediaItemRead(row: unknown): Keyed<MediaItemRead> {
   };
 }
 
-function toRssItemRead(row: unknown): Keyed<RssItemRead> {
+function toRssItemRead(row: unknown): Keyed<RssItemRead, Cursor> {
   const id = asNumber((row as { id: unknown }).id);
   const updatedAt = asNumber((row as { updated_at: unknown }).updated_at);
   return {
@@ -383,7 +433,7 @@ function toRssItemRead(row: unknown): Keyed<RssItemRead> {
   };
 }
 
-function toDownloadRead(row: unknown): Keyed<DownloadRead> {
+function toDownloadRead(row: unknown): Keyed<DownloadRead, UnionCursor> {
   const id = asNumber((row as { id: unknown }).id);
   const updatedAt = asNumber((row as { updated_at: unknown }).updated_at);
   // Decided by comparison against one literal rather than by a membership
@@ -406,12 +456,14 @@ function toDownloadRead(row: unknown): Keyed<DownloadRead> {
       deliveredAt: asNumberOrNull((row as { delivered_at: unknown }).delivered_at),
       lastError: asTextOrNull((row as { last_error: unknown }).last_error),
     },
-    key: { updatedAt, id },
+    // The transport is part of the key, not only of the item: it is what
+    // separates two rows that share an `(updatedAt, id)` pair.
+    key: { updatedAt, transport, id },
   };
 }
 
 /** A tombstone's item is the id alone; its cursor walks `deleted_at`. */
-function toDeletion(row: unknown): Keyed<number> {
+function toDeletion(row: unknown): Keyed<number, Cursor> {
   const id = asNumber((row as { media_item_id: unknown }).media_item_id);
   return {
     item: id,
@@ -419,19 +471,33 @@ function toDeletion(row: unknown): Keyed<number> {
   };
 }
 
-/** See `Page.cursor` for why an empty page echoes rather than nulling. */
-function cursorFor<T>(keyed: readonly Keyed<T>[], after: Cursor | null): string | null {
+/**
+ * See `Page.cursor` for why an empty page echoes rather than nulling.
+ *
+ * `encode` is passed in rather than chosen here, because the key type decides
+ * it: a `Cursor` encodes as two parts and a `UnionCursor` as three, and the
+ * two forms are deliberately not interchangeable.
+ */
+function cursorFor<T, K>(
+  keyed: readonly Keyed<T, K>[],
+  after: K | null,
+  encode: (key: K) => string,
+): string | null {
   const last = keyed.at(-1);
   if (last !== undefined) {
-    return encodeCursor(last.key);
+    return encode(last.key);
   }
-  return after === null ? null : encodeCursor(after);
+  return after === null ? null : encode(after);
 }
 
-function pageOf<T>(keyed: readonly Keyed<T>[], after: Cursor | null): Page<T> {
+function pageOf<T, K>(
+  keyed: readonly Keyed<T, K>[],
+  after: K | null,
+  encode: (key: K) => string,
+): Page<T> {
   return {
     items: keyed.map((entry) => entry.item),
-    cursor: cursorFor(keyed, after),
+    cursor: cursorFor(keyed, after, encode),
     done: keyed.length < PAGE_SIZE,
   };
 }
@@ -444,7 +510,7 @@ export function mediaItemsSince(
   const from = after ?? BEGINNING;
   const rows = raw.prepare(MEDIA_ITEMS_SINCE)
     .all(pluginId, from.updatedAt, from.updatedAt, from.id, PAGE_SIZE);
-  return pageOf(rows.map(toMediaItemRead), after);
+  return pageOf(rows.map(toMediaItemRead), after, encodeCursor);
 }
 
 /**
@@ -459,30 +525,31 @@ export function mediaItemsSince(
 export function rssItemsSince(raw: DatabaseSync, after: Cursor | null): Page<RssItemRead> {
   const from = after ?? BEGINNING;
   const rows = raw.prepare(RSS_ITEMS_SINCE).all(from.updatedAt, from.updatedAt, from.id, PAGE_SIZE);
-  return pageOf(rows.map(toRssItemRead), after);
+  return pageOf(rows.map(toRssItemRead), after, encodeCursor);
 }
 
 /**
- * One page across both download tables, ordered by `(updated_at, id)` over
- * the union.
+ * One page across both download tables, ordered by
+ * `(updated_at, transport, id)` over the union.
  *
- * **A known limit, recorded rather than hidden.** `id` is a per-table rowid,
- * so a `torrent_download` row and an `nzb_download` row can share an
- * `(updated_at, id)` pair exactly. When a page boundary falls between two
- * such rows, the cursor that names the pair cannot say which of them was
- * already served, and the next page's `id > ?` drops the other. `Cursor`
- * carries two fields, so there is nowhere to put the transport that would
- * separate them; fixing it needs a third cursor field or a union-wide key,
- * neither of which this module can introduce on its own.
+ * A `UnionCursor`, not a `Cursor`, and the extra field is load-bearing rather
+ * than decorative: `id` is a per-table rowid, so a `torrent_download` row and
+ * an `nzb_download` row can share an `(updated_at, id)` pair exactly, and a
+ * two-field cursor naming that pair cannot say which of them was already
+ * served. See `DOWNLOADS_SINCE` for the order this walks and the row that was
+ * measured going missing without it.
+ *
+ * Each branch takes the cursor's three fields twice over, in the order
+ * `unionKeyset` documents; the last binding is the page limit.
  */
-export function downloadsSince(raw: DatabaseSync, after: Cursor | null): Page<DownloadRead> {
-  const from = after ?? BEGINNING;
+export function downloadsSince(raw: DatabaseSync, after: UnionCursor | null): Page<DownloadRead> {
+  const from = after ?? UNION_BEGINNING;
   const rows = raw.prepare(DOWNLOADS_SINCE).all(
-    from.updatedAt, from.updatedAt, from.id,
-    from.updatedAt, from.updatedAt, from.id,
+    from.updatedAt, from.updatedAt, from.transport, from.transport, from.id,
+    from.updatedAt, from.updatedAt, from.transport, from.transport, from.id,
     PAGE_SIZE,
   );
-  return pageOf(rows.map(toDownloadRead), after);
+  return pageOf(rows.map(toDownloadRead), after, encodeUnionCursor);
 }
 
 /**
@@ -499,7 +566,7 @@ export function deletionsSince(
   const from = after ?? BEGINNING;
   const rows = raw.prepare(DELETIONS_SINCE)
     .all(pluginId, from.updatedAt, from.updatedAt, from.id, PAGE_SIZE);
-  return pageOf(rows.map(toDeletion), after);
+  return pageOf(rows.map(toDeletion), after, encodeCursor);
 }
 
 /**

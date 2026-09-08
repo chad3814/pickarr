@@ -50,6 +50,23 @@ makes it stable when several rows share a millisecond. This supersedes slice A's
 wording; the rowid justification still holds, because the tiebreak needs
 monotonic orderable ids for exactly the reason given there.
 
+**The download union's cursor carries a third component, `transport`.**
+`(updated_at, id)` is a key on any *one* table, because `id` there is that
+table's `INTEGER PRIMARY KEY`. It is not a key across `torrent_download` and
+`nzb_download`: `id` is a per-table rowid, so one row from each table can carry
+the same `(updated_at, id)` pair exactly, and a cursor naming that pair cannot
+say which of the two it stood after. The next page's `id > ?` then drops the
+other one, silently and permanently — measured at 400 rows across the two
+tables, 399 ever served. So the downloads read orders and pages by
+`(updated_at, transport, id)`, which *is* a total order: `transport` is constant
+within each branch of the union and the two values are disjoint.
+
+This is a second cursor type (`UnionCursor`), not a third optional field on the
+first. `exactOptionalPropertyTypes` makes an optional field awkward at every
+construction site, and a cursor whose meaning depends on which route issued it
+is the shape of a later bug. The two things being paged genuinely have
+different keys.
+
 **Deletes get tombstones, in a savepoint that already exists.** `media_item`
 rows really are deleted: `MediaWriter.dropMediaItem` removes one along with its
 poster, background and logo rows, inside `SAVEPOINT drop_media_item`. A client

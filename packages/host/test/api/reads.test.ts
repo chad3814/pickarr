@@ -3,8 +3,14 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
-import type { Cursor } from '../../src/api/cursor.ts';
-import { PAGE_SIZE, decodeCursor, encodeCursor } from '../../src/api/cursor.ts';
+import type { Cursor, UnionCursor } from '../../src/api/cursor.ts';
+import {
+  PAGE_SIZE,
+  decodeCursor,
+  decodeUnionCursor,
+  encodeCursor,
+  encodeUnionCursor,
+} from '../../src/api/cursor.ts';
 import {
   SYNC_QUERIES,
   deletionsSince,
@@ -32,6 +38,11 @@ function setup(): DatabaseSync {
  */
 function resume(cursor: string | null): Cursor | null {
   return decodeCursor(cursor ?? undefined);
+}
+
+/** The same round trip for the download union's three-part cursor. */
+function resumeUnion(cursor: string | null): UnionCursor | null {
+  return decodeUnionCursor(cursor ?? undefined);
 }
 
 function seedMediaItem(raw: DatabaseSync, pluginId: string, updatedAt: number, title: string): number {
@@ -309,7 +320,7 @@ test('downloads from both tables interleave by updated_at, not by table', () => 
     { id: 1, transport: 'nzb' },
     { id: 1, transport: 'torrent' },
   ]);
-  assert.equal(page.cursor, encodeCursor({ updatedAt: 200, id: 1 }));
+  assert.equal(page.cursor, encodeUnionCursor({ updatedAt: 200, transport: 'torrent', id: 1 }));
   assert.equal(page.done, true);
 
   // `infohash` exists on `torrent_download` alone, so the nzb row reads null
@@ -364,7 +375,7 @@ test('every sync query uses its index', () => {
       why: 'the index leads with deleted_at, so it supplies the order; plugin_id is filtered as rows come off it',
     },
     downloadsSince: {
-      args: [0, 0, 0, 0, 0, 0, PAGE_SIZE],
+      args: [0, 0, 'nzb', 'nzb', 0, 0, 0, 'nzb', 'nzb', 0, PAGE_SIZE],
       mustMatch: ['torrent_download', 'nzb_download'],
       mustNotMatch: [],
       why: 'no index can order across two tables, so this one sorts. Both tables must at least be reached.',
@@ -565,11 +576,105 @@ test('a download page carries only the columns the read shape names, both transp
     { id: 1, transport: 'nzb', rssItemId: 1 },
     { id: 2, transport: 'torrent', rssItemId: 2 },
   ]);
-  assert.equal(page.cursor, encodeCursor({ updatedAt: 300, id: 2 }));
+  assert.equal(page.cursor, encodeUnionCursor({ updatedAt: 300, transport: 'torrent', id: 2 }));
 
   // And it resumes across the union, not within one table.
   assert.deepEqual(
-    downloadsSince(raw, { updatedAt: 100, id: 1 }).items.map((row) => row.transport),
+    downloadsSince(raw, { updatedAt: 100, transport: 'torrent', id: 1 }).items.map((row) => row.transport),
     ['nzb', 'torrent'],
   );
+});
+
+test('two downloads sharing an (updated_at, id) pair are each served exactly once', () => {
+  // The reason the download cursor carries a transport. `id` is a per-table
+  // rowid, so `torrent_download` row 1 and `nzb_download` row 1 can hold the
+  // same `(updated_at, id)` pair exactly. A two-field cursor naming that pair
+  // cannot say which of the two it stood after: `id > ?` then drops the other
+  // one, permanently, and nothing anywhere reports it.
+  const raw = setup();
+  const feedId = seedFeed(raw, 'https://example.com/feed');
+  const itemId = seedRssItem(raw, feedId, 10, 'a.mkv');
+  const clientId = seedClient(raw, 'Client');
+  seedTorrentDownload(raw, itemId, clientId, 100, 'ref-t', 'abc123');
+  seedNzbDownload(raw, itemId, clientId, 100, 'ref-n');
+
+  // Both rows are `(100, 1)`. The order puts nzb first, because 'nzb' sorts
+  // before 'torrent'.
+  const both = downloadsSince(raw, null);
+  assert.deepEqual(both.items.map((row) => `${row.transport}#${row.id}`), ['nzb#1', 'torrent#1']);
+  // The page's cursor is its *last* row's key, which is the torrent one.
+  assert.equal(both.cursor, encodeUnionCursor({ updatedAt: 100, transport: 'torrent', id: 1 }));
+
+  // The boundary case in literals: a cursor standing exactly on the first of
+  // the pair must serve the second and only the second. A two-field cursor of
+  // `{updatedAt: 100, id: 1}` serves neither.
+  const afterFirst = downloadsSince(raw, { updatedAt: 100, transport: 'nzb', id: 1 });
+  assert.deepEqual(afterFirst.items.map((row) => `${row.transport}#${row.id}`), ['torrent#1']);
+  assert.equal(afterFirst.done, true);
+
+  // And standing on the second serves nothing, rather than re-serving either.
+  const afterBoth = downloadsSince(raw, resumeUnion(afterFirst.cursor));
+  assert.deepEqual(afterBoth.items, []);
+});
+
+test('a full walk of the download union serves every row exactly once', () => {
+  // The same defect at a real page boundary rather than at a hand-written
+  // cursor, arranged so the boundary falls *between* two rows that share an
+  // `(updated_at, id)` pair. This is the reproduction that measured 400 rows
+  // in and 399 out, with `torrent#101` never served.
+  assert.equal(PAGE_SIZE, 200, 'the arrangement below is written for a page size of 200');
+
+  const raw = setup();
+  const feedId = seedFeed(raw, 'https://example.com/feed');
+  const itemId = seedRssItem(raw, feedId, 10, 'a.mkv');
+  const clientId = seedClient(raw, 'Client');
+
+  // 200 torrent rows, `updated_at` equal to the id. And 200 nzb rows, all but
+  // the first likewise -- nzb row 1 is parked far in the future, so the run
+  // of shared pairs starts at an *odd* offset and page 1 therefore ends in
+  // the middle of one. Without that single unpaired row every boundary would
+  // land between pairs, where the two-field cursor happens to be safe.
+  const parked = seedNzbDownload(raw, itemId, clientId, 1000, 'ref-n-parked');
+  assert.equal(parked, 1, 'the parked nzb row must be rowid 1, so it shares a pair with torrent 1');
+  for (const id of ascending(2, 199)) {
+    seedNzbDownload(raw, itemId, clientId, id, `ref-n${id}`);
+  }
+  for (const id of ascending(1, 200)) {
+    seedTorrentDownload(raw, itemId, clientId, id, `ref-t${id}`, `hash${id}`);
+  }
+
+  const expected = [
+    ...ascending(1, 200).map((id) => `torrent#${id}`),
+    ...ascending(1, 200).map((id) => `nzb#${id}`),
+  ].toSorted();
+
+  const served: string[] = [];
+  let cursor: UnionCursor | null = null;
+  let pages = 0;
+  for (;;) {
+    const page = downloadsSince(raw, cursor);
+    pages += 1;
+    served.push(...page.items.map((row) => `${row.transport}#${row.id}`));
+    if (page.done) break;
+    cursor = resumeUnion(page.cursor);
+    // A guard rather than a `while (true)`: a cursor that failed to advance
+    // would otherwise hang the suite instead of failing it.
+    assert.ok(pages < 10, `paging did not terminate; ${served.length} rows over ${pages} pages`);
+  }
+
+  // Named rather than counted, so the failure says *which* row went missing
+  // rather than handing back a 400-element diff to read.
+  assert.deepEqual(
+    expected.filter((key) => !served.includes(key)),
+    [],
+    'no row may be skipped',
+  );
+  assert.equal(new Set(served).size, served.length, 'no row may be served twice');
+  assert.deepEqual(served.toSorted(), expected, 'the set out must equal the set in');
+
+  // The page boundary really is mid-pair, which is what makes this fixture
+  // the reproduction rather than a bulk read that happens to pass.
+  assert.deepEqual([pages, served.length], [3, 400]);
+  assert.equal(served.at(199), 'nzb#101', 'page 1 must end on the first of a shared pair');
+  assert.equal(served.at(200), 'torrent#101', 'page 2 must begin on the second of that pair');
 });
