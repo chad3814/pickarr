@@ -7,6 +7,9 @@
  * `(updatedAt, id)`; `UnionCursor` keys the download union by
  * `(updatedAt, transport, id)`, because `id` alone is a per-table rowid and
  * so not a key across two tables. See `UnionCursor` for the whole argument.
+ * Two, and not five: `Cursor` is issued by three routes over three
+ * different key spaces, and `Cursor`'s own doc argues why those three are
+ * one type rather than three branded ones.
  *
  * **And the compiler keeps them apart, both ways round.** Each carries a
  * `keyedBy` tag naming its own key, because structurally a `UnionCursor` is
@@ -19,6 +22,47 @@
  * has seen. Both are the row's own values, not a hash of them, so the next
  * page's query is a plain `(updatedAt, id) > (cursor.updatedAt, cursor.id)`
  * comparison against the same columns the row was ordered by.
+ *
+ * **Three routes issue this one type over three different key spaces, and
+ * that is decided rather than overlooked.** `/api/media` keys
+ * `media_item.updated_at`/`id`; `/api/rss-items` keys
+ * `rss_item.updated_at`/`id`; `/api/deletions` keys
+ * `deleted_media_item.deleted_at`/`media_item_id`. All three encode to the
+ * same two-part string, so a *client* that muddles them resumes at a
+ * position in the wrong key space -- decoding cleanly, reporting nothing,
+ * and skipping rows. `UnionCursor` below calls a cursor whose meaning
+ * depends on which route issued it "the shape of a later bug", and the words
+ * apply to these three exactly as written. Giving each stream its own
+ * `keyedBy` was considered and declined, on three grounds:
+ *
+ * 1. **The mix-up is a client's, and a cursor crosses to a client as an
+ *    opaque string.** There is no type at the boundary where it happens, so
+ *    no brand can reach it. What `keyedBy` closed was a *server*-side
+ *    wiring bug -- `rssItemsSince(raw, decodeUnionCursor(...))`, which
+ *    compiled -- and per-stream brands could only close the server-side
+ *    analogue of that.
+ * 2. **Which is already covered, and measured rather than assumed.** Three
+ *    crossings were written into `server.ts` and run. The two same-arity
+ *    swaps -- the deletions route calling `mediaItemsSince`, and the media
+ *    route calling `deletionsSince` -- typecheck cleanly and fail two and
+ *    three existing tests respectively. So does the arity-changing one, the
+ *    media route calling `rssItemsSince` with `pluginId` dropped: three
+ *    failures. Every failure is on a page's contents, not on a compile or a
+ *    binding error. That is a behavioural net rather than a compile-time
+ *    one, and it is the net that catches a wrong *reader* as well as a
+ *    wrong cursor.
+ * 3. **The brand would assert what no code can check.** `UnionCursor`'s tag
+ *    mirrors a runtime difference -- three parts on the wire instead of
+ *    two, and a decoder that refuses the other shape. Two `Cursor`s from
+ *    different streams are the same runtime value out of the same decoder,
+ *    so a per-stream tag would be an author's annotation with nothing
+ *    behind it, and the author who annotates the wrong stream is the author
+ *    who would have called the wrong reader.
+ *
+ * What would change the decision: a third two-argument `Cursor` reader, or
+ * one route holding two streams' cursors at once. Then the crossings stop
+ * being refused by arity, and the brand is the cheap answer -- the pattern
+ * is right here on `keyedBy`.
  */
 export interface Cursor {
   updatedAt: number;
@@ -39,7 +83,24 @@ export interface Cursor {
    * with nothing anywhere reporting it. The reverse mix-up was already
    * refused, only because `Cursor` happens to have no `transport`.
    *
-   * With a differing `keyedBy` on each, neither direction compiles.
+   * With a differing `keyedBy` on each, neither direction compiles:
+   * `TS2345 ... Type '"updatedAt, transport, id"' is not assignable to type
+   * '"updatedAt, id"'` in argument position, `TS2375` in an annotated
+   * assignment, and `TS2353 ... 'transport' does not exist in type 'Cursor'`
+   * for a fresh object literal, which excess-property checking refuses on
+   * its own. The one shape that still compiles is a value that has never
+   * been *named* as either type: an inferred `const` carrying `transport`
+   * is assignable to `Cursor`, because excess-property checking applies to
+   * literals and not to variables. Measured, all four.
+   *
+   * Nothing in the tree exploits that: every cursor either comes out of a
+   * decoder (annotated return), is one of `reads.ts`'s two `BEGINNING`
+   * constants (annotated), or is an object literal in a contextually typed
+   * position -- a `Keyed.key` field, an `encodeCursor` argument -- where the
+   * literal rule applies. The one inferred variable of this shape,
+   * `cursor.test.ts`'s `as const` union cursor, is only ever handed to
+   * `encodeUnionCursor`. So the gap is precision about what the tag
+   * defends, not a live hole.
    *
    * **Optional, and set by nothing.** It is a compile-time tag and has no
    * business existing at runtime: a required field would have to be written
@@ -144,6 +205,14 @@ export function decodeCursor(raw: string | undefined): Cursor | null {
  * an argument about an optional field carrying *data*, and not about
  * `keyedBy` below, which nothing ever writes or reads: an optional field no
  * construction site sets costs no construction site anything.
+ *
+ * **And it is not an argument this file has acted on everywhere it applies.**
+ * Three routes issue a plain `Cursor` over three different key spaces, so
+ * "a cursor whose meaning depends on which route issued it" describes them
+ * too. That was decided, not missed: see `Cursor`'s own doc for the three
+ * grounds it was declined on and for what would change the answer. Read the
+ * sentence above as the reason *this* type is separate, not as a rule the
+ * module keeps everywhere.
  *
  * `transport` is spelled as a literal union here rather than imported. The
  * original reason was a cycle -- the union lived in `reads.ts`, which imports
