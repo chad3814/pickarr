@@ -128,6 +128,32 @@ export const torrentDownload = sqliteTable('torrent_download', {
   lastError: text('last_error'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  // The client's own path for this download, exactly as it reports it --
+  // never the mapped path a `filepath_mapping` row would produce. That
+  // mapping is derived on demand and never stored, because a stored mapped
+  // path goes stale the moment a `filepath_mapping` row changes. Nullable,
+  // with no default: no row before this column had this fact measured.
+  storagePath: text('storage_path'),
+  // The client's own completion percentage for this download. Nullable: an
+  // unconfirmed or pre-column row has never had one reported.
+  percentage: integer('percentage'),
+  // Set once the client stops reporting this download at all, so a
+  // reconcile pass can tell "gone" from "never checked". Nullable: most
+  // rows are never absent.
+  absentSince: integer('absent_since'),
+  // Stamped once a download the client confirmed has actually landed. Not
+  // the same fact as `rssItem.deliveredAt`, which is stamped when slice A's
+  // poll hands an undelivered new item to its plugin, before any download
+  // exists -- two columns, one name, two tables, two unrelated facts.
+  // Nullable: unset until landing is observed.
+  deliveredAt: integer('delivered_at'),
+  // Stamped once `deps.remove` has been called for this row and succeeded,
+  // so a reconcile pass reclaims a download once rather than on every tick
+  // for the rest of its existence. Nullable, with no default: no row before
+  // this column had this fact measured, and a guessed value would assert
+  // history the column has no way to know. See `clients/deliver.ts`'s module
+  // doc for what happens without it.
+  reclaimedAt: integer('reclaimed_at'),
 }, (t) => [
   // Partial, not total: many unconfirmed rows (client_ref IS NULL) must be
   // free to coexist so a crashed submission can be retried rather than
@@ -138,6 +164,9 @@ export const torrentDownload = sqliteTable('torrent_download', {
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('torrent_download_item').on(t.rssItemId),
+  // Serves the reconcile pass's own query: every row not yet in a terminal
+  // status, which neither index above can answer.
+  index('torrent_download_status').on(t.status),
 ]);
 
 /** Same shape as `torrent_download`, minus `infohash` -- an nzb has no equivalent identifier to record before submission. */
@@ -151,11 +180,22 @@ export const nzbDownload = sqliteTable('nzb_download', {
   lastError: text('last_error'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  // See `torrentDownload.storagePath`.
+  storagePath: text('storage_path'),
+  // See `torrentDownload.percentage`.
+  percentage: integer('percentage'),
+  // See `torrentDownload.absentSince`.
+  absentSince: integer('absent_since'),
+  // See `torrentDownload.deliveredAt`.
+  deliveredAt: integer('delivered_at'),
+  // See `torrentDownload.reclaimedAt`.
+  reclaimedAt: integer('reclaimed_at'),
 }, (t) => [
   uniqueIndex('nzb_download_client_ref')
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('nzb_download_item').on(t.rssItemId),
+  index('nzb_download_status').on(t.status),
 ]);
 
 export const person = sqliteTable('person', {

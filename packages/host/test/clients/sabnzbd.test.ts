@@ -238,3 +238,263 @@ test('the request goes through the queue, so a second call to the same host wait
 
   assert.equal(track.maxActive(), 1, 'at most one submission to this host was ever in flight at once');
 });
+
+/**
+ * Routes a `fakeQueuedFetch` call by which endpoint it targets. Query-param
+ * substring checks, not a full parse -- this is test scaffolding that
+ * decides *which* canned body to hand back, not an assertion, so it is not
+ * bound by the "assert against literals" rule the url-shape tests below
+ * follow.
+ */
+function isQueueRequest(url: string): boolean {
+  return url.includes('mode=queue');
+}
+
+test('a queue slot becomes a queue entry with its percentage and normalised category', async () => {
+  const config = makeConfig({ id: 20 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) {
+      return {
+        queue: {
+          noofslots: 1,
+          slots: [{ nzo_id: 'SABnzbd_nzo_q1', filename: 'Some.Show.S01E01', percentage: '42', cat: 'None' }],
+        },
+      };
+    }
+    return { history: { noofslots: 0, slots: [] } };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.queue, [
+    { ref: 'SABnzbd_nzo_q1', name: 'Some.Show.S01E01', percentage: 42, category: null },
+  ]);
+});
+
+test('a completed history slot carries its storage path', async () => {
+  const config = makeConfig({ id: 21 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return {
+      history: {
+        noofslots: 1,
+        slots: [{
+          nzo_id: 'SABnzbd_nzo_h1',
+          name: 'Some.Show.S01E01',
+          category: 'tv',
+          status: 'Completed',
+          storage: '/data/complete/Some.Show.S01E01',
+        }],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.history, [
+    {
+      ref: 'SABnzbd_nzo_h1',
+      name: 'Some.Show.S01E01',
+      category: 'tv',
+      outcome: 'completed',
+      storagePath: '/data/complete/Some.Show.S01E01',
+      failMessage: null,
+    },
+  ]);
+});
+
+test('a mid-unpack status is in-progress, not a failure', async () => {
+  // 'Extracting'. This exact reading cost 1.x a fix round: every one of
+  // these used to be a terminal failure, so an ordinary multi-part
+  // download was marked failed while SABnzbd was still unpacking it.
+  const config = makeConfig({ id: 22 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return {
+      history: {
+        noofslots: 1,
+        slots: [{ nzo_id: 'SABnzbd_nzo_h2', name: 'Multi.Part.Show', category: 'tv', status: 'Extracting' }],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.history.length, 1);
+  assert.equal(snapshot.history[0]?.outcome, 'in-progress');
+});
+
+test('a status this client does not enumerate reads as failed, not in-progress', async () => {
+  const config = makeConfig({ id: 23 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return {
+      history: {
+        noofslots: 1,
+        slots: [{ nzo_id: 'SABnzbd_nzo_h3', name: 'Mystery.Job', category: 'tv', status: 'quarantined' }],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.history.length, 1);
+  assert.equal(snapshot.history[0]?.outcome, 'failed');
+  // The guess is reported, not just made. `historyOutcome`'s comment argues
+  // that a wrong `failed` is the safer error because it is "visible
+  // immediately" -- which is only true if something names the status that
+  // caused it. Without this, a status SABnzbd adds later turns into
+  // unexplained failed downloads and nothing points at the list to extend.
+  assert.deepEqual(snapshot.unreadable, ['quarantined']);
+});
+
+test('a status this client does enumerate is never reported unreadable', async () => {
+  // The other half: `unreadable` has to stay empty in the ordinary case, or
+  // a caller learns to ignore it and it stops being a signal at all.
+  const config = makeConfig({ id: 24 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return {
+      history: {
+        noofslots: 2,
+        slots: [
+          { nzo_id: 'SABnzbd_nzo_ok1', name: 'Done.Job', category: 'tv', status: 'Completed', storage: '/done/a' },
+          { nzo_id: 'SABnzbd_nzo_ok2', name: 'Unpacking.Job', category: 'tv', status: 'Extracting' },
+        ],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.unreadable, []);
+});
+
+test('one unreadable status reported by many slots is named once', async () => {
+  const config = makeConfig({ id: 25 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return {
+      history: {
+        noofslots: 2,
+        slots: [
+          { nzo_id: 'SABnzbd_nzo_q1', name: 'A', category: 'tv', status: 'quarantined' },
+          { nzo_id: 'SABnzbd_nzo_q2', name: 'B', category: 'tv', status: 'quarantined' },
+        ],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.unreadable, ['quarantined']);
+});
+
+test('history is paged until noofslots is satisfied', async () => {
+  // Two pages. Assert both requests and that every slot appears once.
+  const config = makeConfig({ id: 24 });
+  const calls: string[] = [];
+  const page1 = Array.from({ length: 500 }, (_, i) => ({
+    nzo_id: `SABnzbd_nzo_h${i}`,
+    name: `Job ${i}`,
+    category: 'tv',
+    status: 'completed',
+    storage: `/data/${i}`,
+  }));
+  const page2 = [
+    { nzo_id: 'SABnzbd_nzo_h500', name: 'Job 500', category: 'tv', status: 'completed', storage: '/data/500' },
+  ];
+  const fetch = fakeQueuedFetch(async (url) => {
+    calls.push(url);
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    if (url.includes('start=0&')) return { history: { noofslots: 501, slots: page1 } };
+    if (url.includes('start=500&')) return { history: { noofslots: 501, slots: page2 } };
+    throw new Error(`unexpected url ${url}`);
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(
+    calls.filter((url) => url.includes('mode=history')),
+    [
+      'https://sab.example.com/api?mode=history&start=0&limit=500&apikey=test-key&output=json',
+      'https://sab.example.com/api?mode=history&start=500&limit=500&apikey=test-key&output=json',
+    ],
+  );
+  assert.equal(snapshot.history.length, 501, 'every slot from both pages must appear');
+  const refs = new Set(snapshot.history.map((entry) => entry.ref));
+  assert.equal(refs.size, 501, 'no slot must appear more than once');
+  assert.equal(snapshot.complete, true);
+});
+
+test('hitting the page cap reports an incomplete snapshot rather than a whole one', async () => {
+  const config = makeConfig({ id: 25 });
+  let historyCalls = 0;
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    historyCalls += 1;
+    const start = Number(new URL(url).searchParams.get('start'));
+    const slots = Array.from({ length: 500 }, (_, i) => ({
+      nzo_id: `SABnzbd_nzo_cap${start + i}`,
+      name: `Job ${start + i}`,
+      status: 'completed',
+    }));
+    // A total that will never be satisfied by any number of pages, so the
+    // only way this loop stops is the cap.
+    return { history: { noofslots: 1_000_000, slots } };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(historyCalls, 20, 'paging must stop at MAX_HISTORY_PAGES, not run forever');
+  assert.equal(snapshot.complete, false);
+  assert.equal(snapshot.history.length, 10_000, 'whatever was fetched before the cap is still usable');
+});
+
+test('a queue call that fails reports an incomplete snapshot, not an empty client', async () => {
+  const config = makeConfig({ id: 26 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) throw new Error('queue unreachable');
+    return {
+      history: {
+        noofslots: 1,
+        slots: [{
+          nzo_id: 'SABnzbd_nzo_h4', name: 'Some.Show', category: 'tv', status: 'completed', storage: '/data/4',
+        }],
+      },
+    };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.complete, false);
+  assert.deepEqual(snapshot.queue, []);
+  assert.equal(snapshot.history.length, 1, 'a page that did load must still be usable, not discarded');
+});
+
+test('remove asks the client to delete the job and its files', async () => {
+  const config = makeConfig({ id: 27, apiKey: 'not-a-real-key' });
+  let capturedUrl = '';
+  const fetch = fakeQueuedFetch(async (url) => {
+    capturedUrl = url;
+    return { status: true };
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  await client.remove('SABnzbd_nzo_remove_me');
+
+  assert.equal(
+    capturedUrl,
+    'https://sab.example.com/api?mode=history&name=delete&value=SABnzbd_nzo_remove_me'
+    + '&del_files=1&apikey=not-a-real-key&output=json',
+  );
+});

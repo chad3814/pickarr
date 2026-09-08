@@ -31,7 +31,9 @@ function fakeHost(overrides: Partial<Host>): Host {
     register: () => { throw new Error('register: not used by this test'); },
     notifyNewRssItems: async () => { throw new Error('notifyNewRssItems: not used by this test'); },
     requestDownload: async () => { throw new Error('requestDownload: not used by this test'); },
+    deliverToPlugin: async () => { throw new Error('deliverToPlugin: not used by this test'); },
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
+    scheduleReconcile: async () => { throw new Error('scheduleReconcile: not used by this test'); },
     // Throwing, not a no-op: a no-op default here would let a test pass
     // while `main`'s real `start()`/`stop()` calls go unexercised -- see
     // `createShutdown`'s own tests below, which override exactly the two

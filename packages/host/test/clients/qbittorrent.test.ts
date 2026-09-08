@@ -567,3 +567,228 @@ test('only the login bypasses the queue; the add goes through it', async () => {
   await submitPromise;
   assert.equal(submitSettled, true, 'the add must complete once the hostname slot is released');
 });
+
+/**
+ * A `QueuedFetch` double for `snapshot`: only `json` is used, since
+ * `/torrents/info` answers with JSON, not the bare-text body `submit`'s
+ * `/torrents/add` uses. Captures the url and headers of every request so a
+ * test can assert against them; `snapshot` makes exactly one.
+ */
+function fakeSnapshotFetch(
+  handler: (url: string, init?: RequestInit) => Promise<unknown>,
+): { fetch: QueuedFetch; calls: Array<{ url: string; init: RequestInit | undefined }> } {
+  const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+  const fetch: QueuedFetch = {
+    async json<T>(url: string, init?: RequestInit): Promise<T> {
+      calls.push({ url, init });
+      const body = await handler(url, init);
+      return body as T;
+    },
+    bytes(): Promise<Uint8Array> {
+      throw new Error('bytes is not used by these tests');
+    },
+    text(): Promise<string> {
+      throw new Error('text is not used by these tests');
+    },
+  };
+  return { fetch, calls };
+}
+
+test('a downloading torrent becomes a queue entry with a percentage out of 100', async () => {
+  const config = makeConfig({ id: 40, category: 'tv' });
+  const { fetch, calls } = fakeSnapshotFetch(async () => [
+    {
+      hash: 'AAAABBBBCCCCDDDDEEEEFFFFAAAABBBBCCCCDDDD',
+      name: 'Some Show',
+      category: 'tv',
+      state: 'downloading',
+      progress: 0.42,
+    },
+  ]);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.queue, [
+    { ref: 'aaaabbbbccccddddeeeeffffaaaabbbbccccdddd', name: 'Some Show', percentage: 42, category: 'tv' },
+  ]);
+  assert.deepEqual(snapshot.history, []);
+  assert.equal(snapshot.complete, true);
+  assert.deepEqual(snapshot.unreadable, []);
+  assert.equal(calls.length, 1, 'snapshot is one unfiltered request');
+  assert.equal(calls[0]?.url, 'https://qbt.example.com/api/v2/torrents/info');
+  assert.deepEqual(calls[0]?.init?.headers, { Authorization: 'Bearer test-key' });
+});
+
+test('a seeding torrent is completed, not still queued', async () => {
+  // 'uploading' means the download finished. Reading it as queue would leave
+  // the row downloading forever, since a seeding torrent never leaves that
+  // state.
+  const config = makeConfig({ id: 41 });
+  const { fetch } = fakeSnapshotFetch(async () => [
+    {
+      hash: 'BBBBCCCCDDDDEEEEFFFFAAAABBBBCCCCDDDDEEEE',
+      name: 'Some Movie',
+      category: 'tv',
+      state: 'uploading',
+      progress: 1,
+      content_path: '/data/complete/Some Movie',
+    },
+  ]);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.queue, []);
+  assert.deepEqual(snapshot.history, [
+    {
+      ref: 'bbbbccccddddeeeeffffaaaabbbbccccddddeeee',
+      name: 'Some Movie',
+      category: 'tv',
+      outcome: 'completed',
+      storagePath: '/data/complete/Some Movie',
+      failMessage: null,
+    },
+  ]);
+});
+
+test('an errored torrent is a failed history entry', async () => {
+  const config = makeConfig({ id: 42 });
+  const { fetch } = fakeSnapshotFetch(async () => [
+    {
+      hash: 'CCCCDDDDEEEEFFFFAAAABBBBCCCCDDDDEEEEFFFF',
+      name: 'Broken Show',
+      category: 'tv',
+      state: 'error',
+      progress: 0,
+    },
+  ]);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.queue, []);
+  assert.deepEqual(snapshot.history, [
+    {
+      ref: 'ccccddddeeeeffffaaaabbbbccccddddeeeeffff',
+      name: 'Broken Show',
+      category: 'tv',
+      outcome: 'failed',
+      storagePath: null,
+      failMessage: null,
+    },
+  ]);
+});
+
+test('an unrecognised state reads as queue and warns once', async () => {
+  // `torrents/info` spans a torrent's whole lifecycle including active
+  // downloading, so an unrecognised state is most likely still in progress
+  // -- unlike `sabnzbd.ts`'s history, whose unrecognised statuses are most
+  // likely terminal. `queue` is the reading that concludes nothing.
+  const config = makeConfig({ id: 43 });
+  const { fetch } = fakeSnapshotFetch(async () => [
+    {
+      hash: 'DDDDEEEEFFFFAAAABBBBCCCCDDDDEEEEFFFFAAAA',
+      name: 'Mystery Torrent',
+      category: 'tv',
+      state: 'mysteryState',
+      progress: 0.1,
+    },
+  ]);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.queue.length, 1);
+  assert.equal(snapshot.queue[0]?.ref, 'ddddeeeeffffaaaabbbbccccddddeeeeffffaaaa');
+  assert.deepEqual(snapshot.history, []);
+  // The guess is reported, not just made -- this is the replacement for a
+  // console warning: an adapter in this package owns no logger (see
+  // `ClientSnapshot.unreadable`'s own doc comment).
+  assert.deepEqual(snapshot.unreadable, ['mysteryState']);
+});
+
+test('a state this client does enumerate is never reported unreadable', async () => {
+  // The other half of the previous test: `unreadable` has to stay empty in
+  // the ordinary case, or a caller learns to ignore it and it stops being a
+  // signal at all. Mirrors `sabnzbd.test.ts`'s own test of the same name.
+  const config = makeConfig({ id: 45 });
+  const { fetch } = fakeSnapshotFetch(async () => [
+    {
+      hash: 'FFFFAAAABBBBCCCCDDDDEEEEFFFFAAAABBBBCCCC',
+      name: 'Downloading Show',
+      category: 'tv',
+      state: 'downloading',
+      progress: 0.2,
+    },
+    {
+      hash: '1111222233334444555566667777888899990000',
+      name: 'Seeding Show',
+      category: 'tv',
+      state: 'uploading',
+      progress: 1,
+      content_path: '/data/complete/Seeding Show',
+    },
+  ]);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.unreadable, []);
+});
+
+test('one unreadable state carried by several torrents is named once', async () => {
+  const config = makeConfig({ id: 46 });
+  const { fetch } = fakeSnapshotFetch(async () => [
+    {
+      hash: '2222333344445555666677778888999900001111',
+      name: 'Torrent A',
+      category: 'tv',
+      state: 'quarantined',
+      progress: 0.1,
+    },
+    {
+      hash: '3333444455556666777788889999000011112222',
+      name: 'Torrent B',
+      category: 'tv',
+      state: 'quarantined',
+      progress: 0.3,
+    },
+  ]);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.deepEqual(snapshot.unreadable, ['quarantined']);
+});
+
+test('a torrent with no category reads as no category', async () => {
+  const config = makeConfig({ id: 44 });
+  const { fetch } = fakeSnapshotFetch(async () => [
+    {
+      hash: 'EEEEFFFFAAAABBBBCCCCDDDDEEEEFFFFAAAABBBB',
+      name: 'No Category Show',
+      category: '',
+      state: 'downloading',
+      progress: 0.5,
+    },
+  ]);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.queue[0]?.category, null);
+});
+
+test('the adapter exposes no remove, so a torrent is never dropped', () => {
+  // qBittorrent's delete stops the seed and abandons the ratio whether or
+  // not deleteFiles is set, so the correct number of calls is zero, and
+  // optionality is what makes the wrong call impossible to write rather
+  // than merely discouraged. Asserted as the absence of the method itself,
+  // not merely that it went uncalled.
+  const config = makeConfig({ id: 47 });
+  const fetch = fakeQueuedFetch(async () => 'Ok.');
+  const client = createQbittorrentClient(config, fetch);
+
+  assert.equal(Object.hasOwn(client, 'remove'), false);
+});

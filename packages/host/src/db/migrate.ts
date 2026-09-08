@@ -282,6 +282,70 @@ CREATE INDEX nzb_download_item ON nzb_download (rss_item_id);
 `;
 
 /**
+ * Gives a download row somewhere to record what the client says about it, so
+ * a later reconcile pass can compare its own belief against reality instead
+ * of only ever recording what the host submitted.
+ *
+ * Every column is nullable and carries no `DEFAULT` -- unlike `MIGRATION_2`'s
+ * or `MIGRATION_6`'s, none of these four columns is ever `NOT NULL`, so none
+ * needs one to make `ADD COLUMN` legal on a populated table. A `DEFAULT`
+ * here would be a guess written into every existing row, and nothing has
+ * measured any of these four facts for a row that predates this column.
+ *
+ * `storage_path` holds the *client's own* path, exactly as it reports it --
+ * never the mapped path a `filepath_mapping` row would produce. That mapping
+ * is derived on demand by a later task and never stored, because a stored
+ * mapped path goes stale the moment a `filepath_mapping` row changes, and is
+ * then a lie that outlived its cause.
+ *
+ * `delivered_at` here is not `rss_item.delivered_at`: that column is stamped
+ * when slice A's poll hands an undelivered *new item* to its plugin, before
+ * any download exists. This one is stamped once a download the client
+ * confirmed has actually landed. Two columns, one name, two tables, two
+ * unrelated facts.
+ *
+ * `torrent_download_status` and `nzb_download_status` exist for the
+ * reconcile pass's own query: "every row not yet in a terminal state",
+ * filtered by `status` -- a query the existing indexes on `client_ref` and
+ * `rss_item_id` cannot serve.
+ */
+const MIGRATION_7 = `
+ALTER TABLE torrent_download ADD COLUMN storage_path TEXT;
+ALTER TABLE torrent_download ADD COLUMN percentage INTEGER;
+ALTER TABLE torrent_download ADD COLUMN absent_since INTEGER;
+ALTER TABLE torrent_download ADD COLUMN delivered_at INTEGER;
+
+ALTER TABLE nzb_download ADD COLUMN storage_path TEXT;
+ALTER TABLE nzb_download ADD COLUMN percentage INTEGER;
+ALTER TABLE nzb_download ADD COLUMN absent_since INTEGER;
+ALTER TABLE nzb_download ADD COLUMN delivered_at INTEGER;
+
+CREATE INDEX torrent_download_status ON torrent_download (status);
+CREATE INDEX nzb_download_status ON nzb_download (status);
+`;
+
+/**
+ * Marks a `delivered` row as having had `deps.remove` called for it, so a
+ * reconcile pass's reclaim step happens once per download, not once per
+ * tick for the rest of that download's existence. Nullable, and carries no
+ * `DEFAULT`: no existing row has actually had `remove` called for it under
+ * this column's meaning, and guessing either `now` or `null` for one would
+ * assert history the column has no way to know.
+ *
+ * Without this column, `deliverCompleted` re-selects every `delivered` row
+ * on every pass and calls `remove` for each all over again, forever: a
+ * SABnzbd client with 500 delivered downloads would issue 500 delete
+ * requests a minute indefinitely, and the set only grows as more downloads
+ * finish. Torrent clients have no `remove` at all (see `clients/deliver.ts`'s
+ * module doc), which is the only thing that bounded the damage before this
+ * column existed.
+ */
+const MIGRATION_8 = `
+ALTER TABLE torrent_download ADD COLUMN reclaimed_at INTEGER;
+ALTER TABLE nzb_download ADD COLUMN reclaimed_at INTEGER;
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -293,6 +357,8 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 4, up: (db) => db.exec(MIGRATION_4) },
   { version: 5, up: (db) => db.exec(MIGRATION_5) },
   { version: 6, up: (db) => db.exec(MIGRATION_6) },
+  { version: 7, up: (db) => db.exec(MIGRATION_7) },
+  { version: 8, up: (db) => db.exec(MIGRATION_8) },
 ];
 
 /**
