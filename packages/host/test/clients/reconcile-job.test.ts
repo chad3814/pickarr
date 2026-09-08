@@ -6,11 +6,11 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { createHost, HOST_PLUGIN_ID } from '../../src/host.ts';
 import type { Host } from '../../src/host.ts';
 import { scheduleKnownDownloadClients } from '../../src/main.ts';
-import { buildReconcileAdapter, RECONCILE_INTERVAL_S } from '../../src/clients/reconcile-job.ts';
+import { buildReconcileAdapter, createReconcileHandler, RECONCILE_INTERVAL_S } from '../../src/clients/reconcile-job.ts';
 import { readClientConfig } from '../../src/clients/config.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
 import type { Timers } from '../../src/jobs/dispatcher.ts';
-import type { DownloadClients } from '@pickarr/contract';
+import type { DownloadClients, JobQueue, PluginContext } from '@pickarr/contract';
 
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
 const unusedFetch: QueuedFetch = {
@@ -510,4 +510,165 @@ test('an nzb client run through the whole handler does reclaim, on the same row 
   assert.equal(readNzbColumn(raw, rowId, 'reclaimed_at'), 900, 'the nzb row is reclaimed at the tick\'s own now()');
   assert.equal(deleteUrls.length, 1, 'exactly one delete, for the one unreclaimed delivered row');
   assert.match(deleteUrls[0] ?? '', /value=nzo-1/, 'the delete names this row\'s own client ref');
+});
+
+// --- The tick's own summary line -------------------------------------------
+//
+// `walkSnapshot` and `deliverCompleted` both return counts, and both returns
+// were discarded: every counter in this slice was computed on every tick and
+// visible only to a test. `reclaimFailures` in particular was added because
+// "a client refusing every delete looks identical to a client with nothing
+// left to reclaim if all you have is `reclaimed: 0`" -- and nobody outside a
+// test had `reclaimed: 0` either. These drive the handler directly rather
+// than through `createHost`, because `hostLog` writes to `console` and the
+// point is to assert the line's *values*, not that something was printed.
+
+/** One `deps.log` call, as `captureLog` below records it. */
+interface LoggedLine {
+  message: string;
+  detail: Readonly<Record<string, unknown>> | undefined;
+}
+
+/** A `log` that records every call, and the array it records into. */
+function captureLog(): {
+  log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
+  lines: LoggedLine[];
+} {
+  const lines: LoggedLine[] = [];
+  return {
+    log: (message, detail) => { lines.push({ message, detail }); },
+    lines,
+  };
+}
+
+/** A `MediaWriter` method that fails loudly, naming itself, if a test ever reaches it. */
+function unusedMediaCall(name: string): () => never {
+  return () => { throw new Error(`ctx.media.${name}: not used by this test`); };
+}
+
+/**
+ * A `PluginContext` whose every member fails loudly except `jobs`, which is
+ * all this handler actually uses -- it passes `ctx.jobs` to
+ * `scheduleReconcile` and touches nothing else on the context. The same
+ * "fails loudly if a test never meant to reach it" shape as `unusedFetch`
+ * and `unusedDownloads` above.
+ */
+function fakeContext(jobs: JobQueue): PluginContext {
+  return {
+    db: undefined,
+    media: {
+      createMediaItem: unusedMediaCall('createMediaItem'),
+      updateMediaItem: unusedMediaCall('updateMediaItem'),
+      claimProviderRef: unusedMediaCall('claimProviderRef'),
+      relinkRssItem: unusedMediaCall('relinkRssItem'),
+      dropMediaItem: unusedMediaCall('dropMediaItem'),
+      attachPoster: unusedMediaCall('attachPoster'),
+      attachBackground: unusedMediaCall('attachBackground'),
+      attachLogo: unusedMediaCall('attachLogo'),
+      upsertPerson: unusedMediaCall('upsertPerson'),
+      attachRole: unusedMediaCall('attachRole'),
+      setResolution: unusedMediaCall('setResolution'),
+    },
+    jobs,
+    fetch: {
+      json: async () => { throw new Error('ctx.fetch.json: not used by this test'); },
+      bytes: async () => { throw new Error('ctx.fetch.bytes: not used by this test'); },
+    },
+    downloads: unusedDownloads,
+    log: () => { throw new Error('ctx.log: not used by this test -- the handler logs through its own deps.log'); },
+  };
+}
+
+/** A `JobQueue` that hands back a fixed id and records nothing -- the reschedule is not what these tests are about. */
+const countingJobs: JobQueue = { enqueue: async () => 1 };
+
+/** Runs the reconcile handler once, outside the dispatcher, and returns whatever it logged. */
+async function runHandlerOnce(
+  raw: DatabaseSync,
+  clientId: number,
+  fetch: QueuedFetch,
+  now = 900,
+): Promise<LoggedLine[]> {
+  const { log, lines } = captureLog();
+  const handler = createReconcileHandler({
+    raw,
+    fetch,
+    now: () => now,
+    log,
+    deliver: async () => { throw new Error('deliver: not used by this test'); },
+  });
+  await handler(
+    { id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 },
+    fakeContext(countingJobs),
+  );
+  return lines;
+}
+
+/** The one `reconcile tick` line in `lines`, or `undefined` when the tick logged no summary at all. */
+function summaryLine(lines: readonly LoggedLine[]): LoggedLine | undefined {
+  const summaries = lines.filter((line) => line.message === 'reconcile tick');
+  assert.ok(summaries.length <= 1, 'a tick must log at most one summary line');
+  return summaries[0];
+}
+
+test('a tick logs one summary line carrying its non-zero counters by value', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+  const itemId = seedRssItem(raw, 'x');
+  insertNzbRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'submitted' });
+
+  const lines = await runHandlerOnce(raw, clientId, sabnzbdFetch({
+    queueSlots: [
+      // Advances the row above: submitted -> downloading, `advanced: 1`.
+      { nzo_id: 'ref-1', filename: 'x.mkv', percentage: '10', cat: 'movies' },
+      // Matches no row of ours: `untracked: 1`.
+      { nzo_id: 'ref-2', filename: 'someone-elses.mkv', percentage: '50', cat: 'movies' },
+    ],
+  }));
+
+  assert.deepEqual(
+    summaryLine(lines),
+    { message: 'reconcile tick', detail: { clientId, advanced: 1, untracked: 1 } },
+    'the summary must name the client and carry each non-zero counter at its actual value',
+  );
+});
+
+test('a tick that did nothing logs no summary at all', async () => {
+  // The other half of the choice `logTickSummary` argues: a settled client
+  // ticks once a minute forever, and a line printed on every one of those
+  // ticks is a line an operator learns to skip past.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+
+  const lines = await runHandlerOnce(raw, clientId, sabnzbdFetch({}));
+
+  assert.equal(summaryLine(lines), undefined, 'an empty client with no rows must produce no summary line');
+});
+
+test('the summary carries the delivery pass\'s own counters, not only the walk\'s', async () => {
+  // `deliverCompleted`'s result was discarded separately from
+  // `walkSnapshot`'s, so this pins that both halves reach the same line. A
+  // `completed` row the client reported no path for is the cheapest
+  // delivery counter to produce: it needs no plugin, no stat and no
+  // filesystem.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+  const itemId = seedRssItem(raw, 'y');
+  const rowId = insertNzbRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-9' });
+  raw.prepare("UPDATE nzb_download SET status = 'completed', storage_path = NULL WHERE id = ?").run(rowId);
+
+  const lines = await runHandlerOnce(raw, clientId, sabnzbdFetch({}));
+
+  assert.deepEqual(
+    summaryLine(lines),
+    // `absent: 1` travels with it: a complete snapshot that does not
+    // account for this row's ref is exactly the absence observation the
+    // sweep records, and the summary reports it rather than choosing which
+    // of the two facts an operator wanted.
+    { message: 'reconcile tick', detail: { clientId, absent: 1, undeliverable: 1 } },
+    'a counter from the delivery pass must reach the same line as the walk\'s own',
+  );
 });
