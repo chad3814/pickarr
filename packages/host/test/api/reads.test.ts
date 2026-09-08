@@ -345,6 +345,13 @@ test('every sync query seeks its index rather than scanning it', () => {
   // 0.20 ms for the row-value form. An assertion that only checked the name
   // passed against both, because the scan is spelled `SCAN rss_item USING
   // INDEX rss_item_updated`.
+  //
+  // And for a query with a leading equality -- `mediaItemsSince` -- even
+  // `SEARCH` alone proves nothing: the OR form plans as `SEARCH media_item
+  // USING INDEX media_item_sync (plugin_id=?)`, seeking the plugin and then
+  // walking all of that plugin's rows. So each keyset query names the
+  // *columns in its seek*, which is the only fragment the two forms differ
+  // on.
   const raw = setup();
 
   // Every exported query is checked, including the two that reach no index:
@@ -365,9 +372,16 @@ test('every sync query seeks its index rather than scanning it', () => {
   const checks: Readonly<Record<string, PlanCheck>> = {
     mediaItemsSince: {
       args: ['alpha', 0, 0, PAGE_SIZE],
-      mustMatch: ['SEARCH media_item USING INDEX media_item_sync'],
+      // `(plugin_id=? AND updated_at>?)`, not just `SEARCH`. This query is
+      // the one where a bare `SEARCH` assertion proves nothing: with the OR
+      // form the plan still reads `SEARCH media_item USING INDEX
+      // media_item_sync (plugin_id=?)` -- it seeks the *plugin* and then
+      // walks that plugin's whole run of rows, measured at 9.84 ms/page at a
+      // cursor 199,000 rows deep against 0.18 ms. The cursor column has to
+      // appear in the seek, and that is what this pins.
+      mustMatch: ['SEARCH media_item USING INDEX media_item_sync (plugin_id=? AND updated_at>?)'],
       mustNotMatch: ['USE TEMP B-TREE', 'SCAN media_item'],
-      why: '`media_item_sync` leads with plugin_id, so it both narrows and supplies the (updated_at, id) order',
+      why: '`media_item_sync` leads with plugin_id, so it narrows on the plugin and then seeks the cursor within it',
     },
     rssItemsSince: {
       args: [0, 0, PAGE_SIZE],

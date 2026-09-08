@@ -42,11 +42,22 @@
  * because it says the same thing in one comparison rather than relying on the
  * planner noticing a repeated parameter.
  *
- * Measured at 200,000 `rss_item` rows: the `OR` form costs
- * 0.30 / 4.02 / 7.85 ms per page at cursor depths 1,000 / 100,000 / 199,000,
- * growing with how far a client has paged, while the row-value form is a flat
- * 0.20 ms at all three. `node:sqlite` is synchronous, so that growth is
- * blocked event loop.
+ * Measured at 200,000 rows in each table, per page at cursor depths
+ * 1,000 / 100,000 / 199,000 -- the `OR` form's cost grows with how far a
+ * client has paged and the row-value form's does not:
+ *
+ *     rssItemsSince    OR 0.21 / 4.00 / 7.82    row-value 0.21 / 0.17 / 0.20
+ *     mediaItemsSince  OR 0.20 / 4.99 / 9.84    row-value 0.17 / 0.18 / 0.14
+ *     deletionsSince   OR 0.10 / 4.05 / 7.72    row-value 0.06 / 0.06 / 0.06
+ *
+ * `node:sqlite` is synchronous, so that growth is blocked event loop.
+ *
+ * `mediaItemsSince` is worth singling out, because it is why the plan test
+ * names the seek's *columns* rather than just looking for `SEARCH`: with the
+ * `OR` form its plan is `SEARCH media_item USING INDEX media_item_sync
+ * (plugin_id=?)`. That genuinely is a seek -- of the plugin -- followed by a
+ * walk of every row that plugin owns. Only `(plugin_id=? AND updated_at>?)`
+ * says the cursor is in the seek too.
  *
  * That holds for every read here that reads one table. `downloadsSince` pages
  * a **union** of two tables whose ids are separate rowid spaces, so
