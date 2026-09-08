@@ -82,10 +82,16 @@
  * migration 8 comment for the growth that produces. `remove` is *absent*
  * for qBittorrent: qBittorrent's `/torrents/delete` stops a torrent's seed
  * and abandons its ratio whether or not `deleteFiles` is set, and there is
- * no "forget this job but keep seeding" call to make instead. Making
- * `remove` optional -- rather than a boolean flag some config could set
- * wrong -- is what makes calling it for a client that cannot safely support
- * it impossible to write, not merely discouraged.
+ * no "forget this job but keep seeding" call to make instead.
+ *
+ * Optionality here is what makes *this* function's "if `deps.remove` is
+ * present" the whole of the decision, rather than a flag some config could
+ * set wrong. It is not, on its own, what makes reclaiming a torrent
+ * impossible to write: an optional member is still a member, and the
+ * composition that decides which client gets a `remove` lives one layer up.
+ * `reconcile-job.ts`'s `ReconcileAdapter` is where that is enforced -- a
+ * union discriminated on the client's transport, whose torrent arm has no
+ * `remove` field for anyone to fill in. See its own doc comment.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile } from '@pickarr/contract';

@@ -81,30 +81,65 @@ function clientRowExists(raw: DatabaseSync, clientId: number): boolean {
   return row !== undefined;
 }
 
-/** The two calls a reconcile tick needs from a client's adapter -- never `submit`, which this job never calls. */
-interface ReconcileAdapter {
-  snapshot(): Promise<ClientSnapshot>;
-  /** Absent for qBittorrent -- see `deliver.ts`'s own module doc for why removing a job from qBittorrent has no safe call to make. */
-  remove?(ref: string): Promise<void>;
-}
+/**
+ * The calls a reconcile tick needs from a client's adapter -- never
+ * `submit`, which this job never calls -- as a union discriminated on the
+ * client's transport (`config.ts`'s own `ClientType` spelling).
+ *
+ * **A union, not one interface with an optional `remove`.** The spec's §2
+ * rejects a `reclaimsFinishedJobs` boolean because "a flag would leave a
+ * method on the interface that must never be invoked, which is the shape of
+ * a future bug", and concludes "optionality makes the wrong call impossible
+ * to write". That holds of the *adapters*: `createQbittorrentClient`
+ * genuinely returns no `remove`, so there is nothing to call. It did not
+ * hold of this type. An optional `remove` is still a declared member here,
+ * so `remove: (ref) => client.remove(ref)` added to the torrent branch
+ * below type-checked, ran, and would have had Pickarr delete torrents --
+ * stopping the seed and abandoning the ratio, which §9 says never happens
+ * -- with every test still passing. The optionality handed the possibility
+ * straight back.
+ *
+ * With the arms split, the torrent arm has no `remove` field at all, so
+ * writing one into it is not a call nobody happens to make: it is an
+ * excess property on a discriminated union member, and it fails to
+ * compile. That is the difference between a rule and a convention.
+ */
+type ReconcileAdapter =
+  | {
+    transport: 'nzb';
+    snapshot(): Promise<ClientSnapshot>;
+    /** Present only on this arm -- an nzb client's history delete costs nothing but the history entry. */
+    remove(ref: string): Promise<void>;
+  }
+  | {
+    transport: 'torrent';
+    snapshot(): Promise<ClientSnapshot>;
+  };
 
 /**
  * Builds the adapter this tick talks to, from the config `readClientConfig`
  * already decided. Mirrors `clients/downloads.ts`'s own `buildPlan`: switch
  * on `config.kind`, not on `config.implementation` or `config.type`, since
  * `kind` is what already encodes the auth strategy a request needs.
+ *
+ * Exported for `reconcile-job.test.ts` alone. The composition this function
+ * performs -- which client kind ends up with a reclaim capability -- was
+ * the one thing no test covered: the adapter having no `remove`
+ * (`qbittorrent.test.ts`) and reclaim skipping a deps object without one
+ * (`deliver.test.ts`) were both asserted in isolation, and neither said
+ * anything about what happens here, in between them.
  */
-function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch): ReconcileAdapter {
+export function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch): ReconcileAdapter {
   const kind = config.kind;
   switch (kind) {
     case 'sabnzbd': {
       const client = createSabnzbdClient(config, fetch);
-      return { snapshot: () => client.snapshot(), remove: (ref: string) => client.remove(ref) };
+      return { transport: 'nzb', snapshot: () => client.snapshot(), remove: (ref: string) => client.remove(ref) };
     }
     case 'qbittorrent-bearer':
     case 'qbittorrent-login': {
       const client = createQbittorrentClient(config, fetch);
-      return { snapshot: () => client.snapshot() };
+      return { transport: 'torrent', snapshot: () => client.snapshot() };
     }
     default: {
       // Unreachable given today's three-member `ClientConfig['kind']` union
@@ -208,11 +243,17 @@ export function createReconcileHandler(deps: {
       log: deps.log,
     });
 
+    // Branched on the adapter's own discriminant, not on whether some
+    // `remove` happens to be present: `adapter.transport` is what decides
+    // whether this client has a reclaim capability at all, and on the
+    // `'torrent'` arm there is no `remove` to reach for even by mistake
+    // (see `ReconcileAdapter`).
+    //
     // Two shapes, not one object literal with `remove` always present:
     // `exactOptionalPropertyTypes` is on, and an explicit `remove: undefined`
-    // is not the same thing as the property being absent -- qBittorrent's
-    // adapter has no `remove` at all (see `buildReconcileAdapter`).
-    const deliverDeps: DeliverDeps = adapter.remove === undefined
+    // is not the same thing as the property being absent, which is what
+    // `deliverCompleted`'s own "if `deps.remove` is present" test reads.
+    const deliverDeps: DeliverDeps = adapter.transport === 'torrent'
       ? { raw: deps.raw, clientId, now: deps.now(), stat: statForDeliver, deliver: deps.deliver, log: deps.log }
       : {
         raw: deps.raw, clientId, now: deps.now(), stat: statForDeliver, deliver: deps.deliver,
