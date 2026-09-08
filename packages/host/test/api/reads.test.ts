@@ -412,10 +412,22 @@ test('every sync query seeks its index rather than scanning it', () => {
     },
     deletionsSince: {
       args: ['alpha', 0, 0, PAGE_SIZE],
-      mustMatch: ['SEARCH deleted_media_item USING', 'INDEX deleted_media_item_at (deleted_at>?)'],
-      mustNotMatch: ['SCAN deleted_media_item'],
+      // Both sought columns named, and `plugin_id` is the one that matters.
+      // This entry used to expect `(deleted_at>?)` alone, and passed: the
+      // only index on tombstones was `(deleted_at, media_item_id)`, so the
+      // plan sought the time and then walked every *other* plugin's
+      // tombstones testing `plugin_id` row by row -- `LIMIT` bounded the
+      // output and nothing bounded the input. This entry's own `why` said as
+      // much ("plugin_id is filtered as rows come off it") and the
+      // expectation was written to match it instead of to refuse it. A
+      // caught-up client returning zero rows cost 3.26 ms against another
+      // plugin's 50,000 tombstones and 26.53 ms against 400,000, on a table
+      // the spec's §8 says nothing ever prunes; 0.004 ms at 400,000 with
+      // migration 11's `(plugin_id, deleted_at, media_item_id)`.
+      mustMatch: ['SEARCH deleted_media_item USING', 'INDEX deleted_media_item_sync (plugin_id=? AND deleted_at>?)'],
+      mustNotMatch: ['SCAN deleted_media_item', 'deleted_media_item_at'],
       tempBTrees: 0,
-      why: 'the index leads with deleted_at, so it supplies both the seek and the order; plugin_id is filtered as rows come off it',
+      why: 'the index leads with plugin_id and then carries the cursor, so one seek narrows to this plugin and lands on its page; a plugin_id filtered off the rows instead is unbounded work',
     },
     downloadsSince: {
       // Nine bindings now: each branch's three cursor fields and its own

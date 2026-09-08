@@ -157,10 +157,22 @@ export const deletedMediaItem = sqliteTable('deleted_media_item', {
   pluginId: text('plugin_id').notNull(),
   deletedAt: integer('deleted_at').notNull(),
 }, (t) => [
-  // The read API's cursor over tombstones orders by (deleted_at, id) -- the
-  // same shape `media_item_sync` gives `media_item`, and the same shape
-  // `rss_item_updated` already gave `rss_item`.
-  index('deleted_media_item_at').on(t.deletedAt, t.mediaItemId),
+  // `deletionsSince` is `WHERE plugin_id = ? AND (deleted_at, media_item_id)
+  // > (?, ?)`, so the index leads with the equality and then carries the
+  // cursor's two columns in the order the query sorts them -- genuinely the
+  // shape `media_item_sync` gives `media_item`, which the index this replaced
+  // was not. Migration 9's `deleted_media_item_at` covered
+  // `(deleted_at, media_item_id)` and named no `plugin_id`, so a caught-up
+  // client walked every *other* plugin's tombstones on every poll: 26.53 ms
+  // at 400,000 of them against 0.004 ms here. Migration 11 drops it in the
+  // same statement that creates this, because nothing else reads that table
+  // -- `MediaWriter.dropMediaItem` upserts on the primary key -- and an index
+  // no query uses is a B-tree maintained on every tombstone write for
+  // nothing.
+  //
+  // Covering, as it happens: `media_item_id` and `deleted_at` are the only
+  // columns `deletionsSince` selects, so the read never touches the table.
+  index('deleted_media_item_sync').on(t.pluginId, t.deletedAt, t.mediaItemId),
 ]);
 
 /**

@@ -386,13 +386,35 @@ ALTER TABLE nzb_download ADD COLUMN reclaimed_at INTEGER;
  * a client syncing one media type must not be handed another plugin's
  * deletions.
  *
- * Two indexes, not three. Every cursor query in this slice orders by
- * `(updated_at, id)` and filters by plugin: `media_item_sync` serves that on
- * `media_item`, and `deleted_media_item_at` serves the same shape on
- * tombstones. **`rss_item` gets nothing new** -- `rss_item_updated` has
- * covered `(updated_at, id)` since migration 1, and a second index on the
- * same columns would be a second B-tree maintained on every `rss_item` write
- * for a query that can only use one of them. A test in
+ * Two indexes, not three, and only one of the two was right.
+ *
+ * `media_item_sync` is `(plugin_id, updated_at, id)`, which is what
+ * `mediaItemsSince` needs: the plugin equality first, then the cursor.
+ * `deleted_media_item_at` is `(deleted_at, media_item_id)` and names no
+ * `plugin_id`, so it does **not** serve `deletionsSince`, whose `WHERE`
+ * leads with `plugin_id = ?` -- it sought the time and then walked every
+ * other plugin's tombstones, filtering row by row. Migration 11 replaces it
+ * with `deleted_media_item_sync`, `media_item_sync`'s shape one table over,
+ * and drops this one; see `MIGRATION_11` for the measurement.
+ *
+ * An earlier version of this paragraph said "every cursor query in this slice
+ * orders by `(updated_at, id)` and filters by plugin: `media_item_sync`
+ * serves that on `media_item`, and `deleted_media_item_at` serves the same
+ * shape on tombstones", which was wrong three times over. Only
+ * `mediaItemsSince` and `deletionsSince` filter by plugin at all --
+ * `rssItemsSince` and `downloadsSince` filter by nothing, because feed items
+ * and downloads are one stream every client syncs. `deletionsSince` orders by
+ * `(deleted_at, media_item_id)`, not `(updated_at, id)`; the tombstone table
+ * has neither of those columns. And "the same shape" was the half that
+ * mattered and the half that was missing: the plugin column. The knowledge
+ * was not absent either -- the plan test's own `why` field said "plugin_id is
+ * filtered as rows come off it" -- it simply never reached the index or this
+ * comment.
+ *
+ * **`rss_item` gets nothing new** -- `rss_item_updated` has covered
+ * `(updated_at, id)` since migration 1, and a second index on the same
+ * columns would be a second B-tree maintained on every `rss_item` write for
+ * a query that can only use one of them. A test in
  * `test/db/migrate.test.ts` asserts exactly one index covers those columns,
  * because a first draft of this migration created that duplicate and nothing
  * objected.
@@ -511,6 +533,60 @@ UPDATE rss_item SET download_type = 'nzb' WHERE download_type = 'usenet';
 `;
 
 /**
+ * The tombstone index migration 9 should have created, in place of the one it
+ * did.
+ *
+ * `reads.ts`'s `deletionsSince` is `WHERE plugin_id = ? AND (deleted_at,
+ * media_item_id) > (?, ?)`. `deleted_media_item_at` covers
+ * `(deleted_at, media_item_id)` and **names no `plugin_id` at all**, so the
+ * plan sought the *time* and then walked every tombstone after it, testing
+ * `plugin_id` row by row: `LIMIT 200` bounded the output and nothing bounded
+ * the input. Every other plugin's deletions were on the path between a
+ * client's cursor and its answer.
+ *
+ * Measured with one plugin holding a single tombstone, caught up, and polling
+ * for nothing while another accumulates -- the poll that returns zero rows
+ * forever, which is the steady state of every synced client:
+ *
+ *     other plugin's tombstones    50,000    100,000    200,000    400,000
+ *     caught-up poll, before       3.26 ms    6.57 ms   13.00 ms   26.53 ms
+ *     caught-up poll, after       0.004 ms   0.004 ms   0.004 ms   0.004 ms
+ *
+ * Perfectly linear before, because the walk is the whole cost, and the read
+ * API spec's §8 records that tombstones accumulate forever with nothing
+ * pruning them -- so that line has no ceiling over an installation's life. It
+ * is `media_item_sync`'s shape one table over, and `mediaItemsSince` measured
+ * 0.008 ms flat through the same fixture at every one of those sizes, for
+ * exactly that reason.
+ *
+ * `(plugin_id, deleted_at, media_item_id)`, in that order: the equality
+ * first, then the cursor's two columns in the order the query sorts them, so
+ * one index supplies the narrowing, the seek and the order. The plan is
+ * `SEARCH deleted_media_item USING COVERING INDEX deleted_media_item_sync
+ * (plugin_id=? AND deleted_at>?)` -- covering, because the three columns are
+ * the only three the query reads.
+ *
+ * **And `deleted_media_item_at` is dropped rather than kept alongside.** With
+ * this index in place nothing reads it: `deletionsSince` is the only query
+ * over this table, and `MediaWriter.dropMediaItem` writes it as an upsert on
+ * the primary key. An index no query uses is still a B-tree maintained on
+ * every tombstone write, and this branch has already shipped one of those --
+ * migration 9's first draft duplicated `rss_item_updated`, and slice D
+ * shipped two status indexes nothing used, which cost a 153 ms reconcile
+ * tick before anyone measured it. The lesson is recorded and this is it
+ * being applied: the replaced index goes in the same statement as its
+ * replacement, so no database ever carries both.
+ *
+ * Not unique, although `media_item_id` is the table's primary key and so the
+ * triple could never repeat: declaring it unique would add a constraint the
+ * primary key already enforces, and a second place for a write to fail.
+ */
+const MIGRATION_11 = `
+DROP INDEX deleted_media_item_at;
+CREATE INDEX deleted_media_item_sync ON deleted_media_item (plugin_id, deleted_at, media_item_id);
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -526,6 +602,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 8, up: (db) => db.exec(MIGRATION_8) },
   { version: 9, up: (db) => db.exec(MIGRATION_9) },
   { version: 10, up: (db) => db.exec(MIGRATION_10) },
+  { version: 11, up: (db) => db.exec(MIGRATION_11) },
 ];
 
 /**

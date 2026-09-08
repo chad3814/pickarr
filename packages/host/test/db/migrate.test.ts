@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { HOST_MIGRATIONS, migrateHost, migrateHostWith, migratePlugin } from '../../src/db/migrate.ts';
+import { SYNC_QUERIES, deletionsSince } from '../../src/api/reads.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -519,7 +520,11 @@ test('reclaimed_at is nullable, so a row that predates it needs no back-filled g
 
 test('a migration to version 9 adds the tombstone table and the sync indexes', () => {
   const { raw } = openTestDatabase();
-  migrateHost(raw);
+  // A prefix ending at 9, not the whole list: migration 11 drops
+  // `deleted_media_item_at` and replaces it, so this is the only way to watch
+  // migration 9 create what migration 9 creates. Run to head it would assert
+  // an index a current database deliberately does not have.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 9));
 
   assert.ok(tableNames(raw).has('deleted_media_item'), 'missing deleted_media_item');
 
@@ -643,6 +648,71 @@ test('migrating renames an existing rss item from usenet to nzb, which migration
     ).all(),
     [],
   );
+});
+
+test('a migration to version 11 replaces the tombstone index with one that leads with plugin_id', () => {
+  // The half of migration 9's index that was missing, and the half that
+  // matters. `deletionsSince` is `WHERE plugin_id = ? AND (deleted_at,
+  // media_item_id) > (?, ?)`, and `deleted_media_item_at` named no
+  // `plugin_id` at all -- so the plan sought the time and then walked every
+  // other plugin's tombstones testing `plugin_id` row by row. `LIMIT 200`
+  // bounded the output and nothing bounded the input: measured with one
+  // plugin caught up and returning zero rows, 3.26 ms against another
+  // plugin's 50,000 tombstones, 6.57 ms at 100,000, 13.00 ms at 200,000 and
+  // 26.53 ms at 400,000, on a table the read API spec's §8 says nothing ever
+  // prunes. 0.004 ms at 400,000 with this index.
+  //
+  // Seeded on the pre-migration-11 schema through a prefix of the real
+  // `HOST_MIGRATIONS`, so the real `MIGRATION_11` statement is watched acting
+  // on a populated table -- a `DROP INDEX` and a `CREATE INDEX` in one
+  // migration, on rows that already exist.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 10));
+  const insert = raw.prepare(
+    'INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at) VALUES (?, ?, ?)',
+  );
+  insert.run(1, 'alpha', 10);
+  insert.run(2, 'beta', 20);
+  insert.run(3, 'beta', 30);
+
+  // Picks up only version 11: versions 1 through 10 are already recorded as applied.
+  migrateHost(raw);
+
+  const indexes = raw.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'deleted_media_item' ORDER BY name",
+  ).all().map((r) => {
+    const row = r as { name: unknown; sql: unknown };
+    return { name: String(row.name), sql: String(row.sql ?? '') };
+  });
+
+  // Exactly one, and it is the new one. The replaced index is dropped in the
+  // same migration rather than left beside it: nothing reads it once this
+  // exists -- `deletionsSince` is the only query over this table, and
+  // `MediaWriter.dropMediaItem` upserts on the primary key -- and an index no
+  // query uses is a B-tree maintained on every tombstone write for nothing.
+  // Migration 9's first draft shipped a duplicate of `rss_item_updated` and
+  // slice D shipped two status indexes nothing used; this is that lesson.
+  assert.deepEqual(indexes.map((index) => index.name), ['deleted_media_item_sync']);
+  assert.match(
+    indexes[0]?.sql ?? '',
+    /CREATE INDEX deleted_media_item_sync ON deleted_media_item \(plugin_id, deleted_at, media_item_id\)/,
+  );
+
+  // The index exists because one query needs it, so the query is what is
+  // asserted rather than the index alone -- and the fixture holds two
+  // plugins, because with one plugin's rows in the table the defective index
+  // and this one are indistinguishable by both plan and clock.
+  const plan = raw.prepare(`EXPLAIN QUERY PLAN ${SYNC_QUERIES['deletionsSince'] ?? ''}`)
+    .all('alpha', 10, 1, 200)
+    .map((row) => String((row as { detail: unknown }).detail)).join('\n');
+  assert.match(plan, /SEARCH deleted_media_item USING COVERING INDEX deleted_media_item_sync \(plugin_id=\? AND deleted_at>\?\)/);
+  assert.doesNotMatch(plan, /USE TEMP B-TREE/);
+
+  // And the rows are still readable through it, scoped to their own plugin:
+  // an index swap that changed what the query answers would be a far worse
+  // bug than the one it fixes.
+  assert.deepEqual(deletionsSince(raw, 'beta', null).items, [2, 3]);
+  assert.deepEqual(deletionsSince(raw, 'alpha', null).items, [1]);
 });
 
 test('a tombstone cannot be written twice for one media item', () => {

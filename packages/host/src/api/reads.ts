@@ -55,18 +55,37 @@
  *
  * `node:sqlite` is synchronous, so that growth is blocked event loop.
  *
- * `mediaItemsSince` is worth singling out, because it is why the plan test
- * names the seek's *columns* rather than just looking for `SEARCH`: with the
- * `OR` form its plan is `SEARCH media_item USING INDEX media_item_sync
- * (plugin_id=?)`. That genuinely is a seek -- of the plugin -- followed by a
- * walk of every row that plugin owns. Only `(plugin_id=? AND updated_at>?)`
- * says the cursor is in the seek too.
+ * **Those figures are one plugin's database, and the `deletionsSince` line
+ * was read as a general claim it never was.** An earlier version of this
+ * paragraph followed the table with "that holds for every read here that
+ * reads one table", which is true of the *cursor*'s cost and not of the
+ * query's. A row-value keyset bounds how much of the index a read walks
+ * *behind* the cursor; it says nothing about how much it walks ahead of one
+ * looking for rows that match the rest of the `WHERE`. `deletionsSince`
+ * filters `plugin_id = ?` as well, and until migration 11 the only index on
+ * tombstones named no `plugin_id` at all -- so a caught-up client walked
+ * every *other* plugin's tombstones on every poll, linearly and without
+ * bound: 3.26 ms at 50,000 of them, 26.53 ms at 400,000, for a page that
+ * returns nothing. A second plugin was all it took, and this table said
+ * 0.06 ms flat. `deleted_media_item_sync` is now `(plugin_id, deleted_at,
+ * media_item_id)` and that poll is 0.004 ms at 400,000.
  *
- * That holds for every read here that reads one table. `downloadsSince` pages
- * a **union** of two tables whose ids are separate rowid spaces, so
- * `(updated_at, id)` is not a key there at all; it walks
- * `(updated_at, transport, id)` with a `UnionCursor` instead. See
- * `DOWNLOADS_SINCE` for why that triple is a total order and the pair is not.
+ * So the rule the plan test enforces is the *columns* in the seek, per read,
+ * measured against a fixture with more than one plugin in it.
+ * `mediaItemsSince` is why: with the `OR` form its plan is
+ * `SEARCH media_item USING INDEX media_item_sync (plugin_id=?)`, which
+ * genuinely is a seek -- of the plugin -- followed by a walk of every row
+ * that plugin owns. Only `(plugin_id=? AND updated_at>?)` says the cursor is
+ * in the seek too, and only `(plugin_id=? AND deleted_at>?)` says it for
+ * tombstones.
+ *
+ * `downloadsSince` and `rssItemsSince` filter by no plugin at all, so neither
+ * has that half to get wrong: feed items and downloads are one stream every
+ * client syncs. `downloadsSince` pages a **union** of two tables whose ids
+ * are separate rowid spaces, so `(updated_at, id)` is not a key there at all;
+ * it walks `(updated_at, transport, id)` with a `UnionCursor` instead, and
+ * bounds each branch's own read with its own `LIMIT`. See `DOWNLOADS_SINCE`
+ * for both.
  *
  * Synchronous, because `node:sqlite` is. Wrapping these in `async` would
  * promise a yield that never happens and buy nothing. `MediaReader`
@@ -443,6 +462,23 @@ ${NZB_DOWNLOAD_SELECT}
  ORDER BY download.updated_at, download.transport, download.id
 `;
 
+/**
+ * Keyed on `(deleted_at, media_item_id)` rather than `(updated_at, id)`,
+ * because those are the columns the tombstone table has -- `keyset` takes the
+ * pair by name for exactly this read.
+ *
+ * **`plugin_id = ?` has to be in the index, not only in the `WHERE`.**
+ * `deleted_media_item_sync` (migration 11) is `(plugin_id, deleted_at,
+ * media_item_id)`, so the equality narrows to this plugin's tombstones and
+ * the keyset then seeks within them, in the order this query already sorts
+ * by. Before it, the only index on this table was
+ * `(deleted_at, media_item_id)` with no `plugin_id` in it: the plan sought
+ * the time and then walked every tombstone after it testing `plugin_id` row
+ * by row, so `LIMIT` bounded the output and nothing bounded the input. A
+ * caught-up client returning zero rows cost 3.26 ms against another plugin's
+ * 50,000 tombstones and 26.53 ms against 400,000, growing linearly with a
+ * table the spec's §8 says nothing ever prunes. It is 0.004 ms at 400,000 now.
+ */
 const DELETIONS_SINCE = `
   SELECT media_item_id, deleted_at
     FROM deleted_media_item

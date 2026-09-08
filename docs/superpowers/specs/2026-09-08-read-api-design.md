@@ -167,6 +167,11 @@ CREATE INDEX deleted_media_item_at ON deleted_media_item (deleted_at, media_item
 CREATE INDEX media_item_sync    ON media_item (plugin_id, updated_at, id);
 ```
 
+`deleted_media_item_at` was the wrong index and is superseded by migration
+11's `deleted_media_item_sync (plugin_id, deleted_at, media_item_id)`, below.
+It is left here as what migration 9 actually ran, because a database that has
+been through migration 9 has been through it.
+
 `media_item_id` is the primary key rather than a surrogate: one tombstone per
 id is the whole truth there is to record. An id *can* be reused — SQLite hands
 the highest rowid out again once its row is deleted, measured against
@@ -223,17 +228,43 @@ hands a plugin the raw connection, so a row written *after* this migration can
 still carry any string. The union is honest because the read boundary enforces
 it, not because the schema does — see §4.
 
-The sync indexes exist because every cursor query orders by
-`(updated_at, id)` and filters by plugin. **A test asserts each index is
-*sought*, and asserts which columns that seek names**, via
-`EXPLAIN QUERY PLAN` against the query text the code itself exports —
-reconcile shipped two status indexes that no query ever used, and nothing
-noticed until a reviewer measured a 153 ms tick. Neither weaker assertion
-holds: `SCAN … USING INDEX …` names an index while reading all of it, and a
-bare `SEARCH` is satisfied by a seek of the leading `plugin_id` followed by a
-walk of everything behind it. So the assertion looks for the seek's own
-column list — `(plugin_id=? AND updated_at>?)`. See §2 for the three
-iterations that got there and the row-value predicate that earns the seek.
+A sync index exists because one query needs it, and it has to carry **that
+query's own** filter and order — not a shape all four are assumed to share.
+This section said "the sync indexes exist because every cursor query orders by
+`(updated_at, id)` and filters by plugin", and no cursor query here matches
+that description on both halves. `mediaItemsSince` filters `plugin_id` and
+orders `(updated_at, id)`; `deletionsSince` filters `plugin_id` and orders
+`(deleted_at, media_item_id)`, on a table that has neither of the other two
+columns; `rssItemsSince` and `downloadsSince` filter by **no** plugin at all,
+because feed items and downloads are one stream every client syncs. The
+generalisation is what produced `deleted_media_item_at (deleted_at,
+media_item_id)`, an index with no `plugin_id` in it for a query that leads
+with `plugin_id = ?`: the plan sought the time and then walked every *other*
+plugin's tombstones filtering row by row, 3.26 ms for a caught-up client at
+50,000 of them and 26.53 ms at 400,000, on a table §8 says nothing prunes.
+**Migration 11** replaces it with
+
+```sql
+DROP INDEX deleted_media_item_at;
+CREATE INDEX deleted_media_item_sync ON deleted_media_item (plugin_id, deleted_at, media_item_id);
+```
+
+which is 0.004 ms at 400,000, and drops rather than keeps the old one because
+`deletionsSince` is the only query over that table.
+
+**A test asserts each index is *sought*, and asserts which columns that seek
+names**, via `EXPLAIN QUERY PLAN` against the query text the code itself
+exports — reconcile shipped two status indexes that no query ever used, and
+nothing noticed until a reviewer measured a 153 ms tick. Neither weaker
+assertion holds: `SCAN … USING INDEX …` names an index while reading all of
+it, and a bare `SEARCH` is satisfied by a seek of the leading `plugin_id`
+followed by a walk of everything behind it. So the assertion looks for the
+seek's own column list — `(plugin_id=? AND updated_at>?)`, and
+`(plugin_id=? AND deleted_at>?)` for tombstones, which is the assertion this
+section's generalisation had let read `(deleted_at>?)` alone. Naming only the
+columns a *shared* shape would have is how an index missing the half that
+matters passes a plan test. See §2 for the three iterations that got there
+and the row-value predicate that earns the seek.
 
 ## 4. `MediaReader`
 
