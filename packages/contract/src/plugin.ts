@@ -21,11 +21,21 @@ export interface PluginContext {
    * created.
    */
   db: unknown;
+  /**
+   * The typed way to write the shared rows -- and, unlike `read` below,
+   * **not** scoped to this plugin. It is one writer shared by every plugin
+   * context, closed over no plugin id, so `setResolution`,
+   * `updateMediaItem` and `dropMediaItem` all act on any row id handed to
+   * them regardless of who owns the row. See `MediaWriter` for why that
+   * asymmetry stands for now.
+   */
   media: MediaWriter;
   /**
    * The typed way to read the shared rows, scoped to this plugin: the host
    * builds one per plugin, closed over its id, so a plugin cannot read
-   * another's media items. `media` is deliberately *not* renamed to `write`
+   * another plugin's media items, nor the rss items and downloads under
+   * another plugin's feeds -- all four methods are scoped, not just the two
+   * that name a media item. `media` is deliberately *not* renamed to `write`
    * alongside it -- every plugin, the test double and the flow tests name it,
    * and the churn would buy nothing.
    */

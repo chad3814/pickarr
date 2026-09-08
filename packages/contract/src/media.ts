@@ -80,6 +80,23 @@ export interface ProviderClaim {
  * nothing stops a plugin from writing to `media_item`, `role` and the rest
  * directly instead. The two invariants below hold only for writes that go
  * through this interface.
+ *
+ * **Nothing here is scoped to the calling plugin -- do not infer symmetry
+ * with `MediaReader`.** Unlike the reader, which the host builds once *per
+ * plugin* around that plugin's id, there is one writer shared by every
+ * plugin context and it closes over no plugin id at all: ten of its eleven
+ * methods are handed none, and `createMediaItem` stores the `pluginId` in
+ * `MediaItemInit` without checking it against the plugin doing the writing.
+ * So every method acts on the bare row id it is given, whoever wrote that
+ * row: `setResolution` on another plugin's rss item, `updateMediaItem` and
+ * `dropMediaItem` on another plugin's media item, all succeed. Verified by
+ * execution against the real writer, not inferred.
+ * `MediaReader` next door scopes every one of its four methods, and the
+ * asymmetry is deliberate for now rather than an oversight: a read side
+ * honest about ownership is worth having on its own, and closing the write
+ * side touches every caller of these methods, which is a later slice's
+ * change. Until it happens, a plugin can change and delete rows it does not
+ * own, and the host does not stop it.
  */
 export interface MediaWriter {
   createMediaItem(init: MediaItemInit): Promise<number>;
@@ -213,12 +230,19 @@ export interface DownloadRead {
  * Plain data, not Drizzle rows, for the same reason `MediaWriter` takes plain
  * data -- a typed row would couple every plugin to the host's migrations.
  *
- * **A plugin reads only its own media items.** The host builds one of these
- * per plugin, closed over that plugin's id, so a plugin cannot ask about
- * another's. A media item belonging to someone else answers `null` -- the
- * same answer as one that does not exist, and not an error: telling those two
- * apart would report the existence of the other plugin's rows, which is the
- * first half of reading them.
+ * **Every method here is scoped to the calling plugin -- all four, not just
+ * the two that name a media item.** The host builds one of these per plugin,
+ * closed over that plugin's id, so a plugin cannot ask about another's.
+ * `mediaItem` and `mediaItemByProviderRef` filter on that id directly;
+ * `rssItemsFor` and `downloadsFor` reach it one join further on, because an
+ * rss item belongs to a feed and a feed names its plugin. Someone else's
+ * media item answers `null` and someone else's feed answers `[]` -- the same
+ * answer each read gives for a row that does not exist, and not an error:
+ * telling those two apart would report the existence of the other plugin's
+ * rows, which is the first half of reading them.
+ *
+ * The scoping is this interface's, not `MediaWriter`'s. See that interface
+ * for what a plugin can still change without owning it.
  *
  * `mediaItemByProviderRef` reads `media_item.provider` / `provider_ref` --
  * the pair `MediaWriter.claimProviderRef` writes and the unique index dedups
@@ -234,8 +258,26 @@ export interface DownloadRead {
 export interface MediaReader {
   mediaItem(id: number): Promise<MediaItemRead | null>;
   mediaItemByProviderRef(provider: string, ref: string): Promise<MediaItemRead | null>;
-  /** Every rss item pointing at this media item, in discovery order. */
+  /**
+   * Every rss item pointing at this media item **from a feed this plugin
+   * owns**, in discovery order.
+   *
+   * The scope is not implied by the media item id, and the difference is
+   * reachable: `MediaWriter.relinkRssItem` is unscoped, so another plugin
+   * can point an rss item in *its* feed at *your* media item, and that item
+   * is not returned here. Asking about a media item you own can therefore
+   * answer `[]` while an rss item pointing at it exists. Returning it is the
+   * alternative and it is worse -- it would hand you a filename and a link
+   * out of a feed you do not own -- so the read stays scoped and the gap
+   * belongs to `relinkRssItem`.
+   */
   rssItemsFor(mediaItemId: number): Promise<RssItemRead[]>;
-  /** Every download for this rss item, from both tables, oldest change first. */
+  /**
+   * Every download for this rss item, from both tables, oldest change first
+   * -- and only when that rss item is in a feed this plugin owns, scoped
+   * through the same feed join as `rssItemsFor` one step further on. An rss
+   * item id belonging to another plugin's feed answers `[]`, whatever rows
+   * that item really has.
+   */
   downloadsFor(rssItemId: number): Promise<DownloadRead[]>;
 }
