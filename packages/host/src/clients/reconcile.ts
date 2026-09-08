@@ -96,6 +96,38 @@ const ADVANCES_TO_COMPLETED: ReadonlySet<DownloadRow['status']> =
   new Set(['submitting', 'submitted', 'downloading', 'failed']);
 
 /**
+ * Whether this row already records exactly the failure the client is
+ * reporting now -- same status, same reason.
+ *
+ * The `failed` arm's counterpart to `ADVANCES_TO_COMPLETED`, and the reason
+ * the two arms of `walkHistoryEntry` now read alike. The `completed` arm has
+ * always asked "is this row somewhere an advance to `completed` is a real
+ * transition from?" and skipped the write when it was not. The `failed` arm
+ * asked nothing: a failed history entry issued one `UPDATE` per tick against
+ * a row it had already failed, forever, at once per minute per client. That
+ * cost three things. `updated_at` was rewritten on every tick, so the column
+ * stopped answering "when did this row last change" for exactly the rows an
+ * operator is most likely to be looking at. `result.failed` reported a fresh
+ * failure every tick, so the count meant "failed rows the client still
+ * mentions" rather than "rows this tick failed" -- and with the summary line
+ * now logging it, that would have been a line printed forever about nothing
+ * happening. And the asymmetry itself was undocumented, which is what makes
+ * a reader assume it was reasoned about.
+ *
+ * **Not terminality.** A row already `failed` whose job the client later
+ * reports `completed` still advances -- `ADVANCES_TO_COMPLETED` includes
+ * `'failed'` deliberately, and that a wrong verdict stays recoverable is
+ * this module's whole headline property (see the module doc's account of
+ * 1.x's 2026-08-15 incident). This guard is narrower than that: it declines
+ * to rewrite a verdict with the one it already holds. A `failed` entry whose
+ * *reason* has changed is a new fact and is written, so a client that
+ * refines its own message still reaches `last_error`.
+ */
+function alreadyFailedForThisReason(row: DownloadRow, message: string): boolean {
+  return row.status === 'failed' && row.lastError === message;
+}
+
+/**
  * Handles one queue entry: an advance to `downloading` from `submitted` or
  * `submitting`, then a progress observation applied regardless -- unless the
  * row is `delivered`, which every arm of this walk leaves untouched because
@@ -128,7 +160,9 @@ function walkQueueEntry(
  * state **and from `failed`** -- the one arm that reaches a row 1.x's
  * row-first ordering could never have asked about again. `failed` fails the
  * row with the client's message, redacted, or a stated default when the
- * client gave none. `in-progress` is a transient post-processing state, not
+ * client gave none -- unless the row already carries that same failure, in
+ * which case there is nothing to record and it is left alone
+ * (`alreadyFailedForThisReason`). `in-progress` is a transient post-processing state, not
  * a verdict either way, so it does nothing at all: 1.x once read every such
  * status as terminal and failed an ordinary multi-part download while
  * SABnzbd was still unpacking it.
@@ -160,6 +194,10 @@ function walkHistoryEntry(
     }
     case 'failed': {
       const message = redactUrl(entry.failMessage ?? defaultFailMessage(deps.clientId));
+      // Guarded the same way the `completed` arm above is -- see
+      // `alreadyFailedForThisReason` for what the unguarded version cost and
+      // why this is not the same thing as making `failed` terminal.
+      if (alreadyFailedForThisReason(row, message)) return;
       if (failRow(deps.raw, row, message, deps.now)) {
         result.failed += 1;
       }

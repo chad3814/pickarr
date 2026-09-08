@@ -644,3 +644,101 @@ test('a row with no ref is never swept', () => {
   assert.equal(result.absent, 0);
   assert.equal(readColumn(raw, 'torrent_download', id, 'absent_since'), null);
 });
+
+// --- The failed arm, guarded the way the completed arm always was ----------
+
+test('a failed entry does not re-fail a row already failed for that reason, across three ticks', () => {
+  // The unguarded arm issued one UPDATE per failed history entry per tick,
+  // forever -- once a minute per client for as long as the client kept the
+  // entry. `updated_at` is the assertion that catches it: SABnzbd prunes
+  // history on its own schedule, so a failed job can sit there for weeks,
+  // and every tick would have rewritten the one column that answers "when
+  // did this row last change".
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'downloading' });
+
+  const snapshot: ClientSnapshot = {
+    ...emptySnapshot,
+    history: [historyEntry({ ref: 'ref-1', outcome: 'failed', failMessage: 'unpack failed' })],
+  };
+
+  const first = walkSnapshot(deps(raw, clientId, { snapshot, now: 500 }));
+  assert.equal(first.failed, 1, 'the first tick is the one that actually fails the row');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'failed');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'last_error'), 'unpack failed');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 500);
+
+  const second = walkSnapshot(deps(raw, clientId, { snapshot, now: 600 }));
+  const third = walkSnapshot(deps(raw, clientId, { snapshot, now: 700 }));
+
+  assert.equal(second.failed, 0, 'a second tick has nothing to fail -- the verdict is already recorded');
+  assert.equal(third.failed, 0);
+  assert.equal(
+    readColumn(raw, 'torrent_download', id, 'updated_at'),
+    500,
+    'updated_at must still be the tick that failed the row, not the last tick that looked at it',
+  );
+  assert.equal(readColumn(raw, 'torrent_download', id, 'last_error'), 'unpack failed');
+});
+
+test('a failed entry whose reason has changed is written, because that is a new fact', () => {
+  // The guard is "same status and same reason", not "already failed": a
+  // client that refines its own message on a later poll still reaches
+  // `last_error`.
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'failed' });
+  raw.prepare("UPDATE torrent_download SET last_error = 'unpack failed', updated_at = 500 WHERE id = ?").run(id);
+
+  const result = walkSnapshot(deps(raw, clientId, {
+    now: 600,
+    snapshot: {
+      ...emptySnapshot,
+      history: [historyEntry({ ref: 'ref-1', outcome: 'failed', failMessage: 'unpack failed: no par2 volumes' })],
+    },
+  }));
+
+  assert.equal(result.failed, 1);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'last_error'), 'unpack failed: no par2 volumes');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 600);
+});
+
+test('a failed row still advances when the client later reports it completed, guard or no guard', () => {
+  // `failed` is explicitly not terminal -- `ADVANCES_TO_COMPLETED` includes
+  // it, because a wrong verdict staying recoverable is this module's
+  // headline property and the whole lesson of 1.x's 2026-08-15 incident.
+  // The guard above declines to rewrite a verdict with itself; it must not
+  // have made `failed` a state a row cannot leave. This is the same
+  // property as 'a completed job whose row we already failed is advanced
+  // anyway' above, asserted against a row that reached `failed` through
+  // this walk's own guarded arm rather than being inserted that way.
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'downloading' });
+
+  walkSnapshot(deps(raw, clientId, {
+    now: 500,
+    snapshot: {
+      ...emptySnapshot,
+      history: [historyEntry({ ref: 'ref-1', outcome: 'failed', failMessage: 'unpack failed' })],
+    },
+  }));
+  assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'failed', 'precondition: the row is failed');
+
+  const recovered = walkSnapshot(deps(raw, clientId, {
+    now: 900,
+    snapshot: {
+      ...emptySnapshot,
+      history: [historyEntry({ ref: 'ref-1', outcome: 'completed', storagePath: '/downloads/movie.mkv' })],
+    },
+  }));
+
+  assert.equal(recovered.completed, 1, 'the client\'s later verdict must still reach the row');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'completed');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'storage_path'), '/downloads/movie.mkv');
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 900);
+});

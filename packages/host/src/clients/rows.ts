@@ -69,6 +69,18 @@ export interface DownloadRow {
   absentSince: number | null;
   deliveredAt: number | null;
   reclaimedAt: number | null;
+  /**
+   * The reason the row carries for its current state -- `failRow`'s own
+   * message when `status` is `failed`, and whatever an earlier failure left
+   * behind otherwise, since nothing clears it on the way back out.
+   *
+   * Read, not merely written, since `reconcile.ts`'s history walk decides on
+   * it: a `failed` history entry that names the reason this row already
+   * holds is a repeat of a verdict already recorded, and re-issuing the
+   * `UPDATE` would churn `updated_at` on every tick forever. That decision
+   * needs the current value, so it is part of the row.
+   */
+  lastError: string | null;
 }
 
 /**
@@ -76,9 +88,13 @@ export interface DownloadRow {
  * (torrent-only, and no function here needs it), never `attempts` (dead in
  * this slice), and never `api_key`/`username`/`password` -- this module
  * touches only the two download tables, which do not have those columns.
+ *
+ * `last_error` is here because it is read, not only written: see
+ * `DownloadRow.lastError`.
  */
 const SELECT_COLUMNS =
-  'id, rss_item_id, download_client_id, client_ref, status, storage_path, absent_since, delivered_at, reclaimed_at';
+  'id, rss_item_id, download_client_id, client_ref, status, storage_path, absent_since, delivered_at, '
+  + 'reclaimed_at, last_error';
 
 /**
  * Narrows one raw row into a `DownloadRow`, the same idiom `clients/config.ts`'s
@@ -95,6 +111,7 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
   const absentSince = (raw as { absent_since: unknown }).absent_since;
   const deliveredAt = (raw as { delivered_at: unknown }).delivered_at;
   const reclaimedAt = (raw as { reclaimed_at: unknown }).reclaimed_at;
+  const lastError = (raw as { last_error: unknown }).last_error;
   const statusValue = String((raw as { status: unknown }).status);
   if (!isDownloadStatus(statusValue)) {
     throw new Error(`${table} row ${id} has unknown status ${JSON.stringify(statusValue)}`);
@@ -110,6 +127,7 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
     absentSince: absentSince === null || absentSince === undefined ? null : Number(absentSince),
     deliveredAt: deliveredAt === null || deliveredAt === undefined ? null : Number(deliveredAt),
     reclaimedAt: reclaimedAt === null || reclaimedAt === undefined ? null : Number(reclaimedAt),
+    lastError: lastError === null || lastError === undefined ? null : String(lastError),
   };
 }
 
