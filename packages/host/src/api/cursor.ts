@@ -65,6 +65,13 @@ export function decodeCursor(raw: string | undefined): Cursor | null {
     return null;
   }
 
+  // `Buffer.from(x, 'base64url')` never throws: invalid characters, bad
+  // padding and non-ascii all yield empty or garbage bytes, which the
+  // digits-only checks below then reject. That is why there is no try/catch
+  // here -- and it is a property of *this* primitive, not of base64 decoding
+  // generally. `atob` throws a `DOMException` on every one of those inputs,
+  // so swapping to it without adding a catch would turn a malformed cursor
+  // from "start from the beginning" into a 500 on every poll.
   const decoded = Buffer.from(raw, 'base64url').toString('utf8');
   const separator = decoded.indexOf('.');
   if (separator === -1) {
