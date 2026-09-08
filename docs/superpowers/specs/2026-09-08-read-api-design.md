@@ -1,0 +1,243 @@
+# Pickarr 2.0 Slice E — The Read API
+
+The fifth slice of the 2.0 backend. Four slices have built writers: a plugin
+contract, a feed reader, a job dispatcher, download submission, and reconcile.
+**Nothing reads.** `MediaWriter` covers every write to the shared tables and has
+no counterpart, so slice A's spec already recorded the consequence — *"the read
+API is slice E's, and until it exists every plugin will improvise one"* — and the
+test double proves it, hand-writing SQL against `rss_item` through the untyped
+`ctx.db`. Reconcile then added five columns per download table that nothing can
+read at all.
+
+This slice builds the read side once, for both consumers that need it.
+
+## 1. What this slice delivers
+
+- **One query layer** over the shared tables, with keyset cursors. Every read in
+  the slice goes through it.
+- **`MediaReader` on `PluginContext`** — the typed counterpart to `MediaWriter`,
+  so a plugin stops improvising SQL against tables it does not own.
+- **An HTTP read API**, read-only, served from `node:http`: keyset-paginated sync
+  endpoints and artwork bytes.
+- **Tombstones, migration 9** — so a client that has cached a media item learns
+  when a merge deletes it.
+
+### 1.1 Not in this slice, deliberately
+
+- **No mutations. Not one endpoint.** 1.x's server has twenty-four routes, most
+  of them writes — config, restart, backup, pick, dismiss, retry, requery,
+  manual fields. None arrives here. A read API that also writes is two slices
+  wearing one name, and the write surface needs decisions this slice does not
+  have to make.
+- **No client.** The IndexedDB rewrite is the next slice; this one gives it
+  something to sync against.
+- **No auth, and the server binds to loopback only.** See §8 — this is a stated
+  consequence, not an oversight.
+- **No WebSocket and no SSE.** The client polls with a cursor. A push channel is
+  an optimisation of a protocol that does not exist yet.
+- **No search, no filtering beyond the cursor and media type, no sort options.**
+  Keyset pagination and one order.
+
+## 2. The forks, and how each was decided
+
+**The cursor is `(updated_at, id)`, not `id`.** Slice A's spec describes the flow
+as *"the client provides a media type and the last media item id it has"*, and
+justified integer rowids by it. That flow only ever sees **appends**. Reconcile
+updates rows constantly — status, percentage, `absent_since` — and an id cursor
+would never show a client any of it. A composite cursor ordered
+`(updated_at, id)` sees appends and updates both, and the `id` tiebreak is what
+makes it stable when several rows share a millisecond. This supersedes slice A's
+wording; the rowid justification still holds, because the tiebreak needs
+monotonic orderable ids for exactly the reason given there.
+
+**Deletes get tombstones, in a savepoint that already exists.** `media_item`
+rows really are deleted: `MediaWriter.dropMediaItem` removes one along with its
+poster, background and logo rows, inside `SAVEPOINT drop_media_item`. A client
+holding item 500 would otherwise never learn it was merged away, and no cursor
+over live rows can express absence. A tombstone insert joins that savepoint, so
+the row's disappearance and the record of it commit together or not at all.
+
+The alternative — a global generation counter and a full resync whenever it moves
+— was rejected because merges are routine, and it would make every one of them
+cost a full refetch of everything.
+
+**Artwork's content type is sniffed from the bytes, never stored.** The artwork
+store writes a fixed `.bin` suffix on purpose: the path is a pure function of
+`(mediaItemId, url)` so that a CDN re-serving a png as a jpg overwrites in place
+rather than orphaning the old file. That decision means **no content type exists
+anywhere in the schema**, and a browser `<img>` needs one. Adding a
+`content_type` column would create a second source of truth that the very
+re-serve the store was designed for could desync. Sniffing magic bytes on read
+cannot drift, because it is derived from the bytes being served.
+
+**Validators are weak, and that is forced.** The cached path is a hash of
+`(mediaItemId, url)` — *not* of the content — so it is stable across a re-fetch
+and cannot serve as a strong validator. `ETag: W/"<mtime>-<size>"` with
+`Last-Modified` is what the filesystem actually knows. Claiming a strong ETag
+from a path that survives content changes would be a lie a cache would believe.
+
+**`node:http`, no framework.** Six routes, read-only, on loopback. The host has
+no HTTP dependency today and this is not the reason to acquire one.
+
+**One query layer, and the HTTP handlers contain no SQL.** Both consumers —
+plugins in-process, the client over HTTP — call the same functions. Two readers
+with their own queries would drift on exactly the questions that matter: what
+counts as deleted, what a null `client_ref` means, which rows are terminal.
+
+**`MediaReader` returns plain data, not Drizzle rows**, for the same reason
+`MediaWriter` takes plain data: the plugin has never seen the host's schema
+types, and handing it a typed row would couple every plugin to our migrations.
+
+## 3. Schema, migration 9
+
+```sql
+CREATE TABLE deleted_media_item (
+  media_item_id INTEGER PRIMARY KEY,
+  plugin_id     TEXT    NOT NULL,
+  deleted_at    INTEGER NOT NULL
+);
+CREATE INDEX deleted_media_item_at ON deleted_media_item (deleted_at, media_item_id);
+
+CREATE INDEX media_item_sync    ON media_item (plugin_id, updated_at, id);
+CREATE INDEX rss_item_sync      ON rss_item (updated_at, id);
+```
+
+`media_item_id` is the primary key rather than a surrogate: a media item is
+deleted once, and a second tombstone for the same id would mean the id was
+reused, which `INTEGER PRIMARY KEY` does not do. `plugin_id` is copied onto the
+tombstone because the row it names is gone by the time anyone reads it, and a
+client syncing one media type must not be told about another's deletions.
+
+The sync indexes exist because every cursor query orders by
+`(updated_at, id)` and filters by plugin. **A test asserts each index is used**,
+via `EXPLAIN QUERY PLAN` against the query builder the code itself exports —
+reconcile shipped two status indexes that no query ever used, and nothing noticed
+until a reviewer measured a 153 ms tick.
+
+## 4. `MediaReader`
+
+```ts
+export interface MediaItemRead {
+  id: number; title: string; releaseDate: string | null; description: string | null;
+  provider: string | null; providerRef: string | null;
+  createdAt: number; updatedAt: number;
+}
+export interface RssItemRead {
+  id: number; feedId: number; filename: string; link: string;
+  mediaItemId: number | null; resolution: string; resolutionDetail: string | null;
+  downloadType: 'torrent' | 'nzb'; deliveredAt: number | null;
+}
+export interface DownloadRead {
+  id: number; rssItemId: number; downloadClientId: number;
+  transport: 'torrent' | 'nzb'; status: string; clientRef: string | null;
+  infohash: string | null; percentage: number | null;
+  absentSince: number | null; deliveredAt: number | null; lastError: string | null;
+}
+
+export interface MediaReader {
+  mediaItem(id: number): Promise<MediaItemRead | null>;
+  mediaItemByExternalReference(provider: string, ref: string): Promise<MediaItemRead | null>;
+  rssItemsFor(mediaItemId: number): Promise<RssItemRead[]>;
+  downloadsFor(rssItemId: number): Promise<DownloadRead[]>;
+}
+```
+
+Reaches `PluginContext` as **`read`**, beside the existing `media` writer.
+`media` is not renamed: every plugin, the test double and the flow tests all
+name it, and a rename would churn every one of them to no benefit.
+
+**A plugin sees only its own media items.** `mediaItem` and
+`mediaItemByExternalReference` filter on the calling plugin's id, the way
+`MediaWriter` already scopes its writes. A plugin that could read another's
+items would be reading a schema it has never seen, and the `None`-category class
+of bug says what happens when one subsystem interprets another's vocabulary.
+
+`downloadsFor` reads both download tables and tags each row with its
+`transport`, the same shape `DownloadRow.table` already carries internally.
+`status` is `string`, not the host's union: the vocabulary is the host's and will
+grow, and a plugin pinned to today's six values would break on the seventh.
+
+## 5. The HTTP API
+
+Read-only. Six routes.
+
+```
+GET /api/health                          → { ok: true, version }
+GET /api/media?type=<t>&since=<cursor>   → { items, cursor, done }
+GET /api/rss-items?since=<cursor>        → { items, cursor, done }
+GET /api/downloads?since=<cursor>        → { items, cursor, done }
+GET /api/deletions?since=<cursor>        → { ids, cursor, done }
+GET /api/artwork/:kind/:mediaItemId      → bytes
+```
+
+A cursor is an opaque string the client echoes back — `<updatedAt>.<id>`, encoded
+so a client cannot be tempted to construct one. `done: true` means the page
+reached the end of what exists now, which is the client's signal to stop paging
+and start polling. Page size is fixed and stated in one constant.
+
+`:kind` is `poster` | `background` | `logo`. A media item with no artwork of that
+kind is a 404, not an empty 200. A row whose `path` is null — recorded but never
+fetched — is also a 404: there are no bytes, and a zero-length 200 would cache as
+though there were.
+
+**Every response is JSON except artwork.** Errors are
+`{ error: <message> }` with a status, and **no error carries a path, a url or a
+query string** — the redaction rules from slice C apply to anything this server
+writes, and a download row's `last_error` is already redacted at rest.
+
+## 6. Where it runs
+
+`main.ts` starts the server after `host.start()` and stops it before
+`host.stop()`. Port from `PICKARR_PORT`, default 8787, **bound to `127.0.0.1`**.
+
+Shutdown closes the listener and does not wait for in-flight requests to drain,
+matching what the dispatcher already does with in-flight jobs: a read that is
+abandoned mid-response costs a client one retry, and waiting is the coupling the
+job slice deliberately removed.
+
+## 7. Testing
+
+The properties worth pinning, each because it fails silently:
+
+1. **A cursor sees an update, not only an append.** Change a row's `updated_at`
+   behind an existing cursor and assert the next page contains it. An
+   id-cursored implementation fails this, which is the whole reason for §2's
+   first fork.
+2. **A cursor is stable across rows sharing one `updated_at`.** Several rows on
+   the same millisecond, paged one at a time, each appearing exactly once.
+3. **A deleted item reaches the client.** `dropMediaItem`, then a `/deletions`
+   page carrying its id — and the tombstone is in the same savepoint, so a
+   forced failure mid-drop leaves neither the deletion nor the tombstone.
+4. **A plugin cannot read another plugin's media item.** By id and by external
+   reference, both null rather than an error.
+5. **Each sync index is used**, by `EXPLAIN QUERY PLAN` against the exported
+   query builder — not a restated lookalike.
+6. **Artwork's content type comes from the bytes.** A png served as
+   `image/png` and a jpeg as `image/jpeg` from the same `.bin` suffix.
+7. **A null artwork path is a 404**, not a zero-length 200.
+8. **No error response carries a url, a path or a query string.** One assertion
+   per error route, asserting the absence of a recognisable secret.
+
+## 8. Consequences
+
+- **The API is unauthenticated.** Anything that can reach the port can read every
+  media item, every feed item and every download. Loopback binding is the whole
+  of the protection, so a reverse proxy or a container publishing that port
+  exposes the library. Auth is the next slice's to add, and it is a real gap
+  until then, not a theoretical one.
+- **A client's first sync reads everything.** No snapshot, no compaction — a
+  library of 50,000 items pages through 50,000 items once. Acceptable because it
+  happens once per client, and the alternative needs a bulk format nothing
+  consumes yet.
+- **Tombstones accumulate forever.** Nothing prunes them, because pruning needs
+  to know the oldest cursor any client still holds, and no client registers
+  itself. One row per deleted media item is small; the decision to prune belongs
+  with whatever first tracks clients.
+- **`updated_at` is a wall clock.** A clock moved backwards can hide a row from a
+  cursor that has already passed its new timestamp. Nothing in the host uses a
+  monotonic sequence today, and adding one is a bigger change than this slice;
+  the exposure is a manual clock change on the host, and it is recorded rather
+  than fixed.
+- **Nothing reads `ranking_score`, `role`, `person` or `filepath_mapping`.** They
+  have no reader after this slice either. Only what a client needs to render and
+  a plugin needs to decide is here.
