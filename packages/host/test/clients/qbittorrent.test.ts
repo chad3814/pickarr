@@ -792,3 +792,61 @@ test('the adapter exposes no remove, so a torrent is never dropped', () => {
 
   assert.equal(Object.hasOwn(client, 'remove'), false);
 });
+
+test('a 200 whose body is not a list of torrents is an incomplete snapshot, not a crash and not an empty client', async () => {
+  // `{"error":"Forbidden"}` at HTTP 200 is what a reverse proxy in front of
+  // qBittorrent routinely answers with, and nothing in the transport
+  // notices a 200. Unguarded, `for (const raw of torrents)` threw
+  // `TypeError: torrents is not iterable` out of the tick; five of those
+  // dead-letter the client's whole reconcile cycle until a restart.
+  const config = makeConfig({ id: 41, category: 'tv' });
+  const { fetch, calls } = fakeSnapshotFetch(async () => ({ error: 'Forbidden' }));
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(
+    snapshot.complete,
+    false,
+    'a body that is not a list of torrents licenses no conclusion about what this client holds',
+  );
+  assert.deepEqual(snapshot.queue, []);
+  assert.deepEqual(snapshot.history, []);
+  // Not `unreadable`: that list carries a *status or state* value this
+  // adapter could not interpret, one named value per entry, and a body that
+  // is not a list of torrents contains no such value.
+  assert.deepEqual(snapshot.unreadable, []);
+  assert.equal(calls.length, 1, 'the request itself still happened exactly once');
+});
+
+test('an empty list is an empty client, and still complete', async () => {
+  // The pair that makes the test above meaningful: `complete: false` must
+  // mean "this body told me nothing", not "this body was empty". A client
+  // genuinely holding nothing answers `[]`, and concluding absence from
+  // that is correct -- it is the only way a row whose torrent is gone ever
+  // gets its `absent_since` stamped at all.
+  const config = makeConfig({ id: 42, category: 'tv' });
+  const { fetch } = fakeSnapshotFetch(async () => []);
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.complete, true);
+  assert.deepEqual(snapshot.queue, []);
+  assert.deepEqual(snapshot.history, []);
+});
+
+test('a body that is neither a list nor an object is refused the same way', async () => {
+  // A proxy answering a bare string, or a body of `null`, reaches the same
+  // guard: the check is "is this a list", not "is this an error object", so
+  // no new shape of junk needs its own branch.
+  const config = makeConfig({ id: 43, category: 'tv' });
+  const { fetch } = fakeSnapshotFetch(async () => 'Forbidden');
+  const client = createQbittorrentClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.complete, false);
+  assert.deepEqual(snapshot.queue, []);
+  assert.deepEqual(snapshot.history, []);
+});
