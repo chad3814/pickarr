@@ -840,3 +840,47 @@ test('a full walk of the download union serves every row exactly once', () => {
   assert.equal(served.at(199), 'nzb#101', 'page 1 must end on the first of a shared pair');
   assert.equal(served.at(200), 'torrent#101', 'page 2 must begin on the second of that pair');
 });
+
+test('a row stamped updated_at = 0 is served to a caller who sent no cursor', () => {
+  // What makes both `BEGINNING` constants exact rather than approximate, and
+  // the one fixture no other test in this file has: every `updated_at` here
+  // comes from a `now()` reading, so nothing a host writer produces is ever
+  // 0 -- but `PluginContext.db` hands a plugin the raw connection, exactly
+  // the reasoning `downloadTypeOf` already gives for reading a column
+  // defensively.
+  //
+  // `(updated_at, id) > (0, 0)` admits a row at time 0 because SQLite never
+  // hands out a rowid below 1, so the row still compares greater on its id.
+  // A floor of `{updatedAt: 1, id: 0}` would drop every one of these rows.
+  const raw = setup();
+  const feedId = seedFeed(raw, 'https://example.com/feed');
+  const itemId = seedRssItem(raw, feedId, 0, 'zero.mkv');
+  const clientId = seedClient(raw, 'Client');
+  const torrentId = seedTorrentDownload(raw, itemId, clientId, 0, 'ref-t', 'abc123');
+  const nzbId = seedNzbDownload(raw, itemId, clientId, 0, 'ref-n');
+  const mediaItemId = seedMediaItem(raw, 'alpha', 0, 'Stamped Zero');
+  // A tombstone names no live row -- that is the point of one -- so this id
+  // is written rather than read back from `media_item`.
+  seedTombstone(raw, 9001, 'alpha', 0);
+
+  assert.equal(
+    [itemId, torrentId, nzbId, mediaItemId].every((id) => id >= 1),
+    true,
+    'every rowid is at least 1, which is what makes (0, 0) an exact floor rather than a guess',
+  );
+
+  assert.deepEqual(mediaItemsSince(raw, 'alpha', null).items.map((row) => row.id), [mediaItemId]);
+  assert.deepEqual(rssItemsSince(raw, null).items.map((row) => row.id), [itemId]);
+  assert.deepEqual(deletionsSince(raw, 'alpha', null).items, [9001]);
+
+  // Both transports, and the nzb one is the half that vanishes if
+  // `UNION_BEGINNING` names `'torrent'`: `'nzb' < 'torrent'` under SQLite's
+  // default BINARY collation, so `(0, 'torrent', 0)` sits *above* every nzb
+  // row stamped 0 and below every torrent row stamped 0 -- a floor that
+  // silently serves one table and not the other.
+  assert.deepEqual(
+    downloadsSince(raw, null).items.map((row) => `${row.transport}#${row.id}`),
+    [`nzb#${nzbId}`, `torrent#${torrentId}`],
+    'a null cursor must reach both tables at time 0, not just the one whose transport it names',
+  );
+});
