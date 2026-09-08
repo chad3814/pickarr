@@ -7,6 +7,8 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { PluginNotRegisteredError } from '../../src/host.ts';
 import { deliverCompleted } from '../../src/clients/deliver.ts';
 import type { DeliverDeps } from '../../src/clients/deliver.ts';
+import { createSabnzbdClient } from '../../src/clients/sabnzbd.ts';
+import type { QueuedFetch } from '../../src/fetch/queue.ts';
 
 function setup(): DatabaseSync {
   const { raw } = openTestDatabase();
@@ -336,6 +338,55 @@ test('a remove that throws leaves the row unreclaimed, and the next pass retries
 
   const second = await deliverCompleted(deps);
   assert.equal(calls, 2, 'the row must be retried on the next pass, the same shape delivery already has');
+  assert.equal(second.reclaimed, 1);
+  assert.equal(second.reclaimFailures, 0);
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
+});
+
+test("a SABnzbd delete refused at HTTP 200 leaves the row unreclaimed, and the next pass retries it", async () => {
+  // The real adapter, not a hand-written `remove`: the defect was that
+  // `remove` read nothing out of the response, so a refusal answered with a
+  // 200 came back as success, `reclaimed_at` was stamped, the row was never
+  // offered again, and -- because the request carries `del_files=1` -- the
+  // files stayed on disk forever. Wiring the actual client in is what makes
+  // this test see that, rather than testing a double that agrees with it.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'SABnzbd_nzo_1',
+    status: 'delivered', deliveredAt: 500,
+  });
+
+  let calls = 0;
+  const fetch: QueuedFetch = {
+    async json<T>(): Promise<T> {
+      calls += 1;
+      // Refused on the first pass, accepted on the second: SABnzbd answers
+      // both with HTTP 200, which is the whole point.
+      const body: unknown = calls === 1
+        ? { status: false, error: 'API Key Incorrect' }
+        : { status: true };
+      return body as T;
+    },
+    bytes(): Promise<Uint8Array> { throw new Error('bytes is not used by this test'); },
+    text(): Promise<string> { throw new Error('text is not used by this test'); },
+  };
+  const sabnzbd = createSabnzbdClient({
+    kind: 'sabnzbd', id: 41, baseUrl: 'https://sab.example.com', apiKey: 'not-a-real-key', category: 'movies',
+  }, fetch);
+  const deps = baseDeps(raw, clientId, { now: 900, remove: (ref) => sabnzbd.remove(ref) });
+
+  const first = await deliverCompleted(deps);
+
+  assert.equal(first.reclaimed, 0, 'a refused delete is not a reclaim');
+  assert.equal(first.reclaimFailures, 1, 'the refusal is reported, not swallowed');
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), null, 'the row must stay unmarked -- the job is still in SABnzbd');
+  assert.equal(readColumn(raw, id, 'status'), 'delivered');
+
+  const second = await deliverCompleted(deps);
+
+  assert.equal(calls, 2, 'the row must be offered again, which the stamp would have prevented forever');
   assert.equal(second.reclaimed, 1);
   assert.equal(second.reclaimFailures, 0);
   assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
