@@ -140,11 +140,48 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       // failed row delete after the unlink leaves a row pointing at nothing,
       // which is worse, because something will try to serve it.
       const paths = artworkPaths(mediaItemId);
-      // One savepoint for the three artwork tables and the media item row:
-      // a crash between them must not leave, say, the poster rows gone but
-      // the media item row (and thus its background/logo rows) still there.
+      const at = now();
+      // One savepoint for the three artwork tables, the media item row and
+      // the tombstone that records its deletion: a crash between them must
+      // not leave, say, the poster rows gone but the media item row (and thus
+      // its background/logo rows) still there -- and must not leave a
+      // tombstone standing over a row that is still present, which would
+      // tell every syncing client an item was deleted that is not.
       raw.exec('SAVEPOINT drop_media_item');
       try {
+        // The tombstone first, and reading `plugin_id` off the live row is
+        // the reason: after the DELETE below there is nothing left to read it
+        // from, and nothing to join a tombstone to either -- which is why
+        // `deleted_media_item` carries its own copy of the owner.
+        //
+        // `ON CONFLICT` rather than a plain INSERT because a media item id is
+        // reusable: SQLite hands the highest rowid back once its row is gone
+        // (measured, not assumed), and the dedup path drops exactly the newest
+        // row, so the very next `createMediaItem` takes the dropped id. The
+        // second drop of that id must move the tombstone forward -- both its
+        // owner and its time -- rather than abort on the primary key and take
+        // the whole deletion down with it.
+        //
+        // Moving the *owner* forward is a real loss when the two drops
+        // belong to two different plugins: the first plugin's tombstone
+        // becomes the second's, so a client of the first that had not polled
+        // in between never learns its item was deleted, and nothing can tell
+        // it later because the live row is gone. Measured through this method
+        // and `deletionsSince`; the owner half is pinned by the reused-id
+        // test in `test/media/writer.test.ts`. Every alternative with one
+        // row per id is worse: keeping the older tombstone loses the *second*
+        // plugin's deletion instead, and the plain INSERT aborts on the
+        // primary key (errcode 1555), rolling this savepoint back so that no
+        // deletion is recorded and the duplicate row stays alive -- which is
+        // the bug the upsert was added to fix. So this stands; the read API
+        // spec's §8 records it as a known gap rather than a decision to be
+        // re-derived here.
+        raw.prepare(`
+          INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
+          SELECT id, plugin_id, ? FROM media_item WHERE id = ?
+          ON CONFLICT (media_item_id) DO UPDATE
+            SET plugin_id = excluded.plugin_id, deleted_at = excluded.deleted_at
+        `).run(at, mediaItemId);
         raw.prepare('DELETE FROM poster WHERE media_item_id = ?').run(mediaItemId);
         raw.prepare('DELETE FROM background WHERE media_item_id = ?').run(mediaItemId);
         raw.prepare('DELETE FROM logo WHERE media_item_id = ?').run(mediaItemId);

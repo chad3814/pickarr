@@ -398,10 +398,13 @@ interface RssItemName {
 /**
  * The filenames to look up.
  *
- * Hand-written SQL against a table the plugin does not own, because the
- * contract has one writer for shared tables (`MediaWriter`) and no matching
- * reader: `ctx.db` is the only route to a column a plugin needs and cannot
- * write.
+ * Hand-written SQL against a table the plugin does not own, and still
+ * `ctx.db` now that `ctx.read` exists: `MediaReader` reaches rss items only
+ * *through* a media item (`rssItemsFor`), and these ids have none yet -- they
+ * are exactly the items a feed poll just delivered and this lookup is about
+ * to identify. So this remains the one route to a column a plugin needs and
+ * cannot write. A `rssItemsByIds` on the reader would close it; nothing in
+ * the read API's spec asks for one.
  */
 function readRssItems(raw: DatabaseSync, ids: readonly number[]): RssItemName[] {
   if (ids.length === 0) return [];

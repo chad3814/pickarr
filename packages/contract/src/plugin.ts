@@ -1,7 +1,7 @@
 import type { DownloadClients } from './downloads.ts';
 import type { HostFetch } from './fetch.ts';
 import type { JobQueue, JobRecord } from './jobs.ts';
-import type { MediaWriter } from './media.ts';
+import type { MediaReader, MediaWriter } from './media.ts';
 import type { Migration } from './migrations.ts';
 
 export type MediaType = 'tv' | 'movie' | 'xxx' | 'book';
@@ -21,7 +21,35 @@ export interface PluginContext {
    * created.
    */
   db: unknown;
+  /**
+   * The typed way to write the shared rows -- and, unlike `read` below,
+   * **not** scoped to this plugin. It is one writer shared by every plugin
+   * context, closed over no plugin id, so `setResolution`,
+   * `updateMediaItem` and `dropMediaItem` all act on any row id handed to
+   * them regardless of who owns the row. See `MediaWriter` for why that
+   * asymmetry stands for now.
+   */
   media: MediaWriter;
+  /**
+   * The intended way a plugin reads shared rows, not the only way -- the
+   * same caveat `MediaWriter` opens with, and for the same reason: `db`
+   * above is the host's raw connection, the very one the shared tables live
+   * in, so nothing stops a plugin from selecting another plugin's
+   * `media_item`, `rss_item` or download rows directly. What follows is a
+   * property of reads that come *through this interface*.
+   *
+   * Through it, every read is scoped to this plugin: the host builds one
+   * reader per plugin, closed over its id, so a plugin cannot read another
+   * plugin's media items, nor the rss items and downloads under another
+   * plugin's feeds -- all four methods are scoped, not just the two that
+   * name a media item. That is a typed boundary a plugin can rely on, not a
+   * sandbox the host enforces; there is no confinement here to breach.
+   *
+   * `media` is deliberately *not* renamed to `write` alongside it -- every
+   * plugin, the test double and the flow tests name it, and the churn would
+   * buy nothing.
+   */
+  read: MediaReader;
   jobs: JobQueue;
   fetch: HostFetch;
   downloads: DownloadClients;

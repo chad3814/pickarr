@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { HOST_MIGRATIONS, migrateHost, migrateHostWith, migratePlugin } from '../../src/db/migrate.ts';
+import { SYNC_QUERIES, deletionsSince } from '../../src/api/reads.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -515,6 +516,250 @@ test('reclaimed_at is nullable, so a row that predates it needs no back-filled g
 
   const nzbRow = raw.prepare('SELECT reclaimed_at FROM nzb_download').get() as { reclaimed_at: unknown };
   assert.equal(nzbRow.reclaimed_at, null);
+});
+
+test('a migration to version 9 adds the tombstone table and the sync indexes', () => {
+  const { raw } = openTestDatabase();
+  // A prefix ending at 9, not the whole list: migration 11 drops
+  // `deleted_media_item_at` and replaces it, so this is the only way to watch
+  // migration 9 create what migration 9 creates. Run to head it would assert
+  // an index a current database deliberately does not have.
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 9));
+
+  assert.ok(tableNames(raw).has('deleted_media_item'), 'missing deleted_media_item');
+
+  for (const [indexName, table] of [
+    ['deleted_media_item_at', 'deleted_media_item'],
+    ['media_item_sync', 'media_item'],
+  ] as const) {
+    const index = raw.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+    ).get(indexName) as { sql: unknown } | undefined;
+    assert.ok(index, `expected an index named ${indexName} on ${table}`);
+  }
+});
+
+test('no second (updated_at, id) index is created on rss_item', () => {
+  // `rss_item_updated` has indexed exactly those columns in that order since
+  // migration 1. A second identical index would never be chosen by SQLite and
+  // would be maintained on every rss_item write for nothing -- a feed poll
+  // writes one row per item, reconcile writes one per delivery. Migration 9's
+  // first draft created one; this is what stops it coming back.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const rows = raw.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'rss_item'",
+  ).all().map((row) => String((row as { name: unknown }).name));
+
+  const onUpdatedAtAndId = rows.filter((name) => {
+    const sql = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(name);
+    const text = String((sql as { sql: unknown } | undefined)?.sql ?? '');
+    return /\(\s*updated_at\s*,\s*id\s*\)/.test(text);
+  });
+
+  assert.deepEqual(onUpdatedAtAndId, ['rss_item_updated'], 'exactly one index covers (updated_at, id)');
+});
+
+test('a migration to version 10 indexes rss_item.media_item_id', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const index = raw.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'rss_item_media_item'",
+  ).get() as { sql: unknown } | undefined;
+  assert.ok(index, 'expected an index named rss_item_media_item');
+  assert.match(
+    String(index.sql),
+    /CREATE INDEX rss_item_media_item ON rss_item \(media_item_id\)/,
+  );
+
+  // The index exists because one query needs it, so the query is what is
+  // asserted rather than the index alone: "every release found for this media
+  // item" must seek. Before migration 10 the plan was a bare `SCAN rss_item`,
+  // and the read API asks this once per media item.
+  // `filename` is outside the index deliberately: selecting only indexed
+  // columns would plan as a *covering* index scan, which is a different plan
+  // string from the one the read API's query gets and would pin the wrong
+  // fact.
+  const plan = raw.prepare(
+    'EXPLAIN QUERY PLAN SELECT id, filename FROM rss_item WHERE media_item_id = ? ORDER BY id',
+  ).all(1).map((row) => String((row as { detail: unknown }).detail)).join('\n');
+  assert.match(plan, /SEARCH rss_item USING INDEX rss_item_media_item \(media_item_id=\?\)/);
+  // One column suffices for `ORDER BY id`: an index entry carries the rowid.
+  assert.doesNotMatch(plan, /USE TEMP B-TREE/);
+});
+
+test('migrating renames an existing rss item from usenet to nzb, which migration 5 did not', () => {
+  // The half of migration 5's rename that migration 5 left undone. Migration
+  // 5 is `UPDATE rss_feed ...` and only `rss_feed`, while `feeds/reader.ts`
+  // copies a feed's `download_type` onto every `rss_item` it inserts -- so
+  // every rss item written before migration 5 ran still held `'usenet'`, and
+  // the read API types the value as `'torrent' | 'nzb'`.
+  //
+  // Seeded on the pre-migration-10 schema through a prefix of the real
+  // `HOST_MIGRATIONS`, the same way the migration-5 test above does it, so
+  // this watches the real `MIGRATION_10` statement act on a real row rather
+  // than a synthetic one.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 9));
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, download_type, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 'nzb', 1, 1)
+  `).run();
+  // Three rows: the stale spelling, the current one, and a torrent, so the
+  // statement is shown renaming exactly what it should and nothing else.
+  const insert = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    VALUES (1, ?, ?, 10, 20, ?, '1080p')
+  `);
+  insert.run('stale.mkv', 'https://example.com/stale', 'usenet');
+  insert.run('current.mkv', 'https://example.com/current', 'nzb');
+  insert.run('torrent.mkv', 'https://example.com/torrent', 'torrent');
+
+  // Picks up only version 10: versions 1 through 9 are already recorded as applied.
+  migrateHost(raw);
+
+  assert.deepEqual(
+    raw.prepare('SELECT filename, download_type, updated_at FROM rss_item ORDER BY id').all()
+      .map((r) => {
+        const row = r as { filename: unknown; download_type: unknown; updated_at: unknown };
+        return {
+          filename: String(row.filename),
+          downloadType: String(row.download_type),
+          updatedAt: Number(row.updated_at),
+        };
+      }),
+    [
+      // Renamed, and `updated_at` untouched: the row's transport was always
+      // nzb and only its spelling changed, so bumping it would re-serve the
+      // row to every synced client for a change no client can see.
+      { filename: 'stale.mkv', downloadType: 'nzb', updatedAt: 20 },
+      { filename: 'current.mkv', downloadType: 'nzb', updatedAt: 20 },
+      { filename: 'torrent.mkv', downloadType: 'torrent', updatedAt: 20 },
+    ],
+  );
+
+  // And no row is left outside the union the read API promises, which is the
+  // property the rename exists for.
+  assert.deepEqual(
+    raw.prepare(
+      "SELECT DISTINCT download_type FROM rss_item WHERE download_type NOT IN ('torrent', 'nzb')",
+    ).all(),
+    [],
+  );
+});
+
+test('a migration to version 11 replaces the tombstone index with one that leads with plugin_id', () => {
+  // The half of migration 9's index that was missing, and the half that
+  // matters. `deletionsSince` is `WHERE plugin_id = ? AND (deleted_at,
+  // media_item_id) > (?, ?)`, and `deleted_media_item_at` named no
+  // `plugin_id` at all -- so the plan sought the time and then walked every
+  // other plugin's tombstones testing `plugin_id` row by row. `LIMIT 200`
+  // bounded the output and nothing bounded the input: measured with one
+  // plugin caught up and returning zero rows, 3.26 ms against another
+  // plugin's 50,000 tombstones, 6.57 ms at 100,000, 13.00 ms at 200,000 and
+  // 26.53 ms at 400,000, on a table the read API spec's §8 says nothing ever
+  // prunes. 0.004 ms at 400,000 with this index.
+  //
+  // Seeded on the pre-migration-11 schema through a prefix of the real
+  // `HOST_MIGRATIONS`, so the real `MIGRATION_11` statement is watched acting
+  // on a populated table -- a `DROP INDEX` and a `CREATE INDEX` in one
+  // migration, on rows that already exist.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 10));
+  const insert = raw.prepare(
+    'INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at) VALUES (?, ?, ?)',
+  );
+  insert.run(1, 'alpha', 10);
+  insert.run(2, 'beta', 20);
+  insert.run(3, 'beta', 30);
+
+  // Picks up only version 11: versions 1 through 10 are already recorded as applied.
+  migrateHost(raw);
+
+  const indexes = raw.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'deleted_media_item' ORDER BY name",
+  ).all().map((r) => {
+    const row = r as { name: unknown; sql: unknown };
+    return { name: String(row.name), sql: String(row.sql ?? '') };
+  });
+
+  // Exactly one, and it is the new one. The replaced index is dropped in the
+  // same migration rather than left beside it: nothing reads it once this
+  // exists -- `deletionsSince` is the only query over this table, and
+  // `MediaWriter.dropMediaItem` upserts on the primary key -- and an index no
+  // query uses is a B-tree maintained on every tombstone write for nothing.
+  // Migration 9's first draft shipped a duplicate of `rss_item_updated` and
+  // slice D shipped two status indexes nothing used; this is that lesson.
+  assert.deepEqual(indexes.map((index) => index.name), ['deleted_media_item_sync']);
+  assert.match(
+    indexes[0]?.sql ?? '',
+    /CREATE INDEX deleted_media_item_sync ON deleted_media_item \(plugin_id, deleted_at, media_item_id\)/,
+  );
+
+  // The index exists because one query needs it, so the query is what is
+  // asserted rather than the index alone -- and the fixture holds two
+  // plugins, because with one plugin's rows in the table the defective index
+  // and this one are indistinguishable by both plan and clock.
+  const plan = raw.prepare(`EXPLAIN QUERY PLAN ${SYNC_QUERIES['deletionsSince'] ?? ''}`)
+    .all('alpha', 10, 1, 200)
+    .map((row) => String((row as { detail: unknown }).detail)).join('\n');
+  assert.match(plan, /SEARCH deleted_media_item USING COVERING INDEX deleted_media_item_sync \(plugin_id=\? AND deleted_at>\?\)/);
+  assert.doesNotMatch(plan, /USE TEMP B-TREE/);
+
+  // And the rows are still readable through it, scoped to their own plugin:
+  // an index swap that changed what the query answers would be a far worse
+  // bug than the one it fixes.
+  assert.deepEqual(deletionsSince(raw, 'beta', null).items, [2, 3]);
+  assert.deepEqual(deletionsSince(raw, 'alpha', null).items, [1]);
+});
+
+test('a tombstone cannot be written twice for one media item', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  // What the constraint guarantees, not what `dropMediaItem` does: that
+  // writer inserts with `ON CONFLICT (media_item_id) DO UPDATE`, so a media
+  // item id SQLite handed out a second time moves this row forward instead
+  // of tripping the key. The constraint is what makes one row per id the
+  // only possibility for either of them.
+  const insert = raw.prepare(`
+    INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
+    VALUES (1, 'alpha', 100)
+  `);
+  insert.run();
+
+  assert.throws(
+    () => insert.run(),
+    (err: unknown) => {
+      const code = (err as { code?: unknown }).code;
+      // 1555 is SQLite's own SQLITE_CONSTRAINT_PRIMARYKEY -- proof that the
+      // primary key on media_item_id fired, not merely that some insert
+      // threw for some reason.
+      const errcode = (err as { errcode?: unknown }).errcode;
+      return code === 'ERR_SQLITE_ERROR' && errcode === 1555;
+    },
+  );
+});
+
+test('the tombstone keeps its own plugin_id, because the row it names is gone', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  raw.prepare(`
+    INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at)
+    VALUES (1, 'alpha', 100)
+  `).run();
+
+  // No media_item row exists at id 1 -- there is nothing left to join to, so
+  // plugin_id must read back from the tombstone's own column.
+  const row = raw.prepare('SELECT plugin_id, deleted_at FROM deleted_media_item WHERE media_item_id = 1')
+    .get() as { plugin_id: unknown; deleted_at: unknown };
+  assert.deepEqual(
+    { plugin_id: String(row.plugin_id), deleted_at: Number(row.deleted_at) },
+    { plugin_id: 'alpha', deleted_at: 100 },
+  );
 });
 
 test('both download tables carry a status index', () => {

@@ -72,6 +72,9 @@ export const mediaItem = sqliteTable('media_item', {
   // The dedup's whole basis. Nullable while a lookup is outstanding, and
   // SQLite treats NULLs as distinct, so unclaimed rows do not collide.
   uniqueIndex('media_item_provider_ref').on(t.provider, t.providerRef),
+  // Every cursor query in the read API's sync slice orders by
+  // (updated_at, id) filtered by plugin, so plugin_id leads.
+  index('media_item_sync').on(t.pluginId, t.updatedAt, t.id),
 ]);
 
 export const rssItem = sqliteTable('rss_item', {
@@ -106,6 +109,70 @@ export const rssItem = sqliteTable('rss_item', {
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),
   uniqueIndex('rss_item_feed_guid').on(t.feedId, t.guid),
+  // "Every release found for this media item", which the read API asks once
+  // per media item. Migration 10; without it that query was a bare
+  // `SCAN rss_item`. One column, not (media_item_id, id): an index entry
+  // already carries the rowid, so the query's `ORDER BY id` needs no sort.
+  index('rss_item_media_item').on(t.mediaItemId),
+  // No second `(updated_at, id)` index for the read API's sync cursor:
+  // `rss_item_updated` above already is one, byte for byte. Migration 9's
+  // DDL originally created `rss_item_sync` alongside it, which SQLite would
+  // never have chosen -- two identical B-trees, both maintained on every
+  // `rss_item` write (a feed poll writes one per item, reconcile writes one
+  // per delivery) for a query that can only use one of them. The read API
+  // uses `rss_item_updated`.
+]);
+
+/**
+ * Records that a media item was deleted, since no query over `media_item`'s
+ * live rows can say so once the row is gone.
+ *
+ * `mediaItemId` is the primary key, not a surrogate `id` with its own
+ * foreign key: one tombstone per id is the whole truth there is to record.
+ * An id *can* come back -- SQLite hands the highest rowid out again once its
+ * row is deleted, measured against `node:sqlite`, and the dedup path drops
+ * exactly the newest row -- so the second deletion of a reused id must move
+ * this row's `pluginId` and `deletedAt` forward rather than sit beside a
+ * stale twin. `MediaWriter.dropMediaItem` writes it as an upsert for that
+ * reason. It is deliberately not a reference to `media_item` either -- the
+ * row it names is gone, which is the entire point, so a reference would be
+ * unsatisfiable by construction.
+ *
+ * That is only "forward" **within one plugin**. When the reused id is taken
+ * by a *different* plugin the upsert moves `pluginId` too, so the first
+ * plugin's tombstone becomes the second's, and a client of the first that
+ * had not polled inside that window never learns its item was deleted --
+ * nor can it later, since the live row is gone. Not theoretical:
+ * `test/media/writer.test.ts` asserts the re-tombstoned row names the second
+ * owner. It is still the least-bad shape available with one row per id; the
+ * read API spec's §8 records the trade and what closing it would take.
+ *
+ * `pluginId` is copied onto the tombstone rather than looked up: by the time
+ * anyone reads it there is nothing left on `media_item` to join to, and a
+ * client syncing one media type must not be handed another plugin's
+ * deletions.
+ */
+export const deletedMediaItem = sqliteTable('deleted_media_item', {
+  mediaItemId: integer('media_item_id').primaryKey(),
+  pluginId: text('plugin_id').notNull(),
+  deletedAt: integer('deleted_at').notNull(),
+}, (t) => [
+  // `deletionsSince` is `WHERE plugin_id = ? AND (deleted_at, media_item_id)
+  // > (?, ?)`, so the index leads with the equality and then carries the
+  // cursor's two columns in the order the query sorts them -- genuinely the
+  // shape `media_item_sync` gives `media_item`, which the index this replaced
+  // was not. Migration 9's `deleted_media_item_at` covered
+  // `(deleted_at, media_item_id)` and named no `plugin_id`, so a caught-up
+  // client walked every *other* plugin's tombstones on every poll: 26.53 ms
+  // at 400,000 of them against 0.004 ms here. Migration 11 drops it in the
+  // same statement that creates this, because nothing else reads that table
+  // -- `MediaWriter.dropMediaItem` upserts on the primary key -- and an index
+  // no query uses is a B-tree maintained on every tombstone write for
+  // nothing.
+  //
+  // Covering, as it happens: `media_item_id` and `deleted_at` are the only
+  // columns `deletionsSince` selects, so the read never touches the table.
+  index('deleted_media_item_sync').on(t.pluginId, t.deletedAt, t.mediaItemId),
 ]);
 
 /**
@@ -164,6 +231,8 @@ export const torrentDownload = sqliteTable('torrent_download', {
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('torrent_download_item').on(t.rssItemId),
+  // The read API's sync cursor over this table's branch of the union.
+  index('torrent_download_sync').on(t.updatedAt, t.id),
   // Serves `clients/rows.ts`'s `rowsForClientByStatus` -- the reconcile
   // tick's only read shape, asked for non-terminal statuses by the absence
   // sweep, `completed` by delivery, `delivered` by reclaim and `submitting`
@@ -201,6 +270,8 @@ export const nzbDownload = sqliteTable('nzb_download', {
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('nzb_download_item').on(t.rssItemId),
+  // The read API's sync cursor over this table's branch of the union.
+  index('nzb_download_sync').on(t.updatedAt, t.id),
   // See `torrentDownload`'s own `..._status` comment: the same query reads
   // both tables, so both need the index.
   index('nzb_download_status').on(t.status),

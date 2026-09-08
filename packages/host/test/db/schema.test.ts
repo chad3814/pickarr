@@ -1,6 +1,7 @@
 /**
- * `schema.ts` and `migrate.ts`'s `INITIAL_SCHEMA` declare the same 13 tables
- * and 13 indexes twice — once as Drizzle objects, once as DDL — and nothing
+ * `schema.ts` and `migrate.ts` declare the same 16 tables and 26 indexes
+ * twice — once as Drizzle objects, once as DDL, spread across
+ * `INITIAL_SCHEMA` and the numbered migrations that follow it — and nothing
  * generates either from the other. There is no drizzle config in this repo
  * and no script runs `drizzle-kit`, so these tests are what keeps the two in
  * step: the table set; every column's name, SQL type and nullability; and

@@ -80,6 +80,23 @@ export interface ProviderClaim {
  * nothing stops a plugin from writing to `media_item`, `role` and the rest
  * directly instead. The two invariants below hold only for writes that go
  * through this interface.
+ *
+ * **Nothing here is scoped to the calling plugin -- do not infer symmetry
+ * with `MediaReader`.** Unlike the reader, which the host builds once *per
+ * plugin* around that plugin's id, there is one writer shared by every
+ * plugin context and it closes over no plugin id at all: ten of its eleven
+ * methods are handed none, and `createMediaItem` stores the `pluginId` in
+ * `MediaItemInit` without checking it against the plugin doing the writing.
+ * So every method acts on the bare row id it is given, whoever wrote that
+ * row: `setResolution` on another plugin's rss item, `updateMediaItem` and
+ * `dropMediaItem` on another plugin's media item, all succeed. Verified by
+ * execution against the real writer, not inferred.
+ * `MediaReader` next door scopes every one of its four methods, and the
+ * asymmetry is deliberate for now rather than an oversight: a read side
+ * honest about ownership is worth having on its own, and closing the write
+ * side touches every caller of these methods, which is a later slice's
+ * change. Until it happens, a plugin can change and delete rows it does not
+ * own, and the host does not stop it.
  */
 export interface MediaWriter {
   createMediaItem(init: MediaItemInit): Promise<number>;
@@ -143,4 +160,131 @@ export interface MediaWriter {
    */
   attachRole(mediaItemId: number, role: RoleInit): Promise<void>;
   setResolution(rssItemId: number, resolution: Resolution, detail: string | null): Promise<void>;
+}
+
+/**
+ * Which of the two download tables a row came from, and which kind of thing
+ * an rss item is fetched as. A union, not an enum: `erasableSyntaxOnly` is on
+ * and these two values are the whole vocabulary a *reader* is ever handed.
+ * The columns behind them are TEXT and one of them can still hold a third
+ * value -- see `downloadTypeOf` in `@pickarr/host`'s `api/reads.ts` for which,
+ * and for what happens to it.
+ */
+export type Transport = 'torrent' | 'nzb';
+
+/** A media item as a reader sees it. */
+export interface MediaItemRead {
+  id: number;
+  title: string;
+  releaseDate: string | null;
+  description: string | null;
+  provider: string | null;
+  providerRef: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * An rss item as a reader sees it. No `updatedAt`: the column exists and is
+ * what a paged read is ordered by, but it is the *cursor's* business rather
+ * than a fact about the item, and the cursor already carries it.
+ */
+export interface RssItemRead {
+  id: number;
+  feedId: number;
+  filename: string;
+  link: string;
+  mediaItemId: number | null;
+  resolution: string;
+  resolutionDetail: string | null;
+  downloadType: Transport;
+  deliveredAt: number | null;
+}
+
+/**
+ * A download as a reader sees it, from either table. `status` is `string`
+ * rather than the host's own union: the vocabulary is the host's and will
+ * grow, and a plugin pinned to today's values would break on the next one.
+ *
+ * `infohash` exists on `torrent_download` alone and reads `null` for an nzb
+ * row -- one shape for both transports, rather than a field that is present
+ * or absent depending on which table answered.
+ */
+export interface DownloadRead {
+  id: number;
+  rssItemId: number;
+  downloadClientId: number;
+  transport: Transport;
+  status: string;
+  clientRef: string | null;
+  infohash: string | null;
+  percentage: number | null;
+  absentSince: number | null;
+  deliveredAt: number | null;
+  lastError: string | null;
+}
+
+/**
+ * The typed counterpart to `MediaWriter`: how a plugin reads the shared rows
+ * it wrote, instead of improvising SQL against tables it has never seen.
+ * Plain data, not Drizzle rows, for the same reason `MediaWriter` takes plain
+ * data -- a typed row would couple every plugin to the host's migrations.
+ *
+ * The intended way a plugin reads those rows, **not the only way** -- the
+ * caveat `MediaWriter` opens with applies here word for word:
+ * `PluginContext.db` is the same raw connection the shared tables live in,
+ * so a plugin can select any plugin's `media_item`, `rss_item` or download
+ * rows directly and the host does not stop it. The scoping below is a
+ * boundary this interface keeps, not one the host enforces on a plugin.
+ *
+ * **Every method here is scoped to the calling plugin -- all four, not just
+ * the two that name a media item.** The host builds one of these per plugin,
+ * closed over that plugin's id, so a plugin cannot ask about another's.
+ * `mediaItem` and `mediaItemByProviderRef` filter on that id directly;
+ * `rssItemsFor` and `downloadsFor` reach it one join further on, because an
+ * rss item belongs to a feed and a feed names its plugin. Someone else's
+ * media item answers `null` and someone else's feed answers `[]` -- the same
+ * answer each read gives for a row that does not exist, and not an error:
+ * telling those two apart would report the existence of the other plugin's
+ * rows, which is the first half of reading them.
+ *
+ * The scoping is this interface's, not `MediaWriter`'s. See that interface
+ * for what a plugin can still change without owning it.
+ *
+ * `mediaItemByProviderRef` reads `media_item.provider` / `provider_ref` --
+ * the pair `MediaWriter.claimProviderRef` writes and the unique index dedups
+ * on -- and **not** the separate `external_reference` table, which has no
+ * writer anywhere in the tree. An earlier draft called this
+ * `mediaItemByExternalReference`, which named the table it does not consult.
+ *
+ * Every method returns a `Promise` to match `MediaWriter`'s shape, even
+ * though `node:sqlite` answers synchronously: a plugin awaits both halves of
+ * the contract the same way, and the host is free to put a read behind
+ * something that really does yield without changing this interface.
+ */
+export interface MediaReader {
+  mediaItem(id: number): Promise<MediaItemRead | null>;
+  mediaItemByProviderRef(provider: string, ref: string): Promise<MediaItemRead | null>;
+  /**
+   * Every rss item pointing at this media item **from a feed this plugin
+   * owns**, in discovery order.
+   *
+   * The scope is not implied by the media item id, and the difference is
+   * reachable: `MediaWriter.relinkRssItem` is unscoped, so another plugin
+   * can point an rss item in *its* feed at *your* media item, and that item
+   * is not returned here. Asking about a media item you own can therefore
+   * answer `[]` while an rss item pointing at it exists. Returning it is the
+   * alternative and it is worse -- it would hand you a filename and a link
+   * out of a feed you do not own -- so the read stays scoped and the gap
+   * belongs to `relinkRssItem`.
+   */
+  rssItemsFor(mediaItemId: number): Promise<RssItemRead[]>;
+  /**
+   * Every download for this rss item, from both tables, oldest change first
+   * -- and only when that rss item is in a feed this plugin owns, scoped
+   * through the same feed join as `rssItemsFor` one step further on. An rss
+   * item id belonging to another plugin's feed answers `[]`, whatever rows
+   * that item really has.
+   */
+  downloadsFor(rssItemId: number): Promise<DownloadRead[]>;
 }
