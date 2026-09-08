@@ -259,12 +259,16 @@ const RSS_ITEMS_SINCE = `
  * media item, and id order is discovery order, which does not reshuffle
  * itself the moment one of the rows is touched.
  *
- * `rss_item` carries no index on `media_item_id`, so this one **scans** --
- * `EXPLAIN QUERY PLAN` says `SCAN rss_item` and the index test pins that as
- * the measured fact it is rather than as an approval. `ORDER BY id` is at
- * least rowid order, so the scan needs no sort on top of it. An index on
- * `media_item_id` is what would fix it, and adding one is a migration this
- * module cannot write.
+ * Served by `rss_item_media_item`, migration 10's index on exactly
+ * `media_item_id`. Before it existed this query was a bare `SCAN rss_item`,
+ * reading the whole table for one item's handful of rows -- and
+ * `MediaReader.rssItemsFor` calls it once per media item, so a plugin walking
+ * its library scanned `rss_item` once per item in it.
+ *
+ * `ORDER BY id` needs no sort on top of that index: an index entry carries the
+ * rowid as its tail, so the matches for one `media_item_id` come back in
+ * rowid order already. The index test asserts both -- `SEARCH`, and no temp
+ * B-tree.
  */
 const RSS_ITEMS_FOR_MEDIA_ITEM = `
   SELECT ${RSS_ITEM_COLUMNS} FROM rss_item WHERE media_item_id = ? ORDER BY id

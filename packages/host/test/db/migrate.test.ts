@@ -556,6 +556,35 @@ test('no second (updated_at, id) index is created on rss_item', () => {
   assert.deepEqual(onUpdatedAtAndId, ['rss_item_updated'], 'exactly one index covers (updated_at, id)');
 });
 
+test('a migration to version 10 indexes rss_item.media_item_id', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const index = raw.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'rss_item_media_item'",
+  ).get() as { sql: unknown } | undefined;
+  assert.ok(index, 'expected an index named rss_item_media_item');
+  assert.match(
+    String(index.sql),
+    /CREATE INDEX rss_item_media_item ON rss_item \(media_item_id\)/,
+  );
+
+  // The index exists because one query needs it, so the query is what is
+  // asserted rather than the index alone: "every release found for this media
+  // item" must seek. Before migration 10 the plan was a bare `SCAN rss_item`,
+  // and the read API asks this once per media item.
+  // `filename` is outside the index deliberately: selecting only indexed
+  // columns would plan as a *covering* index scan, which is a different plan
+  // string from the one the read API's query gets and would pin the wrong
+  // fact.
+  const plan = raw.prepare(
+    'EXPLAIN QUERY PLAN SELECT id, filename FROM rss_item WHERE media_item_id = ? ORDER BY id',
+  ).all(1).map((row) => String((row as { detail: unknown }).detail)).join('\n');
+  assert.match(plan, /SEARCH rss_item USING INDEX rss_item_media_item \(media_item_id=\?\)/);
+  // One column suffices for `ORDER BY id`: an index entry carries the rowid.
+  assert.doesNotMatch(plan, /USE TEMP B-TREE/);
+});
+
 test('a tombstone cannot be written twice for one media item', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);

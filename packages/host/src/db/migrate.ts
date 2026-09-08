@@ -390,6 +390,32 @@ CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
 `;
 
 /**
+ * Indexes `rss_item.media_item_id`, which nothing has ever indexed.
+ *
+ * `reads.ts`'s `rssItemsForMediaItem` -- "every release found for this media
+ * item" -- filters on exactly that column, and with no index it planned as a
+ * bare `SCAN rss_item`, reading the whole table for one item's handful of
+ * rows. The read API's `MediaReader.rssItemsFor` calls it **once per media
+ * item**, so a plugin walking its library scanned `rss_item` once for every
+ * item in it. With this index the plan is
+ * `SEARCH rss_item USING INDEX rss_item_media_item (media_item_id=?)`.
+ *
+ * One column, not `(media_item_id, id)`, although the query is
+ * `ORDER BY id`: an index entry already carries the rowid as its tail, so
+ * SQLite hands the matches back in rowid order and needs no sort on top --
+ * measured, `EXPLAIN QUERY PLAN` shows no `USE TEMP B-TREE FOR ORDER BY`.
+ * Naming `id` explicitly would index the rowid twice for nothing.
+ *
+ * Not unique: one media item genuinely has many rss items, which is the whole
+ * point of the query. Nullable too -- an unmatched rss item has no media item
+ * -- and those rows sit in the index under NULL, which costs nothing because
+ * nothing ever searches for them.
+ */
+const MIGRATION_10 = `
+CREATE INDEX rss_item_media_item ON rss_item (media_item_id);
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -404,6 +430,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 7, up: (db) => db.exec(MIGRATION_7) },
   { version: 8, up: (db) => db.exec(MIGRATION_8) },
   { version: 9, up: (db) => db.exec(MIGRATION_9) },
+  { version: 10, up: (db) => db.exec(MIGRATION_10) },
 ];
 
 /**

@@ -411,9 +411,9 @@ test('every sync query seeks its index rather than scanning it', () => {
     },
     rssItemsForMediaItem: {
       args: [1],
-      mustMatch: ['SCAN rss_item'],
-      mustNotMatch: ['USE TEMP B-TREE'],
-      why: 'rss_item has no index on media_item_id, so this scans -- pinned as the measured fact it is, not as an approval',
+      mustMatch: ['SEARCH rss_item USING INDEX rss_item_media_item (media_item_id=?)'],
+      mustNotMatch: ['USE TEMP B-TREE', 'SCAN rss_item'],
+      why: "migration 10's index on media_item_id; its entries carry the rowid, so `ORDER BY id` needs no sort on top",
     },
     downloadsForRssItem: {
       args: [1, 1],
@@ -429,6 +429,16 @@ test('every sync query seeks its index rather than scanning it', () => {
     'every exported query needs a plan expectation, and every expectation an exported query',
   );
 
+  /**
+   * The two compound reads. Named once, because everything else reads a
+   * single table and must therefore *seek* it -- a blanket rule on top of
+   * each entry's own `mustMatch`, so a read added later cannot satisfy the
+   * table above by naming an index it walks end to end. `SCAN (subquery-2)`
+   * is a union plan's sort input and appears nowhere else, which is why the
+   * two unions are exempted by name rather than by pattern.
+   */
+  const compound = new Set(['downloadsSince', 'downloadsForRssItem']);
+
   for (const [name, check] of Object.entries(checks)) {
     const sql = SYNC_QUERIES[name];
     assert.ok(sql !== undefined, `SYNC_QUERIES has no entry for ${name}`);
@@ -442,6 +452,10 @@ test('every sync query seeks its index rather than scanning it', () => {
     }
     for (const fragment of check.mustNotMatch) {
       assert.ok(!plan.includes(fragment), `${name} plan must not contain ${fragment} (${check.why})\n${plan}`);
+    }
+    if (!compound.has(name)) {
+      assert.ok(plan.includes('SEARCH'), `${name} reads one table and must seek it\n${plan}`);
+      assert.ok(!plan.includes('SCAN'), `${name} reads one table and must not scan anything\n${plan}`);
     }
   }
 });

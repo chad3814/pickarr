@@ -158,12 +158,26 @@ reused, which `INTEGER PRIMARY KEY` does not do. `plugin_id` is copied onto the
 tombstone because the row it names is gone by the time anyone reads it, and a
 client syncing one media type must not be told about another's deletions.
 
-`rss_item` gets **no new index**: `rss_item_updated` has covered
-`(updated_at, id)` since migration 1, byte for byte, and the read API uses it.
-An earlier draft of this spec created a second one under a different name —
-two identical B-trees, both maintained on every `rss_item` write, for a query
-that can only ever use one. A test asserts exactly one index covers those
-columns.
+`rss_item` gets **no new `(updated_at, id)` index**: `rss_item_updated` has
+covered exactly those columns since migration 1, byte for byte, and the read
+API uses it. An earlier draft of this spec created a second one under a
+different name — two identical B-trees, both maintained on every `rss_item`
+write, for a query that can only ever use one. A test asserts exactly one index
+covers those columns.
+
+It does get one index it has never had, in **migration 10**:
+
+```sql
+CREATE INDEX rss_item_media_item ON rss_item (media_item_id);
+```
+
+`MediaReader.rssItemsFor` — "every release found for this media item" — filters
+on `media_item_id`, which nothing had ever indexed, so that query planned as a
+bare `SCAN rss_item`. It is asked **once per media item**, so a plugin walking
+its library scanned the whole of `rss_item` once for every item in it. One
+column, not `(media_item_id, id)`: an index entry already carries the rowid, so
+the query's `ORDER BY id` needs no sort on top — measured, no
+`USE TEMP B-TREE FOR ORDER BY` in the plan.
 
 The sync indexes exist because every cursor query orders by
 `(updated_at, id)` and filters by plugin. **A test asserts each index is

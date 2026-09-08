@@ -109,6 +109,11 @@ export const rssItem = sqliteTable('rss_item', {
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),
   uniqueIndex('rss_item_feed_guid').on(t.feedId, t.guid),
+  // "Every release found for this media item", which the read API asks once
+  // per media item. Migration 10; without it that query was a bare
+  // `SCAN rss_item`. One column, not (media_item_id, id): an index entry
+  // already carries the rowid, so the query's `ORDER BY id` needs no sort.
+  index('rss_item_media_item').on(t.mediaItemId),
   // No second `(updated_at, id)` index for the read API's sync cursor:
   // `rss_item_updated` above already is one, byte for byte. Migration 9's
   // DDL originally created `rss_item_sync` alongside it, which SQLite would
