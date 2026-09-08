@@ -234,9 +234,18 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
     // Every other throw from steps 1-4, including `stat` finding nothing
     // there: logged, and the row stays `completed` for the next tick. See
     // the module doc for why this never calls `failRow`.
+    //
+    // `redactUrl`, matching `reclaimRows` below. Defence in depth rather
+    // than a live leak: nothing that reaches this catch holds a credential
+    // today -- steps 1-4 are two sqlite reads, `deps.stat`, and the
+    // plugin's own `onDownloadedFile` -- so there is no url with an api key
+    // in it for a message here to carry. The point is that the two catches
+    // in one file no longer differ in a way a reader has to check, and a
+    // later step that does build a url (a plugin handed the client's base
+    // url, say) cannot leak through the one that was left raw.
     deps.log('failed to deliver a completed download, leaving it completed for the next tick', {
       rowId: row.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: error instanceof Error ? redactUrl(error.message) : String(error),
     });
   }
 }

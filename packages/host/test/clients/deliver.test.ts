@@ -497,3 +497,42 @@ test('one ref the client will not delete does not starve the rows behind it', as
   assert.equal(readColumn(raw, poisonId, 'reclaimed_at'), null);
   assert.equal(readColumn(raw, goodId, 'reclaimed_at'), 900, 'the row behind the poison one is reclaimed');
 });
+
+test('a delivery failure\'s message is redacted, the same way a reclaim failure\'s already was', async () => {
+  // Defence in depth, not a live leak: the four steps `deliverOne` guards
+  // are two sqlite reads, `deps.stat` and the plugin's own
+  // `onDownloadedFile`, none of which is handed a url with a credential in
+  // it. This asserts the two catches in this file no longer differ -- a
+  // reader should not have to check which of them redacts, and a later step
+  // that does build a url cannot leak through the one that was left raw.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/media');
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
+  });
+
+  const lines: { message: string; detail: Readonly<Record<string, unknown>> | undefined }[] = [];
+  const result = await deliverCompleted(baseDeps(raw, clientId, {
+    stat: async () => ({ sizeBytes: 8 }),
+    deliver: async () => {
+      throw new Error('plugin refused: https://sab.example.com/api?apikey=super-secret&mode=queue');
+    },
+    log: (message, detail) => { lines.push({ message, detail }); },
+  }));
+
+  assert.equal(result.delivered, 0);
+  assert.deepEqual(
+    lines,
+    [{
+      message: 'failed to deliver a completed download, leaving it completed for the next tick',
+      detail: {
+        rowId: id,
+        error: 'plugin refused: https://sab.example.com/api?apikey=***&mode=queue',
+      },
+    }],
+    'the logged message must carry the redacted url, not the raw one',
+  );
+  assert.equal(readColumn(raw, id, 'status'), 'completed', 'the row is still retried next tick');
+});

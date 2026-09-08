@@ -80,9 +80,12 @@ function buildAddUrlUrl(config: SabnzbdConfig, link: string, name: string): stri
   // config form or this one would produce by accident. SABnzbd's own use of
   // `"None"` is on the way *back*: it is the literal text the server itself
   // answers with for a queue slot that has no category (1.x's
-  // `readCategory`, `packages/core/src/clients/sabnzbd.ts`, ~line 296) --
-  // this adapter never reads a slot's category back at all, so that
-  // reasoning has nothing to apply to here.
+  // `readCategory`, `packages/core/src/clients/sabnzbd.ts`, ~line 296).
+  // This adapter does read a slot's category back -- `toQueueEntry` and
+  // `toHistoryEntry` both fold it through `normalizeClientCategory` -- and
+  // that fold is exactly where it belongs, on the read side. What this
+  // function must not do is normalise on the way *out*, which would file a
+  // download under a category no operator configured.
   query.set('cat', config.category);
   query.set('nzbname', name);
   query.set('apikey', config.apiKey);
@@ -141,8 +144,8 @@ const IN_PROGRESS_STATUSES = new Set([
  * status to `IN_PROGRESS_STATUSES`; a wrong "still working" has no such
  * feedback loop.
  *
- * `qbittorrent.ts` (Task 4) defaults the opposite way for an unrecognised
- * torrent *state* -- not a bug, a different endpoint shape. SABnzbd's
+ * `qbittorrent.ts`'s own `readState` defaults the opposite way for an
+ * unrecognised torrent *state* -- not a bug, a different endpoint shape. SABnzbd's
  * history holds only jobs that have already left the queue, so an
  * unrecognised status there is more likely a terminal one this list
  * hasn't caught up with. qBittorrent's `torrents/info` spans a torrent's

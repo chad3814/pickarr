@@ -294,9 +294,10 @@ CREATE INDEX nzb_download_item ON nzb_download (rss_item_id);
  *
  * `storage_path` holds the *client's own* path, exactly as it reports it --
  * never the mapped path a `filepath_mapping` row would produce. That mapping
- * is derived on demand by a later task and never stored, because a stored
- * mapped path goes stale the moment a `filepath_mapping` row changes, and is
- * then a lie that outlived its cause.
+ * is derived on demand, by `clients/paths.ts`'s `mapClientPath` at the
+ * moment a row is delivered, and never stored: a stored mapped path goes
+ * stale the moment a `filepath_mapping` row changes, and is then a lie that
+ * outlived its cause.
  *
  * `delivered_at` here is not `rss_item.delivered_at`: that column is stamped
  * when slice A's poll hands an undelivered *new item* to its plugin, before

@@ -89,7 +89,7 @@ export interface Host {
   requestDownload(rssItemId: number): Promise<void>;
   /**
    * Delivers `file` to the plugin `pluginId` names, calling its
-   * `onDownloadedFile`. The shape Task 10's `deliverCompleted`
+   * `onDownloadedFile`. The shape `deliverCompleted`
    * (`clients/deliver.ts`) expects for its own `deliver` dependency --
    * built here, rather than by whoever wires `deliverCompleted` up,
    * because only this closure holds the registered `plugins` map and
@@ -204,12 +204,6 @@ export function createHost(deps: {
     now: deps.now,
     defaultMaxAttempts: DEFAULT_MAX_ATTEMPTS,
   });
-
-  // Shared by the feed reader, the host's own job-scanning code below, and
-  // the artwork store created next -- a corrupt row, a feed lookup failure
-  // and an unlink that failed for a reason other than the file already
-  // being gone all surface through the same channel a plugin's own
-  // `ctx.log` would use.
 
   // The real dispatcher behind `start()`/`stop()`/`idle()`, meant to live
   // for as long as the host runs, driving every registered handler as its

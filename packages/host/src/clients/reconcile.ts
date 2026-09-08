@@ -18,11 +18,14 @@
  * not exist at all**. A wrong verdict is then recoverable on the very next
  * poll, rather than terminal.
  *
- * This module runs a ref-recovery pass (below), then step 1 (queue) and
- * step 3 (history) of the full reconcile pass, then an absence sweep, given
- * a snapshot already fetched. Delivering a `completed` row to its plugin is
- * Task 10's -- it runs in the same function, around this walk, once that
- * task lands.
+ * This module runs a ref-recovery pass (below), then the queue walk and the
+ * history walk of the full reconcile pass, then an absence sweep, given a
+ * snapshot already fetched. Delivering a `completed` row to its plugin is
+ * not here and not in this function: `deliver.ts`'s `deliverCompleted` does
+ * it, and `reconcile-job.ts`'s handler calls it after `walkSnapshot`
+ * returns. Nothing in this module awaits anything, which is the practical
+ * reason the two are separate -- delivery calls a plugin and a filesystem,
+ * and this walk is a run of synchronous sqlite writes.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { redactUrl } from './redact.ts';
@@ -34,11 +37,13 @@ import type { DownloadRow, DownloadStatus } from './rows.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
 
 /**
- * Only the fields this task and Task 9's absence sweep produce. `delivered`
- * and `reclaimed` belong to Task 10's own `deliverCompleted`, a separate
- * function with a separate result -- they never join this type; a reviewer
- * seeing a type that will grow once more is expected here, not a sign this
- * was left unfinished.
+ * What one `walkSnapshot` pass did: only the counters the walk and the
+ * absence sweep in this module produce. `delivered`, `reclaimed`,
+ * `unowned`, `reclaimFailures` and `undeliverable` belong to `deliver.ts`'s
+ * `DeliverResult` -- a separate function, a separate pass, a separate
+ * result -- and never join this type. `reconcile-job.ts`'s
+ * `logTickSummary` is what puts the two side by side on one line, which is
+ * the only place a tick is described as a whole.
  */
 export interface ReconcileResult {
   advanced: number;
@@ -388,7 +393,19 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
   }
 }
 
-/** `delivered` and `failed` are where a row's life in this slice ends; an absence observation about either would say nothing anyone acts on, so neither is ever swept. */
+/**
+ * The two statuses the absence sweep skips. Terminal *for the sweep's
+ * purposes* only -- an absence observation about either says nothing anyone
+ * acts on, so stamping one would cost a write and buy no decision.
+ *
+ * Neither is where a row's life ends, and `failed` emphatically is not:
+ * `ADVANCES_TO_COMPLETED` includes it on purpose, so a row this database
+ * failed is advanced the moment the client reports the job completed. That
+ * a wrong verdict stays recoverable is this module's headline property (see
+ * the module doc's account of 1.x's 2026-08-15 incident), and this set does
+ * not weaken it -- a `failed` row is reached through the snapshot's own
+ * entries, which is precisely the path that does not depend on any sweep.
+ */
 const TERMINAL_STATUSES: ReadonlySet<DownloadRow['status']> = new Set(['delivered', 'failed']);
 
 /**
