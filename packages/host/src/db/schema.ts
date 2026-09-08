@@ -139,8 +139,9 @@ export const deletedMediaItem = sqliteTable('deleted_media_item', {
   pluginId: text('plugin_id').notNull(),
   deletedAt: integer('deleted_at').notNull(),
 }, (t) => [
-  // The read API's cursor over tombstones orders by (deleted_at, id), same
-  // shape as media_item_sync and rss_item_sync above.
+  // The read API's cursor over tombstones orders by (deleted_at, id) -- the
+  // same shape `media_item_sync` gives `media_item`, and the same shape
+  // `rss_item_updated` already gave `rss_item`.
   index('deleted_media_item_at').on(t.deletedAt, t.mediaItemId),
 ]);
 

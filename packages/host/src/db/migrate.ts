@@ -368,10 +368,16 @@ ALTER TABLE nzb_download ADD COLUMN reclaimed_at INTEGER;
  * a client syncing one media type must not be handed another plugin's
  * deletions.
  *
- * The three indexes exist because every cursor query in this slice orders by
- * `(updated_at, id)` and filters by plugin -- `media_item_sync` and
- * `rss_item_sync` serve that on their own tables, and
- * `deleted_media_item_at` serves the same shape on tombstones.
+ * Two indexes, not three. Every cursor query in this slice orders by
+ * `(updated_at, id)` and filters by plugin: `media_item_sync` serves that on
+ * `media_item`, and `deleted_media_item_at` serves the same shape on
+ * tombstones. **`rss_item` gets nothing new** -- `rss_item_updated` has
+ * covered `(updated_at, id)` since migration 1, and a second index on the
+ * same columns would be a second B-tree maintained on every `rss_item` write
+ * for a query that can only use one of them. A test in
+ * `test/db/migrate.test.ts` asserts exactly one index covers those columns,
+ * because a first draft of this migration created that duplicate and nothing
+ * objected.
  */
 const MIGRATION_9 = `
 CREATE TABLE deleted_media_item (
