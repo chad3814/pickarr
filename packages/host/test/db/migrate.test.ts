@@ -585,6 +585,66 @@ test('a migration to version 10 indexes rss_item.media_item_id', () => {
   assert.doesNotMatch(plan, /USE TEMP B-TREE/);
 });
 
+test('migrating renames an existing rss item from usenet to nzb, which migration 5 did not', () => {
+  // The half of migration 5's rename that migration 5 left undone. Migration
+  // 5 is `UPDATE rss_feed ...` and only `rss_feed`, while `feeds/reader.ts`
+  // copies a feed's `download_type` onto every `rss_item` it inserts -- so
+  // every rss item written before migration 5 ran still held `'usenet'`, and
+  // the read API types the value as `'torrent' | 'nzb'`.
+  //
+  // Seeded on the pre-migration-10 schema through a prefix of the real
+  // `HOST_MIGRATIONS`, the same way the migration-5 test above does it, so
+  // this watches the real `MIGRATION_10` statement act on a real row rather
+  // than a synthetic one.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 9));
+  raw.prepare(`
+    INSERT INTO rss_feed (plugin_id, name, url, download_type, created_at, updated_at)
+    VALUES ('alpha', 'Feed', 'https://example.com/feed', 'nzb', 1, 1)
+  `).run();
+  // Three rows: the stale spelling, the current one, and a torrent, so the
+  // statement is shown renaming exactly what it should and nothing else.
+  const insert = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    VALUES (1, ?, ?, 10, 20, ?, '1080p')
+  `);
+  insert.run('stale.mkv', 'https://example.com/stale', 'usenet');
+  insert.run('current.mkv', 'https://example.com/current', 'nzb');
+  insert.run('torrent.mkv', 'https://example.com/torrent', 'torrent');
+
+  // Picks up only version 10: versions 1 through 9 are already recorded as applied.
+  migrateHost(raw);
+
+  assert.deepEqual(
+    raw.prepare('SELECT filename, download_type, updated_at FROM rss_item ORDER BY id').all()
+      .map((r) => {
+        const row = r as { filename: unknown; download_type: unknown; updated_at: unknown };
+        return {
+          filename: String(row.filename),
+          downloadType: String(row.download_type),
+          updatedAt: Number(row.updated_at),
+        };
+      }),
+    [
+      // Renamed, and `updated_at` untouched: the row's transport was always
+      // nzb and only its spelling changed, so bumping it would re-serve the
+      // row to every synced client for a change no client can see.
+      { filename: 'stale.mkv', downloadType: 'nzb', updatedAt: 20 },
+      { filename: 'current.mkv', downloadType: 'nzb', updatedAt: 20 },
+      { filename: 'torrent.mkv', downloadType: 'torrent', updatedAt: 20 },
+    ],
+  );
+
+  // And no row is left outside the union the read API promises, which is the
+  // property the rename exists for.
+  assert.deepEqual(
+    raw.prepare(
+      "SELECT DISTINCT download_type FROM rss_item WHERE download_type NOT IN ('torrent', 'nzb')",
+    ).all(),
+    [],
+  );
+});
+
 test('a tombstone cannot be written twice for one media item', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);

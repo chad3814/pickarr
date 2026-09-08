@@ -179,6 +179,25 @@ column, not `(media_item_id, id)`: an index entry already carries the rowid, so
 the query's `ORDER BY id` needs no sort on top — measured, no
 `USE TEMP B-TREE FOR ORDER BY` in the plan.
 
+Migration 10 also carries the half of migration 5's rename that migration 5 did
+not do:
+
+```sql
+UPDATE rss_item SET download_type = 'nzb' WHERE download_type = 'usenet';
+```
+
+Migration 5 renamed `'usenet'` to `'nzb'` on `rss_feed` **and only there**,
+while `feeds/reader.ts` copies a feed's `download_type` onto every `rss_item`
+it inserts — so every rss item written before migration 5 ran still held
+`'usenet'`. `RssItemRead.downloadType` is typed `'torrent' | 'nzb'`, which was
+a lie for exactly those rows.
+
+This does not make the column safe by construction, and the read layer's
+refusal stays: `download_type` is TEXT with no CHECK, and `PluginContext.db`
+hands a plugin the raw connection, so a row written *after* this migration can
+still carry any string. The union is honest because the read boundary enforces
+it, not because the schema does — see §4.
+
 The sync indexes exist because every cursor query orders by
 `(updated_at, id)` and filters by plugin. **A test asserts each index is
 *sought*, not merely named**, via `EXPLAIN QUERY PLAN` against the query text

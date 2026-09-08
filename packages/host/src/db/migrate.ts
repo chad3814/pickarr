@@ -219,6 +219,13 @@ ALTER TABLE rss_item ADD COLUMN delivered_at INTEGER;
  * -- the two columns are compared directly starting next slice, and one
  * concept spelled two ways on two tables is how they drift apart. The
  * column's default stays `'torrent'`; only this value is renamed.
+ *
+ * **`rss_feed` only, which was not enough.** `feeds/reader.ts` copies a
+ * feed's `download_type` onto every `rss_item` it inserts, so this statement
+ * left every pre-existing rss item holding `'usenet'`. `MIGRATION_10` is the
+ * matching `UPDATE rss_item`; this one is deliberately left as it shipped
+ * rather than widened, because a migration already recorded as applied never
+ * runs again.
  */
 const MIGRATION_5 = `
 UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet';
@@ -390,7 +397,12 @@ CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
 `;
 
 /**
- * Indexes `rss_item.media_item_id`, which nothing has ever indexed.
+ * Two unrelated repairs the read API needs, in one migration because they
+ * landed in one fix wave: an index `rss_item` has never had, and the half of
+ * migration 5's rename that migration 5 did not do.
+ *
+ * **The index.** Indexes `rss_item.media_item_id`, which nothing has ever
+ * indexed.
  *
  * `reads.ts`'s `rssItemsForMediaItem` -- "every release found for this media
  * item" -- filters on exactly that column, and with no index it planned as a
@@ -410,9 +422,34 @@ CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
  * point of the query. Nullable too -- an unmatched rss item has no media item
  * -- and those rows sit in the index under NULL, which costs nothing because
  * nothing ever searches for them.
+ *
+ * **The rename migration 5 left half-done.** `MIGRATION_5` is
+ * `UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet'`
+ * -- `rss_feed` and **only** `rss_feed`. But `feeds/reader.ts` copies a feed's
+ * `download_type` onto every `rss_item` it inserts, so every rss item written
+ * before migration 5 ran still held `'usenet'`, and nothing had ever touched
+ * that column. The read API types the value as `'torrent' | 'nzb'`, which was
+ * a lie for exactly those rows: `reads.ts`'s `downloadTypeOf` refuses them,
+ * and one such row fails the whole page it lands in. This is the statement
+ * migration 5 needed and did not carry.
+ *
+ * Written the same way round as migration 5's, deliberately: same column
+ * name, same old value, same new value, one table over. Idempotent -- a
+ * database with no `'usenet'` row updates nothing -- and it does not touch
+ * `created_at`/`updated_at`, because the row's transport was always nzb and
+ * only its spelling has changed. Bumping `updated_at` would re-serve every
+ * such row to every synced client for a change no client can see.
+ *
+ * It does **not** make the column safe by construction, and `downloadTypeOf`
+ * stays. The column is TEXT with no CHECK, and `PluginContext.db` hands a
+ * plugin the raw connection, so a row written after this migration can still
+ * carry any string at all. What this closes is the one source that history
+ * actually produced.
  */
 const MIGRATION_10 = `
 CREATE INDEX rss_item_media_item ON rss_item (media_item_id);
+
+UPDATE rss_item SET download_type = 'nzb' WHERE download_type = 'usenet';
 `;
 
 /**

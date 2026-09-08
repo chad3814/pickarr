@@ -399,13 +399,23 @@ function asNumberOrNull(value: unknown): number | null {
 }
 
 /**
- * `rss_item.download_type` is TEXT, so nothing in the schema stops a third
- * value reaching this point -- and one is genuinely reachable. `'usenet'`
- * was the old spelling of `'nzb'`; migration 5 renamed it on `rss_feed`
- * **and only there**, while `feeds/reader.ts` copies a feed's value onto
- * every item it writes. Any `rss_item` row written before migration 5 ran
- * therefore still holds `'usenet'` today, because no migration has ever
- * touched this column.
+ * `rss_item.download_type` is TEXT with no CHECK, so nothing in the *schema*
+ * stops a third value reaching this point. This function is therefore what
+ * makes `RssItemRead.downloadType`'s `'torrent' | 'nzb'` true rather than
+ * hopeful -- the guarantee is enforced here, at the read boundary, not by the
+ * column.
+ *
+ * The value history actually produced was `'usenet'`, the old spelling of
+ * `'nzb'`. Migration 5 renamed it on `rss_feed` **and only there**, while
+ * `feeds/reader.ts` copies a feed's value onto every item it writes, so every
+ * rss item written before migration 5 ran still held it. **Migration 10
+ * renames it on `rss_item` too**, which closes that source -- so on a
+ * migrated database no row reaches here with a value outside the union.
+ *
+ * That is not the same as the column being safe. It is still unconstrained,
+ * and `PluginContext.db` hands a plugin the raw connection, so a row written
+ * *after* migration 10 can carry any string at all. The check stays for that
+ * reason, and it is load-bearing rather than defensive padding.
  *
  * Refused rather than folded to `'torrent'`, because a coerced value hands
  * a client a fact the row does not hold and the client has no way to find

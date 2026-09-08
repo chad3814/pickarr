@@ -543,19 +543,39 @@ test('an rss item page reads back its shape and pages by updated_at', () => {
 });
 
 test('an rss item whose download_type is neither transport is refused rather than guessed', () => {
-  // `download_type` is TEXT, so nothing in the schema stops a third value,
-  // and `'usenet'` is a reachable one rather than a made-up one: migration 5
-  // renamed it to `'nzb'` on `rss_feed` and only there, while the feed reader
-  // copies a feed's value onto every item, so an item written before that
-  // migration still holds it. Coercing it to 'torrent' would hand a plugin a
-  // fact the row does not hold; the message names the row's id and the
-  // offending value, and nothing else off the row.
+  // `download_type` is TEXT with no CHECK, so nothing in the schema stops a
+  // third value, and `PluginContext.db` hands a plugin the raw connection --
+  // so this refusal is what makes `RssItemRead.downloadType`'s union true
+  // rather than hopeful. Migration 10 renames the one value history actually
+  // produced (`'usenet'`, see the migration test), so a *migrated* database
+  // has none; a row written afterwards can still carry anything.
+  //
+  // Coercing it to 'torrent' would hand a plugin a fact the row does not
+  // hold; the message names the row's id and the offending value, and nothing
+  // else off the row.
   const raw = setup();
   const feedId = seedFeed(raw, 'https://example.com/feed');
-  seedRssItem(raw, feedId, 100, 'a.mkv');
+  const mediaId = seedMediaItem(raw, 'alpha', 5, 'Item');
+  seedRssItem(raw, feedId, 100, 'a.mkv', mediaId);
   raw.prepare('UPDATE rss_item SET download_type = ? WHERE id = ?').run('usenet', 1);
 
+  // Both read paths, not just the paged one: `rssItemsForMediaItem` builds
+  // the same shape, so a row outside the union must not reach a caller
+  // through it either.
   assert.throws(() => rssItemsSince(raw, null), /rss item 1 has unknown download type "usenet"/);
+  assert.throws(
+    () => rssItemsForMediaItem(raw, mediaId),
+    /rss item 1 has unknown download type "usenet"/,
+  );
+
+  // And the column really is unconstrained, which is why the check above is
+  // load-bearing rather than dead. Asserted against the DDL rather than
+  // assumed: a CHECK added later would make the guard unreachable, and this
+  // is what would say so.
+  const ddl = raw.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rss_item'",
+  ).get() as { sql: unknown };
+  assert.doesNotMatch(String(ddl.sql), /CHECK/);
 });
 
 test('a download page carries only the columns the read shape names, both transports', () => {
