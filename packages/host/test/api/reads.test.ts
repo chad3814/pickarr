@@ -399,14 +399,20 @@ test('every sync query seeks its index rather than scanning it', () => {
     },
     downloadsSince: {
       args: [0, 'nzb', 0, 0, 'nzb', 0, PAGE_SIZE],
-      mustMatch: ['torrent_download', 'nzb_download'],
-      mustNotMatch: [],
-      // The one paged read with no `SEARCH` to assert, and the reason is a
-      // missing index rather than the predicate: neither download table has
-      // one on `(updated_at, id)`, so each branch scans however the keyset is
-      // written. Adding two is a migration, and deliberately not this
-      // change's -- recorded here so it is a known gap and not a silence.
-      why: 'no index can order across two tables, so this one sorts, and neither table indexes (updated_at, id) for the branch keyset to seek on. Both tables must at least be reached.',
+      mustMatch: [
+        'SEARCH torrent_download USING',
+        'INDEX torrent_download_sync (updated_at>?)',
+        'SEARCH nzb_download USING',
+        'INDEX nzb_download_sync (updated_at>?)',
+      ],
+      // `USE TEMP B-TREE` is expected here and only here: no index can order
+      // across two tables, so the union's own sort stays. What each branch
+      // must not do is scan -- migration 10 gives both tables
+      // `(updated_at, id)` so the keyset comparison seeks, and without them
+      // every page read both tables from the beginning and grew with the
+      // installation's whole download history.
+      mustNotMatch: ['SCAN torrent_download', 'SCAN nzb_download'],
+      why: 'no index can order across two tables, so the union sorts -- but each branch must seek its own keyset rather than scan',
     },
     mediaItemById: {
       args: ['alpha', 1],

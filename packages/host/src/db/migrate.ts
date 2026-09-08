@@ -423,6 +423,16 @@ CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
  * -- and those rows sit in the index under NULL, which costs nothing because
  * nothing ever searches for them.
  *
+ * **The two download tables get their own `(updated_at, id)` indexes.**
+ * `downloadsSince` pages a union of both, and no index can order across two
+ * tables -- that sort stays a temp B-tree whatever is indexed. What these fix
+ * is the other half: each branch's keyset comparison had nothing to seek on,
+ * so every page scanned both tables from the beginning, and the cost grew
+ * with the installation's whole download history rather than with the page.
+ * Slice D shipped two status indexes no query used; this is the mirror-image
+ * mistake, a query with no index, and it was found the same way -- by reading
+ * `EXPLAIN QUERY PLAN` instead of assuming.
+ *
  * **The rename migration 5 left half-done.** `MIGRATION_5` is
  * `UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet'`
  * -- `rss_feed` and **only** `rss_feed`. But `feeds/reader.ts` copies a feed's
@@ -448,6 +458,9 @@ CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
  */
 const MIGRATION_10 = `
 CREATE INDEX rss_item_media_item ON rss_item (media_item_id);
+
+CREATE INDEX torrent_download_sync ON torrent_download (updated_at, id);
+CREATE INDEX nzb_download_sync     ON nzb_download (updated_at, id);
 
 UPDATE rss_item SET download_type = 'nzb' WHERE download_type = 'usenet';
 `;

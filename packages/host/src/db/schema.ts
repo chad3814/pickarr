@@ -206,6 +206,8 @@ export const torrentDownload = sqliteTable('torrent_download', {
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('torrent_download_item').on(t.rssItemId),
+  // The read API's sync cursor over this table's branch of the union.
+  index('torrent_download_sync').on(t.updatedAt, t.id),
   // Serves `clients/rows.ts`'s `rowsForClientByStatus` -- the reconcile
   // tick's only read shape, asked for non-terminal statuses by the absence
   // sweep, `completed` by delivery, `delivered` by reclaim and `submitting`
@@ -243,6 +245,8 @@ export const nzbDownload = sqliteTable('nzb_download', {
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
   index('nzb_download_item').on(t.rssItemId),
+  // The read API's sync cursor over this table's branch of the union.
+  index('nzb_download_sync').on(t.updatedAt, t.id),
   // See `torrentDownload`'s own `..._status` comment: the same query reads
   // both tables, so both need the index.
   index('nzb_download_status').on(t.status),
