@@ -50,17 +50,43 @@ export type ArtworkKind = 'poster' | 'background' | 'logo';
  * so "which one" needs an answer that does not depend on SQLite's own
  * unspecified row order. Lowest `id` is the row written first and is stable
  * across calls -- an arbitrary choice, but a fixed one, which is what a
- * cacheable response needs.
+ * cacheable response needs. Leaving the clause off is not a laxer version of
+ * the same thing: `media_item_id = ?` is served by that very unique index, so
+ * the rows arrive in *url* order, and which poster is served then changes the
+ * moment a second url is recorded for the item -- measured, not supposed.
+ *
+ * `AND path IS NOT NULL` is what keeps lowest-id-wins from composing with
+ * "a null `path` is 404" into a permanent 404 for a media item that *does*
+ * have bytes. `path` is nullable (migration 3), so a row recorded before its
+ * bytes were ever fetched, carrying a lower `id` than a fetched row of the
+ * same kind, would otherwise be the row picked -- and answered 404 for as
+ * long as both rows exist. Nothing in this tree writes that pair today
+ * (`media/writer.ts` sets `path` from `artwork.put` on every insert), but
+ * `PluginContext.db` hands a plugin the raw connection, so "no writer does
+ * this" is not a claim about the rows this query will meet. A media item
+ * whose only rows of a kind are null-path is still a 404, now because no row
+ * matches rather than because the matched row had nothing to serve.
  */
 const ARTWORK_QUERY: Record<ArtworkKind, string> = {
-  poster: 'SELECT path FROM poster WHERE media_item_id = ? ORDER BY id ASC LIMIT 1',
-  background: 'SELECT path FROM background WHERE media_item_id = ? ORDER BY id ASC LIMIT 1',
-  logo: 'SELECT path FROM logo WHERE media_item_id = ? ORDER BY id ASC LIMIT 1',
+  poster:
+    'SELECT path FROM poster WHERE media_item_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
+  background:
+    'SELECT path FROM background WHERE media_item_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
+  logo:
+    'SELECT path FROM logo WHERE media_item_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
 };
 
-/** `path` is nullable (migration 3): a row can be recorded before its bytes
- * are ever fetched. `undefined` (the column absent from the row) is treated
- * the same as SQL `NULL` here -- neither case has bytes to serve. */
+/**
+ * The row's `path`, or `null` for a row that has none.
+ *
+ * `ARTWORK_QUERY` already refuses null-path rows, so no row reaching here
+ * carries one -- this stays because it is the one place a column becomes a
+ * filesystem path, and `String(null)` is the string `'null'`. Without the
+ * check a query that stopped filtering would `stat('null')` instead of
+ * answering 404, which is the failure being guarded, not the one being
+ * expected. `undefined` (the column absent from the row) is treated the same
+ * as SQL `NULL`: neither has bytes to serve.
+ */
 function pathOf(row: unknown): string | null {
   const value = (row as { path: unknown }).path;
   return value === null || value === undefined ? null : String(value);
@@ -123,18 +149,23 @@ const NOT_FOUND: ArtworkResponse = { status: 404, headers: {}, body: null };
  * specifically the pair of filesystem calls a test replaces; the caller's
  * request header is not one of those.
  *
- * Two rows answer 404 identically, and deliberately do not distinguish
- * themselves in the response: no row of `kind` for this media item, and a
- * row whose `path` is still null. Both mean "no bytes exist to serve" --
- * the second because the artwork was recorded before it was ever fetched --
- * and a zero-length `200` for either would be cached by a browser as a real
- * (empty) image, staying broken until the cache entry expires long after the
- * bytes finally arrive. A file that the row's `path` names but that is no
- * longer readable (the artwork directory cleared by hand, say) gets the same
- * 404: the row and the disk have disagreed, and that is not this caller's
- * fault to see as a 500. Neither 404 names the path that was, or was not,
- * found -- only a missing row's `kind` and `mediaItemId` are known outside
- * this function, and this function never returns the path either.
+ * Two situations answer 404 identically, and deliberately do not
+ * distinguish themselves in the response: no row of `kind` for this media
+ * item at all, and rows of `kind` that all still have a null `path`. Both
+ * mean "no bytes exist to serve" -- the second because the artwork was
+ * recorded before it was ever fetched -- and a zero-length `200` for either
+ * would be cached by a browser as a real (empty) image, staying broken until
+ * the cache entry expires long after the bytes finally arrive. *All* the
+ * rows, note: `ARTWORK_QUERY` skips null-path rows rather than letting one
+ * stand for its kind, so a media item with a null-path row and a fetched one
+ * serves the fetched one -- see that constant for why it must.
+ *
+ * A file that the row's `path` names but that is no longer readable (the
+ * artwork directory cleared by hand, say) gets the same 404: the row and the
+ * disk have disagreed, and that is not this caller's fault to see as a 500.
+ * Neither 404 names the path that was, or was not, found -- only a missing
+ * row's `kind` and `mediaItemId` are known outside this function, and this
+ * function never returns the path either.
  */
 export async function readArtwork(
   raw: DatabaseSync,

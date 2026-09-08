@@ -137,6 +137,68 @@ test('a row whose path is null is 404, not a zero-length 200', async () => {
   assert.deepEqual(statCalls, []);
 });
 
+test('several posters for one media item serve the first-written one', async () => {
+  // `UNIQUE (media_item_id, url)` permits any number of posters per media
+  // item, so "which one" has to be answered by the query and not by SQLite.
+  // The two urls are chosen so index order and id order disagree: `a-` sorts
+  // before `z-`, and `media_item_id = ?` is served by that very unique index
+  // -- so a query with no `ORDER BY` reads the rows in url order and hands
+  // back the *second* row, and `ORDER BY id DESC` hands back the same wrong
+  // one. Only lowest-id-wins serves the first-written row.
+  const raw = setup();
+  const mediaItemId = seedMediaItem(raw);
+  const firstId = seedArtwork(raw, 'poster', mediaItemId, 'https://example.com/z-first.png', '/artwork/first.bin');
+  const secondId = seedArtwork(raw, 'poster', mediaItemId, 'https://example.com/a-second.jpg', '/artwork/second.bin');
+  assert.equal(firstId < secondId, true, 'the first-written row must be the lower id for this fixture to mean anything');
+
+  const { deps, statCalls } = fakeDeps({
+    '/artwork/first.bin': { bytes: PNG_BYTES, mtimeMs: 1000, size: PNG_BYTES.length },
+    '/artwork/second.bin': { bytes: JPEG_BYTES, mtimeMs: 2000, size: JPEG_BYTES.length },
+  });
+
+  const response = await readArtwork(raw, 'poster', mediaItemId, deps);
+  assert.equal(response.status, 200);
+  // By value, and by a content type only the first row's bytes can produce:
+  // the second row is a jpeg, so a wrong pick cannot pass either assertion.
+  assert.deepEqual(response.body, PNG_BYTES);
+  assert.equal(response.headers['Content-Type'], 'image/png');
+  // The other row's file was never even stat'ed, so the choice was made in
+  // SQL rather than by reading both and preferring one.
+  assert.deepEqual(statCalls, ['/artwork/first.bin']);
+
+  // Stable across calls, which is what a cacheable response needs: the same
+  // request twice cannot answer two different posters.
+  const again = await readArtwork(raw, 'poster', mediaItemId, deps);
+  assert.deepEqual(again.body, PNG_BYTES);
+  assert.equal(again.headers.ETag, response.headers.ETag);
+});
+
+test('a null-path row does not shadow a later row of the same kind that has bytes', async () => {
+  // Lowest-id-wins on its own composes with "a null `path` is 404" into a
+  // permanent 404 for a media item that does have bytes: the null-path row
+  // here is the *lower* id, so a query that did not skip it would pick it and
+  // answer 404 for as long as both rows existed. `path` is nullable, so this
+  // pair is a shape the tables permit even though no host writer produces it
+  // -- and `PluginContext.db` hands a plugin the raw connection.
+  const raw = setup();
+  const mediaItemId = seedMediaItem(raw);
+  const nullId = seedArtwork(raw, 'poster', mediaItemId, 'https://example.com/recorded.png', null);
+  const fetchedId = seedArtwork(raw, 'poster', mediaItemId, 'https://example.com/fetched.png', '/artwork/g.bin');
+  assert.equal(nullId < fetchedId, true, 'the null-path row must be the lower id, or this proves nothing');
+
+  const { deps, readFileCalls, statCalls } = fakeDeps({
+    '/artwork/g.bin': { bytes: PNG_BYTES, mtimeMs: 6000, size: PNG_BYTES.length },
+  });
+
+  const response = await readArtwork(raw, 'poster', mediaItemId, deps);
+  assert.equal(response.status, 200, 'the row with bytes is served, not the null-path row that precedes it');
+  assert.deepEqual(response.body, PNG_BYTES);
+  // The null-path row named no file, so nothing could have been looked up for
+  // it -- only the fetched row's path was ever touched.
+  assert.deepEqual(statCalls, ['/artwork/g.bin']);
+  assert.deepEqual(readFileCalls, ['/artwork/g.bin']);
+});
+
 test('a matching If-None-Match gets 304 with no body', async () => {
   const raw = setup();
   const mediaItemId = seedMediaItem(raw);
