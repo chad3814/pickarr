@@ -119,6 +119,55 @@ export function rowsForClient(raw: DatabaseSync, clientId: number): DownloadRow[
 }
 
 /**
+ * Adds every non-null `client_ref` in `rows` to `refs`. At module scope
+ * rather than nested inside `heldRefs`: it closes over nothing from that
+ * call, and a nested helper that could be hoisted is a lint warning this
+ * package keeps at zero.
+ */
+function collectRefs(rows: readonly unknown[], refs: Set<string>): void {
+  for (const row of rows) {
+    const ref = (row as { client_ref: unknown }).client_ref;
+    if (ref !== null && ref !== undefined) refs.add(String(ref));
+  }
+}
+
+/**
+ * Every `client_ref` a row on `clientId` already holds -- both tables, and
+ * every status, because a `delivered` row's ref is exactly as taken as a
+ * `downloading` one's.
+ *
+ * Both tables even though each has its own unique index, and the index is
+ * per-table: `rowByRef` looks a ref up in `torrent_download` first and
+ * `nzb_download` second, so a ref taken in either one is a ref nothing may
+ * attach to a row in the other -- doing it anyway would not violate a
+ * constraint, it would just make `rowByRef` answer with whichever table was
+ * asked first. This function answers "is this ref taken", not "would this
+ * write be rejected".
+ *
+ * Selects `client_ref` alone and states `client_ref IS NOT NULL`, which is
+ * what lets the *partial* unique index `(download_client_id, client_ref)`
+ * cover the read -- no table row is visited at all. Filtering the nulls out
+ * in JavaScript instead would leave the predicate unstated, the index
+ * unusable, and the read a full scan of every row this client has ever had.
+ */
+export function heldRefs(raw: DatabaseSync, clientId: number): Set<string> {
+  const refs = new Set<string>();
+  collectRefs(
+    raw.prepare(
+      'SELECT client_ref FROM torrent_download WHERE download_client_id = ? AND client_ref IS NOT NULL',
+    ).all(clientId),
+    refs,
+  );
+  collectRefs(
+    raw.prepare(
+      'SELECT client_ref FROM nzb_download WHERE download_client_id = ? AND client_ref IS NOT NULL',
+    ).all(clientId),
+    refs,
+  );
+  return refs;
+}
+
+/**
  * The row on `clientId` holding `ref`, from whichever table has it.
  *
  * Keyed on `(download_client_id, client_ref)` together, never on `ref`

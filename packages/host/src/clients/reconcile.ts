@@ -27,7 +27,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { redactUrl } from './redact.ts';
 import {
-  advanceStatus, failRow, rowByRef, rowsForClient, setAbsent, setProgress, setRef, setStoragePath,
+  advanceStatus, failRow, heldRefs, rowByRef, rowsForClient, setAbsent, setProgress, setRef,
+  setStoragePath,
 } from './rows.ts';
 import type { DownloadRow } from './rows.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
@@ -46,6 +47,20 @@ export interface ReconcileResult {
   untracked: number;
   recovered: number;
   absent: number;
+  /**
+   * Candidate refs recovery declined because a row on this client already
+   * holds them -- see `refCandidates`. Reported rather than only logged for
+   * the same reason `DeliverResult.reclaimFailures` is: a client whose every
+   * candidate is already claimed looks identical to a client with nothing to
+   * recover if all you have is `recovered: 0`.
+   */
+  refsAlreadyHeld: number;
+  /**
+   * Rows whose recovery write itself threw. The row keeps its null ref and
+   * the next tick tries again; every other row's recovery in the same pass
+   * still happened. See `recoverRefs`.
+   */
+  recoverFailures: number;
 }
 
 /**
@@ -171,18 +186,41 @@ function filenameForItem(raw: DatabaseSync, rssItemId: number): string {
 
 /**
  * Every ref in `deps.snapshot` -- queue and history alike -- whose category
- * matches this client's and whose name matches `filename`. Both collections
- * are searched because a job can already be finished (in history) by the
- * time its ref is recovered.
+ * matches this client's and whose name matches `filename`, minus every ref
+ * `held` says a row on this client already has. Both collections are
+ * searched because a job can already be finished (in history) by the time
+ * its ref is recovered.
+ *
+ * The `held` exclusion is not an optimisation. A `(category, name)` match
+ * says nothing about who owns the job: a row already `downloading` under
+ * `nzo-1` and a second `submitting` row for the same `rss_item.filename`
+ * produce exactly one candidate each, and attaching `nzo-1` to the second
+ * row is a `client_ref` unique-index violation -- a throw that escapes
+ * `walkSnapshot` and abandons the rest of the tick, five ticks running,
+ * until the dispatcher dead-letters the job and the client has no reconcile
+ * at all. `recoverRefs`'s claim pass makes recovery a bijection *among
+ * candidates*; this makes it a bijection against the rows that are not
+ * candidates too, which is the other half of the same property.
+ *
+ * `alreadyHeld` is returned rather than silently dropped so the caller can
+ * count it: a row whose only candidate belongs to someone else is left
+ * `submitting` with a null ref forever, and "recovered nothing" is not a
+ * useful description of that.
  */
-function refCandidates(deps: ReconcileDeps, filename: string): string[] {
+function refCandidates(
+  deps: ReconcileDeps,
+  filename: string,
+  held: ReadonlySet<string>,
+): { refs: string[]; alreadyHeld: number } {
   const queueRefs = deps.snapshot.queue
     .filter((entry) => entry.category === deps.category && entry.name === filename)
     .map((entry) => entry.ref);
   const historyRefs = deps.snapshot.history
     .filter((entry) => entry.category === deps.category && entry.name === filename)
     .map((entry) => entry.ref);
-  return [...queueRefs, ...historyRefs];
+  const matches = [...queueRefs, ...historyRefs];
+  const refs = matches.filter((ref) => !held.has(ref));
+  return { refs, alreadyHeld: matches.length - refs.length };
 }
 
 /**
@@ -205,40 +243,67 @@ function refCandidates(deps: ReconcileDeps, filename: string): string[] {
  * match resolved arbitrarily could attach the wrong job's ref to this row,
  * which is worse than leaving it for a human to look at.
  *
- * Ambiguity runs both ways, so this resolves in two passes. "Exactly one
- * candidate for this row" is not enough on its own: two rows whose
- * `rss_item.filename` is the same -- the same release picked twice, or two
- * feeds carrying it -- each see the same single client job, and each would
- * claim it. Attaching one job to two rows is wrong on its face, and it does
- * not even fail quietly: `client_ref`'s partial unique index would reject
- * the second write with SQLITE_CONSTRAINT_UNIQUE, and that throw would
- * escape `walkSnapshot` and abandon the rest of the tick -- the queue walk,
- * the history walk, everything after. One pair of same-named downloads
- * would stop reconciling that client entirely, on every tick, until someone
- * noticed. So a ref claimed by more than one row is dropped and logged, the
- * same way a row with more than one candidate is.
+ * Ambiguity runs three ways, so this resolves in three steps.
+ *
+ * 1. **A candidate a non-candidate row already holds is not a candidate at
+ *    all.** `refCandidates` excludes every ref `heldRefs` reports, because a
+ *    `(category, name)` match says nothing about ownership: a row already
+ *    `downloading` under one ref and a `submitting` row for the same
+ *    `rss_item.filename` each see that one job. See `refCandidates`.
+ * 2. **"Exactly one candidate for this row" is not enough on its own.** Two
+ *    rows whose `rss_item.filename` is the same -- the same `rss_item`
+ *    requested twice, the same release picked twice, or two feeds carrying it
+ *    -- each see the same single client job, and each would claim it.
+ *    Attaching one job to two rows is wrong on its face. So a ref claimed by
+ *    more than one row is dropped and logged, the same way a row with more
+ *    than one candidate is, and the count is taken before anything is written
+ *    so the decision does not depend on which row happened to be read first.
+ * 3. **The write itself is caught per row.** Steps 1 and 2 close both routes
+ *    this codebase knows about into `client_ref`'s partial unique index, and
+ *    a violation there does not fail quietly: it throws
+ *    SQLITE_CONSTRAINT_UNIQUE out of `setRef`, and that throw would escape
+ *    `walkSnapshot` and abandon the rest of the tick -- the queue walk, the
+ *    history walk, everything after. Five consecutive ticks of that
+ *    dead-letters the reconcile job and the client stops being reconciled at
+ *    all until a restart. Whatever route a future change opens, it must cost
+ *    that row's recovery and nothing else's, which is the same reasoning
+ *    `deliver.ts`'s `deliverOne` and `reclaimRows` already apply to a plugin
+ *    and to a client that throw.
  */
 function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
   if (!deps.snapshot.complete) return;
 
   const candidateRows = rowsForClient(deps.raw, deps.clientId)
     .filter((row) => row.status === 'submitting' && row.clientRef === null);
+  // Nothing to recover means nothing to look up: the held-ref read is
+  // skipped entirely rather than run for every tick of a client with no
+  // unconfirmed submissions, which is almost every tick.
+  if (candidateRows.length === 0) return;
+
+  const held = heldRefs(deps.raw, deps.clientId);
 
   // First pass: which row wants which ref, for the rows whose match is
   // unambiguous from their own side.
   const claims: Array<{ row: DownloadRow; ref: string }> = [];
   for (const row of candidateRows) {
     const filename = filenameForItem(deps.raw, row.rssItemId);
-    const matches = refCandidates(deps, filename);
+    const { refs, alreadyHeld } = refCandidates(deps, filename, held);
 
-    if (matches.length > 1) {
+    if (alreadyHeld > 0) {
+      result.refsAlreadyHeld += alreadyHeld;
+      deps.log('ref recovery candidate is already held by another download', {
+        rowId: row.id, candidates: alreadyHeld, name: filename,
+      });
+    }
+
+    if (refs.length > 1) {
       deps.log('ambiguous ref recovery candidates', {
-        rowId: row.id, candidates: matches.length, name: filename,
+        rowId: row.id, candidates: refs.length, name: filename,
       });
       continue;
     }
 
-    const [only] = matches;
+    const [only] = refs;
     if (only === undefined) continue;
     claims.push({ row, ref: only });
   }
@@ -259,8 +324,18 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
       });
       continue;
     }
-    if (setRef(deps.raw, claim.row, claim.ref, deps.now)) {
-      result.recovered += 1;
+    // Caught per row -- see step 3 of this function's doc comment. Only the
+    // reason is logged, never the row or the snapshot entry.
+    try {
+      if (setRef(deps.raw, claim.row, claim.ref, deps.now)) {
+        result.recovered += 1;
+      }
+    } catch (error) {
+      result.recoverFailures += 1;
+      deps.log('ref recovery write failed, leaving the download unconfirmed for the next tick', {
+        rowId: claim.row.id,
+        reason: error instanceof Error ? redactUrl(error.message) : String(error),
+      });
     }
   }
 }
@@ -355,7 +430,10 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
  * it at.
  */
 export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
-  const result: ReconcileResult = { advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0 };
+  const result: ReconcileResult = {
+    advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0,
+  };
 
   recoverRefs(deps, result);
 
