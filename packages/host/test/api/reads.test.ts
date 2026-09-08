@@ -370,6 +370,18 @@ test('every sync query seeks its index rather than scanning it', () => {
     readonly mustMatch: readonly string[];
     /** Substrings the plan must not contain. */
     readonly mustNotMatch: readonly string[];
+    /**
+     * Exactly how many `USE TEMP B-TREE` steps the plan may have. A count
+     * rather than a presence check, and required of every query rather than
+     * optional, because the two union reads legitimately have one -- no
+     * index can order across two tables -- and a *second* one would mean a
+     * branch had lost the index that supplies its own `ORDER BY`, which is
+     * precisely what makes `downloadsSince`'s per-branch `LIMIT` stop early
+     * instead of sorting the whole of both tables. Measured: dropping both
+     * `(updated_at, id)` indexes takes that plan from one temp B-tree to
+     * three and the page from 0.37 ms to 12.2 ms.
+     */
+    readonly tempBTrees: number;
     /** Why the expectations above are what they are. */
     readonly why: string;
   }
@@ -385,7 +397,8 @@ test('every sync query seeks its index rather than scanning it', () => {
       // cursor 199,000 rows deep against 0.18 ms. The cursor column has to
       // appear in the seek, and that is what this pins.
       mustMatch: ['SEARCH media_item USING INDEX media_item_sync (plugin_id=? AND updated_at>?)'],
-      mustNotMatch: ['USE TEMP B-TREE', 'SCAN media_item'],
+      mustNotMatch: ['SCAN media_item'],
+      tempBTrees: 0,
       why: '`media_item_sync` leads with plugin_id, so it narrows on the plugin and then seeks the cursor within it',
     },
     rssItemsSince: {
@@ -393,36 +406,46 @@ test('every sync query seeks its index rather than scanning it', () => {
       // `rss_item_updated` has existed since migration 1 and is the index
       // this query uses. Migration 9 deliberately adds no second one.
       mustMatch: ['SEARCH rss_item USING', 'INDEX rss_item_updated (updated_at>?)'],
-      mustNotMatch: ['USE TEMP B-TREE', 'SCAN rss_item'],
+      mustNotMatch: ['SCAN rss_item'],
+      tempBTrees: 0,
       why: 'the row-value keyset seeks straight to the cursor rather than walking the index from entry one',
     },
     deletionsSince: {
       args: ['alpha', 0, 0, PAGE_SIZE],
       mustMatch: ['SEARCH deleted_media_item USING', 'INDEX deleted_media_item_at (deleted_at>?)'],
-      mustNotMatch: ['USE TEMP B-TREE', 'SCAN deleted_media_item'],
+      mustNotMatch: ['SCAN deleted_media_item'],
+      tempBTrees: 0,
       why: 'the index leads with deleted_at, so it supplies both the seek and the order; plugin_id is filtered as rows come off it',
     },
     downloadsSince: {
-      args: [0, 'nzb', 0, 0, 'nzb', 0, PAGE_SIZE],
+      // Nine bindings now: each branch's three cursor fields and its own
+      // limit, then the union's limit. See the branch-limit test below for
+      // what those inner limits are for -- a plan cannot show them.
+      args: [0, 'nzb', 0, PAGE_SIZE, 0, 'nzb', 0, PAGE_SIZE, PAGE_SIZE],
       mustMatch: [
+        // Each branch is its own co-routine, because each is wrapped in its
+        // own ordered, limited subquery -- the wrapping is the only way to
+        // give a branch of a compound select an `ORDER BY`/`LIMIT` of its
+        // own, since one written on the compound belongs to the compound.
+        'CO-ROUTINE',
         'SEARCH torrent_download USING',
         'INDEX torrent_download_sync (updated_at>?)',
         'SEARCH nzb_download USING',
         'INDEX nzb_download_sync (updated_at>?)',
       ],
-      // `USE TEMP B-TREE` is expected here and only here: no index can order
-      // across two tables, so the union's own sort stays. What each branch
-      // must not do is scan -- migration 10 gives both tables
-      // `(updated_at, id)` so the keyset comparison seeks, and without them
-      // every page read both tables from the beginning and grew with the
-      // installation's whole download history.
       mustNotMatch: ['SCAN torrent_download', 'SCAN nzb_download'],
-      why: 'no index can order across two tables, so the union sorts -- but each branch must seek its own keyset rather than scan',
+      // One temp B-tree, for the union's own cross-table sort, and only one:
+      // a second would mean a branch was sorting its whole ahead-of-cursor
+      // set rather than reading `(updated_at, id)` in order and stopping at
+      // its limit.
+      tempBTrees: 1,
+      why: 'no index can order across two tables, so the union itself sorts -- but each branch seeks its own keyset and reads it in index order, so its own limit stops it after one page',
     },
     mediaItemById: {
       args: ['alpha', 1],
       mustMatch: ['SEARCH media_item USING INTEGER PRIMARY KEY'],
       mustNotMatch: ['SCAN media_item'],
+      tempBTrees: 0,
       why: 'the rowid is the id, so this is a single-row seek and needs no secondary index',
     },
     mediaItemByProviderRef: {
@@ -432,6 +455,7 @@ test('every sync query seeks its index rather than scanning it', () => {
       // must never happen is a table scan.
       mustMatch: ['SEARCH media_item USING INDEX media_item_'],
       mustNotMatch: ['SCAN media_item'],
+      tempBTrees: 0,
       why: 'either index on media_item answers this; a scan does not',
     },
     rssItemsForMediaItem: {
@@ -444,7 +468,8 @@ test('every sync query seeks its index rather than scanning it', () => {
         'SEARCH rss_item USING INDEX rss_item_media_item (media_item_id=?)',
         'SEARCH rss_feed USING INTEGER PRIMARY KEY (rowid=?)',
       ],
-      mustNotMatch: ['USE TEMP B-TREE', 'SCAN rss_item', 'SCAN rss_feed'],
+      mustNotMatch: ['SCAN rss_item', 'SCAN rss_feed'],
+      tempBTrees: 0,
       why: "migration 10's index on media_item_id; its entries carry the rowid, so `ORDER BY id` needs no sort on top, and the ownership join costs one more rowid seek rather than a scan",
     },
     downloadsForRssItem: {
@@ -453,9 +478,9 @@ test('every sync query seeks its index rather than scanning it', () => {
       // task 4b: one rowid seek into `rss_item`, then one into `rss_feed`.
       // `SCAN download` (the union's own derived-table scan) and
       // `USE TEMP B-TREE FOR ORDER BY` are the pre-existing union-sorting
-      // cost `downloadsSince` already pays, not this join's -- which is why
-      // this read stays in `compound` rather than gaining a blanket
-      // `SCAN`/`SEARCH` check like a single-table read.
+      // cost `downloadsSince` already pays, not this join's. `download` is a
+      // derived table rather than a base one, which is why the blanket rule
+      // below reads it as a scan of a subquery and not as a scan of a table.
       mustMatch: [
         'SEARCH torrent_download USING INDEX torrent_download_item (rss_item_id=?)',
         'SEARCH nzb_download USING INDEX nzb_download_item (rss_item_id=?)',
@@ -463,6 +488,7 @@ test('every sync query seeks its index rather than scanning it', () => {
         'SEARCH rss_feed USING INTEGER PRIMARY KEY (rowid=?)',
       ],
       mustNotMatch: ['SCAN torrent_download', 'SCAN nzb_download', 'SCAN rss_item', 'SCAN rss_feed'],
+      tempBTrees: 1,
       why: 'both per-item indexes exist and are used; the ownership join costs one rowid seek per table, not a scan; the union still sorts, as downloadsSince does',
     },
   };
@@ -474,22 +500,31 @@ test('every sync query seeks its index rather than scanning it', () => {
   );
 
   /**
-   * The two compound reads. Named once, because everything else reads a
-   * single table and must therefore *seek* it -- a blanket rule on top of
-   * each entry's own `mustMatch`, so a read added later cannot satisfy the
-   * table above by naming an index it walks end to end. `SCAN (subquery-2)`
-   * is a union plan's sort input and appears nowhere else, which is why the
-   * two unions are exempted by name rather than by pattern.
+   * Every base table, so the blanket rule below can tell a scan of a *table*
+   * from a scan of a derived one.
+   *
+   * That distinction is what lets the rule apply to all eight reads instead
+   * of exempting the two unions by name. A union plan legitimately scans its
+   * own sort input -- `SCAN (subquery-1)`, or `SCAN download` where the
+   * derived table is aliased -- and neither of those names a table, so
+   * neither is a table read end to end. Every `SCAN <base table>`, in any
+   * read, is: the read is walking a table when it could be seeking it.
+   * Exempting by name meant `downloadsSince` and `downloadsForRssItem` had
+   * no blanket rule at all, and a third union added later would have joined
+   * them there by being added to a set.
    */
-  const compound = new Set(['downloadsSince', 'downloadsForRssItem']);
+  const baseTables = new Set(
+    raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all().map((row) => String((row as { name: unknown }).name)),
+  );
 
   for (const [name, check] of Object.entries(checks)) {
     const sql = SYNC_QUERIES[name];
     assert.ok(sql !== undefined, `SYNC_QUERIES has no entry for ${name}`);
-    const plan = raw.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+    const steps = raw.prepare(`EXPLAIN QUERY PLAN ${sql}`)
       .all(...check.args)
-      .map((step) => String((step as { detail: unknown }).detail))
-      .join('\n');
+      .map((step) => String((step as { detail: unknown }).detail));
+    const plan = steps.join('\n');
 
     for (const fragment of check.mustMatch) {
       assert.ok(plan.includes(fragment), `${name} plan must contain ${fragment} (${check.why})\n${plan}`);
@@ -497,11 +532,64 @@ test('every sync query seeks its index rather than scanning it', () => {
     for (const fragment of check.mustNotMatch) {
       assert.ok(!plan.includes(fragment), `${name} plan must not contain ${fragment} (${check.why})\n${plan}`);
     }
-    if (!compound.has(name)) {
-      assert.ok(plan.includes('SEARCH'), `${name} reads one table and must seek it\n${plan}`);
-      assert.ok(!plan.includes('SCAN'), `${name} reads one table and must not scan anything\n${plan}`);
+    assert.equal(
+      steps.filter((step) => step.includes('USE TEMP B-TREE')).length,
+      check.tempBTrees,
+      `${name} must sort exactly ${check.tempBTrees} time(s) (${check.why})\n${plan}`,
+    );
+    assert.ok(plan.includes('SEARCH'), `${name} must seek something\n${plan}`);
+    for (const step of steps) {
+      const scanned = /^SCAN (\S+)/.exec(step)?.[1];
+      assert.ok(
+        scanned === undefined || !baseTables.has(scanned),
+        `${name} must not scan the table ${scanned} end to end (${check.why})\n${plan}`,
+      );
     }
   }
+});
+
+test('each branch of the download union is ordered and limited on its own', () => {
+  // The bound `EXPLAIN QUERY PLAN` cannot show, so it is asserted against the
+  // SQL the module exports instead. A `LIMIT` does not appear in a plan at
+  // all: measured, the plan for this query is the same two index seeks and
+  // the same single temp B-tree with the per-branch limits and without them.
+  //
+  // What they fix: an `ORDER BY` or `LIMIT` written on a compound select
+  // belongs to the compound, not to a branch, and SQLite cannot push the
+  // outer limit into either branch because the union's order is not either
+  // branch's order alone. So with one outer limit every page materialised
+  // **every row ahead of the cursor in both tables**, sorted the lot and
+  // discarded all but `PAGE_SIZE`. Measured on `node:sqlite` at 100,000 rows
+  // per table: 34.9 ms for page 1 and 17.4 ms at a cursor half way in,
+  // against a flat 0.37 ms both ways once each branch is limited. A first
+  // sync of 50,000 download rows is 251 pages -- 1,222 ms of blocked event
+  // loop against 122 ms -- and the old cost was O(D^2 / PAGE_SIZE), so it
+  // quadrupled every time the tables doubled.
+  const sql = SYNC_QUERIES['downloadsSince'];
+  assert.ok(sql !== undefined, 'SYNC_QUERIES has no entry for downloadsSince');
+
+  // Two branch limits, each paired with the branch's own two-column order.
+  // The pairing is the whole assertion: `LIMIT` without that `ORDER BY`
+  // takes an arbitrary `PAGE_SIZE` rows off the branch and can drop one the
+  // union would have served, and `ORDER BY` without the `LIMIT` is the
+  // unbounded form this replaced. `(updated_at, id)` is the union's own
+  // order restricted to one branch, because `transport` is constant there --
+  // which is why limiting a branch to `PAGE_SIZE` cannot hide a row from a
+  // page of `PAGE_SIZE`.
+  assert.equal(
+    sql.match(/ORDER BY updated_at, id\s+LIMIT \?/g)?.length,
+    2,
+    'each union branch needs its own (updated_at, id) order and its own limit',
+  );
+  // And the union itself still orders by the triple and takes one page.
+  assert.equal(
+    sql.match(/ORDER BY updated_at, transport, id\s+LIMIT \?/g)?.length,
+    1,
+    'the union is still ordered across both tables and limited to one page',
+  );
+  // Three limits and no fourth, which is what makes `downloadsSince`'s nine
+  // bindings the right number.
+  assert.equal(sql.match(/LIMIT \?/g)?.length, 3, 'three limits: one per branch and one for the union');
 });
 
 test('a media item reads back every column the read shape names', () => {

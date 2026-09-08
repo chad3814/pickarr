@@ -436,13 +436,47 @@ CREATE INDEX media_item_sync       ON media_item (plugin_id, updated_at, id);
  *
  * **The two download tables get their own `(updated_at, id)` indexes.**
  * `downloadsSince` pages a union of both, and no index can order across two
- * tables -- that sort stays a temp B-tree whatever is indexed. What these fix
- * is the other half: each branch's keyset comparison had nothing to seek on,
- * so every page scanned both tables from the beginning, and the cost grew
- * with the installation's whole download history rather than with the page.
- * Slice D shipped two status indexes no query used; this is the mirror-image
- * mistake, a query with no index, and it was found the same way -- by reading
- * `EXPLAIN QUERY PLAN` instead of assuming.
+ * tables -- that sort stays a temp B-tree whatever is indexed.
+ *
+ * **What these fixed when they landed is the caught-up poll, and only that.**
+ * An earlier version of this paragraph said they fixed the case where "every
+ * page scanned both tables from the beginning, and the cost grew with the
+ * installation's whole download history rather than with the page". That was
+ * false on the day it was written, and it is the kind of false that argues
+ * against ever looking again. These indexes do turn each branch's keyset
+ * comparison into a seek -- but the query as it then stood carried its only
+ * `LIMIT` on the *outer* select, and SQLite cannot push that into either
+ * branch, because the union's order is not either branch's order alone. So
+ * every page still read every row ahead of the cursor in *both* tables,
+ * sought or scanned, and sorted the lot to keep 200 of them.
+ *
+ * Measured on `node:sqlite`, 100,000 rows per table, per page: with these two
+ * indexes 34.9 ms at page 1 and 17.4 ms at a cursor half way in; with both
+ * dropped 28.9 ms and 18.5 ms. At page 1 the index was 20% **slower** than
+ * the scan it replaced -- an index entry costs a rowid indirection per row
+ * where the scan read the table sequentially -- and half way in the two were
+ * within a millisecond of each other.
+ *
+ * The steady state is where they earn their keep, and it is worth having: a
+ * caught-up client polling for nothing costs 0.02 ms with them against
+ * 8.1 ms without, because the seek lands past the last row and stops while
+ * the scan reads both tables to the end on every tick. That is the poll every
+ * synced client makes forever, so it is the common case rather than the tail.
+ *
+ * **And they became load-bearing afterwards.** `reads.ts`'s `DOWNLOADS_SINCE`
+ * now wraps each branch in its own ordered, limited subquery, and that is
+ * what bounds a page to the page. These indexes are what each branch's inner
+ * `ORDER BY updated_at, id` reads, so a branch stops after `PAGE_SIZE` index
+ * entries rather than sorting: 0.37 ms per page at any depth with them,
+ * 12.2 ms without, because without them each branch sorts its whole
+ * ahead-of-cursor set into a temp B-tree before its own `LIMIT` can bite.
+ * `test/api/reads.test.ts` asserts exactly one temp B-tree in that plan --
+ * the union's own cross-table sort -- and that assertion is what now holds
+ * both of these indexes in place.
+ *
+ * Slice D shipped two status indexes no query used. These two are used, so
+ * the mistake worth naming here is a different one: a fix whose measurement
+ * was never taken, wearing a justification that outlived being true.
  *
  * **The rename migration 5 left half-done.** `MIGRATION_5` is
  * `UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet'`

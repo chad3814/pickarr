@@ -348,14 +348,60 @@ const NZB_DOWNLOAD_SELECT = `
  * `(updated_at, transport, id)` is a genuine total order, because `transport`
  * is constant within each branch and the two values are disjoint, so no two
  * rows in the union can share the triple. `UnionCursor` carries all three.
+ *
+ * **Each branch is ordered and limited inside its own subquery, and that is
+ * what makes a page cost the page rather than the history.** An `ORDER BY`
+ * or `LIMIT` written on a compound select belongs to the compound, not to a
+ * branch, so the only way to give a branch its own is to wrap it -- hence
+ * `SELECT * FROM (branch ... ORDER BY ... LIMIT ?)` twice rather than one
+ * flat `UNION ALL`. With the limit on the outer select alone SQLite cannot
+ * push it into either branch, because the global order is not either
+ * branch's order alone: every page materialised **every row ahead of the
+ * cursor in both tables**, sorted the lot in a temp B-tree and threw away
+ * all but `PAGE_SIZE`. Measured on `node:sqlite` at 100,000 rows per table:
+ * 34.9 ms for page 1 and 17.4 ms at a cursor half way in, against a flat
+ * 0.37 ms both ways once each branch is limited. A first sync of 50,000
+ * download rows is 251 pages, so the whole walk was 1,222 ms of blocked
+ * event loop against 122 ms -- and the old total was O(D^2 / PAGE_SIZE),
+ * quadrupling every time the tables double.
+ *
+ * **`ORDER BY updated_at, id` on a branch, not the triple, and the two agree
+ * because `transport` is constant within the branch.** So the branch's own
+ * order *is* the union order restricted to that branch, and the union's
+ * first `PAGE_SIZE` rows can only come from each branch's own first
+ * `PAGE_SIZE` -- which is why limiting each branch to `PAGE_SIZE` cannot
+ * drop a row the outer select would have returned. Verified rather than
+ * reasoned about: a differential walk of this text against the unlimited
+ * form over fixtures with cross-table `(updated_at, id)` ties, a page
+ * boundary strictly inside one tie group, each branch empty in turn, and one
+ * table entirely ahead of the other returns a byte-identical row sequence
+ * every time -- and over the 50,000-row walk above, the same 251 pages and
+ * the same 50,000 distinct rows in the same order.
+ *
+ * That inner `ORDER BY` is served by `torrent_download_sync` /
+ * `nzb_download_sync` (migration 10), so a branch stops after `PAGE_SIZE`
+ * index entries instead of sorting. **Those indexes are what bound the page
+ * now**, and only now: dropping both leaves this query correct and costs
+ * 12.2 ms per page, because each branch then has to sort its whole
+ * ahead-of-cursor set into a temp B-tree before its own `LIMIT` can bite.
+ * See `MIGRATION_10` in `db/migrate.ts` for what they did and did not do
+ * before this shape existed.
  */
 const DOWNLOADS_SINCE = `
   SELECT ${DOWNLOAD_COLUMNS} FROM (
+    SELECT * FROM (
 ${TORRENT_DOWNLOAD_SELECT}
-     WHERE ${unionKeyset('torrent')}
+       WHERE ${unionKeyset('torrent')}
+       ORDER BY updated_at, id
+       LIMIT ?
+    )
     UNION ALL
+    SELECT * FROM (
 ${NZB_DOWNLOAD_SELECT}
-     WHERE ${unionKeyset('nzb')}
+       WHERE ${unionKeyset('nzb')}
+       ORDER BY updated_at, id
+       LIMIT ?
+    )
   )
   ORDER BY updated_at, transport, id
   LIMIT ?
@@ -648,14 +694,17 @@ export function rssItemsSince(raw: DatabaseSync, after: Cursor | null): Page<Rss
  * served. See `DOWNLOADS_SINCE` for the order this walks and the row that was
  * measured going missing without it.
  *
- * Each branch takes the cursor's three fields, in the order `unionKeyset`
- * documents; the last binding is the page limit.
+ * Nine bindings, in three groups: each branch takes the cursor's three
+ * fields in the order `unionKeyset` documents and then its own `PAGE_SIZE`,
+ * and the last is the outer limit. All three limits are the same number on
+ * purpose -- see `DOWNLOADS_SINCE` for why a branch limited to `PAGE_SIZE`
+ * cannot hide a row the outer select would have served.
  */
 export function downloadsSince(raw: DatabaseSync, after: UnionCursor | null): Page<DownloadRead> {
   const from = after ?? UNION_BEGINNING;
   const rows = raw.prepare(DOWNLOADS_SINCE).all(
-    from.updatedAt, from.transport, from.id,
-    from.updatedAt, from.transport, from.id,
+    from.updatedAt, from.transport, from.id, PAGE_SIZE,
+    from.updatedAt, from.transport, from.id, PAGE_SIZE,
     PAGE_SIZE,
   );
   return pageOf(rows.map(toDownloadRead), after, encodeUnionCursor);
