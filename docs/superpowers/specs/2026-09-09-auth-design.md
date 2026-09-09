@@ -54,6 +54,14 @@ thrown away; nothing entered the repo.
   the *schema object's property key*, so `emailVerified` reaches a column named
   `email_verified` and the `user` model reaches a table named `auth_user`. The
   repo's naming convention survives intact — it did not have to be traded away.
+- **The schema goes to the adapter only, so `db/open.ts` is untouched.** This
+  matters more than it sounds: `drizzle-orm@1.0.0-rc.4` types SQLite's config as
+  `Omit<DrizzleConfig, 'schema'>`, so this repo builds its handle with
+  `relations` and *cannot* pass `schema` at all. The first probe passed the
+  schema to both the Drizzle instance and the adapter, which would have led this
+  spec to demand a second Drizzle instance that does not typecheck here. A
+  handle built with `relations: defineRelations({})` and the schema given only
+  to `drizzleAdapter` signs a user up and writes the row.
 - **`toNodeHandler` mounts on a bare `node:http` server.** No framework needed.
 - **A state-changing request without an `Origin` header is refused**, 403
   `MISSING_OR_NULL_ORIGIN`. A browser always sends one; anything server-side must
@@ -208,8 +216,15 @@ may select.** `auth_account.password` is a password hash and
 `auth_session.token` is a live session. The slice-C rule extends: only
 `readClientConfig` may select download-client credentials, and **only the auth
 adapter may select `auth_account.password`, `auth_session.token`, or
-`host_state.value`**. A test greps for it, the way `test-hygiene` already greps
-for a live DOM handed to `node:assert`.
+`host_state.value`**.
+
+Enforced by an **AST walk**, not a grep — and the reason is written into
+`scripts/check-test-hygiene.ts`, which chose parsing over pattern-matching
+because the suite it guards *documents* its forbidden call by quoting it, so a
+text match reported twenty-two comments as violations. This rule has the same
+shape: the comments explaining it, and §4 of this document, both name the columns
+they forbid. Extend that script rather than adding a second mechanism with the
+same flaw it already avoided.
 
 ## 5. The guard
 
