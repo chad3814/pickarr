@@ -278,7 +278,7 @@ The properties worth pinning, each because it fails silently:
    with `PICKARR_PUBLIC_URL` unset.
 8. **The generated secret is stable across restarts** — two hosts over one
    database issue cookies the other accepts.
-9. **No query outside the auth adapter selects a credential column**, by grep
+9. **No query outside the auth adapter selects a credential column**, by the AST walk §4 describes — never by grep, for the reason given there
    over `packages/host/src`.
 
 Tests bind port 0 and must therefore compute `baseURL` after the port is known —
