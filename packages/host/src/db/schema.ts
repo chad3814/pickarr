@@ -414,3 +414,146 @@ export const jobs = sqliteTable('jobs', {
   // the queue rather than to every job ever run.
   index('jobs_ready').on(t.runAt, t.id).where(sql`${t.state} = 'ready'`),
 ]);
+
+/**
+ * A key/value row per host-wide fact, deliberately general: it already holds
+ * two unrelated things (the generated Better Auth signing secret and the
+ * first-boot claim token), and inventing a column per fact would mean a
+ * migration per fact.
+ *
+ * `value` is a credential column. Only the module that persists the signing
+ * secret may select it, enforced at build time by
+ * `scripts/check-test-hygiene.ts` over `packages/host/src`.
+ */
+export const hostState = sqliteTable('host_state', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+});
+
+/**
+ * The four tables Better Auth's `drizzleAdapter` expects, `auth_`-prefixed.
+ *
+ * **The property keys are the library's interface, not just labels.** The
+ * adapter maps each model's fields onto the *schema object's property keys*,
+ * so `emailVerified` here is what makes the `user` model's `emailVerified`
+ * field reach the `email_verified` column. Renaming a property is a runtime
+ * failure `test/db/schema.test.ts` cannot see -- it compares this file against
+ * the DDL, and a rename that changed both would leave the two agreeing and
+ * both wrong. The SQL names stay snake_case, which the spike measured working.
+ *
+ * **`id` is `text`, and these four are the only tables in this file with a
+ * text `id`** -- every table above declares `integer('id').primaryKey()`, i.e.
+ * the rowid. (`hostState` just above is keyed by a text `key`, but that is a
+ * caller-chosen name rather than a generated id, so it is not the same
+ * asymmetry.) Better Auth's default id generator is a random base62 string,
+ * and adopting it avoids configuring `advanced.database.generateId` to
+ * something the library then has to be told about. The asymmetry is the
+ * library's; it is said out loud here so the next reader does not "fix" it and
+ * break sign-up.
+ */
+export const authUser = sqliteTable('auth_user', {
+  id: text('id').primaryKey(),
+  // Nullable: Better Auth's email/password sign-up takes a name, but the
+  // library's own model does not require one.
+  name: text('name'),
+  email: text('email').notNull(),
+  // 0 or 1. Nothing in this slice verifies an email -- there is no outbound
+  // mail path -- so every row keeps the default; the column exists because the
+  // library's model has the field.
+  emailVerified: integer('email_verified').notNull().default(0),
+  image: text('image'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => [
+  // Unique, not a plain index: the email is how sign-in identifies an account,
+  // so two rows sharing one would make that lookup ambiguous rather than
+  // merely slow.
+  uniqueIndex('auth_user_email').on(t.email),
+]);
+
+/**
+ * One live session. `token` is the credential the cookie carries, so only
+ * Better Auth's own adapter may select it -- enforced at build time by
+ * `scripts/check-test-hygiene.ts`.
+ */
+export const authSession = sqliteTable('auth_session', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => authUser.id),
+  token: text('token').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+  // Nullable: recorded from the request when present, and a request through a
+  // proxy that strips them has neither.
+  ipAddress: text('ip_address'),
+  userAgent: text('user_agent'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => [
+  // Unique because the token *is* the lookup key: every guarded request
+  // resolves a cookie to one session through this index, and two rows sharing
+  // a token would mean one cookie naming two sessions.
+  uniqueIndex('auth_session_token').on(t.token),
+  // "Every session for this user", which is what revoking them all reads.
+  index('auth_session_user').on(t.userId),
+]);
+
+/**
+ * The credentials behind a user. With no social providers in this slice every
+ * row is the `credential` provider, and `password` is that account's password
+ * hash -- a credential column only Better Auth's own adapter may select,
+ * enforced at build time by `scripts/check-test-hygiene.ts`.
+ *
+ * The six token columns are nullable and stay null throughout this slice:
+ * they belong to OAuth providers, which §1.1 of the auth design spec excludes.
+ * They exist because the library's `account` model has the fields.
+ */
+export const authAccount = sqliteTable('auth_account', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => authUser.id),
+  providerId: text('provider_id').notNull(),
+  accountId: text('account_id').notNull(),
+  accessToken: text('access_token'),
+  refreshToken: text('refresh_token'),
+  idToken: text('id_token'),
+  accessTokenExpiresAt: integer('access_token_expires_at'),
+  refreshTokenExpiresAt: integer('refresh_token_expires_at'),
+  scope: text('scope'),
+  password: text('password'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => [
+  // "The accounts belonging to this user", which sign-in reads once it has
+  // resolved the email to a user row.
+  index('auth_account_user').on(t.userId),
+]);
+
+/**
+ * **Nothing in this slice writes this table**, the way `externalReference`
+ * had no writer when it was created: email verification, password reset and
+ * social sign-in are all excluded by §1.1 of the auth design spec, because
+ * each needs an outbound mail path or a provider registration this host does
+ * not have. It exists because `drizzleAdapter` expects the `verification`
+ * model to exist, and a table Better Auth may write to is cheaper than
+ * discovering at runtime which code path needs it. Do not hunt for the writer.
+ *
+ * `value` here is *not* `hostState.value`: two columns, one name, two tables,
+ * two unrelated facts. The auth design spec's §4 names three credential
+ * columns and this is not one of them, so `check-test-hygiene.ts` does not
+ * guard it -- which costs nothing while nothing reads it, and is worth
+ * revisiting by whatever slice first does.
+ */
+export const authVerification = sqliteTable('auth_verification', {
+  id: text('id').primaryKey(),
+  identifier: text('identifier').notNull(),
+  value: text('value').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+  createdAt: integer('created_at').notNull(),
+  // Nullable, unlike every other `updated_at` in this file: Better Auth's
+  // `verification` model declares it optional, and the DDL matches the model
+  // rather than the house style.
+  updatedAt: integer('updated_at'),
+}, (t) => [
+  // The library looks a verification up by its identifier, never by id.
+  index('auth_verification_identifier').on(t.identifier),
+]);

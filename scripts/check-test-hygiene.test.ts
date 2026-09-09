@@ -1,6 +1,10 @@
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { findViolations } from './check-test-hygiene.ts';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
+import { findCredentialSelections, findViolations } from './check-test-hygiene.ts';
 
 /** Runs the detector over a snippet, returning just the offending source text. */
 function flagged(source: string): string[] {
@@ -135,4 +139,100 @@ test('the violation carries a line number, so the report can name a place', () =
   assert.equal(violations.length, 1);
   assert.equal(violations[0]?.line, 2);
   assert.equal(violations[0]?.file, 'sample.test.tsx');
+});
+
+/**
+ * The second rule: no file under `packages/host/src` may name a credential
+ * column in a SQL string, outside an allow-list of paths.
+ *
+ * Every test from here down runs over a fixture written under a temp directory
+ * rather than a real file in the tree — a test that edited tracked source to
+ * prove a linter works is a test that can leave the tree broken.
+ */
+
+/** A temp directory holding `files`, removed when the test ends. */
+async function fixtureDir(t: TestContext, files: Record<string, string>): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-hygiene-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await Promise.all(
+    Object.entries(files).map(([name, source]) => writeFile(join(dir, name), source, 'utf8')),
+  );
+  return dir;
+}
+
+test('the credential-column check rejects a select outside the allow-list', async (t) => {
+  // Fixture source under a temp dir, not a real file in the tree.
+  const dir = await fixtureDir(t, {
+    'guard.ts': `export const SESSION = 'SELECT user_id, token FROM auth_session WHERE token = ?';\n`,
+    'adapter.ts': `export const SESSION = 'SELECT user_id, token FROM auth_session WHERE token = ?';\n`,
+  });
+
+  // The identical query in both files: only the allow-listed path is spared,
+  // so what is being pinned is the path check and not the pattern.
+  const violations = await findCredentialSelections(dir, [join(dir, 'adapter.ts')]);
+  assert.deepEqual(
+    violations.map((violation) => [relative(dir, violation.file), violation.line, violation.text]),
+    [['guard.ts', 1, 'auth_session.token']],
+  );
+});
+
+test('the credential-column check ignores a comment naming the same column', async (t) => {
+  // The whole reason it is an AST walk. A grep fails this test: every one of
+  // these lines names a forbidden column verbatim, because that is how the
+  // rule gets explained to the next reader.
+  const dir = await fixtureDir(t, {
+    'notes.ts': [
+      `// Only the auth adapter may run SELECT password FROM auth_account, or`,
+      `// SELECT token FROM auth_session — see the auth design spec's §4.`,
+      `/**`,
+      ` * host_state.value holds the signing secret, so nothing here selects it.`,
+      ` */`,
+      `export const KEYS = ['auth.secret', 'auth.claim-token'];`,
+      ``,
+    ].join('\n'),
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('an allow-list path naming a file that does not exist yet is not an error', async (t) => {
+  // The allow-list is the one thing this rule writes forward: it names the
+  // modules that read these columns before those modules are written. An
+  // entry with no file behind it has to be inert, or the check could not be
+  // landed ahead of them.
+  const dir = await fixtureDir(t, {
+    'guard.ts': `export const SECRET = 'SELECT value FROM host_state WHERE key = ?';\n`,
+  });
+
+  const violations = await findCredentialSelections(dir, [
+    join(dir, 'not-written-yet.ts'),
+    join(dir, 'guard.ts'),
+  ]);
+  assert.deepEqual(violations, []);
+});
+
+test('the DDL that declares a credential column is not a query over it', async (t) => {
+  // What keeps `db/migrate.ts` off the allow-list. Migration 12's DDL has to
+  // name all three columns -- it is where they come from -- and exempting that
+  // whole file would exempt every query anyone later added to it. A `CREATE`
+  // statement names its table after `TABLE`/`ON`; a query names it after
+  // `FROM`, `JOIN`, `UPDATE` or `INTO`, and only the second is a read.
+  const dir = await fixtureDir(t, {
+    'ddl.ts': [
+      'export const MIGRATION = `',
+      'CREATE TABLE host_state (',
+      '  key   TEXT PRIMARY KEY,',
+      '  value TEXT NOT NULL',
+      ');',
+      'CREATE TABLE auth_session (',
+      '  id    TEXT PRIMARY KEY,',
+      '  token TEXT NOT NULL',
+      ');',
+      'CREATE UNIQUE INDEX auth_session_token ON auth_session (token);',
+      '`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
 });

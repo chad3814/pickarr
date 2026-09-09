@@ -1,5 +1,5 @@
 /**
- * `schema.ts` and `migrate.ts` declare the same 16 tables and 26 indexes
+ * `schema.ts` and `migrate.ts` declare the same 21 tables and 31 indexes
  * twice — once as Drizzle objects, once as DDL, spread across
  * `INITIAL_SCHEMA` and the numbered migrations that follow it — and nothing
  * generates either from the other. There is no drizzle config in this repo

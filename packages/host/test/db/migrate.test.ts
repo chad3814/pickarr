@@ -777,3 +777,119 @@ test('both download tables carry a status index', () => {
     assert.match(String(index.sql), new RegExp(`CREATE INDEX ${indexName} ON ${table} \\(status\\)`));
   }
 });
+
+test('a migration to version 12 adds host_state and the four auth tables', () => {
+  // Seeded on the pre-migration-12 schema through a prefix of the real
+  // `HOST_MIGRATIONS`, the same way the migration-11 test above does it, so
+  // the real `MIGRATION_12` DDL is watched acting on a database that already
+  // holds the other sixteen tables.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 11));
+  for (const table of ['host_state', 'auth_user', 'auth_session', 'auth_account', 'auth_verification']) {
+    assert.equal(tableNames(raw).has(table), false, `${table} must not exist before migration 12`);
+  }
+
+  // Picks up only version 12: versions 1 through 11 are already recorded as applied.
+  migrateHost(raw);
+
+  const names = tableNames(raw);
+  for (const table of ['host_state', 'auth_user', 'auth_session', 'auth_account', 'auth_verification']) {
+    assert.ok(names.has(table), `missing ${table}`);
+  }
+
+  // The indexes Better Auth's own lookups need, by name and shape. The
+  // adapter maps by the schema object's property key, so it is these SQL
+  // names that have to be right rather than the Drizzle ones.
+  const indexes = raw.prepare(`
+    SELECT name, sql FROM sqlite_master
+     WHERE type = 'index' AND tbl_name LIKE 'auth_%' AND sql IS NOT NULL
+     ORDER BY name
+  `).all().map((r) => {
+    const row = r as { name: unknown; sql: unknown };
+    return { name: String(row.name), sql: String(row.sql ?? '') };
+  });
+  assert.deepEqual(indexes.map((index) => index.name), [
+    'auth_account_user',
+    'auth_session_token',
+    'auth_session_user',
+    'auth_user_email',
+    'auth_verification_identifier',
+  ]);
+  // Uniqueness is the part of an index's shape that changes behaviour rather
+  // than only speed: two rows sharing a session token, or two users sharing
+  // an email, is a correctness failure and not a slow query.
+  const sqlByName = new Map(indexes.map((index) => [index.name, index.sql]));
+  assert.match(sqlByName.get('auth_user_email') ?? '', /CREATE UNIQUE INDEX auth_user_email ON auth_user \(email\)/);
+  assert.match(sqlByName.get('auth_session_token') ?? '', /CREATE UNIQUE INDEX auth_session_token ON auth_session \(token\)/);
+  assert.match(sqlByName.get('auth_session_user') ?? '', /CREATE INDEX auth_session_user ON auth_session \(user_id\)/);
+  assert.match(sqlByName.get('auth_account_user') ?? '', /CREATE INDEX auth_account_user ON auth_account \(user_id\)/);
+  assert.match(
+    sqlByName.get('auth_verification_identifier') ?? '',
+    /CREATE INDEX auth_verification_identifier ON auth_verification \(identifier\)/,
+  );
+});
+
+test('every auth table is keyed by TEXT, not an integer rowid', () => {
+  // Better Auth generates base62 string ids. An INTEGER PRIMARY KEY here would
+  // accept them (SQLite is permissive) and then hand back numbers, so this is
+  // asserted from PRAGMA table_info rather than from a successful insert.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  for (const table of ['auth_user', 'auth_session', 'auth_account', 'auth_verification']) {
+    const id = raw.prepare(`PRAGMA table_info(${table})`).all()
+      .map((r) => {
+        const row = r as { name: unknown; type: unknown; pk: unknown };
+        return { name: String(row.name), type: String(row.type), pk: Number(row.pk) };
+      })
+      .find((column) => column.name === 'id');
+    assert.deepEqual(id, { name: 'id', type: 'TEXT', pk: 1 }, `${table}.id must be the TEXT primary key`);
+  }
+
+  // The foreign keys onto it are TEXT too, or a session would key its user by
+  // a value the user table cannot hold.
+  for (const table of ['auth_session', 'auth_account']) {
+    const userId = raw.prepare(`PRAGMA table_info(${table})`).all()
+      .map((r) => {
+        const row = r as { name: unknown; type: unknown };
+        return { name: String(row.name), type: String(row.type) };
+      })
+      .find((column) => column.name === 'user_id');
+    assert.deepEqual(userId, { name: 'user_id', type: 'TEXT' }, `${table}.user_id must be TEXT`);
+  }
+});
+
+test('host_state holds one row per key', () => {
+  // The primary key is the point: two rows for one key would make "the
+  // secret" ambiguous. Assert errcode 1555, not message text.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const insert = raw.prepare(
+    'INSERT INTO host_state (key, value, created_at, updated_at) VALUES (?, ?, ?, ?)',
+  );
+  insert.run('auth.secret.placeholder', 'first', 10, 10);
+
+  assert.throws(
+    () => insert.run('auth.secret.placeholder', 'second', 20, 20),
+    (err: unknown) => {
+      const code = (err as { code?: unknown }).code;
+      // 1555 is SQLite's own SQLITE_CONSTRAINT_PRIMARYKEY -- proof that the
+      // primary key on `key` fired, not merely that some insert threw for
+      // some reason. A plain unique violation would be 2067.
+      const errcode = (err as { errcode?: unknown }).errcode;
+      return code === 'ERR_SQLITE_ERROR' && errcode === 1555;
+    },
+  );
+
+  // And the first row is still the one that is there, so the refusal did not
+  // half-apply the second.
+  assert.deepEqual(
+    raw.prepare('SELECT key, value FROM host_state').all()
+      .map((r) => {
+        const row = r as { key: unknown; value: unknown };
+        return { key: String(row.key), value: String(row.value) };
+      }),
+    [{ key: 'auth.secret.placeholder', value: 'first' }],
+  );
+});

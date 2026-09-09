@@ -587,6 +587,118 @@ CREATE INDEX deleted_media_item_sync ON deleted_media_item (plugin_id, deleted_a
 `;
 
 /**
+ * `host_state` plus the four tables Better Auth's Drizzle adapter expects.
+ *
+ * **The column names are the library's, not this repo's choice.** The adapter
+ * maps a model's fields onto the *schema object's property keys*, so the
+ * Drizzle mirror in `schema.ts` is what has to spell `emailVerified`, and this
+ * DDL is what has to spell `email_verified`. Renaming a column here is a
+ * runtime failure `test/db/schema.test.ts` cannot see: the mirror would be
+ * changed to agree with the DDL, both would agree, and Better Auth would ask
+ * for a column neither has.
+ *
+ * **`auth_`-prefixed.** The library's defaults are `user`, `session`,
+ * `account` and `verification` -- four of the most collidable names available,
+ * in a schema where plugins are required to prefix their tables and the host
+ * owns the unprefixed namespace. A future plugin wanting a `session` table
+ * would otherwise be blocked for a reason nobody could see. The prefix costs
+ * one `schema` object the adapter already accepts.
+ *
+ * **`id` is `TEXT` on all four, and these are the only tables in this schema
+ * with a text `id`** -- every table above declares `id INTEGER PRIMARY KEY`,
+ * i.e. the rowid. (`host_state` in this same migration is keyed by a text
+ * `key`, but that is a caller-chosen name rather than a generated id, so it is
+ * not the same asymmetry.) Better Auth's default id generator is a random
+ * base62 string, and adopting it avoids configuring
+ * `advanced.database.generateId` to something the library then has to be told
+ * about. The asymmetry is the library's, and it is recorded here so it does not
+ * read as an accident: an `INTEGER PRIMARY KEY` would *accept* a base62 string
+ * -- SQLite's type affinity is permissive -- and then hand something else back,
+ * which is why `test/db/migrate.test.ts` asserts the declaration from
+ * `PRAGMA table_info` rather than from a successful round trip.
+ *
+ * **`auth_verification` has no writer in this slice**, the way
+ * `external_reference` had none when it was created: nothing here sends mail,
+ * so no email verification or password reset runs. It is created anyway
+ * because the adapter expects the model to exist, and a table Better Auth may
+ * write to is cheaper than discovering at runtime which code path needs it.
+ * Nobody should hunt for the writer.
+ *
+ * **`host_state` is deliberately general** -- one key/value row per fact --
+ * because it already holds two unrelated things (the generated signing secret
+ * and the first-boot claim token) and a column per fact would mean a migration
+ * per fact.
+ *
+ * **Three of these columns are credentials no other query may name.**
+ * `auth_account.password` is a password hash, `auth_session.token` is a live
+ * session, and `host_state.value` is the signing secret; only Better Auth's
+ * own adapter and the module that persists that secret may select them.
+ * Enforced at build time by `scripts/check-test-hygiene.ts`, as an AST walk
+ * rather than a grep -- this very comment names all three verbatim, which is
+ * exactly the shape that made a text match report twenty-two comments as
+ * violations when that script was first written.
+ */
+const MIGRATION_12 = `
+CREATE TABLE host_state (
+  key        TEXT PRIMARY KEY,
+  value      TEXT    NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE auth_user (
+  id             TEXT    PRIMARY KEY,
+  name           TEXT,
+  email          TEXT    NOT NULL,
+  email_verified INTEGER NOT NULL DEFAULT 0,
+  image          TEXT,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX auth_user_email ON auth_user (email);
+
+CREATE TABLE auth_session (
+  id         TEXT    PRIMARY KEY,
+  user_id    TEXT    NOT NULL REFERENCES auth_user (id),
+  token      TEXT    NOT NULL,
+  expires_at INTEGER NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX auth_session_token ON auth_session (token);
+CREATE INDEX auth_session_user ON auth_session (user_id);
+
+CREATE TABLE auth_account (
+  id                       TEXT    PRIMARY KEY,
+  user_id                  TEXT    NOT NULL REFERENCES auth_user (id),
+  provider_id              TEXT    NOT NULL,
+  account_id               TEXT    NOT NULL,
+  access_token             TEXT,
+  refresh_token            TEXT,
+  id_token                 TEXT,
+  access_token_expires_at  INTEGER,
+  refresh_token_expires_at INTEGER,
+  scope                    TEXT,
+  password                 TEXT,
+  created_at               INTEGER NOT NULL,
+  updated_at               INTEGER NOT NULL
+);
+CREATE INDEX auth_account_user ON auth_account (user_id);
+
+CREATE TABLE auth_verification (
+  id         TEXT    PRIMARY KEY,
+  identifier TEXT    NOT NULL,
+  value      TEXT    NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+);
+CREATE INDEX auth_verification_identifier ON auth_verification (identifier);
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -603,6 +715,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 9, up: (db) => db.exec(MIGRATION_9) },
   { version: 10, up: (db) => db.exec(MIGRATION_10) },
   { version: 11, up: (db) => db.exec(MIGRATION_11) },
+  { version: 12, up: (db) => db.exec(MIGRATION_12) },
 ];
 
 /**
