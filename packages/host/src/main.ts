@@ -18,7 +18,9 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { MediaPlugin } from '@pickarr/contract';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
 import { DEFAULT_PORT, createReadServer } from './api/server.ts';
+import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
+import { ensureAuthSecret } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
@@ -377,6 +379,23 @@ export async function main(
     raw,
     pluginIdForType,
     port,
+    // Built from the address the listener bound rather than here, because
+    // `baseURL` has to be the origin requests arrive at and `port` may be 0 --
+    // see `ReadServerDeps.authFor`.
+    //
+    // **The secret is never logged**, here or anywhere it travels; it is read
+    // (and generated once) by `ensureAuthSecret`, so the host boots configured.
+    // `publicUrl` is deliberately `undefined` for now: `PICKARR_PUBLIC_URL` is
+    // read in exactly one place, and that place is the binding-and-wiring step
+    // of the auth slice's §6, which also prints the claim token.
+    authFor: (baseURL) => createAuth({
+      raw,
+      db,
+      secret: ensureAuthSecret(raw, Date.now()),
+      baseURL,
+      publicUrl: undefined,
+      log,
+    }),
     log,
   });
 

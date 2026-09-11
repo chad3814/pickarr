@@ -21,6 +21,17 @@ import { authSchema } from './schema.ts';
  * would be a cycle.
  */
 
+/**
+ * The instance `createAuth` returns, for the modules that have to hold one.
+ *
+ * **Inferred, deliberately** -- `betterAuth`'s return type carries the
+ * endpoint types its options imply, so `auth.api.getSession` keeps its precise
+ * result type at the guard rather than widening to the library's generic
+ * `Auth`. Naming the inference rather than restating it is what keeps a
+ * consumer from having to say `ReturnType<typeof createAuth>` at every turn.
+ */
+export type Auth = ReturnType<typeof createAuth>;
+
 /** What `createAuth` needs, and nothing else it could reach for. */
 export interface AuthDeps {
   /**
