@@ -982,6 +982,18 @@ test('the temp file is created in the target directory, so the rename cannot cro
 
 Re-apply Mutation B with that test present and report whether it now fails. If it still cannot isolate the rename, say so plainly — `rename`'s atomicity is a filesystem property this suite cannot observe from one process, and the reason it is used stands on the comment and the `dirname` join rather than on a test.
 
+> **Measured outcome, recorded after execution: do not add that test.** The
+> implementer ran both implementations 20+ times each. The test above does not
+> isolate the mutation, *and it is independently flaky* — it fails on the
+> **correct** implementation in roughly a third of runs, because the unawaited
+> write and the single `readdir` sample both go through libuv's thread pool
+> with no synchronisation point between them. Its failure rate under the
+> mutation was no higher than under correct code, so it measures scheduling,
+> not atomicity. It was deliberately not committed. `rename`'s atomicity rests
+> on the `dirname` join and the docblock, which is the outcome this step
+> already permitted. Anyone re-reading this step should not reintroduce the
+> test on the assumption it was merely forgotten.
+
 - [ ] **Step 7: Run the gate**
 
 Run: `npm run typecheck && npm run test:server && npm run lint && npm run test-hygiene`
