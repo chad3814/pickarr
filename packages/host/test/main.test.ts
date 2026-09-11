@@ -29,6 +29,7 @@ import {
   resolveReadPort,
   resolveSettings,
   scheduleKnownFeeds,
+  shippedPlugins,
 } from '../src/main.ts';
 import { DEFAULT_CONFIG_PATH } from '../src/config/schemas.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
@@ -401,8 +402,8 @@ test('main boots with no plugin registered, and still schedules a poll for every
   // permanently destroyed. `rss_item.delivered_at` (see `feeds/reader.ts`)
   // is what removed that danger -- an unowned row simply stays undelivered
   // and is re-offered once a plugin registers -- so booting with an empty
-  // plugin list, exactly what the shipped `SHIPPED_PLUGINS` is today, must
-  // now succeed rather than throw.
+  // plugin list, passed here through `deps.plugins` rather than the shipped
+  // default, must succeed rather than throw.
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-no-plugin-'));
   try {
     const databasePath = join(dir, 'pickarr.db');
@@ -1307,4 +1308,19 @@ test('resolveOpenmetadataUrl defaults, and refuses what is not an origin', () =>
   assert.equal(resolveOpenmetadataUrl('https://metadata.example.test/'), 'https://metadata.example.test');
   assert.throws(() => resolveOpenmetadataUrl('metadata.example.test'), /PICKARR_OPENMETADATA_URL/);
   assert.throws(() => resolveOpenmetadataUrl('https://metadata.example.test/api'), /PICKARR_OPENMETADATA_URL/);
+});
+
+test('shippedPlugins builds one plugin per media type, each with its own prefix', () => {
+  const plugins = shippedPlugins({
+    now: () => 0,
+    resolveSecret: async () => 'test-key',
+    baseUrl: 'https://openmetadata.test',
+  });
+
+  assert.deepEqual(plugins.map((plugin) => plugin.id), ['tv', 'movie', 'xxx']);
+  assert.deepEqual(plugins.map((plugin) => plugin.mediaType), ['tv', 'movie', 'xxx']);
+  // Migration 1 is the engine's state table; each plugin adds its own at 2.
+  for (const plugin of plugins) {
+    assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2]);
+  }
 });

@@ -16,6 +16,9 @@
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
+import { createMoviePlugin } from '@pickarr/plugin-movie';
+import { createTvPlugin } from '@pickarr/plugin-tv';
+import { createXxxPlugin } from '@pickarr/plugin-xxx';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
 import { createReadServer } from './api/server.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
@@ -34,6 +37,8 @@ import { createHost } from './host.ts';
 import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { assertOriginOnly } from './origin.ts';
+import type { ResolveSecret } from './secrets.ts';
+import { createEnvSecretResolver } from './secrets.ts';
 
 /**
  * A log line's structured half, as `key=value` pairs.
@@ -138,16 +143,24 @@ export async function scheduleKnownDownloadClients(host: Host, raw: DatabaseSync
 }
 
 /**
- * The plugins the shipped process runs with: none, because no media plugin
- * ships inside `@pickarr/host` yet. This is where a later slice's plugin
- * wires in. An empty list is not a refusal: a poll's `rss_item.delivered_at`
- * stays null for anything `notifyNewRssItems` reports `unowned`, and
- * `feeds/reader.ts`'s `pollFeed` re-offers every undelivered row on every
- * later poll of that feed -- so the process boots and polls safely with no
- * plugin at all, and each feed's backlog is delivered in full the moment a
- * plugin registers for it.
+ * The plugins the shipped process runs with.
+ *
+ * A function rather than a const, because each plugin needs `now`, the base
+ * url and the secret resolver injected -- and because nothing in this module
+ * may run at module scope. `main` calls it; a test passes `deps.plugins`
+ * instead and never reaches it.
+ *
+ * Three plugins, three media types, three wire categories. `createPluginIdForType`
+ * in `host.ts` refuses two plugins claiming one media type, so this list
+ * cannot grow a duplicate unnoticed.
  */
-const SHIPPED_PLUGINS: readonly MediaPlugin[] = [];
+export function shippedPlugins(deps: {
+  now: () => number;
+  resolveSecret: ResolveSecret;
+  baseUrl: string;
+}): readonly MediaPlugin[] {
+  return [createTvPlugin(deps), createMoviePlugin(deps), createXxxPlugin(deps)];
+}
 
 /**
  * The `pluginIdForType` the read API's `/api/media` and `/api/deletions`
@@ -597,7 +610,17 @@ export async function main(
 ): Promise<void> {
   void argv;
 
-  const plugins = deps.plugins ?? SHIPPED_PLUGINS;
+  // Resolved before the database is opened, beside the other variables: a
+  // malformed url is a configuration error, and the earliest refusal is the
+  // one that touches least on its way out.
+  const openmetadataUrl = resolveOpenmetadataUrl(process.env['PICKARR_OPENMETADATA_URL']);
+  const plugins = deps.plugins ?? shippedPlugins({
+    now: () => Date.now(),
+    // The key itself is read per request, by the resolver, and never here:
+    // this passes the *means* of getting it, not the credential.
+    resolveSecret: createEnvSecretResolver(process.env),
+    baseUrl: openmetadataUrl,
+  });
 
   // Before the database is opened, before anything is migrated: two plugins
   // claiming one media type is a configuration error, and the earliest
@@ -699,6 +722,7 @@ export async function main(
 
   log(
     `running: database ${settings.databasePath}, artwork ${artworkDir}, `
+    + `lookups to ${openmetadataUrl}, `
     + `read api on http://${server.host}:${server.port}, `
     + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
     + `${clientIds.length} download client(s) scheduled`,
