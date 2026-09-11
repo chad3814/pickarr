@@ -280,6 +280,32 @@ function offeredClaimToken(body: unknown): string | null {
  * token is refused. Nothing but sign-up creates a user today, so this
  * changes no behaviour -- it decides what happens to a path that does not
  * exist yet, and fail-closed is the answer that does not need revisiting.
+ *
+ * ---
+ *
+ * **What is measured about these hooks, and not documented anywhere by the
+ * library.** All of it read off an instrumented 1.7.3 instance, most recently
+ * while moving the token's consumption here:
+ *
+ * - `before` runs ahead of the origin check *and* ahead of the
+ *   password-length check. So a request that reaches it has passed nothing
+ *   yet, and anything `before` spends is spent before Better Auth has decided
+ *   whether to serve the request at all.
+ * - `databaseHooks.user.create.before` runs after both, immediately before
+ *   the row is written; `user.create.after` and then the request-level `after`
+ *   follow it. An `APIError` thrown from it answers 403 with this module's own
+ *   message and leaves `auth_user` empty.
+ * - **There is no `after` hook here, and that is deliberate.** The request's
+ *   `after` runs on every path where `before` did not throw -- a refused
+ *   origin, a too-short password, a missing field, a duplicate email, all
+ *   measured -- but it does **not** run when `before` throws: a `before` that
+ *   throws gives 403 with `after` never firing. So an `after` that reacted to
+ *   a refusal at the hook could not see one, and a comment in this file used
+ *   to claim the opposite ("whether or not that request threw"), which is
+ *   exactly the sentence a reader would consult before deciding some guard was
+ *   redundant. Task 4b established the fact by tracing a mutation whose
+ *   predicted kill landed on a different test, recorded it in its report, and
+ *   it never reached this file until now.
  */
 export function createAuth(deps: AuthDeps) {
   const { publicUrl, raw } = deps;
