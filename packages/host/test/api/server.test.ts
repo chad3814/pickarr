@@ -6,17 +6,56 @@ import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { ensureClaimToken } from '../../src/auth/claim.ts';
+import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
+import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer } from '../../src/api/server.ts';
-import { API_VERSION, DEFAULT_PORT, createReadServer } from '../../src/api/server.ts';
+import { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, ROUTES, createReadServer } from '../../src/api/server.ts';
 
-function setup(): DatabaseSync {
-  const { raw } = openTestDatabase();
+/**
+ * One database behind both handles: `raw` for the fixtures and the read
+ * routes, `db` for the Drizzle handle Better Auth's adapter writes sessions
+ * through. If these were two databases, a session the mount issued would be a
+ * session the guard could not find, and every test here would fail for a
+ * reason that had nothing to do with what it was asserting.
+ */
+function setup(): { raw: DatabaseSync; db: HostDb } {
+  const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  return raw;
+  return { raw, db };
 }
+
+/**
+ * Obviously synthetic placeholders that say so in their own text, and none of
+ * them is a secret worth having.
+ *
+ * **No assertion in this file formats a session token.** The one real
+ * credential these tests handle is the cookie `signUpOwner` reads off a
+ * sign-up response: it is passed straight back as a header, asserted only by
+ * presence and by a message of its own, never by a value the test framework
+ * would print into a diff on the run where it fails.
+ */
+const AUTH_SECRET = 'placeholder-not-a-real-signing-secret-for-tests';
+const PASSWORD = 'placeholder-not-a-real-password';
+const OWNER_EMAIL = 'owner@example.invalid';
+
+/** No cookie at all, which is what an unauthenticated caller sends. */
+const ANONYMOUS = null;
+
+/**
+ * A session cookie whose signature nothing could have produced.
+ *
+ * Better Auth answers the session check for it exactly as it answers one with
+ * no cookie at all -- 200, with a body of `null` -- which is the trap the
+ * guard must not fall into, and measured here rather than assumed.
+ */
+const BOGUS_COOKIE = 'better-auth.session_token=placeholder.not-a-real-signature';
+
+/** A log that drops every line, for the instance whose lines this file does not assert. */
+const dropLine = (): void => {};
 
 /** One `log` call, as the fake below records it. */
 interface LogLine {
@@ -30,22 +69,59 @@ interface Running {
   logs: LogLine[];
 }
 
+/** `Running`, plus the session of the one account the install has. */
+interface SignedIn extends Running {
+  /** The `Cookie` header a request carries to be let past the guard. */
+  cookie: string;
+}
+
 /**
  * Starts a server on **port 0** -- the kernel picks a free port and
  * `server.port` reads back the one it assigned. No test in this file may name
  * a port: two tests running in the same process at the same time would fight
  * over any number written down, and the failure would look like a bug in
  * whichever of them lost.
+ *
+ * **Nothing has signed up yet**, so nothing here holds a session -- which is
+ * what the tests about an unauthenticated caller need. `startSignedIn` is the
+ * one that claims the install.
+ *
+ * The auth instance is a *function of the origin* rather than an instance,
+ * because Better Auth refuses every POST whose `Origin` is not `baseURL`'s
+ * (design spec §2) and port 0 means the address is not known until the
+ * listener has bound. `createReadServer` calls this back once it has read its
+ * own address; production has the same ordering problem and solves it the
+ * same way.
+ *
+ * **Auth's own log is dropped, deliberately.** `logs` is asserted *by value*
+ * by the 500 and unknown-route tests, and `createAuth` writes a line at
+ * construction when no public url is configured -- a property of
+ * `auth/instance.ts`, tested there, with no business in this file's log.
+ *
+ * `host` is the interface to bind, and `undefined` -- what every test but the
+ * bind test passes -- is what an unset `PICKARR_READ_API_HOST` means in
+ * production: `DEFAULT_HOST`, every interface.
  */
 async function start(
   raw: DatabaseSync,
+  db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
+  host?: string,
 ): Promise<Running> {
   const logs: LogLine[] = [];
   const server = await createReadServer({
     raw,
     pluginIdForType,
+    host,
     port: 0,
+    authFor: (baseURL) => createAuth({
+      raw,
+      db,
+      secret: AUTH_SECRET,
+      baseURL,
+      publicUrl: undefined,
+      log: dropLine,
+    }),
     log: (message, detail) => {
       logs.push({ message, detail });
     },
@@ -53,13 +129,113 @@ async function start(
   return { server, logs };
 }
 
-/** A GET against the address the listener actually bound, never a written-down one. */
+/**
+ * The origin the listener actually bound, which is also the auth instance's
+ * `baseURL` -- and with the default bind that origin names the unspecified
+ * address, `http://0.0.0.0:<port>`.
+ *
+ * **Every request in this file is made to that address**, rather than to
+ * loopback with an `Origin` of its own, and that is what keeps the two halves
+ * of a POST agreeing: Better Auth refuses any state-changing request whose
+ * `Origin` is neither `baseURL`'s nor one `trustedOrigins` places (design spec
+ * §2), and the wildcard address is not one `trustedOrigins` places -- so a
+ * sign-up below is accepted because `baseURL` was built from what the listener
+ * bound, which is the property `api/server.ts` exists to get right. Connecting
+ * to the unspecified address reaches a listener on this machine; measured here
+ * on darwin, and the behaviour linux shares.
+ */
+function originOf(server: ReadServer): string {
+  return `http://${server.host}:${server.port}`;
+}
+
+/**
+ * The `Cookie` header a browser would send back, built from a response's
+ * `Set-Cookie` headers. Throws rather than returning an empty string when
+ * there is nothing to send: a silently cookie-less request would be
+ * indistinguishable from a session that failed to round-trip, which is the
+ * one thing the tests using this have to tell apart.
+ */
+function cookieHeader(response: Response): string {
+  const pairs = response.headers.getSetCookie().map((value) => {
+    const [pair] = value.split(';');
+    if (pair === undefined) throw new Error('a Set-Cookie header with no name=value pair');
+    return pair;
+  });
+  if (pairs.length === 0) throw new Error('the response set no cookie to send back');
+  return pairs.join('; ');
+}
+
+/**
+ * Signs the owner up **through the mounted auth routes** and returns the
+ * session cookie that sign-up issued.
+ *
+ * Over the socket rather than through `auth.api`, because the socket is the
+ * only path that proves the mount: an unauthenticated POST reaching Better
+ * Auth at all is precisely what the guard must not break, and every test in
+ * this file that needs a session depends on it having worked.
+ *
+ * The `Origin` header is the bound address, which is `baseURL`'s origin --
+ * without one Better Auth answers 403 `MISSING_OR_NULL_ORIGIN` (spec §2), and
+ * a browser always sends one.
+ *
+ * The claim token is the install's own, because `auth/instance.ts` refuses a
+ * first sign-up that does not carry it. What the claim itself does is
+ * `auth/claim.test.ts`'s.
+ */
+async function signUpOwner(server: ReadServer, raw: DatabaseSync): Promise<string> {
+  const origin = originOf(server);
+  const response = await fetch(`${origin}/api/auth/sign-up/email`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin },
+    body: JSON.stringify({
+      email: OWNER_EMAIL,
+      password: PASSWORD,
+      name: 'Placeholder Owner',
+      claimToken: ensureClaimToken(raw, 1_000),
+    }),
+  });
+  assert.equal(response.status, 200, 'the harness must be able to sign up through the mounted auth routes');
+  return cookieHeader(response);
+}
+
+/**
+ * `start`, plus the one account this install gets and its session.
+ *
+ * Closes the listener if the sign-up fails, rather than leaking a bound port
+ * out of a failing test: the `try` in each test only runs once this has
+ * returned.
+ */
+async function startSignedIn(
+  raw: DatabaseSync,
+  db: HostDb,
+  pluginIdForType: (type: string) => string | undefined,
+): Promise<SignedIn> {
+  const running = await start(raw, db, pluginIdForType);
+  try {
+    return { ...running, cookie: await signUpOwner(running.server, raw) };
+  } catch (error) {
+    await running.server.close();
+    throw error;
+  }
+}
+
+/**
+ * A GET against the address the listener actually bound, never a written-down
+ * one, carrying `cookie` as its session -- or `ANONYMOUS` for a caller that
+ * has none.
+ *
+ * The session is a required argument rather than a default, so every request
+ * in this file says which side of the guard it is on.
+ */
 async function get(
   server: ReadServer,
   path: string,
+  cookie: string | null,
   headers: Readonly<Record<string, string>> = {},
 ): Promise<Response> {
-  return fetch(`http://${server.host}:${server.port}${path}`, { headers });
+  return fetch(`${originOf(server)}${path}`, {
+    headers: cookie === null ? headers : { ...headers, cookie },
+  });
 }
 
 /**
@@ -75,11 +251,43 @@ async function get(
 async function getAll(
   server: ReadServer,
   paths: readonly string[],
+  cookie: string | null,
 ): Promise<{ path: string; status: number; text: string }[]> {
   return Promise.all(paths.map(async (path) => {
-    const response = await get(server, path);
+    const response = await get(server, path, cookie);
     return { path, status: response.status, text: await response.text() };
   }));
+}
+
+/**
+ * A request target for a route the table describes, with every `:name`
+ * segment filled in.
+ *
+ * **Derived from `ROUTES`, never written out here.** A hand-written list of
+ * paths is a list that goes stale the moment someone adds a route, and
+ * silently -- so a route a later slice adds is probed by the tests below
+ * without anyone having to remember to add it, or those tests fail.
+ */
+function probeFor(route: { readonly path: string }): string {
+  return route.path.split('/').map((segment) => (segment.startsWith(':') ? '1' : segment)).join('/');
+}
+
+/**
+ * The session check and a guarded read, made with the same cookie.
+ *
+ * Both in one helper so the `200 null` trap can be asserted as one fact: the
+ * check answers 200 for a caller with no session, and the route refuses that
+ * same caller anyway. A guard written against the check's *status* passes the
+ * first half and fails the second.
+ */
+async function checkAndRead(server: ReadServer, cookie: string | null): Promise<{
+  check: { status: number; text: string };
+  guardedStatus: number;
+}> {
+  const check = await get(server, '/api/auth/get-session', cookie);
+  const checked = { status: check.status, text: await check.text() };
+  const guarded = await get(server, '/api/media?type=movie', cookie);
+  return { check: checked, guardedStatus: guarded.status };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -102,8 +310,8 @@ interface ReadPage {
   done: boolean;
 }
 
-async function pageFrom(server: ReadServer, path: string): Promise<ReadPage> {
-  const response = await get(server, path);
+async function pageFrom(server: ReadServer, path: string, cookie: string | null): Promise<ReadPage> {
+  const response = await get(server, path, cookie);
   assert.equal(response.status, 200, `${path} must answer a page`);
   const body: unknown = JSON.parse(await response.text());
   if (!isRecord(body)) throw new Error(`${path} answered something that is not a json object`);
@@ -254,10 +462,10 @@ function seedNzbDownload(
 const PNG_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x11, 0x22]);
 
 test('health answers ok', async () => {
-  const raw = setup();
-  const { server } = await start(raw, moviesOnly);
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const response = await get(server, '/api/health');
+    const response = await get(server, '/api/health', cookie);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('content-type'), 'application/json; charset=utf-8');
     const body: unknown = JSON.parse(await response.text());
@@ -273,7 +481,7 @@ test('a media page answers items and an opaque cursor, and the cursor pages forw
   // cursor has somewhere to go. A fixture smaller than a page would return
   // every row at once, and an implementation that ignored `since` entirely
   // would pass.
-  const raw = setup();
+  const { raw, db } = setup();
   assert.equal(PAGE_SIZE, 200, 'the literals below are written for a page size of 200');
   for (let id = 1; id <= PAGE_SIZE + 1; id += 1) {
     seedMediaItem(raw, 'alpha', 1000 + id, `Movie ${id}`);
@@ -282,9 +490,9 @@ test('a media page answers items and an opaque cursor, and the cursor pages forw
   // neither page. `type=movie` resolves to `alpha` alone.
   seedMediaItem(raw, 'beta', 9999, 'Not alphas');
 
-  const { server } = await start(raw, moviesOnly);
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const first = await get(server, '/api/media?type=movie');
+    const first = await get(server, '/api/media?type=movie', cookie);
     assert.equal(first.status, 200);
     const firstBody: unknown = JSON.parse(await first.text());
     const firstCursor = encodeCursor({ updatedAt: 1000 + PAGE_SIZE, id: PAGE_SIZE });
@@ -299,7 +507,7 @@ test('a media page answers items and an opaque cursor, and the cursor pages forw
     assert.equal(firstCursor.includes('.'), false, 'the cursor a client sees carries no visible separator');
     assert.equal(firstCursor.includes('1200'), false, 'nor the timestamp it was built from');
 
-    const second = await get(server, `/api/media?type=movie&since=${encodeURIComponent(firstCursor)}`);
+    const second = await get(server, `/api/media?type=movie&since=${encodeURIComponent(firstCursor)}`, cookie);
     assert.equal(second.status, 200);
     const secondBody: unknown = JSON.parse(await second.text());
     assert.deepEqual(secondBody, {
@@ -313,10 +521,10 @@ test('a media page answers items and an opaque cursor, and the cursor pages forw
 });
 
 test('an unknown media type is 404 naming the type', async () => {
-  const raw = setup();
-  const { server } = await start(raw, moviesOnly);
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const response = await get(server, '/api/media?type=book');
+    const response = await get(server, '/api/media?type=book', cookie);
     assert.equal(response.status, 404, 'a type no plugin claims is not found, not a 500 and not an empty 200');
     const text = await response.text();
     assert.deepEqual(JSON.parse(text), { error: 'unknown media type: book' }, 'the message names the type');
@@ -328,8 +536,8 @@ test('an unknown media type is 404 naming the type', async () => {
 });
 
 test('an unknown route is 404, not a 500', async () => {
-  const raw = setup();
-  const { server, logs } = await start(raw, moviesOnly);
+  const { raw, db } = setup();
+  const { server, logs, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
     const answers = await getAll(server, [
       '/api/nope',
@@ -338,7 +546,7 @@ test('an unknown route is 404, not a 500', async () => {
       '/api/artwork/poster',
       '/api/artwork/statue/1',
       '/api/artwork/poster/nine',
-    ]);
+    ], cookie);
     for (const { path, status, text } of answers) {
       assert.equal(status, 404, `${path} must be 404`);
       assert.deepEqual(JSON.parse(text), { error: 'unknown route' }, `${path} answers a fixed message`);
@@ -351,18 +559,18 @@ test('an unknown route is 404, not a 500', async () => {
 });
 
 test('a read that throws answers 500 with no url, path or query in the body', async () => {
-  const raw = setup();
+  const { raw, db } = setup();
   seedMediaItem(raw, 'alpha', 1000, 'Recognisable Fixture Title');
 
   // A message shaped like everything this must never write into a response:
   // a url, a path, a query string and a credential.
   const secretUrl = 'https://sab.test/api?apikey=SECRET-KEY-9&mode=queue&file=/media/movies/Recognisable.mkv';
-  const { server, logs } = await start(raw, (type) => {
+  const { server, logs, cookie } = await startSignedIn(raw, db, (type) => {
     if (type === 'movie') throw new Error(secretUrl);
     return undefined;
   });
   try {
-    const response = await get(server, '/api/media?type=movie&since=whatever');
+    const response = await get(server, '/api/media?type=movie&since=whatever', cookie);
     assert.equal(response.status, 500);
     const text = await response.text();
     assert.deepEqual(JSON.parse(text), { error: 'read failed' }, 'a fixed message and nothing derived from the throw');
@@ -389,11 +597,11 @@ test('a read that throws answers 500 with no url, path or query in the body', as
   // And a genuinely failing query, not only a failing mapping: the same fixed
   // body, with the table the statement named nowhere in it.
   const broken = setup();
-  seedMediaItem(broken, 'alpha', 1000, 'Recognisable Fixture Title');
-  broken.exec('DROP TABLE media_item');
-  const failing = await start(broken, moviesOnly);
+  seedMediaItem(broken.raw, 'alpha', 1000, 'Recognisable Fixture Title');
+  broken.raw.exec('DROP TABLE media_item');
+  const failing = await startSignedIn(broken.raw, broken.db, moviesOnly);
   try {
-    const response = await get(failing.server, '/api/media?type=movie');
+    const response = await get(failing.server, '/api/media?type=movie', failing.cookie);
     assert.equal(response.status, 500);
     const text = await response.text();
     assert.deepEqual(JSON.parse(text), { error: 'read failed' });
@@ -408,20 +616,54 @@ test('a read that throws answers 500 with no url, path or query in the body', as
   }
 });
 
-test('the server binds to loopback only', async () => {
-  // The listener's own address, not a probe against an external interface: a
-  // probe would pass on a machine with no route to that interface and prove
-  // nothing about what this bound to.
-  const raw = setup();
-  const { server } = await start(raw, moviesOnly);
-  try {
-    assert.equal(server.host, '127.0.0.1', 'the address the listener actually bound');
-    assert.equal(server.family, 'IPv4', 'and its family, so a v6 wildcard cannot pass as loopback');
-    assert.ok(server.port > 0, 'port 0 was replaced by the one the kernel assigned');
-    assert.equal(DEFAULT_PORT, 8787, 'the documented default, which no test in this file binds');
-  } finally {
-    await server.close();
+test('the server binds the configured host, defaulting to 0.0.0.0', async () => {
+  // **The listener's own address, never a probe against an external
+  // interface.** That was slice E's reasoning for the shape of this test when
+  // the expected value was loopback, and the reasoning survives the reversal
+  // of the value: a probe that failed to reach an external interface would
+  // pass on a machine with no route to that interface, and one that reached
+  // it would be asserting the machine's routing table rather than this bind.
+  // What the kernel says this listener holds is `server.address()`, which is
+  // what `ReadServer.host` and `.family` are read back from.
+  //
+  // **Both halves in one test, asserted against the value that was
+  // configured.** A second test for the override could drift from this one,
+  // and there is one property here rather than two: whatever host was asked
+  // for is the host that was bound. `undefined` is the request an unset
+  // `PICKARR_READ_API_HOST` makes, and `DEFAULT_HOST` is the answer to it.
+  const { raw, db } = setup();
+  const cases = [undefined, '127.0.0.1'] as const;
+
+  // Both listeners at once, and each closes its own port before this
+  // resolves: two binds on port 0 share nothing and neither decides the
+  // other, which is the same reason `getAll` above is concurrent rather than
+  // a loop with an `await` in it. What follows is a plain loop of assertions
+  // with no await at all, so a failure still names the case it came from.
+  const bound = await Promise.all(cases.map(async (configured) => {
+    const { server } = await start(raw, db, moviesOnly, configured);
+    try {
+      return { host: server.host, family: server.family, port: server.port };
+    } finally {
+      await server.close();
+    }
+  }));
+
+  for (const [index, configured] of cases.entries()) {
+    const actual = bound[index];
+    assert.ok(actual, `a listener was bound for a configured host of ${String(configured)}`);
+    assert.equal(
+      actual.host,
+      configured ?? DEFAULT_HOST,
+      `the address the listener actually bound, for a configured host of ${String(configured)}`,
+    );
+    assert.equal(actual.family, 'IPv4', 'and its family, so a v6 wildcard cannot pass for a v4 one');
+    assert.ok(actual.port > 0, 'port 0 was replaced by the one the kernel assigned');
   }
+
+  // The defaults themselves, pinned here because nothing else can: a default
+  // is the one value no caller passes.
+  assert.equal(DEFAULT_HOST, '0.0.0.0', 'every interface, which is what the auth slice\'s §6 asks for');
+  assert.equal(DEFAULT_PORT, 8787, 'the documented default port, which no test in this file binds');
 });
 
 test('close stops the listener and does not wait for an in-flight read', async () => {
@@ -447,8 +689,8 @@ test('close stops the listener and does not wait for an in-flight read', async (
   // that connection open, callback unfired, until the socket dies. Measured
   // both ways: the drain-awaiting `close()` fails the assertion below, and
   // the real one passes it.
-  const raw = setup();
-  const { server } = await start(raw, moviesOnly);
+  const { raw, db } = setup();
+  const { server } = await start(raw, db, moviesOnly);
   const socket = connect({ port: server.port, host: server.host });
   try {
     await once(socket, 'connect');
@@ -473,7 +715,26 @@ test('close stops the listener and does not wait for an in-flight read', async (
       'GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n'
       + 'GET /api/health HTTP/1.1\r\nHost: localhost\r\n',
     );
-    await firstAnswered;
+    // Bounded, because an unbounded wait for a substring turns any change that
+    // stops health answering `200 {...,"version":1}` into a **hung file**
+    // rather than a failed test. Slice F's guard task hit exactly that: it
+    // marked health as needing a session, and this test stopped the whole
+    // file with no name attached -- the `check-test-hygiene` failure mode
+    // ("presents as a bare SIGKILL, costs an hour to trace") reached by a
+    // different route. The bound is generous enough never to fire on a
+    // working server and short enough to name the problem when it breaks.
+    await Promise.race([
+      firstAnswered,
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(
+            'health never answered with a 200 body; received so far: '
+            + JSON.stringify(received.slice(0, 120)),
+          ));
+        }, 5_000);
+        timer.unref();
+      }),
+    ]);
 
     let settled = false;
     const closing = server.close().then(() => {
@@ -496,7 +757,7 @@ test('close stops the listener and does not wait for an in-flight read', async (
     await closing;
     // The listener is gone: a fresh connection to the same port is refused,
     // which `fetch` reports as a rejection rather than a response.
-    await assert.rejects(get(server, '/api/health'));
+    await assert.rejects(get(server, '/api/health', ANONYMOUS));
 
     // And the held connection is dropped, not merely left without a listener
     // to accept new ones. That is what "does not drain" means from the side
@@ -521,7 +782,7 @@ test('close stops the listener and does not wait for an in-flight read', async (
 });
 
 test('rss items, downloads and deletions each page their own stream', async () => {
-  const raw = setup();
+  const { raw, db } = setup();
   const feedId = seedFeed(raw, 'https://feeds.test/one.xml');
   const rssItemId = seedRssItem(raw, feedId, 2000, 'One.Movie.1080p.mkv');
   const clientId = seedClient(raw, 'main');
@@ -531,9 +792,9 @@ test('rss items, downloads and deletions each page their own stream', async () =
   raw.prepare('INSERT INTO deleted_media_item (media_item_id, plugin_id, deleted_at) VALUES (?, ?, ?)')
     .run(mediaItemId, 'alpha', 4000);
 
-  const { server } = await start(raw, moviesOnly);
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const items: unknown = JSON.parse(await (await get(server, '/api/rss-items')).text());
+    const items: unknown = JSON.parse(await (await get(server, '/api/rss-items', cookie)).text());
     assert.deepEqual(items, {
       items: [{
         id: rssItemId,
@@ -550,7 +811,7 @@ test('rss items, downloads and deletions each page their own stream', async () =
       done: true,
     });
 
-    const downloads: unknown = JSON.parse(await (await get(server, '/api/downloads')).text());
+    const downloads: unknown = JSON.parse(await (await get(server, '/api/downloads', cookie)).text());
     assert.deepEqual(downloads, {
       items: [
         {
@@ -587,7 +848,7 @@ test('rss items, downloads and deletions each page their own stream', async () =
       done: true,
     });
 
-    const deletions: unknown = JSON.parse(await (await get(server, '/api/deletions?type=movie')).text());
+    const deletions: unknown = JSON.parse(await (await get(server, '/api/deletions?type=movie', cookie)).text());
     assert.deepEqual(deletions, {
       // `ids`, not `items`: a tombstone is an id and nothing else.
       ids: [mediaItemId],
@@ -595,7 +856,7 @@ test('rss items, downloads and deletions each page their own stream', async () =
       done: true,
     }, 'deletions are scoped by type, because a tombstone carries the plugin that owned the row');
 
-    const foreign = await get(server, '/api/deletions?type=book');
+    const foreign = await get(server, '/api/deletions?type=book', cookie);
     assert.equal(foreign.status, 404, 'and an unknown type is refused there exactly as it is on /api/media');
     assert.deepEqual(JSON.parse(await foreign.text()), { error: 'unknown media type: book' });
   } finally {
@@ -613,22 +874,22 @@ const OVER_ONE_PAGE = PAGE_SIZE + 1;
 
 test('the rss items cursor pages forward when a client sends it back', async () => {
   assert.equal(PAGE_SIZE, 200, 'the counts below are written for a page size of 200');
-  const raw = setup();
+  const { raw, db } = setup();
   const feedId = seedFeed(raw, 'https://feeds.test/paging.xml');
   const expected: string[] = [];
   for (let index = 1; index <= OVER_ONE_PAGE; index += 1) {
     expected.push(String(seedRssItem(raw, feedId, 1000 + index, `Item.${index}.mkv`)));
   }
 
-  const { server } = await start(raw, moviesOnly);
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const first = await pageFrom(server, '/api/rss-items');
+    const first = await pageFrom(server, '/api/rss-items', cookie);
     // The round trip a real client makes. This route decodes a two-part
     // cursor; handing its own cursor to `decodeUnionCursor` used to typecheck
     // (`UnionCursor` was structurally a `Cursor`), and every cursor the route
     // issued then decoded to `null` -- so a client past 200 rss items never
     // advanced, with nothing anywhere reporting it.
-    const second = await pageFrom(server, `/api/rss-items?since=${encodeURIComponent(first.cursor ?? '')}`);
+    const second = await pageFrom(server, `/api/rss-items?since=${encodeURIComponent(first.cursor ?? '')}`, cookie);
     continues(first, second, rowId, expected);
   } finally {
     await server.close();
@@ -637,7 +898,7 @@ test('the rss items cursor pages forward when a client sends it back', async () 
 
 test('the downloads cursor pages forward across both tables when a client sends it back', async () => {
   assert.equal(PAGE_SIZE, 200, 'the counts below are written for a page size of 200');
-  const raw = setup();
+  const { raw, db } = setup();
   const feedId = seedFeed(raw, 'https://feeds.test/downloads.xml');
   const rssItemId = seedRssItem(raw, feedId, 100, 'Paged.Movie.1080p.mkv');
   const clientId = seedClient(raw, 'paging');
@@ -655,10 +916,10 @@ test('the downloads cursor pages forward across both tables when a client sends 
   expected.push(`torrent#${seedTorrentDownload(raw, rssItemId, clientId, 1000 + 2 * 101, 'ref-t101')}`);
   assert.equal(expected.length, OVER_ONE_PAGE, 'the fixture must be exactly one row past a page');
 
-  const { server } = await start(raw, moviesOnly);
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const first = await pageFrom(server, '/api/downloads');
-    const second = await pageFrom(server, `/api/downloads?since=${encodeURIComponent(first.cursor ?? '')}`);
+    const first = await pageFrom(server, '/api/downloads', cookie);
+    const second = await pageFrom(server, `/api/downloads?since=${encodeURIComponent(first.cursor ?? '')}`, cookie);
     continues(first, second, downloadKey, expected);
   } finally {
     await server.close();
@@ -667,7 +928,7 @@ test('the downloads cursor pages forward across both tables when a client sends 
 
 test('the deletions cursor pages forward when a client sends it back', async () => {
   assert.equal(PAGE_SIZE, 200, 'the counts below are written for a page size of 200');
-  const raw = setup();
+  const { raw, db } = setup();
   // No `media_item` rows: a tombstone deliberately holds no reference to one,
   // because the row it names is gone. `media_item_id` is the tombstone's own
   // primary key, so the ids are named here rather than read back.
@@ -682,12 +943,13 @@ test('the deletions cursor pages forward when a client sends it back', async () 
   // Another plugin's tombstone, newest of all: it belongs on neither page.
   insert.run(OVER_ONE_PAGE + 1, 'beta', 99999);
 
-  const { server } = await start(raw, moviesOnly);
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const first = await pageFrom(server, '/api/deletions?type=movie');
+    const first = await pageFrom(server, '/api/deletions?type=movie', cookie);
     const second = await pageFrom(
       server,
       `/api/deletions?type=movie&since=${encodeURIComponent(first.cursor ?? '')}`,
+      cookie,
     );
     continues(first, second, deletionKey, expected);
   } finally {
@@ -696,7 +958,7 @@ test('the deletions cursor pages forward when a client sends it back', async () 
 });
 
 test('artwork is served from the real filesystem with its type read from the bytes, and honours If-None-Match', async () => {
-  const raw = setup();
+  const { raw, db } = setup();
   const mediaItemId = seedMediaItem(raw, 'alpha', 1000, 'Has A Poster');
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-server-artwork-'));
   try {
@@ -705,9 +967,9 @@ test('artwork is served from the real filesystem with its type read from the byt
     raw.prepare('INSERT INTO poster (media_item_id, url, width, height, created_at, path) VALUES (?, ?, 100, 100, 1, ?)')
       .run(mediaItemId, 'https://images.test/a.png', path);
 
-    const { server } = await start(raw, moviesOnly);
+    const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
     try {
-      const response = await get(server, `/api/artwork/poster/${mediaItemId}`);
+      const response = await get(server, `/api/artwork/poster/${mediaItemId}`, cookie);
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('content-type'), 'image/png', 'sniffed from the bytes, not from the .bin suffix');
       assert.deepEqual(new Uint8Array(await response.arrayBuffer()), PNG_BYTES, 'the bytes on disk, by value');
@@ -715,11 +977,11 @@ test('artwork is served from the real filesystem with its type read from the byt
       const etag = response.headers.get('etag');
       assert.ok(etag !== null && etag.startsWith('W/'), 'a weak etag, since the cached path is not a hash of the content');
 
-      const cached = await get(server, `/api/artwork/poster/${mediaItemId}`, { 'if-none-match': etag });
+      const cached = await get(server, `/api/artwork/poster/${mediaItemId}`, cookie, { 'if-none-match': etag });
       assert.equal(cached.status, 304, 'the header the request carried reaches readArtwork');
       assert.equal((await cached.arrayBuffer()).byteLength, 0);
 
-      const missing = await get(server, `/api/artwork/logo/${mediaItemId}`);
+      const missing = await get(server, `/api/artwork/logo/${mediaItemId}`, cookie);
       assert.equal(missing.status, 404, 'no logo row is a 404, not an empty 200');
       assert.equal((await missing.arrayBuffer()).byteLength, 0);
     } finally {
@@ -735,11 +997,11 @@ test('a media type shaped like a path or a query is refused without echoing it',
   // place the no-path/no-query rule could be broken by whatever a client
   // sends. So the echo is limited to values that could be a media type at
   // all, and anything else is refused without repetition.
-  const raw = setup();
-  const { server } = await start(raw, moviesOnly);
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
     const types = ['../../etc/passwd', 'movie?apikey=SECRET', '/media/movies', 'a'.repeat(64)];
-    const answers = await getAll(server, types.map((type) => `/api/media?type=${encodeURIComponent(type)}`));
+    const answers = await getAll(server, types.map((type) => `/api/media?type=${encodeURIComponent(type)}`), cookie);
     for (const { path, status, text } of answers) {
       assert.equal(status, 404, `${path} is not a media type`);
       assert.deepEqual(JSON.parse(text), { error: 'unknown media type' }, 'refused without the value');
@@ -753,10 +1015,10 @@ test('a media type shaped like a path or a query is refused without echoing it',
 });
 
 test('a request with no type at all is refused before any read', async () => {
-  const raw = setup();
-  const { server } = await start(raw, moviesOnly);
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const answers = await getAll(server, ['/api/media', '/api/media?type=', '/api/deletions']);
+    const answers = await getAll(server, ['/api/media', '/api/media?type=', '/api/deletions'], cookie);
     for (const { path, status, text } of answers) {
       assert.equal(status, 400, `${path} is a malformed request, not a missing thing`);
       assert.deepEqual(JSON.parse(text), { error: 'a type query parameter is required' });
@@ -770,12 +1032,12 @@ test('a malformed cursor answers the first page rather than an error', async () 
   // A client that sends a cursor this server never issued gets the beginning
   // back, which it can recover from by paging forward. A throw here would
   // fail every poll until whatever produced the bad cursor was fixed.
-  const raw = setup();
+  const { raw, db } = setup();
   seedMediaItem(raw, 'alpha', 1001, 'Movie 1');
-  const { server } = await start(raw, moviesOnly);
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
     const cursors = ['!!!', '', 'YWJjZGVm', encodeURIComponent('12.abc')];
-    const answers = await getAll(server, cursors.map((cursor) => `/api/media?type=movie&since=${cursor}`));
+    const answers = await getAll(server, cursors.map((cursor) => `/api/media?type=movie&since=${cursor}`), cookie);
     for (const { path, status, text } of answers) {
       assert.equal(status, 200, `${path} is not an error`);
       assert.deepEqual(JSON.parse(text), {
@@ -789,21 +1051,376 @@ test('a malformed cursor answers the first page rather than an error', async () 
   }
 });
 
-test('anything but a read is refused', async () => {
+test('anything but a read is refused, whether or not the caller has a session', async () => {
   // The whole API is read-only, so a write method is refused by the method
   // rather than routed as though it were a GET -- which is what a router that
   // only looked at the path would do, answering a POST with a page of data.
-  const raw = setup();
-  const { server } = await start(raw, moviesOnly);
+  //
+  // **The method check sits ahead of the guard, and it is the *guarded* path
+  // with no session that pins that.** It costs nothing to put it there: every
+  // non-GET answers the same 405 on every path with or without a session, so
+  // the ordering tells an anonymous caller nothing beyond "the API is
+  // read-only". The four combinations are all needed, and the one that does
+  // the work is a guarded path anonymously: an open path answers 405 whatever
+  // the order, so a version probing only `/api/health` could not tell the two
+  // orderings apart -- measured, by moving the guard in front and watching
+  // 23/23 pass.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const answers = await Promise.all(['POST', 'PUT', 'DELETE', 'PATCH'].map(async (method) => {
-      const response = await fetch(`http://${server.host}:${server.port}/api/health`, { method });
-      return { method, status: response.status, text: await response.text() };
+    const probes = ['POST', 'PUT', 'DELETE', 'PATCH'].flatMap((method) => (
+      ['/api/health', '/api/media?type=movie'].flatMap((path) => [
+        { method, path, cookie, session: 'a session' },
+        { method, path, cookie: ANONYMOUS, session: 'no session' },
+      ])
+    ));
+    const answers = await Promise.all(probes.map(async (probe) => {
+      const response = await fetch(`${originOf(server)}${probe.path}`, {
+        method: probe.method,
+        headers: probe.cookie === null ? {} : { cookie: probe.cookie },
+      });
+      // Named out rather than spread: `no-map-spread` is a warning in this
+      // repo and the three fields are the three this loop asserts over.
+      return {
+        method: probe.method,
+        path: probe.path,
+        session: probe.session,
+        status: response.status,
+        text: await response.text(),
+      };
     }));
-    for (const { method, status, text } of answers) {
-      assert.equal(status, 405, `${method} is not a read`);
+    for (const { method, path, session, status, text } of answers) {
+      assert.equal(status, 405, `${method} ${path} with ${session} is not a read`);
       assert.deepEqual(JSON.parse(text), { error: 'method not allowed' });
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test('every route except health refuses without a session', async () => {
+  // Enumerated from the route table, not hand-listed: `probeFor` turns each
+  // route's own path into a request, so a route a later slice adds is either
+  // guarded or fails here. A written-out list of six paths would pass
+  // untouched beside a seventh route nobody guarded.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    const guarded = ROUTES.filter((route) => !route.open);
+    // Both halves of the table's shape, because the filter above is what a
+    // route wrongly marked open would slip through: flipping one `open` would
+    // otherwise *remove* that route from this test rather than fail it.
+    assert.equal(guarded.length, ROUTES.length - 1, 'exactly one route in the table is open');
+    assert.ok(guarded.length >= 5, 'and the table is the real one, not a list this test passed over');
+
+    const refused = await getAll(server, guarded.map(probeFor), ANONYMOUS);
+    for (const { path, status, text } of refused) {
+      assert.equal(status, 401, `${path} must refuse a caller with no session`);
+      assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, `${path} refuses with the fixed body`);
+    }
+
+    // And the same enumeration with a session: nothing here is 401, so the
+    // loop above is not passing merely because the guard refuses everyone.
+    const allowed = await getAll(server, guarded.map(probeFor), cookie);
+    for (const { path, status } of allowed) {
+      assert.notEqual(status, 401, `${path} must be reachable by a session holder`);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test('health answers without a session, and is the only route that does', async () => {
+  // A container health check has no credential to offer, so this one route
+  // stays open -- and *only* this one, which is why the assertion is over the
+  // whole table rather than over health alone.
+  const { raw, db } = setup();
+  const { server } = await start(raw, db, moviesOnly);
+  try {
+    assert.deepEqual(
+      ROUTES.filter((route) => route.open).map((route) => route.path),
+      ['/api/health'],
+      'one open route, and it is the health check',
+    );
+
+    const answers = await getAll(server, ROUTES.map(probeFor), ANONYMOUS);
+    for (const { path, status } of answers) {
+      const expected = path === '/api/health' ? 200 : 401;
+      assert.equal(status, expected, `${path} answers ${expected} to a caller with no session`);
+    }
+
+    const health = await get(server, '/api/health', ANONYMOUS);
+    assert.deepEqual(
+      JSON.parse(await health.text()),
+      { ok: true, version: API_VERSION },
+      'and answers the body a health check reads, not merely a status',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * The reviewer's probe path: shaped exactly like a route a later slice would
+ * add, and named by no route in `ROUTES`.
+ *
+ * A constant so the test below can assert that it names nothing in the table.
+ * The day it does name something, this test says so rather than quietly
+ * becoming a test of that route.
+ */
+const UNMOUNTED_PROBE = '/api/rss-items-v2';
+
+test('a path beside the auth dispatch is refused, mounted or not', async () => {
+  // **The reviewer's exact probe, as a test.** An unguarded
+  // `/api/rss-items-v2` serving real rows was mounted in `handle` beside the
+  // auth dispatch and all 22 tests passed: the guarded set is derived from
+  // `ROUTES`, which is right, and a route that is not in `ROUTES` inherits
+  // nothing from it. Nothing but `/api/auth/*` is mounted there today, so
+  // nothing was exposed -- what this pins is that the guard is taken *before*
+  // the router, so a mount written below it is refused without its author
+  // having had to think about the guard.
+  //
+  // The rows exist so the mutation that re-mounts that probe has something
+  // real to serve, which is what made it worth reporting: it was not an empty
+  // page that happened to answer 200.
+  const { raw, db } = setup();
+  const feedId = seedFeed(raw, 'https://feeds.test/beside.xml');
+  seedRssItem(raw, feedId, 2000, 'Beside.The.Dispatch.1080p.mkv');
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    assert.ok(
+      !ROUTES.some((route) => route.path === UNMOUNTED_PROBE),
+      `${UNMOUNTED_PROBE} now names a route in ROUTES, so it is no longer a probe for an unmounted path`,
+    );
+
+    const anonymous = await get(server, UNMOUNTED_PROBE, ANONYMOUS);
+    assert.equal(anonymous.status, 401, 'a path no route claims is refused, not answered');
+    // The body, not only the status: a 401 saying `unauthorized` is the
+    // guard's answer, where a 404 would be the router's. That distinction is
+    // the whole of this test -- a mount above the guard answers with its own
+    // body, and a mount below it never runs.
+    assert.deepEqual(
+      JSON.parse(await anonymous.text()),
+      { error: 'unauthorized' },
+      'refused by the guard, rather than answered by anything mounted beside the dispatch',
+    );
+
+    // The other half, and it is a different fact: nothing *is* mounted there
+    // today. Mounting the reviewer's probe below the guard fails this
+    // assertion and not the one above -- which is the proof, because a route
+    // mounted below the guard answering a session holder is exactly what a
+    // correctly guarded new route does. Mounted above the guard it fails the
+    // anonymous assertion instead, with a 200 and real rows.
+    const signedIn = await get(server, UNMOUNTED_PROBE, cookie);
+    assert.equal(signedIn.status, 404, 'past the guard, a path no route claims is an unknown route');
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * A path that shares the auth mount's prefix without being inside it, which
+ * is the whole space `isAuthPath`'s trailing slash keeps out of the
+ * dispatcher. `/api/rss-items-v2` above cannot cover it: it does not share
+ * the prefix, so it exercises the router rather than the prefix test.
+ *
+ * `/api/authors` is the shape a later slice actually adds; `authx` is the
+ * shortest thing with the same property, and both are equally unclaimed.
+ */
+const AUTH_PREFIX_PROBE = '/api/authx';
+
+test('a path that merely starts with the auth prefix is the guard\'s, not the dispatcher\'s', async () => {
+  // **The one surviving mutation the whole-branch review found.**
+  // `isAuthPath` is `pathname === AUTH_BASE || pathname.startsWith(`${AUTH_BASE}/`)`,
+  // and its comment says the trailing slash is load-bearing. Replacing it with
+  // `pathname.startsWith(AUTH_BASE)` passed all 1937 tests, while handing the
+  // entire `/api/auth*` prefix space to a library that knows nothing about it:
+  // measured at the socket, `/api/authx` then answers Better Auth's **404**
+  // instead of this module's 401, so a route named `/api/authors` added later
+  // would be dispatched into the library and nothing would fail.
+  //
+  // Anonymous is the half that matters: the 401 is proof the request was
+  // guarded, and the dispatcher's 404 is proof it was not. The body is
+  // asserted for the same reason as the test above -- a status alone cannot
+  // tell which module answered.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    assert.ok(
+      !ROUTES.some((route) => route.path === AUTH_PREFIX_PROBE),
+      `${AUTH_PREFIX_PROBE} now names a route in ROUTES, so it is no longer a probe for the prefix`,
+    );
+
+    const anonymous = await get(server, AUTH_PREFIX_PROBE, ANONYMOUS);
+    assert.equal(anonymous.status, 401, 'a path beside the mount, not in it, must reach the guard');
+    assert.deepEqual(
+      JSON.parse(await anonymous.text()),
+      { error: 'unauthorized' },
+      'answered by the guard; a 404 here would mean the auth dispatcher was handed a path it does not own',
+    );
+
+    // Past the guard it is an unknown route, exactly as `/api/rss-items-v2`
+    // is -- which is what makes the 401 above the guard's and not the
+    // router's.
+    const signedIn = await get(server, AUTH_PREFIX_PROBE, cookie);
+    assert.equal(signedIn.status, 404, 'past the guard, a path no route claims is an unknown route');
+
+    // And the mount itself still dispatches, so this is not a test that would
+    // pass by breaking the forwarding it is written beside: `/api/auth` and
+    // `/api/auth/get-session` are both the library's.
+    const session = await get(server, '/api/auth/get-session', ANONYMOUS);
+    assert.equal(session.status, 200, 'the mount still reaches Better Auth');
+    assert.equal(await session.text(), 'null', 'and answers 200 with a null body for an anonymous caller, which is what the guard reads');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a valid session cookie reaches the data', async () => {
+  // The other half of the guard, and the one a refuse-everything
+  // implementation fails: a real session, issued by a real sign-up through
+  // the mounted auth routes, reads a real row.
+  const { raw, db } = setup();
+  const mediaItemId = seedMediaItem(raw, 'alpha', 1001, 'Movie 1');
+  const feedId = seedFeed(raw, 'https://feeds.test/session.xml');
+  seedRssItem(raw, feedId, 2000, 'Session.Movie.1080p.mkv');
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    const media = await get(server, '/api/media?type=movie', cookie);
+    assert.equal(media.status, 200, 'a session holder reads the media route');
+    assert.deepEqual(JSON.parse(await media.text()), {
+      items: [expectedMediaItem(mediaItemId)],
+      cursor: encodeCursor({ updatedAt: 1001, id: mediaItemId }),
+      done: true,
+    }, 'the rows themselves, not an empty page the guard happened to allow');
+
+    // A second route with the same cookie, so the pass is the session and not
+    // one route's own accident.
+    //
+    // Read back through checks rather than a cast, the rule `pageFrom` above
+    // states and the reason it gives: `Response.json()` is `unknown` under
+    // this tsconfig, so `as { items: unknown[] }` silenced a real error and
+    // would have let a route answering a different shape fail somewhere
+    // downstream instead of here, by name. `isRecord` is already here for
+    // exactly this.
+    const items = await get(server, '/api/rss-items', cookie);
+    assert.equal(items.status, 200, 'the same session cookie reads a second route');
+    const itemsBody: unknown = await items.json();
+    if (!isRecord(itemsBody) || !Array.isArray(itemsBody.items)) {
+      throw new Error('/api/rss-items answered no items array');
+    }
+    assert.equal(itemsBody.items.length, 1, 'the seeded rss item, not an empty page the guard let through');
+
+    // Artwork too, which slice E left as an existence oracle over integer
+    // ids: a session holder still gets its 404 for a media item with no
+    // poster, rather than the guard's 401.
+    const artwork = await get(server, `/api/artwork/poster/${mediaItemId}`, cookie);
+    assert.equal(artwork.status, 404, 'past the guard, and answered by the route');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a session check resolving null refuses, though the check answered 200', async () => {
+  // The `200 null` trap, and the reason the guard tests the *value* the check
+  // resolves to. Better Auth answers an unauthenticated session check with
+  // 200 and a body of `null` (design spec §2, measured), so a guard written
+  // against the status code lets every anonymous caller through while looking
+  // correct in review.
+  const { raw, db } = setup();
+  seedMediaItem(raw, 'alpha', 1001, 'Movie 1');
+  const { server } = await start(raw, db, moviesOnly);
+  try {
+    const [anonymous, bogus] = await Promise.all([
+      checkAndRead(server, ANONYMOUS),
+      checkAndRead(server, BOGUS_COOKIE),
+    ]);
+
+    for (const [name, probe] of [['no cookie', anonymous], ['a forged cookie', bogus]] as const) {
+      assert.equal(probe.check.status, 200, `the session check for ${name} is 200, not 401`);
+      // `assert.ok` with a message of its own rather than `assert.equal` on
+      // the body: a check that wrongly resolved a session *is* a live session
+      // token, and `assert.equal` would print it into the output on the one
+      // run where this fails.
+      assert.ok(probe.check.text === 'null', `the session check for ${name} resolved to null`);
+      assert.equal(probe.guardedStatus, 401, `and the guard refuses ${name} anyway, on the value and not the status`);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test('a 401 body carries no url, path or query string', async () => {
+  // The same discipline as the 500 handler: a refusal says one fixed thing.
+  // The request below carries a path, a query string and something shaped
+  // like a credential, and none of it may come back.
+  const { raw, db } = setup();
+  const { server, logs } = await start(raw, db, moviesOnly);
+  try {
+    const probes = [
+      '/api/media?type=movie&since=CURSOR-9&apikey=SECRET-KEY-9',
+      '/api/artwork/poster/1?apikey=SECRET-KEY-9',
+      '/api/nope?apikey=SECRET-KEY-9',
+    ];
+    const answers = await getAll(server, probes, ANONYMOUS);
+    for (const { path, status, text } of answers) {
+      assert.equal(status, 401, `${path} is refused`);
+      assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, 'a fixed body');
+      // The absence of the recognisable values, not the presence of a generic
+      // message: a body can carry both.
+      for (const forbidden of ['/', '?', 'api', 'media', 'artwork', 'poster', 'since', 'apikey', 'SECRET-KEY-9']) {
+        assert.equal(text.includes(forbidden), false, `the body must not carry ${forbidden}`);
+      }
+    }
+    assert.deepEqual(logs, [], 'a caller with no session is not a failure, so nothing is logged as one');
+  } finally {
+    await server.close();
+  }
+});
+
+test('the auth routes are reachable without a session', async () => {
+  // Otherwise nobody could ever sign in: the route that issues a session
+  // would itself require one. `/api/auth/*` is dispatched by `toNodeHandler`
+  // *before* the guard, and this asserts the dispatch rather than the absence
+  // of a 401 -- Better Auth's own answer to a wrong password is also 401, so
+  // "not 401" would prove nothing here.
+  const { raw, db } = setup();
+  const { server } = await start(raw, db, moviesOnly);
+  try {
+    const origin = originOf(server);
+    const signIn = async (password: string): Promise<Response> => fetch(`${origin}/api/auth/sign-in/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ email: OWNER_EMAIL, password }),
+    });
+
+    // The dispatch, asserted first and *before any account exists*, so this
+    // assertion depends on nothing but the ordering: Better Auth answers a
+    // sign-in it cannot satisfy with 401 and an error code of its own, and the
+    // guard answers `{ error: 'unauthorized' }`. Same status, different body,
+    // which is why the body is what is asserted.
+    const noSuchAccount = await signIn(PASSWORD);
+    assert.equal(noSuchAccount.status, 401);
+    const refusalBody: unknown = JSON.parse(await noSuchAccount.text());
+    assert.ok(
+      isRecord(refusalBody) && typeof refusalBody.code === 'string',
+      'sign-in reached Better Auth, which refused it with an error code of its own',
+    );
+    assert.notDeepEqual(refusalBody, { error: 'unauthorized' }, 'the guard did not answer for it');
+
+    // Sign-up, unauthenticated, through the mount: the request a fresh install
+    // has to be able to make before anything can hold a session at all.
+    const cookie = await signUpOwner(server, raw);
+    assert.ok(cookie.length > 0, 'sign-up issued a session');
+
+    const signedIn = await signIn(PASSWORD);
+    assert.equal(signedIn.status, 200, 'and now the same sign-in succeeds');
+    // By count, never by value: the cookie is a live session.
+    assert.equal(signedIn.headers.getSetCookie().length, 1, 'issuing exactly one session cookie');
+
+    // And the GET half of the mount, which is the call the guard itself makes.
+    const check = await get(server, '/api/auth/get-session', ANONYMOUS);
+    assert.equal(check.status, 200, 'the session check is dispatched too, rather than guarded');
   } finally {
     await server.close();
   }

@@ -647,7 +647,7 @@ is resolved — so refusing it would break paging during normal operation.
 
 ## Operational notes
 
-- [There is no authentication](https://github.com/chad3814/pickarr/issues/35) — Put Pickarr behind a reverse proxy or keep it on a LAN.
+- [There is no authentication](https://github.com/chad3814/pickarr/issues/35) — In 1.x. Put it behind a reverse proxy or keep it on a LAN. The 2.0 host requires a session on every route but its health check.
 - [Pickarr never empties `trashDir`](https://github.com/chad3814/pickarr/issues/36) — Deliberate: it is the only destructive operation in the system, so reclaiming the space stays a manual decision.
 - [There is no library scanning](https://github.com/chad3814/pickarr/issues/37) — Pickarr only knows about media it picked itself. Files already on disk are invisible to it.
 - [A chronically unparseable feed logs its cap of 50 parse-failure lines every tick, indefinitely](https://github.com/chad3814/pickarr/issues/38) — `MAX_REPORTED_PARSE_FAILURES` bounds one tick but not the feed's whole lifetime.

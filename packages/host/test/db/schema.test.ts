@@ -1,13 +1,14 @@
 /**
- * `schema.ts` and `migrate.ts` declare the same 16 tables and 26 indexes
+ * `schema.ts` and `migrate.ts` declare the same 21 tables and 31 indexes
  * twice — once as Drizzle objects, once as DDL, spread across
  * `INITIAL_SCHEMA` and the numbered migrations that follow it — and nothing
  * generates either from the other. There is no drizzle config in this repo
  * and no script runs `drizzle-kit`, so these tests are what keeps the two in
  * step: the table set; every column's name, SQL type and nullability; and
- * every index's table, column list (in order) and uniqueness; and every
- * column's default. They do not compare foreign-key targets or a partial
- * index's `WHERE` condition, so those two could still drift unnoticed.
+ * every index's table, column list (in order) and uniqueness; every
+ * column's default; and primary-key membership. They do not compare
+ * foreign-key targets or a partial index's `WHERE` condition, so those two
+ * could still drift unnoticed.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,16 +26,23 @@ interface ColumnInfo {
   notNull: boolean;
   /** `dflt_value` as SQL literal text, or `null` for a column with no default. */
   defaultSql: string | null;
+  /**
+   * Whether `PRAGMA table_info` reports this column as part of the primary
+   * key. `pk` is 0 for a non-key column and 1-based position within a
+   * composite key, so `> 0` is the question, not `=== 1`.
+   */
+  primaryKey: boolean;
 }
 
 function ddlColumns(raw: ReturnType<typeof openTestDatabase>['raw'], table: string): ColumnInfo[] {
   return raw.prepare(`PRAGMA table_info(${table})`).all().map((r) => {
-    const row = r as { name: unknown; type: unknown; notnull: unknown; dflt_value: unknown };
+    const row = r as { name: unknown; type: unknown; notnull: unknown; dflt_value: unknown; pk: unknown };
     return {
       name: String(row.name),
       type: String(row.type),
       notNull: Number(row.notnull) === 1,
       defaultSql: row.dflt_value === null || row.dflt_value === undefined ? null : String(row.dflt_value),
+      primaryKey: Number(row.pk) > 0,
     };
   });
 }
@@ -140,6 +148,24 @@ test('every schema column matches the migration DDL by name, type, nullability a
   for (const [name, table] of declaredTables()) {
     const ddl = new Map(ddlColumns(raw, name).map((column) => [column.name, column]));
     const declared = Object.values(getTableColumns(table));
+    // Both spellings of a primary key in one set: `.primaryKey()` on a column,
+    // and `primaryKey({ columns })` in the table extras, which Drizzle reports
+    // on the *table* rather than on any of its columns.
+    //
+    // **The composite half is unexercised, and says so rather than citing a
+    // case that is not one.** Measured across all 21 mirrored tables,
+    // `getTableConfig(table).primaryKeys.length` is 0 on every one, so the
+    // second spread contributes nothing today and no test can tell it apart
+    // from an empty array. It is kept as future-proofing: the first composite
+    // key declared in `schema.ts` is then compared without this file being
+    // touched. The justification that used to stand here named
+    // `plugin_migrations (plugin_id, version)`, which is not a case at all --
+    // `migratePlugin` creates that table outside the versioned DDL and it is
+    // deliberately not declared to Drizzle, as the test above says.
+    const declaredPrimary = new Set<string>([
+      ...declared.filter((column) => column.primary).map((column) => column.name),
+      ...getTableConfig(table).primaryKeys.flatMap((key) => key.columns.map((column) => column.name)),
+    ]);
 
     for (const column of declared) {
       const actual = ddl.get(column.name);
@@ -161,9 +187,31 @@ test('every schema column matches the migration DDL by name, type, nullability a
       // `INTEGER PRIMARY KEY` (the rowid alias supplies one) with no value
       // to go with it, while the DDL declares none -- a disagreement that
       // exists in neither file.
+      // Primary-key membership IS compared, unlike nullability and default
+      // above -- and it is the one property of a primary column the two files
+      // can genuinely disagree about. A column that loses `PRIMARY KEY` in the
+      // DDL while `schema.ts` still says `.primaryKey()` was invisible here
+      // until slice F, and was caught only by a table-specific test somebody
+      // happened to write. `pk` is compared against both spellings of a
+      // declared key -- see `declaredPrimary` above, where the composite one
+      // is recorded as future-proofing that nothing in this schema exercises.
+      if (actual.primaryKey !== declaredPrimary.has(column.name)) {
+        disagreements.push(
+          `${name}.${column.name}: DDL primaryKey=${actual.primaryKey}, `
+          + `schema.ts primaryKey=${declaredPrimary.has(column.name)}`,
+        );
+      }
       if (!column.primary) {
+        // `mapToDriverValue`, not the declared value itself: a column with a
+        // mode (`integer(..., { mode: 'boolean' })`, which `auth_user.
+        // email_verified` needs so Better Auth's boolean reaches SQLite at
+        // all) spells its default in the *JS* domain -- `false` -- where the
+        // DDL spells the stored one, `0`. Asking Drizzle to map the default
+        // the way it would map a written value compares the two sides in the
+        // one domain they share, and is the identity function for every
+        // mode-less column in this file.
         const declaredDefault = column.hasDefault && column.default !== undefined
-          ? String(column.default)
+          ? String(column.mapToDriverValue(column.default))
           : null;
         const ddlDefault = actual.defaultSql === null ? null : normalizeDefault(actual.defaultSql);
         if (declaredDefault !== ddlDefault) {

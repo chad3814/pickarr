@@ -18,7 +18,10 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { MediaPlugin } from '@pickarr/contract';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
 import { DEFAULT_PORT, createReadServer } from './api/server.ts';
+import { ensureClaimToken, isClaimed } from './auth/claim.ts';
+import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
+import { ensureAuthSecret } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
@@ -209,6 +212,146 @@ export function resolveReadPort(configured: string | undefined): number {
 }
 
 /**
+ * The interface the read API binds: `PICKARR_READ_API_HOST` when set to
+ * anything, and `undefined` -- which `createReadServer` reads as its own
+ * `DEFAULT_HOST`, every interface -- otherwise.
+ *
+ * **The default is deliberately not restated here.** One name for it, in the
+ * module that does the binding, is what keeps this from being a second place
+ * that could disagree about what the shipped process listens on. What this
+ * function decides is only whether the operator said anything.
+ *
+ * Nothing is validated beyond that: what can be bound is the listener's
+ * question, and `createReadServer` already rejects a bind that fails rather
+ * than leaving a process that looks started and serves nothing.
+ *
+ * **An empty variable is an unset one**, exactly as it is for the port -- and
+ * here that is load-bearing rather than tidy. `PICKARR_READ_API_HOST=` is
+ * what a compose file with the key and no value passes, and
+ * `listen(port, '')` binds the IPv6 wildcard `::` (measured on node 26), not
+ * the documented `0.0.0.0`: a different family, reported back as a different
+ * address, for a variable the operator never meant to set.
+ *
+ * Takes the variable's value rather than reading `process.env` itself, so it
+ * is testable without mutating the environment the whole process shares.
+ */
+export function resolveReadHost(configured: string | undefined): string | undefined {
+  return configured === undefined || configured === '' ? undefined : configured;
+}
+
+/**
+ * `PICKARR_PUBLIC_URL`: the externally reachable origin, for a host behind a
+ * reverse proxy. `undefined` when unset or empty, which is the ordinary case
+ * -- no proxy, and the address the listener bound is the origin.
+ *
+ * **Refused at boot when it is not an http origin**, rather than carried into
+ * `baseURL`, because the failure it would otherwise cause is both silent and
+ * total: Better Auth compares every state-changing request's `Origin` against
+ * `baseURL` (the auth slice's §2, measured), so a malformed value refuses
+ * every sign-in with a 403 whose reason appears in no log -- on the slice
+ * where a session is the only thing protecting this socket. A host comes with
+ * the scheme rather than being a second rule: `http:` and `https:` are
+ * special schemes, so a url with no host does not parse at all (`http://` is
+ * a parse failure, measured). What the host resolves to, and whether anything
+ * answers there, is not this process's business and could not be known here
+ * anyway.
+ *
+ * **An origin is the whole of what this variable may hold**, so a path, a
+ * query string or a fragment is refused here too -- the scheme was once the
+ * whole of what was checked, and that left the failure this function exists to
+ * prevent wide open. Measured, all three the same way: with `baseURL`
+ * `http://127.0.0.1:<port>/pickarr`, `…/?x=1` or `…/#frag`, Better Auth mounts
+ * itself under that path and every auth route answers **404** on the path
+ * `api/server.ts` forwards -- so nobody can sign in, sign up or sign out,
+ * sessions issued earlier keep working because the guard calls
+ * `auth.api.getSession` in-process, and `/api/health` answers **200** so a
+ * container health check reports the host healthy. Nothing is logged.
+ * `https://host/pickarr` is a reverse proxy on a subpath, which is an
+ * ordinary arrangement and a *feature* this slice does not have; refusing it
+ * at boot says so, where reducing it to its origin would give that operator a
+ * half-working install (cookies and redirects at the wrong path) instead of
+ * an answer.
+ *
+ * **A trailing slash is not a path**: `https://host/` has pathname `/`, is
+ * accepted, and works -- Better Auth normalizes it when it composes the
+ * mount (measured, and the one prediction the review got backwards).
+ *
+ * **No failure below names the value.** Nothing this repo emits may carry a
+ * url, and a boot that dies on an unreadable environment variable is exactly
+ * where a url would otherwise reach a log: the message names the variable and
+ * the rule it broke, which is all the operator needs to fix it.
+ *
+ * The value is returned as it was written rather than normalized, which after
+ * the checks above means at most a trailing slash. Better Auth compares
+ * origins, and `auth/instance.ts`'s `publicOrigin` is what reduces that to an
+ * origin -- in the one place that does the comparing.
+ */
+export function resolvePublicUrl(configured: string | undefined): string | undefined {
+  if (configured === undefined || configured === '') return undefined;
+  if (!URL.canParse(configured)) {
+    throw new Error('PICKARR_PUBLIC_URL is not a url');
+  }
+  const url = new URL(configured);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('PICKARR_PUBLIC_URL is not an http or https url');
+  }
+  if (url.pathname !== '/') {
+    throw new Error('PICKARR_PUBLIC_URL must have no path: its pathname must be /');
+  }
+  if (url.search !== '') {
+    throw new Error('PICKARR_PUBLIC_URL must have no query string');
+  }
+  if (url.hash !== '') {
+    throw new Error('PICKARR_PUBLIC_URL must have no fragment');
+  }
+  return configured;
+}
+
+/**
+ * The Better Auth signing secret this host will sign cookies with:
+ * `BETTER_AUTH_SECRET` when the operator set it to anything, and the secret
+ * `db/host-state.ts` persists (generating it once, on first boot) otherwise.
+ *
+ * **The variable has to win, because §6 documents it as the only way to
+ * rotate a secret.** It used to do nothing at all: Better Auth's own fallback
+ * chain is `options.secret || env.BETTER_AUTH_SECRET || …`, `options.secret`
+ * wins, and `createAuth` is always passed one -- so an operator who suspected
+ * a compromise could set the documented variable, restart, and have every
+ * session stay valid for its full `Max-Age=604800` with nothing saying
+ * otherwise. Measured before the fix: a cookie issued under the persisted
+ * secret was still accepted by a host booted with a *different*
+ * `BETTER_AUTH_SECRET`.
+ *
+ * **Setting it, changing it or removing it logs everyone out**, which is the
+ * point of having it and is also why §6 documents the hazard next to it: the
+ * cookie signature is what every session is checked against, so a stray value
+ * in the environment invalidates them all. Nothing is logged here either way
+ * -- the value is a credential and cannot be named in a log line, and "the
+ * secret changed" is not something this process can know without holding both.
+ *
+ * **The persisted row is left exactly as it is.** It is not read, not written
+ * and not deleted while the variable is set, so removing the variable later
+ * returns the host to the secret it already had rather than to a fresh one.
+ * The row's other property -- generated once even under a race, so a restart
+ * does not log everyone out -- is `ensureGeneratedValue`'s and is untouched.
+ *
+ * **An empty variable is an unset one**, as it is for the port, the host and
+ * the public url: `BETTER_AUTH_SECRET=` is what a compose file with the key
+ * and no value passes, and signing every cookie with the empty string is not
+ * what that operator asked for.
+ *
+ * Takes the variable's value rather than reading `process.env` itself, so the
+ * precedence is testable without mutating the environment the whole process
+ * shares -- and so the plural `BETTER_AUTH_SECRETS`, which the library reads
+ * on its own and which this function has no part in, stays the library's
+ * business (§6 documents it).
+ */
+export function resolveAuthSecret(configured: string | undefined, raw: DatabaseSync, at: number): string {
+  if (configured !== undefined && configured !== '') return configured;
+  return ensureAuthSecret(raw, at);
+}
+
+/**
  * Builds the process's shutdown handler. `host.stop()` clears the
  * dispatcher's timer and safety interval and returns without waiting on
  * anything -- a handler already in flight is abandoned deliberately, its row
@@ -295,14 +438,28 @@ export function createShutdown(
  *    it is opened after both scheduling calls as well, so nothing is served
  *    until the process has finished deciding what it will do. `main.test.ts`
  *    fails if the server is built before `start()`.
- * 5. The signal handlers, last, so nothing can be asked to stop before the
- *    state above is settled.
+ * 5. The signal handlers, after the server, so nothing can be asked to stop
+ *    before the state above is settled.
+ * 6. The claim-token line, last of all, and only while the install is
+ *    unclaimed. Last because it is the thing an owner starting this process
+ *    has to read, and the bottom of the output is where they are looking --
+ *    the auth slice's §3 asks for it on every boot ("stored in `host_state`,
+ *    cleared once claimed, and re-printed on every boot while the install is
+ *    still unclaimed"), which is why it is a property of `isClaimed` rather
+ *    than of having just generated a token. Cited as §6 here until the
+ *    whole-branch review checked it: §6 is the configuration table and says
+ *    nothing about the claim token.
+ *    It is also the **one place anything prints the token**, and nothing
+ *    anywhere prints the signing secret.
  *
  * `argv` is accepted for parity with a conventional process entry point;
- * this slice has no argument surface beyond the `PICKARR_DATABASE` and
- * `PICKARR_READ_API_PORT` environment variables (there is deliberately no
- * config surface yet -- slice B's spec §1.1, cited in full on
- * `resolveArtworkDir` above), so nothing here reads it.
+ * this slice has no argument surface beyond the `PICKARR_DATABASE`,
+ * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL` and
+ * `BETTER_AUTH_SECRET` environment variables (there is deliberately no config
+ * surface yet -- slice B's spec §1.1, cited in full on `resolveArtworkDir`
+ * above), so nothing here reads it. `BETTER_AUTH_SECRETS`, the plural, is
+ * read by the library itself and by nothing in this package; the auth slice's
+ * §6 documents both.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the
@@ -317,6 +474,10 @@ export function createShutdown(
  * it with, so a test that lets it bind leaves a listener behind for every
  * later test to trip over. It is also the only way to observe *when* the
  * server was built relative to `host.start()`, which is the ordering above.
+ * Supplying it does not have to mean faking it -- `main.test.ts` also passes
+ * a wrapper around the real one, which is how `authFor` below is covered at
+ * all: that closure is called by the listener rather than by anything here,
+ * so a fake server never runs it.
  */
 export async function main(
   argv: readonly string[],
@@ -335,6 +496,8 @@ export async function main(
   // possible refusal is the one that touches least on its way out.
   const pluginIdForType = createPluginIdForType(plugins);
   const port = resolveReadPort(process.env['PICKARR_READ_API_PORT']);
+  const readHost = resolveReadHost(process.env['PICKARR_READ_API_HOST']);
+  const publicUrl = resolvePublicUrl(process.env['PICKARR_PUBLIC_URL']);
 
   const databasePath = process.env['PICKARR_DATABASE'] ?? DEFAULT_DATABASE_PATH;
   const { raw, db } = openDatabase(databasePath);
@@ -376,7 +539,35 @@ export async function main(
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
+    host: readHost,
     port,
+    // Built from the address the listener bound rather than here, because
+    // `baseURL` has to be the origin requests arrive at and `port` may be 0 --
+    // see `ReadServerDeps.authFor`.
+    //
+    // **`PICKARR_PUBLIC_URL` wins over the bound address when it is set**, and
+    // it has to: behind a reverse proxy the origin a browser reaches is the
+    // proxy's, not this listener's, and Better Auth refuses every
+    // state-changing request whose `Origin` is neither `baseURL` nor a trusted
+    // origin (the auth slice's §2, measured). It is passed as `publicUrl` as
+    // well, so `trustedOrigins` names it too and `createAuth` knows it does
+    // not need to warn about a deployment that has told it nothing.
+    //
+    // **The secret is never logged**, here or anywhere it travels; it is
+    // decided by `resolveAuthSecret` above -- `BETTER_AUTH_SECRET` when the
+    // operator set it, else the row `ensureAuthSecret` generates once and
+    // persists -- so the host boots configured either way. Read per
+    // construction rather than once at the top of `main`, on the same
+    // reasoning as `baseURL`: this closure is what the listener calls, and
+    // there is exactly one instance per process.
+    authFor: (baseURL) => createAuth({
+      raw,
+      db,
+      secret: resolveAuthSecret(process.env['BETTER_AUTH_SECRET'], raw, Date.now()),
+      baseURL: publicUrl ?? baseURL,
+      publicUrl,
+      log,
+    }),
     log,
   });
 
@@ -393,4 +584,18 @@ export async function main(
     + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
     + `${clientIds.length} download client(s) scheduled`,
   );
+
+  // Last, and only while there is something to claim -- see the order above.
+  // `isClaimed` is asked first so a claimed install neither prints a token nor
+  // mints one: `ensureClaimToken` would happily write a fresh row on an
+  // install whose token was spent months ago, and printing that row would be
+  // printing a credential for an account that already exists.
+  if (!isClaimed(raw)) {
+    log(
+      'this install is unclaimed: the first sign-up must carry claim token '
+      + `${ensureClaimToken(raw, Date.now())} -- it is single-use, spent only by a sign-up that `
+      + 'succeeds, so a refused attempt leaves it usable, and it is printed on every boot until '
+      + 'an account exists',
+    );
+  }
 }

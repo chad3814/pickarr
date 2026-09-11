@@ -44,7 +44,11 @@ This slice builds the read side once, for both consumers that need it.
 - **No client.** The IndexedDB rewrite is the next slice; this one gives it
   something to sync against.
 - **No auth, and the server binds to loopback only.** See §8 — this is a stated
-  consequence, not an oversight.
+  consequence, not an oversight. **Superseded by slice F**
+  (`2026-09-09-auth-design.md`): every route but `/api/health` now requires a
+  session, and the bind default moved to `0.0.0.0`. Left as written because it
+  records what *this* slice decided; §8's consequences are annotated where they
+  stopped being true.
 - **No WebSocket and no SSE.** The client polls with a cursor. A push channel is
   an optimisation of a protocol that does not exist yet.
 - **No search, no filtering beyond the cursor and media type, no sort options.**
@@ -154,8 +158,11 @@ and cannot serve as a strong validator. `ETag: W/"<mtime>-<size>"` with
 `Last-Modified` is what the filesystem actually knows. Claiming a strong ETag
 from a path that survives content changes would be a lie a cache would believe.
 
-**`node:http`, no framework.** Six routes, read-only, on loopback. The host has
-no HTTP dependency today and this is not the reason to acquire one.
+**`node:http`, no framework.** Six routes, read-only, on loopback *as this
+slice shipped it* — slice F moved the bind to every interface. The host has
+no HTTP dependency today and this is not the reason to acquire one. (Slice F
+added a seventh mount, `/api/auth/*`, on the same bare server — still no
+framework, and `toNodeHandler` was measured to work with one.)
 
 **One query layer, and the HTTP handlers contain no SQL.** Both consumers —
 plugins in-process, the client over HTTP — call the same functions. Two readers
@@ -385,6 +392,14 @@ connection anyway, so scoping the route would confine nobody), and over HTTP
 no route is a confidentiality boundary in the first place, since the caller
 picks the `type` on the two routes that take one.
 
+**Slice F narrows the second ground without removing the conclusion.** Every
+route is now behind a session, so HTTP *is* a boundary — between an account and
+no account. What it still is not is a boundary *between plugins*, which is what
+this paragraph was actually arguing, and the conclusion stands on that reading:
+a session holder may name any type on the two routes that take one, so scoping
+artwork would confine nobody who already has an account. The oracle below is
+therefore no longer reachable anonymously.
+
 What it does add is worth naming: **404 versus 200 across media types, by
 enumerating integer ids** — a caller can learn that *something* owns item
 900 and has a poster for it, without naming a type at all. Which is a real
@@ -450,6 +465,10 @@ a keyhole beside an open door, and the redactor's value is keeping a
 
 `main.ts` starts the server after `host.start()` and stops it before
 `host.stop()`. Port from `PICKARR_READ_API_PORT`, default 8787, **bound to `127.0.0.1`**.
+**Superseded by slice F**, which binds `PICKARR_READ_API_HOST` and defaults it
+to `0.0.0.0` — recorded rather than rewritten, because the loopback bind is
+what made this slice's unauthenticated API defensible and the change of
+default is the reason auth had to exist before it.
 
 Shutdown closes the listener and does not wait for in-flight requests to drain,
 matching what the dispatcher already does with in-flight jobs: a read that is
@@ -489,20 +508,28 @@ The properties worth pinning, each because it fails silently:
 ## 8. Consequences
 
 - **The API is unauthenticated, and what that exposes is not bibliographic.**
-  Loopback binding is the whole of the protection, so a reverse proxy or a
-  container publishing that port exposes everything below. Auth is the next
-  slice's to add, and it is a real gap until then, not a theoretical one.
+  **Closed by slice F**, which put every route but `/api/health` behind a
+  session — and which also moved the bind default from loopback to `0.0.0.0`,
+  so the protection this bullet describes is gone *and* the thing that replaced
+  it is now the only boundary. The exposure below is therefore no longer
+  reachable anonymously, and is exactly what a session holder still obtains, so
+  it is kept rather than deleted: it is the answer to "what does an account get
+  you", which is the question that matters once there are accounts.
+
+  Loopback binding was the whole of the protection, so a reverse proxy or a
+  container publishing that port exposed everything below.
   Spelled out, because "every media item, every feed item and every
   download" reads as metadata and is not:
 
   - **`RssItemRead.link` is served unredacted, and for a private tracker or
-    indexer that url *is* a credential** — it carries the passkey or api
-    key. So an unauthenticated local reader obtains every private-indexer
-    download url the host has ever seen, in `PAGE_SIZE` chunks, from
-    `/api/rss-items` — which is not type-scoped either (see §5). This is not
-    a code defect: the link is the one field a client needs in order to be a
-    client, and redacting it would leave the route useless. It is the cost
-    of the route existing without auth.
+    indexer that url *is* a credential** — it carries the passkey or api key.
+    So a session holder obtains every private-indexer download url the host has
+    ever seen, in `PAGE_SIZE` chunks, from `/api/rss-items` — which is not
+    type-scoped either (see §5). This is not a code defect: the link is the one
+    field a client needs in order to be a client, and redacting it would leave
+    the route useless. It *was* the cost of the route existing without auth;
+    since slice F it is what a session buys, which is the sense this bullet is
+    kept in.
   - **Every download's `clientRef`, `infohash` and `lastError`**, from
     `/api/downloads`. `last_error` is redacted for the *download client's*
     own credential and not for anything nested inside it — see §5.

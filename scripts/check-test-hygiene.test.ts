@@ -1,6 +1,16 @@
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { findViolations } from './check-test-hygiene.ts';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  CREDENTIAL_ALLOW_LIST,
+  findCredentialAssertions,
+  findCredentialOperands,
+  findCredentialSelections,
+  findViolations,
+} from './check-test-hygiene.ts';
 
 /** Runs the detector over a snippet, returning just the offending source text. */
 function flagged(source: string): string[] {
@@ -135,4 +145,568 @@ test('the violation carries a line number, so the report can name a place', () =
   assert.equal(violations.length, 1);
   assert.equal(violations[0]?.line, 2);
   assert.equal(violations[0]?.file, 'sample.test.tsx');
+});
+
+/**
+ * The second rule: no file under `packages/host/src` may name a credential
+ * column in a SQL string, outside an allow-list of paths.
+ *
+ * Every test from here down runs over a fixture written under a temp directory
+ * rather than a real file in the tree — a test that edited tracked source to
+ * prove a linter works is a test that can leave the tree broken.
+ */
+
+/** A temp directory holding `files`, removed when the test ends. */
+async function fixtureDir(t: TestContext, files: Record<string, string>): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-hygiene-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await Promise.all(
+    Object.entries(files).map(([name, source]) => writeFile(join(dir, name), source, 'utf8')),
+  );
+  return dir;
+}
+
+test('the credential-column check rejects a select outside the allow-list', async (t) => {
+  // Fixture source under a temp dir, not a real file in the tree.
+  const dir = await fixtureDir(t, {
+    'guard.ts': `export const SESSION = 'SELECT user_id, token FROM auth_session WHERE token = ?';\n`,
+    'adapter.ts': `export const SESSION = 'SELECT user_id, token FROM auth_session WHERE token = ?';\n`,
+  });
+
+  // The identical query in both files: only the allow-listed path is spared,
+  // so what is being pinned is the path check and not the pattern.
+  const violations = await findCredentialSelections(dir, [join(dir, 'adapter.ts')]);
+  assert.deepEqual(
+    violations.map((violation) => [relative(dir, violation.file), violation.line, violation.text]),
+    [['guard.ts', 1, 'auth_session.token']],
+  );
+});
+
+test('the credential-column check ignores a comment naming the same column', async (t) => {
+  // The whole reason it is an AST walk. A grep fails this test: every one of
+  // these lines names a forbidden column verbatim, because that is how the
+  // rule gets explained to the next reader.
+  const dir = await fixtureDir(t, {
+    'notes.ts': [
+      `// Only the auth adapter may run SELECT password FROM auth_account, or`,
+      `// SELECT token FROM auth_session — see the auth design spec's §4.`,
+      `/**`,
+      ` * host_state.value holds the signing secret, so nothing here selects it.`,
+      ` */`,
+      `export const KEYS = ['auth.secret', 'auth.claim-token'];`,
+      ``,
+    ].join('\n'),
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('an allow-list path naming a file that does not exist yet is not an error', async (t) => {
+  // The allow-list is the one thing this rule writes forward: it names the
+  // modules that read these columns before those modules are written. An
+  // entry with no file behind it has to be inert, or the check could not be
+  // landed ahead of them.
+  const dir = await fixtureDir(t, {
+    'guard.ts': `export const SECRET = 'SELECT value FROM host_state WHERE key = ?';\n`,
+  });
+
+  const violations = await findCredentialSelections(dir, [
+    join(dir, 'not-written-yet.ts'),
+    join(dir, 'guard.ts'),
+  ]);
+  assert.deepEqual(violations, []);
+});
+
+test('the DDL that declares a credential column is not a query over it', async (t) => {
+  // What keeps `db/migrate.ts` off the allow-list. Migration 12's DDL has to
+  // name all three columns -- it is where they come from -- and exempting that
+  // whole file would exempt every query anyone later added to it. A `CREATE`
+  // statement names its table after `TABLE`/`ON`; a query names it after
+  // `FROM`, `JOIN`, `UPDATE` or `INTO`, and only the second is a read.
+  const dir = await fixtureDir(t, {
+    'ddl.ts': [
+      'export const MIGRATION = `',
+      'CREATE TABLE host_state (',
+      '  key   TEXT PRIMARY KEY,',
+      '  value TEXT NOT NULL',
+      ');',
+      'CREATE TABLE auth_session (',
+      '  id    TEXT PRIMARY KEY,',
+      '  token TEXT NOT NULL',
+      ');',
+      'CREATE UNIQUE INDEX auth_session_token ON auth_session (token);',
+      '`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+/**
+ * The bypasses the first version of this rule had, each closed and each
+ * pinned.
+ *
+ * All six were measured against the rule as it shipped, and the first is the
+ * one that matters most: it is not an adversarial spelling, it is how
+ * `api/reads.ts` and `clients/rows.ts` are written. A rule that misses the
+ * house style is a rule that fails silently the first time it matters.
+ */
+
+test('a column list reached through a constant is read, which is this repo own house style', async (t) => {
+  // The shape that defeated the first version: substitutions were dropped, so
+  // the statement read `SELECT ? FROM auth_session` and named no column at
+  // all. `MEDIA_ITEM_COLUMNS` and `DOWNLOAD_COLUMNS` in `api/reads.ts` are
+  // exactly this, so the bypass was one copy-paste from the file next door.
+  const dir = await fixtureDir(t, {
+    'guard.ts': [
+      `const SESSION_COLUMNS = 'id, user_id, token, expires_at, created_at, updated_at';`,
+      'export const SESSION_BY_ID = `SELECT ${SESSION_COLUMNS} FROM auth_session WHERE id = ?`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [violation.line, violation.text]),
+    [[2, 'auth_session.token']],
+  );
+});
+
+test('a constant reached through another constant is read too, and a cycle terminates', async (t) => {
+  // Resolution is recursive, because one hop is an arbitrary depth to stop at:
+  // a column list built from a shared prefix is the obvious second version of
+  // the shape above. `const a = ...b...; const b = ...a...` parses, so the
+  // recursion carries the names it has already followed.
+  const dir = await fixtureDir(t, {
+    'hops.ts': [
+      `const CORE = 'id, token';`,
+      'const LIST = `${CORE}, expires_at`;',
+      'export const Q = `SELECT ${LIST} FROM auth_session`;',
+      '',
+    ].join('\n'),
+    'cycle.ts': [
+      'const a = `${b}`;',
+      'const b = `${a}`;',
+      'export const Q = `SELECT id FROM media_item ${a}`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [violation.line, violation.text]),
+    [[3, 'auth_session.token']],
+    'the two-hop list is read, and the cyclic pair neither hangs nor flags',
+  );
+});
+
+test('a select over a credential table this check cannot read is a violation, not a pass', async (t) => {
+  // **Fail closed.** Neither of these names a credential column and both may
+  // well select one: `SELECT *` selects whichever columns the table has, and a
+  // substitution that resolves to nothing could be any column list at all.
+  // `SELECT *` is already the house style at two sites in `api/reads.ts`, so
+  // treating it as "names no credential" was a rule that passed the easiest
+  // possible bypass. What the report asks for is a human decision: name the
+  // columns, or add the path to the allow-list in a diff.
+  const dir = await fixtureDir(t, {
+    'star.ts': `export const Q = 'SELECT * FROM auth_session WHERE id = ?';\n`,
+    'alias-star.ts': `export const Q = 'SELECT s.* FROM auth_session s WHERE s.id = ?';\n`,
+    'unresolvable.ts': 'export const Q = `SELECT ${columnsFor(table)} FROM auth_account`;\n',
+    'twice-declared.ts': [
+      // No scope analysis behind the resolution, so a name declared twice is
+      // two candidate values; guessing either would be the one kind of wrong
+      // answer that matters here.
+      `const COLUMNS = 'id';`,
+      `const COLUMNS = 'id, password';`,
+      'export const Q = `SELECT ${COLUMNS} FROM auth_account`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [
+      relative(dir, violation.file),
+      violation.text,
+    ]),
+    [
+      ['alias-star.ts', 'auth_session.*'],
+      ['star.ts', 'auth_session.*'],
+      ['twice-declared.ts', 'auth_account.?'],
+      ['unresolvable.ts', 'auth_account.?'],
+    ],
+  );
+});
+
+test('an unreadable select over a table holding no credential is still a pass', async (t) => {
+  // The other half of failing closed: it fails closed *over a credential
+  // table*, and nowhere else. `SELECT *` from a derived table is how
+  // `DOWNLOADS_SINCE` is written and a substituted column list is how every
+  // paged read in `api/reads.ts` is written, so a rule that flagged either one
+  // anywhere would have to be switched off for the file it was written to
+  // protect.
+  const dir = await fixtureDir(t, {
+    'reads.ts': [
+      `const MEDIA_ITEM_COLUMNS = 'id, title, updated_at';`,
+      'export const PAGE = `SELECT ${MEDIA_ITEM_COLUMNS} FROM media_item WHERE id > ?`;',
+      'export const UNION = `SELECT * FROM (SELECT id FROM torrent_download LIMIT ?)`;',
+      'export const CALLED = `SELECT ${qualify("d", MEDIA_ITEM_COLUMNS)} FROM media_item AS d`;',
+      '',
+    ].join('\n'),
+    // `isClaimed`'s own statement, and the `COUNT(*)` it is measured against:
+    // the `*` inside a call is not a select list, so neither is a star select.
+    'claim.ts': [
+      `export const CLAIMED = 'SELECT 1 FROM auth_user LIMIT 1';`,
+      `export const COUNTED = 'SELECT count(*) FROM auth_session';`,
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('a SQL comment between FROM and the table does not hide the table', async (t) => {
+  // **A bypass, not a curiosity.** `readsFrom` matches the table right after
+  // the keyword, so a comment in between defeated it and
+  // `SELECT token FROM /* the sessions */ auth_session` was reported as
+  // nothing at all -- while a newline, or a comment before the column list,
+  // flagged normally. A comment is a token separator to SQLite, so each one
+  // becomes a single space: `FROM/*x*/auth_session` has to read as a read of
+  // that table, and `auth_/*x*/session` must **not**, because to SQLite that
+  // is two tokens and a syntax error rather than a table name.
+  const dir = await fixtureDir(t, {
+    'between.ts': `export const Q = 'SELECT token FROM /* the sessions */ auth_session';\n`,
+    'no-space.ts': `export const Q = 'SELECT token FROM/* s */auth_session';\n`,
+    'line-comment.ts': [
+      'export const Q = `',
+      'SELECT token -- the credential the cookie carries',
+      'FROM auth_session`;',
+      '',
+    ].join('\n'),
+    // The other direction: a comment inside the identifier does not join its
+    // halves into a table name, and the statement reads no credential table.
+    'split-identifier.ts': `export const Q = 'SELECT token FROM auth_/* x */session';\n`,
+    // And a column named only in a SQL comment, over a table that is not a
+    // credential table, is still nothing.
+    'harmless.ts': `export const Q = 'SELECT id FROM media_item -- not token';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['between.ts', 'auth_session.token'],
+      ['line-comment.ts', 'auth_session.token'],
+      ['no-space.ts', 'auth_session.token'],
+    ],
+  );
+});
+
+test('a table name this check cannot resolve is a violation, because it may be a credential table', async (t) => {
+  // The half of failing closed that the docblock claimed and did not do. The
+  // branch was keyed on `readsFrom(sql, table)` for a *known* credential
+  // table, so a statement whose table is a parameter was not "a query over a
+  // credential table" and never reached it: `SELECT token FROM ${t}` reported
+  // nothing, while the same query with the *column* substituted reported
+  // `auth_session.?`.
+  //
+  // Reported as `?.?` -- a table it could not read, selecting columns it
+  // therefore cannot clear -- and answerable the same way as any other
+  // fail-closed finding: name the table, or say in a diff why this module may
+  // read a credential.
+  const dir = await fixtureDir(t, {
+    'from-parameter.ts': 'export function q(t: string): string { return `SELECT token FROM ${t}`; }\n',
+    'star-from-parameter.ts': 'export function q(t: string): string { return `SELECT * FROM ${t}`; }\n',
+    'insert-into-parameter.ts': 'export function q(t: string): string { return `INSERT INTO ${t} (a) VALUES (?)`; }\n',
+    // A table that *does* resolve is read as itself, and this one holds no
+    // credential -- so resolving it is what makes the difference, not the
+    // presence of a substitution.
+    'from-constant.ts': [
+      `const T = 'media_item';`,
+      'export const Q = `SELECT id FROM ${T} WHERE id > ?`;',
+      '',
+    ].join('\n'),
+    // A bound parameter that is not in the table position stays a bound
+    // parameter: the shape is `FROM`/`JOIN`/`UPDATE`/`INTO` immediately
+    // followed by something unreadable, not a `?` anywhere in the statement.
+    'parameter-in-where.ts': `export const Q = 'SELECT id FROM media_item WHERE id = ?';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['from-parameter.ts', '?.?'],
+      ['insert-into-parameter.ts', '?.?'],
+      ['star-from-parameter.ts', '?.*'],
+    ],
+  );
+});
+
+/**
+ * Where rule 2 applies, as the script itself spells it -- **repo-relative,
+ * deliberately**. The allow-list holds repo-relative paths, so the entry can
+ * only match a file walked from the same relative root; the test below is
+ * therefore the one in this file that depends on the working directory, which
+ * is the repo root under `npm run test:server` and under CI's `npm run check`.
+ * Every other test here writes a fixture under a temp dir instead.
+ */
+const HOST_SRC = 'packages/host/src';
+
+test('the credential allow-list has one entry, and the real tree needs no other', async () => {
+  // **An inert entry is how this rule gets lost quietly.**
+  // `auth/instance.ts` was allow-listed too, on the reasoning that it
+  // constructs `betterAuth()`. It reaches every credential column through the
+  // Drizzle adapter and names none of them in any string, so it produced no
+  // violations -- and the entry exempted a 442-line file from a rule it did
+  // not need, where a query added to it later would be a query nothing
+  // reports. Both halves are asserted over the real tree rather than a
+  // fixture, because the claim is about this repo: with the allow-list
+  // emptied, the only credential-column SQL on the branch is
+  // `db/host-state.ts`'s four statements, and the shipped list is exactly
+  // what makes the tree clean.
+  assert.deepEqual(
+    (await findCredentialSelections(HOST_SRC, [])).map((violation) => [
+      relative(HOST_SRC, violation.file),
+      violation.text,
+    ]),
+    [
+      [join('db', 'host-state.ts'), 'host_state.value'],
+      [join('db', 'host-state.ts'), 'host_state.value'],
+      [join('db', 'host-state.ts'), 'host_state.value'],
+      [join('db', 'host-state.ts'), 'host_state.value'],
+    ],
+    'rule 2 with no allow-list must report host-state.ts and nothing else -- an auth file appearing here means the adapter is being bypassed',
+  );
+  assert.deepEqual(
+    await findCredentialSelections(HOST_SRC),
+    [],
+    'and the shipped allow-list, one entry, is enough to make the tree clean',
+  );
+});
+
+test('every allow-list entry is one the tree actually needs', async () => {
+  // **The only thing that can notice an inert entry.** Re-adding
+  // `auth/instance.ts` to the list changes no report -- that is what "inert"
+  // means -- so no assertion about violations can see it. What can be asserted
+  // is the property the list is supposed to have: each entry exempts something
+  // real, so dropping it produces a violation *in that file*. An entry with
+  // nothing behind it fails here, which is what keeps a blanket exemption from
+  // being added back for a file that does not need one.
+  //
+  // A path with no file behind it is still allowed on purpose -- the list is
+  // written forward, and `an allow-list path naming a file that does not exist
+  // yet is not an error` pins that -- so this checks the entries that name a
+  // file in the tree today, which is the whole list.
+  assert.ok(CREDENTIAL_ALLOW_LIST.length > 0, 'an empty allow-list would make this test vacuous');
+  for (const entry of CREDENTIAL_ALLOW_LIST) {
+    const without = CREDENTIAL_ALLOW_LIST.filter((path) => path !== entry);
+    // eslint-disable-next-line no-await-in-loop -- one entry today; a directory walk per entry is not a hot path
+    const violations = await findCredentialSelections(HOST_SRC, without);
+    assert.ok(
+      violations.length > 0 && violations.every((violation) => violation.file === entry),
+      `${entry} exempts nothing: it is an inert allow-list entry, exempting a whole file from a rule it does not need`,
+    );
+  }
+});
+
+test('a statement split across a concatenation is read as one statement', async (t) => {
+  // Two seams, because either one alone would defeat a check that read each
+  // string literal on its own: the column and the table can be separated, and
+  // the table name itself can be cut in half. `DOWNLOAD_COLUMNS` in
+  // `api/reads.ts` is a `+` of two literals, so this is house style too.
+  const dir = await fixtureDir(t, {
+    'split-clause.ts': `export const Q = 'SELECT token' + ' FROM auth_session';\n`,
+    'split-table.ts': `export const Q = 'SELECT token FROM auth_' + 'session';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [
+      relative(dir, violation.file),
+      violation.line,
+      violation.text,
+    ]),
+    [
+      ['split-clause.ts', 1, 'auth_session.token'],
+      ['split-table.ts', 1, 'auth_session.token'],
+    ],
+  );
+});
+
+test('a quoted or schema-qualified table name is the same table', async (t) => {
+  // All three spellings name one table to SQLite, and the rule matched only
+  // the bare one. `main.` is the schema every SQLite database has, so
+  // `FROM main.auth_session` is not even an unusual thing to write.
+  const dir = await fixtureDir(t, {
+    'quoted.ts': `export const Q = 'SELECT token FROM "auth_session"';\n`,
+    'qualified.ts': `export const Q = 'SELECT token FROM main.auth_session';\n`,
+    'both.ts': `export const Q = 'SELECT "token" FROM "main"."auth_session"';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['both.ts', 'auth_session.token'],
+      ['qualified.ts', 'auth_session.token'],
+      ['quoted.ts', 'auth_session.token'],
+    ],
+  );
+});
+
+test('one statement is one violation, however many times its name is used', async (t) => {
+  // Resolution follows identifiers, so the name on the left of a declaration
+  // and every later use of it resolve to the statement as well. Reporting
+  // those would turn one query into a violation count nobody could act on --
+  // and would report the *use* rather than the line the SQL is written on.
+  const dir = await fixtureDir(t, {
+    'used-twice.ts': [
+      `const SESSION = 'SELECT token FROM auth_session WHERE id = ?';`,
+      'export function first(): string { return SESSION; }',
+      'export function second(): string { return SESSION; }',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [violation.line, violation.text]),
+    [[1, 'auth_session.token']],
+  );
+});
+
+/**
+ * The third rule: no host test hands a credential to `node:assert` as an
+ * operand.
+ *
+ * The defect it generalises was in the earliest test file of the auth slice
+ * and printed five distinct 43-character signing secrets, twice each, on the
+ * run where a mutation broke it. The report said that file "never interpolates
+ * one into text", which is true and is not the hazard: `node:assert` formats
+ * both operands whether or not anyone interpolated anything.
+ */
+
+/** Runs the credential-operand detector over a snippet, returning the offending text. */
+function credentials(source: string): string[] {
+  return findCredentialOperands('sample.test.ts', source).map((violation) => violation.text);
+}
+
+test('two generated secrets compared by assert.equal are both flagged', () => {
+  // The shape that actually printed secrets. Neither operand names a producer:
+  // a rule reading only calls would have seen `assert.equal(second, first)` and
+  // found nothing, which is why an identifier is followed to what it was bound
+  // to.
+  assert.deepEqual(
+    credentials([
+      'const first = ensureAuthSecret(raw, 1_000);',
+      'const second = ensureAuthSecret(raw, 2_000);',
+      'assert.equal(second, first);',
+    ].join('\n')),
+    ['second', 'first'],
+  );
+});
+
+test('a name declared twice is a credential if any of its declarations is one', () => {
+  // `first` in `packages/host/test/db/host-state.test.ts` is a generated
+  // secret in one test and an open database in another. There is no scope
+  // analysis here, so resolving it to one declaration is a guess -- and the
+  // guess that skips the secret is the one that lets the leak through. Rule 2
+  // resolves the opposite way for the same reason; see `Bindings`.
+  assert.deepEqual(
+    credentials([
+      'const first = openDatabase(path);',
+      'const first = ensureAuthSecret(raw, 1_000);',
+      'assert.equal(first, other);',
+    ].join('\n')),
+    ['first'],
+  );
+});
+
+test('every producer is flagged called directly, and every formatting assertion is covered', () => {
+  for (const producer of [
+    `ensureAuthSecret(raw, 1_000)`,
+    `ensureGeneratedValue(raw, 'auth.secret', 1_000)`,
+    `ensureClaimToken(raw, 1_000)`,
+    `readHostState(raw, 'auth.secret')`,
+    `resolveAuthSecret(undefined, raw, 1_000)`,
+    `randomBytes(32).toString('base64url')`,
+    `response.headers.getSetCookie()`,
+    `cookieHeader(response)`,
+  ]) {
+    assert.deepEqual(
+      credentials(`assert.equal(${producer}, null);`),
+      [producer],
+      `${producer} is a credential wherever it appears as an operand`,
+    );
+  }
+  for (const method of [
+    'equal',
+    'strictEqual',
+    'notEqual',
+    'notStrictEqual',
+    'deepEqual',
+    'deepStrictEqual',
+    'notDeepEqual',
+    'notDeepStrictEqual',
+  ]) {
+    assert.deepEqual(
+      credentials(`assert.${method}(ensureClaimToken(raw, 1_000), null);`),
+      [`ensureClaimToken(raw, 1_000)`],
+      `assert.${method} formats its operands too`,
+    );
+  }
+});
+
+test('an awaited credential is still a credential', () => {
+  assert.deepEqual(
+    credentials(`assert.equal(await cookieHeader(response), null);`),
+    ['cookieHeader(response)'],
+  );
+});
+
+test('the remedy is not flagged, and neither is a number read off a credential', () => {
+  // `assert.ok` formats nothing, which is why it is the fix and not the
+  // hazard. And the outermost expression is what gets printed: the
+  // `getSetCookie().length` in `api/server.test.ts` is a count, and a rule
+  // that read the whole operand would have condemned it -- measured, it is
+  // the only such site in the host suite.
+  assert.deepEqual(
+    credentials([
+      'const first = ensureAuthSecret(raw, 1_000);',
+      'const second = ensureAuthSecret(raw, 2_000);',
+      "assert.ok(second === first, 'the second call minted a new secret');",
+    ].join('\n')),
+    [],
+  );
+  assert.deepEqual(credentials(`assert.equal(signedIn.headers.getSetCookie().length, 1);`), []);
+  assert.deepEqual(credentials(`assert.equal(tokenIsOnRecord(raw), true);`), []);
+});
+
+test('a message argument is not an operand, and prose is not code', () => {
+  assert.deepEqual(credentials(`assert.ok(true, String(ensureClaimToken(raw, 1_000)));`), []);
+  assert.deepEqual(
+    credentials('// never assert.equal(second, first) over two ensureAuthSecret values\nconst a = 1;'),
+    [],
+  );
+});
+
+test('rule 3 walks a directory and names the file and line', async (t) => {
+  // Over a fixture under a temp dir, like rule 2's tests: a test that edited
+  // tracked source to prove a linter works is a test that can leave the tree
+  // broken.
+  const dir = await fixtureDir(t, {
+    'leaks.test.ts': [
+      'const generated = ensureAuthSecret(raw, 1_000);',
+      'assert.equal(generated, stored);',
+      '',
+    ].join('\n'),
+    'clean.test.ts': [
+      'const generated = ensureAuthSecret(raw, 1_000);',
+      "assert.ok(generated === stored, 'the secret changed');",
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialAssertions(dir)).map((violation) => [
+      relative(dir, violation.file),
+      violation.line,
+      violation.text,
+    ]),
+    [['leaks.test.ts', 2, 'generated']],
+  );
 });

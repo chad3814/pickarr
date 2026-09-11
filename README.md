@@ -483,9 +483,11 @@ sit `pending`, so Picks does not poll forever for an answer that can never come.
 
 ## Operational notes
 
-**No authentication.** Pickarr has no login and no session handling — anyone who can
-reach its port can browse and pick. Run it on a trusted LAN or put it behind a reverse
-proxy that handles auth; do not expose it directly to the internet.
+**No authentication in 1.x.** The version this README documents has no login and no
+session handling — anyone who can reach its port can browse and pick. Run it on a
+trusted LAN or put it behind a reverse proxy that handles auth; do not expose it
+directly to the internet. (The 2.0 host being built on `pickarr-2` does require a
+session on every route but its health check; this README does not describe it yet.)
 
 **Trash is never emptied.** When an import supersedes a previously-imported file, the
 old file moves to `trashDir` instead of being deleted. Pickarr never removes anything

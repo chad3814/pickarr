@@ -587,6 +587,155 @@ CREATE INDEX deleted_media_item_sync ON deleted_media_item (plugin_id, deleted_a
 `;
 
 /**
+ * `host_state` plus the four tables Better Auth's Drizzle adapter expects.
+ *
+ * **The column names are the library's, not this repo's choice.** The adapter
+ * maps a model's fields onto the *schema object's property keys*, so the
+ * Drizzle mirror in `schema.ts` is what has to spell `emailVerified`, and this
+ * DDL is what has to spell `email_verified`. Renaming a column here is a
+ * runtime failure `test/db/schema.test.ts` cannot see: the mirror would be
+ * changed to agree with the DDL, both would agree, and Better Auth would ask
+ * for a column neither has.
+ *
+ * **`auth_`-prefixed.** The library's defaults are `user`, `session`,
+ * `account` and `verification` -- four of the most collidable names available,
+ * in a schema where plugins are required to prefix their tables and the host
+ * owns the unprefixed namespace. A future plugin wanting a `session` table
+ * would otherwise be blocked for a reason nobody could see. The prefix costs
+ * one `schema` object the adapter already accepts.
+ *
+ * **`id` is `TEXT` on all four, and these are the only tables in this schema
+ * with a text `id`** -- every table above that *has* an `id` declares it
+ * `id INTEGER PRIMARY KEY`, i.e. the rowid. The carve-out is why "every table
+ * above" on its own read as false here: two of the tables above have no `id`
+ * column at all (`host_state` in this same migration, keyed by a text `key`,
+ * and `deleted_media_item`, keyed by `media_item_id INTEGER PRIMARY KEY`), and
+ * neither does the migration runner's own bookkeeping further down this file
+ * (`version INTEGER PRIMARY KEY` for `host_migrations`, composite
+ * `PRIMARY KEY (plugin_id, version)` for `plugin_migrations`). None of those is
+ * the same asymmetry: a caller-chosen key, the id of a row that no longer
+ * exists, and a version number are not generated ids. Better Auth's default id
+ * generator is a random
+ * base62 string, and adopting it avoids configuring
+ * `advanced.database.generateId` to something the library then has to be told
+ * about. The asymmetry is the library's, and it is recorded here so it does not
+ * read as an accident: an `INTEGER PRIMARY KEY` would *accept* a base62 string
+ * -- SQLite's type affinity is permissive -- and then hand something else back,
+ * which is why `test/db/migrate.test.ts` asserts the declaration from
+ * `PRAGMA table_info` rather than from a successful round trip.
+ *
+ * **`auth_verification` has no writer in this slice**, the way
+ * `external_reference` had none when it was created: nothing here sends mail,
+ * so no email verification or password reset runs. It is created anyway
+ * because the adapter expects the model to exist, and a table Better Auth may
+ * write to is cheaper than discovering at runtime which code path needs it.
+ * Nobody should hunt for the writer.
+ *
+ * **`host_state` is deliberately general** -- one key/value row per fact --
+ * because it already holds two unrelated things (the generated signing secret
+ * and the first-boot claim token) and a column per fact would mean a migration
+ * per fact.
+ *
+ * **The two foreign keys here declare no `ON DELETE`, and the library's own
+ * model declares `cascade`.** `@better-auth/core`'s `db/get-tables.ts` gives
+ * both `session.userId` and `account.userId`
+ * `references: { model: 'user', field: 'id', onDelete: 'cascade' }`; the DDL
+ * below (and `schema.ts`'s mirror of it) says `REFERENCES auth_user (id)` and
+ * stops there, which is SQLite's `NO ACTION`. With `PRAGMA foreign_keys = ON`
+ * (`db/open.ts`) that is enforced: measured, a direct
+ * `DELETE FROM auth_user` with one session and one account present is refused
+ * with errcode **787, FOREIGN KEY constraint failed**, where the library's
+ * model says the children should have gone with the parent.
+ *
+ * Unreachable today -- `POST /api/auth/delete-user` answers 404, because
+ * `user.deleteUser` is not enabled -- and invisible to `schema.test.ts`, whose
+ * own docblock says foreign-key *targets* are not compared. So it is recorded
+ * rather than fixed: whatever slice enables account deletion meets it here,
+ * and the choice then is to add the cascade to a migration or to delete the
+ * children first in application code. Left as `NO ACTION` for now because a
+ * cascade is the more destructive default to adopt speculatively, on the two
+ * tables where a wrong `DELETE` would silently end every session.
+ *
+ * **`auth_session.updated_at` and `auth_account.updated_at` are `NOT NULL`
+ * against a model that gives them no default.** Both are `required: true`
+ * with an `onUpdate` and **no** `defaultValue`, so `withApplyDefault(…,
+ * 'create')` supplies nothing for them on an insert: the `NOT NULL` below
+ * holds only because the library's adapter passes a value explicitly when it
+ * creates a row (measured: 0 nulls in either column after a sign-up and a
+ * sign-in). `auth_verification.updated_at` has the reverse asymmetry and is
+ * reasoned about at length in `schema.ts`; these two are the pair where the
+ * model actually lacks the default, and nothing said so.
+ *
+ * **Three of these columns are credentials no other query may name.**
+ * `auth_account.password` is a password hash, `auth_session.token` is a live
+ * session, and `host_state.value` is the signing secret; only Better Auth's
+ * own adapter and the module that persists that secret may select them.
+ * Enforced at build time by `scripts/check-test-hygiene.ts`, as an AST walk
+ * rather than a grep -- this very comment names all three verbatim, which is
+ * exactly the shape that made a text match report twenty-two comments as
+ * violations when that script was first written.
+ */
+const MIGRATION_12 = `
+CREATE TABLE host_state (
+  key        TEXT PRIMARY KEY,
+  value      TEXT    NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE auth_user (
+  id             TEXT    PRIMARY KEY,
+  name           TEXT,
+  email          TEXT    NOT NULL,
+  email_verified INTEGER NOT NULL DEFAULT 0,
+  image          TEXT,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX auth_user_email ON auth_user (email);
+
+CREATE TABLE auth_session (
+  id         TEXT    PRIMARY KEY,
+  user_id    TEXT    NOT NULL REFERENCES auth_user (id),
+  token      TEXT    NOT NULL,
+  expires_at INTEGER NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX auth_session_token ON auth_session (token);
+CREATE INDEX auth_session_user ON auth_session (user_id);
+
+CREATE TABLE auth_account (
+  id                       TEXT    PRIMARY KEY,
+  user_id                  TEXT    NOT NULL REFERENCES auth_user (id),
+  provider_id              TEXT    NOT NULL,
+  account_id               TEXT    NOT NULL,
+  access_token             TEXT,
+  refresh_token            TEXT,
+  id_token                 TEXT,
+  access_token_expires_at  INTEGER,
+  refresh_token_expires_at INTEGER,
+  scope                    TEXT,
+  password                 TEXT,
+  created_at               INTEGER NOT NULL,
+  updated_at               INTEGER NOT NULL
+);
+CREATE INDEX auth_account_user ON auth_account (user_id);
+
+CREATE TABLE auth_verification (
+  id         TEXT    PRIMARY KEY,
+  identifier TEXT    NOT NULL,
+  value      TEXT    NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+);
+CREATE INDEX auth_verification_identifier ON auth_verification (identifier);
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -603,6 +752,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 9, up: (db) => db.exec(MIGRATION_9) },
   { version: 10, up: (db) => db.exec(MIGRATION_10) },
   { version: 11, up: (db) => db.exec(MIGRATION_11) },
+  { version: 12, up: (db) => db.exec(MIGRATION_12) },
 ];
 
 /**

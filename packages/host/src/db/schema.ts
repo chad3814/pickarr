@@ -414,3 +414,216 @@ export const jobs = sqliteTable('jobs', {
   // the queue rather than to every job ever run.
   index('jobs_ready').on(t.runAt, t.id).where(sql`${t.state} = 'ready'`),
 ]);
+
+/**
+ * A key/value row per host-wide fact, deliberately general: it already holds
+ * two unrelated things (the generated Better Auth signing secret and the
+ * first-boot claim token), and inventing a column per fact would mean a
+ * migration per fact.
+ *
+ * `value` is a credential column. Only the module that persists the signing
+ * secret may select it, enforced at build time by
+ * `scripts/check-test-hygiene.ts` over `packages/host/src`.
+ */
+export const hostState = sqliteTable('host_state', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+});
+
+/**
+ * The four tables Better Auth's `drizzleAdapter` expects, `auth_`-prefixed.
+ *
+ * **The property keys are the library's interface, not just labels.** The
+ * adapter maps each model's fields onto the *schema object's property keys*,
+ * so `emailVerified` here is what makes the `user` model's `emailVerified`
+ * field reach the `email_verified` column. Renaming a property is a runtime
+ * failure `test/db/schema.test.ts` cannot see -- it compares this file against
+ * the DDL, and a rename that changed both would leave the two agreeing and
+ * both wrong. The SQL names stay snake_case, which the spike measured working.
+ *
+ * **These four declare column modes, which no other table here does.** The
+ * adapter hands Better Auth's values straight to Drizzle: `emailVerified`
+ * arrives as a JS boolean and every `*_at` as a `Date`, and a mode-less
+ * `integer()` would pass both to `node:sqlite` unchanged, which binds
+ * neither -- sign-up fails with "Provided value cannot be bound to SQLite
+ * parameter". `{ mode: 'boolean' }` and `{ mode: 'timestamp_ms' }` are what
+ * turn them into the integers the DDL declares. The SQL type is `INTEGER`
+ * either way, so this stays one definition mirrored against migration 12
+ * rather than a second one shaped for the library.
+ *
+ * **`id` is `text`, and these four are the only tables in this file with a
+ * text `id`** -- every table above that *has* an `id` declares
+ * `integer('id').primaryKey()`, i.e. the rowid. Two have none: `hostState`
+ * just above is keyed by a text `key`, and `deletedMediaItem` by
+ * `mediaItemId`. Neither is the same asymmetry -- a caller-chosen key, and the
+ * id of a row that no longer exists, are not generated ids -- and saying
+ * "every table above" without that carve-out is how this comment previously
+ * read as false about the two tables it skipped over. Better Auth's default id
+ * generator is a random base62 string,
+ * and adopting it avoids configuring `advanced.database.generateId` to
+ * something the library then has to be told about. The asymmetry is the
+ * library's; it is said out loud here so the next reader does not "fix" it and
+ * break sign-up.
+ */
+export const authUser = sqliteTable('auth_user', {
+  id: text('id').primaryKey(),
+  // Nullable, and the library's model is the **opposite** of what this comment
+  // used to say: `name` is `required: true` in `@better-auth/core`'s
+  // `db/get-tables.ts` (1.7.3, read from `node_modules`), with no
+  // `defaultValue`. The column is safe anyway, and for a reason worth having
+  // written down instead: nothing reaches it without a name, because
+  // `/sign-up/email`'s body schema declares `name: z.string()` -- not
+  // `.optional()` -- so a request omitting it is refused before any row is
+  // written. What the nullability buys is the row a *future* creation path
+  // with no name would write: the adapter's `transformInput` drops a field
+  // that is undefined and has no default, so `NOT NULL` would fail that
+  // insert rather than store a blank.
+  name: text('name'),
+  email: text('email').notNull(),
+  // Stored as 0 or 1, read and written as a boolean. Nothing in this slice
+  // verifies an email -- there is no outbound mail path -- so every row keeps
+  // the default; the column exists because the library's model has the field.
+  emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),
+  image: text('image'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+}, (t) => [
+  // Unique, not a plain index: the email is how sign-in identifies an account,
+  // so two rows sharing one would make that lookup ambiguous rather than
+  // merely slow.
+  uniqueIndex('auth_user_email').on(t.email),
+]);
+
+/**
+ * One live session. `token` is the credential the cookie carries, so only
+ * Better Auth's own adapter may select it -- enforced at build time by
+ * `scripts/check-test-hygiene.ts`.
+ *
+ * **This column's value is also served in a response body**, which is worth
+ * knowing beside the rule that keeps it out of everybody's SQL.
+ * `/sign-up/email` answers `{ token, user }` and `/sign-in/email` answers
+ * `{ redirect, token, user }`, where `token` is a 32-character string that is
+ * this column and is the unsigned prefix of the `better-auth.session_token`
+ * cookie (measured by *shape* -- key names and value lengths -- because
+ * formatting one of those bodies is how a probe printed a credential into a
+ * transcript during the whole-branch review). The plan's "no HTTP response
+ * body may carry a session token" is written against that, and the library's
+ * own routes break its letter.
+ *
+ * Bounded, and measured: the value alone grants nothing, because what the
+ * guard checks is the *signed* cookie. `/api/media?type=movie` answers 401
+ * both with `Authorization: Bearer <that value>` and with it pasted into
+ * `better-auth.session_token`; the cookie itself is
+ * `HttpOnly; SameSite=Lax; Max-Age=604800; Path=/`, no `Secure` (correct over
+ * `http:`). So this is a documented divergence from a hard constraint rather
+ * than a live leak -- and the reason no test, message or log line in this repo
+ * may name one of these values even in passing.
+ *
+ * **`userId` declares no `ON DELETE` where the library's model declares
+ * `cascade`**, and `updatedAt` is `NOT NULL` against a model that gives it an
+ * `onUpdate` and no `defaultValue`. Both are recorded in full beside
+ * migration 12's DDL in `db/migrate.ts`, which is the source this mirrors;
+ * `schema.test.ts` compares neither foreign-key targets nor the library's
+ * model, so neither divergence can fail a test today.
+ */
+export const authSession = sqliteTable('auth_session', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => authUser.id),
+  token: text('token').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  // Nullable: recorded from the request when present, and a request through a
+  // proxy that strips them has neither.
+  ipAddress: text('ip_address'),
+  userAgent: text('user_agent'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+}, (t) => [
+  // Unique because the token *is* the lookup key: every guarded request
+  // resolves a cookie to one session through this index, and two rows sharing
+  // a token would mean one cookie naming two sessions.
+  uniqueIndex('auth_session_token').on(t.token),
+  // "Every session for this user", which is what revoking them all reads.
+  index('auth_session_user').on(t.userId),
+]);
+
+/**
+ * The credentials behind a user. With no social providers in this slice every
+ * row is the `credential` provider, and `password` is that account's password
+ * hash -- a credential column only Better Auth's own adapter may select,
+ * enforced at build time by `scripts/check-test-hygiene.ts`.
+ *
+ * The six token columns are nullable and stay null throughout this slice:
+ * they belong to OAuth providers, which §1.1 of the auth design spec excludes.
+ * They exist because the library's `account` model has the fields.
+ *
+ * `userId` and `updatedAt` carry exactly the two divergences `authSession`'s
+ * docblock names -- no `ON DELETE` against the model's `cascade`, and a
+ * `NOT NULL` against a model with an `onUpdate` and no `defaultValue`. Both
+ * are written out beside migration 12 in `db/migrate.ts`.
+ */
+export const authAccount = sqliteTable('auth_account', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => authUser.id),
+  providerId: text('provider_id').notNull(),
+  accountId: text('account_id').notNull(),
+  accessToken: text('access_token'),
+  refreshToken: text('refresh_token'),
+  idToken: text('id_token'),
+  accessTokenExpiresAt: integer('access_token_expires_at', { mode: 'timestamp_ms' }),
+  refreshTokenExpiresAt: integer('refresh_token_expires_at', { mode: 'timestamp_ms' }),
+  scope: text('scope'),
+  password: text('password'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+}, (t) => [
+  // "The accounts belonging to this user", which sign-in reads once it has
+  // resolved the email to a user row.
+  index('auth_account_user').on(t.userId),
+]);
+
+/**
+ * **Nothing in this slice writes this table**, the way `externalReference`
+ * had no writer when it was created: email verification, password reset and
+ * social sign-in are all excluded by §1.1 of the auth design spec, because
+ * each needs an outbound mail path or a provider registration this host does
+ * not have. It exists because `drizzleAdapter` expects the `verification`
+ * model to exist, and a table Better Auth may write to is cheaper than
+ * discovering at runtime which code path needs it. Do not hunt for the writer.
+ *
+ * `value` here is *not* `hostState.value`: two columns, one name, two tables,
+ * two unrelated facts. The auth design spec's §4 names three credential
+ * columns and this is not one of them, so `check-test-hygiene.ts` does not
+ * guard it -- which costs nothing while nothing reads it, and is worth
+ * revisiting by whatever slice first does.
+ */
+export const authVerification = sqliteTable('auth_verification', {
+  id: text('id').primaryKey(),
+  identifier: text('identifier').notNull(),
+  value: text('value').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  // Nullable, unlike every other `updated_at` in this file -- and **not**
+  // because the library declares it optional, which is what this comment used
+  // to say and is the opposite of the truth. `verification.updatedAt` is
+  // `required: true` in `@better-auth/core`'s `db/get-tables.ts` (1.7.3, read
+  // from `node_modules`), and it carries both a `defaultValue` (`new Date()`)
+  // and an `onUpdate`. So the adapter always supplies it: `withApplyDefault`
+  // fills the default on a create and the `onUpdate` on an update, and no
+  // write that reaches this table can leave the column null. The nullability
+  // is slack nothing needs rather than a shape the library asked for, and
+  // that -- not a misread of the model -- is why it is safe.
+  //
+  // **The two columns that actually lack a default are elsewhere**, and this
+  // comment reasoning at length about exactly that shape while saying nothing
+  // about them is why they are now named: `session.updatedAt` and
+  // `account.updatedAt` are `required: true` with an `onUpdate` and **no**
+  // `defaultValue`, so their `NOT NULL` holds only because the adapter passes
+  // a value on create. See their docblocks above, and `db/migrate.ts` for the
+  // measurement.
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }),
+}, (t) => [
+  // The library looks a verification up by its identifier, never by id.
+  index('auth_verification_identifier').on(t.identifier),
+]);

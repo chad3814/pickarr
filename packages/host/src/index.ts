@@ -1,5 +1,5 @@
 export type { ReadServer, ReadServerDeps } from './api/server.ts';
-export { API_VERSION, DEFAULT_PORT, createReadServer } from './api/server.ts';
+export { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, createReadServer } from './api/server.ts';
 export { createDownloadClients } from './clients/downloads.ts';
 export type { HostDb } from './db/open.ts';
 export { openDatabase, openTestDatabase } from './db/open.ts';
