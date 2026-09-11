@@ -8,7 +8,7 @@ import { openDatabase, openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { CLAIM_TOKEN_KEY, readHostState } from '../../src/db/host-state.ts';
 import { createAuth } from '../../src/auth/instance.ts';
-import { consumeClaimToken, ensureClaimToken, isClaimed } from '../../src/auth/claim.ts';
+import { ensureClaimToken, isClaimed, matchesClaimToken } from '../../src/auth/claim.ts';
 
 /**
  * **No listener, on purpose**, for the reason `instance.test.ts` gives: the
@@ -23,11 +23,11 @@ import { consumeClaimToken, ensureClaimToken, isClaimed } from '../../src/auth/c
  * assertion here is on a status code, a row count, or a refusal message.
  *
  * **One property here has no isolating mutation and is not pretended to
- * have one.** `consumeClaimToken` compares with `crypto.timingSafeEqual`
+ * have one.** `matchesClaimToken` compares with `crypto.timingSafeEqual`
  * rather than `===`; both return the same answer to every input, so no
  * assertion in this file can tell them apart, and a test that timed the two
  * would be a flake rather than a proof. The property is pinned by the
- * comment on `consumeClaimToken` and by reading the code, which is stated
+ * comment on `matchesClaimToken` and by reading the code, which is stated
  * plainly instead of being covered by a test that does not really test it.
  */
 
@@ -194,24 +194,54 @@ test('sign-up is refused once a user exists, without restarting', async () => {
   assert.equal(userCount(raw), 1);
 });
 
-test('the token is consumed, so a second sign-up with it fails', async () => {
+test('a rejected sign-up leaves the token usable', async () => {
+  // The first attempt offers the right token but a password Better Auth
+  // refuses outright, so no account is created and the install is still
+  // unclaimed. Task 4 shipped a hook that spent the token the moment it
+  // matched, regardless of what happened next -- so this exact rejection
+  // used to burn the owner's only token and leave the install permanently
+  // unclaimable. The fix is to verify in `before` and consume only in
+  // `after`, and only once `isClaimed` says the sign-up that offered the
+  // token actually went on to succeed.
   const { raw, auth, claimToken } = harness();
 
-  // The first attempt offers the right token and is then turned down by
-  // Better Auth for a reason of its own, so no account is created and the
-  // install is still unclaimed. The token is spent all the same -- it is
-  // cleared the moment it matches -- which is what makes it single-use
-  // rather than retry-until-something-sticks.
-  const rolledBack = await signUp(auth, 'owner@example.invalid', claimToken, TOO_SHORT_PASSWORD);
-  assert.equal(rolledBack.status, 400);
+  const rejected = await signUp(auth, 'owner@example.invalid', claimToken, TOO_SHORT_PASSWORD);
+  assert.equal(rejected.status, 400);
   assert.equal(userCount(raw), 0);
   assert.equal(isClaimed(raw), false);
-  assert.equal(tokenIsOnRecord(raw), false);
+  // The token Better Auth's own validation had nothing to do with is still
+  // on record: a rejection this early never reached anything that could
+  // succeed, so there is nothing here for `isClaimed` to observe.
+  assert.equal(tokenIsOnRecord(raw), true);
 
   const retried = await signUp(auth, 'owner@example.invalid', claimToken);
 
-  assert.equal(retried.status, 403);
+  assert.equal(retried.status, 200);
+  assert.equal(userCount(raw), 1);
+  assert.equal(isClaimed(raw), true);
+  assert.equal(tokenIsOnRecord(raw), false);
+});
+
+test('a sign-up refused by the hook itself does not clear the token', async () => {
+  // A wrong token never matches, so the hook throws before Better Auth's
+  // own validation ever runs and the real token is never touched by this
+  // attempt at all. Distinct from the test above: that one shows a rejection
+  // *downstream* of a match leaves the token alone; this one shows a
+  // rejection *at* the hook -- for a token that never matched in the first
+  // place -- does too.
+  const { raw, auth, claimToken } = harness();
+
+  const refused = await signUp(auth, 'attacker@example.invalid', withLastCharacterChanged(claimToken));
+  assert.equal(refused.status, 403);
   assert.equal(userCount(raw), 0);
+  assert.equal(tokenIsOnRecord(raw), true);
+
+  const claimedIt = await signUp(auth, 'owner@example.invalid', claimToken);
+
+  assert.equal(claimedIt.status, 200);
+  assert.equal(userCount(raw), 1);
+  assert.equal(isClaimed(raw), true);
+  assert.equal(tokenIsOnRecord(raw), false);
 });
 
 test('an unclaimed install re-offers the same token across two boots', async () => {
@@ -261,7 +291,7 @@ test('a claimed install and a wrong token are refused in the same words', async 
   assert.deepEqual(await refusalMessage(refusedAsClaimed), await refusalMessage(refusedAsWrongToken));
 });
 
-test('consumeClaimToken answers false rather than throwing when no token is on record', () => {
+test('matchesClaimToken answers false rather than throwing when no token is on record', () => {
   // The state every claimed install is in. `readHostState` returns `null`
   // here, and a version that handed that straight to `Buffer.from` would
   // throw instead of refusing -- a 500 on the hook's path, for the most
@@ -269,7 +299,7 @@ test('consumeClaimToken answers false rather than throwing when no token is on r
   const { raw } = openTestDatabase();
   migrateHost(raw);
 
-  assert.equal(consumeClaimToken(raw, 'placeholder-offered-token'), false);
+  assert.equal(matchesClaimToken(raw, 'placeholder-offered-token'), false);
 });
 
 test('the owner can still sign in once the install is claimed', async () => {

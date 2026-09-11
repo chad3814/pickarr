@@ -11,7 +11,9 @@ import { CLAIM_TOKEN_KEY, clearHostState, ensureGeneratedValue, readHostState } 
  * network* can claim it. A token generated on first boot and printed to the
  * console the owner just started the process in closes that window with no
  * configuration step: the first sign-up must carry the token, and the token
- * is spent the moment it matches.
+ * is spent once that sign-up actually succeeds -- matching it is a separate,
+ * side-effect-free question from spending it, and the two happen in
+ * different Better Auth hooks; see `matchesClaimToken` and `clearClaimToken`.
  *
  * **Nothing here logs, and nothing here takes a logger.** The token is a
  * credential for as long as it exists; the one place it is ever printed is
@@ -38,7 +40,7 @@ export function isClaimed(raw: DatabaseSync): boolean {
 /**
  * The claim token, generating and persisting one on first call and
  * re-offering that same one on every call after -- for as long as the row
- * survives, which is until `consumeClaimToken` spends it.
+ * survives, which is until `clearClaimToken` spends it.
  *
  * The generate-once-under-a-race shape is `ensureGeneratedValue`'s and the
  * reason is written there: two hosts started against one database file must
@@ -57,7 +59,11 @@ export function ensureClaimToken(raw: DatabaseSync, at: number): string {
 }
 
 /**
- * Whether `offered` is the claim token on record, spending it if it is.
+ * Whether `offered` is the claim token on record. **Never spends it** --
+ * matching is a question, not an action, and answering it has no
+ * side-effect on `host_state` at all. Consuming the token is
+ * `clearClaimToken`'s job, and only the caller that has since confirmed the
+ * sign-up actually succeeded may call that.
  *
  * **Compared with `timingSafeEqual`, not `===`.** A byte-at-a-time
  * comparison that stops at the first difference takes measurably longer the
@@ -77,25 +83,33 @@ export function ensureClaimToken(raw: DatabaseSync, at: number): string {
  * but the length is not the secret and it cannot be hidden: the correct
  * token always compares in constant time, and only a wrong-length one takes
  * the early exit.
- *
- * **Spent on a match, before the caller knows whether the sign-up that
- * offered it went on to succeed.** That is deliberate: a token still valid
- * after a failed attempt is a token that can be retried, and the window
- * this exists to close is measured in the number of attempts an attacker
- * gets. The cost is that an owner whose first sign-up is rejected for some
- * later reason -- a password Better Auth thinks too short, an origin it
- * does not trust -- has burned the token and must restart the host to be
- * given a new one.
  */
-export function consumeClaimToken(raw: DatabaseSync, offered: string): boolean {
+export function matchesClaimToken(raw: DatabaseSync, offered: string): boolean {
   const stored = readHostState(raw, CLAIM_TOKEN_KEY);
   if (stored === null) return false;
 
   const offeredBytes = Buffer.from(offered, 'utf8');
   const storedBytes = Buffer.from(stored, 'utf8');
   if (offeredBytes.length !== storedBytes.length) return false;
-  if (!timingSafeEqual(offeredBytes, storedBytes)) return false;
+  return timingSafeEqual(offeredBytes, storedBytes);
+}
 
+/**
+ * Spends the claim token, unconditionally.
+ *
+ * **Deliberately takes no token to compare.** The one caller of this --
+ * the sign-up hook's `after`, in `instance.ts` -- has already established
+ * the fact that matters by a different route: it reads `isClaimed` *after*
+ * the request has run, and a `true` there can only mean this request's own
+ * sign-up just created the account, since an install with an account
+ * already refuses sign-up in `before` before anything downstream runs. A
+ * second comparison here would be redundant with that one and would need
+ * the raw token in scope a second time for no gain.
+ *
+ * A no-op, like `clearHostState` it wraps, when there is nothing on record
+ * -- calling this twice, or calling it on an already-claimed install, is
+ * never an error.
+ */
+export function clearClaimToken(raw: DatabaseSync): void {
   clearHostState(raw, CLAIM_TOKEN_KEY);
-  return true;
 }

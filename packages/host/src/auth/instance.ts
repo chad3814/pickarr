@@ -3,7 +3,7 @@ import { betterAuth } from 'better-auth';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import type { HostDb } from '../db/open.ts';
-import { consumeClaimToken, isClaimed } from './claim.ts';
+import { clearClaimToken, isClaimed, matchesClaimToken } from './claim.ts';
 import { authSchema } from './schema.ts';
 
 /**
@@ -240,12 +240,19 @@ function offeredClaimToken(body: unknown): string | null {
  * reaches the sign-up route, so the install shuts the moment the first
  * account exists and without anything being restarted.
  *
- * **The hook runs ahead of Better Auth's own origin check and ahead of its
- * password-length check**, measured against 1.7.3 rather than assumed. So a
- * sign-up carrying the right token spends it and *then* gets a 403 for its
- * origin or a 400 for its password -- the single-use rule the design asked
- * for ("a second sign-up with the same token fails even if the first was
- * rolled back"), applied one step earlier than a reader might expect.
+ * **The `before` hook runs ahead of Better Auth's own origin check and
+ * ahead of its password-length check**, measured against 1.7.3 rather than
+ * assumed. That ordering is why `before` only *verifies* the token and
+ * never spends it: an early version consumed it on the match itself, so a
+ * sign-up carrying the right token but a password Better Auth went on to
+ * reject spent the token anyway -- on an install with exactly one token and
+ * no second account to fall back to, that made a single mistyped password
+ * unrecoverable without restarting the host. Consuming happens in `after`
+ * instead, and only once `isClaimed` shows the sign-up that offered the
+ * token actually went on to create the account -- observing the one
+ * side-effect that separates a claim that stuck from one Better Auth
+ * refused for a reason of its own, rather than trusting the shape of
+ * whatever `after` is handed, which is undocumented for this purpose.
  */
 export function createAuth(deps: AuthDeps) {
   const { publicUrl, raw } = deps;
@@ -274,9 +281,25 @@ export function createAuth(deps: AuthDeps) {
         if (ctx.path !== SIGN_UP_PATH) return;
         if (isClaimed(raw)) throw new APIError('FORBIDDEN', { message: SIGN_UP_REFUSED });
         const offered = offeredClaimToken(ctx.body);
-        if (offered === null || !consumeClaimToken(raw, offered)) {
+        // Verifies only. Nothing here spends the token -- see `after` below
+        // for why, and for where spending actually happens.
+        if (offered === null || !matchesClaimToken(raw, offered)) {
           throw new APIError('FORBIDDEN', { message: SIGN_UP_REFUSED });
         }
+      }),
+      // Runs after the request Better Auth actually served, whether or not
+      // that request threw. Narrowed to sign-up for the same reason as
+      // `before`; every other route passes through untouched.
+      after: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== SIGN_UP_PATH) return;
+        // `isClaimed` true here can only mean *this* request's sign-up just
+        // created the account: `before` already refused the request outright
+        // if the install was claimed when it arrived, so nothing upstream of
+        // this line could have let a second sign-up reach the handler.
+        // Anything else -- a bad password, a bad origin, a token that never
+        // matched -- leaves `isClaimed` false and the token on record,
+        // untouched, so it stays usable for a retry.
+        if (isClaimed(raw)) clearClaimToken(raw);
       }),
     },
     // Not `async`: there is nothing to await, and the option's type accepts a
