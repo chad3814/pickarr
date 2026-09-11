@@ -158,7 +158,8 @@ and cannot serve as a strong validator. `ETag: W/"<mtime>-<size>"` with
 `Last-Modified` is what the filesystem actually knows. Claiming a strong ETag
 from a path that survives content changes would be a lie a cache would believe.
 
-**`node:http`, no framework.** Six routes, read-only, on loopback. The host has
+**`node:http`, no framework.** Six routes, read-only, on loopback *as this
+slice shipped it* — slice F moved the bind to every interface. The host has
 no HTTP dependency today and this is not the reason to acquire one. (Slice F
 added a seventh mount, `/api/auth/*`, on the same bare server — still no
 framework, and `toNodeHandler` was measured to work with one.)
@@ -464,6 +465,10 @@ a keyhole beside an open door, and the redactor's value is keeping a
 
 `main.ts` starts the server after `host.start()` and stops it before
 `host.stop()`. Port from `PICKARR_READ_API_PORT`, default 8787, **bound to `127.0.0.1`**.
+**Superseded by slice F**, which binds `PICKARR_READ_API_HOST` and defaults it
+to `0.0.0.0` — recorded rather than rewritten, because the loopback bind is
+what made this slice's unauthenticated API defensible and the change of
+default is the reason auth had to exist before it.
 
 Shutdown closes the listener and does not wait for in-flight requests to drain,
 matching what the dispatcher already does with in-flight jobs: a read that is
