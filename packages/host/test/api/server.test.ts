@@ -1051,19 +1051,46 @@ test('a malformed cursor answers the first page rather than an error', async () 
   }
 });
 
-test('anything but a read is refused', async () => {
+test('anything but a read is refused, whether or not the caller has a session', async () => {
   // The whole API is read-only, so a write method is refused by the method
   // rather than routed as though it were a GET -- which is what a router that
   // only looked at the path would do, answering a POST with a page of data.
+  //
+  // **The method check sits ahead of the guard, and it is the *guarded* path
+  // with no session that pins that.** It costs nothing to put it there: every
+  // non-GET answers the same 405 on every path with or without a session, so
+  // the ordering tells an anonymous caller nothing beyond "the API is
+  // read-only". The four combinations are all needed, and the one that does
+  // the work is a guarded path anonymously: an open path answers 405 whatever
+  // the order, so a version probing only `/api/health` could not tell the two
+  // orderings apart -- measured, by moving the guard in front and watching
+  // 23/23 pass.
   const { raw, db } = setup();
   const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
-    const answers = await Promise.all(['POST', 'PUT', 'DELETE', 'PATCH'].map(async (method) => {
-      const response = await fetch(`${originOf(server)}/api/health`, { method, headers: { cookie } });
-      return { method, status: response.status, text: await response.text() };
+    const probes = ['POST', 'PUT', 'DELETE', 'PATCH'].flatMap((method) => (
+      ['/api/health', '/api/media?type=movie'].flatMap((path) => [
+        { method, path, cookie, session: 'a session' },
+        { method, path, cookie: ANONYMOUS, session: 'no session' },
+      ])
+    ));
+    const answers = await Promise.all(probes.map(async (probe) => {
+      const response = await fetch(`${originOf(server)}${probe.path}`, {
+        method: probe.method,
+        headers: probe.cookie === null ? {} : { cookie: probe.cookie },
+      });
+      // Named out rather than spread: `no-map-spread` is a warning in this
+      // repo and the three fields are the three this loop asserts over.
+      return {
+        method: probe.method,
+        path: probe.path,
+        session: probe.session,
+        status: response.status,
+        text: await response.text(),
+      };
     }));
-    for (const { method, status, text } of answers) {
-      assert.equal(status, 405, `${method} is not a read`);
+    for (const { method, path, session, status, text } of answers) {
+      assert.equal(status, 405, `${method} ${path} with ${session} is not a read`);
       assert.deepEqual(JSON.parse(text), { error: 'method not allowed' });
     }
   } finally {
@@ -1128,6 +1155,64 @@ test('health answers without a session, and is the only route that does', async 
       { ok: true, version: API_VERSION },
       'and answers the body a health check reads, not merely a status',
     );
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * The reviewer's probe path: shaped exactly like a route a later slice would
+ * add, and named by no route in `ROUTES`.
+ *
+ * A constant so the test below can assert that it names nothing in the table.
+ * The day it does name something, this test says so rather than quietly
+ * becoming a test of that route.
+ */
+const UNMOUNTED_PROBE = '/api/rss-items-v2';
+
+test('a path beside the auth dispatch is refused, mounted or not', async () => {
+  // **The reviewer's exact probe, as a test.** An unguarded
+  // `/api/rss-items-v2` serving real rows was mounted in `handle` beside the
+  // auth dispatch and all 22 tests passed: the guarded set is derived from
+  // `ROUTES`, which is right, and a route that is not in `ROUTES` inherits
+  // nothing from it. Nothing but `/api/auth/*` is mounted there today, so
+  // nothing was exposed -- what this pins is that the guard is taken *before*
+  // the router, so a mount written below it is refused without its author
+  // having had to think about the guard.
+  //
+  // The rows exist so the mutation that re-mounts that probe has something
+  // real to serve, which is what made it worth reporting: it was not an empty
+  // page that happened to answer 200.
+  const { raw, db } = setup();
+  const feedId = seedFeed(raw, 'https://feeds.test/beside.xml');
+  seedRssItem(raw, feedId, 2000, 'Beside.The.Dispatch.1080p.mkv');
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    assert.ok(
+      !ROUTES.some((route) => route.path === UNMOUNTED_PROBE),
+      `${UNMOUNTED_PROBE} now names a route in ROUTES, so it is no longer a probe for an unmounted path`,
+    );
+
+    const anonymous = await get(server, UNMOUNTED_PROBE, ANONYMOUS);
+    assert.equal(anonymous.status, 401, 'a path no route claims is refused, not answered');
+    // The body, not only the status: a 401 saying `unauthorized` is the
+    // guard's answer, where a 404 would be the router's. That distinction is
+    // the whole of this test -- a mount above the guard answers with its own
+    // body, and a mount below it never runs.
+    assert.deepEqual(
+      JSON.parse(await anonymous.text()),
+      { error: 'unauthorized' },
+      'refused by the guard, rather than answered by anything mounted beside the dispatch',
+    );
+
+    // The other half, and it is a different fact: nothing *is* mounted there
+    // today. Mounting the reviewer's probe below the guard fails this
+    // assertion and not the one above -- which is the proof, because a route
+    // mounted below the guard answering a session holder is exactly what a
+    // correctly guarded new route does. Mounted above the guard it fails the
+    // anonymous assertion instead, with a 200 and real rows.
+    const signedIn = await get(server, UNMOUNTED_PROBE, cookie);
+    assert.equal(signedIn.status, 404, 'past the guard, a path no route claims is an unknown route');
   } finally {
     await server.close();
   }

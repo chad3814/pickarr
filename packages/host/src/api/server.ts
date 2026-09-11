@@ -29,15 +29,21 @@
  * this API unauthenticated, with loopback binding as the whole of the
  * protection; the auth slice's §5 closes it -- and its §6 then reverses the
  * bind, so a session is not the second of two defences but the only one (see
- * `DEFAULT_HOST`). The guard is in `answerFor` below and it tests the *value*
+ * `DEFAULT_HOST`). The guard is `refusalFor` below, and it tests the *value*
  * `auth.api.getSession` resolves to, never a status code -- an
  * unauthenticated session check answers `200` with a body of `null` (that
  * slice's §2, measured against better-auth 1.7.3), so a guard written
  * against the status lets every anonymous caller through. Health
  * stays open so a container health check needs no credential, and it is the
- * only route that is: which routes are guarded is a property of `ROUTES`
+ * only route that is: *which* routes are open is a property of `ROUTES`
  * below rather than of a list written anywhere else, and the tests enumerate
  * that table so a route added later is guarded or the test fails.
+ *
+ * **The guard is taken in `handle`, ahead of the router.** A table can only
+ * speak for the routes in it, and a route mounted beside the auth dispatch is
+ * not in it -- measured, by mounting one there and watching all 22 tests
+ * pass. Guarding before routing is what makes the next mount inherit the
+ * guard by construction.
  *
  * **`/api/auth/*` is dispatched before the guard**, by `toNodeHandler`. It
  * has to be: the route that issues a session cannot require one.
@@ -523,8 +529,18 @@ function routeFor(pathname: string): Route | undefined {
 }
 
 /**
- * One request, routed -- and guarded, unless the route it names is the open
- * one.
+ * The refusal this request gets before anything is routed, or `null` when it
+ * may proceed.
+ *
+ * **This runs in `handle`, ahead of the router, and that is the whole
+ * point.** Deriving the guarded set from `ROUTES` is right and is not
+ * sufficient: a route mounted in `handle` *beside* the auth dispatch is
+ * outside the table altogether, so it inherits nothing. That is not
+ * hypothetical -- an unguarded `/api/rss-items-v2` serving real rows was
+ * mounted there and all 22 tests passed. Nothing but `/api/auth/*` is
+ * mounted beside the dispatch today, so nothing was exposed; what this
+ * closes is the next mount, which now inherits the guard by construction
+ * rather than by whoever adds it remembering to.
  *
  * Read-only, so anything but a GET is refused by its method rather than
  * routed as though it were one -- a router that looked only at the path
@@ -542,20 +558,28 @@ function routeFor(pathname: string): Route | undefined {
  * check goes through `auth.api`, never through SQL of this module's own --
  * the same rule the rest of this file follows for reads.
  *
- * A path no route claims is guarded too, and refused with the same 401 as a
- * guarded route: answering 404 first would tell a caller with no session
- * which paths exist, which is a question they have no standing to ask.
+ * Open is a property of `ROUTES`, read here: a path no route claims is
+ * guarded, and so is a request target that would not parse. Answering 404
+ * first would tell a caller with no session which paths exist, which is a
+ * question they have no standing to ask.
  */
-async function answerFor(serving: Serving, target: URL | null, request: IncomingMessage): Promise<Answer> {
+async function refusalFor(serving: Serving, target: URL | null, request: IncomingMessage): Promise<Answer | null> {
   if (request.method !== 'GET') return json(405, { error: 'method not allowed' });
+  if (target !== null && routeFor(target.pathname)?.open === true) return null;
+  const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+  return session === null ? UNAUTHORIZED : null;
+}
+
+/**
+ * One request, routed. **Guarded already** -- `handle` has the refusal above
+ * ahead of this call, so nothing here asks about a session and nothing added
+ * here can forget to.
+ */
+function answerFor(serving: Serving, target: URL | null, request: IncomingMessage): Answer | Promise<Answer> {
   if (target === null) return UNKNOWN_ROUTE;
   const { pathname, searchParams } = target;
 
   const route = routeFor(pathname);
-  if (route?.open !== true) {
-    const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
-    if (session === null) return UNAUTHORIZED;
-  }
   if (route === undefined) return UNKNOWN_ROUTE;
 
   return route.answer({ deps: serving.deps, request, pathname, params: searchParams });
@@ -598,6 +622,14 @@ function messageOf(error: unknown): string {
  * Everything under `/api/auth/` is Better Auth's own; this module neither
  * inspects those requests nor writes their responses.
  *
+ * **Everything after that dispatch is guarded, by position.** The refusal is
+ * taken here rather than inside the router, so a mount added below it
+ * inherits the guard whether or not whoever adds it thinks about the guard at
+ * all. That is the one structural difference between this and deriving the
+ * guarded set from `ROUTES`: the table cannot speak for a route that is not
+ * in it, and a route mounted beside this dispatch is not in it. See
+ * `refusalFor`.
+ *
  * The 500's body is a fixed string: the thrown message can name a feed url,
  * an artwork path or a client's api key (SQLite's own messages name tables
  * and constraints; a client adapter's name whatever url it was reaching), and
@@ -614,6 +646,13 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
       await serving.dispatchAuth(request, response);
       return;
     }
+    const refusal = await refusalFor(serving, target, request);
+    if (refusal !== null) {
+      write(response, refusal);
+      return;
+    }
+    // Past the guard. Anything mounted from here down is guarded by having
+    // been written below this line, rather than by being marked in `ROUTES`.
     write(response, await answerFor(serving, target, request));
   } catch (error) {
     const route = targetOf(request.url)?.pathname ?? '(unparseable)';
