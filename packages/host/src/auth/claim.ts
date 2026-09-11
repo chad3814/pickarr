@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import type { DatabaseSync } from 'node:sqlite';
-import { CLAIM_TOKEN_KEY, clearHostState, ensureGeneratedValue, readHostState } from '../db/host-state.ts';
+import { CLAIM_TOKEN_KEY, clearHostStateValue, ensureGeneratedValue, readHostState } from '../db/host-state.ts';
 
 /**
  * Who is allowed to create the one account this host has.
@@ -10,10 +10,11 @@ import { CLAIM_TOKEN_KEY, clearHostState, ensureGeneratedValue, readHostState } 
  * signing up, "the first user claims the install" would mean *anyone on the
  * network* can claim it. A token generated on first boot and printed to the
  * console the owner just started the process in closes that window with no
- * configuration step: the first sign-up must carry the token, and the token
- * is spent once that sign-up actually succeeds -- matching it is a separate,
- * side-effect-free question from spending it, and the two happen in
- * different Better Auth hooks; see `matchesClaimToken` and `clearClaimToken`.
+ * configuration step: the first sign-up must carry the token, and **spending
+ * the token is what admits the account** -- matching it is a separate,
+ * side-effect-free question asked first, and spending it is the single
+ * atomic step that only one caller can win; see `matchesClaimToken` and
+ * `spendClaimToken`.
  *
  * **Nothing here logs, and nothing here takes a logger.** The token is a
  * credential for as long as it exists; the one place it is ever printed is
@@ -40,7 +41,7 @@ export function isClaimed(raw: DatabaseSync): boolean {
 /**
  * The claim token, generating and persisting one on first call and
  * re-offering that same one on every call after -- for as long as the row
- * survives, which is until `clearClaimToken` spends it.
+ * survives, which is until `spendClaimToken` spends it.
  *
  * The generate-once-under-a-race shape is `ensureGeneratedValue`'s and the
  * reason is written there: two hosts started against one database file must
@@ -61,9 +62,17 @@ export function ensureClaimToken(raw: DatabaseSync, at: number): string {
 /**
  * Whether `offered` is the claim token on record. **Never spends it** --
  * matching is a question, not an action, and answering it has no
- * side-effect on `host_state` at all. Consuming the token is
- * `clearClaimToken`'s job, and only the caller that has since confirmed the
- * sign-up actually succeeded may call that.
+ * side-effect on `host_state` at all. Spending the token is
+ * `spendClaimToken`'s job, and it happens later, at the point the account
+ * is about to be created.
+ *
+ * **Two callers ahead of one another can both be told `true`**, and that is
+ * not a defect here: this answers a question about a moment, and nothing
+ * about the answer admits anybody. What decides which of two holders of the
+ * same token gets the account is `spendClaimToken`, one statement, one
+ * winner. This exists ahead of it so a *wrong* token is refused early, in
+ * constant time, with the same words every other refusal uses -- and so the
+ * SQL comparison behind `spendClaimToken` is never reached by a guess.
  *
  * **Compared with `timingSafeEqual`, not `===`.** A byte-at-a-time
  * comparison that stops at the first difference takes measurably longer the
@@ -95,21 +104,36 @@ export function matchesClaimToken(raw: DatabaseSync, offered: string): boolean {
 }
 
 /**
- * Spends the claim token, unconditionally.
+ * Spends the claim token if `offered` is still the one on record, and
+ * answers whether this call was the one that spent it.
  *
- * **Deliberately takes no token to compare.** The one caller of this --
- * the sign-up hook's `after`, in `instance.ts` -- has already established
- * the fact that matters by a different route: it reads `isClaimed` *after*
- * the request has run, and a `true` there can only mean this request's own
- * sign-up just created the account, since an install with an account
- * already refuses sign-up in `before` before anything downstream runs. A
- * second comparison here would be redundant with that one and would need
- * the raw token in scope a second time for no gain.
+ * **This is what admits a sign-up.** Not `isClaimed`, and not
+ * `matchesClaimToken`: both of those are reads, and two requests carrying
+ * the same valid token both pass a read before either has written anything
+ * -- measured, and it gave 200/200 and two accounts on an install whose §3
+ * says one account claims it. `clearHostStateValue` is a single conditional
+ * `DELETE`, so of two callers offering the same token exactly one sees a
+ * change and the other sees none, and the one that sees none is refused.
  *
- * A no-op, like `clearHostState` it wraps, when there is nothing on record
- * -- calling this twice, or calling it on an already-claimed install, is
- * never an error.
+ * **Called at the point the account is about to be created**, from
+ * `instance.ts`'s `databaseHooks.user.create.before`, and that placement is
+ * the other half of the requirement. Spending it in the request's `before`
+ * hook is what task 4 shipped and task 4b undid: that hook runs ahead of
+ * Better Auth's own password-length and origin checks (measured against
+ * 1.7.3), so a correct token with a mistyped password burnt the install's
+ * only token and cost a restart to get another. Here there is nothing left
+ * that can refuse the request: every validation has already passed, and the
+ * next thing that happens is the `INSERT`. So spending the token and
+ * creating the account are as close to one event as this library allows,
+ * and a refused or failed sign-up never reaches this line at all.
+ *
+ * What remains, stated rather than hidden: if the `INSERT` itself fails
+ * after this returns `true`, the token is spent and no account exists. The
+ * install is then claimable again only after a restart, which mints and
+ * prints a fresh token (`main.ts` re-offers on every boot while unclaimed).
+ * Closing that would mean holding a transaction across a hook boundary the
+ * library does not offer.
  */
-export function clearClaimToken(raw: DatabaseSync): void {
-  clearHostState(raw, CLAIM_TOKEN_KEY);
+export function spendClaimToken(raw: DatabaseSync, offered: string): boolean {
+  return clearHostStateValue(raw, CLAIM_TOKEN_KEY, offered);
 }

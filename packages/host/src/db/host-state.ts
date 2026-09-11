@@ -61,6 +61,33 @@ export function clearHostState(raw: DatabaseSync, key: string): void {
 }
 
 /**
+ * Removes `key`, but only while it still holds `value`, and answers whether
+ * **this** call was the one that removed it.
+ *
+ * **One statement, so exactly one of two racing callers can win it.** SQLite
+ * reports `changes` for the statement it just ran, and `node:sqlite` is
+ * synchronous, so two callers in one process cannot interleave *inside* the
+ * `DELETE`: whichever runs it first matches the row, removes it and sees a
+ * change; the second matches nothing and sees none. A read followed by a
+ * write cannot answer this question at all -- both callers can pass the read
+ * before either has written -- which is the whole reason this exists rather
+ * than a `readHostState` and a `clearHostState` next to each other. It is the
+ * same compare-and-set shape as `clients/rows.ts`'s
+ * `UPDATE ... WHERE id = ? AND status = ?`, for the same reason.
+ *
+ * The value is compared **in SQL**, because that is what makes matching it
+ * and removing it one step rather than two. That comparison is not
+ * constant-time and does not need to be: its one caller
+ * (`auth/claim.ts`'s `spendClaimToken`) is reached only by a request whose
+ * token has already been compared with `timingSafeEqual`, so a wrong value
+ * never gets this far. See `matchesClaimToken`.
+ */
+export function clearHostStateValue(raw: DatabaseSync, key: string, value: string): boolean {
+  const result = raw.prepare('DELETE FROM host_state WHERE key = ? AND value = ?').run(key, value);
+  return result.changes > 0;
+}
+
+/**
  * A random value under `key`, generating and persisting one on first call
  * and handing back whatever is already on record on every call after.
  *

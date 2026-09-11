@@ -3,7 +3,7 @@ import { betterAuth } from 'better-auth';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import type { HostDb } from '../db/open.ts';
-import { clearClaimToken, isClaimed, matchesClaimToken } from './claim.ts';
+import { isClaimed, matchesClaimToken, spendClaimToken } from './claim.ts';
 import { authSchema } from './schema.ts';
 
 /**
@@ -35,11 +35,12 @@ export type Auth = ReturnType<typeof createAuth>;
 /** What `createAuth` needs, and nothing else it could reach for. */
 export interface AuthDeps {
   /**
-   * The same database `db` wraps, as the `node:sqlite` handle. The sign-up
-   * hook below asks it, per request, whether the install is claimed and
-   * whether the offered claim token is the one on record; taking it on
-   * `AuthDeps` rather than assembling a second set of deps for the hook is
-   * what keeps the two from ever naming different databases.
+   * The same database `db` wraps, as the `node:sqlite` handle. The two hooks
+   * below ask it, per request, whether the install is claimed and whether the
+   * offered claim token is the one on record -- and then spend that token, in
+   * the hook that runs immediately before the account row is written. Taking
+   * it on `AuthDeps` rather than assembling a second set of deps for the
+   * hooks is what keeps the two from ever naming different databases.
    */
   raw: DatabaseSync;
   db: HostDb;
@@ -257,13 +258,28 @@ function offeredClaimToken(body: unknown): string | null {
  * never spends it: an early version consumed it on the match itself, so a
  * sign-up carrying the right token but a password Better Auth went on to
  * reject spent the token anyway -- on an install with exactly one token and
- * no second account to fall back to, that made a single mistyped password
- * unrecoverable without restarting the host. Consuming happens in `after`
- * instead, and only once `isClaimed` shows the sign-up that offered the
- * token actually went on to create the account -- observing the one
- * side-effect that separates a claim that stuck from one Better Auth
- * refused for a reason of its own, rather than trusting the shape of
- * whatever `after` is handed, which is undocumented for this purpose.
+ * no second account to fall back to, that cost a restart to get another
+ * token.
+ *
+ * **What admits a sign-up is spending the token, in
+ * `databaseHooks.user.create.before`.** Everything `before` does is a read,
+ * and two requests carrying the same valid token both pass a read before
+ * either has written: measured, `Promise.all` of two sign-ups with one token
+ * answered 200/200 and left two accounts on an install whose §3 says one
+ * account claims it. The database hook is the last thing that runs before
+ * the `INSERT` -- past the origin check, past the password check, past every
+ * validation that could still refuse the request (measured, 1.7.3) -- so
+ * spending the token there is both atomic against a second caller and
+ * unreachable by a sign-up that was going to fail. `spendClaimToken` is one
+ * conditional `DELETE`: of two callers offering the same token exactly one
+ * sees a change, and the other is refused in the same words as everybody
+ * else.
+ *
+ * **The database hook is deliberately not narrowed to the sign-up route.**
+ * Any path that creates a user must spend the token; one that carries no
+ * token is refused. Nothing but sign-up creates a user today, so this
+ * changes no behaviour -- it decides what happens to a path that does not
+ * exist yet, and fail-closed is the answer that does not need revisiting.
  */
 export function createAuth(deps: AuthDeps) {
   const { publicUrl, raw } = deps;
@@ -292,26 +308,42 @@ export function createAuth(deps: AuthDeps) {
         if (ctx.path !== SIGN_UP_PATH) return;
         if (isClaimed(raw)) throw new APIError('FORBIDDEN', { message: SIGN_UP_REFUSED });
         const offered = offeredClaimToken(ctx.body);
-        // Verifies only. Nothing here spends the token -- see `after` below
-        // for why, and for where spending actually happens.
+        // Verifies only. Nothing here spends the token: this hook runs ahead
+        // of Better Auth's own validation, so a sign-up refused after this
+        // point must leave the token usable. Spending it is
+        // `databaseHooks.user.create.before`'s, below.
         if (offered === null || !matchesClaimToken(raw, offered)) {
           throw new APIError('FORBIDDEN', { message: SIGN_UP_REFUSED });
         }
       }),
-      // Runs after the request Better Auth actually served, whether or not
-      // that request threw. Narrowed to sign-up for the same reason as
-      // `before`; every other route passes through untouched.
-      after: createAuthMiddleware(async (ctx) => {
-        if (ctx.path !== SIGN_UP_PATH) return;
-        // `isClaimed` true here can only mean *this* request's sign-up just
-        // created the account: `before` already refused the request outright
-        // if the install was claimed when it arrived, so nothing upstream of
-        // this line could have let a second sign-up reach the handler.
-        // Anything else -- a bad password, a bad origin, a token that never
-        // matched -- leaves `isClaimed` false and the token on record,
-        // untouched, so it stays usable for a retry.
-        if (isClaimed(raw)) clearClaimToken(raw);
-      }),
+    },
+    databaseHooks: {
+      user: {
+        create: {
+          // The seam where the token is spent, and where a second holder of
+          // the same token is refused. `async` with nothing awaited, because
+          // the option types the hook as returning a promise and
+          // `node:sqlite` is synchronous.
+          //
+          // `context` is `GenericEndpointContext | null` -- the library
+          // allows a user to be created with no request behind it -- and a
+          // creation this cannot read a token off is refused, which is the
+          // same answer as a creation offering the wrong one.
+          //
+          // Returning nothing admits the creation; the library reads a
+          // returned object as a replacement for the row and `false` as a
+          // silent refusal, and neither is wanted here. A thrown `APIError`
+          // is what answers the caller, measured against 1.7.3: 403, this
+          // module's own message, and no `auth_user` row.
+          before: async (_user, context) => {
+            const body: unknown = context?.body;
+            const offered = offeredClaimToken(body);
+            if (offered === null || !spendClaimToken(raw, offered)) {
+              throw new APIError('FORBIDDEN', { message: SIGN_UP_REFUSED });
+            }
+          },
+        },
+      },
     },
     // Not `async`: there is nothing to await, and the option's type accepts a
     // plain return.

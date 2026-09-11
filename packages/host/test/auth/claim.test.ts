@@ -199,19 +199,19 @@ test('a rejected sign-up leaves the token usable', async () => {
   // refuses outright, so no account is created and the install is still
   // unclaimed. Task 4 shipped a hook that spent the token the moment it
   // matched, regardless of what happened next -- so this exact rejection
-  // used to burn the owner's only token and leave the install permanently
-  // unclaimable. The fix is to verify in `before` and consume only in
-  // `after`, and only once `isClaimed` says the sign-up that offered the
-  // token actually went on to succeed.
+  // used to burn the owner's only token, and the install was then claimable
+  // only after a restart, which mints and prints a fresh one. The token is
+  // verified in `before` and spent in `databaseHooks.user.create.before`,
+  // which the request never reaches when validation refuses it first.
   const { raw, auth, claimToken } = harness();
 
   const rejected = await signUp(auth, 'owner@example.invalid', claimToken, TOO_SHORT_PASSWORD);
   assert.equal(rejected.status, 400);
   assert.equal(userCount(raw), 0);
   assert.equal(isClaimed(raw), false);
-  // The token Better Auth's own validation had nothing to do with is still
-  // on record: a rejection this early never reached anything that could
-  // succeed, so there is nothing here for `isClaimed` to observe.
+  // The token is still on record: Better Auth's own validation refused this
+  // request before anything was about to create a user, so the hook that
+  // spends the token never ran.
   assert.equal(tokenIsOnRecord(raw), true);
 
   const retried = await signUp(auth, 'owner@example.invalid', claimToken);
@@ -223,11 +223,11 @@ test('a rejected sign-up leaves the token usable', async () => {
 });
 
 test('a sign-up refused by the hook itself does not clear the token', async () => {
-  // A wrong token never matches, so the hook throws before Better Auth's
-  // own validation ever runs and the real token is never touched by this
-  // attempt at all. Distinct from the test above: that one shows a rejection
-  // *downstream* of a match leaves the token alone; this one shows a
-  // rejection *at* the hook -- for a token that never matched in the first
+  // A wrong token never matches, so the request hook throws before Better
+  // Auth's own validation ever runs and the real token is never touched by
+  // this attempt at all. Distinct from the test above: that one shows a
+  // rejection *downstream* of a match leaves the token alone; this one shows
+  // a rejection *at* the hook -- for a token that never matched in the first
   // place -- does too.
   const { raw, auth, claimToken } = harness();
 
@@ -242,6 +242,42 @@ test('a sign-up refused by the hook itself does not clear the token', async () =
   assert.equal(userCount(raw), 1);
   assert.equal(isClaimed(raw), true);
   assert.equal(tokenIsOnRecord(raw), false);
+});
+
+test('two concurrent sign-ups with one token create one account', async () => {
+  // Both requests carry the *same valid token* and land on one running
+  // instance, which is what a double-submitted form is. The check that used to
+  // admit a sign-up -- `isClaimed` in the `before` hook -- is a read, and two
+  // reads both see an unclaimed install before either handler writes, so this
+  // used to answer 200/200 and leave two accounts on an install whose whole
+  // design is one. What admits a sign-up now is the *consumption* of the
+  // token, which is a single conditional delete only one caller can win.
+  const { raw, auth, claimToken } = harness();
+
+  const [first, second] = await Promise.all([
+    signUp(auth, 'owner@example.invalid', claimToken),
+    signUp(auth, 'stranger@example.invalid', claimToken),
+  ]);
+
+  assert.deepEqual(
+    [first.status, second.status].toSorted((a, b) => a - b),
+    [200, 403],
+    'exactly one of two concurrent sign-ups with one token may succeed',
+  );
+  assert.equal(userCount(raw), 1);
+  assert.equal(isClaimed(raw), true);
+  assert.equal(tokenIsOnRecord(raw), false);
+
+  // The loser is refused in the same words as every other refusal, so losing
+  // a race tells a caller no more than offering a wrong token does.
+  const loser = first.status === 200 ? second : first;
+  const unclaimed = harness();
+  const wrongToken = await signUp(
+    unclaimed.auth,
+    'attacker@example.invalid',
+    withLastCharacterChanged(unclaimed.claimToken),
+  );
+  assert.deepEqual(await refusalMessage(loser), await refusalMessage(wrongToken));
 });
 
 test('an unclaimed install re-offers the same token across two boots', async () => {
