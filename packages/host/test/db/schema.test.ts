@@ -149,10 +149,19 @@ test('every schema column matches the migration DDL by name, type, nullability a
     const ddl = new Map(ddlColumns(raw, name).map((column) => [column.name, column]));
     const declared = Object.values(getTableColumns(table));
     // Both spellings of a primary key in one set: `.primaryKey()` on a column,
-    // and `primaryKey({ columns })` in the table extras (which is how
-    // `plugin_migrations` declares its `(plugin_id, version)` key -- Drizzle
-    // reports that on the table, and every one of its columns has
-    // `primary === false`).
+    // and `primaryKey({ columns })` in the table extras, which Drizzle reports
+    // on the *table* rather than on any of its columns.
+    //
+    // **The composite half is unexercised, and says so rather than citing a
+    // case that is not one.** Measured across all 21 mirrored tables,
+    // `getTableConfig(table).primaryKeys.length` is 0 on every one, so the
+    // second spread contributes nothing today and no test can tell it apart
+    // from an empty array. It is kept as future-proofing: the first composite
+    // key declared in `schema.ts` is then compared without this file being
+    // touched. The justification that used to stand here named
+    // `plugin_migrations (plugin_id, version)`, which is not a case at all --
+    // `migratePlugin` creates that table outside the versioned DDL and it is
+    // deliberately not declared to Drizzle, as the test above says.
     const declaredPrimary = new Set<string>([
       ...declared.filter((column) => column.primary).map((column) => column.name),
       ...getTableConfig(table).primaryKeys.flatMap((key) => key.columns.map((column) => column.name)),
@@ -183,9 +192,9 @@ test('every schema column matches the migration DDL by name, type, nullability a
       // can genuinely disagree about. A column that loses `PRIMARY KEY` in the
       // DDL while `schema.ts` still says `.primaryKey()` was invisible here
       // until slice F, and was caught only by a table-specific test somebody
-      // happened to write. `pk` covers both spellings: `.primaryKey()` on the
-      // column, and a composite key declared in the table's extras, which
-      // Drizzle reports on the table rather than on any of its columns.
+      // happened to write. `pk` is compared against both spellings of a
+      // declared key -- see `declaredPrimary` above, where the composite one
+      // is recorded as future-proofing that nothing in this schema exercises.
       if (actual.primaryKey !== declaredPrimary.has(column.name)) {
         disagreements.push(
           `${name}.${column.name}: DDL primaryKey=${actual.primaryKey}, `

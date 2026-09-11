@@ -605,10 +605,16 @@ CREATE INDEX deleted_media_item_sync ON deleted_media_item (plugin_id, deleted_a
  * one `schema` object the adapter already accepts.
  *
  * **`id` is `TEXT` on all four, and these are the only tables in this schema
- * with a text `id`** -- every table above declares `id INTEGER PRIMARY KEY`,
- * i.e. the rowid. (`host_state` in this same migration is keyed by a text
- * `key`, but that is a caller-chosen name rather than a generated id, so it is
- * not the same asymmetry.) Better Auth's default id generator is a random
+ * with a text `id`** -- every table above that *has* an `id` declares it
+ * `id INTEGER PRIMARY KEY`, i.e. the rowid. Four do not have one, which is why
+ * "every table above" on its own read as false here: `host_state` in this same
+ * migration is keyed by a text `key`, `deleted_media_item` by
+ * `media_item_id INTEGER PRIMARY KEY`, and the runner's own bookkeeping by
+ * `version INTEGER PRIMARY KEY` (`host_migrations`) and by the composite
+ * `PRIMARY KEY (plugin_id, version)` (`plugin_migrations`). None of those is
+ * the same asymmetry -- a caller-chosen key, a borrowed foreign key and a
+ * version number are not generated ids. Better Auth's default id generator is
+ * a random
  * base62 string, and adopting it avoids configuring
  * `advanced.database.generateId` to something the library then has to be told
  * about. The asymmetry is the library's, and it is recorded here so it does not

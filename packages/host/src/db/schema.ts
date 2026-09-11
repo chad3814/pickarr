@@ -454,10 +454,14 @@ export const hostState = sqliteTable('host_state', {
  * rather than a second one shaped for the library.
  *
  * **`id` is `text`, and these four are the only tables in this file with a
- * text `id`** -- every table above declares `integer('id').primaryKey()`, i.e.
- * the rowid. (`hostState` just above is keyed by a text `key`, but that is a
- * caller-chosen name rather than a generated id, so it is not the same
- * asymmetry.) Better Auth's default id generator is a random base62 string,
+ * text `id`** -- every table above that *has* an `id` declares
+ * `integer('id').primaryKey()`, i.e. the rowid. Two have none: `hostState`
+ * just above is keyed by a text `key`, and `deletedMediaItem` by
+ * `mediaItemId`. Neither is the same asymmetry -- a caller-chosen key and a
+ * borrowed foreign key are not generated ids -- and saying "every table above"
+ * without that carve-out is how this comment previously read as false about
+ * the two tables it skipped over. Better Auth's default id generator is a
+ * random base62 string,
  * and adopting it avoids configuring `advanced.database.generateId` to
  * something the library then has to be told about. The asymmetry is the
  * library's; it is said out loud here so the next reader does not "fix" it and
@@ -465,8 +469,17 @@ export const hostState = sqliteTable('host_state', {
  */
 export const authUser = sqliteTable('auth_user', {
   id: text('id').primaryKey(),
-  // Nullable: Better Auth's email/password sign-up takes a name, but the
-  // library's own model does not require one.
+  // Nullable, and the library's model is the **opposite** of what this comment
+  // used to say: `name` is `required: true` in `@better-auth/core`'s
+  // `db/get-tables.ts` (1.7.3, read from `node_modules`), with no
+  // `defaultValue`. The column is safe anyway, and for a reason worth having
+  // written down instead: nothing reaches it without a name, because
+  // `/sign-up/email`'s body schema declares `name: z.string()` -- not
+  // `.optional()` -- so a request omitting it is refused before any row is
+  // written. What the nullability buys is the row a *future* creation path
+  // with no name would write: the adapter's `transformInput` drops a field
+  // that is undefined and has no default, so `NOT NULL` would fail that
+  // insert rather than store a blank.
   name: text('name'),
   email: text('email').notNull(),
   // Stored as 0 or 1, read and written as a boolean. Nothing in this slice
@@ -559,9 +572,16 @@ export const authVerification = sqliteTable('auth_verification', {
   value: text('value').notNull(),
   expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-  // Nullable, unlike every other `updated_at` in this file: Better Auth's
-  // `verification` model declares it optional, and the DDL matches the model
-  // rather than the house style.
+  // Nullable, unlike every other `updated_at` in this file -- and **not**
+  // because the library declares it optional, which is what this comment used
+  // to say and is the opposite of the truth. `verification.updatedAt` is
+  // `required: true` in `@better-auth/core`'s `db/get-tables.ts` (1.7.3, read
+  // from `node_modules`), and it carries both a `defaultValue` (`new Date()`)
+  // and an `onUpdate`. So the adapter always supplies it: `withApplyDefault`
+  // fills the default on a create and the `onUpdate` on an update, and no
+  // write that reaches this table can leave the column null. The nullability
+  // is slack nothing needs rather than a shape the library asked for, and
+  // that -- not a misread of the model -- is why it is safe.
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }),
 }, (t) => [
   // The library looks a verification up by its identifier, never by id.

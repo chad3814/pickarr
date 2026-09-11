@@ -1,6 +1,12 @@
 /**
- * The read API on a socket: `node:http`, six routes behind a session, bound
- * by default to every interface.
+ * The read API on a socket: `node:http`, six routes -- five behind a session
+ * and `/api/health` open -- bound by default to every interface.
+ *
+ * The split is spelled out because the line that used to stand here said "six
+ * routes behind a session", which the paragraph on the guard below -- and
+ * `ROUTES` itself, where exactly one entry is `open: true` -- contradicts. A
+ * one-line summary disagreeing with its own file is the whole class of defect
+ * the comments here are written against.
  *
  * Everything this file does is routing. Parse a request, call one function
  * from `./reads.ts` or `./artwork-route.ts`, write what came back.
