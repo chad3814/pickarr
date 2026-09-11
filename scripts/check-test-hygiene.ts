@@ -170,12 +170,13 @@ export function findViolations(file: string, source: string): Violation[] {
  * **Rule 2**: a credential column, named in a SQL string, outside the modules
  * allowed to read it.
  *
- * Three columns, from the auth design spec's §4: `auth_account.password` is a
- * password hash, `auth_session.token` is a live session, and `host_state.value`
- * is the host's Better Auth signing secret. A query that selects any of them
- * puts a credential somewhere it can be logged, serialised into a response, or
- * compared in application code that has no business holding it — and none of
- * that shows up as a failing test, because the query works perfectly.
+ * Four columns, from the auth design spec's §4: `auth_account.password` is a
+ * password hash, `auth_session.token` is a live session, `host_state.value`
+ * is the host's Better Auth signing secret, and `secret.value` is a third
+ * party's credential. A query that selects any of them puts a credential
+ * somewhere it can be logged, serialised into a response, or compared in
+ * application code that has no business holding it — and none of that shows
+ * up as a failing test, because the query works perfectly.
  *
  * It extends the slice-C rule that only `readClientConfig` may select
  * download-client credentials, and it is the same rule with a wider list.
@@ -215,6 +216,7 @@ const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
   { table: 'auth_account', column: 'password' },
   { table: 'auth_session', column: 'token' },
   { table: 'host_state', column: 'value' },
+  { table: 'secret', column: 'value' },
 ];
 
 /**
@@ -846,14 +848,15 @@ async function checkCredentialColumns(): Promise<boolean> {
   console.error(
     `\n${violations.length} SQL string(s) read a credential column, or read a credential table in a\n` +
       'statement this check cannot read. auth_account.password is a password hash,\n' +
-      'auth_session.token is a live session, and host_state.value is this host\'s Better Auth\n' +
-      'signing secret — a query that selects one puts it somewhere it can be logged or serialised\n' +
-      'into a response, and nothing fails when that happens. A `table.*` above is a star select and\n' +
-      'a `table.?` is a substitution this check could not resolve; a `?.` names a table it could not\n' +
-      'resolve either, which may be a credential table. None of those names a credential and each\n' +
-      'may select one, so each is reported rather than assumed harmless. Name the columns the\n' +
-      'query actually needs; or, if this module is genuinely the one that may read a credential,\n' +
-      'add its path to CREDENTIAL_ALLOW_LIST in this script.\n',
+      'auth_session.token is a live session, host_state.value is this host\'s Better Auth\n' +
+      'signing secret, and secret.value is a third party\'s credential — a query that selects one\n' +
+      'puts it somewhere it can be logged or serialised into a response, and nothing fails when\n' +
+      'that happens. A `table.*` above is a star select and a `table.?` is a substitution this\n' +
+      'check could not resolve; a `?.` names a table it could not resolve either, which may be a\n' +
+      'credential table. None of those names a credential and each may select one, so each is\n' +
+      'reported rather than assumed harmless. Name the columns the query actually needs; or, if\n' +
+      'this module is genuinely the one that may read a credential, add its path to\n' +
+      'CREDENTIAL_ALLOW_LIST in this script.\n',
   );
   return false;
 }

@@ -736,6 +736,24 @@ CREATE INDEX auth_verification_identifier ON auth_verification (identifier);
 `;
 
 /**
+ * A credential per row, addressed by name. `name` is the primary key rather
+ * than a surrogate id with a unique index: a name *is* the identity, and
+ * `INSERT ... ON CONFLICT (name) DO UPDATE` is the only write.
+ *
+ * `value` is a credential column, enforced at build time by
+ * `scripts/check-test-hygiene.ts` — only `src/secrets/store.ts` may select
+ * it. Migration 14 moves `download_client`'s credentials into here.
+ */
+const MIGRATION_13 = `
+  CREATE TABLE secret (
+    name       TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -753,6 +771,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 10, up: (db) => db.exec(MIGRATION_10) },
   { version: 11, up: (db) => db.exec(MIGRATION_11) },
   { version: 12, up: (db) => db.exec(MIGRATION_12) },
+  { version: 13, up: (db) => db.exec(MIGRATION_13) },
 ];
 
 /**

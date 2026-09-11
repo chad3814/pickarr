@@ -893,3 +893,34 @@ test('host_state holds one row per key', () => {
     [{ key: 'auth.secret.placeholder', value: 'first' }],
   );
 });
+
+test('migration 13 creates the secret table with name as its primary key', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const columns = raw.prepare('PRAGMA table_info(secret)').all()
+    .map((row) => ({
+      name: String((row as { name: unknown }).name),
+      notNull: Number((row as { notnull: unknown }).notnull),
+      pk: Number((row as { pk: unknown }).pk),
+    }));
+  assert.deepEqual(columns, [
+    { name: 'name', notNull: 0, pk: 1 },
+    { name: 'value', notNull: 1, pk: 0 },
+    { name: 'created_at', notNull: 1, pk: 0 },
+    { name: 'updated_at', notNull: 1, pk: 0 },
+  ], 'secret must be keyed on name, with a non-null value');
+});
+
+test('a second row for one secret name is refused', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const insert = raw.prepare('INSERT INTO secret (name, value, created_at, updated_at) VALUES (?, ?, ?, ?)');
+  insert.run('tvdb_key', 'test-value', 1, 1);
+  try {
+    insert.run('tvdb_key', 'other-value', 2, 2);
+    assert.fail('a duplicate secret name must be refused');
+  } catch (error) {
+    // 1555 is SQLITE_CONSTRAINT_PRIMARYKEY. Asserted by code, not message.
+    assert.equal((error as { errcode?: number }).errcode, 1555);
+  }
+});

@@ -627,3 +627,21 @@ export const authVerification = sqliteTable('auth_verification', {
   // The library looks a verification up by its identifier, never by id.
   index('auth_verification_identifier').on(t.identifier),
 ]);
+
+/**
+ * One credential per row, addressed by name — a `randomUUID()` for a
+ * credential the settings UI stored, or a name a human chose like `tvdb_key`
+ * for one they may also supply from the environment.
+ *
+ * `value` is a credential column. Only `src/secrets/store.ts` may select it,
+ * enforced at build time by `scripts/check-test-hygiene.ts` over
+ * `packages/host/src`. It is deliberately *not* `host_state`: that table
+ * holds this host's own facts, while every row here is a third party's
+ * credential, and the two have different readers.
+ */
+export const secret = sqliteTable('secret', {
+  name: text('name').primaryKey(),
+  value: text('value').notNull(),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+});
