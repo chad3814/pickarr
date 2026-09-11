@@ -15,7 +15,7 @@ only one function may read.
 
 - `packages/host/src/config/` — read, validate and update
   `/config/pickarr.config.json`; one namespace per subsystem, registered with
-  a parse function, returning a typed handle.
+  a Zod schema, returning a typed handle.
 - `packages/host/src/secrets/` — `get(name)` and `saveSecret(name, value)`
   over `chain(fromEnv, fromFile, fromDatabase)`, memoized per name.
 - Migration 13 — a `secret` table, and `download_client`'s credential columns
@@ -83,12 +83,18 @@ resolves those references **into the config object** it was given.
 sentinel. The projection idea is good and is kept in spirit; mutating resolved
 secrets into a serializable config object is the thing §6.4 forbids.
 
-**2.6a The host does not depend on Zod.** `packages/host`'s dependencies are
-`@pickarr/contract`, `better-auth`, `drizzle-orm`, `fast-xml-parser` and
-`image-size`; nothing under `packages/host/src` imports `zod`. The schema
-library lives in `packages/core`, which is 1.x. §6.1 therefore takes a parse
-function rather than a schema object, and this slice adds no dependency beyond
-`@chad3814/secret-provider`.
+**2.6a Zod is in the tree but not yet in the host.** `packages/host`'s
+dependencies are `@pickarr/contract`, `better-auth`, `drizzle-orm`,
+`fast-xml-parser` and `image-size`, and nothing under `packages/host/src`
+imports `zod` today. `packages/core` pins `zod@^3.24.0` and **3.25.76** is what
+is installed, so the host takes the same range and node_modules holds one copy.
+
+**2.6c An absent section needs a schema that accepts `undefined`.** Measured:
+`z.object({ baseDir: z.string().default('/run/secrets') }).default({})` parses
+`undefined` into `{ baseDir: '/run/secrets' }`, while a schema with a
+non-defaulted field refuses `undefined`. So a namespace schema must be
+`.default(...)`-wrapped, or have every field optional, or registering a host
+with no config file at all will throw. §6.1 requires it.
 
 **2.6b SQLite is 3.53.4 behind `node:sqlite`.** Measured: `ADD COLUMN` and
 `DROP COLUMN` both succeed on a table carrying an index on a different column,
@@ -175,16 +181,18 @@ when a present section fails its schema. An absent section gets the schema's
 defaults. The host awaits its own registrations at boot, so a malformed host
 section fails the boot rather than running on values nobody chose.
 
-**3.11 A parse function, not a schema object.** `register` takes
-`(raw: unknown) => T`. §2.6a measured that the host depends on no schema
-library, and its existing validation is hand-written (`resolvePublicUrl` is the
-precedent). A function is the smaller contract, adds no dependency, and still
-lets any caller use a schema library by passing its `parse`.
-*Rejected:* adding Zod to `packages/host` to type `register` as
-`ZodType<T>` — it would bind every future subsystem's config to one library
-to save a one-line adapter.
-*Cost:* `register`'s signature cannot itself express "this schema has
-defaults"; an absent section is `undefined` and each `parse` supplies its own.
+**3.11 A Zod schema, at the range 1.x already pins.** `register` takes
+`ZodType<T>`, and `packages/host` adds `zod@^3.24.0` — the same range as
+`packages/core`, so one copy is installed (§2.6a).
+*Rejected:* a bare `(raw: unknown) => T` parse function, which would add no
+dependency and match the host's hand-written validation idiom
+(`resolvePublicUrl` is the precedent). A schema wins because validation is this
+subsystem's entire job, and because the settings API that will edit this file
+needs a schema to validate a `PUT` — 1.x's settings design already does
+exactly that with `configSchema.safeParse`. Hand-rolling that per namespace is
+the larger cost.
+*Cost:* every future namespace is bound to Zod, and a schema must accept
+`undefined` for its section to be optional (§2.6c).
 
 **3.10 Not built.** Hot reload on file change — restart is fine for one
 install. Config-file schema migration — there is one install. A declaration
@@ -274,8 +282,8 @@ the hygiene script's credential-column allow-list.
 openConfig(deps: { path: string }): Promise<Config>
 
 interface Config {
-  /** `parse` returns the namespace's value or throws; see 3.11. */
-  register<T>(namespace: string, parse: (raw: unknown) => T): ConfigHandle<T>;
+  /** The schema must accept `undefined`; see 2.6c and 3.11. */
+  register<T>(namespace: string, schema: ZodType<T>): ConfigHandle<T>;
 }
 
 interface ConfigHandle<T> {
@@ -284,10 +292,10 @@ interface ConfigHandle<T> {
 }
 ```
 
-`parse` receives the namespace's raw JSON value, or `undefined` when the
-section is absent, and returns the validated value or throws. A caller that
-wants a schema library passes `schema.parse` — the subsystem neither knows nor
-cares.
+`register` runs `schema.parse` against the namespace's raw JSON value, or
+against `undefined` when the section is absent. Because an absent section
+parses `undefined`, every namespace schema must supply its own defaults — see
+2.6c for the measurement and 3.11 for why that is the trade accepted.
 
 **6.2 The file.** One JSON object whose top-level keys are namespaces. The
 host registers `server` (`host`, `port`, `publicUrl`), `database` (`path`) and
@@ -335,7 +343,9 @@ no cycle.
 12. A `publicUrl` with a path is refused in the file exactly as slice F
     refuses it in the environment.
 13. A present-but-invalid namespace throws from `register`; an absent one
-    reaches `parse` as `undefined` and gets that parse's defaults.
+    parses `undefined` and gets the schema's defaults. A namespace schema that
+    does not accept `undefined` throws, and the test says so — that is 2.6c's
+    constraint, not a bug.
 14. `secret.value` is unreadable from any module but `fromDatabase` — the
     hygiene check fails when a second reader is added.
 15. No test prints a secret, and `npm run test-hygiene` proves it.
