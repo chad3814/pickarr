@@ -255,6 +255,9 @@ export const CREDENTIAL_ALLOW_LIST: readonly string[] = [
   // Persists (and generates) the Better Auth signing secret and the first-boot
   // claim token, so it is the one module that reads `host_state.value`.
   join(HOST_SRC_DIR, 'db', 'host-state.ts'),
+  // The `secret` table's only reader and writer, so it is the one module that
+  // may name `secret.value`.
+  join(HOST_SRC_DIR, 'secrets', 'store.ts'),
 ];
 
 /**
