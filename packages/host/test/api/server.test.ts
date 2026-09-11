@@ -661,7 +661,26 @@ test('close stops the listener and does not wait for an in-flight read', async (
       'GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n'
       + 'GET /api/health HTTP/1.1\r\nHost: localhost\r\n',
     );
-    await firstAnswered;
+    // Bounded, because an unbounded wait for a substring turns any change that
+    // stops health answering `200 {...,"version":1}` into a **hung file**
+    // rather than a failed test. Slice F's guard task hit exactly that: it
+    // marked health as needing a session, and this test stopped the whole
+    // file with no name attached -- the `check-test-hygiene` failure mode
+    // ("presents as a bare SIGKILL, costs an hour to trace") reached by a
+    // different route. The bound is generous enough never to fire on a
+    // working server and short enough to name the problem when it breaks.
+    await Promise.race([
+      firstAnswered,
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(
+            'health never answered with a 200 body; received so far: '
+            + JSON.stringify(received.slice(0, 120)),
+          ));
+        }, 5_000);
+        timer.unref();
+      }),
+    ]);
 
     let settled = false;
     const closing = server.close().then(() => {
