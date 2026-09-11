@@ -175,8 +175,13 @@ gone with no account, and the install claimable again after a restart.
 `0.0.0.0` the server has no single knowable origin: the user may reach it at
 `localhost`, a LAN address, a container name, or a reverse-proxied hostname.
 `trustedOrigins` accepts `async (request) => string[]`, so the host trusts an
-origin whose host is a loopback or private-range address, plus
-`PICKARR_PUBLIC_URL` when set.
+origin whose host is `localhost` or an IP literal in a loopback
+(`127/8`, `::1`), private (`10/8`, `172.16/12`, `192.168/16`), link-local
+(`169.254/16`) or unique-local (`fc00::/7`) block — on any port, over `http:`
+or `https:` — plus `PICKARR_PUBLIC_URL` when set. It is **block membership**,
+not a question about this host's own interfaces: no interface list or route
+table is read anywhere, so a private address on a network this machine has
+never been on is trusted too.
 
 Echoing back whatever `Origin` arrives would be the easy version and would
 disable CSRF protection entirely — an attacker's page would be trusted because

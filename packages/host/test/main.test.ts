@@ -857,7 +857,8 @@ test('main wires auth so a data route refuses without a session', async () => {
     // And the other half, which is what proves `baseURL` came from the
     // address the listener bound: the `Origin` below is the unspecified
     // address, which `trustedOrigins` will not place (it is neither
-    // `localhost` nor an address on a network this machine is on), so
+    // `localhost` nor in any of the blocks `isPlaceableOrigin` matches --
+    // `0` is not `127`, `10`, `172.16/12`, `192.168` or `169.254`), so
     // nothing but `baseURL` itself can be what lets this POST through.
     const signUp = await fetch(`${origin}/api/auth/sign-up/email`, {
       method: 'POST',

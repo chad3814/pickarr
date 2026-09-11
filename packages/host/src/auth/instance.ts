@@ -73,9 +73,15 @@ export interface AuthDeps {
 }
 
 /**
- * Whether a dotted-quad host is one this network can place: loopback
- * (`127.0.0.0/8`), or one of the private and link-local blocks
- * (`10/8`, `172.16/12`, `192.168/16`, `169.254/16`).
+ * Whether a dotted-quad host falls in one of four blocks: loopback
+ * (`127.0.0.0/8`), private (`10/8`, `172.16/12`, `192.168/16`) or link-local
+ * (`169.254/16`).
+ *
+ * **Block membership, and nothing else.** No interface list, route table or
+ * netmask is read here or anywhere on this branch, so this does not answer
+ * whether the address is one this machine could reach -- `10.0.0.7` and
+ * `192.168.99.99` pass on a host that has never been on either network
+ * (measured). What the set is bounded by is the arithmetic below.
  *
  * `172.16/12` is the one that gets misread: it is `172.16.0.0` through
  * `172.31.255.255`, so neither "`172.16.*`" (too narrow by sixteen /16s) nor
@@ -110,8 +116,12 @@ function isPrivateIPv4(hostname: string): boolean {
 }
 
 /**
- * Whether a bracketed IPv6 host is one this network can place: `::1`, or
- * unique-local (`fc00::/7`).
+ * Whether a bracketed IPv6 host falls in one of two blocks: loopback (`::1`)
+ * or unique-local (`fc00::/7`).
+ *
+ * Membership of the block, exactly as in `isPrivateIPv4` above and with the
+ * same caveat: a local ULA of `fd45:…` does not make `fd00::1` unreachable
+ * here, because nothing compares the two (measured -- both pass).
  *
  * The brackets are how it arrives -- `new URL('http://[::1]:8787').hostname`
  * is `'[::1]'`, not `'::1'` -- and the address inside is already canonical,
@@ -142,11 +152,32 @@ function isPrivateIPv6(hostname: string): boolean {
 }
 
 /**
- * Whether an `Origin` header names a host on a network this machine is
- * actually on -- the question `trustedOrigins` exists to answer.
+ * Whether an `Origin` header names a host in one of the blocks above -- which
+ * is the question `trustedOrigins` actually asks.
+ *
+ * **What this trusts, stated exactly**: `http:` or `https:`, on any port, at
+ * `localhost` or at an IP literal in a private (`10/8`, `172.16/12`,
+ * `192.168/16`), loopback (`127/8`, `::1`), link-local (`169.254/16`) or
+ * unique-local (`fc00::/7`) block. It is **not** bounded by this host's own
+ * networks: no interface or route is consulted, so an origin naming a private
+ * address on a network this machine has never been on is trusted, and so is
+ * any local process at `localhost:<anyport>` (both measured). Three sentences
+ * in this file used to say otherwise, and a reader who believed them would
+ * conclude the trust set was bounded by the routing table.
+ *
+ * That set is the one the design wants -- Pickarr's client is on the LAN, and
+ * §2 explains why the server has no single knowable origin to compare against
+ * -- and it is not a reachable browser CSRF widening: the session cookie is
+ * `HttpOnly; SameSite=Lax` so a cross-site request carries none, and nothing
+ * on this socket answers a CORS preflight (`OPTIONS` into the mount is 404 and
+ * no `access-control-*` header is emitted anywhere), both measured. What
+ * survives is login-CSRF from a trusted private origin using the attacker's
+ * own credentials, on a single-account host. Reading interfaces per request
+ * would also put a syscall on the refusal path for a trust set that changes
+ * as interfaces come and go.
  *
  * **Only `localhost` is trusted by name.** Every other host must be an IP
- * literal this function can place itself, because a name proves nothing: an
+ * literal in one of those blocks, because a name proves nothing: an
  * attacker's domain can resolve to `127.0.0.1` (DNS rebinding), so trusting
  * `Origin: http://evil.example` on the strength of what it resolves to would
  * hand the attacker's page a trusted origin. What a name resolves to is also
@@ -215,8 +246,8 @@ function publicOrigin(publicUrl: string): string {
  * **The request's own `Origin` is echoed back only after being placed.** The
  * easy version -- return the header -- trusts an attacker's page because it
  * said so, which disables CSRF protection entirely rather than configuring
- * it. Everything returned here has either been parsed and found to be on a
- * network this host is on, or was configured by the operator.
+ * it. Everything returned here has either been parsed and found to be in one
+ * of the blocks `isPlaceableOrigin` lists, or was configured by the operator.
  *
  * Called with no request at all when Better Auth builds the static half of
  * its trusted list, which is why `request` is optional and why the result is

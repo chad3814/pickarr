@@ -682,9 +682,11 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
  * wildcard bind it is `http://0.0.0.0:<port>`. Finishing that is the caller's
  * job and `main` does it in two ways: it prefers `PICKARR_PUBLIC_URL` as
  * `baseURL` when a proxy is in front, and `auth/instance.ts`'s
- * `trustedOrigins` places a request that arrives from an address on one of
- * this machine's own networks. What this function is for is the case with
- * neither -- a host reached directly at the address it bound.
+ * `trustedOrigins` accepts a request whose `Origin` names `localhost` or an
+ * address in a private, loopback, link-local or unique-local block -- block
+ * membership, not this machine's own networks, which it reads nothing about.
+ * What this function is for is the case with neither -- a host reached
+ * directly at the address it bound.
  *
  * **`http://0.0.0.0:<port>` reaches this host, and it works only because it
  * arrives here.** That url is a real one a client on the machine can use --
