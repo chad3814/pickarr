@@ -171,9 +171,19 @@ function isPlaceableOrigin(origin: string): boolean {
 }
 
 /**
- * `publicUrl` as an origin, so a value with a path or a trailing slash still
- * matches: Better Auth compares a pattern against `new URL(origin).origin`,
- * and `https://pickarr.example/` would never equal `https://pickarr.example`.
+ * `publicUrl` as an origin, so a value with a trailing slash still matches:
+ * Better Auth compares a pattern against `new URL(origin).origin`, and
+ * `https://pickarr.example/` would never equal `https://pickarr.example`.
+ *
+ * **A path no longer reaches here**, and this is not the place that stops it:
+ * `main.ts`'s `resolvePublicUrl` refuses a `PICKARR_PUBLIC_URL` carrying a
+ * path, a query string or a fragment at boot, because the same value is also
+ * Better Auth's `baseURL` and a path there unmounts every auth route (see that
+ * function). Reducing it here would have hidden that rather than fixed it --
+ * this function only ever normalized the *trusted-origins* copy. What is left
+ * for it to reduce is the trailing slash, and it keeps handling the general
+ * case because `publicUrl` arrives here as a `string` from wherever a caller
+ * got it, not as something this module can prove was checked.
  *
  * A value that will not parse, or that parses to the opaque origin `'null'`
  * (which is what a non-special scheme like `myapp://host` gives, and which is

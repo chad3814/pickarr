@@ -341,7 +341,7 @@ caller, which is the whole point.
 |---|---|---|
 | `PICKARR_READ_API_HOST` | `0.0.0.0` | Interface to bind. |
 | `PICKARR_READ_API_PORT` | `8787` | Port. Deliberately not `PICKARR_PORT`, which 1.x reads. |
-| `PICKARR_PUBLIC_URL` | unset | The externally reachable origin, when behind a proxy. |
+| `PICKARR_PUBLIC_URL` | unset | The externally reachable origin, when behind a proxy. An **origin**, and refused at boot when it carries a path, a query string or a fragment: the same value is Better Auth's `baseURL`, and a path there mounts every auth route somewhere the read API does not forward, so sign-in, sign-up and sign-out all answer 404 while `/api/health` still answers 200. Subpath hosting (`https://host/pickarr`) is a feature this slice does not have; it is refused rather than reduced to its origin so an operator hears that at boot instead of at 3am. |
 | `BETTER_AUTH_SECRET` | generated | Overrides the persisted secret. |
 
 A config file replaces the first three later; nothing here should make that

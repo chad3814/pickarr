@@ -954,8 +954,48 @@ test('resolvePublicUrl reads PICKARR_PUBLIC_URL, and refuses anything that is no
   // state-changing request's `Origin` against `baseURL`, so a malformed one
   // refuses every sign-in with 403 and nothing in the log says why -- on the
   // slice where a session is the only thing protecting the socket.
-  for (const bad of ['pickarr.example', 'pickarr.example:8787', 'myapp://pickarr', '/pickarr', 'http://']) {
-    assert.throws(() => resolvePublicUrl(bad), /PICKARR_PUBLIC_URL/, `${bad} must be refused at boot, not carried into baseURL`);
+  //
+  // **The last three are the case this test used to argue for and never
+  // try.** A *relative* path does not parse and was refused by the scheme
+  // check all along; an absolute url carrying a path -- which is what a
+  // reverse proxy on a subpath looks like, and what a variable named `_URL`
+  // rather than `_ORIGIN` invites -- parsed, passed, and became Better Auth's
+  // `baseURL`. Measured with `baseURL = http://127.0.0.1:<port>/pickarr`:
+  // every auth route answers 404 on the path `api/server.ts` forwards, so
+  // sign-in, sign-up and sign-out are all unreachable, while `/api/health`
+  // answers 200 and a container health check calls the host healthy. A query
+  // string and a fragment do exactly the same thing, measured the same way,
+  // which is why an origin rather than a pathname is what this enforces.
+  const refused = [
+    'pickarr.example',
+    'pickarr.example:8787',
+    'myapp://pickarr',
+    '/pickarr',
+    'http://',
+    'http://pickarr.example/pickarr',
+    'https://pickarr.example:8787/pickarr/',
+    'http://pickarr.example/?x=1',
+    'http://pickarr.example/#frag',
+  ];
+  for (const bad of refused) {
+    assert.throws(
+      () => resolvePublicUrl(bad),
+      // A validator rather than a regex, because two properties are being
+      // pinned and the second is this branch's own constraint: the refusal
+      // names the variable and the rule it broke, and **never the value**. A
+      // boot that dies on an unreadable environment variable is precisely
+      // where a url would otherwise reach a log.
+      (error: unknown) => {
+        assert.ok(error instanceof Error, 'a refusal is an Error');
+        assert.match(error.message, /^PICKARR_PUBLIC_URL /, 'the refusal names the variable first');
+        assert.ok(
+          !error.message.includes(bad),
+          'the refusal quotes the configured value, which no message this repo emits may carry',
+        );
+        return true;
+      },
+      `${bad} must be refused at boot, not carried into baseURL`,
+    );
   }
 });
 
