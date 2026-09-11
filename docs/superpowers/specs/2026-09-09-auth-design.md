@@ -62,6 +62,21 @@ thrown away; nothing entered the repo.
   spec to demand a second Drizzle instance that does not typecheck here. A
   handle built with `relations: defineRelations({})` and the schema given only
   to `drizzleAdapter` signs a user up and writes the row.
+- **The Drizzle mirror's auth columns need explicit modes, or sign-up fails.**
+  Found by Task 3, not by the spike, because the spike wrote its own schema
+  objects rather than reusing the repo's mirror. A mode-less `integer()` column
+  rejects what the adapter hands Drizzle — a JS `boolean` for `email_verified`
+  and a `Date` for every `*_at` — with
+  `Provided value cannot be bound to SQLite parameter 4` and a 422
+  `FAILED_TO_CREATE_USER`. `{ mode: 'boolean' }` and `{ mode: 'timestamp_ms' }`
+  fix it; the SQL type stays `INTEGER`, so migration 12 is untouched and there
+  is still one schema mirrored against the DDL rather than a second copy under
+  `auth/`. One consequence: `schema.test.ts` compares defaults through
+  `column.mapToDriverValue(...)`, because Drizzle now says `false` where the DDL
+  says `0`.
+- **`trustedOrigins` is called with no request at all** when Better Auth builds
+  the static half of its list, so a function reading `request` must tolerate its
+  absence.
 - **`toNodeHandler` mounts on a bare `node:http` server.** No framework needed.
 - **A state-changing request without an `Origin` header is refused**, 403
   `MISSING_OR_NULL_ORIGIN`. A browser always sends one; anything server-side must
