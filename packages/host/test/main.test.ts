@@ -26,6 +26,7 @@ import {
   resolveReadPort,
   scheduleKnownFeeds,
 } from '../src/main.ts';
+import type { Secrets } from '../src/secrets/instance.ts';
 
 /** The plugin id every feed row below names, so `main` can register an owner for it. */
 const OWNER_ID = 'double';
@@ -100,6 +101,17 @@ const unusedFetch: QueuedFetch = {
 /** A `DownloadClients` that fails loudly if a test never meant to submit anywhere. */
 const unusedDownloads: DownloadClients = {
   submit: async () => { throw new Error('downloads.submit: not used by this test'); },
+};
+/**
+ * A `Secrets` that fails loudly if a test never meant to resolve a
+ * credential. No test in this file reads a `download_client` row through
+ * `readClientConfig`, so nothing here should reach the secrets chain --
+ * `clients/config.test.ts` and `clients/reconcile-job.test.ts` are where a
+ * real one is exercised.
+ */
+const unusedSecrets: Secrets = {
+  get: async () => { throw new Error('secrets.get: not used by this test'); },
+  saveSecret: () => { throw new Error('secrets.saveSecret: not used by this test'); },
 };
 
 /** No test in this file writes artwork, so this directory is never created or read. */
@@ -425,6 +437,7 @@ test('a job whose handler rejects does not stop the host from running the next o
     db,
     fetch: unusedFetch,
     downloads: unusedDownloads,
+    secrets: unusedSecrets,
     now: () => 1000,
     artworkDir: unusedArtworkDir,
     timers,

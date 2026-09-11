@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
+import { writeSecretValue } from '../secrets/store.ts';
 
 /**
  * The shared tables, in dependency order so every `REFERENCES` names a table
@@ -754,6 +756,76 @@ const MIGRATION_13 = `
 `;
 
 /**
+ * Moves every `download_client` credential into `secret` and leaves a
+ * `randomUUID()` naming it.
+ *
+ * A function rather than a SQL string because it generates a name per
+ * credential. It runs inside the savepoint `migrateHostWith` opens, so a
+ * throw part-way through leaves neither a half-moved credential nor a
+ * recorded version -- which is the only reason it is safe to read, insert,
+ * update and drop in sequence.
+ *
+ * `username` is untouched: it is not a credential. `api_key` and `password`
+ * are dropped, so the credential exists in exactly one place afterwards.
+ *
+ * **No credential value appears in any log line or error here.** The `name`
+ * of a client is safe to name; its `api_key` is not. Nothing in this function
+ * logs at all, and the value it moves is passed straight from the row it was
+ * read out of into `writeSecretValue`.
+ *
+ * The write goes through `secrets/store.ts`'s `writeSecretValue` rather than
+ * a local `INSERT`, for the reason that module's own doc gives: it is the one
+ * place in `packages/host/src` allowed to name `secret.value` in SQL, and
+ * `scripts/check-test-hygiene.ts` enforces that at build time. A second
+ * writer here would be a build failure, and answering it by widening
+ * `CREDENTIAL_ALLOW_LIST` would exempt every query anyone later added to
+ * this 900-line file. The coupling that buys -- a migration calling into
+ * today's code -- is safe here because `secret`'s shape is fixed by
+ * migration 13 and this migration runs once.
+ *
+ * SQLite is 3.53.4 behind `node:sqlite`, and `ADD COLUMN`/`DROP COLUMN` were
+ * measured to work on a table carrying an index on a different column
+ * (design spec §2.6b), so no table rebuild is needed. `download_client`'s
+ * only index is `download_client_name`, on `name`.
+ */
+function migration14(db: DatabaseSync): void {
+  db.exec(`
+    ALTER TABLE download_client ADD COLUMN api_key_secret_name  TEXT;
+    ALTER TABLE download_client ADD COLUMN password_secret_name TEXT;
+  `);
+
+  const rows = db.prepare('SELECT id, api_key, password FROM download_client').all();
+  const setApiKeyName = db.prepare('UPDATE download_client SET api_key_secret_name = ? WHERE id = ?');
+  const setPasswordName = db.prepare('UPDATE download_client SET password_secret_name = ? WHERE id = ?');
+  const at = Date.now();
+
+  for (const row of rows) {
+    const id = Number((row as { id: unknown }).id);
+    const apiKey = (row as { api_key: unknown }).api_key;
+    const password = (row as { password: unknown }).password;
+
+    // An empty string is not a credential -- it is what a blank form field
+    // saves as -- so it gets no `secret` row and no name, exactly as
+    // `readClientConfig` has always folded it to "absent".
+    if (typeof apiKey === 'string' && apiKey !== '') {
+      const name = randomUUID();
+      writeSecretValue(db, name, apiKey, at);
+      setApiKeyName.run(name, id);
+    }
+    if (typeof password === 'string' && password !== '') {
+      const name = randomUUID();
+      writeSecretValue(db, name, password, at);
+      setPasswordName.run(name, id);
+    }
+  }
+
+  db.exec(`
+    ALTER TABLE download_client DROP COLUMN api_key;
+    ALTER TABLE download_client DROP COLUMN password;
+  `);
+}
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -772,6 +844,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 11, up: (db) => db.exec(MIGRATION_11) },
   { version: 12, up: (db) => db.exec(MIGRATION_12) },
   { version: 13, up: (db) => db.exec(MIGRATION_13) },
+  { version: 14, up: (db) => migration14(db) },
 ];
 
 /**

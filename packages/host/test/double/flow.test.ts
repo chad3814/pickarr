@@ -37,6 +37,7 @@ import {
 } from './plugin.ts';
 import type { FakeParserService, LookupEntry, LookupImage, LookupPerson, ParserScript } from './plugin.ts';
 import { gifBytes } from '../support/gif.ts';
+import type { Secrets } from '../../src/secrets/instance.ts';
 
 /** Where every run's clock starts, so expected `run_at` values can be written down. */
 const START = 1_000;
@@ -55,6 +56,17 @@ function createClock(): Clock {
 /** A `DownloadClients` that fails loudly: the new-items flow submits nothing. */
 const unusedDownloads: DownloadClients = {
   submit: async () => { throw new Error('downloads.submit: not used by these tests'); },
+};
+/**
+ * A `Secrets` that fails loudly if a test never meant to resolve a
+ * credential. No test in this file reads a `download_client` row through
+ * `readClientConfig`, so nothing here should reach the secrets chain --
+ * `clients/config.test.ts` and `clients/reconcile-job.test.ts` are where a
+ * real one is exercised.
+ */
+const unusedSecrets: Secrets = {
+  get: async () => { throw new Error('secrets.get: not used by this test'); },
+  saveSecret: () => { throw new Error('secrets.saveSecret: not used by this test'); },
 };
 
 /**
@@ -227,6 +239,7 @@ function setup(
       fetch: opts.imagesFetch ? combineFetch(service.fetch, opts.imagesFetch) : service.fetch,
     }),
     downloads: unusedDownloads,
+    secrets: unusedSecrets,
     artworkDir: opts.artworkDir ?? unusedArtworkDir,
     now: () => clock.now(),
     timers,
@@ -1267,6 +1280,7 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
     db,
     fetch: createHostFetch({ fetch: hangOnFirstRequest(service.fetch) }),
     downloads: unusedDownloads,
+    secrets: unusedSecrets,
     artworkDir: unusedArtworkDir,
     now: () => clock.now(),
     timers: dyingTimers.timers,
@@ -1302,6 +1316,7 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
     db,
     fetch: createHostFetch({ fetch: service.fetch }),
     downloads: unusedDownloads,
+    secrets: unusedSecrets,
     artworkDir: unusedArtworkDir,
     now: () => clock.now(),
     timers: restartedTimers.timers,

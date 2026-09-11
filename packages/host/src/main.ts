@@ -21,6 +21,8 @@ import { DEFAULT_PORT, createReadServer } from './api/server.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
+import { createSecrets } from './secrets/instance.ts';
+import { secretsConfigSchema } from './config/schemas.ts';
 import { ensureAuthSecret } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase } from './db/open.ts';
@@ -467,7 +469,12 @@ export async function main(
 
   const artworkDir = resolveArtworkDir(databasePath);
   const fetch = createHostFetch({ fetch: globalThis.fetch });
-  const downloads = createDownloadClients({ raw, fetch, now: () => Date.now(), log });
+  // The secrets directory comes from the config file's `secrets` namespace,
+  // whose schema carries the only copy of the default. Read through the
+  // schema rather than restated as a literal here: a default in two places
+  // is one that can disagree with itself.
+  const secrets = createSecrets({ raw, baseDir: secretsConfigSchema.parse(undefined).baseDir });
+  const downloads = createDownloadClients({ raw, fetch, secrets, now: () => Date.now(), log });
 
   // Two shapes, not one object literal with `timers` always present:
   // `exactOptionalPropertyTypes` is on, so an explicit `timers: undefined`
@@ -479,6 +486,7 @@ export async function main(
       db,
       fetch,
       downloads,
+      secrets,
       now: () => Date.now(),
       artworkDir,
     })
@@ -487,6 +495,7 @@ export async function main(
       db,
       fetch,
       downloads,
+      secrets,
       now: () => Date.now(),
       artworkDir,
       timers: deps.timers,

@@ -11,9 +11,16 @@ export const downloadClient = sqliteTable('download_client', {
   name: text('name').notNull(),
   type: text('type').notNull(),
   url: text('url').notNull(),
-  apiKey: text('api_key'),
+  // The `secret` name for this client's api key, not the key -- a
+  // `randomUUID()` resolved through `Secrets.get`. Nullable: a row
+  // authenticating with a username and password has none. Migration 14
+  // replaced the credential columns with these, so a credential lives in
+  // `secret` and in nothing else.
+  apiKeySecretName: text('api_key_secret_name'),
   username: text('username'),
-  password: text('password'),
+  // The `secret` name for this client's password. `username` beside it is
+  // plaintext on purpose: a username is not a credential.
+  passwordSecretName: text('password_secret_name'),
   category: text('category').notNull(),
   importMode: text('import_mode').notNull(),
   createdAt: integer('created_at').notNull(),

@@ -31,9 +31,12 @@ function readFeedRow(raw: DatabaseSync, feedId: number): FeedRow {
 }
 
 /**
- * Only `id` and `type` -- never `api_key`, `username` or `password`. Those
- * columns exist on `download_client` but nothing here compares against
- * them, so nothing here selects them.
+ * Only `id` and `type` -- never `api_key_secret_name`, `username` or
+ * `password_secret_name`. Those columns exist on `download_client` but
+ * nothing here compares against them, so nothing here selects them. Since
+ * migration 14 the first and last name a `secret` rather than holding a
+ * credential, which does not widen what this module may read: resolving a
+ * name is `readClientConfig`'s job alone.
  */
 interface ClientTypeRow {
   id: number;

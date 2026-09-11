@@ -37,6 +37,14 @@
  * that has never been opened by the host process -- seeding is meant to
  * happen before the first boot, not only after it.
  *
+ * **The credential goes into `secret`, and the row gets a name for it.**
+ * Since migration 14 `download_client` has no credential column at all:
+ * this script generates a `randomUUID()`, writes the value under it through
+ * `secrets/store.ts`'s `writeSecretValue` -- the one module allowed to name
+ * `secret.value` in SQL -- and writes the uuid into
+ * `api_key_secret_name` or `password_secret_name`. `readClientConfig`
+ * resolves it back at read time, so nothing about the flags above changed.
+ *
  * `download_client.name` carries a `UNIQUE` index (see `db/schema.ts`), so
  * re-seeding a name already on file fails loudly, naming the existing
  * row's id, rather than silently overwriting its url, credential or
@@ -44,6 +52,7 @@
  * surprise than a script that refuses. Delete the row first, or choose a
  * different name, to reseed it.
  */
+import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 // Reached by path rather than by package name, exactly as `seed-feed.ts`
 // reaches `@pickarr/host`: `@pickarr/host` exports only its application
@@ -51,6 +60,7 @@ import type { DatabaseSync } from 'node:sqlite';
 // surface nothing ships against.
 import { migrateHost } from '../packages/host/src/db/migrate.ts';
 import { openDatabase } from '../packages/host/src/db/open.ts';
+import { writeSecretValue } from '../packages/host/src/secrets/store.ts';
 
 type ClientType = 'torrent' | 'nzb';
 type Implementation = 'qbittorrent' | 'sabnzbd';
@@ -214,18 +224,36 @@ async function main(): Promise<void> {
   }
 
   const now = Date.now();
+
+  // The value goes into `secret` under a generated name, and the row gets
+  // only the name. Written before the row that references it, so a failure
+  // leaves at worst an unreferenced secret rather than a client row naming
+  // a secret that does not exist -- the second of those is a client that
+  // reads as configured and fails on every request.
+  let apiKeySecretName: string | null = null;
+  if (credential.apiKey !== null) {
+    apiKeySecretName = randomUUID();
+    writeSecretValue(raw, apiKeySecretName, credential.apiKey, now);
+  }
+  let passwordSecretName: string | null = null;
+  if (credential.password !== null) {
+    passwordSecretName = randomUUID();
+    writeSecretValue(raw, passwordSecretName, credential.password, now);
+  }
+
   const result = raw.prepare(`
     INSERT INTO download_client
-      (name, type, implementation, url, api_key, username, password, category, import_mode, created_at, updated_at)
+      (name, type, implementation, url, api_key_secret_name, username, password_secret_name,
+       category, import_mode, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     options.name,
     options.type,
     options.implementation,
     options.baseUrl,
-    credential.apiKey,
+    apiKeySecretName,
     options.username,
-    credential.password,
+    passwordSecretName,
     options.category,
     options.importMode,
     now,

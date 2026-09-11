@@ -13,6 +13,7 @@ import { createFeedReader } from './feeds/reader.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
 import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
 import { createReconcileHandler, scheduleReconcile as scheduleReconcileJob } from './clients/reconcile-job.ts';
+import type { Secrets } from './secrets/instance.ts';
 import { HOST_PLUGIN_ID } from './host-id.ts';
 import { PluginNotRegisteredError } from './errors.ts';
 import { ownerPluginId } from './db/owner.ts';
@@ -165,6 +166,18 @@ export function createHost(deps: {
   // call to that hostname is paced by.
   fetch: QueuedFetch;
   downloads: DownloadClients;
+  /**
+   * The secrets subsystem, threaded through to `createReconcileHandler`'s
+   * own `secrets` dependency so a reconcile tick can resolve the `secret`
+   * name its client row holds into the credential its adapter sends.
+   *
+   * Explicit rather than built here from `raw`: `createSecrets` needs the
+   * secrets directory, which comes from the config file, and deciding it
+   * here would put the chain's configuration in a second place. Required
+   * rather than optional for the same reason a default `artworkDir` was
+   * refused below -- a default would hide the wiring.
+   */
+  secrets: Secrets;
   now: () => number;
   /**
    * Where `MediaWriter` caches artwork bytes it measures on the way in.
@@ -397,6 +410,7 @@ export function createHost(deps: {
   const reconcileHandler: JobHandler = createReconcileHandler({
     raw: deps.raw,
     fetch: deps.fetch,
+    secrets: deps.secrets,
     now: deps.now,
     log: hostLog,
     deliver: deliverToPlugin,
