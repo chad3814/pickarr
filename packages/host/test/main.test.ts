@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -15,6 +15,7 @@ import type { ReadServer, ReadServerDeps } from '../src/api/server.ts';
 import { DEFAULT_HOST, DEFAULT_PORT, createReadServer } from '../src/api/server.ts';
 import { isClaimed } from '../src/auth/claim.ts';
 import { AUTH_SECRET_KEY, CLAIM_TOKEN_KEY, readHostState, writeHostState } from '../src/db/host-state.ts';
+import type { HostSettings } from '../src/main.ts';
 import {
   createPluginIdForType,
   createShutdown,
@@ -24,6 +25,7 @@ import {
   resolvePublicUrl,
   resolveReadHost,
   resolveReadPort,
+  resolveSettings,
   scheduleKnownFeeds,
 } from '../src/main.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
@@ -151,6 +153,11 @@ const MAIN_VARIABLES = [
   'PICKARR_READ_API_PORT',
   'PICKARR_READ_API_HOST',
   'PICKARR_PUBLIC_URL',
+  // Cleared for the same reason as the rest: a stray value in the shell
+  // would point `resolveSettings` at a real file this suite never wrote,
+  // and every test below relies on the default path resolving to no file
+  // (`readConfigDocument`'s `{}` for `ENOENT`) unless it sets this itself.
+  'PICKARR_CONFIG',
   // `main` reads this one too, and it is the one whose leaking in from the
   // shell would be hardest to diagnose: set to anything, it becomes the
   // signing secret in place of the persisted row, so a developer who happens
@@ -165,13 +172,13 @@ const MAIN_VARIABLES = [
  * left `PICKARR_DATABASE` pointing at a temporary directory would corrupt
  * every test after it in this file.
  *
- * **The other four are deleted rather than left alone**, and `env` sets only
+ * **The other five are deleted rather than left alone**, and `env` sets only
  * what a test is actually asserting about. `main` reads
- * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL` and
- * `BETTER_AUTH_SECRET`, so a value one of them happened to hold in the shell
- * that started the run would change what these tests observe -- and the
- * failure would read as a defect in `main` rather than as an environment
- * nobody cleared.
+ * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL`,
+ * `PICKARR_CONFIG` and `BETTER_AUTH_SECRET`, so a value one of them happened
+ * to hold in the shell that started the run would change what these tests
+ * observe -- and the failure would read as a defect in `main` rather than as
+ * an environment nobody cleared.
  *
  * **Every boot is captured, whether its test reads a line or not.** An
  * unclaimed boot prints a real claim token, which is `main`'s one credential
@@ -601,11 +608,12 @@ test('main starts the server after the host and closes it before stopping', asyn
     assert.equal(built.length, 1, 'exactly one listener, not one per plugin or per feed');
     const serverDeps = built[0];
     assert.ok(serverDeps, 'the server was built with deps main composed');
-    assert.equal(serverDeps.port, DEFAULT_PORT, 'the documented default, with PICKARR_READ_API_PORT unset');
+    assert.equal(serverDeps.port, DEFAULT_PORT, 'the documented default, with PICKARR_READ_API_PORT unset and no config file');
     assert.equal(
       serverDeps.host,
-      undefined,
-      'and an unset PICKARR_READ_API_HOST is passed through as undefined, which is the listener\'s own DEFAULT_HOST',
+      DEFAULT_HOST,
+      'and an unset PICKARR_READ_API_HOST resolves through the config file\'s own default -- serverConfigSchema\'s '
+      + '\'0.0.0.0\', the same value DEFAULT_HOST names -- rather than being passed through as undefined',
     );
     assert.equal(
       serverDeps.pluginIdForType('movie'),
@@ -949,14 +957,75 @@ test('main binds PICKARR_READ_API_HOST and hands PICKARR_PUBLIC_URL to auth as i
   }
 });
 
-test('resolveReadHost reads PICKARR_READ_API_HOST, and an unset one leaves the listener its default', () => {
+/**
+ * Writes `document` to a temp config file, points `PICKARR_CONFIG` at it,
+ * calls `resolveSettings`, and hands the result to `body` -- then cleans up
+ * both the file and the environment variable, even when `body` rejects, so
+ * one test's config file can never leak into the next.
+ */
+async function withConfigFile(
+  document: Readonly<Record<string, unknown>>,
+  body: (settings: HostSettings) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-settings-'));
+  const path = join(dir, 'pickarr.config.json');
+  await writeFile(path, JSON.stringify(document));
+  const previous = process.env['PICKARR_CONFIG'];
+  process.env['PICKARR_CONFIG'] = path;
+  try {
+    const settings = await resolveSettings(process.env);
+    await body(settings);
+  } finally {
+    if (previous === undefined) delete process.env['PICKARR_CONFIG'];
+    else process.env['PICKARR_CONFIG'] = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('the config file supplies host, port and database path when no variable does', async () => {
+  await withConfigFile({ server: { host: '127.0.0.1', port: 9100 }, database: { path: '/tmp/from-file.db' } }, async (settings) => {
+    assert.equal(settings.readHost, '127.0.0.1');
+    assert.equal(settings.port, 9100);
+    assert.equal(settings.databasePath, '/tmp/from-file.db');
+  });
+});
+
+test('an environment variable beats the file', async (t) => {
+  process.env['PICKARR_READ_API_PORT'] = '9200';
+  process.env['PICKARR_DATABASE'] = '/tmp/from-env.db';
+  t.after(() => { delete process.env['PICKARR_READ_API_PORT']; delete process.env['PICKARR_DATABASE']; });
+  await withConfigFile({ server: { port: 9100 }, database: { path: '/tmp/from-file.db' } }, async (settings) => {
+    assert.equal(settings.port, 9200, 'the variable must win');
+    assert.equal(settings.databasePath, '/tmp/from-env.db', 'the variable must win');
+  });
+});
+
+test('with neither a variable nor a file, the schema defaults apply', async () => {
+  await withConfigFile({}, async (settings) => {
+    assert.equal(settings.readHost, '0.0.0.0');
+    assert.equal(settings.port, 8787);
+    assert.equal(settings.databasePath, '/config/pickarr.db');
+  });
+});
+
+test('a config file with a publicUrl carrying a path refuses the boot', async () => {
+  await assert.rejects(
+    () => withConfigFile({ server: { publicUrl: 'http://host/pickarr' } }, async () => {}),
+    /publicUrl/,
+    'the file must not be able to reintroduce the auth slice B1 failure',
+  );
+});
+
+test('resolveReadHost reads PICKARR_READ_API_HOST, and validates the string an operator set', () => {
   // Taken as an argument rather than read from `process.env` inside, the same
-  // way `resolveReadPort` is and for the same reason.
-  assert.equal(resolveReadHost(undefined), undefined, 'unset asks the listener for its own default, which is every interface');
-  assert.equal(resolveReadHost(''), undefined, 'and an empty variable is an unset one, exactly as it is for the port');
+  // way `resolveReadPort` is and for the same reason. `resolveSettings` is
+  // what decides whether the operator said anything at all -- this function
+  // is called only once that is already true, which is why it no longer has
+  // an "unset" case of its own; `resolveSettings`'s own precedence tests
+  // above cover that branch now.
   assert.equal(resolveReadHost('127.0.0.1'), '127.0.0.1', 'a configured interface passes through');
   assert.equal(resolveReadHost('::1'), '::1', 'including a v6 one: what can actually be bound is the listener\'s question, not this function\'s');
-  assert.equal(DEFAULT_HOST, '0.0.0.0', 'and the default an unset variable leaves in place is every interface');
+  assert.equal(DEFAULT_HOST, '0.0.0.0', 'and the default an unset variable leaves in place -- via the config file\'s own default now -- is every interface');
 });
 
 test('resolvePublicUrl reads PICKARR_PUBLIC_URL, and refuses anything that is not an http origin', () => {
@@ -1019,12 +1088,16 @@ test('resolvePublicUrl reads PICKARR_PUBLIC_URL, and refuses anything that is no
   }
 });
 
-test('resolveReadPort reads PICKARR_READ_API_PORT, defaults to 8787, and refuses anything that is not a port', () => {
+test('resolveReadPort reads PICKARR_READ_API_PORT, and refuses anything that is not a port', () => {
   // Taken as an argument rather than read from `process.env` inside, so this
-  // asserts the precedence without mutating the environment every other test
-  // in this process shares.
-  assert.equal(resolveReadPort(undefined), DEFAULT_PORT, 'unset means the documented default');
-  assert.equal(resolveReadPort(''), DEFAULT_PORT, 'and an empty variable is an unset one');
+  // asserts validation without mutating the environment every other test in
+  // this process shares. The "unset means DEFAULT_PORT" branch this test used
+  // to assert is gone along with the function's own default: `resolveSettings`
+  // now decides whether the operator said anything at all, and calls this
+  // only once that is already true -- `schemas.test.ts` asserts the default
+  // that now lives solely in `serverConfigSchema`, and the precedence tests
+  // above assert `resolveSettings` reaches for it, so DEFAULT_PORT here is
+  // only the value both must resolve to.
   assert.equal(resolveReadPort('9999'), 9999);
   assert.equal(resolveReadPort('1'), 1);
   assert.equal(resolveReadPort('65535'), 65535);
