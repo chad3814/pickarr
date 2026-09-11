@@ -5,12 +5,21 @@
  * plugins: the order the outcomes are read in is a correctness property, not a
  * style, and `PluginContext`'s own documentation warns about two of them.
  */
-import type { DatabaseSync } from 'node:sqlite';
-import type { PluginContext } from '@pickarr/contract';
-import { eq } from 'drizzle-orm';
-import type { drizzle } from 'drizzle-orm/node-sqlite';
+import { DatabaseSync } from 'node:sqlite';
+import type { SQLOutputValue } from 'node:sqlite';
+import type {
+  JobHandler,
+  MediaPlugin,
+  MediaType,
+  Migration,
+  PluginContext,
+} from '@pickarr/contract';
+import { eq, inArray } from 'drizzle-orm';
+import { drizzle as createDrizzle } from 'drizzle-orm/node-sqlite';
+import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
-import type { lookupTable } from './table.ts';
+import { MAX_BATCH, createLookupClient } from './client.ts';
+import { lookupTable, lookupTableMigration } from './table.ts';
 
 export const LOOKUP_JOB = 'lookup';
 export const POLL_JOB = 'poll';
@@ -28,7 +37,7 @@ export const POLL_DELAY_MS = 30_000;
  */
 export const MAX_POLLS = 20;
 
-export type LookupDb = ReturnType<typeof drizzle>;
+export type LookupDb = ReturnType<typeof createDrizzle>;
 export type LookupStateTable = ReturnType<typeof lookupTable>;
 
 /** What a plugin is handed for its own rows. `raw` is already narrowed. */
@@ -207,4 +216,294 @@ export async function applyEnvelope(
 
   // 5. The answer.
   await applyResolved(envelope, envelope.media, target, deps);
+}
+
+export interface LookupPluginSpec {
+  /** Also the required prefix for every table this plugin declares. */
+  readonly id: string;
+  readonly mediaType: MediaType;
+  /** The wire category. `movies` for `mediaType: 'movie'` -- the one asymmetry. */
+  readonly category: LookupCategory;
+  /**
+   * This plugin's own migrations, from version 2 up: version 1 is the engine's
+   * state table, prepended by `createLookupPlugin`.
+   */
+  readonly migrations: readonly Migration[];
+  /** Job handlers beyond the engine's `lookup` and `poll`. */
+  readonly jobs?: Readonly<Record<string, JobHandler>>;
+  /** The plugin's own rows for one resolved answer. Must be idempotent. */
+  apply(args: ApplyArgs): Promise<void>;
+}
+
+export interface LookupPluginDeps {
+  now: () => number;
+  baseUrl: string;
+  resolveSecret: SecretResolver;
+}
+
+/**
+ * `PluginContext.db` is `unknown` by contract: the host has never seen this
+ * plugin's schema, so it cannot hand back a handle typed to it. Narrowed once,
+ * here, at the cost of a runtime check -- there is no compile-time route from
+ * `unknown` to a connection.
+ */
+function asDatabase(db: unknown): DatabaseSync {
+  if (!(db instanceof DatabaseSync)) {
+    throw new TypeError('openmetadata: ctx.db is not a node:sqlite DatabaseSync');
+  }
+  return db;
+}
+
+/** One Drizzle handle per connection, remembered rather than rebuilt per entry point. */
+const handles = new WeakMap<DatabaseSync, LookupDb>();
+
+function ownTables(ctx: PluginContext): { raw: DatabaseSync; db: LookupDb } {
+  const raw = asDatabase(ctx.db);
+  const existing = handles.get(raw);
+  if (existing !== undefined) return { raw, db: existing };
+  const db = createDrizzle({ client: raw });
+  handles.set(raw, db);
+  return { raw, db };
+}
+
+function readInteger(row: Record<string, SQLOutputValue>, column: string): number {
+  const value = row[column];
+  if (typeof value !== 'number') throw new TypeError(`openmetadata: column ${column} is not an integer`);
+  return value;
+}
+
+function readText(row: Record<string, SQLOutputValue>, column: string): string {
+  const value = row[column];
+  if (typeof value !== 'string') throw new TypeError(`openmetadata: column ${column} is not text`);
+  return value;
+}
+
+/**
+ * The filenames to look up, in the caller's order.
+ *
+ * Hand-written SQL against a table this plugin does not own, and still
+ * `ctx.db` rather than `ctx.read`: `MediaReader` reaches rss items only
+ * *through* a media item (`rssItemsFor`), and these have none yet -- they are
+ * exactly the items a poll just delivered and this lookup is about to
+ * identify.
+ *
+ * The caller's order rather than the database's, because that order decides
+ * which of two items claiming one provider reference wins the dedup.
+ */
+function readRssItems(raw: DatabaseSync, ids: readonly number[]): { id: number; filename: string }[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = raw.prepare(`SELECT id, filename FROM rss_item WHERE id IN (${placeholders})`).all(...ids);
+  const byId = new Map(rows.map((row) => [readInteger(row, 'id'), readText(row, 'filename')]));
+  return ids.map((id) => {
+    const filename = byId.get(id);
+    if (filename === undefined) throw new Error(`openmetadata: rss item ${id} does not exist`);
+    return { id, filename };
+  });
+}
+
+function readLookupPayload(payload: unknown): number[] {
+  if (typeof payload !== 'object' || payload === null || !('rssItemIds' in payload)) {
+    throw new TypeError('openmetadata: a lookup payload must carry rssItemIds');
+  }
+  const ids: unknown = payload.rssItemIds;
+  if (!Array.isArray(ids)) throw new TypeError('openmetadata: rssItemIds is not an array');
+  return ids.map((id: unknown) => {
+    if (typeof id !== 'number') throw new TypeError('openmetadata: rssItemIds holds a non-number');
+    return id;
+  });
+}
+
+function readPollPayload(payload: unknown): { lookupId: string; rssItemId: number; polls: number } {
+  if (typeof payload !== 'object' || payload === null
+    || !('lookupId' in payload) || !('rssItemId' in payload) || !('polls' in payload)) {
+    throw new TypeError('openmetadata: a poll payload must carry lookupId, rssItemId and polls');
+  }
+  const { lookupId, rssItemId, polls } = payload;
+  if (typeof lookupId !== 'string' || typeof rssItemId !== 'number' || typeof polls !== 'number') {
+    throw new TypeError('openmetadata: a poll payload must carry lookupId, rssItemId and polls');
+  }
+  return { lookupId, rssItemId, polls };
+}
+
+/**
+ * The url without its query, for a log line.
+ *
+ * The key travels in a header and never in a url, so this is not redaction of
+ * a credential -- it is keeping a log line short and stable. `@pickarr/host`'s
+ * own `redactUrl` does the credential case, and this package cannot import it.
+ */
+function loggableUrl(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return '(an unparseable url)';
+  }
+}
+
+/**
+ * Runs one request, naming the status when it fails.
+ *
+ * `FetchFailedError` carries a numeric `status` and is not exported to
+ * plugins, so the status is read structurally rather than by `instanceof`: a
+ * 401 (a bad or revoked key), a 429 and a 503 are all worth telling apart in a
+ * log, and none of them is worth swallowing -- the throw is what fails the job
+ * and puts it on the runner's backoff curve.
+ */
+async function logged<T>(ctx: PluginContext, baseUrl: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    const status = error instanceof Error && 'status' in error && typeof error.status === 'number'
+      ? error.status
+      : null;
+    ctx.log('a lookup request failed', {
+      url: loggableUrl(baseUrl),
+      status: status ?? 'none',
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+/**
+ * A complete `MediaPlugin` from a spec.
+ *
+ * Everything the three media types share is here; what they do not share is
+ * `spec.apply` and `spec.migrations`. See the slice's spec for why the flow is
+ * shared rather than copied: the branch order in `applyEnvelope` is the part
+ * that is subtle, and three copies of it would be three chances to get it
+ * wrong.
+ */
+export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDeps): MediaPlugin {
+  const table = lookupTable(spec.id);
+
+  function envelopeDeps(ctx: PluginContext, raw: DatabaseSync, db: LookupDb): EnvelopeDeps {
+    return {
+      pluginId: spec.id,
+      ctx,
+      raw,
+      db,
+      table,
+      now: deps.now(),
+      apply: spec.apply,
+    };
+  }
+
+  function clientFor(ctx: PluginContext, signal?: AbortSignal) {
+    // Two shapes rather than one literal with `signal: undefined`:
+    // `exactOptionalPropertyTypes` makes those different things.
+    return signal === undefined
+      ? createLookupClient({ fetch: ctx.fetch, baseUrl: deps.baseUrl, resolveSecret: deps.resolveSecret })
+      : createLookupClient({ fetch: ctx.fetch, baseUrl: deps.baseUrl, resolveSecret: deps.resolveSecret, signal });
+  }
+
+  const lookup: JobHandler = async (job, ctx, signal) => {
+    const { raw, db } = ownTables(ctx);
+    const items = readRssItems(raw, readLookupPayload(job.payload));
+    const answers = await logged(ctx, deps.baseUrl, () =>
+      clientFor(ctx, signal).batch(spec.category, items.map((item) => item.filename)));
+
+    for (const [index, item] of items.entries()) {
+      const envelope = answers[index];
+      if (envelope === undefined) {
+        // `batch` already refuses a length mismatch; this is the compiler's
+        // own question about an indexed read, answered rather than asserted.
+        throw new Error(`openmetadata: no answer for "${item.filename}"`);
+      }
+      // eslint-disable-next-line no-await-in-loop -- answers are applied in the order they were asked for, because that order decides which of two items claiming one provider ref wins the dedup
+      await applyEnvelope(
+        envelope,
+        { rssItemId: item.id, filename: item.filename, polls: 0 },
+        envelopeDeps(ctx, raw, db),
+      );
+    }
+  };
+
+  const poll: JobHandler = async (job, ctx, signal) => {
+    const { raw, db } = ownTables(ctx);
+    // The rss item comes from the payload, never from `job.id`: both are
+    // numbers, so the wrong one compiles and quietly resolves a stranger.
+    const { lookupId, rssItemId, polls } = readPollPayload(job.payload);
+    const [item] = readRssItems(raw, [rssItemId]);
+    if (item === undefined) throw new Error(`openmetadata: rss item ${rssItemId} does not exist`);
+    const envelope = await logged(ctx, deps.baseUrl, () => clientFor(ctx, signal).poll(lookupId));
+    // The same branch as the batch, so a poll that is still partial enqueues
+    // the next one through the very code that enqueued this one.
+    await applyEnvelope(
+      envelope,
+      { rssItemId, filename: item.filename, polls },
+      envelopeDeps(ctx, raw, db),
+    );
+  };
+
+  return {
+    id: spec.id,
+    mediaType: spec.mediaType,
+    migrations: [lookupTableMigration(spec.id), ...spec.migrations],
+    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll },
+
+    async onNewRssItems(ids, ctx) {
+      if (ids.length === 0) return;
+      const { db } = ownTables(ctx);
+      const at = deps.now();
+
+      await db.insert(table).values(ids.map((rssItemId) => ({
+        rssItemId,
+        mediaItemId: null,
+        lookupJobId: null,
+        lookupId: null,
+        providerRef: null,
+        confidence: null,
+        createdAt: at,
+        updatedAt: at,
+      })));
+
+      // One job per chunk the service will accept, so a poll that delivered
+      // three hundred names does not enqueue a job that cannot be sent as one
+      // request. `enqueue`'s return is recorded rather than discarded: a job
+      // id nothing keeps is a job nobody can trace back to the rows it is
+      // identifying.
+      for (let start = 0; start < ids.length; start += MAX_BATCH) {
+        const chunk = ids.slice(start, start + MAX_BATCH);
+        // eslint-disable-next-line no-await-in-loop -- each chunk's job id is recorded on its own rows before the next chunk is enqueued, so a crash between chunks leaves no row pointing at a job that covers different items
+        const jobId = await ctx.jobs.enqueue({ kind: LOOKUP_JOB, payload: { rssItemIds: [...chunk] } });
+        // eslint-disable-next-line no-await-in-loop -- see above
+        await db.update(table)
+          .set({ lookupJobId: jobId, updatedAt: at })
+          .where(inArray(table.rssItemId, [...chunk]));
+      }
+    },
+
+    async onDownloadedFile(file, ctx) {
+      // Importing is out of scope for this slice (the spec's §1.2). Logged
+      // rather than thrown: a plugin that failed a job for work it was never
+      // asked to do would dead-letter every completed download.
+      ctx.log('a download finished', { path: file.path, sizeBytes: file.sizeBytes });
+    },
+
+    async onDownloadRequest(rssItemId, ctx) {
+      const { raw } = ownTables(ctx);
+      const row = raw.prepare(
+        `SELECT rss_feed.download_client_id AS download_client_id
+           FROM rss_item JOIN rss_feed ON rss_feed.id = rss_item.feed_id
+          WHERE rss_item.id = ?`,
+      ).get(rssItemId);
+      const clientId = row === undefined ? null : (row as { download_client_id: SQLOutputValue }).download_client_id;
+      if (typeof clientId !== 'number') {
+        // The column's meaning is "the host's default client", and
+        // `DownloadSubmission.downloadClientId` is a required number with no
+        // way to say that. Picking one here would be a plugin inventing host
+        // policy, so the gap is left visible as a failed job -- see the
+        // spec's §6.
+        throw new Error(
+          `openmetadata: rss item ${rssItemId} is in a feed that names no download client, `
+          + 'and a submission cannot say "the default"',
+        );
+      }
+      const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: clientId });
+      ctx.log('submitted a download', { rssItemId, reference });
+    },
+  };
 }
