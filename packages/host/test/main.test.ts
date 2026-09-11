@@ -23,6 +23,7 @@ import {
   main,
   resolveArtworkDir,
   resolveConfigPath,
+  resolveOpenmetadataUrl,
   resolvePublicUrl,
   resolveReadHost,
   resolveReadPort,
@@ -1296,4 +1297,14 @@ test('formatLogDetail writes key=value pairs, and cannot spill an object it is h
     'row=[object Object]',
     'a row hands over nothing, not even its keys',
   );
+});
+
+test('resolveOpenmetadataUrl defaults, and refuses what is not an origin', () => {
+  assert.equal(resolveOpenmetadataUrl(undefined), 'https://openmetadata.nexus');
+  assert.equal(resolveOpenmetadataUrl(''), 'https://openmetadata.nexus');
+  assert.equal(resolveOpenmetadataUrl('https://metadata.example.test'), 'https://metadata.example.test');
+  // A trailing slash is trimmed, so nothing downstream builds a double slash.
+  assert.equal(resolveOpenmetadataUrl('https://metadata.example.test/'), 'https://metadata.example.test');
+  assert.throws(() => resolveOpenmetadataUrl('metadata.example.test'), /PICKARR_OPENMETADATA_URL/);
+  assert.throws(() => resolveOpenmetadataUrl('https://metadata.example.test/api'), /PICKARR_OPENMETADATA_URL/);
 });

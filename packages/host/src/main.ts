@@ -375,6 +375,38 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
     secretsBaseDir: secrets.current.baseDir,
     config,
   };
+/** The lookup service's origin when nothing says otherwise. */
+const DEFAULT_OPENMETADATA_URL = 'https://openmetadata.nexus';
+
+/**
+ * `PICKARR_OPENMETADATA_URL`: where the lookup service lives, for a test
+ * deployment or a proxy. The default is the real service.
+ *
+ * **Refused at boot when it is not a bare http origin**, on the same
+ * reasoning as `resolvePublicUrl`: the plugins append `/api/v1/lookup` to
+ * this, so a value carrying a path builds a url nobody configured, and a
+ * value that is not a url at all fails every lookup job with a message about
+ * `fetch` rather than about configuration. A trailing slash is trimmed rather
+ * than refused -- it is what an operator types, and it changes nothing.
+ *
+ * Takes the variable's value rather than reading `process.env` itself, so it
+ * is testable without mutating the environment the whole process shares.
+ */
+export function resolveOpenmetadataUrl(configured: string | undefined): string {
+  if (configured === undefined || configured === '') return DEFAULT_OPENMETADATA_URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    throw new Error(`PICKARR_OPENMETADATA_URL is not a url: ${configured}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`PICKARR_OPENMETADATA_URL is not an http url: ${configured}`);
+  }
+  if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
+    throw new Error(`PICKARR_OPENMETADATA_URL must be an origin with no path: ${configured}`);
+  }
+  return parsed.origin;
 }
 
 /**
