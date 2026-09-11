@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readConfigDocument, writeConfigDocument } from '../../src/config/file.ts';
+import { errnoCode, readConfigDocument, writeConfigDocument } from '../../src/config/file.ts';
 
 const withDir = async (body: (dir: string) => Promise<void>) => {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-config-'));
@@ -112,4 +112,21 @@ test('two concurrent writes to the same path both settle, and the file ends up a
     const isSecond = JSON.stringify(written) === JSON.stringify({ server: { port: 9001 } });
     assert.ok(isFirst || isSecond, `must be exactly one of the two documents, got ${JSON.stringify(written)}`);
   });
+});
+
+test('errnoCode does not throw on a non-object rejection, and reads a string code off an object one', () => {
+  // errnoCode is exported specifically so this case can be tested directly:
+  // fs.promises always rejects with an Error in practice, so there is no way
+  // to provoke a non-object rejection through readConfigDocument or
+  // writeConfigDocument's public surface without stubbing node:fs/promises,
+  // which this repo has no existing convention for. This tests the module-
+  // private helper's own contract instead: for any input its `unknown`
+  // signature admits, it must return a string or undefined, never throw.
+  assert.equal(errnoCode(null), undefined);
+  assert.equal(errnoCode(undefined), undefined);
+  assert.equal(errnoCode('a string'), undefined);
+  assert.equal(errnoCode(42), undefined);
+  assert.equal(errnoCode({}), undefined);
+  assert.equal(errnoCode({ code: 42 }), undefined);
+  assert.equal(errnoCode({ code: 'EACCES' }), 'EACCES');
 });

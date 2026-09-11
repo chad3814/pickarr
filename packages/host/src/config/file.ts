@@ -13,9 +13,16 @@ export type ConfigDocument = Readonly<Record<string, unknown>>;
  * No message in this repo may carry one, so every fs call site reads only
  * the errno code off the error -- never its message, and never as `cause`,
  * which would smuggle the same path back in via a cause chain.
+ *
+ * A `catch` binding is `unknown`, not `NodeJS.ErrnoException`: `fs.promises`
+ * always rejects with an `Error` in practice, but nothing in the type or the
+ * call site guarantees it, and this repo does not cast to paper over that --
+ * it checks. Exported so its behaviour on a non-object rejection can be
+ * tested directly; the module's own call sites are the load-bearing use.
  */
-function errnoCode(error: unknown): string | undefined {
-  const code = (error as NodeJS.ErrnoException).code;
+export function errnoCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
+  const { code } = error;
   return typeof code === 'string' ? code : undefined;
 }
 
