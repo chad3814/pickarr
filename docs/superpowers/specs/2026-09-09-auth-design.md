@@ -272,6 +272,18 @@ key and a borrowed foreign key are not generated ids, so neither is the
 asymmetry being recorded here — that one is the library's, written down so it
 does not read as an accident.
 
+**The two `REFERENCES auth_user (id)` above declare no `ON DELETE`, where the
+library's own model declares `cascade`** for both `session.userId` and
+`account.userId` (`@better-auth/core`'s `db/get-tables.ts`). With
+`PRAGMA foreign_keys = ON` that is enforced the other way: measured, a direct
+`DELETE FROM auth_user` with one session and one account present is refused
+with errcode **787, FOREIGN KEY constraint failed**. Unreachable in this slice
+— `POST /api/auth/delete-user` answers 404, since `user.deleteUser` is not
+enabled — and invisible to `schema.test.ts`, which does not compare foreign-key
+targets. Recorded here and beside migration 12, for whichever slice enables
+account deletion: the choice then is a migration that adds the cascade, or
+deleting the children in application code.
+
 `auth_verification` is created despite nothing in §1.1's exclusions using it: the
 adapter expects the model to exist, and a table Better Auth may write to is
 cheaper than discovering at runtime which code path needs it.
@@ -473,3 +485,36 @@ the same problem and solves it the same way.
   `auth/instance.ts` beside the refusal message.
 - **`auth_verification` has no writer in this slice**, like `external_reference`
   before it. Recorded so the next reader does not hunt for one.
+- **Sign-up and sign-in answer a body containing `auth_session.token`**, which
+  is the column §4 forbids any module but the adapter from naming in SQL and
+  which `db/schema.ts` calls "the credential the cookie carries". Measured by
+  *shape* only — key names and value lengths, never a value — because
+  formatting one of those bodies is how the whole-branch review's own probe
+  printed a credential: `/sign-up/email` answers `{ token, user }` and
+  `/sign-in/email` answers `{ redirect, token, user }`, with `token` a
+  32-character string that is that column and the unsigned prefix of the
+  `better-auth.session_token` cookie. It breaks the letter of the plan's "no
+  HTTP response body may carry a session token", on the library's own routes.
+
+  Bounded, and also measured: the value alone grants nothing, because the guard
+  checks the *signed* cookie — `/api/media?type=movie` is 401 both with
+  `Authorization: Bearer <it>` and with it pasted into the cookie, and the
+  cookie is `HttpOnly; SameSite=Lax; Max-Age=604800; Path=/` with no `Secure`
+  (correct over `http:`). So this is a documented divergence rather than a live
+  leak — and it is the reason nothing in this repo may name one of those values
+  in a test, a message or a log line, even in passing.
+- **The library logs to the process console, past the host's own `log`, and the
+  log tells apart what the responses deliberately do not.** Four
+  `[Better Auth]` lines over seven auth requests, measured with all four
+  `console` methods captured: `Password is too short`, `Invalid password`,
+  `User not found`, `Reset password isn't enabled…`. `Invalid password` against
+  `User not found` is an account-existence oracle in this host's stdout, where
+  the HTTP answer is one message for both. A refused origin is logged as
+  `Invalid origin: <the Origin the caller sent>` — a url in a log line, which
+  this project's constraints forbid outright, emitted by the library rather
+  than by us. No credential appears in any of those lines (the signing secret,
+  the password, the claim token, any `$2[aby]$` run and any 32+ hex run were
+  each checked for as a boolean and each absent). Recorded beside the logger
+  wiring in `auth/instance.ts`; a `logger` option would silence or redirect
+  them and would also silence the diagnostics an operator needs, so the shape
+  of a fix is a decision rather than a tidy-up.

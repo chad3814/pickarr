@@ -443,8 +443,12 @@ export function createShutdown(
  * 6. The claim-token line, last of all, and only while the install is
  *    unclaimed. Last because it is the thing an owner starting this process
  *    has to read, and the bottom of the output is where they are looking --
- *    the auth slice's §6 asks for it on every boot, which is why it is a
- *    property of `isClaimed` rather than of having just generated a token.
+ *    the auth slice's §3 asks for it on every boot ("stored in `host_state`,
+ *    cleared once claimed, and re-printed on every boot while the install is
+ *    still unclaimed"), which is why it is a property of `isClaimed` rather
+ *    than of having just generated a token. Cited as §6 here until the
+ *    whole-branch review checked it: §6 is the configuration table and says
+ *    nothing about the claim token.
  *    It is also the **one place anything prints the token**, and nothing
  *    anywhere prints the signing secret.
  *

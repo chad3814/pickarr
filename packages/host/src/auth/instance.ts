@@ -69,6 +69,38 @@ export interface AuthDeps {
   baseURL: string;
   /** `PICKARR_PUBLIC_URL`: the externally reachable origin, when behind a proxy. */
   publicUrl: string | undefined;
+  /**
+   * The host's log, for the one line `createAuth` writes.
+   *
+   * **The library does not use it, and logs past it to the process console.**
+   * Measured (`console.log`/`info`/`warn`/`error` all captured, so nothing is
+   * inferred from which method it picks): seven auth requests produce four
+   * `[Better Auth]` lines -- `Password is too short`, `Invalid password`,
+   * `User not found` and `Reset password isn't enabled…` -- none of them
+   * through this function. Two consequences nothing said:
+   *
+   * - **`Invalid password` against `User not found` is an account-existence
+   *   oracle in this host's own stdout**, where the HTTP answer is
+   *   deliberately a single `401 {"message":"Invalid email or
+   *   password","code":"INVALID_EMAIL_OR_PASSWORD"}` for both (verified, along
+   *   with `request-password-reset` and `send-verification-email` answering
+   *   identically for a known and an unknown email). The "log the discriminant
+   *   alone" discipline this repo holds itself to does not reach the library's
+   *   logger.
+   * - **A refused origin is logged with the url in it**:
+   *   `ERROR [Better Auth]: Invalid origin: <the Origin the caller sent>`,
+   *   measured. That is a url in a log line, which is the one thing this
+   *   branch's constraints forbid outright -- it is the caller's own origin
+   *   rather than anything of this host's, and it is the library's logger
+   *   rather than ours, but it is in the journal.
+   *
+   * No credential appears in any of those lines: the signing secret, the
+   * password, the claim token, any `$2[aby]$` run and any 32+ hex run were all
+   * checked for as booleans and all absent. Passing a `logger` option to
+   * `betterAuth` could silence or redirect them; it is deliberately not done
+   * here, because doing it would also silence the diagnostics an operator
+   * needs, and the shape of a fix is a decision rather than a tidy-up.
+   */
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }
 

@@ -24,12 +24,35 @@
  * `src/api` in a cycle with `host.ts`, and slice D spent real time breaking
  * two of those.
  *
- * **No response body carries a url, a path or a query string.** A thrown
- * error becomes a 500 with a fixed message; the thrown message goes through
- * `redactUrl` on its way to the log and never into the response at all. The
- * one caller-supplied value any body repeats is a media type, which the
- * brief requires an unknown type to name -- and `MEDIA_TYPE` below is what
- * keeps that from becoming a way to get a path echoed back.
+ * **No response body this file composes carries a url, a path or a query
+ * string.** A thrown error becomes a 500 with a fixed message; the thrown
+ * message goes through `redactUrl` on its way to the log and never into the
+ * response at all. The one caller-supplied value any body repeats is a media
+ * type, which the brief requires an unknown type to name -- and `MEDIA_TYPE`
+ * below is what keeps that from becoming a way to get a path echoed back.
+ *
+ * **The auth dispatch's bodies are not this file's, and two of them do carry
+ * urls.** That sentence was once unqualified, and `handle` now forwards
+ * `/api/auth/*` to `toNodeHandler` ahead of everything, so it has to be
+ * scoped. Measured: anonymously, `GET /api/auth/error?error=…` renders a
+ * **9,302-byte HTML page** carrying `https://better-auth.com/docs/reference/
+ * errors/<error>` **twice** (a plain `href` and an `?askai=` variant) and
+ * echoing the caller's own `error` parameter into both -- gated on
+ * `/^['A-Za-z0-9_-]+$/`, so anything else becomes `UNKNOWN`, which is why it
+ * is garbled markup at worst and not reflected XSS (the library escapes and
+ * `encodeURIComponent`s it; a `"><svg/onload=…>` payload does not appear in
+ * the body in any form). With `NODE_ENV=production` -- which the Dockerfile's
+ * runtime stage sets, and which the library reads at module load, so a probe
+ * that set it later could not see this -- the same route answers **302** with
+ * an empty body instead. `GET /api/auth/callback/:id` is **302** either way,
+ * and every one of those redirects carries a url *and* a query string in its
+ * `Location` header (`…/api/auth/error?error=state_not_found`).
+ *
+ * None of that is a credential and none of it is this host's own urls: it is
+ * the library's documentation links plus a caller-supplied code echoed back to
+ * that same caller. It is recorded rather than suppressed because the
+ * constraint is about bodies this repo emits, and the module doc had stopped
+ * being true of the responses that leave this socket.
  *
  * **Every route requires a session except `/api/health`.** Slice E shipped
  * this API unauthenticated, with loopback binding as the whole of the

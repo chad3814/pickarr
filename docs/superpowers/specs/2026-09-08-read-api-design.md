@@ -522,13 +522,14 @@ The properties worth pinning, each because it fails silently:
   download" reads as metadata and is not:
 
   - **`RssItemRead.link` is served unredacted, and for a private tracker or
-    indexer that url *is* a credential** — it carries the passkey or api
-    key. So a reader obtains every private-indexer
-    download url the host has ever seen, in `PAGE_SIZE` chunks, from
-    `/api/rss-items` — which is not type-scoped either (see §5). This is not
-    a code defect: the link is the one field a client needs in order to be a
-    client, and redacting it would leave the route useless. It is the cost
-    of the route existing without auth.
+    indexer that url *is* a credential** — it carries the passkey or api key.
+    So a session holder obtains every private-indexer download url the host has
+    ever seen, in `PAGE_SIZE` chunks, from `/api/rss-items` — which is not
+    type-scoped either (see §5). This is not a code defect: the link is the one
+    field a client needs in order to be a client, and redacting it would leave
+    the route useless. It *was* the cost of the route existing without auth;
+    since slice F it is what a session buys, which is the sense this bullet is
+    kept in.
   - **Every download's `clientRef`, `infohash` and `lastError`**, from
     `/api/downloads`. `last_error` is redacted for the *download client's*
     own credential and not for anything nested inside it — see §5.

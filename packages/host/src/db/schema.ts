@@ -500,6 +500,33 @@ export const authUser = sqliteTable('auth_user', {
  * One live session. `token` is the credential the cookie carries, so only
  * Better Auth's own adapter may select it -- enforced at build time by
  * `scripts/check-test-hygiene.ts`.
+ *
+ * **This column's value is also served in a response body**, which is worth
+ * knowing beside the rule that keeps it out of everybody's SQL.
+ * `/sign-up/email` answers `{ token, user }` and `/sign-in/email` answers
+ * `{ redirect, token, user }`, where `token` is a 32-character string that is
+ * this column and is the unsigned prefix of the `better-auth.session_token`
+ * cookie (measured by *shape* -- key names and value lengths -- because
+ * formatting one of those bodies is how a probe printed a credential into a
+ * transcript during the whole-branch review). The plan's "no HTTP response
+ * body may carry a session token" is written against that, and the library's
+ * own routes break its letter.
+ *
+ * Bounded, and measured: the value alone grants nothing, because what the
+ * guard checks is the *signed* cookie. `/api/media?type=movie` answers 401
+ * both with `Authorization: Bearer <that value>` and with it pasted into
+ * `better-auth.session_token`; the cookie itself is
+ * `HttpOnly; SameSite=Lax; Max-Age=604800; Path=/`, no `Secure` (correct over
+ * `http:`). So this is a documented divergence from a hard constraint rather
+ * than a live leak -- and the reason no test, message or log line in this repo
+ * may name one of these values even in passing.
+ *
+ * **`userId` declares no `ON DELETE` where the library's model declares
+ * `cascade`**, and `updatedAt` is `NOT NULL` against a model that gives it an
+ * `onUpdate` and no `defaultValue`. Both are recorded in full beside
+ * migration 12's DDL in `db/migrate.ts`, which is the source this mirrors;
+ * `schema.test.ts` compares neither foreign-key targets nor the library's
+ * model, so neither divergence can fail a test today.
  */
 export const authSession = sqliteTable('auth_session', {
   id: text('id').primaryKey(),
@@ -530,6 +557,11 @@ export const authSession = sqliteTable('auth_session', {
  * The six token columns are nullable and stay null throughout this slice:
  * they belong to OAuth providers, which §1.1 of the auth design spec excludes.
  * They exist because the library's `account` model has the fields.
+ *
+ * `userId` and `updatedAt` carry exactly the two divergences `authSession`'s
+ * docblock names -- no `ON DELETE` against the model's `cascade`, and a
+ * `NOT NULL` against a model with an `onUpdate` and no `defaultValue`. Both
+ * are written out beside migration 12 in `db/migrate.ts`.
  */
 export const authAccount = sqliteTable('auth_account', {
   id: text('id').primaryKey(),
@@ -582,6 +614,14 @@ export const authVerification = sqliteTable('auth_verification', {
   // write that reaches this table can leave the column null. The nullability
   // is slack nothing needs rather than a shape the library asked for, and
   // that -- not a misread of the model -- is why it is safe.
+  //
+  // **The two columns that actually lack a default are elsewhere**, and this
+  // comment reasoning at length about exactly that shape while saying nothing
+  // about them is why they are now named: `session.updatedAt` and
+  // `account.updatedAt` are `required: true` with an `onUpdate` and **no**
+  // `defaultValue`, so their `NOT NULL` holds only because the adapter passes
+  // a value on create. See their docblocks above, and `db/migrate.ts` for the
+  // measurement.
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }),
 }, (t) => [
   // The library looks a verification up by its identifier, never by id.

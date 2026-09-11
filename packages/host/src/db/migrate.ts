@@ -636,6 +636,36 @@ CREATE INDEX deleted_media_item_sync ON deleted_media_item (plugin_id, deleted_a
  * and the first-boot claim token) and a column per fact would mean a migration
  * per fact.
  *
+ * **The two foreign keys here declare no `ON DELETE`, and the library's own
+ * model declares `cascade`.** `@better-auth/core`'s `db/get-tables.ts` gives
+ * both `session.userId` and `account.userId`
+ * `references: { model: 'user', field: 'id', onDelete: 'cascade' }`; the DDL
+ * below (and `schema.ts`'s mirror of it) says `REFERENCES auth_user (id)` and
+ * stops there, which is SQLite's `NO ACTION`. With `PRAGMA foreign_keys = ON`
+ * (`db/open.ts`) that is enforced: measured, a direct
+ * `DELETE FROM auth_user` with one session and one account present is refused
+ * with errcode **787, FOREIGN KEY constraint failed**, where the library's
+ * model says the children should have gone with the parent.
+ *
+ * Unreachable today -- `POST /api/auth/delete-user` answers 404, because
+ * `user.deleteUser` is not enabled -- and invisible to `schema.test.ts`, whose
+ * own docblock says foreign-key *targets* are not compared. So it is recorded
+ * rather than fixed: whatever slice enables account deletion meets it here,
+ * and the choice then is to add the cascade to a migration or to delete the
+ * children first in application code. Left as `NO ACTION` for now because a
+ * cascade is the more destructive default to adopt speculatively, on the two
+ * tables where a wrong `DELETE` would silently end every session.
+ *
+ * **`auth_session.updated_at` and `auth_account.updated_at` are `NOT NULL`
+ * against a model that gives them no default.** Both are `required: true`
+ * with an `onUpdate` and **no** `defaultValue`, so `withApplyDefault(…,
+ * 'create')` supplies nothing for them on an insert: the `NOT NULL` below
+ * holds only because the library's adapter passes a value explicitly when it
+ * creates a row (measured: 0 nulls in either column after a sign-up and a
+ * sign-in). `auth_verification.updated_at` has the reverse asymmetry and is
+ * reasoned about at length in `schema.ts`; these two are the pair where the
+ * model actually lacks the default, and nothing said so.
+ *
  * **Three of these columns are credentials no other query may name.**
  * `auth_account.password` is a password hash, `auth_session.token` is a live
  * session, and `host_state.value` is the signing secret; only Better Auth's
