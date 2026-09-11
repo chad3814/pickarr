@@ -69,10 +69,21 @@ included.** Measured: the message from
 spent a fix wave on that class, so §5.3 requires the wrapper to replace this
 error rather than propagate it.
 
-**2.5 `crypto.randomUUID()` fits the key shape.** 36 characters, lowercase hex
-and hyphens; it matches `/^[a-z0-9][a-z0-9_-]{0,63}$/`, and
-`name.toUpperCase().replaceAll('-', '_')` is a legal environment-variable
-name. The same regex refuses `..`, `a.b`, `a/b` and `../../etc/passwd`.
+**2.5 `crypto.randomUUID()` fits the name shape; its env variable is another
+matter.** 36 characters, lowercase hex and hyphens; it matches
+`/^[a-z0-9][a-z0-9_-]{0,63}$/`, and the same regex refuses `..`, `a.b`, `a/b`
+and `../../etc/passwd`.
+
+`name.toUpperCase().replaceAll('-', '_')` yields a name containing only legal
+characters, but **not one a shell can assign**: measured, 116 of 200 uuids begin
+with a hex digit, and `sh`, `zsh` and `bash` each refuse `550E8400_...=v` as a
+command rather than an assignment. `env(1)`, a Docker `environment:` entry and
+a systemd `Environment=` all set it, and Node reads it. An earlier version of
+this paragraph called the result "a legal environment-variable name", measured
+on a single uuid that happened to begin with a letter — the generalisation was
+wrong 58% of the time. §5.2's normalisation stands: the env link is a real
+override for a name an operator types, and a theoretical one for a generated
+name whose home is the database.
 
 **2.6 What 1.x already does, which this replaces.** `packages/core/src/config`
 has a `config.json`, a Zod schema, `SECRET_REFERENCE_PREFIX = 'file:'` so a

@@ -262,11 +262,20 @@ test('a name at the length limit is legal and one past it is not', () => {
   assert.throws(() => { assertSecretName('a'.repeat(65)); }, /secret name/);
 });
 
-test('the env var name is legal for every legal secret name', () => {
-  const legalEnv = /^[A-Z_][A-Z0-9_]*$/;
+test('the env var name holds only characters a variable name may contain', () => {
+  // Deliberately NOT /^[A-Z_][A-Z0-9_]*$/: 58% of uuids begin with a hex
+  // digit, so that assertion would fail more often than it passed. See
+  // `envNameFor`'s docblock for what can and cannot set such a variable.
+  const shape = /^[A-Z0-9_]+$/;
   for (const name of ['tvdb_key', 'a-b', randomUUID()]) {
-    assert.ok(legalEnv.test(envNameFor(name)), `${name} must map to a legal env var name`);
+    assert.ok(shape.test(envNameFor(name)), `${name} must map to a usable env var name`);
   }
+});
+
+test('a hyphen becomes an underscore, and a digit-leading name is accepted as-is', () => {
+  assert.equal(envNameFor('550e8400-e29b-41d4-a716-446655440000'), '550E8400_E29B_41D4_A716_446655440000');
+  assert.equal(envNameFor('tvdb_key'), 'TVDB_KEY');
+  assert.equal(envNameFor('a-b-c'), 'A_B_C');
 });
 
 test('SecretNotFound carries the name without a path, and does not shadow Error.name', () => {
@@ -317,9 +326,16 @@ export function assertSecretName(name: string): void {
  * Hyphens become underscores because a `randomUUID()` carries them and an
  * environment variable may not: without this, the env link could never
  * resolve for a credential the settings UI stored, and the rule would differ
- * between a generated name and a chosen one. Measured in the design spec
- * §2.5 -- the result is a legal variable name for every name this module
- * accepts.
+ * between a generated name and a chosen one.
+ *
+ * **A uuid's variable name is not one a shell can export.** Measured: 116 of
+ * 200 uuids begin with a hex digit, and `sh`, `zsh` and `bash` all refuse
+ * `550E8400_...=v` as a command rather than an assignment (`$550E8400_X`
+ * expands as `$5` followed by literal text). `env(1)`, a Docker `environment:`
+ * entry and a systemd `Environment=` all set it, and Node reads it. So the env
+ * link genuinely serves the names an operator types, like `tvdb_key`, and is a
+ * theoretical override for a generated one -- which is fine, because a uuid's
+ * home is the `secret` table.
  */
 export function envNameFor(name: string): string {
   return name.toUpperCase().replaceAll('-', '_');
@@ -351,7 +367,7 @@ export class SecretNotFound extends Error {
 - [ ] **Step 4: Run the name tests**
 
 Run: `node --import tsx --conditions development --test packages/host/test/secrets/names.test.ts`
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Write the failing store tests**
 
@@ -458,7 +474,7 @@ Wave A of the auth slice established that an allow-list entry exempting nothing 
 - [ ] **Step 9: Run the gate**
 
 Run: `npm run typecheck && npm run test:server && npm run lint && npm run test-hygiene`
-Expected: typecheck 0; tests 1955 pass 0 fail (1945 + 10); lint 0 with exactly 124 warnings; hygiene 0.
+Expected: typecheck 0; tests 1956 pass 0 fail (1945 + 11); lint 0 with exactly 124 warnings; hygiene 0.
 
 - [ ] **Step 10: Mutation A — prove the allow-list entry is load-bearing**
 
@@ -747,7 +763,7 @@ Expected: PASS, 9 tests.
 - [ ] **Step 5: Run the gate**
 
 Run: `npm run typecheck && npm run test:server && npm run lint && npm run build && npm run test-hygiene`
-Expected: typecheck 0; tests 1964 pass 0 fail (1955 + 9); lint 0 with exactly 124 warnings; build 0; hygiene 0.
+Expected: typecheck 0; tests 1965 pass 0 fail (1956 + 9); lint 0 with exactly 124 warnings; build 0; hygiene 0.
 
 - [ ] **Step 6: Mutation A — prove `saveSecret` invalidates**
 
@@ -969,7 +985,7 @@ Re-apply Mutation B with that test present and report whether it now fails. If i
 - [ ] **Step 7: Run the gate**
 
 Run: `npm run typecheck && npm run test:server && npm run lint && npm run test-hygiene`
-Expected: typecheck 0; tests 1971 pass 0 fail (1964 + 7); lint 0 with exactly 124 warnings; hygiene 0.
+Expected: typecheck 0; tests 1972 pass 0 fail (1965 + 7); lint 0 with exactly 124 warnings; hygiene 0.
 
 - [ ] **Step 8: Commit**
 
@@ -1200,7 +1216,7 @@ Expected: PASS, 9 tests.
 - [ ] **Step 5: Run the gate**
 
 Run: `npm run typecheck && npm run test:server && npm run lint && npm run build && npm run test-hygiene`
-Expected: typecheck 0; tests 1980 pass 0 fail (1971 + 9); lint 0 with exactly 124 warnings; build 0; hygiene 0.
+Expected: typecheck 0; tests 1981 pass 0 fail (1972 + 9); lint 0 with exactly 124 warnings; build 0; hygiene 0.
 
 - [ ] **Step 6: Mutation A — prove the unknown namespace is preserved by the re-read**
 
@@ -1233,7 +1249,7 @@ test('a failed update does not wedge later writes', async () => {
 ```
 
 Expected: with the mutation, the new test FAILS — the second `update` never runs because the chain's tail is a rejected promise. Keep the test; restore the line.
-Restore by copy-aside, `md5 -q`, re-run. Test count becomes 1981.
+Restore by copy-aside, `md5 -q`, re-run. Test count becomes 1982.
 
 - [ ] **Step 9: Commit**
 
@@ -1460,7 +1476,7 @@ Run: `node --import tsx --conditions development --test packages/host/test/confi
 Expected: PASS. `main.test.ts` passing unchanged is what proves step 4 was a refactor.
 
 Run: `npm run typecheck && npm run test:server && npm run lint && npm run build && npm run test-hygiene`
-Expected: typecheck 0; tests 1988 pass 0 fail (1981 + 7); lint 0 with exactly 124 warnings; build 0; hygiene 0.
+Expected: typecheck 0; tests 1989 pass 0 fail (1982 + 7); lint 0 with exactly 124 warnings; build 0; hygiene 0.
 
 - [ ] **Step 9: Mutation A — prove one check now serves both callers**
 
@@ -1778,7 +1794,7 @@ and for qBittorrent, the same shape: decide on the *name*, then `await secrets.g
 - [ ] **Step 9: Run the gate**
 
 Run: `npm run typecheck && npm run test:server && npm run lint && npm run build && npm run test-hygiene`
-Expected: typecheck 0; tests 1995 pass 0 fail (1988 + 7, plus any existing `config.test.ts` tests that were converted rather than added); lint 0 with exactly 124 warnings; build 0; hygiene 0.
+Expected: typecheck 0; tests 1997 pass 0 fail (1989 + 8, plus any existing `config.test.ts` tests that were converted rather than added); lint 0 with exactly 124 warnings; build 0; hygiene 0.
 
 - [ ] **Step 10: Mutation A — prove the migration moves the value rather than the name**
 
