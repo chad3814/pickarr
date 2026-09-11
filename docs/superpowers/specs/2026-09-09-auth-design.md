@@ -78,10 +78,28 @@ thrown away; nothing entered the repo.
   the static half of its list, so a function reading `request` must tolerate its
   absence.
 - **`toNodeHandler` mounts on a bare `node:http` server.** No framework needed.
-- **A state-changing request without an `Origin` header is refused**, 403
-  `MISSING_OR_NULL_ORIGIN`. A browser always sends one; anything server-side must
-  set it deliberately. This is CSRF protection and it shapes §5.
-- **`baseURL` must match the request's origin**, or every POST is 403. The first
+- **A state-changing request whose `Origin` cannot be checked is refused —
+  but only once something makes the check run.** Re-measured against 1.7.3
+  for this correction: a sign-up carrying no `Origin`, no `Referer`, no
+  `Cookie` and no `Sec-Fetch-*` header answers **200**. Add a cookie, or any
+  `Sec-Fetch-*` header at all (`sec-fetch-site: none` and `sec-fetch-mode:
+  cors` both do it), and the identical request is
+  `403 MISSING_OR_NULL_ORIGIN`; `sec-fetch-site: cross-site` with
+  `sec-fetch-mode: navigate` is `403 CROSS_SITE_NAVIGATION_LOGIN_BLOCKED`.
+  The condition is in the library's own `validateFormCsrf`: with no cookie
+  and no fetch metadata there is nothing it can validate against, and it
+  returns without validating.
+
+  This is still CSRF protection and it still shapes §5, because a *browser*
+  always sends a cookie or fetch metadata or both. What is **not** true, and
+  what an earlier version of this bullet asserted, is that "anything
+  server-side must set it deliberately": a bare `curl -X POST` sets none of
+  those four and is not refused. In that configuration the first sign-up is
+  gated by the claim token alone and every later one by `isClaimed`, which is
+  what those two have to carry.
+- **`baseURL` must match the request's origin** — every POST that carries one
+  the library will check, and that `baseURL` and `trustedOrigins` between them
+  do not name, is 403 (the bullet above is what "will check" means). The first
   probe failed exactly this way against a placeholder URL. It means the server's
   reachable address must be known *before* `betterAuth()` is constructed — which
   collides with binding port 0, and §7 says what the tests do instead.
@@ -129,6 +147,23 @@ and only that one, closes the window without adding a configuration step — the
 owner reads it from the console they just started the process in. It is stored
 in `host_state`, cleared once claimed, and re-printed on every boot while the
 install is still unclaimed.
+
+**Spending the token is what admits the sign-up, and that is an atomicity
+requirement rather than an implementation detail.** `isClaimed` and the
+constant-time token match are both *reads*, and two requests carrying the
+same valid token both pass a read before either has written: measured,
+`Promise.all` of two sign-ups with one token answered 200/200 and left **two**
+accounts on an install this section says one account claims. So the token is
+spent by `spendClaimToken`, a single conditional
+`DELETE FROM host_state WHERE key = ? AND value = ?` whose row count decides
+the winner, issued from `databaseHooks.user.create.before` — the last hook
+before the `INSERT`, past every validation that could still refuse the
+request. Of two callers offering one token exactly one sees a change, and the
+other is refused in the same words as everybody else. The request `before`
+hook keeps the `isClaimed` test and the constant-time match, so a wrong token
+is refused early and never reaches that statement. What remains is stated in
+`spendClaimToken`: an `INSERT` that fails after the spend leaves the token
+gone with no account, and the install claimable again after a restart.
 
 **Trusted origins are computed per request, from the address family.** With
 `0.0.0.0` the server has no single knowable origin: the user may reach it at
@@ -214,9 +249,17 @@ CREATE INDEX auth_verification_identifier ON auth_verification (identifier);
 
 `id` is `TEXT`: Better Auth's default generator is a random base62 string, and
 adopting it avoids configuring `advanced.database.generateId` to something the
-library then has to be told about. These are the only text-keyed tables in the
-schema, and that asymmetry is the library's, recorded here so it does not read as
-an accident.
+library then has to be told about. These four are the only tables in the schema
+with a **text `id`** — which is not the same claim as "the only text-keyed
+tables", the sentence this paragraph used to carry and which
+`host_state (key TEXT PRIMARY KEY)` — the first statement in the block above —
+falsifies. Every other table that has an `id` declares it
+`INTEGER PRIMARY KEY`, i.e. the rowid; three have no `id` at all
+(`host_state`, keyed by a text `key`; `deleted_media_item`, keyed by
+`media_item_id`; and the migration runner's own bookkeeping). A caller-chosen
+key and a borrowed foreign key are not generated ids, so neither is the
+asymmetry being recorded here — that one is the library's, written down so it
+does not read as an accident.
 
 `auth_verification` is created despite nothing in §1.1's exclusions using it: the
 adapter expects the model to exist, and a table Better Auth may write to is
@@ -240,6 +283,35 @@ text match reported twenty-two comments as violations. This rule has the same
 shape: the comments explaining it, and §4 of this document, both name the columns
 they forbid. Extend that script rather than adding a second mechanism with the
 same flaw it already avoided.
+
+**What that walk reads is more than a column name sitting beside a table
+name**, because the first version of the rule was defeated by this repo's own
+dominant SQL idiom. It resolves a substituted identifier to the string it is
+bound to in the same file — recursively, cycle-guarded, through `+`
+concatenations — so the house style for a multi-column select
+(`SELECT ${SESSION_COLUMNS} FROM auth_session`) is read as the statement it
+becomes rather than as `SELECT ? FROM …`, which is how a credential select was
+invisible. It normalizes a quoted or schema-qualified table name
+(`"auth_session"`, `main.auth_session`). And over a credential table it
+**fails closed**: a `SELECT *`, or a substitution it could not resolve, is a
+violation reported as `auth_session.*` or `auth_session.?` — answerable by
+naming the columns, or by adding a path to the allow-list where it shows up in
+a diff, and never by the check guessing that what it cannot read is harmless.
+
+Three things it still cannot see, each stated in the script rather than
+implied: SQL that is never a string in the file (a Drizzle query-builder chain
+names neither table nor column, which is how the allow-listed adapter is
+written, so a *new* module written that way would pass); a statement assembled
+across files, since resolution is syntactic and file-local; and anything
+outside `packages/host/src`, so a plugin holding `PluginContext.db` keeps the
+reach `migratePlugin`'s docblock already records.
+
+The same script carries a **sibling rule over `packages/host/test`**: no test
+may hand a credential to `node:assert` as an operand, because `node:assert`
+formats *both* operands into a failure message. It follows an identifier to
+what it was bound to, which is the whole point — `assert.equal(second, first)`
+names no producer, and that spelling is the one this slice's earliest test file
+used, which is how it came to print live signing secrets whenever it failed.
 
 ## 5. The guard
 
@@ -290,21 +362,38 @@ The properties worth pinning, each because it fails silently:
 6. **The first sign-up requires the claim token, and spends it only on
    success.** Single-use, not single-*attempt* — this sentence originally said
    the token is spent "even if the first was rolled back", which the
-   implementation faithfully delivered and which is a defect: the hook runs
-   before Better Auth's own password-length check, so a correct token with a
-   too-short password returned 400 with the token already gone, and nothing
-   re-offers one while `auth_user` is empty. A typo made the install
-   permanently unclaimable. Verification lives in the `before` hook and
-   consumption in `after`, gated on `isClaimed` having flipped — success
-   observed in the database rather than read out of the library's return
-   shape, which is undocumented for this purpose. A second sign-up with a
-   spent token still fails.
+   implementation faithfully delivered and which is a defect: the hook that
+   verified the token ran ahead of Better Auth's own password-length check, so
+   a correct token with a mistyped password returned 400 with the token
+   already gone.
+
+   **What that cost was a restart**, and two later versions of this paragraph
+   said otherwise. `main.ts` prints the token on every boot while `auth_user`
+   is empty — its own log line says so — and with the `host_state` row spent
+   `ensureGeneratedValue` mints a fresh one, so the next boot offers a
+   different token (measured, twice: once by a reviewer and once for this
+   correction). "Permanently unclaimable, recoverable only by hand-editing the
+   database" was an escalation of what task 4's report had framed correctly,
+   and it was written into this spec by the commit whose stated purpose was to
+   stop this spec asserting something false. The fix is still worth having
+   made: a token printed to the console that silently stops working after any
+   refused attempt is one an owner has no reason to doubt and no way to
+   diagnose, and a restart is a real cost on a host that is meant to be left
+   running.
+
+   Verification lives in the request `before` hook; **spending the token is
+   `databaseHooks.user.create.before`'s, and spending it is what admits the
+   sign-up** — §3 says why that placement rather than an `after` hook, which
+   is what an earlier version of this paragraph described. A second sign-up
+   with a spent token still fails.
 7. **A public-internet origin is refused and a private-range origin accepted**,
    with `PICKARR_PUBLIC_URL` unset.
 8. **The generated secret is stable across restarts** — two hosts over one
    database issue cookies the other accepts.
-9. **No query outside the auth adapter selects a credential column**, by the AST walk §4 describes — never by grep, for the reason given there
-   over `packages/host/src`.
+9. **No query outside the auth adapter selects a credential column**, over
+   `packages/host/src`, by the AST walk §4 describes — never by grep, for the
+   reason given there. A query the walk cannot read over a credential table
+   fails the build rather than passing it.
 
 Tests bind port 0 and must therefore compute `baseURL` after the port is known —
 see §2. That ordering is a real constraint, not a test artifact: production has
