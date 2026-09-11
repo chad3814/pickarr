@@ -94,18 +94,40 @@ resolves those references **into the config object** it was given.
 sentinel. The projection idea is good and is kept in spirit; mutating resolved
 secrets into a serializable config object is the thing §6.4 forbids.
 
-**2.6a Zod is in the tree but not yet in the host.** `packages/host`'s
-dependencies are `@pickarr/contract`, `better-auth`, `drizzle-orm`,
-`fast-xml-parser` and `image-size`, and nothing under `packages/host/src`
-imports `zod` today. `packages/core` pins `zod@^3.24.0` and **3.25.76** is what
-is installed, so the host takes the same range and node_modules holds one copy.
+**2.6a `packages/host` resolves Zod **4**, not the root's 3.** Nothing under
+`packages/host/src` imported `zod` before this slice, which is why this went
+unnoticed. Measured with `require.resolve('zod', { paths: ['packages/host/src'] })`:
+host code gets `packages/host/node_modules/zod` at **4.5.4**, nested there
+because `better-auth@1.7.3` requires `zod@^4.5.4`. The root copy is **3.25.76**,
+which is what `packages/core` (1.x) resolves and must keep.
 
-**2.6c An absent section needs a schema that accepts `undefined`.** Measured:
-`z.object({ baseDir: z.string().default('/run/secrets') }).default({})` parses
-`undefined` into `{ baseDir: '/run/secrets' }`, while a schema with a
-non-defaulted field refuses `undefined`. So a namespace schema must be
-`.default(...)`-wrapped, or have every field optional, or registering a host
-with no config file at all will throw. §6.1 requires it.
+An earlier version of this section said the host would take `^3.24.0` and share
+one hoisted copy. That was false, and `npm ls zod --workspaces --all` says so
+outright — it reports `zod@4.5.4 ... invalid: "^3.24.0" from packages/host`.
+**The host therefore declares `zod@^4.5.4`**, matching what it actually loads
+and what `better-auth` needs. Forcing 3 into the host was attempted with an
+`overrides` entry and breaks `better-call`'s own peer on `zod@^4.0.0`, which
+sits as a flat sibling rather than nested under `better-auth`.
+
+**2.6c An absent section needs `.prefault()`, not `.default()`.** Measured
+against **4.5.4, the copy `packages/host` actually loads** (see 2.6a):
+
+| Schema on `parse(undefined)` | Zod 4.5.4 |
+|---|---|
+| `z.object({ port: z.number().int().default(8787) }).default({})` | `{}` — **the inner default is not applied** |
+| the same with `.prefault({})` | `{ port: 8787 }` |
+| `.strict().prefault({})` on an unknown key | rejected, `unrecognized_keys` |
+| `.optional()` field absent | omitted, no error |
+
+Zod 4 changed `.default()` to short-circuit parsing and stand as the output
+value, so a nested default never runs. `.prefault()` substitutes the value and
+*then* parses it, which is the behaviour every namespace schema here needs.
+
+An earlier version of this section asserted the `.default({})` form worked,
+measured from the repo root — which resolves **3.25.76**, not the 4.5.4 the
+host loads. That is the same error §2.1 records about slice F's spike: a
+measurement taken against a different resolution than the code gets measures
+the probe, not the code. It cost this slice one blocked task.
 
 **2.6b SQLite is 3.53.4 behind `node:sqlite`.** Measured: `ADD COLUMN` and
 `DROP COLUMN` both succeed on a table carrying an index on a different column,
@@ -192,9 +214,10 @@ when a present section fails its schema. An absent section gets the schema's
 defaults. The host awaits its own registrations at boot, so a malformed host
 section fails the boot rather than running on values nobody chose.
 
-**3.11 A Zod schema, at the range 1.x already pins.** `register` takes
-`ZodType<T>`, and `packages/host` adds `zod@^3.24.0` — the same range as
-`packages/core`, so one copy is installed (§2.6a).
+**3.11 A Zod schema, at the version the host actually loads.** `register`
+takes `ZodType<T>`, and `packages/host` declares `zod@^4.5.4` — what
+`better-auth` already nests under it (§2.6a). `packages/core` keeps 3.25.76 at
+the root, untouched.
 *Rejected:* a bare `(raw: unknown) => T` parse function, which would add no
 dependency and match the host's hand-written validation idiom
 (`resolvePublicUrl` is the precedent). A schema wins because validation is this

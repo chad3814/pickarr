@@ -74,10 +74,10 @@ In `packages/host/package.json`, add to `dependencies`, keeping the existing key
 
 ```json
 "@chad3814/secret-provider": "^1.2.0",
-"zod": "^3.24.0"
+"zod": "^4.5.4"
 ```
 
-`^3.24.0` is the range `packages/core` already pins, so one copy is installed (spec §2.6a). Run `npm install` from the repo root; it must update `package-lock.json` and nothing else.
+`^4.5.4` is what `packages/host` actually resolves — `better-auth@1.7.3` nests that copy under it, and npm reports a `^3.24.0` declaration as *invalid* (spec §2.6a). `packages/core` keeps 3.25.76 at the root. Run `npm install` from the repo root; it must update `package-lock.json` and nothing else.
 
 - [ ] **Step 2: Write the failing migration test**
 
@@ -1039,7 +1039,7 @@ const withPath = async (body: (path: string) => Promise<void>) => {
   try { await body(join(dir, 'pickarr.config.json')); } finally { await rm(dir, { recursive: true, force: true }); }
 };
 
-const portSchema = z.object({ port: z.number().int().default(8787) }).default({});
+const portSchema = z.object({ port: z.number().int().default(8787) }).prefault({});
 
 test('an absent section gets the schema defaults', async () => {
   await withPath(async (path) => {
@@ -1098,7 +1098,7 @@ test('two concurrent updates on different namespaces both survive', async () => 
   await withPath(async (path) => {
     const config = await openConfig({ path });
     const server = config.register('server', portSchema);
-    const secrets = config.register('secrets', z.object({ baseDir: z.string().default('/run/secrets') }).default({}));
+    const secrets = config.register('secrets', z.object({ baseDir: z.string().default('/run/secrets') }).prefault({}));
     await Promise.all([server.update({ port: 9002 }), secrets.update({ baseDir: '/tmp/s' })]);
     const after = JSON.parse(await readFile(path, 'utf8'));
     assert.deepEqual(after.server, { port: 9002 }, 'the server update must not be lost');
@@ -1441,10 +1441,10 @@ import { assertOriginOnly } from '../origin.ts';
 export const DEFAULT_CONFIG_PATH = '/config/pickarr.config.json';
 
 /**
- * Every namespace is `.strict()` and `.default({})`.
+ * Every namespace is `.strict()` and `.prefault({})`.
  *
  * `.strict()` because a typo that parses to a default is a configuration
- * change that does nothing and reports nothing. `.default({})` because an
+ * change that does nothing and reports nothing. `.prefault({})` because an
  * absent section reaches `parse` as `undefined`, and a schema without it
  * would make a first boot with no config file throw (design spec §2.6c).
  */
@@ -1467,15 +1467,15 @@ export const serverConfigSchema = z.object({
       }
     })
     .optional(),
-}).strict().default({});
+}).strict().prefault({});
 
 export const databaseConfigSchema = z.object({
   path: z.string().min(1).default('/config/pickarr.db'),
-}).strict().default({});
+}).strict().prefault({});
 
 export const secretsConfigSchema = z.object({
   baseDir: z.string().min(1).default('/run/secrets'),
-}).strict().default({});
+}).strict().prefault({});
 
 export type ServerConfig = z.infer<typeof serverConfigSchema>;
 export type DatabaseConfig = z.infer<typeof databaseConfigSchema>;
