@@ -457,11 +457,11 @@ export const hostState = sqliteTable('host_state', {
  * text `id`** -- every table above that *has* an `id` declares
  * `integer('id').primaryKey()`, i.e. the rowid. Two have none: `hostState`
  * just above is keyed by a text `key`, and `deletedMediaItem` by
- * `mediaItemId`. Neither is the same asymmetry -- a caller-chosen key and a
- * borrowed foreign key are not generated ids -- and saying "every table above"
- * without that carve-out is how this comment previously read as false about
- * the two tables it skipped over. Better Auth's default id generator is a
- * random base62 string,
+ * `mediaItemId`. Neither is the same asymmetry -- a caller-chosen key, and the
+ * id of a row that no longer exists, are not generated ids -- and saying
+ * "every table above" without that carve-out is how this comment previously
+ * read as false about the two tables it skipped over. Better Auth's default id
+ * generator is a random base62 string,
  * and adopting it avoids configuring `advanced.database.generateId` to
  * something the library then has to be told about. The asymmetry is the
  * library's; it is said out loud here so the next reader does not "fix" it and

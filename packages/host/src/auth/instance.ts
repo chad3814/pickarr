@@ -157,8 +157,9 @@ function isPrivateIPv6(hostname: string): boolean {
  * is the opaque string `'null'`, which Better Auth refuses outright before
  * matching anything, so `myapp://127.0.0.1:8787` is refused with the test and
  * without it. The isolating case is pinned by
- * `test/auth/instance.test.ts`'s `ws:` test, which is the only shape that can
- * fail when this line goes.
+ * `test/auth/instance.test.ts`'s `ws:` test, and it is the only thing in the
+ * suite that notices: with this line deleted, 1936 of 1937 still pass and
+ * that one test is the single failure.
  */
 function isPlaceableOrigin(origin: string): boolean {
   if (!URL.canParse(origin)) return false;
@@ -206,10 +207,11 @@ function publicOrigin(publicUrl: string): string {
  * carries a `Referer` is checked against the referring *url*, and nothing
  * here places it: measured, a sign-up with only
  * `Referer: http://127.0.0.1:8787/x` is refused `403 INVALID_ORIGIN` even
- * though the same request with that value as `Origin` is accepted. It is
- * accepted only when the referrer's origin happens to be one Better Auth
- * trusts on its own -- `baseURL`'s, or `publicUrl`'s -- which is the case
- * the measurement also covered.
+ * though the same request with that value as `Origin` is accepted. A
+ * `Referer`-only request gets through only when the referring page's origin
+ * is already in the trusted list for some other reason -- `baseURL`'s, which
+ * Better Auth adds implicitly, or `publicUrl`, which this function returns
+ * whether or not a request asked for it. Both of those were measured too.
  *
  * Known behaviour rather than a defect: it fails *closed*, and a
  * `Referer`-only cross-site POST is exactly what the check exists to refuse.
@@ -259,7 +261,8 @@ const CLAIM_TOKEN_FIELD = 'claimToken';
  *
  * **Timing does, slightly.** The unclaimed-and-wrong-token path runs one
  * extra prepared `host_state` read plus a 43-byte `timingSafeEqual` that the
- * claimed path never reaches, because `isClaimed` throws first. Measured
+ * claimed path never reaches, because the hook throws the moment `isClaimed`
+ * answers `true`. (43 bytes: base64url of `randomBytes(32)`.) Measured
  * interleaved over 6000 samples each, twice: a median of ~138 us for a
  * claimed install against ~142 us for an unclaimed one offered a wrong token
  * of the right length -- a reproducible ~5 us, ~3% of the whole request. An
@@ -269,7 +272,7 @@ const CLAIM_TOKEN_FIELD = 'claimToken';
  *
  * Recorded rather than closed. Equalising it would mean doing the read and
  * the compare on the claimed path too, against noise that is already an
- * order of magnitude larger than the signal (p90 is ~380 us on both paths),
+ * order of magnitude larger than the signal (p90 is 370-405 us on both),
  * over a network that adds more. What a reader should know is that the
  * identical response is deliberate and that the residual channel is timing,
  * so nobody re-derives the whole argument from the fact that the two paths

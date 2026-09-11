@@ -303,9 +303,10 @@ test('a hostname other than localhost is refused, however it resolves', async ()
 });
 
 test('a ws: origin over a loopback host is refused, because the scheme is checked', async () => {
-  // `isPlaceableOrigin`'s `http:`/`https:` test had no isolating test at all:
-  // removing the line left the whole suite green. This is the one shape that
-  // fails when it goes, and the reason is which schemes the URL parser treats
+  // `isPlaceableOrigin`'s `http:`/`https:` test had nothing pinning it: with
+  // this test present, deleting that line fails exactly one of 1937 tests --
+  // this one -- so before it existed the mutation was invisible. The reason it
+  // is this shape and not a tidier one is which schemes the URL parser treats
   // as special.
   //
   // `ws` is special, so `new URL('ws://127.0.0.1:8787')` has hostname

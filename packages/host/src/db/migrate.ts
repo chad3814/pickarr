@@ -606,15 +606,16 @@ CREATE INDEX deleted_media_item_sync ON deleted_media_item (plugin_id, deleted_a
  *
  * **`id` is `TEXT` on all four, and these are the only tables in this schema
  * with a text `id`** -- every table above that *has* an `id` declares it
- * `id INTEGER PRIMARY KEY`, i.e. the rowid. Four do not have one, which is why
- * "every table above" on its own read as false here: `host_state` in this same
- * migration is keyed by a text `key`, `deleted_media_item` by
- * `media_item_id INTEGER PRIMARY KEY`, and the runner's own bookkeeping by
- * `version INTEGER PRIMARY KEY` (`host_migrations`) and by the composite
- * `PRIMARY KEY (plugin_id, version)` (`plugin_migrations`). None of those is
- * the same asymmetry -- a caller-chosen key, a borrowed foreign key and a
- * version number are not generated ids. Better Auth's default id generator is
- * a random
+ * `id INTEGER PRIMARY KEY`, i.e. the rowid. The carve-out is why "every table
+ * above" on its own read as false here: two of the tables above have no `id`
+ * column at all (`host_state` in this same migration, keyed by a text `key`,
+ * and `deleted_media_item`, keyed by `media_item_id INTEGER PRIMARY KEY`), and
+ * neither does the migration runner's own bookkeeping further down this file
+ * (`version INTEGER PRIMARY KEY` for `host_migrations`, composite
+ * `PRIMARY KEY (plugin_id, version)` for `plugin_migrations`). None of those is
+ * the same asymmetry: a caller-chosen key, the id of a row that no longer
+ * exists, and a version number are not generated ids. Better Auth's default id
+ * generator is a random
  * base62 string, and adopting it avoids configuring
  * `advanced.database.generateId` to something the library then has to be told
  * about. The asymmetry is the library's, and it is recorded here so it does not

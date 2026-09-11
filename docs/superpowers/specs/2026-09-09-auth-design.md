@@ -151,9 +151,12 @@ install is still unclaimed.
 **Spending the token is what admits the sign-up, and that is an atomicity
 requirement rather than an implementation detail.** `isClaimed` and the
 constant-time token match are both *reads*, and two requests carrying the
-same valid token both pass a read before either has written: measured,
-`Promise.all` of two sign-ups with one token answered 200/200 and left **two**
-accounts on an install this section says one account claims. So the token is
+same valid token both pass a read before either has written: measured on the
+shape that shipped first, where `Promise.all` of two sign-ups with one token
+answered 200/200 and left **two** accounts on an install this section says one
+account claims. It is pinned now by `claim.test.ts`'s
+`two concurrent sign-ups with one token create one account` — 200/403, one
+account, token spent. So the token is
 spent by `spendClaimToken`, a single conditional
 `DELETE FROM host_state WHERE key = ? AND value = ?` whose row count decides
 the winner, issued from `databaseHooks.user.create.before` — the last hook
@@ -371,8 +374,10 @@ The properties worth pinning, each because it fails silently:
    said otherwise. `main.ts` prints the token on every boot while `auth_user`
    is empty — its own log line says so — and with the `host_state` row spent
    `ensureGeneratedValue` mints a fresh one, so the next boot offers a
-   different token (measured, twice: once by a reviewer and once for this
-   correction). "Permanently unclaimable, recoverable only by hand-editing the
+   different token — measured again for this correction: with the row spent
+   and `auth_user` still empty, the next call returns a 43-character token
+   that is not the first one, and no database edit was involved.
+   "Permanently unclaimable, recoverable only by hand-editing the
    database" was an escalation of what task 4's report had framed correctly,
    and it was written into this spec by the commit whose stated purpose was to
    stop this spec asserting something false. The fix is still worth having
