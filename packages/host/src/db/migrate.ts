@@ -238,9 +238,9 @@ UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet';
  * ('qbittorrent' | 'sabnzbd'), distinct from `download_client.type` (the
  * transport, 'torrent' | 'nzb', which this migration leaves untouched).
  * `DEFAULT 'qbittorrent'` exists only to make `ADD COLUMN ... NOT NULL`
- * legal on a populated table -- nothing in this tree writes a
- * download_client row yet (the seed script arrives in a later task), so no
- * real row has actually inherited this default silently.
+ * legal on a populated table -- the one writer of a download_client row,
+ * `scripts/seed-client.ts`, names this column explicitly, so no real row
+ * has actually inherited this default silently.
  *
  * `torrent_download` and `nzb_download` are one table per client type,
  * recording what the host submitted and what the client confirmed. A row is

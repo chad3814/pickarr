@@ -135,8 +135,39 @@ test('a qbittorrent row with an api key name uses bearer, and one with a passwor
 test('a row naming a secret that does not resolve fails with SecretNotFound, and the message carries no credential', async () => {
   const raw = setup();
   const secrets = makeSecrets(raw);
-  insertClient(raw, { id: 1, implementation: 'sabnzbd', type: 'nzb', apiKeySecretName: 'a3f1b2c4-0000-4000-8000-000000000004' });
-  await assert.rejects(() => readClientConfig(raw, 1, secrets), SecretNotFound);
+  // A qbittorrent row rather than a sabnzbd one, so that a credential this
+  // read could leak actually exists. The api key name has no `secret` row
+  // behind it -- a rotated or hand-edited name -- and the password name
+  // does. Bearer is decided on the api key name, so the read fails there;
+  // the resolvable password is the row's other credential and must appear in
+  // nothing. With no credential anywhere near the row, the second half of
+  // this test's name would be a claim it could not check.
+  const SECRET_PASSWORD = 'recognisable-password-marker';
+  const MISSING_NAME = 'a3f1b2c4-0000-4000-8000-000000000004';
+  secrets.saveSecret('a3f1b2c4-0000-4000-8000-000000000007', SECRET_PASSWORD);
+  insertClient(raw, {
+    id: 1,
+    implementation: 'qbittorrent',
+    type: 'torrent',
+    apiKeySecretName: MISSING_NAME,
+    username: 'admin',
+    passwordSecretName: 'a3f1b2c4-0000-4000-8000-000000000007',
+  });
+
+  await assert.rejects(
+    () => readClientConfig(raw, 1, secrets),
+    (err: unknown) => err instanceof SecretNotFound
+      // The name it could not resolve, which is the whole diagnostic and is
+      // safe to carry: a name is not a secret.
+      && err.secretName === MISSING_NAME
+      && err.message.includes(MISSING_NAME)
+      // And nothing else. `SecretNotFound` exists because the chain's own
+      // `ProviderError` joins every link's failure, `fromFile`'s full path
+      // included (design spec §2.4).
+      && !err.message.includes(SECRET_PASSWORD)
+      && !err.message.includes('admin')
+      && !err.message.includes('nonexistent-secrets-dir'),
+  );
 });
 
 test('the strategy is chosen before any secret is resolved', async () => {

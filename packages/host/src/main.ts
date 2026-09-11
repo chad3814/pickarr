@@ -15,13 +15,14 @@
  */
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaPlugin } from '@pickarr/contract';
+import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
 import { DEFAULT_PORT, createReadServer } from './api/server.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
 import { createSecrets } from './secrets/instance.ts';
+import type { Secrets } from './secrets/instance.ts';
 import { secretsConfigSchema } from './config/schemas.ts';
 import { ensureAuthSecret } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
@@ -474,7 +475,11 @@ export async function main(
   // schema rather than restated as a literal here: a default in two places
   // is one that can disagree with itself.
   const secrets = createSecrets({ raw, baseDir: secretsConfigSchema.parse(undefined).baseDir });
-  const downloads = createDownloadClients({ raw, fetch, secrets, now: () => Date.now(), log });
+  // A factory, not a built object: `createHost` supplies the `Secrets` it
+  // will also give the reconcile handler, so the two cannot be different
+  // instances. See `createHost`'s own `downloads` doc for why that matters.
+  const downloads = (hostSecrets: Secrets): DownloadClients =>
+    createDownloadClients({ raw, fetch, secrets: hostSecrets, now: () => Date.now(), log });
 
   // Two shapes, not one object literal with `timers` always present:
   // `exactOptionalPropertyTypes` is on, so an explicit `timers: undefined`

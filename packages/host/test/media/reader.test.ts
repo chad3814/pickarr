@@ -244,7 +244,7 @@ test('a plugin\'s context carries a reader scoped to it', async () => {
     raw,
     db,
     fetch: unusedFetch,
-    downloads: unusedDownloads,
+    downloads: () => unusedDownloads,
     secrets: unusedSecrets,
     now: () => 1000,
     artworkDir: unusedArtworkDir,

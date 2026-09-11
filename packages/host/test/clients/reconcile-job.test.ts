@@ -145,7 +145,7 @@ function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
     raw,
     db,
     fetch: overrides?.fetch ?? unusedFetch,
-    downloads: unusedDownloads,
+    downloads: () => unusedDownloads,
     secrets: makeSecrets(raw),
     now: overrides?.now ?? (() => 1000),
     artworkDir: unusedArtworkDir,

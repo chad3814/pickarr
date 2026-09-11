@@ -165,11 +165,37 @@ export function createHost(deps: {
   // would let a feed's fetches skip the per-hostname budget every other
   // call to that hostname is paced by.
   fetch: QueuedFetch;
-  downloads: DownloadClients;
   /**
-   * The secrets subsystem, threaded through to `createReconcileHandler`'s
-   * own `secrets` dependency so a reconcile tick can resolve the `secret`
-   * name its client row holds into the credential its adapter sends.
+   * Builds the download subsystem from **this host's** `secrets`, rather
+   * than arriving already built beside it.
+   *
+   * A factory and not a `DownloadClients`, for a reason that is not style.
+   * `createDownloadClients` closes over a `Secrets` of its own, and
+   * `createReconcileHandler` below is handed one too. Taking both as
+   * separate parameters would let a caller pass two different instances
+   * with nothing here saying they must agree -- and two instances are two
+   * memoization caches, so a `saveSecret` through one would leave the other
+   * serving the old credential for the life of the process. That is exactly
+   * the staleness design spec §3.5 exists to prevent, and it would show up
+   * as an authentication failure against a service whose password had just
+   * been fixed, with no failing test anywhere.
+   *
+   * Supplying the instance instead of accepting a built object closes that
+   * by construction: there is one `Secrets` inside this host, this factory
+   * receives it, and nothing here has two to disagree about.
+   *
+   * **The `Secrets` is deliberately not reachable through
+   * `DownloadClients`.** That type is `PluginContext.downloads` -- the
+   * object handed verbatim to every registered plugin by `ctxFor` below --
+   * so a `secrets` member on it would give every plugin `get` over the
+   * whole secret keyspace. Detecting a mismatch that way would cost more
+   * than the mismatch does.
+   */
+  downloads: (secrets: Secrets) => DownloadClients;
+  /**
+   * The secrets subsystem: the one instance this host resolves every
+   * credential through, handed to `createReconcileHandler` below and to
+   * `downloads` above.
    *
    * Explicit rather than built here from `raw`: `createSecrets` needs the
    * secrets directory, which comes from the config file, and deciding it
@@ -203,6 +229,11 @@ export function createHost(deps: {
    */
   concurrency?: number;
 }): Host {
+  // Built once, from the one `Secrets` this host has, and shared by every
+  // plugin context below. See `deps.downloads` for why it arrives as a
+  // factory rather than already built.
+  const downloads = deps.downloads(deps.secrets);
+
   // Plugins are wired explicitly via `register`, never discovered, so this
   // map is the host's whole notion of "who exists" — an id absent here is an
   // id nobody has registered, whether or not some `rss_feed` row names it.
@@ -284,7 +315,7 @@ export function createHost(deps: {
         },
       },
       fetch: deps.fetch,
-      downloads: deps.downloads,
+      downloads,
       log: (message, detail) => {
         console.log(`[${pluginId}] ${message}`, detail ?? {});
       },

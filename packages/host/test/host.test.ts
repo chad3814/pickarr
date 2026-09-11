@@ -173,7 +173,7 @@ function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
     raw,
     db,
     fetch: overrides?.fetch ?? unusedFetch,
-    downloads: unusedDownloads,
+    downloads: () => unusedDownloads,
     secrets: unusedSecrets,
     now: overrides?.now ?? (() => 1000),
     artworkDir: unusedArtworkDir,
@@ -314,7 +314,15 @@ test('a plugin submitting a download reaches the injected client and reads back 
     },
   };
   const host = createHost({
-    raw, db, fetch: unusedFetch, downloads, secrets: unusedSecrets, now: () => 1000, artworkDir: unusedArtworkDir,
+    raw,
+    db,
+    fetch: unusedFetch,
+    // The factory ignores the `Secrets` it is handed: this double resolves
+    // no credential, so there is nothing for it to resolve one through.
+    downloads: () => downloads,
+    secrets: unusedSecrets,
+    now: () => 1000,
+    artworkDir: unusedArtworkDir,
   });
 
   // The reference is read, not discarded. A call whose return value nothing

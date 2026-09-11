@@ -1001,6 +1001,39 @@ test('a row resolves to the same ClientConfig after migration 14 as before it', 
   assert.deepEqual(after, before, 'the indirection must be invisible to every caller');
 });
 
+test('migration 14 gives a blank credential no secret and no name', () => {
+  // `''` is what a blank form field saves as, and pre-migration
+  // `readClientConfig` folded it to "absent" and refused the client. If the
+  // migration named it, the row would come out holding a real uuid
+  // addressing a `secret` whose value is `''` -- so the client would read as
+  // *configured with a blank credential* rather than be refused, and that
+  // refusal would be lost on exactly the rows that most need it. The fold
+  // in `migration14` is what preserves it, and the analogous fold in
+  // `readClientConfig` is pinned by `clients/config.test.ts`.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 13));
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(1, 'blank-key', 'nzb', 'http://sab', '', null, null, 'movies', 'move', 1, 1, 'sabnzbd');
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(2, 'blank-password', 'torrent', 'http://qbt', null, 'admin', '', 'movies', 'move', 1, 1, 'qbittorrent');
+
+  migrateHost(raw);
+
+  const rows = raw.prepare('SELECT id, api_key_secret_name, password_secret_name FROM download_client ORDER BY id').all()
+    .map((row) => row as Record<string, unknown>);
+  assert.equal(rows[0]?.['api_key_secret_name'], null, 'a blank api key must not become a name');
+  assert.equal(rows[1]?.['password_secret_name'], null, 'a blank password must not become a name');
+  assert.equal(
+    Number(raw.prepare('SELECT count(*) c FROM secret').get()?.c),
+    0,
+    'a blank credential is not a credential, so it gets no secret row either',
+  );
+});
+
 test('migration 14 leaves a row with no credential alone', () => {
   const { raw } = openTestDatabase();
   migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 13));
