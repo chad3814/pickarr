@@ -406,18 +406,56 @@ the same problem and solves it the same way.
   weak password is now directly exposed to whatever network the host sits on.
   This was chosen deliberately over loopback-plus-opt-in, and it is the single
   largest risk this slice introduces.
+- **That default reaches no published artefact yet**, which is worth knowing
+  alongside the bullet above rather than instead of it. Verified in this tree:
+  the `Dockerfile`'s runtime stage runs `packages/core/dist/main.js` — 1.x —
+  with `EXPOSE 8080`, `packages/host` appears in that file nowhere at all, and
+  the one compose file publishes `8080:8080`. No Dockerfile, compose file or
+  manifest anywhere in the repo mentions 8787. So the exposure begins the day
+  the 2.0 host is containerised, not today. That is also the day Better Auth's
+  own rate limiter switches itself on, since the runtime stage sets
+  `NODE_ENV=production` — see below, and note that the limiter arriving is not
+  the same thing as the limiter being useful.
 - **Anything that was already reachable is still reachable to a session
   holder**, including every private-indexer URL with its passkey. Auth changes
   who can read it, not what is served. Redacting `link` is a different slice and
   would break the client that needs it.
-- **There is no password policy and no rate limit on sign-in.** Better Auth's
-  defaults apply; nothing here adds throttling, and a reachable `0.0.0.0` bind
-  makes that more consequential than it was.
+- **There is no password policy, and no rate limit on sign-in that is switched
+  on.** "Better Auth's defaults apply" is true and says nothing, so here is
+  what they are, read out of 1.7.3 and then measured. `rateLimit.enabled`
+  defaults to `isProduction` — `NODE_ENV === 'production'` — and nothing in
+  this repo sets `NODE_ENV` for the host: `npm start` and the test runner both
+  leave it unset. Measured: twelve consecutive wrong-password sign-ins against
+  one account all answer 401. The same twelve under `NODE_ENV=production`
+  answer `401, 401, 401` and then nine `429`s, because the library's default
+  special rule for `/sign-in`, `/sign-up`, `/change-password` and
+  `/change-email` is **3 requests per 10 seconds** (everything else is 100 per
+  10 seconds, counted in an in-process `Map` that a restart clears).
+
+  Two consequences a reader should not have to re-measure. **Turning it on is
+  not the whole fix**: `getIP` reads forwarded-IP *headers* and never the
+  socket, so with no proxy in front and no
+  `advanced.ipAddress.ipAddressHeaders` configured the rate-limit key collapses
+  to one shared bucket per path — the library logs exactly that, measured — and
+  three wrong guesses from anywhere then lock the owner out of their own
+  sign-in for ten seconds. **And the read routes have no limiter at all**: the
+  limiter is Better Auth's middleware over `/api/auth/*`, while the five
+  guarded routes go through `api/server.ts`'s `handle`, which has nothing of
+  the kind. A reachable `0.0.0.0` bind makes all of that more consequential
+  than it was.
 - **One account, no recovery.** No email path exists, so a forgotten password
   means editing the database. A `seed-user` script or a reset path is the obvious
   next thing and is not here.
 - **The claim token is printed to the log.** Anything reading the host's stdout
   during the unclaimed window can claim the install. That is a smaller surface
   than the network, which is the trade.
+- **The two sign-up refusals are told apart by timing and by nothing else.**
+  "Claimed" and "unclaimed, wrong token" answer the same 403, the same single
+  header, the same 31-byte body and no cookie — deliberately, so a garbage
+  token cannot be used to ask whether the install is still worth attacking.
+  The unclaimed path does one extra `host_state` read and a buffer compare,
+  which is a measured and reproducible ~5 µs on a ~138 µs request. Accepted
+  rather than equalised; the measurement and the reason are in
+  `auth/instance.ts` beside the refusal message.
 - **`auth_verification` has no writer in this slice**, like `external_reference`
   before it. Recorded so the next reader does not hunt for one.
