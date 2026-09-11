@@ -1218,6 +1218,64 @@ test('a path beside the auth dispatch is refused, mounted or not', async () => {
   }
 });
 
+/**
+ * A path that shares the auth mount's prefix without being inside it, which
+ * is the whole space `isAuthPath`'s trailing slash keeps out of the
+ * dispatcher. `/api/rss-items-v2` above cannot cover it: it does not share
+ * the prefix, so it exercises the router rather than the prefix test.
+ *
+ * `/api/authors` is the shape a later slice actually adds; `authx` is the
+ * shortest thing with the same property, and both are equally unclaimed.
+ */
+const AUTH_PREFIX_PROBE = '/api/authx';
+
+test('a path that merely starts with the auth prefix is the guard\'s, not the dispatcher\'s', async () => {
+  // **The one surviving mutation the whole-branch review found.**
+  // `isAuthPath` is `pathname === AUTH_BASE || pathname.startsWith(`${AUTH_BASE}/`)`,
+  // and its comment says the trailing slash is load-bearing. Replacing it with
+  // `pathname.startsWith(AUTH_BASE)` passed all 1937 tests, while handing the
+  // entire `/api/auth*` prefix space to a library that knows nothing about it:
+  // measured at the socket, `/api/authx` then answers Better Auth's **404**
+  // instead of this module's 401, so a route named `/api/authors` added later
+  // would be dispatched into the library and nothing would fail.
+  //
+  // Anonymous is the half that matters: the 401 is proof the request was
+  // guarded, and the dispatcher's 404 is proof it was not. The body is
+  // asserted for the same reason as the test above -- a status alone cannot
+  // tell which module answered.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    assert.ok(
+      !ROUTES.some((route) => route.path === AUTH_PREFIX_PROBE),
+      `${AUTH_PREFIX_PROBE} now names a route in ROUTES, so it is no longer a probe for the prefix`,
+    );
+
+    const anonymous = await get(server, AUTH_PREFIX_PROBE, ANONYMOUS);
+    assert.equal(anonymous.status, 401, 'a path beside the mount, not in it, must reach the guard');
+    assert.deepEqual(
+      JSON.parse(await anonymous.text()),
+      { error: 'unauthorized' },
+      'answered by the guard; a 404 here would mean the auth dispatcher was handed a path it does not own',
+    );
+
+    // Past the guard it is an unknown route, exactly as `/api/rss-items-v2`
+    // is -- which is what makes the 401 above the guard's and not the
+    // router's.
+    const signedIn = await get(server, AUTH_PREFIX_PROBE, cookie);
+    assert.equal(signedIn.status, 404, 'past the guard, a path no route claims is an unknown route');
+
+    // And the mount itself still dispatches, so this is not a test that would
+    // pass by breaking the forwarding it is written beside: `/api/auth` and
+    // `/api/auth/get-session` are both the library's.
+    const session = await get(server, '/api/auth/get-session', ANONYMOUS);
+    assert.equal(session.status, 200, 'the mount still reaches Better Auth');
+    assert.equal(await session.text(), 'null', 'and answers 200 with a null body for an anonymous caller, which is what the guard reads');
+  } finally {
+    await server.close();
+  }
+});
+
 test('a valid session cookie reaches the data', async () => {
   // The other half of the guard, and the one a refuse-everything
   // implementation fails: a real session, issued by a real sign-up through

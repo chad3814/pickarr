@@ -364,6 +364,16 @@ const AUTH_BASE = '/api/auth';
  * `/api/authors` would be handed to Better Auth, which knows nothing about
  * it. The base itself is included so `/api/auth` is Better Auth's 404 rather
  * than this module's.
+ *
+ * **Measured, and pinned.** Under `return pathname.startsWith(AUTH_BASE)` the
+ * whole `/api/auth*` prefix space escapes the guard: anonymous
+ * `GET /api/authx` answers the library's 404 instead of this module's 401.
+ * That mutation passed the entire suite until
+ * `test/api/server.test.ts`'s `AUTH_PREFIX_PROBE` test existed -- the nearest
+ * test used `/api/rss-items-v2`, which does not share the prefix and so
+ * exercises the router rather than this function. It is the one surviving
+ * mutation the whole-branch review found, and it is now the single failure
+ * under it.
  */
 function isAuthPath(pathname: string): boolean {
   return pathname === AUTH_BASE || pathname.startsWith(`${AUTH_BASE}/`);
