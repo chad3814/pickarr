@@ -18,6 +18,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { MediaPlugin } from '@pickarr/contract';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
 import { DEFAULT_PORT, createReadServer } from './api/server.ts';
+import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
 import { ensureAuthSecret } from './db/host-state.ts';
@@ -211,6 +212,68 @@ export function resolveReadPort(configured: string | undefined): number {
 }
 
 /**
+ * The interface the read API binds: `PICKARR_READ_API_HOST` when set to
+ * anything, and `undefined` -- which `createReadServer` reads as its own
+ * `DEFAULT_HOST`, every interface -- otherwise.
+ *
+ * **The default is deliberately not restated here.** One name for it, in the
+ * module that does the binding, is what keeps this from being a second place
+ * that could disagree about what the shipped process listens on. What this
+ * function decides is only whether the operator said anything.
+ *
+ * Nothing is validated beyond that: what can be bound is the listener's
+ * question, and `createReadServer` already rejects a bind that fails rather
+ * than leaving a process that looks started and serves nothing.
+ *
+ * **An empty variable is an unset one**, exactly as it is for the port -- and
+ * here that is load-bearing rather than tidy. `PICKARR_READ_API_HOST=` is
+ * what a compose file with the key and no value passes, and
+ * `listen(port, '')` binds the IPv6 wildcard `::` (measured on node 26), not
+ * the documented `0.0.0.0`: a different family, reported back as a different
+ * address, for a variable the operator never meant to set.
+ *
+ * Takes the variable's value rather than reading `process.env` itself, so it
+ * is testable without mutating the environment the whole process shares.
+ */
+export function resolveReadHost(configured: string | undefined): string | undefined {
+  return configured === undefined || configured === '' ? undefined : configured;
+}
+
+/**
+ * `PICKARR_PUBLIC_URL`: the externally reachable origin, for a host behind a
+ * reverse proxy. `undefined` when unset or empty, which is the ordinary case
+ * -- no proxy, and the address the listener bound is the origin.
+ *
+ * **Refused at boot when it is not an http origin**, rather than carried into
+ * `baseURL`, because the failure it would otherwise cause is both silent and
+ * total: Better Auth compares every state-changing request's `Origin` against
+ * `baseURL` (the auth slice's §2, measured), so a malformed value refuses
+ * every sign-in with a 403 whose reason appears in no log -- on the slice
+ * where a session is the only thing protecting this socket. **The scheme is
+ * the whole of what is checked**, and a host comes with it rather than being
+ * a second rule: `http:` and `https:` are special schemes, so a url with no
+ * host does not parse at all (`http://` is a parse failure, measured). What
+ * the host resolves to, and whether anything answers there, is not this
+ * process's business and could not be known here anyway.
+ *
+ * The value is returned as it was written rather than normalized. Better Auth
+ * compares origins, and `auth/instance.ts`'s `publicOrigin` is what reduces a
+ * configured url with a path or a trailing slash to one -- in the one place
+ * that does the comparing.
+ */
+export function resolvePublicUrl(configured: string | undefined): string | undefined {
+  if (configured === undefined || configured === '') return undefined;
+  if (!URL.canParse(configured)) {
+    throw new Error(`PICKARR_PUBLIC_URL is not a url: ${configured}`);
+  }
+  const { protocol } = new URL(configured);
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    throw new Error(`PICKARR_PUBLIC_URL is not an http or https url: ${configured}`);
+  }
+  return configured;
+}
+
+/**
  * Builds the process's shutdown handler. `host.stop()` clears the
  * dispatcher's timer and safety interval and returns without waiting on
  * anything -- a handler already in flight is abandoned deliberately, its row
@@ -297,14 +360,22 @@ export function createShutdown(
  *    it is opened after both scheduling calls as well, so nothing is served
  *    until the process has finished deciding what it will do. `main.test.ts`
  *    fails if the server is built before `start()`.
- * 5. The signal handlers, last, so nothing can be asked to stop before the
- *    state above is settled.
+ * 5. The signal handlers, after the server, so nothing can be asked to stop
+ *    before the state above is settled.
+ * 6. The claim-token line, last of all, and only while the install is
+ *    unclaimed. Last because it is the thing an owner starting this process
+ *    has to read, and the bottom of the output is where they are looking --
+ *    the auth slice's §6 asks for it on every boot, which is why it is a
+ *    property of `isClaimed` rather than of having just generated a token.
+ *    It is also the **one place anything prints the token**, and nothing
+ *    anywhere prints the signing secret.
  *
  * `argv` is accepted for parity with a conventional process entry point;
- * this slice has no argument surface beyond the `PICKARR_DATABASE` and
- * `PICKARR_READ_API_PORT` environment variables (there is deliberately no
- * config surface yet -- slice B's spec §1.1, cited in full on
- * `resolveArtworkDir` above), so nothing here reads it.
+ * this slice has no argument surface beyond the `PICKARR_DATABASE`,
+ * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST` and `PICKARR_PUBLIC_URL`
+ * environment variables (there is deliberately no config surface yet --
+ * slice B's spec §1.1, cited in full on `resolveArtworkDir` above), so
+ * nothing here reads it.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the
@@ -319,6 +390,10 @@ export function createShutdown(
  * it with, so a test that lets it bind leaves a listener behind for every
  * later test to trip over. It is also the only way to observe *when* the
  * server was built relative to `host.start()`, which is the ordering above.
+ * Supplying it does not have to mean faking it -- `main.test.ts` also passes
+ * a wrapper around the real one, which is how `authFor` below is covered at
+ * all: that closure is called by the listener rather than by anything here,
+ * so a fake server never runs it.
  */
 export async function main(
   argv: readonly string[],
@@ -337,6 +412,8 @@ export async function main(
   // possible refusal is the one that touches least on its way out.
   const pluginIdForType = createPluginIdForType(plugins);
   const port = resolveReadPort(process.env['PICKARR_READ_API_PORT']);
+  const readHost = resolveReadHost(process.env['PICKARR_READ_API_HOST']);
+  const publicUrl = resolvePublicUrl(process.env['PICKARR_PUBLIC_URL']);
 
   const databasePath = process.env['PICKARR_DATABASE'] ?? DEFAULT_DATABASE_PATH;
   const { raw, db } = openDatabase(databasePath);
@@ -378,22 +455,28 @@ export async function main(
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
+    host: readHost,
     port,
     // Built from the address the listener bound rather than here, because
     // `baseURL` has to be the origin requests arrive at and `port` may be 0 --
     // see `ReadServerDeps.authFor`.
     //
+    // **`PICKARR_PUBLIC_URL` wins over the bound address when it is set**, and
+    // it has to: behind a reverse proxy the origin a browser reaches is the
+    // proxy's, not this listener's, and Better Auth refuses every
+    // state-changing request whose `Origin` is neither `baseURL` nor a trusted
+    // origin (the auth slice's §2, measured). It is passed as `publicUrl` as
+    // well, so `trustedOrigins` names it too and `createAuth` knows it does
+    // not need to warn about a deployment that has told it nothing.
+    //
     // **The secret is never logged**, here or anywhere it travels; it is read
     // (and generated once) by `ensureAuthSecret`, so the host boots configured.
-    // `publicUrl` is deliberately `undefined` for now: `PICKARR_PUBLIC_URL` is
-    // read in exactly one place, and that place is the binding-and-wiring step
-    // of the auth slice's §6, which also prints the claim token.
     authFor: (baseURL) => createAuth({
       raw,
       db,
       secret: ensureAuthSecret(raw, Date.now()),
-      baseURL,
-      publicUrl: undefined,
+      baseURL: publicUrl ?? baseURL,
+      publicUrl,
       log,
     }),
     log,
@@ -412,4 +495,18 @@ export async function main(
     + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
     + `${clientIds.length} download client(s) scheduled`,
   );
+
+  // Last, and only while there is something to claim -- see the order above.
+  // `isClaimed` is asked first so a claimed install neither prints a token nor
+  // mints one: `ensureClaimToken` would happily write a fresh row on an
+  // install whose token was spent months ago, and printing that row would be
+  // printing a credential for an account that already exists.
+  if (!isClaimed(raw)) {
+    log(
+      'this install is unclaimed: the first sign-up must carry claim token '
+      + `${ensureClaimToken(raw, Date.now())} -- it is single-use, spent only by a sign-up that `
+      + 'succeeds, so a refused attempt leaves it usable, and it is printed on every boot until '
+      + 'an account exists',
+    );
+  }
 }

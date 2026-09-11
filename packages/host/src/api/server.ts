@@ -1,6 +1,6 @@
 /**
  * The read API on a socket: `node:http`, six routes behind a session, bound
- * to loopback.
+ * by default to every interface.
  *
  * Everything this file does is routing. Parse a request, call one function
  * from `./reads.ts` or `./artwork-route.ts`, write what came back.
@@ -27,11 +27,13 @@
  *
  * **Every route requires a session except `/api/health`.** Slice E shipped
  * this API unauthenticated, with loopback binding as the whole of the
- * protection; the auth slice's §5 closes it. The guard is in `answerFor`
- * below and it tests the *value* `auth.api.getSession` resolves to, never a
- * status code -- an unauthenticated session check answers `200` with a body
- * of `null` (that slice's §2, measured against better-auth 1.7.3), so a guard
- * written against the status lets every anonymous caller through. Health
+ * protection; the auth slice's §5 closes it -- and its §6 then reverses the
+ * bind, so a session is not the second of two defences but the only one (see
+ * `DEFAULT_HOST`). The guard is in `answerFor` below and it tests the *value*
+ * `auth.api.getSession` resolves to, never a status code -- an
+ * unauthenticated session check answers `200` with a body of `null` (that
+ * slice's §2, measured against better-auth 1.7.3), so a guard written
+ * against the status lets every anonymous caller through. Health
  * stays open so a container health check needs no credential, and it is the
  * only route that is: which routes are guarded is a property of `ROUTES`
  * below rather than of a list written anywhere else, and the tests enumerate
@@ -87,33 +89,45 @@ export const DEFAULT_PORT = 8787;
 export const API_VERSION = 1;
 
 /**
- * Loopback, and a literal rather than a parameter.
+ * Every interface, and the default the shipped process binds when
+ * `PICKARR_READ_API_HOST` says nothing.
  *
- * It is no longer the whole of this API's access control -- a session is, for
- * every route but the health check -- so the reason this is not a parameter is
- * now only that nothing has asked to bind anything else. When something does,
- * it can argue for it then, and the auth slice's §6 is where that argument
- * lands.
+ * **This reverses slice E's loopback bind, deliberately.** That slice bound
+ * `127.0.0.1` and argued for it, on the grounds that the API was
+ * unauthenticated and the bind was therefore the whole of its access control.
+ * It is not any more: every route but the health check requires a session
+ * (see the module doc), and a host reachable only from the machine it runs on
+ * cannot serve the client it exists for. The auth slice's §6 configures the
+ * interface and its §8 records the consequence in the plainest terms it has
+ * -- a session is now the *only* boundary rather than the second of two, so a
+ * session-handling defect or a weak password is exposed to whatever network
+ * this host sits on.
+ *
+ * A parameter now, because something has asked to bind something else:
+ * `ReadServerDeps.host` overrides this, and that is what
+ * `PICKARR_READ_API_HOST` reaches.
  */
-const LOOPBACK = '127.0.0.1';
+export const DEFAULT_HOST = '0.0.0.0';
 
 /**
  * A listening read API.
  *
  * `host` and `family` are read back from `server.address()` rather than
  * echoed from what was asked for, and they are on this interface for a
- * reason the brief's shape did not have room for: the loopback property is
+ * reason the brief's shape did not have room for: what a listener bound is
  * only testable by asserting *what the listener bound*. A test that instead
- * probed an external interface and found nothing would pass on a machine
- * with no route to that interface, which proves nothing at all about the
- * bind.
+ * probed an interface would prove nothing either way -- finding nothing on an
+ * external interface passes on a machine with no route to it, and finding
+ * something asserts the machine's routing table rather than this bind. That
+ * reasoning is slice E's, from when the expected value was loopback, and it
+ * survives the default having been reversed: only the value changed.
  */
 export interface ReadServer {
-  /** The address the listener actually bound -- `127.0.0.1`. */
+  /** The address the listener actually bound -- `DEFAULT_HOST`, unless `ReadServerDeps.host` asked for another. */
   host: string;
   /** The port it actually bound, which is the assigned one when 0 was asked for. */
   port: number;
-  /** Its address family, so an IPv6 wildcard cannot pass for loopback. */
+  /** Its address family, so an IPv6 wildcard cannot pass for the IPv4 one. */
   family: string;
   /**
    * Stops the listener. Does **not** drain in-flight requests: open
@@ -140,6 +154,16 @@ export interface ReadServerDeps {
    * the module doc.
    */
   pluginIdForType: (type: string) => string | undefined;
+  /**
+   * The interface to bind, or `undefined` for `DEFAULT_HOST` -- which is what
+   * an unset `PICKARR_READ_API_HOST` means, and what `main` passes for it.
+   *
+   * Required-but-nullable rather than optional: `exactOptionalPropertyTypes`
+   * is on, so an optional property would make "absent" and "explicitly
+   * undefined" two different things for a caller forwarding a value it read
+   * from the environment, and there is only one thing they could mean here.
+   */
+  host: string | undefined;
   /** 0 asks the kernel for a free port, which `ReadServer.port` then reports. */
   port: number;
   /**
@@ -606,8 +630,17 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
 }
 
 /**
- * The origin a listener at `address` is reachable at, which is the auth
- * instance's `baseURL`.
+ * The origin of the address a listener bound, which is what
+ * `ReadServerDeps.authFor` is handed.
+ *
+ * **One origin this listener answers at, not the only one and not
+ * necessarily a reachable one.** With the default wildcard bind it is
+ * `http://0.0.0.0:<port>`, which no browser will ever send as an `Origin`.
+ * Finishing that is the caller's job and `main` does it in two ways: it
+ * prefers `PICKARR_PUBLIC_URL` as `baseURL` when a proxy is in front, and
+ * `auth/instance.ts`'s `trustedOrigins` places a request that arrives from an
+ * address on one of this machine's own networks. What this function is for is
+ * the case with neither -- a host reached directly at the address it bound.
  *
  * An IPv6 address is bracketed, because `http://::1:8787` is not a url and
  * `http://[::1]:8787` is: `address.address` reports the bare address, and an
@@ -640,7 +673,7 @@ export async function createReadServer(deps: ReadServerDeps): Promise<ReadServer
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(deps.port, LOOPBACK, () => {
+    server.listen(deps.port, deps.host ?? DEFAULT_HOST, () => {
       server.removeListener('error', reject);
       resolve();
     });

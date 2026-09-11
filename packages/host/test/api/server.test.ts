@@ -13,7 +13,7 @@ import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer } from '../../src/api/server.ts';
-import { API_VERSION, DEFAULT_PORT, ROUTES, createReadServer } from '../../src/api/server.ts';
+import { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, ROUTES, createReadServer } from '../../src/api/server.ts';
 
 /**
  * One database behind both handles: `raw` for the fixtures and the read
@@ -97,16 +97,22 @@ interface SignedIn extends Running {
  * by the 500 and unknown-route tests, and `createAuth` writes a line at
  * construction when no public url is configured -- a property of
  * `auth/instance.ts`, tested there, with no business in this file's log.
+ *
+ * `host` is the interface to bind, and `undefined` -- what every test but the
+ * bind test passes -- is what an unset `PICKARR_READ_API_HOST` means in
+ * production: `DEFAULT_HOST`, every interface.
  */
 async function start(
   raw: DatabaseSync,
   db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
+  host?: string,
 ): Promise<Running> {
   const logs: LogLine[] = [];
   const server = await createReadServer({
     raw,
     pluginIdForType,
+    host,
     port: 0,
     authFor: (baseURL) => createAuth({
       raw,
@@ -123,7 +129,21 @@ async function start(
   return { server, logs };
 }
 
-/** The origin the listener actually bound, which is also the auth instance's `baseURL`. */
+/**
+ * The origin the listener actually bound, which is also the auth instance's
+ * `baseURL` -- and with the default bind that origin names the unspecified
+ * address, `http://0.0.0.0:<port>`.
+ *
+ * **Every request in this file is made to that address**, rather than to
+ * loopback with an `Origin` of its own, and that is what keeps the two halves
+ * of a POST agreeing: Better Auth refuses any state-changing request whose
+ * `Origin` is neither `baseURL`'s nor one `trustedOrigins` places (design spec
+ * §2), and the wildcard address is not one `trustedOrigins` places -- so a
+ * sign-up below is accepted because `baseURL` was built from what the listener
+ * bound, which is the property `api/server.ts` exists to get right. Connecting
+ * to the unspecified address reaches a listener on this machine; measured here
+ * on darwin, and the behaviour linux shares.
+ */
 function originOf(server: ReadServer): string {
   return `http://${server.host}:${server.port}`;
 }
@@ -596,20 +616,54 @@ test('a read that throws answers 500 with no url, path or query in the body', as
   }
 });
 
-test('the server binds to loopback only', async () => {
-  // The listener's own address, not a probe against an external interface: a
-  // probe would pass on a machine with no route to that interface and prove
-  // nothing about what this bound to.
+test('the server binds the configured host, defaulting to 0.0.0.0', async () => {
+  // **The listener's own address, never a probe against an external
+  // interface.** That was slice E's reasoning for the shape of this test when
+  // the expected value was loopback, and the reasoning survives the reversal
+  // of the value: a probe that failed to reach an external interface would
+  // pass on a machine with no route to that interface, and one that reached
+  // it would be asserting the machine's routing table rather than this bind.
+  // What the kernel says this listener holds is `server.address()`, which is
+  // what `ReadServer.host` and `.family` are read back from.
+  //
+  // **Both halves in one test, asserted against the value that was
+  // configured.** A second test for the override could drift from this one,
+  // and there is one property here rather than two: whatever host was asked
+  // for is the host that was bound. `undefined` is the request an unset
+  // `PICKARR_READ_API_HOST` makes, and `DEFAULT_HOST` is the answer to it.
   const { raw, db } = setup();
-  const { server } = await start(raw, db, moviesOnly);
-  try {
-    assert.equal(server.host, '127.0.0.1', 'the address the listener actually bound');
-    assert.equal(server.family, 'IPv4', 'and its family, so a v6 wildcard cannot pass as loopback');
-    assert.ok(server.port > 0, 'port 0 was replaced by the one the kernel assigned');
-    assert.equal(DEFAULT_PORT, 8787, 'the documented default, which no test in this file binds');
-  } finally {
-    await server.close();
+  const cases = [undefined, '127.0.0.1'] as const;
+
+  // Both listeners at once, and each closes its own port before this
+  // resolves: two binds on port 0 share nothing and neither decides the
+  // other, which is the same reason `getAll` above is concurrent rather than
+  // a loop with an `await` in it. What follows is a plain loop of assertions
+  // with no await at all, so a failure still names the case it came from.
+  const bound = await Promise.all(cases.map(async (configured) => {
+    const { server } = await start(raw, db, moviesOnly, configured);
+    try {
+      return { host: server.host, family: server.family, port: server.port };
+    } finally {
+      await server.close();
+    }
+  }));
+
+  for (const [index, configured] of cases.entries()) {
+    const actual = bound[index];
+    assert.ok(actual, `a listener was bound for a configured host of ${String(configured)}`);
+    assert.equal(
+      actual.host,
+      configured ?? DEFAULT_HOST,
+      `the address the listener actually bound, for a configured host of ${String(configured)}`,
+    );
+    assert.equal(actual.family, 'IPv4', 'and its family, so a v6 wildcard cannot pass for a v4 one');
+    assert.ok(actual.port > 0, 'port 0 was replaced by the one the kernel assigned');
   }
+
+  // The defaults themselves, pinned here because nothing else can: a default
+  // is the one value no caller passes.
+  assert.equal(DEFAULT_HOST, '0.0.0.0', 'every interface, which is what the auth slice\'s §6 asks for');
+  assert.equal(DEFAULT_PORT, 8787, 'the documented default port, which no test in this file binds');
 });
 
 test('close stops the listener and does not wait for an in-flight read', async () => {

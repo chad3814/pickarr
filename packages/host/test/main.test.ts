@@ -12,13 +12,17 @@ import { openDatabase, openTestDatabase } from '../src/db/open.ts';
 import type { QueuedFetch } from '../src/fetch/queue.ts';
 import type { Timers } from '../src/jobs/dispatcher.ts';
 import type { ReadServer, ReadServerDeps } from '../src/api/server.ts';
-import { DEFAULT_PORT } from '../src/api/server.ts';
+import { DEFAULT_HOST, DEFAULT_PORT, createReadServer } from '../src/api/server.ts';
+import { isClaimed } from '../src/auth/claim.ts';
+import { AUTH_SECRET_KEY, CLAIM_TOKEN_KEY, readHostState, writeHostState } from '../src/db/host-state.ts';
 import {
   createPluginIdForType,
   createShutdown,
   formatLogDetail,
   main,
   resolveArtworkDir,
+  resolvePublicUrl,
+  resolveReadHost,
   resolveReadPort,
   scheduleKnownFeeds,
 } from '../src/main.ts';
@@ -129,21 +133,157 @@ function createFakeTimers(): { timers: Timers; setTimeoutCalls: { fn: () => void
   return { timers, setTimeoutCalls };
 }
 
+/** Every environment variable `main` reads, so each test starts from a known one. */
+const MAIN_VARIABLES = [
+  'PICKARR_DATABASE',
+  'PICKARR_READ_API_PORT',
+  'PICKARR_READ_API_HOST',
+  'PICKARR_PUBLIC_URL',
+] as const;
+
 /**
- * Runs `main` against a database of the test's own, with `PICKARR_DATABASE`
- * restored afterwards whatever happens -- this is the process's own
- * environment, and a test that left it pointing at a temporary directory
- * would corrupt every test after it in this file.
+ * Runs `main` against a database of the test's own and hands back every line
+ * the boot wrote, with every variable `main` reads restored afterwards
+ * whatever happens -- this is the process's own environment, and a test that
+ * left `PICKARR_DATABASE` pointing at a temporary directory would corrupt
+ * every test after it in this file.
+ *
+ * **The other three are deleted rather than left alone**, and `env` sets only
+ * what a test is actually asserting about. `main` reads
+ * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST` and `PICKARR_PUBLIC_URL`,
+ * so a value one of them happened to hold in the shell that started the run
+ * would change what these tests observe -- and the failure would read as a
+ * defect in `main` rather than as an environment nobody cleared.
+ *
+ * **Every boot is captured, whether its test reads a line or not.** An
+ * unclaimed boot prints a real claim token, which is `main`'s one credential
+ * line, and a test run's own output is no place for one even when the
+ * database it opens is deleted a moment later. Measured rather than feared:
+ * before this captured unconditionally, three tests here that assert nothing
+ * but job rows were each putting a freshly generated token on stdout.
  */
-async function runMain(databasePath: string, deps: Parameters<typeof main>[1]): Promise<void> {
-  const previous = process.env['PICKARR_DATABASE'];
+async function runMain(
+  databasePath: string,
+  deps: Parameters<typeof main>[1],
+  env: Readonly<Record<string, string>> = {},
+): Promise<string[]> {
+  const previous = new Map(MAIN_VARIABLES.map((name) => [name, process.env[name]]));
+  for (const name of MAIN_VARIABLES) delete process.env[name];
   process.env['PICKARR_DATABASE'] = databasePath;
+  for (const [name, value] of Object.entries(env)) process.env[name] = value;
   try {
-    await main([], deps);
+    return await captureConsole(() => main([], deps));
   } finally {
-    if (previous === undefined) delete process.env['PICKARR_DATABASE'];
-    else process.env['PICKARR_DATABASE'] = previous;
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
+}
+
+/**
+ * Every line the process wrote to its console while `run` was in flight, with
+ * `console` put back whatever happens.
+ *
+ * All four methods, not only the `console.log` `main`'s own `log` writes to:
+ * the property the tests below assert is that the signing secret reaches no
+ * log line *at all*, and a line Better Auth's own logger wrote would be as
+ * bad as one of ours -- and would not come through an injected fake `log`,
+ * which is why this captures the console rather than taking a seam.
+ *
+ * **Nothing here is ever printed by an assertion.** The captured lines carry
+ * a live claim token on an unclaimed boot, so every assertion over them
+ * compares a boolean or a count and carries a message of its own; none of them
+ * hands a line to a helper that would format it into a failure.
+ */
+async function captureConsole(run: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const record = (...args: unknown[]): void => {
+    lines.push(args.map((value) => String(value)).join(' '));
+  };
+  const original = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error,
+  };
+  console.log = record;
+  console.info = record;
+  console.warn = record;
+  console.error = record;
+  try {
+    await run();
+  } finally {
+    console.log = original.log;
+    console.info = original.info;
+    console.warn = original.warn;
+    console.error = original.error;
+  }
+  return lines;
+}
+
+/**
+ * A database file, migrated, with whatever a test wants on it already -- the
+ * shape every `main` test needs, since `main` opens the path it is given
+ * rather than a handle it is passed. The seeding connection is closed before
+ * `main` opens its own.
+ */
+function seedDatabase(databasePath: string, seed: (raw: DatabaseSync) => void = () => {}): void {
+  const { raw } = openDatabase(databasePath);
+  try {
+    migrateHost(raw);
+    seed(raw);
+  } finally {
+    raw.close();
+  }
+}
+
+/** The one account a claimed install has, inserted directly rather than signed up for. */
+function insertOwner(raw: DatabaseSync): void {
+  raw.prepare(`
+    INSERT INTO auth_user (id, name, email, email_verified, created_at, updated_at)
+    VALUES ('placeholder-owner', 'Placeholder Owner', 'owner@example.invalid', 0, 0, 0)
+  `).run();
+}
+
+/**
+ * Obviously synthetic placeholders that say so in their own text, the same
+ * ones `api/server.test.ts` uses.
+ *
+ * The claim token is **seeded rather than generated**, which is what keeps
+ * every test below from handling a real one: a real token is worth the whole
+ * install for as long as it is unspent, and this one is worth nothing outside
+ * the temporary database it was written to.
+ */
+const PLACEHOLDER_CLAIM_TOKEN = 'placeholder-not-a-real-claim-token';
+const PASSWORD = 'placeholder-not-a-real-password';
+const OWNER_EMAIL = 'owner@example.invalid';
+
+/**
+ * A public origin no request below is ever *sent* to -- it is only ever an
+ * `Origin` header and, through `PICKARR_PUBLIC_URL`, a `baseURL`. `.test` is
+ * reserved by RFC 2606, so it resolves nowhere even if something tried, and
+ * it is neither `localhost` nor an address `trustedOrigins` can place -- which
+ * is what makes a request accepted from it evidence that the variable was
+ * read.
+ */
+const PUBLIC_URL = 'http://pickarr.test:9999';
+
+/**
+ * The `Cookie` header a browser would send back, built from a response's
+ * `Set-Cookie` headers -- the same shape `api/server.test.ts` builds, and it
+ * throws rather than returning an empty string for the same reason: a
+ * silently cookie-less request cannot be told apart from a session that
+ * failed to round-trip.
+ */
+function cookieHeader(response: Response): string {
+  const pairs = response.headers.getSetCookie().map((value) => {
+    const [pair] = value.split(';');
+    if (pair === undefined) throw new Error('a Set-Cookie header with no name=value pair');
+    return pair;
+  });
+  if (pairs.length === 0) throw new Error('the response set no cookie to send back');
+  return pairs.join('; ');
 }
 
 /** How many `poll` jobs are in a state anything will ever claim again. */
@@ -399,15 +539,14 @@ test('main starts the server after the host and closes it before stopping', asyn
   // interval, so a `setInterval` already recorded by the time the server is
   // built is exactly the evidence that `start()` came first -- and a
   // `createReadServer` call moved above it reverses the two entries below.
+  // `runMain` clears every variable `main` reads, so the defaults asserted
+  // below are the defaults and not whatever the shell happened to export.
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-server-'));
-  const previousPort = process.env['PICKARR_READ_API_PORT'];
   try {
-    delete process.env['PICKARR_READ_API_PORT'];
     const databasePath = join(dir, 'pickarr.db');
-    const seed = openDatabase(databasePath);
-    migrateHost(seed.raw);
-    insertFeed(seed.raw, 'https://a.test/feed.xml');
-    seed.raw.close();
+    seedDatabase(databasePath, (raw) => {
+      insertFeed(raw, 'https://a.test/feed.xml');
+    });
 
     const order: string[] = [];
     const { timers } = createFakeTimers();
@@ -445,14 +584,17 @@ test('main starts the server after the host and closes it before stopping', asyn
     assert.ok(serverDeps, 'the server was built with deps main composed');
     assert.equal(serverDeps.port, DEFAULT_PORT, 'the documented default, with PICKARR_READ_API_PORT unset');
     assert.equal(
+      serverDeps.host,
+      undefined,
+      'and an unset PICKARR_READ_API_HOST is passed through as undefined, which is the listener\'s own DEFAULT_HOST',
+    );
+    assert.equal(
       serverDeps.pluginIdForType('movie'),
       OWNER_ID,
       'the type mapping is built from main\'s own plugin list, which is what keeps src/api off host.ts',
     );
     assert.equal(serverDeps.pluginIdForType('book'), undefined, 'and answers nothing for a type no plugin claims');
   } finally {
-    if (previousPort === undefined) delete process.env['PICKARR_READ_API_PORT'];
-    else process.env['PICKARR_READ_API_PORT'] = previousPort;
     await rm(dir, { recursive: true, force: true });
   }
 
@@ -474,6 +616,347 @@ test('main starts the server after the host and closes it before stopping', asyn
     ['listener closed', 'host stopped', 'exited'],
     'the listener stops first, so no read is accepted against a host that has already been told to stop',
   );
+});
+
+/**
+ * `main`, with the **real** `createReadServer` -- wrapped rather than
+ * replaced.
+ *
+ * Every other test in this file hands `main` a `fakeServer`, and that is what
+ * leaves `main`'s own `authFor` closure uncovered: the closure over this
+ * process's database, its persisted signing secret and its public url is
+ * called by the *listener*, once the listener knows what it bound. So the two
+ * tests below let a real listener bind, and wrap it only to keep the handle --
+ * `main` returns none, and a leaked listener outlives the test -- and to ask
+ * for port 0.
+ *
+ * **The port is the only thing overridden.** `main`'s own `resolveReadPort`
+ * refuses 0 outright, deliberately: a *process* told to listen on an
+ * arbitrary free port answers at an address nothing can be configured to
+ * poll. A port written down in a test, meanwhile, is a port two tests can
+ * fight over. Everything else, `authFor` included, is exactly what `main`
+ * composed.
+ *
+ * The ordering this exercises is production's rather than this test's:
+ * `baseURL` must be the origin requests actually arrive at or Better Auth
+ * refuses every POST (design spec §2), so `createReadServer` binds first and
+ * builds the auth instance from the address it reads back. Port 0 only makes
+ * that ordering visible -- it does not create it, and a fixed port would not
+ * remove it.
+ */
+async function runMainListening(
+  databasePath: string,
+  deps: Parameters<typeof main>[1],
+  env: Readonly<Record<string, string>> = {},
+): Promise<{ server: ReadServer; lines: string[] }> {
+  let listening: ReadServer | undefined;
+  let lines: string[] = [];
+  try {
+    lines = await runMain(databasePath, {
+      ...deps,
+      createReadServer: async (serverDeps) => {
+        listening = await createReadServer({ ...serverDeps, port: 0 });
+        return listening;
+      },
+    }, env);
+  } catch (error) {
+    // Closed here rather than left to the test's own `finally`: the handle
+    // never reached the caller, so nothing else can close it.
+    await listening?.close();
+    throw error;
+  }
+  if (listening === undefined) throw new Error('main returned without building a listener');
+  return { server: listening, lines };
+}
+
+test('an unclaimed install prints its claim token on boot', async () => {
+  // **The token is seeded, not generated by this boot**, and that is what
+  // makes this the "every boot" case rather than the first-boot one: a print
+  // gated on having just minted the token would pass against a fresh
+  // database and fail here, which is the second boot an owner who missed the
+  // line the first time actually performs.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-claim-print-'));
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, (raw) => {
+      writeHostState(raw, CLAIM_TOKEN_KEY, PLACEHOLDER_CLAIM_TOKEN, 0);
+    });
+
+    const { timers } = createFakeTimers();
+    const lines = await runMain(databasePath, {
+      plugins: [],
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
+
+    const carrying = lines.filter((line) => line.includes(PLACEHOLDER_CLAIM_TOKEN));
+    assert.equal(
+      carrying.length,
+      1,
+      'exactly one line carries the token: it is a credential until it is spent, and one line is the whole of its exposure',
+    );
+    const line = carrying[0] ?? '';
+    assert.equal(
+      line.includes('single-use'),
+      true,
+      'the line says the token is single-use, because a token that reads as reusable invites being left lying around',
+    );
+    assert.equal(
+      line.includes('succeeds'),
+      true,
+      'and that only a sign-up which succeeds spends it, so the line cannot be read as "one attempt is all you get"',
+    );
+    // Last of all, which is what `main`'s own startup-order doc claims and
+    // the only part of "at a level someone starting the process will see"
+    // that is testable: the bottom of the output is where they are looking.
+    assert.equal(
+      lines.at(-1) === line,
+      true,
+      'the token line is the last thing the boot writes, above nothing that would scroll it away',
+    );
+
+    const after = openDatabase(databasePath);
+    try {
+      // `assert.ok(a === b)`, not `assert.equal`: the equality helpers format
+      // both operands into a failure, and one of these is the token.
+      assert.ok(
+        readHostState(after.raw, CLAIM_TOKEN_KEY) === PLACEHOLDER_CLAIM_TOKEN,
+        'printing the token neither spends it nor mints a second one',
+      );
+      assert.equal(isClaimed(after.raw), false, 'the fixture is an unclaimed install, which is why there was anything to print');
+    } finally {
+      after.raw.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a claimed install prints no token', async () => {
+  // **A token left on record *and* an account**, which is the fixture that
+  // isolates the check: a boot that printed whatever `ensureClaimToken`
+  // handed back would print this row, so the absence below is the
+  // `isClaimed` test and not an empty table.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-claimed-'));
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, (raw) => {
+      insertOwner(raw);
+      writeHostState(raw, CLAIM_TOKEN_KEY, PLACEHOLDER_CLAIM_TOKEN, 0);
+    });
+
+    const { timers } = createFakeTimers();
+    const lines = await runMain(databasePath, {
+      plugins: [],
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
+
+    assert.ok(lines.length > 0, 'the boot printed something, so the two absences below are not an empty capture');
+    assert.equal(
+      lines.filter((line) => line.includes(PLACEHOLDER_CLAIM_TOKEN)).length,
+      0,
+      'a claimed install prints no token, and this one had one on record to print',
+    );
+    assert.equal(
+      lines.filter((line) => line.toLowerCase().includes('claim token')).length,
+      0,
+      'and says nothing about claiming, which would only invite an attempt that is already refused',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the signing secret is never printed', async () => {
+  // The noisiest boot there is: nothing seeded, so this process generates the
+  // secret itself, mints and prints a claim token, and -- with no public url
+  // configured -- writes `createAuth`'s warning too. Every line of it is
+  // asserted against the one value none of them may carry.
+  //
+  // **A real listener, because a faked one never builds the auth instance.**
+  // `ensureAuthSecret` is called inside `main`'s `authFor` closure, which the
+  // *listener* calls back once it knows its own address -- so a boot whose
+  // `createReadServer` is replaced by a fake persists no secret at all, and
+  // this test would then assert the absence of a value that was never
+  // generated. Measured, not assumed: with the fake, `host_state` had no
+  // `auth.secret` row.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-secret-'));
+  let server: ReadServer | undefined;
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath);
+
+    const { timers } = createFakeTimers();
+    const { server: listener, lines } = await runMainListening(databasePath, { plugins: [], timers });
+    server = listener;
+
+    const after = openDatabase(databasePath);
+    try {
+      const secret = readHostState(after.raw, AUTH_SECRET_KEY);
+      assert.ok(secret !== null, 'the boot generated and persisted a signing secret, which is the value nothing may print');
+      assert.ok(secret.length >= 32, 'and a real one, not an empty string that would make every assertion below vacuous');
+      assert.ok(lines.length > 0, 'the boot printed something, so the absence below is not an empty capture');
+      for (const [index, line] of lines.entries()) {
+        // The secret's own **value**, never a placeholder standing in for it
+        // -- and compared into a boolean with a message of its own, because
+        // `assert.equal(line, ...)` would print the line, and therefore the
+        // secret, into the failure it reported.
+        assert.equal(line.includes(secret), false, `line ${index} of the boot log must not carry the signing secret`);
+      }
+    } finally {
+      after.raw.close();
+    }
+  } finally {
+    await server?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('main wires auth so a data route refuses without a session', async () => {
+  // **Driven through `main`, not through `createReadServer`.** `main` builds
+  // the auth instance the guard asks -- the `authFor` closure over this
+  // process's database, its persisted secret and its public url -- and every
+  // other test in this file replaces `createReadServer` with a fake, so
+  // nothing else covers that closure at all. Task 5 flagged exactly this gap;
+  // this is the test that closes it.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-auth-'));
+  let server: ReadServer | undefined;
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, (raw) => {
+      writeHostState(raw, CLAIM_TOKEN_KEY, PLACEHOLDER_CLAIM_TOKEN, 0);
+    });
+
+    // The boot's own lines go unread here and are captured anyway, by
+    // `runMain`: this one generates a real signing secret, and a real boot
+    // whose console is not captured is how a line carrying one would reach
+    // the run's output. Measured rather than feared -- the mutation that logs
+    // the secret printed it from exactly this test, back when it was the one
+    // `main` test not capturing, while the test written to catch that was
+    // busy catching it somewhere else.
+    const { timers } = createFakeTimers();
+    const { server: listener } = await runMainListening(databasePath, { plugins: [ownerPlugin], timers });
+    server = listener;
+    const origin = `http://${server.host}:${server.port}`;
+
+    const anonymous = await fetch(`${origin}/api/media?type=movie`);
+    assert.equal(anonymous.status, 401, 'a data route refuses a caller with no session, through the auth main wired in');
+
+    // The listener is answering, so the refusal above is the guard rather
+    // than a socket with nothing behind it.
+    const health = await fetch(`${origin}/api/health`);
+    assert.equal(health.status, 200, 'the one open route answers, so the refusal above is the guard and not a dead listener');
+
+    // And the other half, which is what proves `baseURL` came from the
+    // address the listener bound: the `Origin` below is the unspecified
+    // address, which `trustedOrigins` will not place (it is neither
+    // `localhost` nor an address on a network this machine is on), so
+    // nothing but `baseURL` itself can be what lets this POST through.
+    const signUp = await fetch(`${origin}/api/auth/sign-up/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({
+        email: OWNER_EMAIL,
+        password: PASSWORD,
+        name: 'Placeholder Owner',
+        claimToken: PLACEHOLDER_CLAIM_TOKEN,
+      }),
+    });
+    assert.equal(signUp.status, 200, 'sign-up through main\'s own mount, carrying the claim token this boot printed');
+
+    const signedIn = await fetch(`${origin}/api/media?type=movie`, {
+      headers: { cookie: cookieHeader(signUp) },
+    });
+    assert.equal(signedIn.status, 200, 'and the session that sign-up issued reaches the data, so the guard is not simply refusing everything');
+  } finally {
+    await server?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('main binds PICKARR_READ_API_HOST and hands PICKARR_PUBLIC_URL to auth as its origin', async () => {
+  // The two variables this step adds, both read in exactly one place (design
+  // spec §6) and both observed here at the far end: the host from the
+  // listener's own address, the public url from what Better Auth will accept
+  // a POST from.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-public-'));
+  let server: ReadServer | undefined;
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, (raw) => {
+      writeHostState(raw, CLAIM_TOKEN_KEY, PLACEHOLDER_CLAIM_TOKEN, 0);
+    });
+
+    const { timers } = createFakeTimers();
+    const { server: listener, lines } = await runMainListening(
+      databasePath,
+      { plugins: [ownerPlugin], timers },
+      { PICKARR_READ_API_HOST: '127.0.0.1', PICKARR_PUBLIC_URL: PUBLIC_URL },
+    );
+    server = listener;
+    assert.equal(
+      server.host,
+      '127.0.0.1',
+      'the interface PICKARR_READ_API_HOST named, read back from the listener rather than from what was asked for',
+    );
+
+    assert.equal(
+      lines.filter((line) => line.includes('no public url configured')).length,
+      0,
+      'PICKARR_PUBLIC_URL reached createAuth, which writes that warning only when it has none',
+    );
+
+    // A sign-up driven from the configured public origin, which is neither
+    // `baseURL`'s bound address nor an origin `trustedOrigins` could place on
+    // its own -- so a 200 here is PICKARR_PUBLIC_URL doing the only job it
+    // has. Without it this is 403 and the deployment behind a proxy can
+    // never sign in.
+    const signUp = await fetch(`http://${server.host}:${server.port}/api/auth/sign-up/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: PUBLIC_URL },
+      body: JSON.stringify({
+        email: OWNER_EMAIL,
+        password: PASSWORD,
+        name: 'Placeholder Owner',
+        claimToken: PLACEHOLDER_CLAIM_TOKEN,
+      }),
+    });
+    assert.equal(signUp.status, 200, 'a request from the configured public origin is accepted, which is the whole of what PICKARR_PUBLIC_URL buys');
+  } finally {
+    await server?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveReadHost reads PICKARR_READ_API_HOST, and an unset one leaves the listener its default', () => {
+  // Taken as an argument rather than read from `process.env` inside, the same
+  // way `resolveReadPort` is and for the same reason.
+  assert.equal(resolveReadHost(undefined), undefined, 'unset asks the listener for its own default, which is every interface');
+  assert.equal(resolveReadHost(''), undefined, 'and an empty variable is an unset one, exactly as it is for the port');
+  assert.equal(resolveReadHost('127.0.0.1'), '127.0.0.1', 'a configured interface passes through');
+  assert.equal(resolveReadHost('::1'), '::1', 'including a v6 one: what can actually be bound is the listener\'s question, not this function\'s');
+  assert.equal(DEFAULT_HOST, '0.0.0.0', 'and the default an unset variable leaves in place is every interface');
+});
+
+test('resolvePublicUrl reads PICKARR_PUBLIC_URL, and refuses anything that is not an http origin', () => {
+  assert.equal(resolvePublicUrl(undefined), undefined, 'unset is the ordinary case: no proxy, and the bound address is the origin');
+  assert.equal(resolvePublicUrl(''), undefined, 'and an empty variable is an unset one');
+  assert.equal(resolvePublicUrl('https://pickarr.example'), 'https://pickarr.example');
+  assert.equal(
+    resolvePublicUrl('http://pickarr.example:8787/'),
+    'http://pickarr.example:8787/',
+    'a trailing slash is left alone here and normalized where it matters, by createAuth',
+  );
+
+  // Refused at boot rather than carried into `baseURL`, because the failure
+  // it would otherwise cause is silent and total: Better Auth compares every
+  // state-changing request's `Origin` against `baseURL`, so a malformed one
+  // refuses every sign-in with 403 and nothing in the log says why -- on the
+  // slice where a session is the only thing protecting the socket.
+  for (const bad of ['pickarr.example', 'pickarr.example:8787', 'myapp://pickarr', '/pickarr', 'http://']) {
+    assert.throws(() => resolvePublicUrl(bad), /PICKARR_PUBLIC_URL/, `${bad} must be refused at boot, not carried into baseURL`);
+  }
 });
 
 test('resolveReadPort reads PICKARR_READ_API_PORT, defaults to 8787, and refuses anything that is not a port', () => {
