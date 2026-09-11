@@ -1,14 +1,14 @@
 /**
- * `schema.ts` and `migrate.ts` declare the same 21 tables and 31 indexes
- * twice — once as Drizzle objects, once as DDL, spread across
- * `INITIAL_SCHEMA` and the numbered migrations that follow it — and nothing
- * generates either from the other. There is no drizzle config in this repo
- * and no script runs `drizzle-kit`, so these tests are what keeps the two in
- * step: the table set; every column's name, SQL type and nullability; and
- * every index's table, column list (in order) and uniqueness; every
- * column's default; and primary-key membership. They do not compare
- * foreign-key targets or a partial index's `WHERE` condition, so those two
- * could still drift unnoticed.
+ * `schema.ts` and `migrate.ts` declare the same tables and indexes twice —
+ * once as Drizzle objects, once as DDL, spread across `INITIAL_SCHEMA` and
+ * the numbered migrations that follow it — and nothing generates either
+ * from the other. There is no drizzle config in this repo and no script
+ * runs `drizzle-kit`, so these tests are what keeps the two in step: the
+ * table set; every column's name, SQL type and nullability; and every
+ * index's table, column list (in order) and uniqueness; every column's
+ * default; and primary-key membership. They do not compare foreign-key
+ * targets or a partial index's `WHERE` condition, so those two could still
+ * drift unnoticed.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -153,10 +153,13 @@ test('every schema column matches the migration DDL by name, type, nullability a
     // on the *table* rather than on any of its columns.
     //
     // **The composite half is unexercised, and says so rather than citing a
-    // case that is not one.** Measured across all 21 mirrored tables,
-    // `getTableConfig(table).primaryKeys.length` is 0 on every one, so the
-    // second spread contributes nothing today and no test can tell it apart
-    // from an empty array. It is kept as future-proofing: the first composite
+    // case that is not one.** Measured once, when this file mirrored 21
+    // tables, `getTableConfig(table).primaryKeys.length` was 0 on every one,
+    // so the second spread contributed nothing then and no test could tell it
+    // apart from an empty array. The loop above is keyed off `declaredTables()`
+    // directly rather than that count, so it re-checks the primary-key shape
+    // of however many tables are declared now, not the 21 that existed at
+    // measurement time. It is kept as future-proofing: the first composite
     // key declared in `schema.ts` is then compared without this file being
     // touched. The justification that used to stand here named
     // `plugin_migrations (plugin_id, version)`, which is not a case at all --
