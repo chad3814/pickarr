@@ -233,18 +233,24 @@ const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
  * exempts. An entry with no file behind it simply never matches, and a stale
  * entry left behind after a file is deleted grants nothing.
  *
- * **It is also the only entry that does any work, and there is now exactly
- * one.** `auth/instance.ts` was listed too, on the reasoning that it constructs
- * `betterAuth()` and hands the schema to `drizzleAdapter`. Measured: with the
- * allow-list emptied, rule 2 over `packages/host/src` reports **4** violations
- * and all four are `db/host-state.ts`; `auth/instance.ts` produces **zero**,
- * because it reaches those columns through the Drizzle adapter and names none
- * of them in any string. So "only the adapter may select these columns" holds
- * over every file on the branch on its own merits, and that entry was granting
- * a 442-line file a blanket exemption it never needed — which is the one way
- * this rule can be lost quietly, since a query added to an exempt file is a
- * query nothing reports. Removed. If the adapter is ever bypassed there
- * deliberately, the entry comes back in a diff, which is what this list is for.
+ * **There are now two entries, and both do real work.** `auth/instance.ts` was
+ * listed too, on the reasoning that it constructs `betterAuth()` and hands the
+ * schema to `drizzleAdapter`. Measured, when `db/host-state.ts` was the only
+ * credential reader: with the allow-list emptied, rule 2 over
+ * `packages/host/src` reported **4** violations and all four were
+ * `db/host-state.ts`; `auth/instance.ts` produced **zero**, because it reaches
+ * those columns through the Drizzle adapter and names none of them in any
+ * string. So "only the adapter may select these columns" held over every file
+ * on the branch on its own merits, and that entry was granting a 442-line file
+ * a blanket exemption it never needed — which is the one way this rule can be
+ * lost quietly, since a query added to an exempt file is a query nothing
+ * reports. Removed. If the adapter is ever bypassed there deliberately, the
+ * entry comes back in a diff, which is what this list is for.
+ *
+ * Task 2 added the second entry, `secrets/store.ts`, the only reader and
+ * writer of `secret.value`. With the allow-list emptied today, rule 2 over
+ * `packages/host/src` reports **6** violations: the same 4 `host_state.value`
+ * plus 2 `secret.value`, one for `store.ts`'s reader and one for its writer.
  *
  * Exported for the test that keeps it honest: dropping any one entry has to
  * produce a violation in that entry's own file, so an inert entry cannot be

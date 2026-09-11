@@ -499,7 +499,7 @@ test('every allow-list entry is one the tree actually needs', async () => {
   assert.ok(CREDENTIAL_ALLOW_LIST.length > 0, 'an empty allow-list would make this test vacuous');
   for (const entry of CREDENTIAL_ALLOW_LIST) {
     const without = CREDENTIAL_ALLOW_LIST.filter((path) => path !== entry);
-    // eslint-disable-next-line no-await-in-loop -- one entry today; a directory walk per entry is not a hot path
+    // eslint-disable-next-line no-await-in-loop -- two entries today; a directory walk per entry is not a hot path
     const violations = await findCredentialSelections(HOST_SRC, without);
     assert.ok(
       violations.length > 0 && violations.every((violation) => violation.file === entry),
