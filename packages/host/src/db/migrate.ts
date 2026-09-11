@@ -238,9 +238,12 @@ UPDATE rss_feed SET download_type = 'nzb' WHERE download_type = 'usenet';
  * ('qbittorrent' | 'sabnzbd'), distinct from `download_client.type` (the
  * transport, 'torrent' | 'nzb', which this migration leaves untouched).
  * `DEFAULT 'qbittorrent'` exists only to make `ADD COLUMN ... NOT NULL`
- * legal on a populated table -- the one writer of a download_client row,
- * `scripts/seed-client.ts`, names this column explicitly, so no real row
- * has actually inherited this default silently.
+ * legal on a populated table -- the one writer of a download_client row
+ * outside tests, `scripts/seed-client.ts`, names this column explicitly, so
+ * no row an operator creates inherits it silently. Test rows do inherit it,
+ * including two in `migrate.test.ts` that seed the pre-migration-6 schema
+ * this migration acts on, and that is the default doing its job rather than
+ * a gap in it.
  *
  * `torrent_download` and `nzb_download` are one table per client type,
  * recording what the host submitted and what the client confirmed. A row is

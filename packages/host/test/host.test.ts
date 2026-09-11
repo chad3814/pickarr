@@ -298,6 +298,44 @@ test('a download request reaches the plugin owning that item\'s feed', async () 
   assert.deepEqual(betaReceived, []);
 });
 
+test('the downloads subsystem is built from the very Secrets the host resolves credentials through', () => {
+  // The invariant `createHost`'s `downloads` parameter exists to hold, and
+  // the only reason it is a factory rather than a built object: there is one
+  // `Secrets` in this host, the downloads subsystem is built from it, and
+  // `createReconcileHandler` is handed the same `deps.secrets` expression --
+  // so the two cannot end up on separate memoization caches, where a
+  // `saveSecret` through one would leave the other serving a credential that
+  // had just been changed (design spec §3.5).
+  //
+  // Asserted by reference, not by shape: two `Secrets` with identical
+  // behaviour are still two caches, so equality of value would prove
+  // nothing here.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const hostSecrets: Secrets = {
+    get: async () => { throw new Error('secrets.get: not used by this test'); },
+    saveSecret: () => { throw new Error('secrets.saveSecret: not used by this test'); },
+  };
+
+  let handed: Secrets | undefined;
+  createHost({
+    raw,
+    db,
+    fetch: unusedFetch,
+    downloads: (secrets) => {
+      handed = secrets;
+      return unusedDownloads;
+    },
+    secrets: hostSecrets,
+    now: () => 1000,
+    artworkDir: unusedArtworkDir,
+    // No `timers` override and no `start()`: the dispatcher arms nothing
+    // until started, so no real timer is created by this test.
+  });
+
+  assert.equal(handed, hostSecrets, "the factory must be handed the host's own Secrets, not another instance");
+});
+
 test('a plugin submitting a download reaches the injected client and reads back its reference', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);

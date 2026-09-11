@@ -182,7 +182,18 @@ export function createHost(deps: {
    *
    * Supplying the instance instead of accepting a built object closes that
    * by construction: there is one `Secrets` inside this host, this factory
-   * receives it, and nothing here has two to disagree about.
+   * receives it, and nothing inside this host has two to disagree about.
+   *
+   * **What is left, stated so the invariant is not read as stronger than it
+   * is.** The boundary is not sealed: a caller can write `() => …` and
+   * return a `DownloadClients` built over a second `createSecrets`. That is
+   * a different failure from the one this shape removed, though -- it takes
+   * a *visibly* zero-argument factory, because ignoring a named parameter
+   * is `no-unused-vars`, which oxlint puts in `correctness` and the lint
+   * gate therefore treats as an error. So the mistake has to be written on
+   * purpose and is legible at the call site, where the old shape let two
+   * parameters silently fail to agree. Five test files take that route
+   * deliberately, each returning a double that resolves no credential.
    *
    * **The `Secrets` is deliberately not reachable through
    * `DownloadClients`.** That type is `PluginContext.downloads` -- the

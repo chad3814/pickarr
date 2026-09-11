@@ -28,9 +28,13 @@ export const downloadClient = sqliteTable('download_client', {
   // The product behind this client ('qbittorrent' | 'sabnzbd'), distinct
   // from `type` above (the transport, 'torrent' | 'nzb'). Defaulted only so
   // the column was legal to add to a table that may already hold rows. The
-  // one writer of a download_client row, `scripts/seed-client.ts`, names
-  // this column explicitly and refuses an implementation that disagrees
-  // with `type`, so no row it creates inherits the default silently.
+  // one writer of a download_client row outside tests,
+  // `scripts/seed-client.ts`, names this column explicitly and refuses an
+  // implementation that disagrees with `type`, so no row an operator
+  // creates inherits the default silently. Tests are the exception and are
+  // meant to be: 5 of the 22 inserts in this repo omit the column, and
+  // those rows do inherit 'qbittorrent' -- which is what the default is
+  // for.
   implementation: text('implementation').notNull().default('qbittorrent'),
 }, (t) => [
   // A feed names a client by this, so two clients answering to the same name

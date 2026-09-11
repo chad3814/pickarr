@@ -948,6 +948,10 @@ test('migration 14 moves a credential into secret and leaves a name behind', () 
   migrateHost(raw);
 
   const rows = raw.prepare('SELECT id, username, api_key_secret_name, password_secret_name FROM download_client ORDER BY id').all();
+  // Before either row is indexed: a migration that dropped the rows it was
+  // moving credentials off would otherwise be caught only incidentally, by
+  // whichever assertion below happened to throw on `undefined` first.
+  assert.equal(rows.length, 2, 'both client rows must survive the migration');
   const sab = rows[0] as Record<string, unknown>;
   const qbt = rows[1] as Record<string, unknown>;
 
@@ -1025,6 +1029,15 @@ test('migration 14 gives a blank credential no secret and no name', () => {
 
   const rows = raw.prepare('SELECT id, api_key_secret_name, password_secret_name FROM download_client ORDER BY id').all()
     .map((row) => row as Record<string, unknown>);
+  // Both rows are still there, asserted before anything is read off them.
+  // `node:assert/strict` already makes `assert.equal(undefined, null)` throw,
+  // so an absent row fails the two assertions below rather than passing
+  // them -- but resting that on which `assert` this file happens to import
+  // is thinner than saying it, and a migration that dropped these rows
+  // should fail by name rather than incidentally. The `?.` stays regardless:
+  // `noUncheckedIndexedAccess` types an index read as possibly `undefined`
+  // and no runtime length assertion narrows that.
+  assert.equal(rows.length, 2, 'the migration must not drop the rows it was moving credentials off');
   assert.equal(rows[0]?.['api_key_secret_name'], null, 'a blank api key must not become a name');
   assert.equal(rows[1]?.['password_secret_name'], null, 'a blank password must not become a name');
   assert.equal(
