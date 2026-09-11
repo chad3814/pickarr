@@ -10,12 +10,17 @@
  *
  * Nothing here touches `globalThis.fetch`, so no test has to put it back.
  */
+import { DatabaseSync } from 'node:sqlite';
 import type {
+  DownloadClients,
+  JobEnqueue,
+  JobQueue,
   MediaItemInit,
   MediaItemRead,
   MediaItemUpdate,
   MediaReader,
   MediaWriter,
+  PluginContext,
   ProviderClaim,
   Resolution,
   HostFetch,
@@ -316,5 +321,95 @@ export function createRecordingMedia(): RecordingMedia {
     resolutions,
     roles,
     loseNextClaim(winner: number): void { claimLoser = winner; },
+  };
+}
+
+export interface TestHarness {
+  readonly ctx: PluginContext;
+  readonly raw: DatabaseSync;
+  readonly media: RecordingMedia;
+  /** Every job enqueued, with the id `enqueue` answered -- rising from 1. */
+  readonly enqueued: readonly (JobEnqueue & { id: number })[];
+  readonly logs: readonly { message: string; detail: Readonly<Record<string, unknown>> | undefined }[];
+  /** Inserts an `rss_item` row and returns its id. */
+  insertRssItem(filename: string, feedId?: number): number;
+  /** Inserts an `rss_feed` row and returns its id. */
+  insertFeed(downloadClientId: number | null): number;
+}
+
+/**
+ * A `PluginContext` over an in-memory database holding *stubs* of the host
+ * tables a plugin's own DDL references.
+ *
+ * Stubs rather than the real schema, because this package must not import from
+ * `@pickarr/host`: what these tests prove is that a plugin written against the
+ * contract behaves, and the real migrations, real foreign keys and real
+ * dispatcher are proven by the host's own flow test. Foreign keys are turned
+ * off below -- `node:sqlite` enables them by default, unlike `better-sqlite3` --
+ * so a test may reference an rss item, feed or media item it never inserted
+ * when the row itself is beside the point, and so `applyEnvelope`'s writes
+ * against a `media_item_id` the recording `MediaWriter` invented, rather than
+ * one that exists in this stub table, are not rejected by a constraint this
+ * package's own tests have no way to satisfy.
+ *
+ * `rss_feed` and `rss_item.feed_id` are included even though this task's own
+ * tests never join them, because the next task's `onDownloadRequest` does --
+ * `rss_item` joined through to `rss_feed` for the download client to submit
+ * against -- and a harness patched in afterward would leave that join
+ * untested here.
+ */
+export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number } = {}): TestHarness {
+  const raw = new DatabaseSync(':memory:');
+  raw.exec('PRAGMA foreign_keys = OFF');
+  raw.exec('CREATE TABLE rss_feed (id INTEGER PRIMARY KEY, download_client_id INTEGER)');
+  raw.exec('CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL)');
+  raw.exec('CREATE TABLE media_item (id INTEGER PRIMARY KEY)');
+
+  const media = createRecordingMedia();
+  const enqueued: (JobEnqueue & { id: number })[] = [];
+  const logs: { message: string; detail: Readonly<Record<string, unknown>> | undefined }[] = [];
+
+  const jobs: JobQueue = {
+    async enqueue(job: JobEnqueue): Promise<number> {
+      const id = enqueued.length + 1;
+      enqueued.push({ ...job, id });
+      return id;
+    },
+  };
+
+  const downloads: DownloadClients = {
+    async submit(): Promise<string | null> {
+      throw new Error('downloads.submit: not used by a lookup test');
+    },
+  };
+
+  const fetch: HostFetch = deps.fetch ?? {
+    async json(): Promise<never> { throw new Error('fetch.json: this test scripted no service'); },
+    async bytes(): Promise<never> { throw new Error('fetch.bytes: nothing here serves bytes'); },
+  };
+
+  return {
+    ctx: {
+      db: raw,
+      media: media.writer,
+      read: media.reader,
+      jobs,
+      fetch,
+      downloads,
+      log: (message, detail) => logs.push({ message, detail }),
+    },
+    raw,
+    media,
+    enqueued,
+    logs,
+    insertRssItem(filename: string, feedId?: number): number {
+      const result = raw.prepare('INSERT INTO rss_item (filename, feed_id) VALUES (?, ?)')
+        .run(filename, feedId ?? null);
+      return Number(result.lastInsertRowid);
+    },
+    insertFeed(downloadClientId: number | null): number {
+      const result = raw.prepare('INSERT INTO rss_feed (download_client_id) VALUES (?)').run(downloadClientId);
+      return Number(result.lastInsertRowid);
+    },
   };
 }

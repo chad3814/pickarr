@@ -1,0 +1,175 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { drizzle } from 'drizzle-orm/node-sqlite';
+import { applyEnvelope } from '../src/engine.ts';
+import { lookupTable, lookupTableMigration } from '../src/table.ts';
+import { createTestHarness, resolvedEnvelope } from '../src/testing.ts';
+import type { ApplyArgs } from '../src/engine.ts';
+import type { Media } from '../src/types.ts';
+
+const PLUGIN_ID = 'movie';
+const NOW = 1_700_000_000_000;
+
+function movieMedia(): Media {
+  return {
+    id: '22222222-2222-2222-2222-222222222222',
+    kind: 'movie',
+    title: 'Dune: Part Two',
+    releaseDate: '2024-03-01',
+    year: 2024,
+    provider: 'tmdb',
+    providerRef: 'tmdb:movie:693134',
+    overview: 'Paul unites with the Fremen.',
+    details: { runtimeMinutes: 166 },
+    parents: [],
+    people: [
+      { providerRef: 'tmdb:person:1', name: 'First Billed', role: 'cast', characterName: 'Paul', billingOrder: 0 },
+      { providerRef: 'tmdb:person:2', name: 'Second Billed', role: 'cast', characterName: 'Chani', billingOrder: 1 },
+      { providerRef: 'tmdb:person:1', name: 'First Billed', role: 'director', characterName: null, billingOrder: null },
+    ],
+  };
+}
+
+function fixture() {
+  const harness = createTestHarness();
+  lookupTableMigration(PLUGIN_ID).up(harness.raw);
+  const rssItemId = harness.insertRssItem('dune.mkv');
+  harness.raw.prepare(
+    `INSERT INTO ${PLUGIN_ID}_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)`,
+  ).run(rssItemId, NOW, NOW);
+  const applied: ApplyArgs[] = [];
+  const deps = {
+    pluginId: PLUGIN_ID,
+    ctx: harness.ctx,
+    raw: harness.raw,
+    db: drizzle({ client: harness.raw }),
+    table: lookupTable(PLUGIN_ID),
+    now: NOW,
+    apply: async (args: ApplyArgs) => { applied.push(args); },
+  };
+  return { harness, deps, rssItemId, applied };
+}
+
+/**
+ * `node:sqlite` rows come back with a null prototype, so `assert.deepEqual`
+ * (which is `deepStrictEqual` under `node:assert/strict`, and compares
+ * prototypes) fails against an object literal even when every column
+ * matches. Normalized the same way `test/table.test.ts` does.
+ */
+function stateRow(harness: ReturnType<typeof fixture>['harness']) {
+  const row = harness.raw.prepare(
+    `SELECT media_item_id, lookup_id, provider_ref, confidence, updated_at FROM ${PLUGIN_ID}_lookup`,
+  ).get();
+  return Object.assign({}, row);
+}
+
+test('creates the media item from the answer and claims its provider reference', async () => {
+  const { harness, deps, rssItemId } = fixture();
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-1', confidence: 0.94, media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  const item = harness.media.items.get(1);
+  assert.equal(item?.title, 'Dune: Part Two');
+  assert.equal(item?.releaseDate, '2024-03-01');
+  // `description` comes from the answer's `overview`.
+  assert.equal(item?.description, 'Paul unites with the Fremen.');
+  assert.equal(item?.provider, 'tmdb');
+  assert.equal(item?.providerRef, 'tmdb:movie:693134');
+  assert.deepEqual(harness.media.resolutions.get(rssItemId), { resolution: 'resolved', detail: null });
+});
+
+test('records the lookup id, the reference and the confidence on its own row', async () => {
+  const { harness, deps, rssItemId } = fixture();
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-2', confidence: 0.81, media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  assert.deepEqual(stateRow(harness), {
+    media_item_id: 1,
+    lookup_id: 'lookup-2',
+    provider_ref: 'tmdb:movie:693134',
+    confidence: 0.81,
+    updated_at: NOW,
+  });
+});
+
+test('hands the plugin the media item it should write against', async () => {
+  const { deps, rssItemId, applied } = fixture();
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-3', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0]?.mediaItemId, 1);
+  assert.equal(applied[0]?.media.providerRef, 'tmdb:movie:693134');
+  assert.equal(applied[0]?.now, NOW);
+});
+
+test('writes each person once and each part in billing order', async () => {
+  const { harness, deps, rssItemId } = fixture();
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-4', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  // Three parts, two people: the same provider ref plays cast and director.
+  assert.equal(harness.media.roles.length, 3);
+  assert.deepEqual(harness.media.roles.map((role) => role.role), ['cast', 'cast', 'director']);
+  assert.equal(harness.media.roles[0]?.personId, 1);
+  assert.equal(harness.media.roles[1]?.personId, 2);
+  assert.equal(harness.media.roles[2]?.personId, 1, 'one person, two parts');
+  assert.equal(harness.media.roles[0]?.name, 'Paul');
+  assert.equal(harness.media.roles[0]?.billingOrder, 0);
+});
+
+test('a lost claim drops our row, links the winner, and applies against it', async () => {
+  const { harness, deps, rssItemId, applied } = fixture();
+  harness.media.loseNextClaim(99);
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-5', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  const methods = harness.media.calls.map((call) => call.method);
+  assert.deepEqual(methods.slice(0, 4), ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'relinkRssItem']);
+  assert.equal(harness.media.items.has(1), false, 'the row that lost is gone');
+  assert.deepEqual(harness.media.calls[3]?.args, [rssItemId, 99]);
+  assert.equal(applied[0]?.mediaItemId, 99, 'the plugin writes against the winner');
+  assert.equal(stateRow(harness)?.['media_item_id'], 99);
+});
+
+test('the resolution is written last, after the rows a reader would then look for', async () => {
+  const { harness, deps, rssItemId } = fixture();
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-6', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  const methods = harness.media.calls.map((call) => call.method);
+  assert.equal(methods.at(-1), 'setResolution');
+});
+
+test('a null confidence is stored as null rather than refused', async () => {
+  const { harness, deps, rssItemId } = fixture();
+  const envelope = { ...resolvedEnvelope({ lookupId: 'lookup-7', media: movieMedia() }), confidence: null };
+
+  await applyEnvelope(envelope, { rssItemId, filename: 'dune.mkv', polls: 0 }, deps);
+
+  assert.equal(stateRow(harness)?.['confidence'], null);
+});
