@@ -302,6 +302,32 @@ test('a hostname other than localhost is refused, however it resolves', async ()
   assert.ok(userRow(raw) === undefined, 'the unplaceable hostname still created an account');
 });
 
+test('a ws: origin over a loopback host is refused, because the scheme is checked', async () => {
+  // `isPlaceableOrigin`'s `http:`/`https:` test had no isolating test at all:
+  // removing the line left the whole suite green. This is the one shape that
+  // fails when it goes, and the reason is which schemes the URL parser treats
+  // as special.
+  //
+  // `ws` is special, so `new URL('ws://127.0.0.1:8787')` has hostname
+  // `127.0.0.1` -- which `isPrivateIPv4` places -- *and* a real tuple origin,
+  // `ws://127.0.0.1:8787`. With the scheme test deleted, `trustedOrigins`
+  // returns that origin and Better Auth's own pattern match accepts it:
+  // measured, 200 with a row in `auth_user`. `wss:` and `ftp:` behave the
+  // same way.
+  //
+  // A *custom* scheme cannot reach that far and so cannot pin this:
+  // `new URL('myapp://127.0.0.1:8787').origin` is the opaque string `'null'`,
+  // which Better Auth refuses before matching anything, so `myapp://` is
+  // refused with the scheme test and without it -- also measured. The
+  // justification for this guard has to name `ws:`, not `myapp:`.
+  const { raw, auth, claimToken } = harness(undefined);
+
+  const response = await signUp(auth, 'ws://127.0.0.1:8787', 'attacker@example.invalid', claimToken);
+
+  assert.equal(response.status, 403);
+  assert.ok(userRow(raw) === undefined, 'the ws: origin still created an account');
+});
+
 test('a configured public url is trusted even though it is public', async () => {
   const { auth, claimToken } = harness(PUBLIC_URL);
 

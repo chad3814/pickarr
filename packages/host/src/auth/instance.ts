@@ -146,6 +146,19 @@ function isPrivateIPv6(hostname: string): boolean {
  * The scheme must be `http`/`https`: a custom-scheme origin (`myapp://...`)
  * belongs to an app this host does not serve, and Better Auth matches those
  * by a different rule than the exact-origin comparison this returns for.
+ *
+ * **What that scheme test actually catches is `ws:`, `wss:` and `ftp:`, not
+ * `myapp:`** -- measured, by deleting the line and re-running both shapes.
+ * Those three are WHATWG *special* schemes, so `new URL('ws://127.0.0.1:8787')`
+ * reports hostname `127.0.0.1` (which `isPrivateIPv4` places) *and* a real
+ * tuple origin, and without the test this function would hand that origin
+ * back as trusted: a sign-up carrying `Origin: ws://127.0.0.1:8787` answers
+ * 200 and writes a row. A custom scheme cannot get that far -- its `.origin`
+ * is the opaque string `'null'`, which Better Auth refuses outright before
+ * matching anything, so `myapp://127.0.0.1:8787` is refused with the test and
+ * without it. The isolating case is pinned by
+ * `test/auth/instance.test.ts`'s `ws:` test, which is the only shape that can
+ * fail when this line goes.
  */
 function isPlaceableOrigin(origin: string): boolean {
   if (!URL.canParse(origin)) return false;
@@ -187,6 +200,24 @@ function publicOrigin(publicUrl: string): string {
  * Called with no request at all when Better Auth builds the static half of
  * its trusted list, which is why `request` is optional and why the result is
  * just `publicUrl` in that case.
+ *
+ * **This reads `Origin` and only `Origin`, where the library falls back to
+ * `origin || referer`.** So a state-changing request that omits `Origin` and
+ * carries a `Referer` is checked against the referring *url*, and nothing
+ * here places it: measured, a sign-up with only
+ * `Referer: http://127.0.0.1:8787/x` is refused `403 INVALID_ORIGIN` even
+ * though the same request with that value as `Origin` is accepted. It is
+ * accepted only when the referrer's origin happens to be one Better Auth
+ * trusts on its own -- `baseURL`'s, or `publicUrl`'s -- which is the case
+ * the measurement also covered.
+ *
+ * Known behaviour rather than a defect: it fails *closed*, and a
+ * `Referer`-only cross-site POST is exactly what the check exists to refuse.
+ * Recorded here so the next person to meet a form that submits without an
+ * `Origin` finds the reason written down instead of diagnosing it as a bug.
+ * Widening this to the referrer would mean trusting a header that names a
+ * page rather than an origin, on the request shape least able to prove
+ * anything about itself.
  */
 function trustedOriginsFor(publicUrl: string | undefined, request?: Request): string[] {
   const trusted: string[] = [];
@@ -220,6 +251,31 @@ const CLAIM_TOKEN_FIELD = 'claimToken';
  * one. One message for both is what makes that probe answer nothing. It
  * costs an owner who mistypes the token a more specific error, which is the
  * cheaper half of the trade: the token is on the console in front of them.
+ *
+ * **What the two refusals do share is byte-identical, and measured.** Status
+ * 403, one header (`content-type: application/json`), a 31-byte body of
+ * `{"message":"sign-up is closed"}`, and no `Set-Cookie` on either. Nothing
+ * a caller reads off the response distinguishes them.
+ *
+ * **Timing does, slightly.** The unclaimed-and-wrong-token path runs one
+ * extra prepared `host_state` read plus a 43-byte `timingSafeEqual` that the
+ * claimed path never reaches, because `isClaimed` throws first. Measured
+ * interleaved over 6000 samples each, twice: a median of ~138 us for a
+ * claimed install against ~142 us for an unclaimed one offered a wrong token
+ * of the right length -- a reproducible ~5 us, ~3% of the whole request. An
+ * unclaimed install offered *no* token is indistinguishable from the claimed
+ * case (-0.2 us), because `offeredClaimToken` returns `null` before the
+ * `host_state` read happens.
+ *
+ * Recorded rather than closed. Equalising it would mean doing the read and
+ * the compare on the claimed path too, against noise that is already an
+ * order of magnitude larger than the signal (p90 is ~380 us on both paths),
+ * over a network that adds more. What a reader should know is that the
+ * identical response is deliberate and that the residual channel is timing,
+ * so nobody re-derives the whole argument from the fact that the two paths
+ * have different shapes. (An earlier review measured the same direction at
+ * 296 us against 346 us; the absolute figures did not reproduce here, the
+ * ordering and the mechanism did.)
  */
 const SIGN_UP_REFUSED = 'sign-up is closed';
 

@@ -678,14 +678,29 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
  * The origin of the address a listener bound, which is what
  * `ReadServerDeps.authFor` is handed.
  *
- * **One origin this listener answers at, not the only one and not
- * necessarily a reachable one.** With the default wildcard bind it is
- * `http://0.0.0.0:<port>`, which no browser will ever send as an `Origin`.
- * Finishing that is the caller's job and `main` does it in two ways: it
- * prefers `PICKARR_PUBLIC_URL` as `baseURL` when a proxy is in front, and
- * `auth/instance.ts`'s `trustedOrigins` places a request that arrives from an
- * address on one of this machine's own networks. What this function is for is
- * the case with neither -- a host reached directly at the address it bound.
+ * **One origin this listener answers at, not the only one.** With the default
+ * wildcard bind it is `http://0.0.0.0:<port>`. Finishing that is the caller's
+ * job and `main` does it in two ways: it prefers `PICKARR_PUBLIC_URL` as
+ * `baseURL` when a proxy is in front, and `auth/instance.ts`'s
+ * `trustedOrigins` places a request that arrives from an address on one of
+ * this machine's own networks. What this function is for is the case with
+ * neither -- a host reached directly at the address it bound.
+ *
+ * **`http://0.0.0.0:<port>` reaches this host, and it works only because it
+ * arrives here.** That url is a real one a client on the machine can use --
+ * every request in `test/api/server.test.ts` targets it -- so it is an origin
+ * a browser can genuinely be on, and `0.0.0.0` being the default bind is what
+ * makes that ordinary rather than exotic. It is *not* a placeable origin:
+ * `isPrivateIPv4` matches `127`, `10`, `172.16/12`, `192.168` and `169.254`,
+ * and `0` is none of them, so `trustedOrigins` never returns it. Measured: a
+ * sign-up carrying `Origin: http://0.0.0.0:<port>` against some other
+ * `baseURL` is refused `403 INVALID_ORIGIN`, and the same request succeeds
+ * when this function's value *is* the `baseURL` -- Better Auth puts
+ * `baseURL`'s origin in its trusted list implicitly. So this path is held
+ * open by that implicit trust and by nothing in the origin policy. Anything
+ * that stops passing the bound address as `baseURL` closes it, which is worth
+ * knowing before `PICKARR_PUBLIC_URL` is made mandatory or this value is
+ * normalized to something "nicer".
  *
  * An IPv6 address is bracketed, because `http://::1:8787` is not a url and
  * `http://[::1]:8787` is: `address.address` reports the bare address, and an
