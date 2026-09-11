@@ -1238,9 +1238,20 @@ test('a valid session cookie reaches the data', async () => {
 
     // A second route with the same cookie, so the pass is the session and not
     // one route's own accident.
+    //
+    // Read back through checks rather than a cast, the rule `pageFrom` above
+    // states and the reason it gives: `Response.json()` is `unknown` under
+    // this tsconfig, so `as { items: unknown[] }` silenced a real error and
+    // would have let a route answering a different shape fail somewhere
+    // downstream instead of here, by name. `isRecord` is already here for
+    // exactly this.
     const items = await get(server, '/api/rss-items', cookie);
-    assert.equal(items.status, 200);
-    assert.equal((await items.json() as { items: unknown[] }).items.length, 1);
+    assert.equal(items.status, 200, 'the same session cookie reads a second route');
+    const itemsBody: unknown = await items.json();
+    if (!isRecord(itemsBody) || !Array.isArray(itemsBody.items)) {
+      throw new Error('/api/rss-items answered no items array');
+    }
+    assert.equal(itemsBody.items.length, 1, 'the seeded rss item, not an empty page the guard let through');
 
     // Artwork too, which slice E left as an existence oracle over integer
     // ids: a session holder still gets its 404 for a media item with no
