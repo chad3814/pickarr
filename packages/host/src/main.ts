@@ -28,6 +28,7 @@ import { createHostFetch } from './fetch/queue.ts';
 import { createHost } from './host.ts';
 import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
+import { assertOriginOnly } from './origin.ts';
 
 /** `PICKARR_DATABASE`'s fallback -- the documented `/config` volume, exactly as 1.x's own default. */
 const DEFAULT_DATABASE_PATH = '/config/pickarr.db';
@@ -244,66 +245,27 @@ export function resolveReadHost(configured: string | undefined): string | undefi
  * reverse proxy. `undefined` when unset or empty, which is the ordinary case
  * -- no proxy, and the address the listener bound is the origin.
  *
- * **Refused at boot when it is not an http origin**, rather than carried into
+ * **Refused at boot when it is not a bare origin**, rather than carried into
  * `baseURL`, because the failure it would otherwise cause is both silent and
  * total: Better Auth compares every state-changing request's `Origin` against
  * `baseURL` (the auth slice's §2, measured), so a malformed value refuses
  * every sign-in with a 403 whose reason appears in no log -- on the slice
- * where a session is the only thing protecting this socket. A host comes with
- * the scheme rather than being a second rule: `http:` and `https:` are
- * special schemes, so a url with no host does not parse at all (`http://` is
- * a parse failure, measured). What the host resolves to, and whether anything
- * answers there, is not this process's business and could not be known here
- * anyway.
- *
- * **An origin is the whole of what this variable may hold**, so a path, a
- * query string or a fragment is refused here too -- the scheme was once the
- * whole of what was checked, and that left the failure this function exists to
- * prevent wide open. Measured, all three the same way: with `baseURL`
- * `http://127.0.0.1:<port>/pickarr`, `…/?x=1` or `…/#frag`, Better Auth mounts
- * itself under that path and every auth route answers **404** on the path
- * `api/server.ts` forwards -- so nobody can sign in, sign up or sign out,
- * sessions issued earlier keep working because the guard calls
- * `auth.api.getSession` in-process, and `/api/health` answers **200** so a
- * container health check reports the host healthy. Nothing is logged.
- * `https://host/pickarr` is a reverse proxy on a subpath, which is an
- * ordinary arrangement and a *feature* this slice does not have; refusing it
- * at boot says so, where reducing it to its origin would give that operator a
- * half-working install (cookies and redirects at the wrong path) instead of
- * an answer.
- *
- * **A trailing slash is not a path**: `https://host/` has pathname `/`, is
- * accepted, and works -- Better Auth normalizes it when it composes the
- * mount (measured, and the one prediction the review got backwards).
- *
- * **No failure below names the value.** Nothing this repo emits may carry a
- * url, and a boot that dies on an unreadable environment variable is exactly
- * where a url would otherwise reach a log: the message names the variable and
- * the rule it broke, which is all the operator needs to fix it.
+ * where a session is the only thing protecting this socket. The checks
+ * themselves -- what counts as an origin, what a path/query string/fragment
+ * does to Better Auth's mount, why a trailing slash is not a path, and why no
+ * failure names the value -- live in `origin.ts`'s `assertOriginOnly`, which
+ * this variable shares with the config file's `server.publicUrl`
+ * (`config/schemas.ts`): one function both callers refuse the same value
+ * through, rather than two copies that could drift.
  *
  * The value is returned as it was written rather than normalized, which after
- * the checks above means at most a trailing slash. Better Auth compares
+ * `assertOriginOnly` means at most a trailing slash. Better Auth compares
  * origins, and `auth/instance.ts`'s `publicOrigin` is what reduces that to an
  * origin -- in the one place that does the comparing.
  */
 export function resolvePublicUrl(configured: string | undefined): string | undefined {
   if (configured === undefined || configured === '') return undefined;
-  if (!URL.canParse(configured)) {
-    throw new Error('PICKARR_PUBLIC_URL is not a url');
-  }
-  const url = new URL(configured);
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('PICKARR_PUBLIC_URL is not an http or https url');
-  }
-  if (url.pathname !== '/') {
-    throw new Error('PICKARR_PUBLIC_URL must have no path: its pathname must be /');
-  }
-  if (url.search !== '') {
-    throw new Error('PICKARR_PUBLIC_URL must have no query string');
-  }
-  if (url.hash !== '') {
-    throw new Error('PICKARR_PUBLIC_URL must have no fragment');
-  }
+  assertOriginOnly(configured, 'PICKARR_PUBLIC_URL');
   return configured;
 }
 

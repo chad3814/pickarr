@@ -63,6 +63,15 @@ export async function openConfig(deps: { path: string }): Promise<Config> {
         // config diagnosable. Do not "fix" this by adding `cause` to
         // `file.ts` or by removing it here -- the two are asymmetric on
         // purpose, not inconsistent.
+        //
+        // That guarantee holds for zod's default formatter -- measured
+        // against invalid_type, too_small, unrecognized_keys, invalid_value
+        // and custom, none echoes the received value -- and for any
+        // hand-written `ctx.addIssue` message, which is a discipline schema
+        // authors must keep rather than something the type system enforces.
+        // `origin.ts`'s `assertOriginOnly`, wired into a `superRefine` in
+        // `config/schemas.ts`, is the first hand-written one in this slice,
+        // and it names no value.
         throw new Error(
           `config namespace ${JSON.stringify(namespace)} is invalid: ` +
           `${error instanceof Error ? error.message : String(error)}`,
