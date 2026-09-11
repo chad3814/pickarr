@@ -123,6 +123,9 @@ function requestedBatch(body: RequestInit['body']): RequestedBatch {
     }
     return item.name;
   });
+  // This guard is unreachable through the client's only caller: the batch client never
+  // sends an empty chunk. It guards a caller mistake the current client cannot make, and
+  // is untested on purpose.
   if (category === undefined) {
     throw new TypeError('fake lookup service: a batch request must carry at least one item');
   }
@@ -156,7 +159,7 @@ export function createFakeLookupService(script: FakeLookupScript): FakeLookupSer
           if (envelope === undefined) {
             throw new Error(`fake lookup service: nothing scripted for "${name}"`);
           }
-          return { ...envelope, status: 200 };
+          return Object.assign({}, envelope, { status: 200 });
         }),
       };
     }
