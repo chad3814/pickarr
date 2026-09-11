@@ -185,17 +185,24 @@ export function findViolations(file: string, source: string): Violation[] {
  * and normalizes a quoted or schema-qualified table name — so the house style
  * for a multi-column select (`SELECT ${COLUMNS} FROM …`) is read as the
  * statement it becomes rather than as `SELECT ? FROM …`, which is how a
- * credential select used to be invisible here. Over a credential table it then
- * **fails closed**: a `SELECT *`, or a substitution it could not resolve, is a
- * violation demanding a human decision rather than a pass.
+ * credential select used to be invisible here. It reads SQL comments as the
+ * token separators SQLite treats them as, so a comment between `FROM` and the
+ * table does not hide the table. Over a credential table -- **or over a table
+ * it could not resolve**, since that may be one -- it then **fails closed**: a
+ * `SELECT *`, or a substitution it could not resolve, is a violation demanding
+ * a human decision rather than a pass. That second half was the claim this
+ * docblock made before it was true: the branch was keyed on the table already
+ * resolving, so `` `SELECT token FROM ${aParameter}` `` was reported as
+ * nothing at all.
  *
  * Three things it still does not see, all of them stated rather than implied:
  *
  * - **SQL that is never a string in this file.** A Drizzle query-builder
  *   chain (`db.select({ token: authSession.token }).from(authSession)`) names
- *   neither table nor column in any literal, so nothing here can flag it. The
- *   one module written that way today is the allow-listed adapter; a new one
- *   would pass.
+ *   neither table nor column in any literal, so nothing here can flag it. That
+ *   is how Better Auth's adapter reaches these columns from `auth/instance.ts`
+ *   -- which is why that file needs no allow-list entry and no longer has one
+ *   -- and a new module written that way would pass.
  * - **A statement assembled across files.** Resolution is syntactic and
  *   file-local: an imported constant, a function's return and a parameter are
  *   all unresolvable, which is a violation over a credential table and
@@ -217,21 +224,35 @@ const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
  * added beside one of these, which is the opposite of what an allow-list is
  * for: adding a path here should be a visible decision in a diff.
  *
- * Both entries named files that **did not exist when this rule landed** — task
- * 2 wrote `db/host-state.ts` and task 3 wrote `auth/instance.ts` afterwards.
- * That is deliberate and it is why nothing here checks the paths resolve: the
- * allow-list is the one part of this rule written forward, so the check could
- * land before the code it exempts. An entry with no file behind it simply
- * never matches, and a stale entry left behind after a file is deleted grants
- * nothing.
+ * The one entry below named a file that **did not exist when this rule
+ * landed** — task 2 wrote `db/host-state.ts` afterwards. That is deliberate and
+ * it is why nothing here checks the paths resolve: the allow-list is the one
+ * part of this rule written forward, so the check could land before the code it
+ * exempts. An entry with no file behind it simply never matches, and a stale
+ * entry left behind after a file is deleted grants nothing.
+ *
+ * **It is also the only entry that does any work, and there is now exactly
+ * one.** `auth/instance.ts` was listed too, on the reasoning that it constructs
+ * `betterAuth()` and hands the schema to `drizzleAdapter`. Measured: with the
+ * allow-list emptied, rule 2 over `packages/host/src` reports **4** violations
+ * and all four are `db/host-state.ts`; `auth/instance.ts` produces **zero**,
+ * because it reaches those columns through the Drizzle adapter and names none
+ * of them in any string. So "only the adapter may select these columns" holds
+ * over every file on the branch on its own merits, and that entry was granting
+ * a 442-line file a blanket exemption it never needed — which is the one way
+ * this rule can be lost quietly, since a query added to an exempt file is a
+ * query nothing reports. Removed. If the adapter is ever bypassed there
+ * deliberately, the entry comes back in a diff, which is what this list is for.
+ *
+ * Exported for the test that keeps it honest: dropping any one entry has to
+ * produce a violation in that entry's own file, so an inert entry cannot be
+ * added back without a test failing. Nothing else in the rule can notice one
+ * -- an entry that exempts no violation has no effect to observe.
  */
-const CREDENTIAL_ALLOW_LIST: readonly string[] = [
+export const CREDENTIAL_ALLOW_LIST: readonly string[] = [
   // Persists (and generates) the Better Auth signing secret and the first-boot
   // claim token, so it is the one module that reads `host_state.value`.
   join(HOST_SRC_DIR, 'db', 'host-state.ts'),
-  // Constructs `betterAuth()` and hands the Drizzle schema to `drizzleAdapter`,
-  // which is what issues every query over `auth_account` and `auth_session`.
-  join(HOST_SRC_DIR, 'auth', 'instance.ts'),
 ];
 
 /**
@@ -384,6 +405,42 @@ function unquoted(sql: string): string {
 }
 
 /**
+ * The same statement with SQL comments taken out, each replaced by **one
+ * space**.
+ *
+ * `SELECT token FROM /* the sessions *\/ auth_session` read as 0 violations
+ * before this existed: `readsFrom` matches the table right after the keyword,
+ * and a comment between the two defeated it -- while a newline or a comment
+ * before the column list did not, so the shape was unusual *and* silently
+ * defeated a build-time rule. SQLite treats a comment as a token separator,
+ * which is why it becomes a space rather than nothing: `FROM/*x*\/table`
+ * has to read as `FROM table`, and `auth_/*x*\/session` must **not** read as
+ * `auth_session`, because to SQLite that is two tokens and a syntax error
+ * rather than a table name.
+ *
+ * `--` runs to the end of its line and the newline is kept, so a statement
+ * commented line by line does not collapse into one line.
+ *
+ * What it does not do: tell a comment from those two character sequences
+ * inside a quoted SQL *string literal* (`'a--b'`). Nothing under
+ * `packages/host/src` writes one, and getting it wrong in that direction
+ * widens what the rule reads rather than narrowing it, which is the safe
+ * direction for this rule.
+ */
+function withoutSqlComments(sql: string): string {
+  return sql.replaceAll(/\/\*[\s\S]*?\*\//g, ' ').replaceAll(/--[^\n]*/g, ' ');
+}
+
+/**
+ * A statement as this rule's matchers should read it: comments gone, quoting
+ * gone. Every regex below that looks for a table or a select list goes through
+ * this rather than through `unquoted` alone.
+ */
+function normalized(sql: string): string {
+  return unquoted(withoutSqlComments(sql));
+}
+
+/**
  * Whether `sql` reads rows *from* `table`, as opposed to declaring it.
  *
  * This is what keeps `migrate.ts` off the allow-list. Migration 12's DDL has
@@ -402,7 +459,25 @@ function readsFrom(sql: string, table: string): boolean {
   return new RegExp(
     String.raw`\b(?:from|join|update|into)\s+(?:\w+\s*\.\s*)?${table}\b`,
     'i',
-  ).test(unquoted(sql));
+  ).test(normalized(sql));
+}
+
+/**
+ * Whether the *table* a statement reads from is a substitution this check
+ * could not follow -- `` `SELECT token FROM ${t}` `` with `t` a parameter,
+ * which `sqlTextOf` renders as `SELECT token FROM  ? `.
+ *
+ * This is the other half of failing closed, and it was missing: the
+ * fail-closed branch is keyed on `readsFrom(sql, table)` for a *known*
+ * credential table, so a statement whose table is unknown was not "a query
+ * over a credential table" and never reached it -- 0 violations for a query
+ * that may well be selecting `auth_session.token`.
+ *
+ * Keyed on `unresolved` as well as on the shape, so a literal `?` that got
+ * there some other way cannot trip it (`FROM ?` is not valid SQLite anyway).
+ */
+function readsFromUnknownTable(sql: SqlText): boolean {
+  return sql.unresolved && /\b(?:from|join|update|into)\s+\?/i.test(normalized(sql.text));
 }
 
 /**
@@ -416,7 +491,7 @@ function readsFrom(sql: string, table: string): boolean {
  * a bare one.
  */
 function selectsEveryColumn(sql: string): boolean {
-  const list = /\bselect\b([\s\S]*?)\bfrom\b/i.exec(unquoted(sql))?.[1];
+  const list = /\bselect\b([\s\S]*?)\bfrom\b/i.exec(normalized(sql))?.[1];
   if (list === undefined) return false;
   return /(?:^|[\s,])(?:\w+\s*\.\s*)?\*/.test(list);
 }
@@ -462,7 +537,7 @@ function unreadableSelectMark(sql: SqlText): string | null {
  */
 function credentialColumnsIn(sql: SqlText): string[] {
   const named = CREDENTIAL_COLUMNS.filter(({ table, column }) => {
-    if (new RegExp(String.raw`\b${table}\s*\.\s*${column}\b`, 'i').test(unquoted(sql.text))) return true;
+    if (new RegExp(String.raw`\b${table}\s*\.\s*${column}\b`, 'i').test(normalized(sql.text))) return true;
     return readsFrom(sql.text, table) && new RegExp(String.raw`\b${column}\b`, 'i').test(sql.text);
   });
   const readable = named.map(({ table, column }) => `${table}.${column}`);
@@ -471,7 +546,15 @@ function credentialColumnsIn(sql: SqlText): string[] {
   const unread = CREDENTIAL_TABLES
     .filter((table) => readsFrom(sql.text, table) && !named.some((column) => column.table === table))
     .map((table) => `${table}.${unreadable}`);
-  return [...readable, ...unread];
+  // A table this check could not resolve is reported as `?.*` or `?.?`: it may
+  // be a credential table, and nothing above can have matched it by name. Only
+  // when no credential table was matched either, so a statement that reads a
+  // known credential table *and* an unknown one is reported once for the one
+  // that can be named.
+  const unknown = unread.length === 0 && readable.length === 0 && readsFromUnknownTable(sql)
+    ? [`?.${unreadable}`]
+    : [];
+  return [...readable, ...unread, ...unknown];
 }
 
 /**
@@ -766,10 +849,11 @@ async function checkCredentialColumns(): Promise<boolean> {
       'auth_session.token is a live session, and host_state.value is this host\'s Better Auth\n' +
       'signing secret — a query that selects one puts it somewhere it can be logged or serialised\n' +
       'into a response, and nothing fails when that happens. A `table.*` above is a star select and\n' +
-      'a `table.?` is a substitution this check could not resolve: neither names a credential and\n' +
-      'both may select one, so both are reported rather than assumed harmless. Name the columns the\n' +
-      'query actually needs; or, if this module is genuinely one of the two that may read a\n' +
-      'credential, add its path to CREDENTIAL_ALLOW_LIST in this script.\n',
+      'a `table.?` is a substitution this check could not resolve; a `?.` names a table it could not\n' +
+      'resolve either, which may be a credential table. None of those names a credential and each\n' +
+      'may select one, so each is reported rather than assumed harmless. Name the columns the\n' +
+      'query actually needs; or, if this module is genuinely the one that may read a credential,\n' +
+      'add its path to CREDENTIAL_ALLOW_LIST in this script.\n',
   );
   return false;
 }

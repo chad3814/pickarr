@@ -315,16 +315,20 @@ concatenations — so the house style for a multi-column select
 (`SELECT ${SESSION_COLUMNS} FROM auth_session`) is read as the statement it
 becomes rather than as `SELECT ? FROM …`, which is how a credential select was
 invisible. It normalizes a quoted or schema-qualified table name
-(`"auth_session"`, `main.auth_session`). And over a credential table it
-**fails closed**: a `SELECT *`, or a substitution it could not resolve, is a
-violation reported as `auth_session.*` or `auth_session.?` — answerable by
-naming the columns, or by adding a path to the allow-list where it shows up in
-a diff, and never by the check guessing that what it cannot read is harmless.
+(`"auth_session"`, `main.auth_session`) and reads SQL comments as the token
+separators SQLite treats them as, so a comment between `FROM` and the table
+does not hide the table. And over a credential table — or over a table it could
+not resolve, since that may be one — it **fails closed**: a `SELECT *`, or a
+substitution it could not resolve, is a violation reported as `auth_session.*`,
+`auth_session.?` or `?.?` — answerable by naming the columns, or by adding a
+path to the allow-list where it shows up in a diff, and never by the check
+guessing that what it cannot read is harmless.
 
 Three things it still cannot see, each stated in the script rather than
 implied: SQL that is never a string in the file (a Drizzle query-builder chain
-names neither table nor column, which is how the allow-listed adapter is
-written, so a *new* module written that way would pass); a statement assembled
+names neither table nor column, which is how Better Auth's adapter reaches
+these columns from `auth/instance.ts` — the reason that file needs no
+allow-list entry — so a *new* module written that way would pass); a statement assembled
 across files, since resolution is syntactic and file-local; and anything
 outside `packages/host/src`, so a plugin holding `PluginContext.db` keeps the
 reach `migratePlugin`'s docblock already records.

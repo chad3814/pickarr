@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  CREDENTIAL_ALLOW_LIST,
   findCredentialAssertions,
   findCredentialOperands,
   findCredentialSelections,
@@ -360,6 +361,149 @@ test('an unreadable select over a table holding no credential is still a pass', 
   });
 
   assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('a SQL comment between FROM and the table does not hide the table', async (t) => {
+  // **A bypass, not a curiosity.** `readsFrom` matches the table right after
+  // the keyword, so a comment in between defeated it and
+  // `SELECT token FROM /* the sessions */ auth_session` was reported as
+  // nothing at all -- while a newline, or a comment before the column list,
+  // flagged normally. A comment is a token separator to SQLite, so each one
+  // becomes a single space: `FROM/*x*/auth_session` has to read as a read of
+  // that table, and `auth_/*x*/session` must **not**, because to SQLite that
+  // is two tokens and a syntax error rather than a table name.
+  const dir = await fixtureDir(t, {
+    'between.ts': `export const Q = 'SELECT token FROM /* the sessions */ auth_session';\n`,
+    'no-space.ts': `export const Q = 'SELECT token FROM/* s */auth_session';\n`,
+    'line-comment.ts': [
+      'export const Q = `',
+      'SELECT token -- the credential the cookie carries',
+      'FROM auth_session`;',
+      '',
+    ].join('\n'),
+    // The other direction: a comment inside the identifier does not join its
+    // halves into a table name, and the statement reads no credential table.
+    'split-identifier.ts': `export const Q = 'SELECT token FROM auth_/* x */session';\n`,
+    // And a column named only in a SQL comment, over a table that is not a
+    // credential table, is still nothing.
+    'harmless.ts': `export const Q = 'SELECT id FROM media_item -- not token';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['between.ts', 'auth_session.token'],
+      ['line-comment.ts', 'auth_session.token'],
+      ['no-space.ts', 'auth_session.token'],
+    ],
+  );
+});
+
+test('a table name this check cannot resolve is a violation, because it may be a credential table', async (t) => {
+  // The half of failing closed that the docblock claimed and did not do. The
+  // branch was keyed on `readsFrom(sql, table)` for a *known* credential
+  // table, so a statement whose table is a parameter was not "a query over a
+  // credential table" and never reached it: `SELECT token FROM ${t}` reported
+  // nothing, while the same query with the *column* substituted reported
+  // `auth_session.?`.
+  //
+  // Reported as `?.?` -- a table it could not read, selecting columns it
+  // therefore cannot clear -- and answerable the same way as any other
+  // fail-closed finding: name the table, or say in a diff why this module may
+  // read a credential.
+  const dir = await fixtureDir(t, {
+    'from-parameter.ts': 'export function q(t: string): string { return `SELECT token FROM ${t}`; }\n',
+    'star-from-parameter.ts': 'export function q(t: string): string { return `SELECT * FROM ${t}`; }\n',
+    'insert-into-parameter.ts': 'export function q(t: string): string { return `INSERT INTO ${t} (a) VALUES (?)`; }\n',
+    // A table that *does* resolve is read as itself, and this one holds no
+    // credential -- so resolving it is what makes the difference, not the
+    // presence of a substitution.
+    'from-constant.ts': [
+      `const T = 'media_item';`,
+      'export const Q = `SELECT id FROM ${T} WHERE id > ?`;',
+      '',
+    ].join('\n'),
+    // A bound parameter that is not in the table position stays a bound
+    // parameter: the shape is `FROM`/`JOIN`/`UPDATE`/`INTO` immediately
+    // followed by something unreadable, not a `?` anywhere in the statement.
+    'parameter-in-where.ts': `export const Q = 'SELECT id FROM media_item WHERE id = ?';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['from-parameter.ts', '?.?'],
+      ['insert-into-parameter.ts', '?.?'],
+      ['star-from-parameter.ts', '?.*'],
+    ],
+  );
+});
+
+/**
+ * Where rule 2 applies, as the script itself spells it -- **repo-relative,
+ * deliberately**. The allow-list holds repo-relative paths, so the entry can
+ * only match a file walked from the same relative root; the test below is
+ * therefore the one in this file that depends on the working directory, which
+ * is the repo root under `npm run test:server` and under CI's `npm run check`.
+ * Every other test here writes a fixture under a temp dir instead.
+ */
+const HOST_SRC = 'packages/host/src';
+
+test('the credential allow-list has one entry, and the real tree needs no other', async () => {
+  // **An inert entry is how this rule gets lost quietly.**
+  // `auth/instance.ts` was allow-listed too, on the reasoning that it
+  // constructs `betterAuth()`. It reaches every credential column through the
+  // Drizzle adapter and names none of them in any string, so it produced no
+  // violations -- and the entry exempted a 442-line file from a rule it did
+  // not need, where a query added to it later would be a query nothing
+  // reports. Both halves are asserted over the real tree rather than a
+  // fixture, because the claim is about this repo: with the allow-list
+  // emptied, the only credential-column SQL on the branch is
+  // `db/host-state.ts`'s four statements, and the shipped list is exactly
+  // what makes the tree clean.
+  assert.deepEqual(
+    (await findCredentialSelections(HOST_SRC, [])).map((violation) => [
+      relative(HOST_SRC, violation.file),
+      violation.text,
+    ]),
+    [
+      [join('db', 'host-state.ts'), 'host_state.value'],
+      [join('db', 'host-state.ts'), 'host_state.value'],
+      [join('db', 'host-state.ts'), 'host_state.value'],
+      [join('db', 'host-state.ts'), 'host_state.value'],
+    ],
+    'rule 2 with no allow-list must report host-state.ts and nothing else -- an auth file appearing here means the adapter is being bypassed',
+  );
+  assert.deepEqual(
+    await findCredentialSelections(HOST_SRC),
+    [],
+    'and the shipped allow-list, one entry, is enough to make the tree clean',
+  );
+});
+
+test('every allow-list entry is one the tree actually needs', async () => {
+  // **The only thing that can notice an inert entry.** Re-adding
+  // `auth/instance.ts` to the list changes no report -- that is what "inert"
+  // means -- so no assertion about violations can see it. What can be asserted
+  // is the property the list is supposed to have: each entry exempts something
+  // real, so dropping it produces a violation *in that file*. An entry with
+  // nothing behind it fails here, which is what keeps a blanket exemption from
+  // being added back for a file that does not need one.
+  //
+  // A path with no file behind it is still allowed on purpose -- the list is
+  // written forward, and `an allow-list path naming a file that does not exist
+  // yet is not an error` pins that -- so this checks the entries that name a
+  // file in the tree today, which is the whole list.
+  assert.ok(CREDENTIAL_ALLOW_LIST.length > 0, 'an empty allow-list would make this test vacuous');
+  for (const entry of CREDENTIAL_ALLOW_LIST) {
+    const without = CREDENTIAL_ALLOW_LIST.filter((path) => path !== entry);
+    // eslint-disable-next-line no-await-in-loop -- one entry today; a directory walk per entry is not a hot path
+    const violations = await findCredentialSelections(HOST_SRC, without);
+    assert.ok(
+      violations.length > 0 && violations.every((violation) => violation.file === entry),
+      `${entry} exempts nothing: it is an inert allow-list entry, exempting a whole file from a rule it does not need`,
+    );
+  }
 });
 
 test('a statement split across a concatenation is read as one statement', async (t) => {
