@@ -287,8 +287,18 @@ The properties worth pinning, each because it fails silently:
 5. **Sign-up is refused once a user exists**, evaluated per request rather than at
    construction: create a user, then attempt a second sign-up **without
    restarting the server**.
-6. **The first sign-up requires the claim token**, and the token is single-use:
-   a second sign-up with the same token fails even if the first was rolled back.
+6. **The first sign-up requires the claim token, and spends it only on
+   success.** Single-use, not single-*attempt* — this sentence originally said
+   the token is spent "even if the first was rolled back", which the
+   implementation faithfully delivered and which is a defect: the hook runs
+   before Better Auth's own password-length check, so a correct token with a
+   too-short password returned 400 with the token already gone, and nothing
+   re-offers one while `auth_user` is empty. A typo made the install
+   permanently unclaimable. Verification lives in the `before` hook and
+   consumption in `after`, gated on `isClaimed` having flipped — success
+   observed in the database rather than read out of the library's return
+   shape, which is undocumented for this purpose. A second sign-up with a
+   spent token still fails.
 7. **A public-internet origin is refused and a private-range origin accepted**,
    with `PICKARR_PUBLIC_URL` unset.
 8. **The generated secret is stable across restarts** — two hosts over one
