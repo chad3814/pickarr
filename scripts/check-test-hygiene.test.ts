@@ -478,6 +478,7 @@ test('every producer is flagged called directly, and every formatting assertion 
     `ensureGeneratedValue(raw, 'auth.secret', 1_000)`,
     `ensureClaimToken(raw, 1_000)`,
     `readHostState(raw, 'auth.secret')`,
+    `resolveAuthSecret(undefined, raw, 1_000)`,
     `randomBytes(32).toString('base64url')`,
     `response.headers.getSetCookie()`,
     `cookieHeader(response)`,

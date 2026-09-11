@@ -139,6 +139,11 @@ const MAIN_VARIABLES = [
   'PICKARR_READ_API_PORT',
   'PICKARR_READ_API_HOST',
   'PICKARR_PUBLIC_URL',
+  // `main` reads this one too, and it is the one whose leaking in from the
+  // shell would be hardest to diagnose: set to anything, it becomes the
+  // signing secret in place of the persisted row, so a developer who happens
+  // to export it would change which cookie every test here can present.
+  'BETTER_AUTH_SECRET',
 ] as const;
 
 /**
@@ -148,12 +153,13 @@ const MAIN_VARIABLES = [
  * left `PICKARR_DATABASE` pointing at a temporary directory would corrupt
  * every test after it in this file.
  *
- * **The other three are deleted rather than left alone**, and `env` sets only
+ * **The other four are deleted rather than left alone**, and `env` sets only
  * what a test is actually asserting about. `main` reads
- * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST` and `PICKARR_PUBLIC_URL`,
- * so a value one of them happened to hold in the shell that started the run
- * would change what these tests observe -- and the failure would read as a
- * defect in `main` rather than as an environment nobody cleared.
+ * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL` and
+ * `BETTER_AUTH_SECRET`, so a value one of them happened to hold in the shell
+ * that started the run would change what these tests observe -- and the
+ * failure would read as a defect in `main` rather than as an environment
+ * nobody cleared.
  *
  * **Every boot is captured, whether its test reads a line or not.** An
  * unclaimed boot prints a real claim token, which is `main`'s one credential

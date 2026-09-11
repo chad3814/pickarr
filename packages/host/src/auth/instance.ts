@@ -45,8 +45,18 @@ export interface AuthDeps {
   raw: DatabaseSync;
   db: HostDb;
   /**
-   * The signing secret. Persisted by `db/host-state.ts` so it survives a
-   * restart; **never logged**, here or anywhere this value travels.
+   * The signing secret, and the whole of what decides whether a cookie this
+   * host issued is still one it will accept. **Never logged**, here or
+   * anywhere this value travels.
+   *
+   * Which value it is belongs to the caller: `main.ts`'s `resolveAuthSecret`
+   * answers `BETTER_AUTH_SECRET` when the operator set it and the row
+   * `db/host-state.ts` persists otherwise, so a restart with no variable set
+   * does not log everyone out. Passing it in is also what keeps Better Auth
+   * from falling back to `BETTER_AUTH_SECRET` itself, or to its own
+   * hard-coded default string, on its own terms rather than on this host's
+   * (`options.secret || env.BETTER_AUTH_SECRET || …`, and `options.secret`
+   * wins).
    */
   secret: string;
   /**

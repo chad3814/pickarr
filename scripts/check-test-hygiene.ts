@@ -566,6 +566,13 @@ const CREDENTIAL_PRODUCERS = new Set([
   'ensureGeneratedValue',
   'ensureClaimToken',
   'readHostState',
+  // `main.ts`: the signing secret this host will actually sign with, which is
+  // `BETTER_AUTH_SECRET` when the operator set it and `ensureAuthSecret`'s row
+  // otherwise. A wrapper is not seen through -- only `.toString(...)` is -- so
+  // the function that answers "the secret" has to be named here in its own
+  // right or the value would stop being tracked the moment a test called the
+  // one production code calls.
+  'resolveAuthSecret',
   // The primitive under all of them; a test that generates its own is the
   // same hazard as one that asks the host for the host's.
   'randomBytes',

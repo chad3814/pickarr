@@ -129,7 +129,10 @@ configuration.** Better Auth falls back to `BETTER_AUTH_SECRET`, then to a
 sessions. Requiring an environment variable would mean a host that will not boot
 until someone reads the docs; generating one at first boot into a `host_state`
 row means it boots configured and stays stable across restarts. An explicit
-`BETTER_AUTH_SECRET` still wins if set. The database already holds download
+`BETTER_AUTH_SECRET` still wins if set — because `main` reads it and hands it
+to `createAuth`; the library's own fallback to it is unreachable once
+`options.secret` is passed, so this row was documentation of a variable that
+did nothing until `resolveAuthSecret` existed (§6). The database already holds download
 client credentials, so this stores nothing of a new kind.
 
 **Sign-up is closed by a hook, not by configuration.** `emailAndPassword.disableSignUp`
@@ -342,7 +345,8 @@ caller, which is the whole point.
 | `PICKARR_READ_API_HOST` | `0.0.0.0` | Interface to bind. |
 | `PICKARR_READ_API_PORT` | `8787` | Port. Deliberately not `PICKARR_PORT`, which 1.x reads. |
 | `PICKARR_PUBLIC_URL` | unset | The externally reachable origin, when behind a proxy. An **origin**, and refused at boot when it carries a path, a query string or a fragment: the same value is Better Auth's `baseURL`, and a path there mounts every auth route somewhere the read API does not forward, so sign-in, sign-up and sign-out all answer 404 while `/api/health` still answers 200. Subpath hosting (`https://host/pickarr`) is a feature this slice does not have; it is refused rather than reduced to its origin so an operator hears that at boot instead of at 3am. |
-| `BETTER_AUTH_SECRET` | generated | Overrides the persisted secret. |
+| `BETTER_AUTH_SECRET` | generated | Overrides the persisted secret. Read by `main` (`resolveAuthSecret`) and passed to `createAuth`, because Better Auth's own fallback chain is `options.secret \|\| env.BETTER_AUTH_SECRET \|\| …` and `options.secret` always wins — so the variable does nothing unless the host reads it. **Setting, changing or removing it invalidates every existing session**, which is what makes it the rotation path and also the hazard: a stray value in the environment logs everyone out on the next restart. The persisted row is left untouched, so removing the variable returns the host to the secret it already had. |
+| `BETTER_AUTH_SECRETS` | unset | The plural, read by the **library** itself and by nothing in this package (`create-context.mjs`: `options.secrets ?? parseSecretsEnv(env.BETTER_AUTH_SECRETS)`). Documented because it is live and undocumented is worse: measured, with it set a previously issued cookie is refused, so setting it invalidates every existing session exactly as the singular does. |
 
 A config file replaces the first three later; nothing here should make that
 harder, which is why each is read in exactly one place.

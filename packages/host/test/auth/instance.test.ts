@@ -5,6 +5,8 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createAuth } from '../../src/auth/instance.ts';
 import { ensureClaimToken } from '../../src/auth/claim.ts';
+import { AUTH_SECRET_KEY, readHostState } from '../../src/db/host-state.ts';
+import { resolveAuthSecret } from '../../src/main.ts';
 
 /**
  * **No listener, on purpose.** Better Auth's instance exposes
@@ -176,9 +178,9 @@ test('the secret the caller passed is the one the cookie is signed with', async 
   // Two instances over one database, the way a restart is two instances over
   // one file. The same secret has to accept the other's cookie -- that is
   // what `db/host-state.ts` persists a secret *for* -- and a different one
-  // has to refuse it, which is the half that would fail if this module let
-  // Better Auth fall back to `BETTER_AUTH_SECRET` or to its own hard-coded
-  // default string instead of using `deps.secret`.
+  // has to refuse it. Which value `deps.secret` actually carries, and the
+  // fallbacks this module's passing it forecloses, is the test below; this
+  // one is the mechanism both rest on.
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const claimToken = ensureClaimToken(raw, 1_000);
@@ -212,6 +214,85 @@ test('the secret the caller passed is the one the cookie is signed with', async 
   assert.ok(
     await refused.json() === null,
     'a cookie signed with a different secret resolved to a session',
+  );
+});
+
+test('BETTER_AUTH_SECRET decides the secret when it is set, and the persisted row when it is not', async () => {
+  // **The variable §6 documents as the way to rotate a secret, measured
+  // rather than argued about.** It used to do nothing at all: Better Auth's
+  // own chain is `options.secret || env.BETTER_AUTH_SECRET || …`, and
+  // `createAuth` is always passed an `options.secret`, so an operator who
+  // suspected a compromise could set it, restart, and have every session stay
+  // valid for its full `Max-Age=604800`. The comment above used to be the only
+  // thing in this file that said so, as prose about a risk. This is that
+  // prose, run.
+  //
+  // `resolveAuthSecret` takes the variable's value as an argument, so nothing
+  // here mutates the environment this process shares with every other test.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const claimToken = ensureClaimToken(raw, 1_000);
+
+  const instance = (configured: string | undefined, at: number): Auth => createAuth({
+    raw,
+    db,
+    // Exactly `main`'s own arrangement, which is the point: the precedence
+    // has to be the one the shipped process applies, not one a test composes.
+    secret: resolveAuthSecret(configured, raw, at),
+    baseURL: BASE_URL,
+    publicUrl: undefined,
+    log: noop,
+  });
+
+  // The row the boot below will resolve to, read once so the check further
+  // down compares against what was on file *before* any instance was built
+  // with the variable set -- rather than against whatever the row holds by
+  // then, which would make it nearly a tautology.
+  const persisted = resolveAuthSecret(undefined, raw, 1_000);
+
+  const booted = instance(undefined, 1_000);
+  const signedUp = await signUp(booted, LOOPBACK_ORIGIN, 'owner@example.invalid', claimToken);
+  assert.equal(signedUp.status, 200);
+  const cookie = cookieHeader(signedUp);
+
+  const session = async (auth: Auth): Promise<boolean> => {
+    const response = await auth.handler(new Request(`${BASE_URL}/api/auth/get-session`, { headers: { cookie } }));
+    // 200 with a body of `null` is what an unaccepted cookie answers, not 401
+    // -- the design spec's §2 measured that, and it is why this reads the body.
+    assert.equal(response.status, 200);
+    return await response.json() !== null;
+  };
+
+  // **Nothing below is an `assert.equal` over a secret.** Two secrets compared
+  // by a formatting assertion print both of them on the run where something is
+  // already broken, which is rule 3 of `check-test-hygiene.ts` and is how a
+  // signing secret reached a log in this slice once already.
+  assert.ok(
+    await session(instance(undefined, 2_000)),
+    'a restart with the variable unset must still accept the cookie it issued: that is what persisting the secret is for',
+  );
+  assert.ok(
+    !await session(instance('placeholder-a-different-signing-secret', 3_000)),
+    'a host booted with BETTER_AUTH_SECRET set to something else still accepted the cookie, so the variable did nothing',
+  );
+
+  // **The persisted row is not spent by the variable winning**, and this is
+  // asserted *here* rather than at the end of the test on purpose: every
+  // assertion below reads the same row, so a mutation that damaged it would
+  // fail one of those first and this one would never run to say what actually
+  // broke. Removing `BETTER_AUTH_SECRET` has to return the host to the secret
+  // it already had rather than to a freshly generated one, so the rotation
+  // path is reversible and a boot with the variable set does not quietly
+  // re-key the install. `assert.ok`, again, over two values neither of which
+  // may be printed.
+  assert.ok(
+    readHostState(raw, AUTH_SECRET_KEY) === persisted,
+    'the persisted secret changed while BETTER_AUTH_SECRET was deciding the answer',
+  );
+
+  assert.ok(
+    await session(instance('', 4_000)),
+    'an empty variable is an unset one, as it is for every other variable main reads',
   );
 });
 

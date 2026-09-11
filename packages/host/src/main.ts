@@ -308,6 +308,50 @@ export function resolvePublicUrl(configured: string | undefined): string | undef
 }
 
 /**
+ * The Better Auth signing secret this host will sign cookies with:
+ * `BETTER_AUTH_SECRET` when the operator set it to anything, and the secret
+ * `db/host-state.ts` persists (generating it once, on first boot) otherwise.
+ *
+ * **The variable has to win, because §6 documents it as the only way to
+ * rotate a secret.** It used to do nothing at all: Better Auth's own fallback
+ * chain is `options.secret || env.BETTER_AUTH_SECRET || …`, `options.secret`
+ * wins, and `createAuth` is always passed one -- so an operator who suspected
+ * a compromise could set the documented variable, restart, and have every
+ * session stay valid for its full `Max-Age=604800` with nothing saying
+ * otherwise. Measured before the fix: a cookie issued under the persisted
+ * secret was still accepted by a host booted with a *different*
+ * `BETTER_AUTH_SECRET`.
+ *
+ * **Setting it, changing it or removing it logs everyone out**, which is the
+ * point of having it and is also why §6 documents the hazard next to it: the
+ * cookie signature is what every session is checked against, so a stray value
+ * in the environment invalidates them all. Nothing is logged here either way
+ * -- the value is a credential and cannot be named in a log line, and "the
+ * secret changed" is not something this process can know without holding both.
+ *
+ * **The persisted row is left exactly as it is.** It is not read, not written
+ * and not deleted while the variable is set, so removing the variable later
+ * returns the host to the secret it already had rather than to a fresh one.
+ * The row's other property -- generated once even under a race, so a restart
+ * does not log everyone out -- is `ensureGeneratedValue`'s and is untouched.
+ *
+ * **An empty variable is an unset one**, as it is for the port, the host and
+ * the public url: `BETTER_AUTH_SECRET=` is what a compose file with the key
+ * and no value passes, and signing every cookie with the empty string is not
+ * what that operator asked for.
+ *
+ * Takes the variable's value rather than reading `process.env` itself, so the
+ * precedence is testable without mutating the environment the whole process
+ * shares -- and so the plural `BETTER_AUTH_SECRETS`, which the library reads
+ * on its own and which this function has no part in, stays the library's
+ * business (§6 documents it).
+ */
+export function resolveAuthSecret(configured: string | undefined, raw: DatabaseSync, at: number): string {
+  if (configured !== undefined && configured !== '') return configured;
+  return ensureAuthSecret(raw, at);
+}
+
+/**
  * Builds the process's shutdown handler. `host.stop()` clears the
  * dispatcher's timer and safety interval and returns without waiting on
  * anything -- a handler already in flight is abandoned deliberately, its row
@@ -406,10 +450,12 @@ export function createShutdown(
  *
  * `argv` is accepted for parity with a conventional process entry point;
  * this slice has no argument surface beyond the `PICKARR_DATABASE`,
- * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST` and `PICKARR_PUBLIC_URL`
- * environment variables (there is deliberately no config surface yet --
- * slice B's spec §1.1, cited in full on `resolveArtworkDir` above), so
- * nothing here reads it.
+ * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL` and
+ * `BETTER_AUTH_SECRET` environment variables (there is deliberately no config
+ * surface yet -- slice B's spec §1.1, cited in full on `resolveArtworkDir`
+ * above), so nothing here reads it. `BETTER_AUTH_SECRETS`, the plural, is
+ * read by the library itself and by nothing in this package; the auth slice's
+ * §6 documents both.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the
@@ -503,12 +549,17 @@ export async function main(
     // well, so `trustedOrigins` names it too and `createAuth` knows it does
     // not need to warn about a deployment that has told it nothing.
     //
-    // **The secret is never logged**, here or anywhere it travels; it is read
-    // (and generated once) by `ensureAuthSecret`, so the host boots configured.
+    // **The secret is never logged**, here or anywhere it travels; it is
+    // decided by `resolveAuthSecret` above -- `BETTER_AUTH_SECRET` when the
+    // operator set it, else the row `ensureAuthSecret` generates once and
+    // persists -- so the host boots configured either way. Read per
+    // construction rather than once at the top of `main`, on the same
+    // reasoning as `baseURL`: this closure is what the listener calls, and
+    // there is exactly one instance per process.
     authFor: (baseURL) => createAuth({
       raw,
       db,
-      secret: ensureAuthSecret(raw, Date.now()),
+      secret: resolveAuthSecret(process.env['BETTER_AUTH_SECRET'], raw, Date.now()),
       baseURL: publicUrl ?? baseURL,
       publicUrl,
       log,
