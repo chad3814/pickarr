@@ -443,6 +443,16 @@ export const hostState = sqliteTable('host_state', {
  * the DDL, and a rename that changed both would leave the two agreeing and
  * both wrong. The SQL names stay snake_case, which the spike measured working.
  *
+ * **These four declare column modes, which no other table here does.** The
+ * adapter hands Better Auth's values straight to Drizzle: `emailVerified`
+ * arrives as a JS boolean and every `*_at` as a `Date`, and a mode-less
+ * `integer()` would pass both to `node:sqlite` unchanged, which binds
+ * neither -- sign-up fails with "Provided value cannot be bound to SQLite
+ * parameter". `{ mode: 'boolean' }` and `{ mode: 'timestamp_ms' }` are what
+ * turn them into the integers the DDL declares. The SQL type is `INTEGER`
+ * either way, so this stays one definition mirrored against migration 12
+ * rather than a second one shaped for the library.
+ *
  * **`id` is `text`, and these four are the only tables in this file with a
  * text `id`** -- every table above declares `integer('id').primaryKey()`, i.e.
  * the rowid. (`hostState` just above is keyed by a text `key`, but that is a
@@ -459,13 +469,13 @@ export const authUser = sqliteTable('auth_user', {
   // library's own model does not require one.
   name: text('name'),
   email: text('email').notNull(),
-  // 0 or 1. Nothing in this slice verifies an email -- there is no outbound
-  // mail path -- so every row keeps the default; the column exists because the
-  // library's model has the field.
-  emailVerified: integer('email_verified').notNull().default(0),
+  // Stored as 0 or 1, read and written as a boolean. Nothing in this slice
+  // verifies an email -- there is no outbound mail path -- so every row keeps
+  // the default; the column exists because the library's model has the field.
+  emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),
   image: text('image'),
-  createdAt: integer('created_at').notNull(),
-  updatedAt: integer('updated_at').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 }, (t) => [
   // Unique, not a plain index: the email is how sign-in identifies an account,
   // so two rows sharing one would make that lookup ambiguous rather than
@@ -482,13 +492,13 @@ export const authSession = sqliteTable('auth_session', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => authUser.id),
   token: text('token').notNull(),
-  expiresAt: integer('expires_at').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
   // Nullable: recorded from the request when present, and a request through a
   // proxy that strips them has neither.
   ipAddress: text('ip_address'),
   userAgent: text('user_agent'),
-  createdAt: integer('created_at').notNull(),
-  updatedAt: integer('updated_at').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 }, (t) => [
   // Unique because the token *is* the lookup key: every guarded request
   // resolves a cookie to one session through this index, and two rows sharing
@@ -516,12 +526,12 @@ export const authAccount = sqliteTable('auth_account', {
   accessToken: text('access_token'),
   refreshToken: text('refresh_token'),
   idToken: text('id_token'),
-  accessTokenExpiresAt: integer('access_token_expires_at'),
-  refreshTokenExpiresAt: integer('refresh_token_expires_at'),
+  accessTokenExpiresAt: integer('access_token_expires_at', { mode: 'timestamp_ms' }),
+  refreshTokenExpiresAt: integer('refresh_token_expires_at', { mode: 'timestamp_ms' }),
   scope: text('scope'),
   password: text('password'),
-  createdAt: integer('created_at').notNull(),
-  updatedAt: integer('updated_at').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 }, (t) => [
   // "The accounts belonging to this user", which sign-in reads once it has
   // resolved the email to a user row.
@@ -547,12 +557,12 @@ export const authVerification = sqliteTable('auth_verification', {
   id: text('id').primaryKey(),
   identifier: text('identifier').notNull(),
   value: text('value').notNull(),
-  expiresAt: integer('expires_at').notNull(),
-  createdAt: integer('created_at').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   // Nullable, unlike every other `updated_at` in this file: Better Auth's
   // `verification` model declares it optional, and the DDL matches the model
   // rather than the house style.
-  updatedAt: integer('updated_at'),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }),
 }, (t) => [
   // The library looks a verification up by its identifier, never by id.
   index('auth_verification_identifier').on(t.identifier),

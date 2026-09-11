@@ -193,8 +193,16 @@ test('every schema column matches the migration DDL by name, type, nullability a
         );
       }
       if (!column.primary) {
+        // `mapToDriverValue`, not the declared value itself: a column with a
+        // mode (`integer(..., { mode: 'boolean' })`, which `auth_user.
+        // email_verified` needs so Better Auth's boolean reaches SQLite at
+        // all) spells its default in the *JS* domain -- `false` -- where the
+        // DDL spells the stored one, `0`. Asking Drizzle to map the default
+        // the way it would map a written value compares the two sides in the
+        // one domain they share, and is the identity function for every
+        // mode-less column in this file.
         const declaredDefault = column.hasDefault && column.default !== undefined
-          ? String(column.default)
+          ? String(column.mapToDriverValue(column.default))
           : null;
         const ddlDefault = actual.defaultSql === null ? null : normalizeDefault(actual.defaultSql);
         if (declaredDefault !== ddlDefault) {
