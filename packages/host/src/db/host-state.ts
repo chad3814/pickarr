@@ -20,7 +20,14 @@ export const AUTH_SECRET_KEY = 'auth.secret';
 /** Key under which the first-boot claim token is stored. */
 export const CLAIM_TOKEN_KEY = 'auth.claimToken';
 
-/** `randomBytes` reads this many bytes; base64url of 32 bytes is 43 characters, well past Better Auth's own 32-character minimum. */
+/**
+ * `randomBytes` reads this many bytes; base64url of 32 bytes is 43
+ * characters, well past Better Auth's own 32-character minimum for the
+ * signing secret. The claim token is generated the same way and at the same
+ * size: it is typed once, by the owner, off the console it was printed to,
+ * so there is nothing to be gained by making it shorter to type and 256
+ * bits to be lost.
+ */
 const SECRET_BYTES = 32;
 
 /**
@@ -54,11 +61,8 @@ export function clearHostState(raw: DatabaseSync, key: string): void {
 }
 
 /**
- * The Better Auth signing secret, generating and persisting one on first
- * call. Stable across calls and across processes: Better Auth signs every
- * session cookie with this value, so a secret that changed on restart --
- * or that two racing callers disagreed on -- would invalidate sessions
- * with nothing in any log to explain why.
+ * A random value under `key`, generating and persisting one on first call
+ * and handing back whatever is already on record on every call after.
  *
  * **Generates exactly once, even under a race**, and the shape of this
  * function is why: it always generates a candidate, always attempts the
@@ -72,16 +76,39 @@ export function clearHostState(raw: DatabaseSync, key: string): void {
  * `readHostState() === null`, and only then wrote would look identical for
  * a single caller but not close that window: two processes can each pass
  * the `=== null` check before either has written.
+ *
+ * **This lives here rather than beside either caller** because the
+ * `INSERT` names `host_state.value`, and `scripts/check-test-hygiene.ts`
+ * allows that column to be named only by this module and by Better Auth's
+ * own adapter. Widening the allow-list so `auth/claim.ts` could issue its
+ * own copy of this statement would spend the rule to save a delegation.
+ *
+ * The key is a parameter rather than two near-identical functions because
+ * the two facts stored this way -- the signing secret and the claim token
+ * -- want exactly the same race behaviour and exactly the same generator.
+ * What differs between them is only what the value *means*, which is what
+ * `ensureAuthSecret` below and `auth/claim.ts` each document.
  */
-export function ensureAuthSecret(raw: DatabaseSync, at: number): string {
+export function ensureGeneratedValue(raw: DatabaseSync, key: string, at: number): string {
   const candidate = randomBytes(SECRET_BYTES).toString('base64url');
   raw.prepare(`
     INSERT INTO host_state (key, value, created_at, updated_at) VALUES (?, ?, ?, ?)
     ON CONFLICT (key) DO NOTHING
-  `).run(AUTH_SECRET_KEY, candidate, at, at);
-  const stored = readHostState(raw, AUTH_SECRET_KEY);
+  `).run(key, candidate, at, at);
+  const stored = readHostState(raw, key);
   if (stored === null) {
-    throw new Error('ensureAuthSecret: no secret on record immediately after inserting one');
+    throw new Error(`ensureGeneratedValue: nothing on record under ${key} immediately after inserting it`);
   }
   return stored;
+}
+
+/**
+ * The Better Auth signing secret, generating and persisting one on first
+ * call. Stable across calls and across processes: Better Auth signs every
+ * session cookie with this value, so a secret that changed on restart --
+ * or that two racing callers disagreed on -- would invalidate sessions
+ * with nothing in any log to explain why.
+ */
+export function ensureAuthSecret(raw: DatabaseSync, at: number): string {
+  return ensureGeneratedValue(raw, AUTH_SECRET_KEY, at);
 }

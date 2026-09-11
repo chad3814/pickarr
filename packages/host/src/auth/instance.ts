@@ -1,7 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { betterAuth } from 'better-auth';
+import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import type { HostDb } from '../db/open.ts';
+import { consumeClaimToken, isClaimed } from './claim.ts';
 import { authSchema } from './schema.ts';
 
 /**
@@ -22,11 +24,11 @@ import { authSchema } from './schema.ts';
 /** What `createAuth` needs, and nothing else it could reach for. */
 export interface AuthDeps {
   /**
-   * **Not read by this module, and no code reads it yet.** It is on
-   * `AuthDeps` because the sign-up hook that closes the install to a second
-   * account has to count `auth_user` rows per request, and deps assembled
-   * twice -- once for the instance, once for the hook -- would be free to
-   * name two different databases. Nothing below touches it.
+   * The same database `db` wraps, as the `node:sqlite` handle. The sign-up
+   * hook below asks it, per request, whether the install is claimed and
+   * whether the offered claim token is the one on record; taking it on
+   * `AuthDeps` rather than assembling a second set of deps for the hook is
+   * what keeps the two from ever naming different databases.
    */
   raw: DatabaseSync;
   db: HostDb;
@@ -185,17 +187,68 @@ function trustedOriginsFor(publicUrl: string | undefined, request?: Request): st
 }
 
 /**
+ * The route the sign-up hook applies to, spelled the way `ctx.path` reports
+ * it: Better Auth strips the `/api/auth` mount prefix before a hook sees it,
+ * so matching on the full request path would match nothing and the hook
+ * would silently never fire.
+ */
+const SIGN_UP_PATH = '/sign-up/email';
+
+/** The sign-up body field the claim token arrives in. */
+const CLAIM_TOKEN_FIELD = 'claimToken';
+
+/**
+ * What every refusal from the sign-up hook says, and it is deliberately the
+ * *same* sentence for both reasons it can fire.
+ *
+ * A claimed install and a wrong token are the two states an attacker most
+ * wants to tell apart: "the claim token is wrong" would confirm the install
+ * is still unclaimed and therefore still worth attacking, and the attacker
+ * learns that by offering a garbage token rather than by guessing a real
+ * one. One message for both is what makes that probe answer nothing. It
+ * costs an owner who mistypes the token a more specific error, which is the
+ * cheaper half of the trade: the token is on the console in front of them.
+ */
+const SIGN_UP_REFUSED = 'sign-up is closed';
+
+/**
+ * The claim token a sign-up body offers, or `null` when it offers none.
+ *
+ * `body` is `unknown` on purpose. Better Auth hands the hook whatever was
+ * parsed off the request, and `claimToken` is not part of the sign-up
+ * schema, so nothing has checked its type. That an unknown field reaches
+ * the hook at all -- rather than being stripped by the endpoint's own
+ * validation, or rejected outright -- was measured against 1.7.3 while
+ * writing this, not read anywhere. The `in` narrowing is what reads the
+ * field without a cast.
+ */
+function offeredClaimToken(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) return null;
+  if (!(CLAIM_TOKEN_FIELD in body)) return null;
+  const offered: unknown = body[CLAIM_TOKEN_FIELD];
+  return typeof offered === 'string' ? offered : null;
+}
+
+/**
  * The instance. One per host; `baseURL` and the secret are fixed at
  * construction, so a host that changes either has to build a new one.
  *
  * **`disableSignUp` is deliberately not set.** It is read once, here, and a
  * host started with zero users would then keep sign-up open until it
- * restarted -- the exact window this slice exists to close. Closing it is a
- * `before` hook on the sign-up route, evaluated per request, and is not in
- * this module yet.
+ * restarted -- the exact window this slice exists to close. What closes it
+ * is the `before` hook below, which asks `isClaimed` on every request that
+ * reaches the sign-up route, so the install shuts the moment the first
+ * account exists and without anything being restarted.
+ *
+ * **The hook runs ahead of Better Auth's own origin check and ahead of its
+ * password-length check**, measured against 1.7.3 rather than assumed. So a
+ * sign-up carrying the right token spends it and *then* gets a 403 for its
+ * origin or a 400 for its password -- the single-use rule the design asked
+ * for ("a second sign-up with the same token fails even if the first was
+ * rolled back"), applied one step earlier than a reader might expect.
  */
 export function createAuth(deps: AuthDeps) {
-  const { publicUrl } = deps;
+  const { publicUrl, raw } = deps;
   if (publicUrl === undefined) {
     // Once, at construction, and not from inside `trustedOrigins`: that
     // function runs on every request, so a line there would be a line per
@@ -210,6 +263,22 @@ export function createAuth(deps: AuthDeps) {
     secret: deps.secret,
     database: drizzleAdapter(deps.db, { provider: 'sqlite', schema: authSchema }),
     emailAndPassword: { enabled: true },
+    hooks: {
+      // `async` with nothing awaited, because `createAuthMiddleware` types
+      // its handler as returning a promise and `node:sqlite` is
+      // synchronous, so there is genuinely nothing here to wait for.
+      before: createAuthMiddleware(async (ctx) => {
+        // Every route's hook, so everything but sign-up passes straight
+        // through. Sign-in in particular: an install with an account has to
+        // stay reachable by the person who owns it.
+        if (ctx.path !== SIGN_UP_PATH) return;
+        if (isClaimed(raw)) throw new APIError('FORBIDDEN', { message: SIGN_UP_REFUSED });
+        const offered = offeredClaimToken(ctx.body);
+        if (offered === null || !consumeClaimToken(raw, offered)) {
+          throw new APIError('FORBIDDEN', { message: SIGN_UP_REFUSED });
+        }
+      }),
+    },
     // Not `async`: there is nothing to await, and the option's type accepts a
     // plain return.
     trustedOrigins: (request) => trustedOriginsFor(publicUrl, request),

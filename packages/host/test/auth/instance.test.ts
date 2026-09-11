@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createAuth } from '../../src/auth/instance.ts';
+import { ensureClaimToken } from '../../src/auth/claim.ts';
 
 /**
  * **No listener, on purpose.** Better Auth's instance exposes
@@ -20,6 +21,14 @@ import { createAuth } from '../../src/auth/instance.ts';
  * credentials any of these tests handle -- the session cookies the
  * round-trip and secret tests read off a response -- are passed straight
  * back as a header.
+ *
+ * **Every sign-up below carries the install's claim token**, because the
+ * sign-up hook in `auth/instance.ts` refuses one that does not and these
+ * tests are about origins and cookies rather than about the claim. Passing
+ * the real token is what keeps a 403 here meaning what each test says it
+ * means: the refusals asserted below are the origin check's, and a test
+ * that omitted the token would get the same status from the hook and prove
+ * nothing. What the claim itself does is `claim.test.ts`.
  */
 
 /**
@@ -45,6 +54,8 @@ type Auth = ReturnType<typeof createAuth>;
 interface Harness {
   raw: DatabaseSync;
   auth: Auth;
+  /** This install's claim token, which its first sign-up has to carry. */
+  claimToken: string;
   /** Every message `createAuth` passed to `log`, in order. */
   lines: string[];
 }
@@ -53,6 +64,7 @@ interface Harness {
 function harness(publicUrl: string | undefined): Harness {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
+  const claimToken = ensureClaimToken(raw, 1_000);
   const lines: string[] = [];
   const auth = createAuth({
     raw,
@@ -64,14 +76,14 @@ function harness(publicUrl: string | undefined): Harness {
       lines.push(message);
     },
   });
-  return { raw, auth, lines };
+  return { raw, auth, claimToken, lines };
 }
 
-function signUp(auth: Auth, origin: string, email: string): Promise<Response> {
+function signUp(auth: Auth, origin: string, email: string, claimToken: string): Promise<Response> {
   return auth.handler(new Request(`${BASE_URL}/api/auth/sign-up/email`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', origin },
-    body: JSON.stringify({ email, password: PASSWORD, name: 'Placeholder Owner' }),
+    body: JSON.stringify({ email, password: PASSWORD, name: 'Placeholder Owner', claimToken }),
   }));
 }
 
@@ -106,9 +118,9 @@ function userRow(raw: DatabaseSync): Record<string, unknown> | undefined {
 }
 
 test('a user signs up and the row lands in auth_user with snake_case columns', async () => {
-  const { raw, auth } = harness(undefined);
+  const { raw, auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, LOOPBACK_ORIGIN, 'owner@example.invalid');
+  const response = await signUp(auth, LOOPBACK_ORIGIN, 'owner@example.invalid', claimToken);
 
   assert.equal(response.status, 200);
   const row = userRow(raw);
@@ -135,9 +147,9 @@ test('a user signs up and the row lands in auth_user with snake_case columns', a
 });
 
 test('a session cookie round-trips to the user who signed up', async () => {
-  const { auth } = harness(undefined);
+  const { auth, claimToken } = harness(undefined);
 
-  const signedUp = await signUp(auth, LOOPBACK_ORIGIN, 'owner@example.invalid');
+  const signedUp = await signUp(auth, LOOPBACK_ORIGIN, 'owner@example.invalid', claimToken);
   assert.equal(signedUp.status, 200);
 
   const session = await auth.handler(new Request(`${BASE_URL}/api/auth/get-session`, {
@@ -158,6 +170,7 @@ test('the secret the caller passed is the one the cookie is signed with', async 
   // default string instead of using `deps.secret`.
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
+  const claimToken = ensureClaimToken(raw, 1_000);
   const first = createAuth({ raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined, log: noop });
   const restarted = createAuth({ raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined, log: noop });
   const stranger = createAuth({
@@ -169,7 +182,7 @@ test('the secret the caller passed is the one the cookie is signed with', async 
     log: noop,
   });
 
-  const signedUp = await signUp(first, LOOPBACK_ORIGIN, 'owner@example.invalid');
+  const signedUp = await signUp(first, LOOPBACK_ORIGIN, 'owner@example.invalid', claimToken);
   assert.equal(signedUp.status, 200);
   const cookie = cookieHeader(signedUp);
 
@@ -192,13 +205,15 @@ test('the secret the caller passed is the one the cookie is signed with', async 
 });
 
 test('a loopback origin is trusted and a public one is not', async () => {
-  const { raw, auth } = harness(undefined);
+  const { raw, auth, claimToken } = harness(undefined);
 
-  const loopback = await signUp(auth, LOOPBACK_ORIGIN, 'owner@example.invalid');
+  const loopback = await signUp(auth, LOOPBACK_ORIGIN, 'owner@example.invalid', claimToken);
   assert.equal(loopback.status, 200);
 
-  const { raw: otherRaw, auth: other } = harness(undefined);
-  const evil = await signUp(other, 'https://evil.example', 'attacker@example.invalid');
+  const { raw: otherRaw, auth: other, claimToken: otherToken } = harness(undefined);
+  // The attacker's request carries the *correct* token for that install, so
+  // the 403 below is the origin check's and nothing else's.
+  const evil = await signUp(other, 'https://evil.example', 'attacker@example.invalid', otherToken);
 
   assert.equal(evil.status, 403);
   // Refused before the write, not after: an attacker's origin that still
@@ -210,9 +225,9 @@ test('a loopback origin is trusted and a public one is not', async () => {
 test('a private-range origin is trusted', async () => {
   // The LAN case the `0.0.0.0` bind exists for: a browser on the owner's
   // network reaching the host by its private address.
-  const { auth } = harness(undefined);
+  const { auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, 'http://192.168.1.9:8787', 'owner@example.invalid');
+  const response = await signUp(auth, 'http://192.168.1.9:8787', 'owner@example.invalid', claimToken);
 
   assert.equal(response.status, 200);
 });
@@ -220,9 +235,9 @@ test('a private-range origin is trusted', async () => {
 test('a link-local origin is trusted', async () => {
   // 169.254/16: what a host with no DHCP lease gives itself, so a direct
   // cable between a laptop and this machine still reaches it.
-  const { auth } = harness(undefined);
+  const { auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, 'http://169.254.10.5:8787', 'owner@example.invalid');
+  const response = await signUp(auth, 'http://169.254.10.5:8787', 'owner@example.invalid', claimToken);
 
   assert.equal(response.status, 200);
 });
@@ -235,9 +250,9 @@ test('the private block ends at 172.31, so 172.32 is refused', async () => {
   const last = harness(undefined);
   const outside = harness(undefined);
 
-  const inFirst = await signUp(first.auth, 'http://172.16.0.1:8787', 'owner@example.invalid');
-  const inLast = await signUp(last.auth, 'http://172.31.255.254:8787', 'owner@example.invalid');
-  const beyond = await signUp(outside.auth, 'http://172.32.0.1:8787', 'attacker@example.invalid');
+  const inFirst = await signUp(first.auth, 'http://172.16.0.1:8787', 'owner@example.invalid', first.claimToken);
+  const inLast = await signUp(last.auth, 'http://172.31.255.254:8787', 'owner@example.invalid', last.claimToken);
+  const beyond = await signUp(outside.auth, 'http://172.32.0.1:8787', 'attacker@example.invalid', outside.claimToken);
 
   assert.equal(inFirst.status, 200);
   assert.equal(inLast.status, 200);
@@ -252,9 +267,9 @@ test('a bracketed IPv6 loopback is trusted and a public IPv6 is not', async () =
   const unique = harness(undefined);
   const global = harness(undefined);
 
-  const loopbackResponse = await signUp(loopback.auth, 'http://[::1]:8787', 'owner@example.invalid');
-  const uniqueResponse = await signUp(unique.auth, 'http://[fd12:3456::1]:8787', 'owner@example.invalid');
-  const globalResponse = await signUp(global.auth, 'http://[2606:4700::1111]:8787', 'attacker@example.invalid');
+  const loopbackResponse = await signUp(loopback.auth, 'http://[::1]:8787', 'owner@example.invalid', loopback.claimToken);
+  const uniqueResponse = await signUp(unique.auth, 'http://[fd12:3456::1]:8787', 'owner@example.invalid', unique.claimToken);
+  const globalResponse = await signUp(global.auth, 'http://[2606:4700::1111]:8787', 'attacker@example.invalid', global.claimToken);
 
   assert.equal(loopbackResponse.status, 200);
   // fc00::/7, the IPv6 equivalent of 10/8: `fd` is in the block, and the
@@ -268,18 +283,18 @@ test('a hostname other than localhost is refused, however it resolves', async ()
   // The DNS-rebinding case: `pickarr.local` may well resolve to a private
   // address on this network, and trusting it because of that would mean any
   // name an attacker controls and points at 127.0.0.1 is trusted too.
-  const { raw, auth } = harness(undefined);
+  const { raw, auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, 'http://pickarr.local:8787', 'attacker@example.invalid');
+  const response = await signUp(auth, 'http://pickarr.local:8787', 'attacker@example.invalid', claimToken);
 
   assert.equal(response.status, 403);
   assert.equal(userRow(raw), undefined);
 });
 
 test('a configured public url is trusted even though it is public', async () => {
-  const { auth } = harness(PUBLIC_URL);
+  const { auth, claimToken } = harness(PUBLIC_URL);
 
-  const response = await signUp(auth, PUBLIC_URL, 'owner@example.invalid');
+  const response = await signUp(auth, PUBLIC_URL, 'owner@example.invalid', claimToken);
 
   assert.equal(response.status, 200);
 });
