@@ -20,6 +20,7 @@
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@pickarr/contract": "*"
+    "@pickarr/contract": "*",
+    "drizzle-orm": "1.0.0-rc.4"
   }
 }
