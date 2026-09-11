@@ -59,18 +59,18 @@ function array(value: unknown, field: string): readonly unknown[] {
   return value;
 }
 
-const STATES: readonly string[] = ['resolved', 'unresolved', 'pending'];
-const KINDS: readonly string[] = ['movie', 'series', 'season', 'episode', 'book', 'scene'];
+const STATES: ReadonlySet<string> = new Set(['resolved', 'unresolved', 'pending']);
+const KINDS: ReadonlySet<string> = new Set(['movie', 'series', 'season', 'episode', 'book', 'scene']);
 
 function state(value: unknown): LookupState {
   const text = string(value, 'state');
-  if (!STATES.includes(text)) fail('state', `is not a lookup state: ${text}`);
+  if (!STATES.has(text)) fail('state', `is not a lookup state: ${text}`);
   return text as LookupState;
 }
 
 function kind(value: unknown, field: string): MediaKind {
   const text = string(value, field);
-  if (!KINDS.includes(text)) fail(field, `is not a media kind: ${text}`);
+  if (!KINDS.has(text)) fail(field, `is not a media kind: ${text}`);
   return text as MediaKind;
 }
 
