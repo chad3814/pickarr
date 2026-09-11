@@ -4,7 +4,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
-import { findCredentialSelections, findViolations } from './check-test-hygiene.ts';
+import {
+  findCredentialAssertions,
+  findCredentialOperands,
+  findCredentialSelections,
+  findViolations,
+} from './check-test-hygiene.ts';
 
 /** Runs the detector over a snippet, returning just the offending source text. */
 function flagged(source: string): string[] {
@@ -417,5 +422,146 @@ test('one statement is one violation, however many times its name is used', asyn
   assert.deepEqual(
     (await findCredentialSelections(dir, [])).map((violation) => [violation.line, violation.text]),
     [[1, 'auth_session.token']],
+  );
+});
+
+/**
+ * The third rule: no host test hands a credential to `node:assert` as an
+ * operand.
+ *
+ * The defect it generalises was in the earliest test file of the auth slice
+ * and printed five distinct 43-character signing secrets, twice each, on the
+ * run where a mutation broke it. The report said that file "never interpolates
+ * one into text", which is true and is not the hazard: `node:assert` formats
+ * both operands whether or not anyone interpolated anything.
+ */
+
+/** Runs the credential-operand detector over a snippet, returning the offending text. */
+function credentials(source: string): string[] {
+  return findCredentialOperands('sample.test.ts', source).map((violation) => violation.text);
+}
+
+test('two generated secrets compared by assert.equal are both flagged', () => {
+  // The shape that actually printed secrets. Neither operand names a producer:
+  // a rule reading only calls would have seen `assert.equal(second, first)` and
+  // found nothing, which is why an identifier is followed to what it was bound
+  // to.
+  assert.deepEqual(
+    credentials([
+      'const first = ensureAuthSecret(raw, 1_000);',
+      'const second = ensureAuthSecret(raw, 2_000);',
+      'assert.equal(second, first);',
+    ].join('\n')),
+    ['second', 'first'],
+  );
+});
+
+test('a name declared twice is a credential if any of its declarations is one', () => {
+  // `first` in `packages/host/test/db/host-state.test.ts` is a generated
+  // secret in one test and an open database in another. There is no scope
+  // analysis here, so resolving it to one declaration is a guess -- and the
+  // guess that skips the secret is the one that lets the leak through. Rule 2
+  // resolves the opposite way for the same reason; see `Bindings`.
+  assert.deepEqual(
+    credentials([
+      'const first = openDatabase(path);',
+      'const first = ensureAuthSecret(raw, 1_000);',
+      'assert.equal(first, other);',
+    ].join('\n')),
+    ['first'],
+  );
+});
+
+test('every producer is flagged called directly, and every formatting assertion is covered', () => {
+  for (const producer of [
+    `ensureAuthSecret(raw, 1_000)`,
+    `ensureGeneratedValue(raw, 'auth.secret', 1_000)`,
+    `ensureClaimToken(raw, 1_000)`,
+    `readHostState(raw, 'auth.secret')`,
+    `randomBytes(32).toString('base64url')`,
+    `response.headers.getSetCookie()`,
+    `cookieHeader(response)`,
+  ]) {
+    assert.deepEqual(
+      credentials(`assert.equal(${producer}, null);`),
+      [producer],
+      `${producer} is a credential wherever it appears as an operand`,
+    );
+  }
+  for (const method of [
+    'equal',
+    'strictEqual',
+    'notEqual',
+    'notStrictEqual',
+    'deepEqual',
+    'deepStrictEqual',
+    'notDeepEqual',
+    'notDeepStrictEqual',
+  ]) {
+    assert.deepEqual(
+      credentials(`assert.${method}(ensureClaimToken(raw, 1_000), null);`),
+      [`ensureClaimToken(raw, 1_000)`],
+      `assert.${method} formats its operands too`,
+    );
+  }
+});
+
+test('an awaited credential is still a credential', () => {
+  assert.deepEqual(
+    credentials(`assert.equal(await cookieHeader(response), null);`),
+    ['cookieHeader(response)'],
+  );
+});
+
+test('the remedy is not flagged, and neither is a number read off a credential', () => {
+  // `assert.ok` formats nothing, which is why it is the fix and not the
+  // hazard. And the outermost expression is what gets printed: the
+  // `getSetCookie().length` in `api/server.test.ts` is a count, and a rule
+  // that read the whole operand would have condemned it -- measured, it is
+  // the only such site in the host suite.
+  assert.deepEqual(
+    credentials([
+      'const first = ensureAuthSecret(raw, 1_000);',
+      'const second = ensureAuthSecret(raw, 2_000);',
+      "assert.ok(second === first, 'the second call minted a new secret');",
+    ].join('\n')),
+    [],
+  );
+  assert.deepEqual(credentials(`assert.equal(signedIn.headers.getSetCookie().length, 1);`), []);
+  assert.deepEqual(credentials(`assert.equal(tokenIsOnRecord(raw), true);`), []);
+});
+
+test('a message argument is not an operand, and prose is not code', () => {
+  assert.deepEqual(credentials(`assert.ok(true, String(ensureClaimToken(raw, 1_000)));`), []);
+  assert.deepEqual(
+    credentials('// never assert.equal(second, first) over two ensureAuthSecret values\nconst a = 1;'),
+    [],
+  );
+});
+
+test('rule 3 walks a directory and names the file and line', async (t) => {
+  // Over a fixture under a temp dir, like rule 2's tests: a test that edited
+  // tracked source to prove a linter works is a test that can leave the tree
+  // broken.
+  const dir = await fixtureDir(t, {
+    'leaks.test.ts': [
+      'const generated = ensureAuthSecret(raw, 1_000);',
+      'assert.equal(generated, stored);',
+      '',
+    ].join('\n'),
+    'clean.test.ts': [
+      'const generated = ensureAuthSecret(raw, 1_000);',
+      "assert.ok(generated === stored, 'the secret changed');",
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialAssertions(dir)).map((violation) => [
+      relative(dir, violation.file),
+      violation.line,
+      violation.text,
+    ]),
+    [['leaks.test.ts', 2, 'generated']],
   );
 });

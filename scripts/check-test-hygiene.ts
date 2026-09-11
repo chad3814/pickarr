@@ -8,6 +8,8 @@
  *    string, and none reads a credential table through a statement this check
  *    cannot read**, outside an allow-list of paths. See
  *    `findCredentialSelections`.
+ * 3. **No host test hands a credential to `node:assert`** as a value it might
+ *    have to print. See `findCredentialAssertions`.
  *
  * **Parsed rather than pattern-matched, and that is not fastidiousness.** Each
  * rule is *documented* by quoting the thing it forbids. The web suite quotes
@@ -260,23 +262,31 @@ interface SqlText {
 }
 
 /**
- * Every `const`-bound name in one file, so a substituted identifier can be
- * followed to the string it stands for.
+ * Every declaration of every `const`-bound name in one file, so an identifier
+ * can be followed to what it stands for.
  *
- * **A name declared more than once is `'ambiguous'` and resolves to nothing.**
- * This is a syntactic map with no scope analysis behind it, so two declarations
- * of one name are two candidate values and picking either would be a guess.
- * An unresolvable substitution is a violation over a credential table, so the
- * guess is the one outcome that could be wrong in the direction that matters.
+ * **A name is mapped to *every* initializer it is given, not to one.** There is
+ * no scope analysis behind this -- it is a syntactic map -- so a name declared
+ * in two tests has two candidate values, and the two rules that read this map
+ * resolve that differently *because failing closed means opposite things for
+ * them*. Rule 2 resolves only a name with exactly one declaration, since a
+ * guess that happened to read no credential would let a query pass; rule 3
+ * asks whether *any* declaration produces a credential, since a guess that
+ * happened to miss would let an assertion print one. Both answers are the
+ * cautious one for their own rule, and `first` in
+ * `packages/host/test/db/host-state.test.ts` -- a generated signing secret in
+ * one test and an open database in another -- is why rule 3 cannot be the
+ * first policy: that is the exact operand that printed a secret.
  */
-type Bindings = Map<string, ts.Expression | 'ambiguous'>;
+type Bindings = Map<string, ts.Expression[]>;
 
 function collectBindings(parsed: ts.SourceFile): Bindings {
   const bindings: Bindings = new Map();
   function visit(node: ts.Node): void {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
-      const name = node.name.text;
-      bindings.set(name, bindings.has(name) ? 'ambiguous' : node.initializer);
+      const declared = bindings.get(node.name.text);
+      if (declared === undefined) bindings.set(node.name.text, [node.initializer]);
+      else declared.push(node.initializer);
     }
     ts.forEachChild(node, visit);
   }
@@ -351,9 +361,11 @@ function sqlTextOf(node: ts.Node, bindings: Bindings, seen: ReadonlySet<string> 
   }
   if (ts.isIdentifier(node)) {
     if (seen.has(node.text)) return null;
-    const bound = bindings.get(node.text);
-    if (bound === undefined || bound === 'ambiguous') return null;
-    return sqlTextOf(bound, bindings, new Set([...seen, node.text]));
+    // Exactly one declaration, or nothing: see `Bindings` for why this rule
+    // refuses to pick between two and rule 3 refuses to ignore either.
+    const [only, ...rest] = bindings.get(node.text) ?? [];
+    if (only === undefined || rest.length > 0) return null;
+    return sqlTextOf(only, bindings, new Set([...seen, node.text]));
   }
   return null;
 }
@@ -518,6 +530,140 @@ export function findCredentialViolations(file: string, source: string): Violatio
 }
 
 /**
+ * **Rule 3**: a credential handed to `node:assert` as an operand, in a host
+ * test.
+ *
+ * The same mechanism as rule 1 and a different payload. `node:assert`'s
+ * equality helpers format *both* operands into the failure message, so
+ * `assert.equal(second, first)` over two generated signing secrets prints both
+ * of them -- and only on the run where something is already broken, which is
+ * the run whose output somebody pastes into an issue or a CI log.
+ *
+ * **This is the fourth place that shape appeared in one slice**, each time
+ * somewhere new: a session token in a mutation's assertion diff, a token in a
+ * refusal message, production logging landing in test stdout, and finally the
+ * earliest test file in the slice comparing two live secrets. Each was fixed
+ * where it was found. A rule is here because "no credential in output" kept
+ * needing a new venue, and because the remedy is mechanical:
+ * `assert.ok(a === b, '<message>')` formats nothing.
+ *
+ * What it catches is narrow on purpose: an operand that **is** a call to one
+ * of the functions below, or a name bound to one. What it therefore does not
+ * catch, stated rather than implied:
+ *
+ * - a credential reached some other way -- a new helper, a field read off a
+ *   response body, a row selected in the test itself. The producer list is a
+ *   list, and a name not on it is not seen.
+ * - a credential interpolated into a *message*. That is deliberate rather than
+ *   accidental, and nothing here formats a message as a value.
+ * - `console.log`, which is how slice F's other leak happened. The remedy
+ *   there was capturing the console inside the test helper, not a rule.
+ */
+const CREDENTIAL_PRODUCERS = new Set([
+  // `db/host-state.ts`: the signing secret and the claim token, generated or
+  // read straight out of `host_state.value`.
+  'ensureAuthSecret',
+  'ensureGeneratedValue',
+  'ensureClaimToken',
+  'readHostState',
+  // The primitive under all of them; a test that generates its own is the
+  // same hazard as one that asks the host for the host's.
+  'randomBytes',
+  // A live session, in both spellings these tests use to get one: the
+  // `Set-Cookie` off a sign-up response, and the helper that joins them into
+  // a `Cookie` header.
+  'getSetCookie',
+  'cookieHeader',
+]);
+
+/** Where rule 3 applies: the only tests that handle one of these values. */
+const HOST_TEST_DIR = 'packages/host/test';
+
+/**
+ * Whether this operand's **outermost** expression is a credential.
+ *
+ * Outermost, exactly as in rule 1 and for the same reason: a
+ * `getSetCookie().length` is a number and formats for nothing, and there is
+ * one of those in `api/server.test.ts` that a rule reading the whole operand
+ * would have condemned. An `await`, a parenthesis, an `as`, a `!` and a
+ * `.toString(...)` are seen through, since none of those changes the value
+ * printed.
+ *
+ * An identifier is followed to what it was bound to, because that is where the
+ * defect actually lived: `assert.equal(second, first)` names no producer at
+ * all, and a rule that only read calls would have missed every instance of
+ * this in the slice.
+ */
+function yieldsCredential(node: ts.Expression, bindings: Bindings, seen: ReadonlySet<string> = new Set()): boolean {
+  const expression = unwrap(node);
+  if (ts.isAsExpression(expression)) return yieldsCredential(expression.expression, bindings, seen);
+  if (ts.isCallExpression(expression)) {
+    const { expression: callee } = expression;
+    // `.toString(...)` is seen through, and it is the one transformation that
+    // has to be: `randomBytes(32).toString('base64url')` *is* the secret, and
+    // its outermost expression names no producer. Nothing else is followed --
+    // a credential put through any other call is not tracked, and a
+    // `.length` must stay untracked or the count in `api/server.test.ts`
+    // becomes a violation.
+    if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'toString') {
+      return yieldsCredential(callee.expression, bindings, seen);
+    }
+    if (ts.isIdentifier(callee)) return CREDENTIAL_PRODUCERS.has(callee.text);
+    return ts.isPropertyAccessExpression(callee) && CREDENTIAL_PRODUCERS.has(callee.name.text);
+  }
+  if (ts.isIdentifier(expression)) {
+    if (seen.has(expression.text)) return false;
+    const declared = bindings.get(expression.text) ?? [];
+    const followed = new Set([...seen, expression.text]);
+    // *Any* declaration of the name, not the only one: see `Bindings`.
+    return declared.some((initializer) => yieldsCredential(initializer, bindings, followed));
+  }
+  return false;
+}
+
+/** Every credential handed to a formatting assertion in one file, in source order. */
+export function findCredentialOperands(file: string, source: string): Violation[] {
+  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, /* setParentNodes */ true);
+  const bindings = collectBindings(parsed);
+  const violations: Violation[] = [];
+
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && FORMATTING_ASSERTIONS.has(node.expression.name.text)) {
+      // The first two arguments are the operands; a third is the message.
+      for (const argument of node.arguments.slice(0, 2)) {
+        if (!yieldsCredential(argument, bindings)) continue;
+        violations.push({
+          file,
+          line: parsed.getLineAndCharacterOfPosition(argument.getStart(parsed)).line + 1,
+          text: unwrap(argument).getText(parsed),
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(parsed);
+  return violations;
+}
+
+/**
+ * Rule 3 over a whole directory tree.
+ *
+ * `dir` is a parameter rather than the constant above for the reason
+ * `findCredentialSelections` gives: the tests point it at a fixture under a
+ * temp directory instead of editing tracked source.
+ */
+export async function findCredentialAssertions(dir: string): Promise<Violation[]> {
+  const violations: Violation[] = [];
+  for (const file of await sourceFiles(dir)) {
+    // eslint-disable-next-line no-await-in-loop -- a few dozen files in a one-shot check; not a hot path
+    violations.push(...findCredentialOperands(file, await readFile(file, 'utf8')));
+  }
+  return violations;
+}
+
+/**
  * Rule 2 over a whole directory tree, so the allow-list is applied once and in
  * one place.
  *
@@ -621,11 +767,40 @@ async function checkCredentialColumns(): Promise<boolean> {
   return false;
 }
 
+/** Rule 3 across `HOST_TEST_DIR`, reported. Resolves `true` when the tree is clean. */
+async function checkCredentialAssertions(): Promise<boolean> {
+  const violations = await findCredentialAssertions(HOST_TEST_DIR);
+  if (violations.length === 0) {
+    console.log(`test-hygiene: no credential handed to node:assert under ${HOST_TEST_DIR}`);
+    return true;
+  }
+
+  for (const violation of violations) {
+    console.error(
+      `${relative(process.cwd(), violation.file)}:${violation.line}: ` +
+        `${violation.text} is a credential`,
+    );
+  }
+  console.error(
+    `\n${violations.length} assertion(s) hand a credential to node:assert, which formats both\n` +
+      'operands into the failure message — so the run where this breaks is the run that prints a\n' +
+      'signing secret, a claim token or a live session cookie into whatever captures the output.\n' +
+      'Use `assert.ok(<boolean>, "<message>")`, which formats nothing, and let the message name\n' +
+      'the property instead of the values:\n\n' +
+      "  assert.ok(second === first, 'the second call minted a new secret')\n",
+  );
+  return false;
+}
+
 async function main(): Promise<void> {
-  // Both run, and both report, before the exit code is set: a run that stopped
-  // at the first failing rule would hide the second one's findings until the
-  // first was fixed.
-  const clean = await Promise.all([checkDomAssertions(), checkCredentialColumns()]);
+  // All three run, and all three report, before the exit code is set: a run
+  // that stopped at the first failing rule would hide the others' findings
+  // until the first was fixed.
+  const clean = await Promise.all([
+    checkDomAssertions(),
+    checkCredentialColumns(),
+    checkCredentialAssertions(),
+  ]);
   if (clean.includes(false)) process.exitCode = 1;
 }
 

@@ -17,8 +17,25 @@ import {
  * Placeholder values below are obviously synthetic -- fixed strings that
  * cannot be mistaken for a real generated secret -- because
  * `ensureAuthSecret` itself produces the only values in this file that are
- * meant to look like credentials, and even those are never printed: every
- * assertion below compares them, it never formats one into a message.
+ * meant to look like credentials.
+ *
+ * **No assertion here formats a `host_state.value`, whatever the row happens
+ * to hold.** `node:assert`'s equality helpers format *both* operands into the
+ * failure message -- the mechanism `scripts/check-test-hygiene.ts`'s own
+ * header documents for DOM nodes -- so `assert.equal(second, first)` over two
+ * real `randomBytes(32)` signing secrets prints both of them on the one run
+ * where it fails. It did: a mutation returning the generated candidate instead
+ * of the stored row put five distinct 43-character base64url secrets into the
+ * run's output, ten times over, and "the test never *interpolates* a secret"
+ * was mistaken for "the test never prints one".
+ *
+ * So every assertion over a stored value is `assert.ok(a === b, '<message>')`,
+ * which formats nothing, and the message names the property rather than the
+ * values. What stays on `assert.equal` is row counts and timestamps: neither
+ * is a credential, and a count that disagrees is worth printing. The rule is
+ * mechanical on purpose -- it does not depend on arguing which test seeds a
+ * real secret and which seeds a placeholder, because the next test added here
+ * will not have read that argument.
  */
 
 test('a secret generated once is returned again unchanged', () => {
@@ -28,7 +45,7 @@ test('a secret generated once is returned again unchanged', () => {
   const first = ensureAuthSecret(raw, 1_000);
   const second = ensureAuthSecret(raw, 2_000);
 
-  assert.equal(second, first);
+  assert.ok(second === first, 'the second call minted a new secret instead of returning the first');
 });
 
 test('two ensureAuthSecret calls on one database yield one secret', () => {
@@ -52,7 +69,10 @@ test('two ensureAuthSecret calls on one database yield one secret', () => {
 
   const returned = ensureAuthSecret(raw, 1_000);
 
-  assert.equal(returned, 'placeholder-preexisting-secret-value');
+  assert.ok(
+    returned === 'placeholder-preexisting-secret-value',
+    'the call returned its own freshly generated secret rather than the row already on record',
+  );
   const rows = raw.prepare('SELECT key FROM host_state WHERE key = ?').all(AUTH_SECRET_KEY);
   assert.equal(rows.length, 1);
 });
@@ -71,7 +91,7 @@ test('a secret survives a fresh connection to the same file', async () => {
     const reread = ensureAuthSecret(second.raw, 2_000);
     second.raw.close();
 
-    assert.equal(reread, generated);
+    assert.ok(reread === generated, 'a fresh connection to the same file read back a different secret');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -81,7 +101,7 @@ test('an absent key reads as null rather than throwing', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
 
-  assert.equal(readHostState(raw, 'auth.neverSet'), null);
+  assert.ok(readHostState(raw, 'auth.neverSet') === null, 'an absent key read back as something other than null');
 });
 
 test('writing an existing key moves updated_at and keeps one row', () => {
@@ -91,7 +111,10 @@ test('writing an existing key moves updated_at and keeps one row', () => {
   writeHostState(raw, 'auth.claimToken', 'placeholder-token-one', 1_000);
   writeHostState(raw, 'auth.claimToken', 'placeholder-token-two', 2_000);
 
-  assert.equal(readHostState(raw, 'auth.claimToken'), 'placeholder-token-two');
+  assert.ok(
+    readHostState(raw, 'auth.claimToken') === 'placeholder-token-two',
+    'the second write did not replace the value the first one stored',
+  );
   const rows = raw.prepare(
     'SELECT created_at, updated_at FROM host_state WHERE key = ?',
   ).all('auth.claimToken') as { created_at: unknown; updated_at: unknown }[];
@@ -107,7 +130,7 @@ test('clearing a key removes it', () => {
   writeHostState(raw, 'auth.claimToken', 'placeholder-token', 1_000);
   clearHostState(raw, 'auth.claimToken');
 
-  assert.equal(readHostState(raw, 'auth.claimToken'), null);
+  assert.ok(readHostState(raw, 'auth.claimToken') === null, 'the cleared key still reads back a value');
   const rows = raw.prepare('SELECT key FROM host_state WHERE key = ?').all('auth.claimToken');
   assert.equal(rows.length, 0);
 });

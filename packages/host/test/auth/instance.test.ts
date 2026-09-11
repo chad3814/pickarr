@@ -112,7 +112,18 @@ function cookieHeader(response: Response): string {
   return pairs.join('; ');
 }
 
-/** The one `auth_user` row, as a plain record, or `undefined` when the table is empty. */
+/**
+ * The one `auth_user` row, as a plain record, or `undefined` when the table is
+ * empty.
+ *
+ * **Never an operand of `assert.equal`.** Every caller below asserts
+ * `userRow(...) === undefined` through `assert.ok` with a message, because
+ * `assert.equal` formats both operands into the failure and this one is a
+ * whole row of a table Better Auth owns. `auth_user` holds no credential
+ * column today -- the password hash is `auth_account`'s -- so what is being
+ * avoided is the shape rather than a live leak; the shape is what keeps
+ * mattering, since the row printed is whatever the table grows.
+ */
 function userRow(raw: DatabaseSync): Record<string, unknown> | undefined {
   return raw.prepare('SELECT * FROM auth_user').get() as Record<string, unknown> | undefined;
 }
@@ -218,7 +229,7 @@ test('a loopback origin is trusted and a public one is not', async () => {
   assert.equal(evil.status, 403);
   // Refused before the write, not after: an attacker's origin that still
   // created an account would be a refusal in name only.
-  assert.equal(userRow(otherRaw), undefined);
+  assert.ok(userRow(otherRaw) === undefined, 'the refused origin still created an account');
   assert.ok(userRow(raw), 'the loopback sign-up should still have landed');
 });
 
@@ -257,7 +268,7 @@ test('the private block ends at 172.31, so 172.32 is refused', async () => {
   assert.equal(inFirst.status, 200);
   assert.equal(inLast.status, 200);
   assert.equal(beyond.status, 403);
-  assert.equal(userRow(outside.raw), undefined);
+  assert.ok(userRow(outside.raw) === undefined, 'the origin beyond the private block still created an account');
 });
 
 test('a bracketed IPv6 loopback is trusted and a public IPv6 is not', async () => {
@@ -276,7 +287,7 @@ test('a bracketed IPv6 loopback is trusted and a public IPv6 is not', async () =
   // block is the top seven bits rather than the first byte.
   assert.equal(uniqueResponse.status, 200);
   assert.equal(globalResponse.status, 403);
-  assert.equal(userRow(global.raw), undefined);
+  assert.ok(userRow(global.raw) === undefined, 'the public IPv6 origin still created an account');
 });
 
 test('a hostname other than localhost is refused, however it resolves', async () => {
@@ -288,7 +299,7 @@ test('a hostname other than localhost is refused, however it resolves', async ()
   const response = await signUp(auth, 'http://pickarr.local:8787', 'attacker@example.invalid', claimToken);
 
   assert.equal(response.status, 403);
-  assert.equal(userRow(raw), undefined);
+  assert.ok(userRow(raw) === undefined, 'the unplaceable hostname still created an account');
 });
 
 test('a configured public url is trusted even though it is public', async () => {
