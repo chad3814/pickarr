@@ -5,7 +5,9 @@
  * 1. **No web test hands a live DOM element to `node:assert`** as a value it
  *    might have to print. See `findViolations`.
  * 2. **No file under `packages/host/src` names a credential column in a SQL
- *    string**, outside an allow-list of paths. See `findCredentialSelections`.
+ *    string, and none reads a credential table through a statement this check
+ *    cannot read**, outside an allow-list of paths. See
+ *    `findCredentialSelections`.
  *
  * **Parsed rather than pattern-matched, and that is not fastidiousness.** Each
  * rule is *documented* by quoting the thing it forbids. The web suite quotes
@@ -175,6 +177,30 @@ export function findViolations(file: string, source: string): Violation[] {
  *
  * It extends the slice-C rule that only `readClientConfig` may select
  * download-client credentials, and it is the same rule with a wider list.
+ *
+ * **What it reads, and what it cannot.** It resolves a substituted identifier
+ * to the string it is bound to in the same file, joins a `+` concatenation,
+ * and normalizes a quoted or schema-qualified table name — so the house style
+ * for a multi-column select (`SELECT ${COLUMNS} FROM …`) is read as the
+ * statement it becomes rather than as `SELECT ? FROM …`, which is how a
+ * credential select used to be invisible here. Over a credential table it then
+ * **fails closed**: a `SELECT *`, or a substitution it could not resolve, is a
+ * violation demanding a human decision rather than a pass.
+ *
+ * Three things it still does not see, all of them stated rather than implied:
+ *
+ * - **SQL that is never a string in this file.** A Drizzle query-builder
+ *   chain (`db.select({ token: authSession.token }).from(authSession)`) names
+ *   neither table nor column in any literal, so nothing here can flag it. The
+ *   one module written that way today is the allow-listed adapter; a new one
+ *   would pass.
+ * - **A statement assembled across files.** Resolution is syntactic and
+ *   file-local: an imported constant, a function's return and a parameter are
+ *   all unresolvable, which is a violation over a credential table and
+ *   silently dropped everywhere else.
+ * - **Anything outside `packages/host/src`.** A plugin holding
+ *   `PluginContext.db` can select whatever it likes — the same reach
+ *   `migratePlugin`'s docblock already records.
  */
 const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
   { table: 'auth_account', column: 'password' },
@@ -189,12 +215,13 @@ const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
  * added beside one of these, which is the opposite of what an allow-list is
  * for: adding a path here should be a visible decision in a diff.
  *
- * Both entries name files that **do not exist yet** — task 2 writes
- * `db/host-state.ts` and task 3 writes `auth/instance.ts`. That is deliberate
- * and it is why nothing here checks the paths resolve: the allow-list is the
- * one part of this rule written forward, so the check can land before the code
- * it exempts. An entry with no file behind it simply never matches, and a stale
- * entry left behind after a file is deleted grants nothing.
+ * Both entries named files that **did not exist when this rule landed** — task
+ * 2 wrote `db/host-state.ts` and task 3 wrote `auth/instance.ts` afterwards.
+ * That is deliberate and it is why nothing here checks the paths resolve: the
+ * allow-list is the one part of this rule written forward, so the check could
+ * land before the code it exempts. An entry with no file behind it simply
+ * never matches, and a stale entry left behind after a file is deleted grants
+ * nothing.
  */
 const CREDENTIAL_ALLOW_LIST: readonly string[] = [
   // Persists (and generates) the Better Auth signing secret and the first-boot
@@ -206,6 +233,145 @@ const CREDENTIAL_ALLOW_LIST: readonly string[] = [
 ];
 
 /**
+ * The tables holding a credential column, each once — what the fail-closed
+ * half of the rule below is keyed on. Derived rather than listed, so a fourth
+ * credential column cannot arrive with its table left out of the star and
+ * unresolvable cases.
+ */
+const CREDENTIAL_TABLES: readonly string[] = [
+  ...new Set(CREDENTIAL_COLUMNS.map(({ table }) => table)),
+];
+
+/**
+ * One SQL string as this check reads it.
+ *
+ * `unresolved` is the half that matters: a statement assembled from something
+ * this file cannot follow — a function call, a parameter, a name imported from
+ * elsewhere — is *not* a statement that reads no credential, it is a statement
+ * whose reading is unknown. Carrying that as a flag rather than silently
+ * closing the gap with ` ? ` is what lets the rule fail closed over a
+ * credential table instead of passing.
+ */
+interface SqlText {
+  /** The statement, with every substitution this check could resolve spliced in. */
+  text: string;
+  /** Whether any substitution could not be resolved, so `text` is an incomplete reading. */
+  unresolved: boolean;
+}
+
+/**
+ * Every `const`-bound name in one file, so a substituted identifier can be
+ * followed to the string it stands for.
+ *
+ * **A name declared more than once is `'ambiguous'` and resolves to nothing.**
+ * This is a syntactic map with no scope analysis behind it, so two declarations
+ * of one name are two candidate values and picking either would be a guess.
+ * An unresolvable substitution is a violation over a credential table, so the
+ * guess is the one outcome that could be wrong in the direction that matters.
+ */
+type Bindings = Map<string, ts.Expression | 'ambiguous'>;
+
+function collectBindings(parsed: ts.SourceFile): Bindings {
+  const bindings: Bindings = new Map();
+  function visit(node: ts.Node): void {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      const name = node.name.text;
+      bindings.set(name, bindings.has(name) ? 'ambiguous' : node.initializer);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  return bindings;
+}
+
+/**
+ * The text a node contributes to the SQL it becomes, or `null` for a node that
+ * is not a string at all.
+ *
+ * **Four shapes, and three of them were bypasses.** A credential select
+ * written in this repo's own dominant idiom — a column-list constant
+ * interpolated into the statement — was invisible to the first version of this
+ * rule, which dropped every substitution:
+ *
+ * ```ts
+ * const SESSION_COLUMNS = 'id, user_id, token, expires_at';
+ * const SESSION_BY_ID = `SELECT ${SESSION_COLUMNS} FROM auth_session WHERE id = ?`;
+ * ```
+ *
+ * That is how `api/reads.ts` and `clients/rows.ts` are written, so the rule
+ * failed silently in the file next door. So:
+ *
+ * - **A string or a no-substitution template** is its own text.
+ * - **A template** splices in each substitution it can resolve, *without*
+ *   padding: `SELECT ${COLUMNS} FROM` has to read as one statement, and
+ *   `'…auth_' + 'session'` has to read as one table name, or the two ways of
+ *   splitting an identifier across a seam both walk past. A substitution that
+ *   resolves to nothing becomes ` ? ` — a bound parameter, which is what most
+ *   of them are — and sets `unresolved`.
+ * - **A `+` concatenation** is both sides joined, provided at least one side
+ *   is a string: `a + b` over two numbers is not SQL and must not be read as
+ *   an empty statement.
+ * - **An identifier** is followed to its `const`, recursively, with `seen`
+ *   guarding against a cycle (`const a = b; const b = a` parses).
+ *
+ * A parenthesised expression and an `as const` are seen through, since
+ * neither changes the string.
+ */
+function sqlTextOf(node: ts.Node, bindings: Bindings, seen: ReadonlySet<string> = new Set()): SqlText | null {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return { text: node.text, unresolved: false };
+  }
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
+    return sqlTextOf(node.expression, bindings, seen);
+  }
+  if (ts.isTemplateExpression(node)) {
+    let text = node.head.text;
+    let unresolved = false;
+    for (const span of node.templateSpans) {
+      const substituted = sqlTextOf(span.expression, bindings, seen);
+      if (substituted === null) {
+        text += ' ? ';
+        unresolved = true;
+      } else {
+        text += substituted.text;
+        unresolved = unresolved || substituted.unresolved;
+      }
+      text += span.literal.text;
+    }
+    return { text, unresolved };
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = sqlTextOf(node.left, bindings, seen);
+    const right = sqlTextOf(node.right, bindings, seen);
+    if (left === null && right === null) return null;
+    return {
+      text: (left?.text ?? ' ? ') + (right?.text ?? ' ? '),
+      unresolved: left === null || right === null || left.unresolved || right.unresolved,
+    };
+  }
+  if (ts.isIdentifier(node)) {
+    if (seen.has(node.text)) return null;
+    const bound = bindings.get(node.text);
+    if (bound === undefined || bound === 'ambiguous') return null;
+    return sqlTextOf(bound, bindings, new Set([...seen, node.text]));
+  }
+  return null;
+}
+
+/**
+ * The same statement with the ways of spelling an identifier that are not the
+ * identifier taken off: `"auth_session"`, `` `auth_session` `` and
+ * `[auth_session]` are all the same table to SQLite, and a rule that matched
+ * only the bare spelling is a rule a quoted table name walks past. The
+ * schema qualifier (`main.auth_session`) is handled where the table is
+ * matched, since dropping the dot would also drop the qualified *column*
+ * form this rule turns on.
+ */
+function unquoted(sql: string): string {
+  return sql.replaceAll(/["`[\]]/g, '');
+}
+
+/**
  * Whether `sql` reads rows *from* `table`, as opposed to declaring it.
  *
  * This is what keeps `migrate.ts` off the allow-list. Migration 12's DDL has
@@ -215,16 +381,53 @@ const CREDENTIAL_ALLOW_LIST: readonly string[] = [
  * and exempting `migrate.ts` wholesale would then exempt every query anyone
  * ever added to it. A `CREATE TABLE` or `CREATE INDEX` names the table after
  * `TABLE`/`ON`; a query names it after `FROM`, `JOIN`, `UPDATE` or `INTO`.
+ *
+ * An optional `schema.` in front of the table is matched too, because
+ * `FROM main.auth_session` is the same read as `FROM auth_session` and the
+ * first spelling used to pass.
  */
 function readsFrom(sql: string, table: string): boolean {
-  return new RegExp(String.raw`\b(?:from|join|update|into)\s+${table}\b`, 'i').test(sql);
+  return new RegExp(
+    String.raw`\b(?:from|join|update|into)\s+(?:\w+\s*\.\s*)?${table}\b`,
+    'i',
+  ).test(unquoted(sql));
 }
 
 /**
- * Which credential columns one SQL string names, as `table.column`.
+ * Whether the select list is `*` — every column, including whichever of them
+ * is the credential.
  *
- * Two spellings, because a violation can be written either way and only
- * catching one would be a check a real query walks straight past:
+ * Only the text between `SELECT` and the first `FROM` is looked at, and a `*`
+ * directly after `(` is not a select list: `SELECT count(*) FROM auth_session`
+ * reads no column at all, and flagging it would flag `auth/claim.ts`'s own
+ * measured-not-to-be-used counterexample. An alias's `s.*` is the same star as
+ * a bare one.
+ */
+function selectsEveryColumn(sql: string): boolean {
+  const list = /\bselect\b([\s\S]*?)\bfrom\b/i.exec(unquoted(sql))?.[1];
+  if (list === undefined) return false;
+  return /(?:^|[\s,])(?:\w+\s*\.\s*)?\*/.test(list);
+}
+
+/**
+ * How a statement over a credential table is unreadable, or `null` when it is
+ * not: `'*'` for a star select, `'?'` for a substitution this check could not
+ * follow. The star is reported in preference to the substitution when a
+ * statement manages both, because it is the more specific thing to say.
+ */
+function unreadableSelectMark(sql: SqlText): string | null {
+  if (selectsEveryColumn(sql.text)) return '*';
+  if (sql.unresolved) return '?';
+  return null;
+}
+
+/**
+ * Which credential columns one SQL string names, as `table.column` — plus,
+ * for a statement this check cannot read, which credential *table* it reads
+ * from.
+ *
+ * Three ways a violation is reported, and the third is the one that makes the
+ * rule fail closed:
  *
  * - **Qualified** — `auth_session.token`, or the same through an alias's
  *   table name. Flagged wherever it appears in a string, with no `readsFrom`
@@ -232,42 +435,72 @@ function readsFrom(sql: string, table: string): boolean {
  * - **Bare, in a query over that table** — `SELECT token FROM auth_session`,
  *   which is how the column would actually be selected, and how
  *   `SELECT s.token FROM auth_session s` reads once the alias is discounted.
+ * - **Unreadable, in a query over that table** — `SELECT *`, or a
+ *   substitution that could not be resolved. Neither names a credential
+ *   column and both may well select one, so each is reported as
+ *   `table.*`/`table.?` and has to be answered by a human: either the query
+ *   is rewritten to name its columns, or the file is added to
+ *   `CREDENTIAL_ALLOW_LIST` deliberately and in a diff. A rule that passed
+ *   these would be a rule that passes `SELECT *`, which is already the house
+ *   style at two sites in `api/reads.ts`.
+ *
+ * A table that already contributed a named column is not reported a second
+ * time for its star, so `SELECT *, token FROM auth_session` reads as one
+ * violation and names the column.
  */
-function credentialColumnsIn(sql: string): string[] {
-  return CREDENTIAL_COLUMNS.filter(({ table, column }) => {
-    if (new RegExp(String.raw`\b${table}\s*\.\s*${column}\b`, 'i').test(sql)) return true;
-    return (
-      readsFrom(sql, table) && new RegExp(String.raw`\b${column}\b`, 'i').test(sql)
-    );
-  }).map(({ table, column }) => `${table}.${column}`);
+function credentialColumnsIn(sql: SqlText): string[] {
+  const named = CREDENTIAL_COLUMNS.filter(({ table, column }) => {
+    if (new RegExp(String.raw`\b${table}\s*\.\s*${column}\b`, 'i').test(unquoted(sql.text))) return true;
+    return readsFrom(sql.text, table) && new RegExp(String.raw`\b${column}\b`, 'i').test(sql.text);
+  });
+  const readable = named.map(({ table, column }) => `${table}.${column}`);
+  const unreadable = unreadableSelectMark(sql);
+  if (unreadable === null) return readable;
+  const unread = CREDENTIAL_TABLES
+    .filter((table) => readsFrom(sql.text, table) && !named.some((column) => column.table === table))
+    .map((table) => `${table}.${unreadable}`);
+  return [...readable, ...unread];
 }
 
 /**
- * The text a string or template literal contributes to the SQL it becomes.
+ * Whether this node is a place a statement is *written*, as opposed to a place
+ * one is referred to or a part of one already read.
  *
- * A template's substitutions are dropped and their gaps closed with ` ? `, so
- * the literal chunks read as the statement rather than running together: a
- * `WHERE key = ${KEY}` neither invents a column name at the seam nor loses the
- * `WHERE`. Substituted values are not inspected at all — following one would
- * mean resolving an identifier, and the interesting case (Drizzle's `sql`
- * template, whose substitutions are column *objects*) is the adapter's own
- * code, which is allow-listed.
+ * Two ways a node is neither, and both of them reported every violation twice
+ * before they were here:
+ *
+ * - **An identifier is a reference.** `sqlTextOf` follows one to its `const`
+ *   so a substituted column list can be spliced in, which means the name on
+ *   the left of its own declaration resolves to the statement too. Reporting
+ *   there would name the declaration twice and, worse, would report every
+ *   later *use* of a constant as a fresh violation.
+ * - **A part its parent already composed.** The walk visits every node, and
+ *   `sqlTextOf` reads a template and a concatenation through to their pieces —
+ *   so the pieces are visited on their own afterwards. A string inside a
+ *   *call* is not skipped, because its parent could not resolve it and so
+ *   nothing has read it yet.
  */
-function sqlTextOf(node: ts.Node): string | null {
-  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
-  if (ts.isTemplateExpression(node)) {
-    return [node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join(' ? ');
+function writesSqlHere(node: ts.Node): boolean {
+  // The source file is the one node with no parent at all -- `parent` is typed
+  // as a `Node` but is undefined there, so this is a check and not a formality.
+  if (ts.isSourceFile(node)) return false;
+  if (ts.isIdentifier(node)) return false;
+  const { parent } = node;
+  if (ts.isTemplateSpan(parent) || ts.isTemplateExpression(parent)) return false;
+  if (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isSatisfiesExpression(parent)) {
+    return false;
   }
-  return null;
+  return !(ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.PlusToken);
 }
 
 /** Every credential column named in a SQL string in one file's source, in source order. */
 export function findCredentialViolations(file: string, source: string): Violation[] {
   const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, /* setParentNodes */ true);
+  const bindings = collectBindings(parsed);
   const violations: Violation[] = [];
 
   function visit(node: ts.Node): void {
-    const sql = sqlTextOf(node);
+    const sql = writesSqlHere(node) ? sqlTextOf(node, bindings) : null;
     if (sql !== null) {
       for (const name of credentialColumnsIn(sql)) {
         violations.push({
@@ -375,12 +608,15 @@ async function checkCredentialColumns(): Promise<boolean> {
     );
   }
   console.error(
-    `\n${violations.length} SQL string(s) name a credential column. auth_account.password is a\n` +
-      'password hash, auth_session.token is a live session, and host_state.value is this host\'s\n' +
-      'Better Auth signing secret — a query that selects one puts it somewhere it can be logged or\n' +
-      'serialised into a response, and nothing fails when that happens. Only Better Auth\'s own\n' +
-      'adapter and the module that persists the secret may read them; if this file is genuinely\n' +
-      'one of those, add its path to CREDENTIAL_ALLOW_LIST in this script.\n',
+    `\n${violations.length} SQL string(s) read a credential column, or read a credential table in a\n` +
+      'statement this check cannot read. auth_account.password is a password hash,\n' +
+      'auth_session.token is a live session, and host_state.value is this host\'s Better Auth\n' +
+      'signing secret — a query that selects one puts it somewhere it can be logged or serialised\n' +
+      'into a response, and nothing fails when that happens. A `table.*` above is a star select and\n' +
+      'a `table.?` is a substitution this check could not resolve: neither names a credential and\n' +
+      'both may select one, so both are reported rather than assumed harmless. Name the columns the\n' +
+      'query actually needs; or, if this module is genuinely one of the two that may read a\n' +
+      'credential, add its path to CREDENTIAL_ALLOW_LIST in this script.\n',
   );
   return false;
 }

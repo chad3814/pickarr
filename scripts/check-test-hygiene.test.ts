@@ -236,3 +236,186 @@ test('the DDL that declares a credential column is not a query over it', async (
 
   assert.deepEqual(await findCredentialSelections(dir, []), []);
 });
+
+/**
+ * The bypasses the first version of this rule had, each closed and each
+ * pinned.
+ *
+ * All six were measured against the rule as it shipped, and the first is the
+ * one that matters most: it is not an adversarial spelling, it is how
+ * `api/reads.ts` and `clients/rows.ts` are written. A rule that misses the
+ * house style is a rule that fails silently the first time it matters.
+ */
+
+test('a column list reached through a constant is read, which is this repo own house style', async (t) => {
+  // The shape that defeated the first version: substitutions were dropped, so
+  // the statement read `SELECT ? FROM auth_session` and named no column at
+  // all. `MEDIA_ITEM_COLUMNS` and `DOWNLOAD_COLUMNS` in `api/reads.ts` are
+  // exactly this, so the bypass was one copy-paste from the file next door.
+  const dir = await fixtureDir(t, {
+    'guard.ts': [
+      `const SESSION_COLUMNS = 'id, user_id, token, expires_at, created_at, updated_at';`,
+      'export const SESSION_BY_ID = `SELECT ${SESSION_COLUMNS} FROM auth_session WHERE id = ?`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [violation.line, violation.text]),
+    [[2, 'auth_session.token']],
+  );
+});
+
+test('a constant reached through another constant is read too, and a cycle terminates', async (t) => {
+  // Resolution is recursive, because one hop is an arbitrary depth to stop at:
+  // a column list built from a shared prefix is the obvious second version of
+  // the shape above. `const a = ...b...; const b = ...a...` parses, so the
+  // recursion carries the names it has already followed.
+  const dir = await fixtureDir(t, {
+    'hops.ts': [
+      `const CORE = 'id, token';`,
+      'const LIST = `${CORE}, expires_at`;',
+      'export const Q = `SELECT ${LIST} FROM auth_session`;',
+      '',
+    ].join('\n'),
+    'cycle.ts': [
+      'const a = `${b}`;',
+      'const b = `${a}`;',
+      'export const Q = `SELECT id FROM media_item ${a}`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [violation.line, violation.text]),
+    [[3, 'auth_session.token']],
+    'the two-hop list is read, and the cyclic pair neither hangs nor flags',
+  );
+});
+
+test('a select over a credential table this check cannot read is a violation, not a pass', async (t) => {
+  // **Fail closed.** Neither of these names a credential column and both may
+  // well select one: `SELECT *` selects whichever columns the table has, and a
+  // substitution that resolves to nothing could be any column list at all.
+  // `SELECT *` is already the house style at two sites in `api/reads.ts`, so
+  // treating it as "names no credential" was a rule that passed the easiest
+  // possible bypass. What the report asks for is a human decision: name the
+  // columns, or add the path to the allow-list in a diff.
+  const dir = await fixtureDir(t, {
+    'star.ts': `export const Q = 'SELECT * FROM auth_session WHERE id = ?';\n`,
+    'alias-star.ts': `export const Q = 'SELECT s.* FROM auth_session s WHERE s.id = ?';\n`,
+    'unresolvable.ts': 'export const Q = `SELECT ${columnsFor(table)} FROM auth_account`;\n',
+    'twice-declared.ts': [
+      // No scope analysis behind the resolution, so a name declared twice is
+      // two candidate values; guessing either would be the one kind of wrong
+      // answer that matters here.
+      `const COLUMNS = 'id';`,
+      `const COLUMNS = 'id, password';`,
+      'export const Q = `SELECT ${COLUMNS} FROM auth_account`;',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [
+      relative(dir, violation.file),
+      violation.text,
+    ]),
+    [
+      ['alias-star.ts', 'auth_session.*'],
+      ['star.ts', 'auth_session.*'],
+      ['twice-declared.ts', 'auth_account.?'],
+      ['unresolvable.ts', 'auth_account.?'],
+    ],
+  );
+});
+
+test('an unreadable select over a table holding no credential is still a pass', async (t) => {
+  // The other half of failing closed: it fails closed *over a credential
+  // table*, and nowhere else. `SELECT *` from a derived table is how
+  // `DOWNLOADS_SINCE` is written and a substituted column list is how every
+  // paged read in `api/reads.ts` is written, so a rule that flagged either one
+  // anywhere would have to be switched off for the file it was written to
+  // protect.
+  const dir = await fixtureDir(t, {
+    'reads.ts': [
+      `const MEDIA_ITEM_COLUMNS = 'id, title, updated_at';`,
+      'export const PAGE = `SELECT ${MEDIA_ITEM_COLUMNS} FROM media_item WHERE id > ?`;',
+      'export const UNION = `SELECT * FROM (SELECT id FROM torrent_download LIMIT ?)`;',
+      'export const CALLED = `SELECT ${qualify("d", MEDIA_ITEM_COLUMNS)} FROM media_item AS d`;',
+      '',
+    ].join('\n'),
+    // `isClaimed`'s own statement, and the `COUNT(*)` it is measured against:
+    // the `*` inside a call is not a select list, so neither is a star select.
+    'claim.ts': [
+      `export const CLAIMED = 'SELECT 1 FROM auth_user LIMIT 1';`,
+      `export const COUNTED = 'SELECT count(*) FROM auth_session';`,
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('a statement split across a concatenation is read as one statement', async (t) => {
+  // Two seams, because either one alone would defeat a check that read each
+  // string literal on its own: the column and the table can be separated, and
+  // the table name itself can be cut in half. `DOWNLOAD_COLUMNS` in
+  // `api/reads.ts` is a `+` of two literals, so this is house style too.
+  const dir = await fixtureDir(t, {
+    'split-clause.ts': `export const Q = 'SELECT token' + ' FROM auth_session';\n`,
+    'split-table.ts': `export const Q = 'SELECT token FROM auth_' + 'session';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [
+      relative(dir, violation.file),
+      violation.line,
+      violation.text,
+    ]),
+    [
+      ['split-clause.ts', 1, 'auth_session.token'],
+      ['split-table.ts', 1, 'auth_session.token'],
+    ],
+  );
+});
+
+test('a quoted or schema-qualified table name is the same table', async (t) => {
+  // All three spellings name one table to SQLite, and the rule matched only
+  // the bare one. `main.` is the schema every SQLite database has, so
+  // `FROM main.auth_session` is not even an unusual thing to write.
+  const dir = await fixtureDir(t, {
+    'quoted.ts': `export const Q = 'SELECT token FROM "auth_session"';\n`,
+    'qualified.ts': `export const Q = 'SELECT token FROM main.auth_session';\n`,
+    'both.ts': `export const Q = 'SELECT "token" FROM "main"."auth_session"';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['both.ts', 'auth_session.token'],
+      ['qualified.ts', 'auth_session.token'],
+      ['quoted.ts', 'auth_session.token'],
+    ],
+  );
+});
+
+test('one statement is one violation, however many times its name is used', async (t) => {
+  // Resolution follows identifiers, so the name on the left of a declaration
+  // and every later use of it resolve to the statement as well. Reporting
+  // those would turn one query into a violation count nobody could act on --
+  // and would report the *use* rather than the line the SQL is written on.
+  const dir = await fixtureDir(t, {
+    'used-twice.ts': [
+      `const SESSION = 'SELECT token FROM auth_session WHERE id = ?';`,
+      'export function first(): string { return SESSION; }',
+      'export function second(): string { return SESSION; }',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [violation.line, violation.text]),
+    [[1, 'auth_session.token']],
+  );
+});
