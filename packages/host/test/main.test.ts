@@ -1000,6 +1000,43 @@ test('an environment variable beats the file', async (t) => {
   });
 });
 
+test('an empty PICKARR_READ_API_HOST, PICKARR_READ_API_PORT or PICKARR_DATABASE is unset, not configured emptiness', async (t) => {
+  // A compose file that declares a key with no value passes exactly this --
+  // not "the operator configured emptiness", but "the operator said
+  // nothing" -- uniformly for `readHost`, `port` and `databasePath`, the
+  // same rule `publicUrl` already applied on its own. `resolveSettings`'s
+  // own comment carries the measurement this protects against: an empty
+  // `PICKARR_READ_API_HOST` reaching the listener unchanged binds the IPv6
+  // wildcard `::` where `0.0.0.0` is documented, on this Node.
+  //
+  // These two assertions replace ones this file used to make directly
+  // against `resolveReadHost('')` and `resolveReadPort('')`, back when
+  // those functions carried the "empty means unset" rule themselves. That
+  // rule now lives one level up, in `resolveSettings`, uniformly across all
+  // three variables rather than duplicated per resolver -- so it is
+  // asserted here instead.
+  process.env['PICKARR_READ_API_HOST'] = '';
+  process.env['PICKARR_READ_API_PORT'] = '';
+  process.env['PICKARR_DATABASE'] = '';
+  t.after(() => {
+    delete process.env['PICKARR_READ_API_HOST'];
+    delete process.env['PICKARR_READ_API_PORT'];
+    delete process.env['PICKARR_DATABASE'];
+  });
+
+  await withConfigFile({ server: { host: '127.0.0.1', port: 9100 }, database: { path: '/tmp/from-file.db' } }, async (settings) => {
+    assert.equal(settings.readHost, '127.0.0.1', 'empty is unset, so the file\'s value wins');
+    assert.equal(settings.port, 9100, 'empty is unset, so the file\'s value wins');
+    assert.equal(settings.databasePath, '/tmp/from-file.db', 'empty is unset, so the file\'s value wins');
+  });
+
+  await withConfigFile({}, async (settings) => {
+    assert.equal(settings.readHost, '0.0.0.0', 'empty is unset, so the schema default applies with no file either');
+    assert.equal(settings.port, 8787, 'empty is unset, so the schema default applies with no file either');
+    assert.equal(settings.databasePath, '/config/pickarr.db', 'empty is unset, so the schema default applies with no file either');
+  });
+});
+
 test('with neither a variable nor a file, the schema defaults apply', async () => {
   await withConfigFile({}, async (settings) => {
     assert.equal(settings.readHost, '0.0.0.0');
