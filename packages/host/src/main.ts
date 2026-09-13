@@ -433,8 +433,8 @@ export function resolveOpenmetadataUrl(configured: string | undefined): string {
   }
   if (parsed.username !== '' || parsed.password !== '') {
     throw new Error(
-      'PICKARR_OPENMETADATA_URL must carry no username or password: the lookup key comes from '
-      + `${OPENMETADATA_API_KEY_VARIABLE}, and userinfo in this url would be dropped rather than sent`,
+      'PICKARR_OPENMETADATA_URL must carry no username or password: userinfo in this url would be '
+      + `dropped rather than sent, and the lookup key is set through ${OPENMETADATA_API_KEY_VARIABLE}`,
     );
   }
   if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
