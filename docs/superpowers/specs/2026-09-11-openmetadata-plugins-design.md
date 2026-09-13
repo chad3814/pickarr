@@ -130,9 +130,28 @@ plugins await it per request for the same reason.
 
 **The resolved value is a credential.** It is used only as an `Authorization`
 header. It is never logged, never written to a table, never put in a job
-payload, and never handed to `node:assert` — tests use a fake key. This is the
-rule `scripts/check-test-hygiene.ts` enforces for the credentials it knows
-about, honoured here for one it does not.
+payload, and never handed to `node:assert` — tests use a fake key.
+
+**This one is enforced by discipline, not by the build.** It is the same rule
+`scripts/check-test-hygiene.ts`'s rule 3 enforces for the credentials it knows
+about, and that check *structurally cannot reach this one*: `yieldsCredential`
+matches an operand that is a call to a name on `CREDENTIAL_PRODUCERS`, or a
+local bound to one. This key arrives as `await resolve(…)`, where `resolve` is
+a local bound to a `createEnvSecretResolver(…)` call — and for a call
+expression the check tests the callee's *name* against the list and does not
+follow it to its binding. So adding `createEnvSecretResolver` to the list
+would not help, and adding `resolve` would only match tests that happened to
+choose that identifier. Teaching the check to follow a factory binding
+through to the function it returned is a separate piece of work, and not this
+slice's.
+
+Also **not logged at boot**: `main` warns when `PICKARR_OPENMETADATA_KEY` is
+empty and the real plugins were constructed, because per-request resolution
+means a deployment that never set it boots cleanly and only dead-letters
+lookups minutes later. The warning tests the variable for emptiness in place
+and names the variable, never the value; it is a warning rather than a
+refusal, because a host serving reads with one plugin misconfigured is the
+right behaviour.
 
 ### 2.4 The process
 
@@ -221,6 +240,9 @@ its fake service echoes `name` and the double matches on it. Our fake
 
 In this order:
 
+0. `spec.check(media)`, the plugin's pre-flight — **before anything is
+   written**. A plugin that cannot represent an answer must refuse it here
+   and nowhere later. See below.
 1. `createMediaItem({ pluginId, title, releaseDate, description: overview })`.
    Created late, as the double does, so branches 2–4 have no row to clean up.
    `releaseDate` is the API's `releaseDate`; `year` is not stored separately —
@@ -245,12 +267,45 @@ crash re-writes rather than duplicates: `claimProviderRef` resolves its own
 race, `attachRole` is keyed on `(mediaItemId, personId, role)`, and the
 plugin's own writes are upserts (§4).
 
+**Step 0, and why `LookupPluginSpec` has a pre-flight at all.** This section
+and §4.3–4.5 were written separately and neither saw the other: this one
+fixed the write order, and those three each told their plugin to throw for a
+`kind` it cannot represent — from inside `apply`, which is step 6. That is
+four steps too late. A mis-sent category or a service bug would leave a
+`media_item` holding the provider-ref claim, an `rss_item` relinked to it and
+the resolution stuck `pending` forever, while the job dead-lettered with
+nothing on any path to undo any of it. The three outcomes that identify
+nothing (§3.3's branches 1–3) were the whole of what "created late" was
+weighed against; **a plugin refusing the answer is a fourth**, and the only
+place it costs nothing is before step 1.
+
+So `LookupPluginSpec` carries `check?(media: Media): void`, called here and
+nowhere else. It is synchronous and must stay cheap — it reads the answer and
+touches nothing else, so it has no failure of its own to contribute, which is
+what makes it safe to run before any row exists. Each plugin's `kind` guard
+lives there, as does tv's refusal of a release that names no series (§4.3),
+which needs only `media.parents`. The guards remain inside `apply` as well:
+`apply` is exported and driven directly by each plugin's own tests, and tv's
+also narrows `media.kind` for the branches below it. The copy in `check` is
+the one that matters; the copy in `apply` is the one that cannot be removed.
+
 ### 3.5 `onNewRssItems`
 
 Inserts one `<id>_lookup` row per rss item id, then enqueues one `lookup` job
 per chunk of at most 100 ids, recording each returned job id on the rows it
 covers — a job id nothing keeps is a job nobody can trace back to the rows it
 is identifying. An empty id list returns without a write.
+
+**The insert tolerates a conflict** (`ON CONFLICT DO NOTHING` against the
+unique index on `rss_item_id`), because this call is re-offered after it
+fails. `feeds/reader.ts` marks nothing delivered when a plugin's
+`onNewRssItems` rejects — a feed names exactly one plugin, so a failure is
+all-or-nothing for the batch — and re-offers every undelivered row on the
+next poll. A plain insert that had succeeded before the enqueue loop failed
+would therefore meet its own rows on the retry and throw for ever, silently
+wedging that feed for every later item too. Tolerating the conflict makes the
+re-invocation a recovery: the rows stand, a fresh job is enqueued, and the
+`lookup_job_id` update covers the chunk again.
 
 The filenames themselves are read with hand-written SQL against `rss_item`
 through `ctx.db`, for the reason the double's `readRssItems` documents:
@@ -313,7 +368,11 @@ CREATE UNIQUE INDEX <id>_lookup_rss_item ON <id>_lookup (rss_item_id);
 Keyed per rss item, not per media item: the dedup points two rss items at one
 media item, and a per-media-item key would make the loser's row collide with
 the winner's. `lookup_id` is the service's own id — what a poll asks about, and
-what a support question quotes. This is each plugin's migration 1.
+what a support question quotes, which is why it is recorded as soon as an
+answer arrives and whatever that answer turns out to be: written only on the
+resolved path it would be null for exactly the rows anyone asks about, an item
+that polled for ten minutes or one that ended `unresolved` or `refused`. This
+is each plugin's migration 1.
 
 Foreign keys name the host's tables, and the Drizzle objects carry no
 `.references()`, because those targets belong to the host's schema and a plugin
@@ -411,6 +470,11 @@ Any other `kind` — `movie`, `book`, `scene` — throws. A category answering
 with a kind that cannot belong to it is a service bug or a mis-sent category,
 and writing a row for it would bury the evidence.
 
+**Both refusals belong in `check`, not in `apply`** — the pre-flight §3.4's
+step 0 runs before the shared `media_item` exists. Both read only `media.kind`
+and `media.parents`, so both can. They are repeated inside `apply` for the
+reason §3.4 gives.
+
 ### 4.4 movie (migration 2)
 
 ```sql
@@ -428,8 +492,9 @@ CREATE TABLE movie_detail (
 CREATE UNIQUE INDEX movie_detail_media_item ON movie_detail (media_item_id);
 ```
 
-`kind: 'movie'` only; anything else throws. `parents` is expected to be empty
-and is ignored if it is not — a movie has no parent this slice models.
+`kind: 'movie'` only; anything else throws, from `check` (§3.4's step 0),
+before the shared rows are written. `parents` is expected to be empty and is
+ignored if it is not — a movie has no parent this slice models.
 
 ### 4.5 xxx (migration 2)
 
@@ -457,7 +522,8 @@ CREATE TABLE xxx_scene (
 CREATE UNIQUE INDEX xxx_scene_media_item ON xxx_scene (media_item_id);
 ```
 
-`kind: 'scene'` only. The site comes from `details.siteName` and
+`kind: 'scene'` only, refused from `check` (§3.4's step 0) before the shared
+rows are written. The site comes from `details.siteName` and
 `details.siteRef`; `site_id` is nullable because a scene whose details name no
 site is still a scene worth recording. Two scenes from one site share one
 `xxx_site` row through the upsert.
@@ -574,6 +640,17 @@ and `npm run build`. Both green before this slice is done.
   choice.
 - **tv's detail keys are unverified** until the probe in §4.2 runs.
   `details_json` is what keeps that from becoming a migration.
+- **A crash between `createMediaItem` and `claimProviderRef` orphans a row.**
+  §3.4's step 1 writes a `media_item` that nothing yet points at; step 2 is
+  what gives it an identity and what another item racing for the same
+  reference would find. A process death in between leaves a row that no
+  `rss_item` links to, that holds no provider reference, and that therefore
+  nothing will ever claim, drop or reach — the retry starts over and creates a
+  fresh one. Narrow, and non-corrupting: the orphan is invisible to the dedup
+  and to every read filtered by plugin and rss item, so no later answer is
+  wrong because of it. It is unbounded only across repeated crashes in that
+  one window, and closing it would mean a transaction spanning two
+  `MediaWriter` calls, which the contract does not offer.
 - **The engine's flow is shared, so a divergence later costs a fork.** If one
   media type needs a materially different flow — a two-stage lookup, say — it
   either grows a branch in the shared engine or stops using it. The bet is that
