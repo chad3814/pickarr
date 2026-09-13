@@ -63,6 +63,8 @@ export interface EnvelopeDeps {
   readonly db: LookupDb;
   readonly table: LookupStateTable;
   readonly now: number;
+  /** The plugin's pre-flight, if it has one. See `LookupPluginSpec.check`. */
+  check?(media: Media): void;
   apply(args: ApplyArgs): Promise<void>;
 }
 
@@ -106,10 +108,20 @@ async function attachPeople(media: Media, mediaItemId: number, ctx: PluginContex
 /**
  * A resolved answer, in the one order that survives a lost dedup race.
  *
- * The media item is created late -- after the answer arrived -- so the three
- * outcomes that identify nothing have no row to clean up. `MediaWriter` does
- * offer `updateMediaItem`, so creating early is implementable; it would only
- * add a row to drop on every refusal.
+ * The media item is created late -- after the answer arrived -- so no outcome
+ * that identifies nothing has a row to clean up. `MediaWriter` does offer
+ * `updateMediaItem`, so creating early is implementable; it would only add a
+ * row to drop on every refusal.
+ *
+ * There are **four** such outcomes, not the three `applyEnvelope`'s branch
+ * reads: the fourth is the plugin refusing an answer it cannot represent, and
+ * `deps.check` below is why that one also lands before anything is written.
+ * An answer whose `kind` cannot belong to this plugin's category used to be
+ * refused inside `spec.apply` -- by which point the media item existed, held
+ * the provider-ref claim, and had the rss item relinked to it, with the
+ * resolution left `pending` forever and nothing on any path to undo any of
+ * it. The pre-flight is deliberately cheap and synchronous: it reads the
+ * answer and nothing else, so there is no failure of its own for it to add.
  */
 async function applyResolved(
   envelope: LookupEnvelope,
@@ -118,6 +130,8 @@ async function applyResolved(
   deps: EnvelopeDeps,
 ): Promise<void> {
   const { ctx } = deps;
+  deps.check?.(media);
+
   const mine = await ctx.media.createMediaItem({
     pluginId: deps.pluginId,
     title: media.title,
@@ -163,6 +177,18 @@ export async function applyEnvelope(
   deps: EnvelopeDeps,
 ): Promise<void> {
   const { ctx } = deps;
+
+  // The service's own id for this lookup, recorded before the branch below
+  // decides anything. §4.1 justifies the column as "what a poll asks about,
+  // and what a support question quotes", and written only on the resolved
+  // path it was null for exactly the rows anyone asks about: an item that
+  // polled for ten minutes, or one that ended `unresolved` or `refused`. The
+  // resolved path writes the same value again as part of its own row update
+  // (§3.4's step 5), which is one statement rather than a column it would
+  // otherwise have to leave to this one.
+  await deps.db.update(deps.table)
+    .set({ lookupId: envelope.lookupId, updatedAt: deps.now })
+    .where(eq(deps.table.rssItemId, target.rssItemId));
 
   // 1. Not here yet -- read FIRST, and per answer rather than per response. A
   //    batch always answers HTTP 200, and a partial entry carries the state it
@@ -231,6 +257,23 @@ export interface LookupPluginSpec {
   readonly migrations: readonly Migration[];
   /** Job handlers beyond the engine's `lookup` and `poll`. */
   readonly jobs?: Readonly<Record<string, JobHandler>>;
+  /**
+   * The pre-flight: throws for an answer this plugin cannot represent.
+   *
+   * Called at the top of the resolved branch, **before** the shared
+   * `media_item` row is created and its provider reference claimed, because
+   * that is the only point at which refusing costs nothing. A plugin that
+   * only refused inside `apply` would leave a media item holding the claim,
+   * an rss item relinked to it, and a resolution stuck `pending` while its
+   * job dead-lettered -- the write order (§3.4) and the per-plugin guards
+   * (§4.3-4.5) were specified separately and neither saw the other.
+   *
+   * Synchronous, and it must stay cheap: it reads the answer and nothing
+   * else. Anything that could fail for a reason of its own belongs in
+   * `apply`, where a failure is a job to retry rather than a verdict on the
+   * answer.
+   */
+  check?(media: Media): void;
   /** The plugin's own rows for one resolved answer. Must be idempotent. */
   apply(args: ApplyArgs): Promise<void>;
 }
@@ -380,7 +423,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
   const table = lookupTable(spec.id);
 
   function envelopeDeps(ctx: PluginContext, raw: DatabaseSync, db: LookupDb): EnvelopeDeps {
-    return {
+    const base = {
       pluginId: spec.id,
       ctx,
       raw,
@@ -389,6 +432,11 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
       now: deps.now(),
       apply: spec.apply,
     };
+    // Two shapes rather than one literal carrying `check: spec.check`:
+    // `exactOptionalPropertyTypes` makes an explicit `undefined` a different
+    // thing from the property being absent, the same way `clientFor` below
+    // builds its two.
+    return spec.check === undefined ? base : { ...base, check: spec.check };
   }
 
   function clientFor(ctx: PluginContext, signal?: AbortSignal) {
@@ -449,6 +497,25 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
       const { db } = ownTables(ctx);
       const at = deps.now();
 
+      // `DO NOTHING`, not a plain insert, because this whole call is offered
+      // again after it fails. `feeds/reader.ts` marks *nothing* delivered
+      // when a plugin's `onNewRssItems` rejects -- a feed names exactly one
+      // plugin, so a failure is all-or-nothing for the batch -- and every
+      // undelivered row is re-offered on the next poll. So if the insert
+      // below succeeded and the enqueue loop after it then failed (or the
+      // process died between chunks), a plain insert would meet its own rows
+      // on the retry, throw `UNIQUE constraint failed`, and throw again on
+      // every later poll: that feed would never deliver another item, with
+      // nothing but a log line to say so.
+      //
+      // Tolerating the conflict is what makes the re-invocation a recovery
+      // rather than a wedge: the rows are already there and are unchanged by
+      // the second insert, the loop below enqueues a fresh lookup job, and
+      // the `lookup_job_id` update points every row in the chunk at it. The
+      // only cost is a duplicate lookup job for rows the first call did get
+      // as far as enqueuing for, which identifies the same items twice and
+      // writes the same rows twice -- every write downstream of here is an
+      // upsert or a claim for exactly that reason.
       await db.insert(table).values(ids.map((rssItemId) => ({
         rssItemId,
         mediaItemId: null,
@@ -458,7 +525,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
         confidence: null,
         createdAt: at,
         updatedAt: at,
-      })));
+      }))).onConflictDoNothing();
 
       // One job per chunk the service will accept, so a poll that delivered
       // three hundred names does not enqueue a job that cannot be sent as one

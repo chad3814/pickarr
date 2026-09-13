@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Media } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
-import { applyMovie } from '../src/apply.ts';
+import { applyMovie, checkMovie } from '../src/apply.ts';
 import { MOVIE_MIGRATIONS } from '../src/migrations.ts';
 
 const NOW = 1_700_000_000_000;
@@ -122,4 +122,11 @@ test('a kind that is not a film throws', async () => {
     }),
     /episode/,
   );
+});
+
+test('the pre-flight refuses what a film cannot be, before the engine writes anything', () => {
+  // Asked before a `media_item` exists, which is the whole reason
+  // `checkMovie` is separate from `applyMovie`.
+  assert.throws(() => { checkMovie({ ...movie({}), kind: 'episode' }); }, /episode/);
+  checkMovie(movie({}));
 });

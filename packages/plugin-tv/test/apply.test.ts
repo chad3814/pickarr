@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Media, MediaKind, MediaParent } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
-import { applyTv } from '../src/apply.ts';
+import { applyTv, checkTv } from '../src/apply.ts';
 import { TV_MIGRATIONS } from '../src/migrations.ts';
 
 const NOW = 1_700_000_000_000;
@@ -176,5 +176,41 @@ test('an episode with no season parent still records its series', async () => {
   assert.deepEqual(
     rows(harness.raw, 'SELECT kind, series_id, season_id FROM tv_release'),
     [{ kind: 'episode', series_id: 1, season_id: null }],
+  );
+});
+
+test('the pre-flight refuses what television cannot write, before the engine writes anything', () => {
+  // The same two refusals `applyTv` makes, asked before a `media_item`
+  // exists -- which is the whole reason `checkTv` is separate from it.
+  assert.throws(() => { checkTv(episode({ kind: 'movie' })); }, /movie/);
+  assert.throws(
+    () => { checkTv(episode({ parents: [parent('season', 'tmdb:season:10', 'Season 3')] })); },
+    /names no series/,
+  );
+
+  // And it passes all three shapes a television feed actually delivers,
+  // including the full-series pack that is its own series.
+  checkTv(episode());
+  checkTv(episode({ kind: 'season', parents: [parent('series', 'tmdb:series:100', 'The Bear')] }));
+  checkTv(episode({ kind: 'series', parents: [] }));
+});
+
+test('a series parent carrying no date does not erase the date a fuller answer taught us', async () => {
+  const harness = harnessWithTables();
+  await apply(harness, episode(), 1);
+  assert.equal(rows(harness.raw, 'SELECT first_air_date FROM tv_series')[0]?.['first_air_date'], '2024-06-26');
+
+  // `MediaParent.releaseDate` is nullable, and a series reached as an
+  // episode's parent is exactly where the service has least to say about it.
+  const dateless: MediaParent = { ...parent('series', 'tmdb:series:100', 'The Bear'), releaseDate: null };
+  await apply(harness, episode({
+    providerRef: 'tmdb:episode:2',
+    parents: [parent('season', 'tmdb:season:10', 'Season 3'), dateless],
+  }), 2);
+
+  assert.equal(
+    rows(harness.raw, 'SELECT first_air_date FROM tv_series')[0]?.['first_air_date'],
+    '2024-06-26',
+    'COALESCE keeps it, exactly as it keeps the overview one line below',
   );
 });

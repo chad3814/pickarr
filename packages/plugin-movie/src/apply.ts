@@ -6,7 +6,7 @@
  * upsert keyed on the media item, so a retried job re-writes rather than
  * duplicating.
  */
-import type { DetailValue } from '@pickarr/openmetadata';
+import type { DetailValue, Media } from '@pickarr/openmetadata';
 import type { ApplyArgs } from '@pickarr/openmetadata';
 
 /** A detail that should be a whole number, or null. A string of digits counts. */
@@ -23,6 +23,31 @@ function text(details: Readonly<Record<string, DetailValue>>, key: string): stri
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
+/**
+ * Whether a film can represent this answer at all: the engine's pre-flight,
+ * run at the top of the resolved branch and before a single shared row
+ * exists.
+ *
+ * The guard was once made inside `applyMovie` alone, which the engine calls
+ * *after* it has created the `media_item`, claimed the provider reference on
+ * it and relinked the rss item to it -- so a mis-sent category stranded all
+ * three with the resolution stuck `pending` and nothing on any path to undo
+ * it. It reads `media.kind` and nothing else, which is what makes it cheap
+ * enough to run this early.
+ */
+export function checkMovie(media: Media): void {
+  if (media.kind !== 'movie') {
+    throw new Error(`plugin-movie: a movies lookup answered with kind ${media.kind}`);
+  }
+}
+
+/**
+ * `checkMovie`'s guard is repeated below rather than removed: `applyMovie` is
+ * exported on its own and driven directly by this package's tests, so a
+ * caller that never ran the pre-flight still cannot write a `movie_detail`
+ * row for something that is not a film. The pre-flight is the copy that
+ * matters -- it is the one that runs before the shared rows exist.
+ */
 export async function applyMovie(args: ApplyArgs): Promise<void> {
   const { media, mediaItemId, raw, now } = args;
   if (media.kind !== 'movie') {

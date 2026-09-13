@@ -98,6 +98,28 @@ test('records a row per new rss item and one lookup job for the batch', async ()
   ]);
 });
 
+test('a re-offered batch recovers instead of colliding with its own rows', async () => {
+  const { plugin, harness } = build();
+  const first = harness.insertRssItem('a.mp4');
+  const second = harness.insertRssItem('b.mp4');
+
+  // The host's feed reader marks *nothing* delivered when a plugin's
+  // `onNewRssItems` rejects (`feeds/reader.ts`: a feed names one plugin, so
+  // a failure is all-or-nothing for the batch), so the very same ids arrive
+  // again on the next poll. If the insert were a plain one it would throw
+  // `UNIQUE constraint failed` here -- forever, and for every later item on
+  // that feed too, because the batch would never be delivered again.
+  await plugin.onNewRssItems([first, second], harness.ctx);
+  await plugin.onNewRssItems([first, second], harness.ctx);
+
+  const rows = harness.raw.prepare('SELECT rss_item_id, lookup_job_id FROM xxx_lookup ORDER BY rss_item_id').all();
+  assert.deepEqual(rows.map((row) => Object.assign({}, row)), [
+    { rss_item_id: first, lookup_job_id: 2 },
+    { rss_item_id: second, lookup_job_id: 2 },
+  ], 'one row per rss item, each naming the job that will now identify it');
+  assert.equal(harness.enqueued.length, 2, 'the second offer enqueues its own lookup job');
+});
+
 test('asks about nothing, and enqueues nothing, for an empty batch', async () => {
   const { plugin, harness } = build();
   await plugin.onNewRssItems([], harness.ctx);
@@ -221,6 +243,46 @@ test('the two entry points this slice does not develop still do something real',
     () => plugin.onDownloadRequest(harness.insertRssItem('e.mp4'), harness.ctx),
     /download client/,
   );
+});
+
+test('the dispatcher\'s signal reaches the request, which is the shape production always takes', async () => {
+  // The branch under test is the one the *process* takes: `run-job.ts` hands
+  // every handler a real signal, so the no-signal shape both `clientFor` and
+  // the client's own `init` also carry is the one nothing in production
+  // reaches. Without this test the covered half and the shipped half are
+  // opposites.
+  const seen: (AbortSignal | null | undefined)[] = [];
+  const service = createFakeLookupService({
+    batch: new Map([['g.srt', refusedEnvelope({ lookupId: 'lookup-s', refusal: 'a sidecar' })]]),
+    polls: new Map(),
+  });
+  // The real fake, at the real wire shape, with the init recorded on its way
+  // through -- so what is asserted is the argument the client actually built.
+  const recording = {
+    fetch: {
+      async json<T>(url: string, init?: RequestInit): Promise<T> {
+        seen.push(init?.signal);
+        return await service.fetch.json<T>(url, init);
+      },
+      async bytes(): Promise<never> { throw new Error('not used'); },
+    },
+  };
+  const { plugin, harness } = build(recording);
+  const rssItemId = harness.insertRssItem('g.srt');
+  harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)')
+    .run(rssItemId, NOW, NOW);
+
+  const controller = new AbortController();
+  const handler = plugin.jobs[LOOKUP_JOB];
+  assert.ok(handler !== undefined);
+  await handler(
+    { id: 8, kind: LOOKUP_JOB, payload: { rssItemIds: [rssItemId] }, attempts: 1 },
+    harness.ctx,
+    controller.signal,
+  );
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0], controller.signal, 'the job\'s own signal, not a copy and not undefined');
 });
 
 test('a failed request is logged with its status, and still fails the job', async () => {

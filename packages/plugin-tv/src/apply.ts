@@ -60,11 +60,16 @@ function upsertSeries(
     INSERT INTO tv_series (provider, provider_ref, title, first_air_date, overview, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (provider, provider_ref) DO UPDATE SET
+      -- title is replaced outright, and it is the only one of the three that
+      -- can be: MediaParent.title is non-nullable in the document, so there
+      -- is no null for a later answer to overwrite a good value with.
       title          = excluded.title,
-      first_air_date = excluded.first_air_date,
-      -- COALESCE, not a replacement: a series learned as an episode's parent
-      -- has no overview to offer, and overwriting one we already have with
-      -- null would lose it on the next episode.
+      -- COALESCE for the two nullable columns, not a replacement. A series
+      -- learned as an episode's parent offers no overview at all, and
+      -- MediaParent.releaseDate is nullable too -- so an episode whose season
+      -- pack already taught us the series' first air date would erase it, and
+      -- the next episode would erase it again.
+      first_air_date = COALESCE(excluded.first_air_date, tv_series.first_air_date),
       overview       = COALESCE(excluded.overview, tv_series.overview),
       updated_at     = excluded.updated_at
     RETURNING id
@@ -132,11 +137,48 @@ function parentOfKind(media: Media, kind: 'series' | 'season'): MediaParent | nu
 }
 
 /**
+ * Whether television can represent this answer at all: the engine's
+ * pre-flight, run at the top of the resolved branch and before a single
+ * shared row exists.
+ *
+ * Both refusals below were once made inside `applyTv` alone, which the engine
+ * calls *after* it has created the `media_item`, claimed the provider
+ * reference on it and relinked the rss item to it. A throw there stranded all
+ * three: a media item holding a claim nothing would ever drop, an rss item
+ * pointing at it, and a resolution left `pending` forever while the job
+ * dead-lettered. Refused here instead, an answer this plugin cannot write
+ * costs nothing at all.
+ *
+ * Cheap enough to belong this early because it reads `media.kind` and
+ * `media.parents` and nothing else -- no database, no service, so it has no
+ * failure of its own to contribute.
+ */
+export function checkTv(media: Media): void {
+  if (media.kind !== 'episode' && media.kind !== 'season' && media.kind !== 'series') {
+    throw new Error(`plugin-tv: a tv lookup answered with kind ${media.kind}`);
+  }
+  // `tv_release.series_id` is `NOT NULL` and every one of the three shapes
+  // names a series -- as itself, for a full-series pack, or through
+  // `parents`. An answer that does neither is not something this schema can
+  // record, and inventing a placeholder series would put a row in the library
+  // that names nothing.
+  if (media.kind !== 'series' && parentOfKind(media, 'series') === null) {
+    throw new Error(`plugin-tv: ${media.kind} ${media.providerRef} names no series`);
+  }
+}
+
+/**
  * The three shapes a television feed delivers, and what each one records.
  *
- * A kind that cannot be television throws rather than writing a row: that is
- * either a service bug or a category sent wrongly, and a row for it would bury
- * the evidence in the library.
+ * Both of `checkTv`'s refusals are repeated below. Kept rather than deleted
+ * for two reasons: the kind guard is what narrows `media.kind` to the three
+ * values `tv_release.kind` may hold and the branches below read, so the
+ * compiler needs it here whatever the engine already asked; and `apply` is
+ * exported on its own and driven directly by this package's tests, so a
+ * caller that never ran the pre-flight still cannot write a row for an answer
+ * that is not television. The pre-flight is where the refusal *matters* --
+ * it is the one that happens before the shared rows exist -- and this is the
+ * one that cannot be removed.
  */
 export async function applyTv(args: ApplyArgs): Promise<void> {
   const { media, mediaItemId, raw, now } = args;
@@ -146,9 +188,8 @@ export async function applyTv(args: ApplyArgs): Promise<void> {
   }
 
   // The series is the answer itself for a full-series pack, and a parent
-  // otherwise. `NOT NULL` on `tv_release.series_id` is why this is refused
-  // rather than defaulted: every one of the three shapes names a series, and
-  // inventing a placeholder would put a row in the library naming nothing.
+  // otherwise. See `checkTv` for why a missing one is refused rather than
+  // defaulted.
   const series = media.kind === 'series' ? media : parentOfKind(media, 'series');
   if (series === null) {
     throw new Error(`plugin-tv: ${media.kind} ${media.providerRef} names no series`);

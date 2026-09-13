@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Media } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
-import { applyXxx } from '../src/apply.ts';
+import { applyXxx, checkXxx } from '../src/apply.ts';
 import { XXX_MIGRATIONS } from '../src/migrations.ts';
 
 const NOW = 1_700_000_000_000;
@@ -155,4 +155,11 @@ test('a kind that is not a scene throws', async () => {
     }),
     /movie/,
   );
+});
+
+test('the pre-flight refuses what a scene cannot be, before the engine writes anything', () => {
+  // Asked before a `media_item` exists, which is the whole reason `checkXxx`
+  // is separate from `applyXxx`.
+  assert.throws(() => { checkXxx({ ...scene('tpdb:scene:7', SITE), kind: 'movie' }); }, /movie/);
+  checkXxx(scene('tpdb:scene:7', SITE));
 });

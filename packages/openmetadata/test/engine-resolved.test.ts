@@ -165,6 +165,38 @@ test('the resolution is written last, after the rows a reader would then look fo
   assert.equal(methods.at(-1), 'setResolution');
 });
 
+test('a plugin that cannot represent the answer refuses it before a single shared row exists', async () => {
+  const { harness, deps, rssItemId, applied } = fixture();
+  // Exactly the guard each plugin's `apply` used to hold alone: a kind this
+  // plugin cannot write. Held here instead, it runs before `createMediaItem`
+  // -- which is the whole point, because a throw from `apply` arrives after
+  // the media item exists, holds the provider-ref claim, and has the rss item
+  // relinked to it, with nothing left to drop any of that.
+  const refusing = {
+    ...deps,
+    check: (media: Media): void => {
+      throw new Error(`a movies lookup answered with kind ${media.kind}`);
+    },
+  };
+
+  await assert.rejects(
+    () => applyEnvelope(
+      resolvedEnvelope({ lookupId: 'lookup-8', media: { ...movieMedia(), kind: 'scene' } }),
+      { rssItemId, filename: 'dune.mkv', polls: 0 },
+      refusing,
+    ),
+    /kind scene/,
+  );
+
+  assert.deepEqual(
+    harness.media.calls.map((call) => call.method),
+    [],
+    'no media item, no claim, no relink, no resolution',
+  );
+  assert.equal(applied.length, 0, 'and the plugin was never asked to write its own rows');
+  assert.equal(stateRow(harness)?.['media_item_id'], null);
+});
+
 test('a null confidence is stored as null rather than refused', async () => {
   const { harness, deps, rssItemId } = fixture();
   const envelope = { ...resolvedEnvelope({ lookupId: 'lookup-7', media: movieMedia() }), confidence: null };

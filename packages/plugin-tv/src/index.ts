@@ -1,7 +1,7 @@
 import type { MediaPlugin } from '@pickarr/contract';
 import type { LookupPluginDeps } from '@pickarr/openmetadata';
 import { createLookupPlugin } from '@pickarr/openmetadata';
-import { applyTv } from './apply.ts';
+import { applyTv, checkTv } from './apply.ts';
 import { TV_MIGRATIONS } from './migrations.ts';
 
 /** Also the required prefix for every table this plugin declares. */
@@ -20,9 +20,10 @@ export function createTvPlugin(deps: LookupPluginDeps): MediaPlugin {
     mediaType: 'tv',
     category: 'tv',
     migrations: TV_MIGRATIONS,
+    check: checkTv,
     apply: applyTv,
   }, deps);
 }
 
-export { applyTv } from './apply.ts';
+export { applyTv, checkTv } from './apply.ts';
 export { TV_MIGRATIONS } from './migrations.ts';

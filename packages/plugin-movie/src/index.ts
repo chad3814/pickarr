@@ -1,7 +1,7 @@
 import type { MediaPlugin } from '@pickarr/contract';
 import type { LookupPluginDeps } from '@pickarr/openmetadata';
 import { createLookupPlugin } from '@pickarr/openmetadata';
-import { applyMovie } from './apply.ts';
+import { applyMovie, checkMovie } from './apply.ts';
 import { MOVIE_MIGRATIONS } from './migrations.ts';
 
 /** Also the required prefix for every table this plugin declares. */
@@ -20,9 +20,10 @@ export function createMoviePlugin(deps: LookupPluginDeps): MediaPlugin {
     mediaType: 'movie',
     category: 'movies',
     migrations: MOVIE_MIGRATIONS,
+    check: checkMovie,
     apply: applyMovie,
   }, deps);
 }
 
-export { applyMovie } from './apply.ts';
+export { applyMovie, checkMovie } from './apply.ts';
 export { MOVIE_MIGRATIONS } from './migrations.ts';

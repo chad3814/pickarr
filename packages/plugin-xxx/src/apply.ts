@@ -6,7 +6,7 @@
  * retried job must re-write rather than duplicate.
  */
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
-import type { ApplyArgs, DetailValue } from '@pickarr/openmetadata';
+import type { ApplyArgs, DetailValue, Media } from '@pickarr/openmetadata';
 
 function wholeNumber(details: Readonly<Record<string, DetailValue>>, key: string): number | null {
   const value = details[key];
@@ -44,6 +44,31 @@ function upsertSite(
   return readInteger(row, 'id');
 }
 
+/**
+ * Whether a scene can represent this answer at all: the engine's pre-flight,
+ * run at the top of the resolved branch and before a single shared row
+ * exists.
+ *
+ * The guard was once made inside `applyXxx` alone, which the engine calls
+ * *after* it has created the `media_item`, claimed the provider reference on
+ * it and relinked the rss item to it -- so a mis-sent category stranded all
+ * three with the resolution stuck `pending` and nothing on any path to undo
+ * it. It reads `media.kind` and nothing else, which is what makes it cheap
+ * enough to run this early.
+ */
+export function checkXxx(media: Media): void {
+  if (media.kind !== 'scene') {
+    throw new Error(`plugin-xxx: an xxx lookup answered with kind ${media.kind}`);
+  }
+}
+
+/**
+ * `checkXxx`'s guard is repeated below rather than removed: `applyXxx` is
+ * exported on its own and driven directly by this package's tests, so a
+ * caller that never ran the pre-flight still cannot write an `xxx_scene` row
+ * for something that is not a scene. The pre-flight is the copy that matters
+ * -- it is the one that runs before the shared rows exist.
+ */
 export async function applyXxx(args: ApplyArgs): Promise<void> {
   const { media, mediaItemId, raw, now } = args;
   if (media.kind !== 'scene') {
