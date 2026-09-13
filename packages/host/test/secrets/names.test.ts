@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { assertSecretName, envNameFor, SecretNotFound } from '../../src/secrets/names.ts';
+import { assertSecretName, envNameFor, SecretNotFound, SecretsFileUnreadable } from '../../src/secrets/names.ts';
 
 test('a generated uuid is a legal secret name', () => {
   for (let i = 0; i < 20; i += 1) {
@@ -48,4 +48,17 @@ test('SecretNotFound carries the name without a path, and does not shadow Error.
   assert.equal(error.name, 'SecretNotFound');
   assert.ok(error.message.includes('tvdb_key'));
   assert.ok(!error.message.includes('/'), 'the message must carry no path');
+});
+
+test('SecretsFileUnreadable carries the name without a path, and is not a SecretNotFound', () => {
+  const error = new SecretsFileUnreadable('tvdb_key');
+  assert.equal(error.secretName, 'tvdb_key');
+  assert.equal(error.name, 'SecretsFileUnreadable');
+  assert.ok(error.message.includes('tvdb_key'));
+  assert.ok(!error.message.includes('/'), 'the message must carry no path');
+  // Two separate classes rather than a flag, because the whole point is that
+  // a caller (and an operator reading a log) can tell "this credential was
+  // never configured" from "the secrets directory could not be read".
+  assert.ok(!(error instanceof SecretNotFound));
+  assert.ok(!(new SecretNotFound('tvdb_key') instanceof SecretsFileUnreadable));
 });

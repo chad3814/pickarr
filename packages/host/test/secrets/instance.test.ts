@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { writeSecretValue } from '../../src/secrets/store.ts';
 import { createSecrets } from '../../src/secrets/instance.ts';
-import { SecretNotFound } from '../../src/secrets/names.ts';
+import { SecretNotFound, SecretsFileUnreadable } from '../../src/secrets/names.ts';
 
 const withDir = async (body: (dir: string) => Promise<void>) => {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-secrets-'));
@@ -131,6 +131,61 @@ test('a name nothing resolves throws SecretNotFound, naming the name and no path
         return true;
       },
     );
+  });
+});
+
+test('a secrets directory present but unreadable halts the chain, and says so rather than reporting a missing secret', async () => {
+  await withDir(async (dir) => {
+    // The database *has* the credential, and must not answer: `fromFile`
+    // marks "present but broken" as a chain-halting failure, deliberately,
+    // so a secrets mount the process cannot read is loud rather than
+    // silently bypassed. Measured, with the row below present: a `baseDir`
+    // that does not exist resolves `from-db`, and a `baseDir` that is a
+    // plain file resolves nothing -- which is why the error has to say
+    // which of the two happened.
+    const notADirectory = join(dir, 'plain-file');
+    await writeFile(notADirectory, 'this is not a directory');
+    const raw = open();
+    writeSecretValue(raw, 'tvdb_key', 'from-db', 1);
+
+    await assert.rejects(
+      () => createSecrets({ raw, baseDir: notADirectory }).get('tvdb_key'),
+      (error: unknown) => {
+        assert.ok(error instanceof SecretsFileUnreadable, 'the failure must be distinguishable from SecretNotFound');
+        assert.ok(!(error instanceof SecretNotFound), 'and must not read as "this credential was never configured"');
+        assert.equal(error.secretName, 'tvdb_key');
+        assert.ok(!error.message.includes(dir), 'the message must not carry the secrets directory');
+        assert.ok(!error.message.includes('/'), 'the message must carry no path at all');
+        return true;
+      },
+    );
+
+    // The contrast, in the same test so the two cannot drift: absent is not
+    // broken, and absent still falls through to the database.
+    assert.equal(
+      await createSecrets({ raw, baseDir: join(dir, 'no-such-directory') }).get('tvdb_key'),
+      'from-db',
+      'a secrets directory that simply does not exist must still fall through',
+    );
+
+    // The `EACCES` half of the same property. Guarded because mode bits do
+    // not apply to uid 0: a suite running as root reads the directory
+    // regardless and would see the database value, which is a property of
+    // the uid rather than of this code.
+    if (process.getuid?.() !== 0) {
+      const locked = join(dir, 'locked');
+      await mkdir(locked);
+      await chmod(locked, 0o000);
+      try {
+        await assert.rejects(
+          () => createSecrets({ raw, baseDir: locked }).get('tvdb_key'),
+          (error: unknown) => error instanceof SecretsFileUnreadable,
+          'a root-owned /run/secrets is the live Docker case, and it must not read as a missing secret',
+        );
+      } finally {
+        await chmod(locked, 0o755);
+      }
+    }
   });
 });
 

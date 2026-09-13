@@ -65,3 +65,47 @@ export class SecretNotFound extends Error {
     this.secretName = secretName;
   }
 }
+
+/**
+ * The secrets directory answered and could not be read, so nothing after it
+ * was consulted.
+ *
+ * **This is not {@link SecretNotFound}, and the distinction is the whole
+ * point.** `fromFile` separates "there is nothing at this path" (`ENOENT`, or
+ * a file empty after trimming) from "there is something here and reading it
+ * failed" -- no permission, a path component that is not a directory, a
+ * symlink loop -- and marks the second so that the chain **halts** instead of
+ * falling through to the database. Measured, with a row in `secret`: a
+ * `baseDir` that does not exist resolves from the database, and a `baseDir` at
+ * mode `000` or one that is a plain file resolves nothing at all. In Docker
+ * `/run/secrets` is routinely root-owned, so that is a live failure and it
+ * makes **every** database-stored credential unresolvable at once.
+ *
+ * Reported as its own error because `SecretNotFound` for that case reads as
+ * "you never configured this credential", which sends the operator to the
+ * settings UI for a permissions problem. The chain's own halt is kept rather
+ * than reversed: a directory that is present but unreadable is a
+ * misconfiguration, and quietly answering from the database instead would
+ * hand out a stale credential while the file the operator actually mounted
+ * sat unread.
+ *
+ * **No path and no errno.** A name is not a secret, so the message may name
+ * the secret, and nothing else: the errno lives only inside `fromFile`'s own
+ * message, which carries the path beside it (design spec §2.4), and this
+ * repo's rule against a path in a message is not worth a substring match
+ * against a third-party string to recover one code. The message names the
+ * two things an operator can check instead.
+ */
+export class SecretsFileUnreadable extends Error {
+  readonly secretName: string;
+
+  constructor(secretName: string) {
+    super(
+      `secret ${JSON.stringify(secretName)} could not be read from the secrets directory, `
+      + 'so no later source was tried: check that the directory and the file in it are '
+      + 'readable by this process',
+    );
+    this.name = 'SecretsFileUnreadable';
+    this.secretName = secretName;
+  }
+}

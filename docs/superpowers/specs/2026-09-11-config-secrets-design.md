@@ -57,7 +57,9 @@ nothing more, which is what lets a database read be a link.
 | `fromEnv` on a name that is illegal for an env var (`has-hyphens`) | `ProviderError`, `tryNextLink: true` — it does not throw differently |
 | `fromFile` on a missing path | `ProviderError`, `tryNextLink: true` |
 | `fromFile` on a file empty after trimming | `ProviderError`, `tryNextLink: true` |
+| `fromFile` on a path that is **present and unreadable** (`EACCES`, `ENOTDIR`) | `ProviderError`, `tryNextLink: **false**` — measured 2026-09-13, after the first three rows generalised a *missing* file to every failure and were wrong to |
 | `fromFile` on `"abc\n"` | `"abc"` — trailing whitespace trimmed, which is what `/run/secrets` files need |
+| `chain` on a link that returns `tryNextLink: false` | later links are **never consulted** — so with a row in `secret` and a `baseDir` at mode `000`, the database link does not run at all |
 | `chain` when no link resolves | `ProviderError`, `tryNextLink: **false**` |
 | `memoize` after a rejection | the rejection is **not** cached; the next call re-resolves |
 | three concurrent calls through `memoize` | **one** underlying call |
@@ -300,7 +302,13 @@ client credential.
   is refused at the boundary. A name is not secret, so the error may name it.
 - **The chain's error is replaced**, never propagated: a `SecretNotFound`
   carrying the name alone. §2.4 measured that the original message contains
-  `fromFile`'s path.
+  `fromFile`'s path. The one failure that is *not* "nothing had it" gets its
+  own class, `SecretsFileUnreadable`: §2.3 measures that a secrets directory
+  which is present and unreadable halts the chain before the database is
+  consulted, and a `SecretNotFound` for that case reads as "you never
+  configured this credential" and sends the operator to the settings UI for a
+  permissions problem. It carries the name, no path and no errno — the errno
+  exists only inside `fromFile`'s message, with the path beside it.
 - **`saveSecret` deletes the memoized entry** for that name in the same call.
 
 **5.4 `fromDatabase`** reads `SELECT value FROM secret WHERE name = ?` and
@@ -365,6 +373,10 @@ no cycle.
    error names the key without a path.
 4. A `SecretNotFound` message contains no path, asserted against §2.4's
    measured leak.
+4a. A secrets directory that is present but unreadable raises
+   `SecretsFileUnreadable`, not `SecretNotFound`, with a row in `secret` that
+   the halted chain never reaches — and a directory that is merely absent
+   still falls through to that row.
 5. Env beats file beats database for the same name; each link alone resolves.
 6. A UUID name resolves from the database, and `PICKARR_<uuid-with-underscores>`
    overrides it.
