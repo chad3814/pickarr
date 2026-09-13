@@ -786,6 +786,18 @@ const MIGRATION_13 = `
  * today's code -- is safe here because `secret`'s shape is fixed by
  * migration 13 and this migration runs once.
  *
+ * **That coupling runs through `secrets/names.ts` as well as `store.ts`**,
+ * and it is the sharper of the two: `writeSecretValue` calls
+ * `assertSecretName`, so `SECRET_NAME` is part of this migration's contract
+ * even though nothing here names it. Tighten that regex to require a leading
+ * letter -- a reasonable-looking change, since an all-digit-leading name is
+ * awkward as an environment variable -- and this migration starts throwing
+ * on the ~62.5% of `randomUUID()`s that begin with a decimal digit,
+ * retroactively, for every install still upgrading from v12. A migration
+ * already applied is not re-run, so the damage lands only on those; that is
+ * still a database that will not open. Changing `SECRET_NAME` means checking
+ * this call site first.
+ *
  * SQLite is 3.53.4 behind `node:sqlite`, and `ADD COLUMN`/`DROP COLUMN` were
  * measured to work on a table carrying an index on a different column
  * (design spec §2.6b), so no table rebuild is needed. `download_client`'s

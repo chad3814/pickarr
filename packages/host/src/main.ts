@@ -42,8 +42,17 @@ import { assertOriginOnly } from './origin.ts';
  * than a formatting preference: `String` of a row, a config or any other
  * object is `[object Object]`, so a caller that broke the rule against
  * logging one could not spill its contents through here even by accident.
- * Only strings pass through this today -- `api/server.ts`'s failure line,
- * whose `error` has already been through `redactUrl`.
+ *
+ * **Six call sites pass a detail today, and their values are not all
+ * strings.** `api/server.ts` has two (`read failed`, `read response
+ * failed`), whose `error` has already been through `redactUrl`;
+ * `clients/downloads.ts` has four, all sharing one
+ * `{rssItemId: number, downloadClientId: number, kind: string}` -- `main`'s
+ * `log` is handed to `createDownloadClients` as well as to the read server.
+ * So `String` here is load-bearing for numbers as much as for objects. (The
+ * `log` that `clients/reconcile.ts`, `clients/deliver.ts` and
+ * `artwork/store.ts` call is `host.ts`'s `hostLog`, which does not come
+ * through this function at all.)
  *
  * Exported for its own test, because the claim above is the whole reason this
  * is a function and not an inline template.
