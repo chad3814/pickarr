@@ -38,7 +38,7 @@ import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { assertOriginOnly } from './origin.ts';
 import type { ResolveSecret } from './secrets.ts';
-import { createEnvSecretResolver } from './secrets.ts';
+import { OPENMETADATA_API_KEY_VARIABLE, createEnvSecretResolver } from './secrets.ts';
 
 /**
  * A log line's structured half, as `key=value` pairs.
@@ -402,6 +402,21 @@ const DEFAULT_OPENMETADATA_URL = 'https://openmetadata.nexus';
  * `fetch` rather than about configuration. A trailing slash is trimmed rather
  * than refused -- it is what an operator types, and it changes nothing.
  *
+ * **No failure below names the value**, exactly as `resolvePublicUrl` above
+ * documents in bold and for a sharper reason than that one has: a url may
+ * carry userinfo, so `PICKARR_OPENMETADATA_URL=https://svc:s3cret@proxy/api`
+ * would print a credential into the boot log -- on the slice whose headline
+ * invariant is that the lookup key is never logged. The message names the
+ * variable and the rule it broke, which is all the operator needs.
+ *
+ * **Userinfo is refused rather than dropped.** `parsed.origin` discards it
+ * silently, so an operator who put credentials in the url would get a host
+ * that booted cleanly and then answered 401 to every lookup, with nothing
+ * anywhere connecting the two. This host authenticates to the service with
+ * the resolver's key and by no other means; a url that carries one is a
+ * misconfiguration, and saying so at boot is the only outcome that gets it
+ * fixed.
+ *
  * Takes the variable's value rather than reading `process.env` itself, so it
  * is testable without mutating the environment the whole process shares.
  */
@@ -411,13 +426,19 @@ export function resolveOpenmetadataUrl(configured: string | undefined): string {
   try {
     parsed = new URL(configured);
   } catch {
-    throw new Error(`PICKARR_OPENMETADATA_URL is not a url: ${configured}`);
+    throw new Error('PICKARR_OPENMETADATA_URL is not a url');
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`PICKARR_OPENMETADATA_URL is not an http url: ${configured}`);
+    throw new Error('PICKARR_OPENMETADATA_URL is not an http or https url');
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    throw new Error(
+      'PICKARR_OPENMETADATA_URL must carry no username or password: the lookup key comes from '
+      + `${OPENMETADATA_API_KEY_VARIABLE}, and userinfo in this url would be dropped rather than sent`,
+    );
   }
   if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
-    throw new Error(`PICKARR_OPENMETADATA_URL must be an origin with no path: ${configured}`);
+    throw new Error('PICKARR_OPENMETADATA_URL must be an origin with no path, query string or fragment');
   }
   return parsed.origin;
 }
@@ -577,10 +598,11 @@ export function createShutdown(
  * `argv` is accepted for parity with a conventional process entry point;
  * this slice has no argument surface beyond `resolveSettings`'s environment
  * variables (`PICKARR_CONFIG`, `PICKARR_DATABASE`, `PICKARR_READ_API_PORT`,
- * `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL`) and `BETTER_AUTH_SECRET`, so
- * nothing here reads it. `BETTER_AUTH_SECRETS`, the plural, is read by the
- * library itself and by nothing in this package; the auth slice's §6
- * documents both.
+ * `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL`), the lookup plugins'
+ * `PICKARR_OPENMETADATA_URL` and `PICKARR_OPENMETADATA_KEY`, and
+ * `BETTER_AUTH_SECRET`, so nothing here reads it. `BETTER_AUTH_SECRETS`, the
+ * plural, is read by the library itself and by nothing in this package; the
+ * auth slice's §6 documents both.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the
@@ -621,6 +643,33 @@ export async function main(
     resolveSecret: createEnvSecretResolver(process.env),
     baseUrl: openmetadataUrl,
   });
+
+  // A presence check, and only when the three real plugins were actually
+  // built -- a caller that injected its own has nothing to authenticate.
+  //
+  // §2.3 resolves the credential per request rather than once at boot, and
+  // that decision stands: an async resolver is what lets the store being
+  // built elsewhere rotate a key between requests. What it never weighed is
+  // that per-request resolution also means a deployment missing the variable
+  // boots perfectly, logs `running:`, schedules every feed, and then
+  // dead-letters every lookup job some minutes later, with the diagnosis
+  // sitting in a job row rather than on the console. This is the likeliest
+  // misconfiguration this slice ships.
+  //
+  // A warning, not a refusal: a host serving reads with one plugin
+  // misconfigured is the right behaviour, and it is the operator who needs
+  // telling, not the process that needs stopping.
+  //
+  // **Nothing here reads the credential into anything.** The variable is
+  // tested for emptiness in place and the line names the variable, never the
+  // value -- the same rule the resolvers above keep for urls, for a value
+  // that is an actual secret.
+  if (deps.plugins === undefined && (process.env[OPENMETADATA_API_KEY_VARIABLE] ?? '') === '') {
+    log(
+      `${OPENMETADATA_API_KEY_VARIABLE} is not set: the tv, movie and xxx plugins will fail every `
+      + 'lookup until it is, leaving each new feed item unidentified with its job dead-lettered',
+    );
+  }
 
   // Before the database is opened, before anything is migrated: two plugins
   // claiming one media type is a configuration error, and the earliest
