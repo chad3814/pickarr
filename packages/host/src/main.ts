@@ -281,6 +281,57 @@ export interface HostSettings {
 }
 
 /**
+ * The value an operator actually set, or `undefined` for one they did not.
+ *
+ * Empty and unset are the same thing, for **every** variable `main` reads --
+ * not just `publicUrl`, which was the only one that used to apply this rule.
+ * A compose file that declares a key with no value passes exactly an empty
+ * string, and "the operator configured emptiness" is never what that means.
+ * Measured on this Node, for the interface case specifically:
+ *
+ *     listen(port, '')        -> address '::'       family IPv6
+ *     listen(port, '0.0.0.0') -> address '0.0.0.0'  family IPv4
+ *     listen(port, undefined) -> address '::'       family IPv6
+ *
+ * so an empty `PICKARR_READ_API_HOST` reaching the listener unchanged binds
+ * the IPv6 wildcard where `0.0.0.0` is documented -- silently, on a
+ * different address family, for a variable the operator never meant to set.
+ * Checking only `=== undefined` would also make an empty
+ * `PICKARR_READ_API_PORT` throw (`resolveReadPort` validates digits, and
+ * `''` has none) instead of falling back, an empty `PICKARR_DATABASE`
+ * resolve to an empty path instead of the file's or the schema's, and an
+ * empty `PICKARR_CONFIG` mean "there is no config file" instead of "use the
+ * default one" -- which was this rule's own first defect, because it was
+ * written per variable at four call sites and the fifth was missed.
+ *
+ * **One function, every variable.** Do not inline `?? default` or
+ * `=== undefined` for a new variable: a rule that differs by variable is the
+ * shape that produced this twice.
+ */
+function configuredEnvValue(raw: string | undefined): string | undefined {
+  return raw === undefined || raw === '' ? undefined : raw;
+}
+
+/**
+ * Which file `resolveSettings` reads: `PICKARR_CONFIG`, else
+ * {@link DEFAULT_CONFIG_PATH}.
+ *
+ * Separate from `resolveSettings` because it is the one of the five
+ * variables whose effect is not observable in the returned settings -- an
+ * empty `PICKARR_CONFIG` used to reach `readFile('')`, which rejects
+ * `ENOENT`, which `readConfigDocument` correctly reads as "no file on a
+ * first boot". So the config file was ignored in its entirety, the database
+ * was opened wherever the *default* said rather than where `database.path`
+ * pointed, `migrateHost` ran against that other file, and the host booted
+ * clean on an empty library with nothing logged as wrong. Exported so that
+ * decision has a test of its own, the way `resolveReadPort` and
+ * `resolveReadHost` do.
+ */
+export function resolveConfigPath(env: NodeJS.ProcessEnv): string {
+  return configuredEnvValue(env['PICKARR_CONFIG']) ?? DEFAULT_CONFIG_PATH;
+}
+
+/**
  * Environment, then config file, then the schema's default.
  *
  * The environment has to keep winning: every deployment that exists today
@@ -288,48 +339,26 @@ export interface HostSettings {
  * change a running install on upgrade. The schema carries the default, and
  * the resolvers below only validate a string an operator actually set --
  * a default in both places is one that can disagree with itself.
+ *
+ * All five variables go through {@link configuredEnvValue}, so "empty is
+ * unset" is decided once rather than per variable.
  */
 export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSettings> {
-  const config = await openConfig({ path: env['PICKARR_CONFIG'] ?? DEFAULT_CONFIG_PATH });
+  const config = await openConfig({ path: resolveConfigPath(env) });
   const server = config.register('server', serverConfigSchema);
   const database = config.register('database', databaseConfigSchema);
   const secrets = config.register('secrets', secretsConfigSchema);
 
-  const portRaw = env['PICKARR_READ_API_PORT'];
-  const hostRaw = env['PICKARR_READ_API_HOST'];
-  const publicUrlRaw = env['PICKARR_PUBLIC_URL'];
-  const databasePathRaw = env['PICKARR_DATABASE'];
-
-  // Empty and unset are the same thing here, uniformly across all four --
-  // not just `publicUrl`, which was the only one that used to apply this
-  // rule. A compose file that declares a key with no value passes exactly
-  // an empty string, and "the operator configured emptiness" is never what
-  // that means. Measured on this Node, for the interface case specifically:
-  //
-  //   listen(port, '')        -> address '::'       family IPv6
-  //   listen(port, '0.0.0.0') -> address '0.0.0.0'  family IPv4
-  //   listen(port, undefined) -> address '::'       family IPv6
-  //
-  // so an empty `PICKARR_READ_API_HOST` reaching the listener unchanged
-  // binds the IPv6 wildcard where `0.0.0.0` is documented -- silently, on a
-  // different address family, for a variable the operator never meant to
-  // set. Checking only `=== undefined` here would also make an empty
-  // `PICKARR_READ_API_PORT` throw (`resolveReadPort` validates digits, and
-  // `''` has none) instead of falling back, and an empty `PICKARR_DATABASE`
-  // resolve to an empty path instead of the file's or the schema's. Do not
-  // narrow this back to `undefined`-only per variable: a rule that differs
-  // by variable is the shape that produced this in the first place.
-  const hostConfigured = hostRaw !== undefined && hostRaw !== '';
-  const portConfigured = portRaw !== undefined && portRaw !== '';
-  const databasePathConfigured = databasePathRaw !== undefined && databasePathRaw !== '';
+  const portRaw = configuredEnvValue(env['PICKARR_READ_API_PORT']);
+  const hostRaw = configuredEnvValue(env['PICKARR_READ_API_HOST']);
+  const publicUrlRaw = configuredEnvValue(env['PICKARR_PUBLIC_URL']);
+  const databasePathRaw = configuredEnvValue(env['PICKARR_DATABASE']);
 
   return {
-    readHost: hostConfigured ? resolveReadHost(hostRaw) : server.current.host,
-    port: portConfigured ? resolveReadPort(portRaw) : server.current.port,
-    publicUrl: publicUrlRaw === undefined || publicUrlRaw === ''
-      ? server.current.publicUrl
-      : resolvePublicUrl(publicUrlRaw),
-    databasePath: databasePathConfigured ? databasePathRaw : database.current.path,
+    readHost: hostRaw === undefined ? server.current.host : resolveReadHost(hostRaw),
+    port: portRaw === undefined ? server.current.port : resolveReadPort(portRaw),
+    publicUrl: publicUrlRaw === undefined ? server.current.publicUrl : resolvePublicUrl(publicUrlRaw),
+    databasePath: databasePathRaw ?? database.current.path,
     secretsBaseDir: secrets.current.baseDir,
     config,
   };

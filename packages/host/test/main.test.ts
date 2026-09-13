@@ -22,12 +22,14 @@ import {
   formatLogDetail,
   main,
   resolveArtworkDir,
+  resolveConfigPath,
   resolvePublicUrl,
   resolveReadHost,
   resolveReadPort,
   resolveSettings,
   scheduleKnownFeeds,
 } from '../src/main.ts';
+import { DEFAULT_CONFIG_PATH } from '../src/config/schemas.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
 
 /** The plugin id every feed row below names, so `main` can register an owner for it. */
@@ -1012,9 +1014,11 @@ test('an empty PICKARR_READ_API_HOST, PICKARR_READ_API_PORT or PICKARR_DATABASE 
   // These two assertions replace ones this file used to make directly
   // against `resolveReadHost('')` and `resolveReadPort('')`, back when
   // those functions carried the "empty means unset" rule themselves. That
-  // rule now lives one level up, in `resolveSettings`, uniformly across all
-  // three variables rather than duplicated per resolver -- so it is
-  // asserted here instead.
+  // rule now lives one level up, in `resolveSettings`'s own
+  // `configuredEnvValue`, in one function for all five variables rather
+  // than duplicated per resolver -- so it is asserted here instead. The
+  // fifth, `PICKARR_CONFIG`, has its own test below, because its effect is
+  // not visible in the settings these three assert on.
   process.env['PICKARR_READ_API_HOST'] = '';
   process.env['PICKARR_READ_API_PORT'] = '';
   process.env['PICKARR_DATABASE'] = '';
@@ -1035,6 +1039,37 @@ test('an empty PICKARR_READ_API_HOST, PICKARR_READ_API_PORT or PICKARR_DATABASE 
     assert.equal(settings.port, 8787, 'empty is unset, so the schema default applies with no file either');
     assert.equal(settings.databasePath, '/config/pickarr.db', 'empty is unset, so the schema default applies with no file either');
   });
+});
+
+test('an empty PICKARR_CONFIG resolves to exactly the same file as an absent one', async () => {
+  // The fifth variable, and the one the "empty is unset" rule was written
+  // four times and missed: `readFile('')` rejects `ENOENT`, which
+  // `readConfigDocument` reads as "no file on a first boot", so an empty
+  // variable used to mean *there is no config file* rather than *use the
+  // default one* -- an install whose `database.path` pointed elsewhere then
+  // migrated and served a different database, with nothing logged as wrong.
+  //
+  // Asserted against `resolveConfigPath` rather than through
+  // `resolveSettings`, because which file was opened is the one decision of
+  // the five that the returned settings cannot show: on a machine without
+  // `DEFAULT_CONFIG_PATH` both the empty and the absent case resolve to the
+  // schema defaults either way, which is exactly why this went unnoticed.
+  assert.equal(resolveConfigPath({}), DEFAULT_CONFIG_PATH, 'absent means the default file');
+  assert.equal(resolveConfigPath({ PICKARR_CONFIG: '' }), DEFAULT_CONFIG_PATH, 'and empty is absent, not "no file at all"');
+  assert.equal(
+    resolveConfigPath({ PICKARR_CONFIG: '/tmp/pickarr-somewhere-else.config.json' }),
+    '/tmp/pickarr-somewhere-else.config.json',
+    'a variable the operator did set still decides the file',
+  );
+
+  // And the boot as a whole survives the empty value the same way it
+  // survives the absent one, rather than throwing on an empty path.
+  const empty = await resolveSettings({ PICKARR_CONFIG: '' });
+  const absent = await resolveSettings({});
+  assert.deepEqual(
+    { host: empty.readHost, port: empty.port, database: empty.databasePath, secrets: empty.secretsBaseDir },
+    { host: absent.readHost, port: absent.port, database: absent.databasePath, secrets: absent.secretsBaseDir },
+  );
 });
 
 test('with neither a variable nor a file, the schema defaults apply', async () => {
