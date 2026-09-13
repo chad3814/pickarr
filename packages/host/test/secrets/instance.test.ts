@@ -44,8 +44,8 @@ test('the environment beats both', async (t) => {
     const raw = open();
     writeSecretValue(raw, 'tvdb_key', 'from-db', 1);
     await writeFile(join(dir, 'tvdb_key'), 'from-file');
-    process.env['TVDB_KEY'] = 'from-env';
-    t.after(() => { delete process.env['TVDB_KEY']; });
+    process.env['PICKARR_SECRET_TVDB_KEY'] = 'from-env';
+    t.after(() => { delete process.env['PICKARR_SECRET_TVDB_KEY']; });
     const secrets = createSecrets({ raw, baseDir: dir });
     assert.equal(await secrets.get('tvdb_key'), 'from-env');
   });
@@ -57,8 +57,8 @@ test('a uuid name resolves from the database and is overridable by its env var',
     const name = '550e8400-e29b-41d4-a716-446655440000';
     writeSecretValue(raw, name, 'from-db', 1);
     assert.equal(await createSecrets({ raw, baseDir: dir }).get(name), 'from-db');
-    process.env['550E8400_E29B_41D4_A716_446655440000'] = 'from-env';
-    t.after(() => { delete process.env['550E8400_E29B_41D4_A716_446655440000']; });
+    process.env['PICKARR_SECRET_550E8400_E29B_41D4_A716_446655440000'] = 'from-env';
+    t.after(() => { delete process.env['PICKARR_SECRET_550E8400_E29B_41D4_A716_446655440000']; });
     assert.equal(await createSecrets({ raw, baseDir: dir }).get(name), 'from-env');
   });
 });
@@ -75,8 +75,8 @@ test('each link resolves on its own, with the others empty', async (t) => {
     assert.equal(await createSecrets({ raw: open(), baseDir: dir }).get('tvdb_key'), 'from-file');
 
     // The environment alone -- no row, and a directory with no such file.
-    process.env['SOLO_KEY'] = 'from-env';
-    t.after(() => { delete process.env['SOLO_KEY']; });
+    process.env['PICKARR_SECRET_SOLO_KEY'] = 'from-env';
+    t.after(() => { delete process.env['PICKARR_SECRET_SOLO_KEY']; });
     assert.equal(await createSecrets({ raw: open(), baseDir: dir }).get('solo_key'), 'from-env');
   });
 });
@@ -131,6 +131,26 @@ test('a name nothing resolves throws SecretNotFound, naming the name and no path
         return true;
       },
     );
+  });
+});
+
+test('a secret whose name matches an ambient variable still resolves from storage', async () => {
+  await withDir(async (dir) => {
+    // `path` is a legal secret name and `PATH` is set in every process this
+    // will ever run in. Unprefixed, `fromEnv` won the chain with the
+    // container's own `PATH` and the stored credential was never read --
+    // measured before the prefix, and the value would then have gone to a
+    // download client as its api key.
+    //
+    // Asserted with `ok` rather than `equal` on purpose: a failure of
+    // `equal` prints the actual value, and here the actual value would be
+    // `PATH`, which no assertion or failure message in this repo may carry.
+    const raw = open();
+    const secrets = createSecrets({ raw, baseDir: dir });
+    secrets.saveSecret('path', 'test-value');
+    const resolved = await secrets.get('path');
+    assert.ok(resolved === 'test-value', 'a secret named `path` must resolve from storage');
+    assert.ok(resolved !== process.env['PATH'], 'and must never be the ambient variable of that name');
   });
 });
 

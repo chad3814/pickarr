@@ -76,16 +76,30 @@ matter.** 36 characters, lowercase hex and hyphens; it matches
 `/^[a-z0-9][a-z0-9_-]{0,63}$/`, and the same regex refuses `..`, `a.b`, `a/b`
 and `../../etc/passwd`.
 
-`name.toUpperCase().replaceAll('-', '_')` yields a name containing only legal
-characters, but **not one a shell can assign**: measured, 116 of 200 uuids begin
-with a hex digit, and `sh`, `zsh` and `bash` each refuse `550E8400_...=v` as a
-command rather than an assignment. `env(1)`, a Docker `environment:` entry and
-a systemd `Environment=` all set it, and Node reads it. An earlier version of
-this paragraph called the result "a legal environment-variable name", measured
-on a single uuid that happened to begin with a letter — the generalisation was
-wrong 58% of the time. §5.2's normalisation stands: the env link is a real
-override for a name an operator types, and a theoretical one for a generated
-name whose home is the database.
+`PICKARR_SECRET_` + `name.toUpperCase().replaceAll('-', '_')` is the variable,
+and **the prefix is load-bearing rather than decorative**. Measured on the
+unprefixed form: `envNameFor('path')` is `PATH`, and `get('path')` for a
+credential saved to the database returns the process's own `PATH`, because
+`fromEnv` wins the chain — so any name that uppercases onto an ambient
+variable (`path`, `home`, `user`, `shell`, `lang`, `term`, …) silently
+resolves to the wrong value, and `assertSecretName` accepts all of them. The
+prefix is applied to every name, the uuid form included; a rule that differs
+by name shape is one nobody can predict from outside.
+
+`a-b` and `a_b` still map to one variable (`PICKARR_SECRET_A_B`). The prefix
+does not change that, and nothing generates both forms today — a uuid carries
+hyphens and no underscores.
+
+On shells, measured 2026-09-13: **200 of 200** uuids begin with a hex digit —
+they are hex, so that is no measurement at all — and **114 of 200** begin with
+a *decimal* digit, which is the property that matters and is 10/16 = 62.5% by
+construction. `sh`, `zsh` and `bash` each refuse `550E8400_X=v` as a command
+rather than an assignment, and each accept `PICKARR_SECRET_550E8400_X=v`. So
+the prefix also turns a generated name's variable into one a shell can set,
+where the bare form needed `env(1)`, a Docker `environment:` entry or a
+systemd `Environment=`. An earlier version of this paragraph said "116 of 200
+uuids begin with a hex digit", which is false as written for every sample: the
+number was the decimal-digit count wearing the wrong word.
 
 **2.6 What 1.x already does, which this replaces.** `packages/core/src/config`
 has a `config.json`, a Zod schema, `SECRET_REFERENCE_PREFIX = 'file:'` so a
@@ -283,7 +297,7 @@ documented exception to preferring async APIs.
 
 ```ts
 memoize(chain(
-  fromEnv(name.toUpperCase().replaceAll('-', '_')),
+  fromEnv(`PICKARR_SECRET_${name.toUpperCase().replaceAll('-', '_')}`),
   fromFile(join(baseDir, name)),
   fromDatabase(raw, name),
 ))
@@ -293,7 +307,14 @@ memoize(chain(
 `secrets` namespace. The env name is normalized so that one rule covers both
 a self-chosen name and a UUID; without `replaceAll`, a UUID's uppercase form
 is not a legal variable name and the env link could never resolve for a
-client credential.
+client credential. The `PICKARR_SECRET_` prefix keeps that variable out of
+the ambient namespace — see §2.5 for the measurement, which is that without
+it a secret named `path` resolves to the container's `PATH`.
+
+The file link is wrapped rather than used bare, so that its one chain-halting
+failure (§2.3: present and unreadable) becomes this subsystem's own
+`SecretsFileUnreadable` instead of `fromFile`'s message, which carries the
+path. The halt itself is unchanged.
 
 **5.3 Three guards.**
 
@@ -378,8 +399,10 @@ no cycle.
    the halted chain never reaches — and a directory that is merely absent
    still falls through to that row.
 5. Env beats file beats database for the same name; each link alone resolves.
-6. A UUID name resolves from the database, and `PICKARR_<uuid-with-underscores>`
-   overrides it.
+6. A UUID name resolves from the database, and
+   `PICKARR_SECRET_<uuid-with-underscores>` overrides it — and a secret named
+   after an ambient variable (`path`) resolves from storage, not from the
+   environment.
 7. Migration 13 moves every credential, leaves `username` alone, and a row's
    resolved `ClientConfig` after migration equals what it was before.
 8. `readClientConfig` returns the resolved credential, so no adapter changes.

@@ -294,6 +294,14 @@ Expected: FAIL — `Cannot find module '../../src/secrets/names.ts'`.
 
 - [ ] **Step 3: Write `names.ts`**
 
+> **Superseded in part by the whole-branch fix wave (2026-09-13).** `envNameFor`
+> now prefixes every variable with `PICKARR_SECRET_`, because the bare form
+> mapped a secret named `path` onto the ambient `PATH` (spec §2.5), and
+> `names.ts` also carries a second error class, `SecretsFileUnreadable`, for
+> the chain-halting file failure (spec §2.3, §5.3). The snippets below are the
+> plan as written, not the code as shipped; read `packages/host/src/secrets/`
+> for the latter.
+
 ```ts
 /**
  * The shape of a secret name, and the two things derived from one.
@@ -329,7 +337,7 @@ export function assertSecretName(name: string): void {
  * between a generated name and a chosen one.
  *
  * **A uuid's variable name is not one a shell can export.** Measured: 116 of
- * 200 uuids begin with a hex digit, and `sh`, `zsh` and `bash` all refuse
+ * 200 uuids begin with a digit, and `sh`, `zsh` and `bash` all refuse
  * `550E8400_...=v` as a command rather than an assignment (`$550E8400_X`
  * expands as `$5` followed by literal text). `env(1)`, a Docker `environment:`
  * entry and a systemd `Environment=` all set it, and Node reads it. So the env

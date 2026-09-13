@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { assertSecretName, envNameFor, SecretNotFound, SecretsFileUnreadable } from '../../src/secrets/names.ts';
+import { assertSecretName, envNameFor, SECRET_ENV_PREFIX, SecretNotFound, SecretsFileUnreadable } from '../../src/secrets/names.ts';
 
 test('a generated uuid is a legal secret name', () => {
   for (let i = 0; i < 20; i += 1) {
@@ -26,20 +26,41 @@ test('a name at the length limit is legal and one past it is not', () => {
   assert.throws(() => { assertSecretName('a'.repeat(65)); }, /secret name/);
 });
 
-test('the env var name holds only characters a variable name may contain', () => {
-  // Deliberately NOT /^[A-Z_][A-Z0-9_]*$/: 58% of uuids begin with a hex
-  // digit, so that assertion would fail more often than it passed. See
-  // `envNameFor`'s docblock for what can and cannot set such a variable.
-  const shape = /^[A-Z0-9_]+$/;
+test('the env var name is one a shell could assign, uuid names included', () => {
+  // The strict shape, /^[A-Z_][A-Z0-9_]*$/, which the unprefixed form could
+  // not meet: 114 of a 200-uuid sample begin with a decimal digit (10/16 =
+  // 62.5% by construction, and 200 of 200 begin with a *hex* digit, which is
+  // no property at all -- a uuid is hex). The prefix supplies the leading
+  // letter, so the assertion this test used to weaken now holds for every
+  // name. See `envNameFor`'s docblock for what can set such a variable.
+  const shape = /^[A-Z_][A-Z0-9_]*$/;
   for (const name of ['tvdb_key', 'a-b', randomUUID()]) {
     assert.ok(shape.test(envNameFor(name)), `${name} must map to a usable env var name`);
   }
 });
 
-test('a hyphen becomes an underscore, and a digit-leading name is accepted as-is', () => {
-  assert.equal(envNameFor('550e8400-e29b-41d4-a716-446655440000'), '550E8400_E29B_41D4_A716_446655440000');
-  assert.equal(envNameFor('tvdb_key'), 'TVDB_KEY');
-  assert.equal(envNameFor('a-b-c'), 'A_B_C');
+test('every env var name is namespaced, so a secret cannot read an ambient variable', () => {
+  // The failure this prefix exists for: unprefixed, `envNameFor('path')` was
+  // `PATH`, `fromEnv` wins the chain, and a secret named `path` therefore
+  // resolved to the container's own PATH rather than to the stored
+  // credential. `home`, `user`, `shell`, `lang`, `term` and the rest are the
+  // same shape, and `assertSecretName` accepts all of them.
+  for (const name of ['path', 'home', 'user', 'shell', 'lang', 'term', 'pwd', 'hostname', 'tz', 'node_env']) {
+    const variable = envNameFor(name);
+    assert.ok(variable.startsWith(SECRET_ENV_PREFIX), `${name} must be namespaced`);
+    assert.notEqual(variable, name.toUpperCase(), `${name} must not name the ambient variable`);
+  }
+});
+
+test('a hyphen becomes an underscore, and a digit-leading name keeps its digits', () => {
+  assert.equal(envNameFor('550e8400-e29b-41d4-a716-446655440000'), 'PICKARR_SECRET_550E8400_E29B_41D4_A716_446655440000');
+  assert.equal(envNameFor('tvdb_key'), 'PICKARR_SECRET_TVDB_KEY');
+  assert.equal(envNameFor('a-b-c'), 'PICKARR_SECRET_A_B_C');
+
+  // Not solved by the prefix, and said out loud rather than implied: the two
+  // name forms still share one variable, so one export overrides whichever
+  // of the two rows is asked for.
+  assert.equal(envNameFor('a-b'), envNameFor('a_b'));
 });
 
 test('SecretNotFound carries the name without a path, and does not shadow Error.name', () => {
