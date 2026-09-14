@@ -150,7 +150,7 @@ test("a scene's read carries its site's name and reference through the join, and
   });
 });
 
-test("a site's own read carries its own columns, and rowsFor dedupes a site two scenes share", async () => {
+test("a site's own read carries its own columns, however many scenes share the site", async () => {
   const harness = harnessWithTables();
   const site = { name: 'A Site', ref: 'tpdb:site:7' };
   await applyXxx({
@@ -166,25 +166,21 @@ test("a site's own read carries its own columns, and rowsFor dedupes a site two 
     "SELECT count(*) c FROM xxx_site WHERE provider_ref = 'tpdb:site:7'",
   ).get()?.c, 1, 'fixture sanity: the provider_ref unique index makes both scenes share one site row');
 
-  const siteIds = tableNamed('xxx_site').rowsFor(harness.raw, [1, 2]);
-  assert.equal(siteIds.length, 1, 'xxx_site rowsFor must dedupe a shared parent');
-  const siteId = siteIds[0];
-  assert.ok(siteId !== undefined);
+  // Found by provider reference rather than through the table declaration: a
+  // `SyncedTable` answers what its rows *are* and no longer how to reach them
+  // from a media item, so a test that needs an id looks it up the way the log
+  // would have handed it over.
+  const siteId = Number(harness.raw.prepare(
+    "SELECT id FROM xxx_site WHERE provider_ref = 'tpdb:site:7'",
+  ).get()?.id);
 
   assert.deepEqual(tableNamed('xxx_site').read(harness.raw, [siteId])[siteId] as XxxSiteRead | undefined, {
     name: 'A Site',
     providerRef: 'tpdb:site:7',
   });
 
-  // A detail table has one row per media item, so its rowsFor must not dedupe.
-  assert.equal(tableNamed('xxx_scene').rowsFor(harness.raw, [1, 2]).length, 2);
-});
-
-test('a scene with no site contributes no id to xxx_site rowsFor', async () => {
-  const harness = harnessWithTables();
-  await applyXxx({
-    media: sceneWith('tpdb:scene:2', null), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW,
-  });
-  assert.deepEqual(tableNamed('xxx_site').rowsFor(harness.raw, [1]), [],
-    '`site_id IS NOT NULL` is what keeps a null out of the id list');
+  // And one entry per row, not per scene: the site is one row, so one op --
+  // the deduplication the walk used to need `rowsFor` for is now the log's
+  // own shape, one entry per row.
+  assert.deepEqual(Object.keys(tableNamed('xxx_site').read(harness.raw, [siteId, siteId])), [String(siteId)]);
 });

@@ -49,13 +49,6 @@ const detail: SyncedTable<MovieRead> = {
     }
     return result;
   },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    const rows = raw.prepare(
-      `SELECT id FROM movie_detail WHERE media_item_id IN (${holes(mediaItemIds)})`,
-    ).all(...mediaItemIds);
-    return rows.map((row) => asNumber(row.id));
-  },
 };
 
 export const MOVIE_SYNCED: readonly SyncedTable<unknown>[] = [detail];

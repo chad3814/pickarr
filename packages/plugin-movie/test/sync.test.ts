@@ -84,17 +84,14 @@ test('a read never returns details_json', async () => {
   assert.ok(!JSON.stringify(result).includes(MARKER), "movie_detail's read must not return details_json");
 });
 
-test("a detail read carries its media item and its own columns, and rowsFor answers one row per item", async () => {
+test('a detail read carries its media item and its own columns', async () => {
   const harness = harnessWithTables();
   await applyMovie({ media: movie(), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW });
 
   const detail = MOVIE_SYNCED.find((table) => table.table === 'movie_detail');
   assert.ok(detail !== undefined, 'movie_detail must be declared');
 
-  const ids = detail.rowsFor(harness.raw, [1]);
-  assert.equal(ids.length, 1, 'one detail row per media item');
-  const id = ids[0];
-  assert.ok(id !== undefined);
+  const id = Number(harness.raw.prepare('SELECT id FROM movie_detail WHERE media_item_id = 1').get()?.id);
 
   // `mediaItemId` is how a client attaches this row to its group; the row's
   // own key is on the op, not in here (`packages/contract/src/sync.ts`).
@@ -105,5 +102,4 @@ test("a detail read carries its media item and its own columns, and rowsFor answ
   });
 
   assert.deepEqual(detail.read(harness.raw, []), {}, 'an empty id list never reaches SQLite');
-  assert.deepEqual(detail.rowsFor(harness.raw, []), []);
 });

@@ -7,22 +7,23 @@
  * column added to any of these tables later reaches no client until someone
  * decides it should.
  *
- * **Declaration order is emission order, and a row that names another synced
- * row must come after it.** The order below is the order the backfill writes
- * these tables for one group (`sync/backfill.ts`), so naming a row is a
- * reason to send it *first*, not last -- a client replaying a page in order
- * has to already hold what an op points at.
+ * **Declaration order is not emission order, and no longer can be.** It was:
+ * the backfill paged `media_item` and emitted a group's plugin tables in the
+ * order the plugin listed them, so `tv_series` was declared before
+ * `tv_season` to keep `TvSeasonRead.seriesId` behind the row it names. The
+ * backfill walks `sync_log` now, so emission order is write order and a
+ * plugin has no handle on it at all. A client can hold a season whose
+ * `seriesId` names a series it has not received yet; the series arrives
+ * elsewhere in the same walk, and the client already tolerates references it
+ * can never resolve (`sync/backfill.ts` has the property and why it was
+ * accepted).
  *
- * Exactly one of these three shapes names another by row id:
- * `TvSeasonRead.seriesId` is a `tv_series.id`. So `tv_series` is declared
- * before `tv_season`, and `TV_SYNCED` at the foot of this file reads
- * `[release, series, season]`. `TvRead` names neither parent by id -- the
- * joins below flatten the series' title and reference and the season's
- * number into the release's own shape (design spec §3.6) -- so `tv_release`
- * is under no ordering constraint from these two at all, and is declared
- * first as the row the group is actually about. Its one reference,
- * `mediaItemId`, is to `media_item`, which the backfill emits before any
- * plugin table.
+ * The order below is therefore just a list, kept as it stands rather than
+ * shuffled for no reason: `[release, series, season]`, the row the group is
+ * about first. `TvRead` names neither parent by id -- the joins below flatten
+ * the series' title and reference and the season's number into the release's
+ * own shape (design spec §3.6) -- and `TvSeasonRead.seriesId` is the one
+ * cross-reference among the three.
  */
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { SyncedTable, TvRead, TvSeasonRead, TvSeriesRead } from '@pickarr/contract';
@@ -98,13 +99,6 @@ const release: SyncedTable<TvRead> = {
     }
     return result;
   },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    const rows = raw.prepare(
-      `SELECT id FROM tv_release WHERE media_item_id IN (${holes(mediaItemIds)})`,
-    ).all(...mediaItemIds);
-    return rows.map((row) => asNumber(row.id));
-  },
 };
 
 /**
@@ -128,14 +122,6 @@ const season: SyncedTable<TvSeasonRead> = {
       };
     }
     return result;
-  },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    const rows = raw.prepare(`
-      SELECT DISTINCT season_id AS id FROM tv_release
-      WHERE media_item_id IN (${holes(mediaItemIds)}) AND season_id IS NOT NULL
-    `).all(...mediaItemIds);
-    return rows.map((row) => asNumber(row.id));
   },
 };
 
@@ -161,13 +147,6 @@ const series: SyncedTable<TvSeriesRead> = {
       };
     }
     return result;
-  },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    const rows = raw.prepare(
-      `SELECT DISTINCT series_id AS id FROM tv_release WHERE media_item_id IN (${holes(mediaItemIds)})`,
-    ).all(...mediaItemIds);
-    return rows.map((row) => asNumber(row.id));
   },
 };
 

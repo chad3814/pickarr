@@ -8,21 +8,19 @@ import { HOST_SYNCED_TABLES, readHostRows } from './tables.ts';
 export interface SyncRegistry {
   /** Every synced table, host and plugin, in a stable order. */
   tables(): readonly string[];
-  /** Current state for these ids of one table, or an empty record for a table nobody owns. */
-  readRows(raw: DatabaseSync, table: string, ids: readonly number[]): Record<number, unknown>;
   /**
-   * A plugin table's own row ids for these media items, or an empty array for
-   * a host table or a table nobody owns.
+   * Current state for these ids of one table, or an empty record for a table
+   * nobody owns.
    *
-   * Dispatches to the declaring plugin's own `SyncedTable.rowsFor` --
-   * `registry.ts` has no schema knowledge of a plugin table of its own, which
-   * is exactly why that method exists on the contract rather than being
-   * derived here the way `readHostRows` derives the host's six. The backfill
-   * (`sync/backfill.ts`) is the caller: it knows a host row's relations
-   * directly (`rss_item.media_item_id` and the rest), but a plugin table's are
-   * only ever reachable through the plugin's own declaration.
+   * **The only question either cursor asks of a plugin table.** There used to
+   * be a second, `rowsFor` -- "which of your rows belong to these media
+   * items" -- which the backfill needed because it paged `media_item` and had
+   * to find each group's dependent rows itself. The backfill walks `sync_log`
+   * now, so the ids arrive with the log entries and no relation has to be
+   * traversed: a plugin declares what its rows *are*, and never how to reach
+   * them from a media item.
    */
-  rowsFor(raw: DatabaseSync, table: string, mediaItemIds: readonly number[]): readonly number[];
+  readRows(raw: DatabaseSync, table: string, ids: readonly number[]): Record<number, unknown>;
 }
 
 /**
@@ -154,10 +152,6 @@ export function createSyncRegistry(raw: DatabaseSync, plugins: readonly MediaPlu
       if (HOST_SYNCED_TABLES.includes(table)) return readHostRows(rawHandle, table, ids);
       const plugin = owned.get(table);
       return plugin === undefined ? {} : plugin.read(rawHandle, ids);
-    },
-    rowsFor(rawHandle, table, mediaItemIds) {
-      const plugin = owned.get(table);
-      return plugin === undefined ? [] : plugin.rowsFor(rawHandle, mediaItemIds);
     },
   };
 }

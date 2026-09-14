@@ -6,8 +6,6 @@ export interface SyncedTable<T> {
   readonly table: string;
   /** Current state for these row ids, in the shape the client receives. */
   read(raw: DatabaseSync, ids: readonly number[]): Record<number, T>;
-  /** This table's row ids belonging to those media items, so the backfill can hydrate a group. */
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[];
 }
 
 /** A plain SQL identifier: what may be interpolated into a trigger body. */
@@ -105,10 +103,17 @@ export interface XxxRead {
  *
  * `seriesId` is a `tv_series.id`, which resolves against the `id` on the
  * `tv_series` op -- the op-level key described above is what makes this
- * reference land on a row the client actually holds. It is also why
- * `plugin-tv` declares `tv_series` *before* `tv_season`: declaration order
- * is the order the backfill emits a group's plugin rows, so a client
- * replaying a page in order holds the series before the season names it.
+ * reference land on a row the client actually holds.
+ *
+ * **It resolves eventually, not in order.** Declaration order used to be
+ * emission order, because the backfill emitted a group's plugin tables in the
+ * order the plugin listed them; it walks `sync_log` now, so emission order is
+ * write order and a plugin has no handle on it. A client can therefore hold a
+ * season whose `seriesId` names a series it has not received yet, and the
+ * series arrives elsewhere in the same walk. That is the same tolerance a
+ * client already needs for `rss_item.feed_id` and `download_client_id`, which
+ * name tables that are never synced at all -- see `sync/backfill.ts` for the
+ * property and why it was accepted.
  */
 export interface TvSeasonRead {
   seriesId: number;

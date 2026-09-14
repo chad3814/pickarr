@@ -4,16 +4,15 @@
  * `details_json` is projected away: it is the metadata provider's answer
  * verbatim, unbounded, and nothing in a view reads it (design spec §3.9).
  *
- * **Declaration order is emission order, and a row that names another synced
- * row must come after it** (`sync/backfill.ts`): naming a row is a reason to
- * send it *first*, not last, since a client replaying a page in order has to
- * already hold what an op points at. Neither shape here names the other by
- * row id -- `XxxRead` flattens the site's name and reference into the
- * scene's own shape by a join, and `XxxSiteRead` carries no reference at all
- * -- so the two are under no ordering constraint from each other, and
- * `xxx_scene` is declared first as the row the group is actually about. Its
- * one reference, `mediaItemId`, is to `media_item`, which the backfill emits
- * before any plugin table.
+ * **Declaration order is not emission order.** It was, while the backfill
+ * paged `media_item` and emitted a group's plugin tables in declared order;
+ * the backfill walks `sync_log` now, so emission order is write order and a
+ * plugin has no handle on it (`sync/backfill.ts`). It happens to cost these
+ * two shapes nothing either way: neither names the other by row id --
+ * `XxxRead` flattens the site's name and reference into the scene's own shape
+ * by a join, and `XxxSiteRead` carries no reference at all -- so the only
+ * forward reference a client can see here is `mediaItemId`, to a `media_item`
+ * that arrives elsewhere in the same walk.
  */
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { SyncedTable, XxxRead, XxxSiteRead } from '@pickarr/contract';
@@ -67,13 +66,6 @@ const scene: SyncedTable<XxxRead> = {
     }
     return result;
   },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    const rows = raw.prepare(
-      `SELECT id FROM xxx_scene WHERE media_item_id IN (${holes(mediaItemIds)})`,
-    ).all(...mediaItemIds);
-    return rows.map((row) => asNumber(row.id));
-  },
 };
 
 /**
@@ -93,14 +85,6 @@ const site: SyncedTable<XxxSiteRead> = {
       result[asNumber(row.id)] = { name: asText(row.name), providerRef: asText(row.provider_ref) };
     }
     return result;
-  },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    const rows = raw.prepare(`
-      SELECT DISTINCT site_id AS id FROM xxx_scene
-      WHERE media_item_id IN (${holes(mediaItemIds)}) AND site_id IS NOT NULL
-    `).all(...mediaItemIds);
-    return rows.map((row) => asNumber(row.id));
   },
 };
 

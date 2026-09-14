@@ -210,11 +210,6 @@ function syncedTableNamed(table: string) {
       void ids;
       return {};
     },
-    rowsFor: (rawHandle: DatabaseSync, mediaItemIds: readonly number[]) => {
-      void rawHandle;
-      void mediaItemIds;
-      return [];
-    },
   };
 }
 
@@ -302,11 +297,6 @@ test('plugin tables gain their triggers when the plugin is registered', () => {
         void ids;
         return {};
       },
-      rowsFor: (rawHandle, mediaItemIds) => {
-        void rawHandle;
-        void mediaItemIds;
-        return [];
-      },
     }],
   });
 
@@ -356,7 +346,7 @@ test('a synced table not prefixed with its own plugin id is refused at registrat
   const plugin = makePlugin({
     id: 'alpha',
     migrations: [],
-    synced: [{ table: 'rogue_thing', read: () => ({}), rowsFor: () => [] }],
+    synced: [{ table: 'rogue_thing', read: () => ({}) }],
   });
 
   assert.throws(() => { host.register(plugin); }, /rogue_thing/);
@@ -375,7 +365,7 @@ test('a synced table keyed by something other than a lone id is refused at regis
   const plugin = makePlugin({
     id: 'alpha',
     migrations: [{ version: 1, up: (db) => db.exec('CREATE TABLE alpha_bad_key (uuid TEXT PRIMARY KEY)') }],
-    synced: [{ table: 'alpha_bad_key', read: () => ({}), rowsFor: () => [] }],
+    synced: [{ table: 'alpha_bad_key', read: () => ({}) }],
   });
 
   assert.throws(() => { host.register(plugin); }, /alpha_bad_key/);

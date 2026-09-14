@@ -21,11 +21,7 @@ function fakePlugin(id: string, synced: readonly SyncedTable<unknown>[]): MediaP
 }
 
 /** A `SyncedTable` whose `read` just returns whatever the test wants back. */
-function fakeTable(
-  table: string,
-  rows: Record<number, unknown>,
-  rowsFor: (mediaItemIds: readonly number[]) => readonly number[] = () => [],
-): SyncedTable<unknown> {
+function fakeTable(table: string, rows: Record<number, unknown>): SyncedTable<unknown> {
   return {
     table,
     read: (_raw, ids) => {
@@ -33,7 +29,6 @@ function fakeTable(
       for (const id of ids) if (rows[id] !== undefined) result[id] = rows[id];
       return result;
     },
-    rowsFor: (_raw, mediaItemIds) => rowsFor(mediaItemIds),
   };
 }
 
@@ -62,23 +57,6 @@ test('a table nobody declares reads as empty rather than throwing', () => {
   const raw = open();
   const registry = createSyncRegistry(raw, []);
   assert.deepEqual(registry.readRows(raw, 'nobody_owns_this', [1]), {});
-});
-
-test("a plugin table's rowsFor dispatches to the plugin's own implementation", () => {
-  const raw = open();
-  raw.exec('CREATE TABLE tv_extra (id INTEGER PRIMARY KEY)');
-  const plugin = fakePlugin('tv', [
-    fakeTable('tv_extra', {}, (mediaItemIds) => mediaItemIds.map((id) => id * 10)),
-  ]);
-  const registry = createSyncRegistry(raw, [plugin]);
-  assert.deepEqual(registry.rowsFor(raw, 'tv_extra', [1, 2]), [10, 20]);
-});
-
-test('rowsFor answers empty for a host table and for a table nobody owns', () => {
-  const raw = open();
-  const registry = createSyncRegistry(raw, []);
-  assert.deepEqual(registry.rowsFor(raw, 'media_item', [1]), []);
-  assert.deepEqual(registry.rowsFor(raw, 'nobody_owns_this', [1]), []);
 });
 
 test('a plugin cannot claim a table already synced by the host', () => {

@@ -11,9 +11,9 @@
  * every plugin upsert was unkeyable and every plugin delete named a row the
  * client had never been able to label.
  *
- * The fake table below reads and paginates a real SQLite table rather than
- * a literal map, because the property under test is what the *host* does
- * with what a plugin returns -- the three shipped plugins' own mapping is
+ * The fake tables below read a real SQLite table rather than a literal map,
+ * because the property under test is what the *host* does with what a plugin
+ * returns -- the three shipped plugins' own mapping is
  * `packages/plugin-{tv,movie,xxx}/test/sync.test.ts`.
  */
 import { test } from 'node:test';
@@ -51,12 +51,6 @@ const detail: SyncedTable<MovieRead> = {
       };
     }
     return result;
-  },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    return raw.prepare(
-      `SELECT id FROM movie_detail WHERE media_item_id IN (${holes(mediaItemIds)})`,
-    ).all(...mediaItemIds).map((row) => Number(row.id));
   },
 };
 
@@ -102,14 +96,6 @@ const brand: SyncedTable<BrandRead> = {
       result[Number(row.id)] = { detailId: Number(row.detail_id), name: String(row.name) };
     }
     return result;
-  },
-  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[] {
-    if (mediaItemIds.length === 0) return [];
-    return raw.prepare(`
-      SELECT DISTINCT s.id FROM movie_brand s
-      JOIN movie_detail d ON d.id = s.detail_id
-      WHERE d.media_item_id IN (${holes(mediaItemIds)})
-    `).all(...mediaItemIds).map((row) => Number(row.id));
   },
 };
 
@@ -177,17 +163,20 @@ test('a plugin row is keyed by its row id on both cursors, and its delete names 
   assert.equal(remove.value, undefined, 'a delete carries no row');
 });
 
-test('a shared plugin row re-sent once per group keys identically each time, so a client deduplicates', () => {
-  // §3.3's shared parent, as the backfill actually emits it. With the key on
-  // the op, the two ops for one row agree; with the key inside a payload
-  // that has none, a client would accumulate one unlabelled copy per group.
+test('a plugin row is sent once and keyed by its own id, whatever it belongs to', () => {
+  // §3.3's shared parent, and its cost is gone. The group-hydrated walk
+  // re-sent a parent once per group and relied on the op-level key to make
+  // those copies deduplicate; the log holds one entry per *row*, so the walk
+  // sends each row exactly once and there is nothing to deduplicate. The key
+  // still matters, for the reason the test above gives -- a client stores the
+  // row under it, and the delete that later names it has to agree.
   const { raw, registry } = open();
   seed(raw, 1, 7);
   seed(raw, 2, 8);
 
   const page = backfillBefore(raw, registry, pivotAboveEverything(raw), 10);
   const keys = page.ops.filter((op) => op.table === 'movie_detail').map((op) => op.id);
-  assert.deepEqual(keys.toSorted((a, b) => a - b), [7, 8], 'one key per plugin row, and they differ');
+  assert.deepEqual(keys.toSorted((a, b) => a - b), [7, 8], 'one op per plugin row, each with its own key');
 });
 
 test('a plugin row above the pivot is the tail\'s, like a host row', () => {
