@@ -35,6 +35,20 @@ import type { DatabaseSync } from 'node:sqlite';
  * failing at runtime -- which is why the repair is unconditional here rather
  * than conditional on noticing.
  *
+ * **`at` is `unixepoch('subsec')`, not `unixepoch()`.** Both mean "now" --
+ * `'now'` is `unixepoch`'s default timespec -- but the bare form is whole
+ * seconds, so multiplying by 1000 produced a number that looked like
+ * milliseconds and was accurate to a thousand of them. Measured on SQLite
+ * 3.53.4: `unixepoch('subsec') * 1000` equals `Date.now()` and advances per
+ * millisecond, where `unixepoch() * 1000` repeats the same value for a
+ * second. The `CAST` is explicit rather than left to the column's INTEGER
+ * affinity, which converts the float anyway; measured, both store `integer`.
+ *
+ * Nothing reads this column today -- ordering is by `id`, which is what the
+ * cursors compare -- so this is for whoever first debugs a log by eye, and
+ * a column that lies to them by three orders of magnitude is worse than no
+ * column.
+ *
  * `table` reaches the SQL below as text, not as a bound parameter: a trigger
  * body is DDL, and SQLite binds no parameters there, so there is no
  * placeholder to put it in. That makes this function unsafe against an
@@ -63,7 +77,7 @@ export function syncTriggerSql(table: string): string {
   const log = (rowId: string, op: string) =>
     `DELETE FROM sync_log WHERE table_name = '${table}' AND row_id = ${rowId};
      INSERT INTO sync_log (table_name, row_id, op, at)
-       VALUES ('${table}', ${rowId}, '${op}', unixepoch() * 1000);`;
+       VALUES ('${table}', ${rowId}, '${op}', CAST(unixepoch('subsec') * 1000 AS INTEGER));`;
   return `
     DROP TRIGGER IF EXISTS ${ins};
     CREATE TRIGGER ${ins} AFTER INSERT ON ${table} BEGIN ${log('NEW.id', 'upsert')} END;

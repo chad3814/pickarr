@@ -25,6 +25,27 @@ test('an insert, an update and a delete each log one op', () => {
   assert.deepEqual(ops(raw), ['delete:1']);
 });
 
+test('at is a millisecond timestamp, not a second one multiplied by a thousand', () => {
+  const raw = open();
+  // Captured immediately either side of the write, and compared as a range
+  // rather than by `at % 1000 !== 0`: a genuine millisecond stamp lands on a
+  // whole second one time in a thousand, which would be a 0.1% flake. The
+  // range is what the resolution actually changes. `unixepoch() * 1000`
+  // floors to the second, so it falls *below* `before` unless the write
+  // happened in the first millisecond of a second -- it fails this 999 times
+  // in 1000 -- while `unixepoch('subsec') * 1000` cannot, since both sides
+  // read the same wall clock.
+  const before = Date.now();
+  raw.prepare('INSERT INTO probe (id, v, created_at) VALUES (1, ?, 1)').run('a');
+  const after = Date.now();
+
+  const at = Number((raw.prepare('SELECT at FROM sync_log').get() as { at: unknown }).at);
+  // `- 1` for the `CAST`'s truncation toward zero, which can shave a
+  // millisecond off a stamp taken in the same millisecond as `before`.
+  assert.ok(at >= before - 1, `at ${at} is below the time before the write (${before})`);
+  assert.ok(at <= after, `at ${at} is above the time after the write (${after})`);
+});
+
 test('a row changed twice takes a higher id the second time', () => {
   const raw = open();
   raw.prepare('INSERT INTO probe (id, v, created_at) VALUES (1, ?, 1)').run('a');

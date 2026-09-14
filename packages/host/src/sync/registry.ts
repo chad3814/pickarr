@@ -89,13 +89,23 @@ export function assertIntegerIdKey(raw: DatabaseSync, table: string): void {
  * rather than two copies that could disagree about what "syncable" means.
  * `sync/log.ts`'s own doc names both callers.
  *
- * This does **not** refuse two plugins declaring the same table -- that
- * check needs the whole plugin set at once (`createSyncRegistry`'s own
- * `owned` map), which a single call validating one plugin's one table has no
- * way to see. `host.register` registers one plugin at a time and has no
- * cheaper way to learn about a table a *different*, not-yet-registered
- * plugin will later declare, so that check stays where the full set is
- * actually gathered.
+ * This does **not** refuse the same table declared twice -- that check needs
+ * the whole plugin set at once (`createSyncRegistry`'s own `owned` map),
+ * which a single call validating one plugin's one table has no way to see.
+ *
+ * **And the prefix check above is why that other guard is narrower than it
+ * looks.** Measured: two plugins with *different* ids can never collide on a
+ * table name, because `assertSyncedTableName` requires the table to start
+ * with `<pluginId>_` and one name cannot start with two different prefixes --
+ * the second plugin is refused here, for the wrong prefix, before the
+ * duplicate check is ever consulted. So `createSyncRegistry`'s guard is
+ * reachable only by one plugin listing a table twice in its own `synced`
+ * array, or by two plugins sharing an id (which `host.register` refuses
+ * separately, but this function's caller does not). That is why its message
+ * names the table rather than blaming two plugins, and
+ * `test/sync/registry.test.ts` pins all three cases -- replacing a test that
+ * claimed to cover the duplicate guard, never reached it, and passed on this
+ * prefix error instead.
  */
 export function assertSyncable(raw: DatabaseSync, pluginId: string, table: string): void {
   assertSyncedTableName(pluginId, table);
@@ -117,9 +127,11 @@ export function assertSyncable(raw: DatabaseSync, pluginId: string, table: strin
  *
  * Every plugin table here has already passed `assertSyncable` -- name shape,
  * the host-collision check and the lone-`id` primary key -- and this is also
- * where the one check `assertSyncable` cannot do alone runs: two plugins
- * declaring the same table, which needs every plugin's declaration gathered
- * at once rather than checked one at a time.
+ * where the one check `assertSyncable` cannot do alone runs: the same table
+ * declared twice, which needs every plugin's declaration gathered at once
+ * rather than checked one at a time. The message does not say "two plugins",
+ * because one plugin listing a table twice in its own `synced` array trips
+ * this too.
  */
 export function createSyncRegistry(raw: DatabaseSync, plugins: readonly MediaPlugin[]): SyncRegistry {
   const owned = new Map<string, SyncedTable<unknown>>();
@@ -129,7 +141,7 @@ export function createSyncRegistry(raw: DatabaseSync, plugins: readonly MediaPlu
       assertSyncable(raw, plugin.id, table.table);
       const claimed = owned.get(table.table);
       if (claimed !== undefined) {
-        throw new Error(`two plugins declare synced table ${JSON.stringify(table.table)}`);
+        throw new Error(`synced table ${JSON.stringify(table.table)} declared twice`);
       }
       owned.set(table.table, table);
     }

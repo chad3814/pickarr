@@ -105,12 +105,41 @@ test('a plugin cannot claim a host table the host does not even sync', () => {
   assert.throws(() => createSyncRegistry(raw, [plugin]), /sync_log/);
 });
 
-test('two plugins cannot declare the same table', () => {
+test('one plugin declaring a table twice is refused', () => {
   const raw = open();
   raw.exec('CREATE TABLE tv_shared (id INTEGER PRIMARY KEY)');
+  // The only way a *shipped* configuration reaches the duplicate guard, and
+  // the reason its message does not say "two plugins": an operator sent
+  // looking for a second plugin would not find one. See the test below for
+  // why two distinct plugins cannot get here at all.
+  const one = fakePlugin('tv', [fakeTable('tv_shared', {}), fakeTable('tv_shared', {})]);
+  assert.throws(() => createSyncRegistry(raw, [one]), /tv_shared.*declared twice/);
+});
+
+test('two plugins sharing an id reach the same guard', () => {
+  const raw = open();
+  raw.exec('CREATE TABLE tv_shared (id INTEGER PRIMARY KEY)');
+  // `host.register` refuses a duplicate plugin id separately, but
+  // `createSyncRegistry` takes a list and checks no ids, so this is the second
+  // and last way in. It is indistinguishable from the case above from in here,
+  // which is the other reason the message names the table and not a plugin.
+  const a = fakePlugin('tv', [fakeTable('tv_shared', {})]);
+  const b = fakePlugin('tv', [fakeTable('tv_shared', {})]);
+  assert.throws(() => createSyncRegistry(raw, [a, b]), /tv_shared.*declared twice/);
+});
+
+test('two plugins with different ids cannot collide on a table name at all', () => {
+  const raw = open();
+  raw.exec('CREATE TABLE tv_shared (id INTEGER PRIMARY KEY)');
+  // Measured, and it replaces a test that claimed to cover the duplicate guard
+  // and never reached it: `assertSyncedTableName` requires the table to start
+  // with `<pluginId>_`, and one name cannot start with two different prefixes,
+  // so the prefix check refuses the second plugin before the duplicate check
+  // is consulted. The old test asserted only `/tv_shared/`, which the prefix
+  // error also contains -- so it passed while proving something else.
   const a = fakePlugin('tv', [fakeTable('tv_shared', {})]);
   const b = fakePlugin('tv2', [fakeTable('tv_shared', {})]);
-  assert.throws(() => createSyncRegistry(raw, [a, b]), /tv_shared/);
+  assert.throws(() => createSyncRegistry(raw, [a, b]), /does not carry its id as a prefix/);
 });
 
 test('assertIntegerIdKey accepts a table whose primary key is a single column named id', () => {
