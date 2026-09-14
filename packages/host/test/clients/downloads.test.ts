@@ -5,6 +5,9 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createDownloadClients } from '../../src/clients/downloads.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
+import { createSecrets } from '../../src/secrets/instance.ts';
+import type { Secrets } from '../../src/secrets/instance.ts';
+import { writeSecretValue } from '../../src/secrets/store.ts';
 
 function setup(): DatabaseSync {
   const { raw } = openTestDatabase();
@@ -14,6 +17,15 @@ function setup(): DatabaseSync {
 
 /** A no-op log, for tests that have nothing to assert about it. */
 function noLog(): void {}
+
+/**
+ * The secrets subsystem these tests resolve credentials through. `baseDir`
+ * does not exist, so the chain's file link finds nothing and every value
+ * comes from the `secret` table `seedClient` wrote it to.
+ */
+function makeSecrets(raw: DatabaseSync): Secrets {
+  return createSecrets({ raw, baseDir: '/nonexistent/pickarr-downloads-test-secrets' });
+}
 
 /**
  * A `QueuedFetch` double whose `json`/`text` are whichever handlers a test
@@ -42,10 +54,25 @@ function fakeFetch(handlers: {
 }
 
 /**
+ * The `secret` name a seeded credential is stored under, derived from the
+ * client's own name so two clients in one test never collide. Lowercased and
+ * stripped to what `SECRET_NAME` admits.
+ */
+function secretNameFor(clientName: string, kind: 'api-key' | 'password'): string {
+  return `${clientName.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}-${kind}`;
+}
+
+/**
  * Inserts one `download_client` row and returns its id. Mirrors
- * `config.test.ts`'s own `seedClient`, plus `baseUrl` -- every column
+ * `config.test.ts`'s own `insertClient`, plus `baseUrl` -- every column
  * `readClientConfig` or `selectClientForFeed` might read is a parameter,
  * defaulted to a shape that would otherwise pass every check.
+ *
+ * `apiKey` and `password` are still the *values* a test names, because what
+ * each test cares about is the credential its adapter ends up sending. Since
+ * migration 14 the row holds only a name, so the value goes into `secret`
+ * here and the name goes into the row -- `makeSecrets` is what turns one
+ * back into the other.
  */
 function seedClient(raw: DatabaseSync, overrides: {
   name?: string;
@@ -61,18 +88,32 @@ function seedClient(raw: DatabaseSync, overrides: {
     name: 'Client',
     type: 'torrent',
     implementation: 'qbittorrent',
-    apiKey: null,
-    username: null,
-    password: null,
+    apiKey: null as string | null,
+    username: null as string | null,
+    password: null as string | null,
     category: 'movies',
     baseUrl: 'https://client.example.com',
     ...overrides,
   };
+  let apiKeySecretName: string | null = null;
+  if (row.apiKey !== null && row.apiKey !== '') {
+    apiKeySecretName = secretNameFor(row.name, 'api-key');
+    writeSecretValue(raw, apiKeySecretName, row.apiKey, 1);
+  }
+  let passwordSecretName: string | null = null;
+  if (row.password !== null && row.password !== '') {
+    passwordSecretName = secretNameFor(row.name, 'password');
+    writeSecretValue(raw, passwordSecretName, row.password, 1);
+  }
   raw.prepare(`
     INSERT INTO download_client
-      (name, type, implementation, url, api_key, username, password, category, import_mode, created_at, updated_at)
+      (name, type, implementation, url, api_key_secret_name, username, password_secret_name,
+       category, import_mode, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'copy', 1, 1)
-  `).run(row.name, row.type, row.implementation, row.baseUrl, row.apiKey, row.username, row.password, row.category);
+  `).run(
+    row.name, row.type, row.implementation, row.baseUrl,
+    apiKeySecretName, row.username, passwordSecretName, row.category,
+  );
   const inserted = raw.prepare('SELECT id FROM download_client WHERE name = ?').get(row.name);
   return Number((inserted as { id: unknown }).id);
 }
@@ -116,7 +157,7 @@ test('a submitted torrent gets a row with its infohash and the returned ref', as
   const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
 
   const fetch = fakeFetch({ text: async () => 'Ok.' });
-  const clients = createDownloadClients({ raw, fetch, now: () => 5000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5000, log: noLog });
 
   const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -139,7 +180,7 @@ test('a resubmit that collides with an already-recorded ref gets a message namin
   const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
 
   const fetch = fakeFetch({ text: async () => 'Ok.' });
-  const clients = createDownloadClients({ raw, fetch, now: () => 5500, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5500, log: noLog });
 
   const firstRef = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
   assert.equal(firstRef, MAGNET_HASH);
@@ -188,7 +229,7 @@ test('the row exists before the client is called', async () => {
       return { status: true, nzo_ids: ['SABnzbd_nzo_xyz'] };
     },
   });
-  const clients = createDownloadClients({ raw, fetch, now: () => 1000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 1000, log: noLog });
 
   await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -207,7 +248,7 @@ test('an unresolved torrent url leaves the row submitting with no error', async 
     // server, which is not a failure -- see `findRegisteredRef`.
     json: async () => [],
   });
-  const clients = createDownloadClients({ raw, fetch, now: () => 2000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 2000, log: noLog });
 
   const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -237,7 +278,7 @@ test('a client that throws leaves the row failed with a redacted error', async (
       throw new Error(`network hiccup fetching https://sab.example.com/api?mode=addurl&apikey=${secret}&output=json`);
     },
   });
-  const clients = createDownloadClients({ raw, fetch, now: () => 3000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 3000, log: noLog });
 
   await assert.rejects(
     clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
@@ -262,7 +303,7 @@ test('a submission naming a client the feed does not use is refused', async () =
   // No handler wired for either transport: a refused submission must never
   // reach the network at all.
   const fetch = fakeFetch({});
-  const clients = createDownloadClients({ raw, fetch, now: () => 4000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4000, log: noLog });
 
   await assert.rejects(
     clients.submit({ rssItemId: itemId, downloadClientId: clientB }),
@@ -297,7 +338,7 @@ test('a download_client type/implementation mismatch is refused before any reque
     json: async () => { requests += 1; throw new Error('must not be called'); },
     text: async () => { requests += 1; throw new Error('must not be called'); },
   });
-  const clients = createDownloadClients({ raw, fetch, now: () => 4500, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4500, log: noLog });
 
   await assert.rejects(
     clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
@@ -325,7 +366,7 @@ test('an nzb feed writes to nzb_download and never to torrent_download', async (
   });
 
   const fetch = fakeFetch({ json: async () => ({ status: true, nzo_ids: ['SABnzbd_nzo_three'] }) });
-  const clients = createDownloadClients({ raw, fetch, now: () => 6000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 6000, log: noLog });
 
   const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -357,7 +398,7 @@ test('a late update cannot overwrite a row that is no longer submitting', async 
       return { status: true, nzo_ids: ['SABnzbd_nzo_four'] };
     },
   });
-  const clients = createDownloadClients({ raw, fetch, now: () => 7000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 7000, log: noLog });
 
   await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 

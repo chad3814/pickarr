@@ -16,13 +16,20 @@ function setup(): DatabaseSync {
   return raw;
 }
 
-/** Inserts one `download_client` row and returns its id. Mirrors `rows.test.ts`'s own `seedClient`. */
+/**
+ * Inserts one `download_client` row and returns its id. Mirrors
+ * `rows.test.ts`'s own `seedClient`, minus the credential: nothing in this
+ * file reads the row through `readClientConfig`, and since migration 14 the
+ * row would hold only a `secret` name, so a name here would be one nothing
+ * ever resolves. `paths.test.ts` and `select.test.ts` seed the same way.
+ */
 function seedClient(raw: DatabaseSync, overrides: { name?: string } = {}): number {
   const name = overrides.name ?? 'Client';
   raw.prepare(`
     INSERT INTO download_client
-      (name, type, implementation, url, api_key, username, password, category, import_mode, created_at, updated_at)
-    VALUES (?, 'torrent', 'qbittorrent', 'https://client.example.com', 'key', NULL, NULL, 'movies', 'copy', 1, 1)
+      (name, type, implementation, url, api_key_secret_name, username, password_secret_name,
+       category, import_mode, created_at, updated_at)
+    VALUES (?, 'torrent', 'qbittorrent', 'https://client.example.com', NULL, NULL, NULL, 'movies', 'copy', 1, 1)
   `).run(name);
   const inserted = raw.prepare('SELECT id FROM download_client WHERE name = ?').get(name);
   return Number((inserted as { id: unknown }).id);

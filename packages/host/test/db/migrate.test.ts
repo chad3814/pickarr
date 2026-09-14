@@ -5,6 +5,8 @@ import type { Migration } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { HOST_MIGRATIONS, migrateHost, migrateHostWith, migratePlugin } from '../../src/db/migrate.ts';
 import { SYNC_QUERIES, deletionsSince } from '../../src/api/reads.ts';
+import { createSecrets } from '../../src/secrets/instance.ts';
+import { readClientConfig } from '../../src/clients/config.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -892,4 +894,169 @@ test('host_state holds one row per key', () => {
       }),
     [{ key: 'auth.secret.placeholder', value: 'first' }],
   );
+});
+
+test('migration 13 creates the secret table with name as its primary key', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const columns = raw.prepare('PRAGMA table_info(secret)').all()
+    .map((row) => ({
+      name: String((row as { name: unknown }).name),
+      notNull: Number((row as { notnull: unknown }).notnull),
+      pk: Number((row as { pk: unknown }).pk),
+    }));
+  assert.deepEqual(columns, [
+    { name: 'name', notNull: 0, pk: 1 },
+    { name: 'value', notNull: 1, pk: 0 },
+    { name: 'created_at', notNull: 1, pk: 0 },
+    { name: 'updated_at', notNull: 1, pk: 0 },
+  ], 'secret must be keyed on name, with a non-null value');
+});
+
+test('a second row for one secret name is refused', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const insert = raw.prepare('INSERT INTO secret (name, value, created_at, updated_at) VALUES (?, ?, ?, ?)');
+  insert.run('tvdb_key', 'test-value', 1, 1);
+  try {
+    insert.run('tvdb_key', 'other-value', 2, 2);
+    assert.fail('a duplicate secret name must be refused');
+  } catch (error) {
+    // 1555 is SQLITE_CONSTRAINT_PRIMARYKEY. Asserted by code, not message.
+    assert.equal((error as { errcode?: number }).errcode, 1555);
+  }
+});
+
+/**
+ * The two credential fakes below (`'sab-api-key'`, `'qbt-password'`) are
+ * fixed, recognisable strings rather than anything real, so a failure diff
+ * from these tests is safe to read. Migration 14 moves real credentials on a
+ * real install; nothing here may print one.
+ */
+test('migration 14 moves a credential into secret and leaves a name behind', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 13));
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(1, 'sab', 'nzb', 'http://sab', 'sab-api-key', null, null, 'movies', 'move', 1, 1, 'sabnzbd');
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(2, 'qbt', 'torrent', 'http://qbt', null, 'admin', 'qbt-password', 'movies', 'move', 1, 1, 'qbittorrent');
+
+  migrateHost(raw);
+
+  const rows = raw.prepare('SELECT id, username, api_key_secret_name, password_secret_name FROM download_client ORDER BY id').all();
+  // Before either row is indexed: a migration that dropped the rows it was
+  // moving credentials off would otherwise be caught only incidentally, by
+  // whichever assertion below happened to throw on `undefined` first.
+  assert.equal(rows.length, 2, 'both client rows must survive the migration');
+  const sab = rows[0] as Record<string, unknown>;
+  const qbt = rows[1] as Record<string, unknown>;
+
+  assert.match(String(sab['api_key_secret_name']), /^[0-9a-f-]{36}$/, 'the api key must be replaced by a uuid');
+  assert.equal(sab['password_secret_name'], null);
+  assert.equal(qbt['api_key_secret_name'], null);
+  assert.match(String(qbt['password_secret_name']), /^[0-9a-f-]{36}$/, 'the password must be replaced by a uuid');
+  assert.equal(qbt['username'], 'admin', 'a username is not a credential and must not move');
+
+  // The credentials are now in `secret`, addressed by those names.
+  const value = (name: unknown) => String(
+    (raw.prepare('SELECT value FROM secret WHERE name = ?').get(String(name)) as { value: unknown }).value,
+  );
+  assert.equal(value(sab['api_key_secret_name']), 'sab-api-key');
+  assert.equal(value(qbt['password_secret_name']), 'qbt-password');
+  assert.equal(Number(raw.prepare('SELECT count(*) c FROM secret').get()?.c), 2, 'one secret per moved credential');
+
+  // The old columns are gone.
+  const columns = new Set(
+    raw.prepare('PRAGMA table_info(download_client)').all()
+      .map((row) => String((row as { name: unknown }).name)),
+  );
+  assert.ok(!columns.has('api_key'), 'api_key must be dropped');
+  assert.ok(!columns.has('password'), 'password must be dropped');
+  assert.ok(columns.has('username'), 'username must remain');
+});
+
+test('a row resolves to the same ClientConfig after migration 14 as before it', async () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 13));
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(1, 'sab', 'nzb', 'http://sab', 'sab-api-key', null, null, 'movies', 'move', 1, 1, 'sabnzbd');
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(2, 'qbt', 'torrent', 'http://qbt', null, 'admin', 'qbt-password', 'movies', 'move', 1, 1, 'qbittorrent');
+
+  // What the old, pre-migration code produced for these two rows, by hand --
+  // this is the contract the indirection must not change.
+  const before = [
+    { kind: 'sabnzbd', id: 1, baseUrl: 'http://sab', apiKey: 'sab-api-key', category: 'movies' },
+    { kind: 'qbittorrent-login', id: 2, baseUrl: 'http://qbt', username: 'admin', password: 'qbt-password', category: 'movies' },
+  ];
+
+  migrateHost(raw);
+  const secrets = createSecrets({ raw, baseDir: '/nonexistent-secrets-dir' });
+  const after = [await readClientConfig(raw, 1, secrets), await readClientConfig(raw, 2, secrets)];
+
+  assert.deepEqual(after, before, 'the indirection must be invisible to every caller');
+});
+
+test('migration 14 gives a blank credential no secret and no name', () => {
+  // `''` is what a blank form field saves as, and pre-migration
+  // `readClientConfig` folded it to "absent" and refused the client. If the
+  // migration named it, the row would come out holding a real uuid
+  // addressing a `secret` whose value is `''` -- so the client would read as
+  // *configured with a blank credential* rather than be refused, and that
+  // refusal would be lost on exactly the rows that most need it. The fold
+  // in `migration14` is what preserves it, and the analogous fold in
+  // `readClientConfig` is pinned by `clients/config.test.ts`.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 13));
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(1, 'blank-key', 'nzb', 'http://sab', '', null, null, 'movies', 'move', 1, 1, 'sabnzbd');
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(2, 'blank-password', 'torrent', 'http://qbt', null, 'admin', '', 'movies', 'move', 1, 1, 'qbittorrent');
+
+  migrateHost(raw);
+
+  const rows = raw.prepare('SELECT id, api_key_secret_name, password_secret_name FROM download_client ORDER BY id').all()
+    .map((row) => row as Record<string, unknown>);
+  // Both rows are still there, asserted before anything is read off them.
+  // `node:assert/strict` already makes `assert.equal(undefined, null)` throw,
+  // so an absent row fails the two assertions below rather than passing
+  // them -- but resting that on which `assert` this file happens to import
+  // is thinner than saying it, and a migration that dropped these rows
+  // should fail by name rather than incidentally. The `?.` stays regardless:
+  // `noUncheckedIndexedAccess` types an index read as possibly `undefined`
+  // and no runtime length assertion narrows that.
+  assert.equal(rows.length, 2, 'the migration must not drop the rows it was moving credentials off');
+  assert.equal(rows[0]?.['api_key_secret_name'], null, 'a blank api key must not become a name');
+  assert.equal(rows[1]?.['password_secret_name'], null, 'a blank password must not become a name');
+  assert.equal(
+    Number(raw.prepare('SELECT count(*) c FROM secret').get()?.c),
+    0,
+    'a blank credential is not a credential, so it gets no secret row either',
+  );
+});
+
+test('migration 14 leaves a row with no credential alone', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 13));
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, api_key, username, password, category, import_mode, created_at, updated_at, implementation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(1, 'bare', 'torrent', 'http://qbt', null, null, null, 'movies', 'move', 1, 1, 'qbittorrent');
+  migrateHost(raw);
+  const row = raw.prepare('SELECT api_key_secret_name, password_secret_name FROM download_client WHERE id = 1').get();
+  assert.equal((row as Record<string, unknown>)['api_key_secret_name'], null);
+  assert.equal((row as Record<string, unknown>)['password_secret_name'], null);
+  assert.equal(Number(raw.prepare('SELECT count(*) c FROM secret').get()?.c), 0, 'no secret row for a row with no credential');
 });

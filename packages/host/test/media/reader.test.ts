@@ -7,6 +7,7 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { createMediaReader } from '../../src/media/reader.ts';
 import { createHost } from '../../src/host.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
+import type { Secrets } from '../../src/secrets/instance.ts';
 
 function setup(): DatabaseSync {
   const { raw } = openTestDatabase();
@@ -196,6 +197,17 @@ const unusedFetch: QueuedFetch = {
 const unusedDownloads: DownloadClients = {
   submit: async () => { throw new Error('downloads.submit: not used by this test'); },
 };
+/**
+ * A `Secrets` that fails loudly if a test never meant to resolve a
+ * credential. No test in this file reads a `download_client` row through
+ * `readClientConfig`, so nothing here should reach the secrets chain --
+ * `clients/config.test.ts` and `clients/reconcile-job.test.ts` are where a
+ * real one is exercised.
+ */
+const unusedSecrets: Secrets = {
+  get: async () => { throw new Error('secrets.get: not used by this test'); },
+  saveSecret: () => { throw new Error('secrets.saveSecret: not used by this test'); },
+};
 
 /**
  * No test here attaches artwork, so this directory is never created --
@@ -232,7 +244,8 @@ test('a plugin\'s context carries a reader scoped to it', async () => {
     raw,
     db,
     fetch: unusedFetch,
-    downloads: unusedDownloads,
+    downloads: () => unusedDownloads,
+    secrets: unusedSecrets,
     now: () => 1000,
     artworkDir: unusedArtworkDir,
     // No `timers` override and no `start()`: the dispatcher arms nothing

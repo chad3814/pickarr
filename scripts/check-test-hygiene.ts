@@ -170,12 +170,13 @@ export function findViolations(file: string, source: string): Violation[] {
  * **Rule 2**: a credential column, named in a SQL string, outside the modules
  * allowed to read it.
  *
- * Three columns, from the auth design spec's §4: `auth_account.password` is a
- * password hash, `auth_session.token` is a live session, and `host_state.value`
- * is the host's Better Auth signing secret. A query that selects any of them
- * puts a credential somewhere it can be logged, serialised into a response, or
- * compared in application code that has no business holding it — and none of
- * that shows up as a failing test, because the query works perfectly.
+ * Four columns, from the auth design spec's §4: `auth_account.password` is a
+ * password hash, `auth_session.token` is a live session, `host_state.value`
+ * is the host's Better Auth signing secret, and `secret.value` is a third
+ * party's credential. A query that selects any of them puts a credential
+ * somewhere it can be logged, serialised into a response, or compared in
+ * application code that has no business holding it — and none of that shows
+ * up as a failing test, because the query works perfectly.
  *
  * It extends the slice-C rule that only `readClientConfig` may select
  * download-client credentials, and it is the same rule with a wider list.
@@ -215,6 +216,7 @@ const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
   { table: 'auth_account', column: 'password' },
   { table: 'auth_session', column: 'token' },
   { table: 'host_state', column: 'value' },
+  { table: 'secret', column: 'value' },
 ];
 
 /**
@@ -231,18 +233,24 @@ const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
  * exempts. An entry with no file behind it simply never matches, and a stale
  * entry left behind after a file is deleted grants nothing.
  *
- * **It is also the only entry that does any work, and there is now exactly
- * one.** `auth/instance.ts` was listed too, on the reasoning that it constructs
- * `betterAuth()` and hands the schema to `drizzleAdapter`. Measured: with the
- * allow-list emptied, rule 2 over `packages/host/src` reports **4** violations
- * and all four are `db/host-state.ts`; `auth/instance.ts` produces **zero**,
- * because it reaches those columns through the Drizzle adapter and names none
- * of them in any string. So "only the adapter may select these columns" holds
- * over every file on the branch on its own merits, and that entry was granting
- * a 442-line file a blanket exemption it never needed — which is the one way
- * this rule can be lost quietly, since a query added to an exempt file is a
- * query nothing reports. Removed. If the adapter is ever bypassed there
- * deliberately, the entry comes back in a diff, which is what this list is for.
+ * **There are now two entries, and both do real work.** `auth/instance.ts` was
+ * listed too, on the reasoning that it constructs `betterAuth()` and hands the
+ * schema to `drizzleAdapter`. Measured, when `db/host-state.ts` was the only
+ * credential reader: with the allow-list emptied, rule 2 over
+ * `packages/host/src` reported **4** violations and all four were
+ * `db/host-state.ts`; `auth/instance.ts` produced **zero**, because it reaches
+ * those columns through the Drizzle adapter and names none of them in any
+ * string. So "only the adapter may select these columns" held over every file
+ * on the branch on its own merits, and that entry was granting a 442-line file
+ * a blanket exemption it never needed — which is the one way this rule can be
+ * lost quietly, since a query added to an exempt file is a query nothing
+ * reports. Removed. If the adapter is ever bypassed there deliberately, the
+ * entry comes back in a diff, which is what this list is for.
+ *
+ * Task 2 added the second entry, `secrets/store.ts`, the only reader and
+ * writer of `secret.value`. With the allow-list emptied today, rule 2 over
+ * `packages/host/src` reports **6** violations: the same 4 `host_state.value`
+ * plus 2 `secret.value`, one for `store.ts`'s reader and one for its writer.
  *
  * Exported for the test that keeps it honest: dropping any one entry has to
  * produce a violation in that entry's own file, so an inert entry cannot be
@@ -253,6 +261,9 @@ export const CREDENTIAL_ALLOW_LIST: readonly string[] = [
   // Persists (and generates) the Better Auth signing secret and the first-boot
   // claim token, so it is the one module that reads `host_state.value`.
   join(HOST_SRC_DIR, 'db', 'host-state.ts'),
+  // The `secret` table's only reader and writer, so it is the one module that
+  // may name `secret.value`.
+  join(HOST_SRC_DIR, 'secrets', 'store.ts'),
 ];
 
 /**
@@ -846,14 +857,15 @@ async function checkCredentialColumns(): Promise<boolean> {
   console.error(
     `\n${violations.length} SQL string(s) read a credential column, or read a credential table in a\n` +
       'statement this check cannot read. auth_account.password is a password hash,\n' +
-      'auth_session.token is a live session, and host_state.value is this host\'s Better Auth\n' +
-      'signing secret — a query that selects one puts it somewhere it can be logged or serialised\n' +
-      'into a response, and nothing fails when that happens. A `table.*` above is a star select and\n' +
-      'a `table.?` is a substitution this check could not resolve; a `?.` names a table it could not\n' +
-      'resolve either, which may be a credential table. None of those names a credential and each\n' +
-      'may select one, so each is reported rather than assumed harmless. Name the columns the\n' +
-      'query actually needs; or, if this module is genuinely the one that may read a credential,\n' +
-      'add its path to CREDENTIAL_ALLOW_LIST in this script.\n',
+      'auth_session.token is a live session, host_state.value is this host\'s Better Auth\n' +
+      'signing secret, and secret.value is a third party\'s credential — a query that selects one\n' +
+      'puts it somewhere it can be logged or serialised into a response, and nothing fails when\n' +
+      'that happens. A `table.*` above is a star select and a `table.?` is a substitution this\n' +
+      'check could not resolve; a `?.` names a table it could not resolve either, which may be a\n' +
+      'credential table. None of those names a credential and each may select one, so each is\n' +
+      'reported rather than assumed harmless. Name the columns the query actually needs; or, if\n' +
+      'this module is genuinely the one that may read a credential, add its path to\n' +
+      'CREDENTIAL_ALLOW_LIST in this script.\n',
   );
   return false;
 }

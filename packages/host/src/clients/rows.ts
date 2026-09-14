@@ -86,8 +86,12 @@ export interface DownloadRow {
 /**
  * The columns every read below needs, in one place: never `infohash`
  * (torrent-only, and no function here needs it), never `attempts` (dead in
- * this slice), and never `api_key`/`username`/`password` -- this module
- * touches only the two download tables, which do not have those columns.
+ * this slice), and never a `download_client` credential column -- this
+ * module touches only the two download tables, which have none. Since
+ * migration 14 those are `api_key_secret_name`, `username` and
+ * `password_secret_name`, and the rule reaches the new names too: a secret
+ * name is safe to log, but a module that selects one is a module that could
+ * resolve it, and only `readClientConfig` may.
  *
  * `last_error` is here because it is read, not only written: see
  * `DownloadRow.lastError`.

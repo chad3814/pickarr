@@ -99,8 +99,16 @@ interface SignedIn extends Running {
  * `auth/instance.ts`, tested there, with no business in this file's log.
  *
  * `host` is the interface to bind, and `undefined` -- what every test but the
- * bind test passes -- is what an unset `PICKARR_READ_API_HOST` means in
- * production: `DEFAULT_HOST`, every interface.
+ * bind test passes -- asks the listener for its own `DEFAULT_HOST`, every
+ * interface.
+ *
+ * **That is a convenience of this file's, not what production does.** Since
+ * the config slice, `main` always passes a concrete string:
+ * `HostSettings.readHost` is a plain `string`, and an unset
+ * `PICKARR_READ_API_HOST` resolves through the config file's `server.host`
+ * and then `serverConfigSchema`'s own default -- the same `'0.0.0.0'`,
+ * carried in one place. `ReadServerDeps.host` one file over says so, and
+ * this comment used to say the opposite.
  */
 async function start(
   raw: DatabaseSync,

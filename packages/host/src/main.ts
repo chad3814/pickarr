@@ -15,12 +15,17 @@
  */
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaPlugin } from '@pickarr/contract';
+import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
-import { DEFAULT_PORT, createReadServer } from './api/server.ts';
+import { createReadServer } from './api/server.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
+import { createSecrets } from './secrets/instance.ts';
+import type { Secrets } from './secrets/instance.ts';
+import type { Config } from './config/instance.ts';
+import { openConfig } from './config/instance.ts';
+import { DEFAULT_CONFIG_PATH, databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from './config/schemas.ts';
 import { ensureAuthSecret } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase } from './db/open.ts';
@@ -28,9 +33,7 @@ import { createHostFetch } from './fetch/queue.ts';
 import { createHost } from './host.ts';
 import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
-
-/** `PICKARR_DATABASE`'s fallback -- the documented `/config` volume, exactly as 1.x's own default. */
-const DEFAULT_DATABASE_PATH = '/config/pickarr.db';
+import { assertOriginOnly } from './origin.ts';
 
 /**
  * A log line's structured half, as `key=value` pairs.
@@ -39,8 +42,17 @@ const DEFAULT_DATABASE_PATH = '/config/pickarr.db';
  * than a formatting preference: `String` of a row, a config or any other
  * object is `[object Object]`, so a caller that broke the rule against
  * logging one could not spill its contents through here even by accident.
- * Only strings pass through this today -- `api/server.ts`'s failure line,
- * whose `error` has already been through `redactUrl`.
+ *
+ * **Six call sites pass a detail today, and their values are not all
+ * strings.** `api/server.ts` has two (`read failed`, `read response
+ * failed`), whose `error` has already been through `redactUrl`;
+ * `clients/downloads.ts` has four, all sharing one
+ * `{rssItemId: number, downloadClientId: number, kind: string}` -- `main`'s
+ * `log` is handed to `createDownloadClients` as well as to the read server.
+ * So `String` here is load-bearing for numbers as much as for objects. (The
+ * `log` that `clients/reconcile.ts`, `clients/deliver.ts` and
+ * `artwork/store.ts` call is `host.ts`'s `hostLog`, which does not come
+ * through this function at all.)
  *
  * Exported for its own test, because the claim above is the whole reason this
  * is a function and not an inline template.
@@ -60,11 +72,11 @@ function log(message: string, detail?: Readonly<Record<string, unknown>>): void 
  * in `packages/core/src/main.ts`, reproduced here rather than imported: host
  * production code must not depend on `@pickarr/core`, which this only
  * mirrors in shape. Unlike 1.x's version this takes no override argument --
- * there is deliberately no config surface in 2.0 yet (slice B's spec,
- * `docs/superpowers/specs/2026-09-03-feed-reader-artwork-design.md` §1.1:
- * 1.x's `PICKARR_CONFIG` json is not ported, feeds are seeded rows), so
- * nothing could ever supply one. Cited as the spec, because no plan in this
- * repo has numbered sections -- slice B's plan has an unnumbered
+ * the config file this slice adds (`config/schemas.ts`) has no `artwork`
+ * namespace, and feeds are seeded rows rather than config (slice B's spec,
+ * `docs/superpowers/specs/2026-09-03-feed-reader-artwork-design.md` §1.1),
+ * so nothing could ever supply one. Cited as the spec, because no plan in
+ * this repo has numbered sections -- slice B's plan has an unnumbered
  * `## Global Constraints` and references the *spec's* §1.2 itself, which is
  * the exclusions list and says nothing about config.
  *
@@ -184,8 +196,14 @@ const PORT_DIGITS = /^\d+$/;
  * takes the one 1.x was configured with -- and the whole point of the
  * `pickarr-2` branch is that both run side by side until 2.0 reaches parity.
  *
- * The port the read API listens on: `PICKARR_READ_API_PORT` when set to one, and
- * `DEFAULT_PORT` otherwise.
+ * The port the read API listens on, once `resolveSettings` has already
+ * decided the operator set `PICKARR_READ_API_PORT` to something: this
+ * validates that string and nothing else. **It carries no default of its
+ * own** -- `config/schemas.ts`'s `serverConfigSchema` does, and
+ * `resolveSettings` reaches for that (via the config file's `server`
+ * namespace) when the variable is unset, so this function is called only
+ * when there is a string to validate. A default in both places is one that
+ * could disagree with itself; `schemas.test.ts` asserts the one that remains.
  *
  * Takes the variable's value rather than reading `process.env` itself, so it
  * is testable without mutating the environment the whole process shares.
@@ -196,8 +214,7 @@ const PORT_DIGITS = /^\d+$/;
  * listens somewhere nothing polls. Digits only, and inside the range a
  * listener can actually bind, or the process refuses to start.
  */
-export function resolveReadPort(configured: string | undefined): number {
-  if (configured === undefined || configured === '') return DEFAULT_PORT;
+export function resolveReadPort(configured: string): number {
   if (!PORT_DIGITS.test(configured)) {
     throw new Error(`PICKARR_READ_API_PORT is not a port number: ${configured}`);
   }
@@ -212,31 +229,25 @@ export function resolveReadPort(configured: string | undefined): number {
 }
 
 /**
- * The interface the read API binds: `PICKARR_READ_API_HOST` when set to
- * anything, and `undefined` -- which `createReadServer` reads as its own
- * `DEFAULT_HOST`, every interface -- otherwise.
+ * The interface the read API binds, once `resolveSettings` has already
+ * decided the operator set `PICKARR_READ_API_HOST` to something: this is
+ * that string, unchanged.
  *
- * **The default is deliberately not restated here.** One name for it, in the
- * module that does the binding, is what keeps this from being a second place
- * that could disagree about what the shipped process listens on. What this
- * function decides is only whether the operator said anything.
+ * **The default is not this function's to carry.** `config/schemas.ts`'s
+ * `serverConfigSchema` holds the one copy (`0.0.0.0`, applied via the
+ * config file's `server` namespace), and `resolveSettings` reaches for it
+ * when the variable is unset -- so this function decides nothing beyond
+ * "the operator set a value, and here it is."
  *
  * Nothing is validated beyond that: what can be bound is the listener's
  * question, and `createReadServer` already rejects a bind that fails rather
  * than leaving a process that looks started and serves nothing.
  *
- * **An empty variable is an unset one**, exactly as it is for the port -- and
- * here that is load-bearing rather than tidy. `PICKARR_READ_API_HOST=` is
- * what a compose file with the key and no value passes, and
- * `listen(port, '')` binds the IPv6 wildcard `::` (measured on node 26), not
- * the documented `0.0.0.0`: a different family, reported back as a different
- * address, for a variable the operator never meant to set.
- *
  * Takes the variable's value rather than reading `process.env` itself, so it
  * is testable without mutating the environment the whole process shares.
  */
-export function resolveReadHost(configured: string | undefined): string | undefined {
-  return configured === undefined || configured === '' ? undefined : configured;
+export function resolveReadHost(configured: string): string {
+  return configured;
 }
 
 /**
@@ -244,67 +255,126 @@ export function resolveReadHost(configured: string | undefined): string | undefi
  * reverse proxy. `undefined` when unset or empty, which is the ordinary case
  * -- no proxy, and the address the listener bound is the origin.
  *
- * **Refused at boot when it is not an http origin**, rather than carried into
+ * **Refused at boot when it is not a bare origin**, rather than carried into
  * `baseURL`, because the failure it would otherwise cause is both silent and
  * total: Better Auth compares every state-changing request's `Origin` against
  * `baseURL` (the auth slice's §2, measured), so a malformed value refuses
  * every sign-in with a 403 whose reason appears in no log -- on the slice
- * where a session is the only thing protecting this socket. A host comes with
- * the scheme rather than being a second rule: `http:` and `https:` are
- * special schemes, so a url with no host does not parse at all (`http://` is
- * a parse failure, measured). What the host resolves to, and whether anything
- * answers there, is not this process's business and could not be known here
- * anyway.
- *
- * **An origin is the whole of what this variable may hold**, so a path, a
- * query string or a fragment is refused here too -- the scheme was once the
- * whole of what was checked, and that left the failure this function exists to
- * prevent wide open. Measured, all three the same way: with `baseURL`
- * `http://127.0.0.1:<port>/pickarr`, `…/?x=1` or `…/#frag`, Better Auth mounts
- * itself under that path and every auth route answers **404** on the path
- * `api/server.ts` forwards -- so nobody can sign in, sign up or sign out,
- * sessions issued earlier keep working because the guard calls
- * `auth.api.getSession` in-process, and `/api/health` answers **200** so a
- * container health check reports the host healthy. Nothing is logged.
- * `https://host/pickarr` is a reverse proxy on a subpath, which is an
- * ordinary arrangement and a *feature* this slice does not have; refusing it
- * at boot says so, where reducing it to its origin would give that operator a
- * half-working install (cookies and redirects at the wrong path) instead of
- * an answer.
- *
- * **A trailing slash is not a path**: `https://host/` has pathname `/`, is
- * accepted, and works -- Better Auth normalizes it when it composes the
- * mount (measured, and the one prediction the review got backwards).
- *
- * **No failure below names the value.** Nothing this repo emits may carry a
- * url, and a boot that dies on an unreadable environment variable is exactly
- * where a url would otherwise reach a log: the message names the variable and
- * the rule it broke, which is all the operator needs to fix it.
+ * where a session is the only thing protecting this socket. The checks
+ * themselves -- what counts as an origin, what a path/query string/fragment
+ * does to Better Auth's mount, why a trailing slash is not a path, and why no
+ * failure names the value -- live in `origin.ts`'s `assertOriginOnly`, which
+ * this variable shares with the config file's `server.publicUrl`
+ * (`config/schemas.ts`): one function both callers refuse the same value
+ * through, rather than two copies that could drift.
  *
  * The value is returned as it was written rather than normalized, which after
- * the checks above means at most a trailing slash. Better Auth compares
+ * `assertOriginOnly` means at most a trailing slash. Better Auth compares
  * origins, and `auth/instance.ts`'s `publicOrigin` is what reduces that to an
  * origin -- in the one place that does the comparing.
  */
 export function resolvePublicUrl(configured: string | undefined): string | undefined {
   if (configured === undefined || configured === '') return undefined;
-  if (!URL.canParse(configured)) {
-    throw new Error('PICKARR_PUBLIC_URL is not a url');
-  }
-  const url = new URL(configured);
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('PICKARR_PUBLIC_URL is not an http or https url');
-  }
-  if (url.pathname !== '/') {
-    throw new Error('PICKARR_PUBLIC_URL must have no path: its pathname must be /');
-  }
-  if (url.search !== '') {
-    throw new Error('PICKARR_PUBLIC_URL must have no query string');
-  }
-  if (url.hash !== '') {
-    throw new Error('PICKARR_PUBLIC_URL must have no fragment');
-  }
+  assertOriginOnly(configured, 'PICKARR_PUBLIC_URL');
   return configured;
+}
+
+/** Every value the boot needs from the environment and the config file, with the environment winning. */
+export interface HostSettings {
+  readHost: string;
+  port: number;
+  publicUrl: string | undefined;
+  databasePath: string;
+  secretsBaseDir: string;
+  config: Config;
+}
+
+/**
+ * The value an operator actually set, or `undefined` for one they did not.
+ *
+ * Empty and unset are the same thing, for **every** variable `main` reads --
+ * not just `publicUrl`, which was the only one that used to apply this rule.
+ * A compose file that declares a key with no value passes exactly an empty
+ * string, and "the operator configured emptiness" is never what that means.
+ * Measured on this Node, for the interface case specifically:
+ *
+ *     listen(port, '')        -> address '::'       family IPv6
+ *     listen(port, '0.0.0.0') -> address '0.0.0.0'  family IPv4
+ *     listen(port, undefined) -> address '::'       family IPv6
+ *
+ * so an empty `PICKARR_READ_API_HOST` reaching the listener unchanged binds
+ * the IPv6 wildcard where `0.0.0.0` is documented -- silently, on a
+ * different address family, for a variable the operator never meant to set.
+ * Checking only `=== undefined` would also make an empty
+ * `PICKARR_READ_API_PORT` throw (`resolveReadPort` validates digits, and
+ * `''` has none) instead of falling back, an empty `PICKARR_DATABASE`
+ * resolve to an empty path instead of the file's or the schema's, and an
+ * empty `PICKARR_CONFIG` mean "there is no config file" instead of "use the
+ * default one" -- which was this rule's own first defect, because it was
+ * written per variable at four call sites and the fifth was missed.
+ *
+ * **One function, every variable.** Do not inline `?? default` or
+ * `=== undefined` for a new variable: a rule that differs by variable is the
+ * shape that produced this twice.
+ */
+function configuredEnvValue(raw: string | undefined): string | undefined {
+  return raw === undefined || raw === '' ? undefined : raw;
+}
+
+/**
+ * Which file `resolveSettings` reads: `PICKARR_CONFIG`, else
+ * {@link DEFAULT_CONFIG_PATH}.
+ *
+ * Separate from `resolveSettings` because it is the one of the five
+ * variables whose effect is not observable in the returned settings -- an
+ * empty `PICKARR_CONFIG` used to reach `readFile('')`, which rejects
+ * `ENOENT`, which `readConfigDocument` correctly reads as "no file on a
+ * first boot". So the config file was ignored in its entirety, the database
+ * was opened wherever the *default* said rather than where `database.path`
+ * pointed, `migrateHost` ran against that other file, and the host booted
+ * clean on an empty library with nothing logged as wrong. Exported so that
+ * decision has a test of its own, the way `resolveReadPort` and
+ * `resolveReadHost` do.
+ */
+export function resolveConfigPath(env: NodeJS.ProcessEnv): string {
+  return configuredEnvValue(env['PICKARR_CONFIG']) ?? DEFAULT_CONFIG_PATH;
+}
+
+/**
+ * Environment, then config file, then the schema's default.
+ *
+ * The environment has to keep winning: every deployment that exists today
+ * sets these variables and nothing else, so a file that overrode them would
+ * change a running install on upgrade. The schema carries the default, and
+ * the resolvers below only validate a string an operator actually set --
+ * a default in both places is one that can disagree with itself.
+ *
+ * All five variables this function reads go through {@link
+ * configuredEnvValue}, so "empty is unset" is decided once rather than per
+ * variable. `BETTER_AUTH_SECRET` is `main`'s sixth and does not come through
+ * here -- it has no config-file counterpart to fall back to -- but it goes
+ * through the same {@link configuredEnvValue} at its own call site, in
+ * `main` itself.
+ */
+export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSettings> {
+  const config = await openConfig({ path: resolveConfigPath(env) });
+  const server = config.register('server', serverConfigSchema);
+  const database = config.register('database', databaseConfigSchema);
+  const secrets = config.register('secrets', secretsConfigSchema);
+
+  const portRaw = configuredEnvValue(env['PICKARR_READ_API_PORT']);
+  const hostRaw = configuredEnvValue(env['PICKARR_READ_API_HOST']);
+  const publicUrlRaw = configuredEnvValue(env['PICKARR_PUBLIC_URL']);
+  const databasePathRaw = configuredEnvValue(env['PICKARR_DATABASE']);
+
+  return {
+    readHost: hostRaw === undefined ? server.current.host : resolveReadHost(hostRaw),
+    port: portRaw === undefined ? server.current.port : resolveReadPort(portRaw),
+    publicUrl: publicUrlRaw === undefined ? server.current.publicUrl : resolvePublicUrl(publicUrlRaw),
+    databasePath: databasePathRaw ?? database.current.path,
+    secretsBaseDir: secrets.current.baseDir,
+    config,
+  };
 }
 
 /**
@@ -335,10 +405,17 @@ export function resolvePublicUrl(configured: string | undefined): string | undef
  * The row's other property -- generated once even under a race, so a restart
  * does not log everyone out -- is `ensureGeneratedValue`'s and is untouched.
  *
- * **An empty variable is an unset one**, as it is for the port, the host and
- * the public url: `BETTER_AUTH_SECRET=` is what a compose file with the key
- * and no value passes, and signing every cookie with the empty string is not
- * what that operator asked for.
+ * **An empty variable is an unset one, same as every other variable `main`
+ * reads** -- but that rule is not this function's own anymore. Its caller
+ * passes `configuredEnvValue(process.env['BETTER_AUTH_SECRET'])`, so `''`
+ * has already become `undefined` by the time it reaches here: `configured`
+ * means "the value an operator actually set", exactly {@link
+ * configuredEnvValue}'s own contract, and this function trusts it rather
+ * than checking `=== ''` a second time. This function used to carry that
+ * check itself, alongside {@link configuredEnvValue}'s -- two copies of the
+ * same rule, which is the shape {@link configuredEnvValue}'s own doc names
+ * as the thing to avoid, because a rule written twice is a rule that can be
+ * fixed in one copy and left broken in the other.
  *
  * Takes the variable's value rather than reading `process.env` itself, so the
  * precedence is testable without mutating the environment the whole process
@@ -347,7 +424,7 @@ export function resolvePublicUrl(configured: string | undefined): string | undef
  * business (§6 documents it).
  */
 export function resolveAuthSecret(configured: string | undefined, raw: DatabaseSync, at: number): string {
-  if (configured !== undefined && configured !== '') return configured;
+  if (configured !== undefined) return configured;
   return ensureAuthSecret(raw, at);
 }
 
@@ -453,13 +530,12 @@ export function createShutdown(
  *    anywhere prints the signing secret.
  *
  * `argv` is accepted for parity with a conventional process entry point;
- * this slice has no argument surface beyond the `PICKARR_DATABASE`,
- * `PICKARR_READ_API_PORT`, `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL` and
- * `BETTER_AUTH_SECRET` environment variables (there is deliberately no config
- * surface yet -- slice B's spec §1.1, cited in full on `resolveArtworkDir`
- * above), so nothing here reads it. `BETTER_AUTH_SECRETS`, the plural, is
- * read by the library itself and by nothing in this package; the auth slice's
- * §6 documents both.
+ * this slice has no argument surface beyond `resolveSettings`'s environment
+ * variables (`PICKARR_CONFIG`, `PICKARR_DATABASE`, `PICKARR_READ_API_PORT`,
+ * `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL`) and `BETTER_AUTH_SECRET`, so
+ * nothing here reads it. `BETTER_AUTH_SECRETS`, the plural, is read by the
+ * library itself and by nothing in this package; the auth slice's §6
+ * documents both.
  *
  * `deps` is a test seam and nothing else: the shipped entry point (`bin.ts`)
  * passes none of it. `plugins` lets a test compose the process the way the
@@ -495,17 +571,24 @@ export async function main(
   // claiming one media type is a configuration error, and the earliest
   // possible refusal is the one that touches least on its way out.
   const pluginIdForType = createPluginIdForType(plugins);
-  const port = resolveReadPort(process.env['PICKARR_READ_API_PORT']);
-  const readHost = resolveReadHost(process.env['PICKARR_READ_API_HOST']);
-  const publicUrl = resolvePublicUrl(process.env['PICKARR_PUBLIC_URL']);
 
-  const databasePath = process.env['PICKARR_DATABASE'] ?? DEFAULT_DATABASE_PATH;
-  const { raw, db } = openDatabase(databasePath);
+  // Config path from `PICKARR_CONFIG` (default `DEFAULT_CONFIG_PATH`) →
+  // config file → database path → database handle → secrets (`raw` plus
+  // `baseDir`). Config never depends on secrets, so there is no cycle
+  // (design spec §6.6) -- and `settings.databasePath` is why the file must
+  // be read before `openDatabase` rather than after.
+  const settings = await resolveSettings(process.env);
+  const { raw, db } = openDatabase(settings.databasePath);
   migrateHost(raw);
 
-  const artworkDir = resolveArtworkDir(databasePath);
+  const secrets = createSecrets({ raw, baseDir: settings.secretsBaseDir });
+  const artworkDir = resolveArtworkDir(settings.databasePath);
   const fetch = createHostFetch({ fetch: globalThis.fetch });
-  const downloads = createDownloadClients({ raw, fetch, now: () => Date.now(), log });
+  // A factory, not a built object: `createHost` supplies the `Secrets` it
+  // will also give the reconcile handler, so the two cannot be different
+  // instances. See `createHost`'s own `downloads` doc for why that matters.
+  const downloads = (hostSecrets: Secrets): DownloadClients =>
+    createDownloadClients({ raw, fetch, secrets: hostSecrets, now: () => Date.now(), log });
 
   // Two shapes, not one object literal with `timers` always present:
   // `exactOptionalPropertyTypes` is on, so an explicit `timers: undefined`
@@ -517,6 +600,7 @@ export async function main(
       db,
       fetch,
       downloads,
+      secrets,
       now: () => Date.now(),
       artworkDir,
     })
@@ -525,6 +609,7 @@ export async function main(
       db,
       fetch,
       downloads,
+      secrets,
       now: () => Date.now(),
       artworkDir,
       timers: deps.timers,
@@ -539,8 +624,8 @@ export async function main(
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
-    host: readHost,
-    port,
+    host: settings.readHost,
+    port: settings.port,
     // Built from the address the listener bound rather than here, because
     // `baseURL` has to be the origin requests arrive at and `port` may be 0 --
     // see `ReadServerDeps.authFor`.
@@ -554,18 +639,20 @@ export async function main(
     // not need to warn about a deployment that has told it nothing.
     //
     // **The secret is never logged**, here or anywhere it travels; it is
-    // decided by `resolveAuthSecret` above -- `BETTER_AUTH_SECRET` when the
-    // operator set it, else the row `ensureAuthSecret` generates once and
-    // persists -- so the host boots configured either way. Read per
-    // construction rather than once at the top of `main`, on the same
-    // reasoning as `baseURL`: this closure is what the listener calls, and
-    // there is exactly one instance per process.
+    // decided by `resolveAuthSecret` above, from `BETTER_AUTH_SECRET` run
+    // through `configuredEnvValue` first -- so an empty variable reaches it
+    // as `undefined`, same as the other five -- else the row
+    // `ensureAuthSecret` generates once and persists -- so the host boots
+    // configured either way. Read per construction rather than once at the
+    // top of `main`, on the same reasoning as `baseURL`: this closure is
+    // what the listener calls, and there is exactly one instance per
+    // process.
     authFor: (baseURL) => createAuth({
       raw,
       db,
-      secret: resolveAuthSecret(process.env['BETTER_AUTH_SECRET'], raw, Date.now()),
-      baseURL: publicUrl ?? baseURL,
-      publicUrl,
+      secret: resolveAuthSecret(configuredEnvValue(process.env['BETTER_AUTH_SECRET']), raw, Date.now()),
+      baseURL: settings.publicUrl ?? baseURL,
+      publicUrl: settings.publicUrl,
       log,
     }),
     log,
@@ -579,7 +666,7 @@ export async function main(
   }
 
   log(
-    `running: database ${databasePath}, artwork ${artworkDir}, `
+    `running: database ${settings.databasePath}, artwork ${artworkDir}, `
     + `read api on http://${server.host}:${server.port}, `
     + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
     + `${clientIds.length} download client(s) scheduled`,

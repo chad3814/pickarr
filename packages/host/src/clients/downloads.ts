@@ -19,6 +19,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, DownloadSubmission } from '@pickarr/contract';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import { readClientConfig } from './config.ts';
+import type { Secrets } from '../secrets/instance.ts';
 import type { ClientConfig } from './config.ts';
 import { createQbittorrentClient, infohashFromMagnet } from './qbittorrent.ts';
 import { redactUrl } from './redact.ts';
@@ -202,10 +203,17 @@ function buildPlan(config: ClientConfig, fetch: QueuedFetch): Plan {
 export function createDownloadClients(deps: {
   raw: DatabaseSync;
   fetch: QueuedFetch;
+  /**
+   * Resolves the `secret` name a client row holds into the credential its
+   * adapter sends. Required rather than optional: a default here would be a
+   * second place the secrets chain is configured, and the chain's order is
+   * its whole contract.
+   */
+  secrets: Secrets;
   now: () => number;
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }): DownloadClients {
-  const { raw, fetch, now, log } = deps;
+  const { raw, fetch, secrets, now, log } = deps;
 
   return {
     async submit(submission: DownloadSubmission): Promise<string | null> {
@@ -218,7 +226,7 @@ export function createDownloadClients(deps: {
         );
       }
 
-      const config = readClientConfig(raw, submission.downloadClientId);
+      const config = await readClientConfig(raw, submission.downloadClientId, secrets);
       const plan = buildPlan(config, fetch);
 
       const insertedAt = now();

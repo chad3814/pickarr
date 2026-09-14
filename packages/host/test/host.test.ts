@@ -14,6 +14,7 @@ import { createHost, HOST_PLUGIN_ID } from '../src/host.ts';
 import type { Host } from '../src/host.ts';
 import type { QueuedFetch } from '../src/fetch/queue.ts';
 import type { Timers } from '../src/jobs/dispatcher.ts';
+import type { Secrets } from '../src/secrets/instance.ts';
 
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
 const unusedFetch: QueuedFetch = {
@@ -94,6 +95,17 @@ async function runDue(host: Host, setTimeoutCalls: TimerCall[]): Promise<void> {
 const unusedDownloads: DownloadClients = {
   submit: async () => { throw new Error('downloads.submit: not used by this test'); },
 };
+/**
+ * A `Secrets` that fails loudly if a test never meant to resolve a
+ * credential. No test in this file reads a `download_client` row through
+ * `readClientConfig`, so nothing here should reach the secrets chain --
+ * `clients/config.test.ts` and `clients/reconcile-job.test.ts` are where a
+ * real one is exercised.
+ */
+const unusedSecrets: Secrets = {
+  get: async () => { throw new Error('secrets.get: not used by this test'); },
+  saveSecret: () => { throw new Error('secrets.saveSecret: not used by this test'); },
+};
 
 /**
  * No test in this file attaches artwork, so this directory is never
@@ -161,7 +173,8 @@ function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
     raw,
     db,
     fetch: overrides?.fetch ?? unusedFetch,
-    downloads: unusedDownloads,
+    downloads: () => unusedDownloads,
+    secrets: unusedSecrets,
     now: overrides?.now ?? (() => 1000),
     artworkDir: unusedArtworkDir,
     timers,
@@ -285,6 +298,44 @@ test('a download request reaches the plugin owning that item\'s feed', async () 
   assert.deepEqual(betaReceived, []);
 });
 
+test('the downloads subsystem is built from the very Secrets the host resolves credentials through', () => {
+  // The invariant `createHost`'s `downloads` parameter exists to hold, and
+  // the only reason it is a factory rather than a built object: there is one
+  // `Secrets` in this host, the downloads subsystem is built from it, and
+  // `createReconcileHandler` is handed the same `deps.secrets` expression --
+  // so the two cannot end up on separate memoization caches, where a
+  // `saveSecret` through one would leave the other serving a credential that
+  // had just been changed (design spec §3.5).
+  //
+  // Asserted by reference, not by shape: two `Secrets` with identical
+  // behaviour are still two caches, so equality of value would prove
+  // nothing here.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const hostSecrets: Secrets = {
+    get: async () => { throw new Error('secrets.get: not used by this test'); },
+    saveSecret: () => { throw new Error('secrets.saveSecret: not used by this test'); },
+  };
+
+  let handed: Secrets | undefined;
+  createHost({
+    raw,
+    db,
+    fetch: unusedFetch,
+    downloads: (secrets) => {
+      handed = secrets;
+      return unusedDownloads;
+    },
+    secrets: hostSecrets,
+    now: () => 1000,
+    artworkDir: unusedArtworkDir,
+    // No `timers` override and no `start()`: the dispatcher arms nothing
+    // until started, so no real timer is created by this test.
+  });
+
+  assert.equal(handed, hostSecrets, "the factory must be handed the host's own Secrets, not another instance");
+});
+
 test('a plugin submitting a download reaches the injected client and reads back its reference', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
@@ -300,7 +351,17 @@ test('a plugin submitting a download reaches the injected client and reads back 
       return `sab-${submission.rssItemId}`;
     },
   };
-  const host = createHost({ raw, db, fetch: unusedFetch, downloads, now: () => 1000, artworkDir: unusedArtworkDir });
+  const host = createHost({
+    raw,
+    db,
+    fetch: unusedFetch,
+    // The factory ignores the `Secrets` it is handed: this double resolves
+    // no credential, so there is nothing for it to resolve one through.
+    downloads: () => downloads,
+    secrets: unusedSecrets,
+    now: () => 1000,
+    artworkDir: unusedArtworkDir,
+  });
 
   // The reference is read, not discarded. A call whose return value nothing
   // consumes pins only the parameters — `submit` could answer `undefined` and

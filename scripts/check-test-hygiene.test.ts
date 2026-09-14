@@ -449,7 +449,7 @@ test('a table name this check cannot resolve is a violation, because it may be a
  */
 const HOST_SRC = 'packages/host/src';
 
-test('the credential allow-list has one entry, and the real tree needs no other', async () => {
+test('the credential allow-list has two entries, and the real tree needs no other', async () => {
   // **An inert entry is how this rule gets lost quietly.**
   // `auth/instance.ts` was allow-listed too, on the reasoning that it
   // constructs `betterAuth()`. It reaches every credential column through the
@@ -459,8 +459,8 @@ test('the credential allow-list has one entry, and the real tree needs no other'
   // reports. Both halves are asserted over the real tree rather than a
   // fixture, because the claim is about this repo: with the allow-list
   // emptied, the only credential-column SQL on the branch is
-  // `db/host-state.ts`'s four statements, and the shipped list is exactly
-  // what makes the tree clean.
+  // `db/host-state.ts`'s four statements and `secrets/store.ts`'s two, and
+  // the shipped list is exactly what makes the tree clean.
   assert.deepEqual(
     (await findCredentialSelections(HOST_SRC, [])).map((violation) => [
       relative(HOST_SRC, violation.file),
@@ -471,13 +471,15 @@ test('the credential allow-list has one entry, and the real tree needs no other'
       [join('db', 'host-state.ts'), 'host_state.value'],
       [join('db', 'host-state.ts'), 'host_state.value'],
       [join('db', 'host-state.ts'), 'host_state.value'],
+      [join('secrets', 'store.ts'), 'secret.value'],
+      [join('secrets', 'store.ts'), 'secret.value'],
     ],
-    'rule 2 with no allow-list must report host-state.ts and nothing else -- an auth file appearing here means the adapter is being bypassed',
+    'rule 2 with no allow-list must report host-state.ts and store.ts and nothing else -- an auth file appearing here means the adapter is being bypassed',
   );
   assert.deepEqual(
     await findCredentialSelections(HOST_SRC),
     [],
-    'and the shipped allow-list, one entry, is enough to make the tree clean',
+    'and the shipped allow-list, two entries, is enough to make the tree clean',
   );
 });
 
@@ -497,7 +499,7 @@ test('every allow-list entry is one the tree actually needs', async () => {
   assert.ok(CREDENTIAL_ALLOW_LIST.length > 0, 'an empty allow-list would make this test vacuous');
   for (const entry of CREDENTIAL_ALLOW_LIST) {
     const without = CREDENTIAL_ALLOW_LIST.filter((path) => path !== entry);
-    // eslint-disable-next-line no-await-in-loop -- one entry today; a directory walk per entry is not a hot path
+    // eslint-disable-next-line no-await-in-loop -- two entries today; a directory walk per entry is not a hot path
     const violations = await findCredentialSelections(HOST_SRC, without);
     assert.ok(
       violations.length > 0 && violations.every((violation) => violation.file === entry),

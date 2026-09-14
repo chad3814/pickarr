@@ -22,8 +22,11 @@
  * doing needless work, never reach the "stop rescheduling" check below, and
  * retry to exhaustion against a row that no longer exists instead of ending
  * its cycle cleanly. The existence check here selects only `id` -- never
- * `api_key`, `username` or `password`, which only `readClientConfig` may
- * select at all.
+ * `api_key_secret_name`, `username` or `password_secret_name`, which only
+ * `readClientConfig` may select at all. Those two name a secret rather than
+ * holding one since migration 14, but the rule is unchanged: resolving a
+ * name is `readClientConfig`'s job, and a module that never selects one can
+ * never resolve one either.
  *
  * **Reschedule goes through `scheduleReconcile`, never a bare `enqueue`.**
  * This handler can legitimately run twice: the enqueue below and the
@@ -46,6 +49,7 @@ import { pendingJobId, readPayloadNumber } from '../jobs/pending.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import { readClientConfig } from './config.ts';
 import type { ClientConfig } from './config.ts';
+import type { Secrets } from '../secrets/instance.ts';
 import { createQbittorrentClient } from './qbittorrent.ts';
 import { createSabnzbdClient } from './sabnzbd.ts';
 import { normalizeClientCategory } from './snapshot.ts';
@@ -75,8 +79,8 @@ function readReconcilePayload(payload: unknown): { clientId: number } {
 /**
  * Whether `download_client` row `clientId` still exists. Selects only `id`
  * -- this is the read the module doc's "read first" step describes, and it
- * must never select `api_key`, `username` or `password`; only
- * `readClientConfig` may.
+ * must never select `api_key_secret_name`, `username` or
+ * `password_secret_name`; only `readClientConfig` may.
  */
 function clientRowExists(raw: DatabaseSync, clientId: number): boolean {
   const row = raw.prepare('SELECT id FROM download_client WHERE id = ?').get(clientId);
@@ -260,6 +264,13 @@ export async function scheduleReconcile(
 export function createReconcileHandler(deps: {
   raw: DatabaseSync;
   fetch: QueuedFetch;
+  /**
+   * Resolves the `secret` name a client row holds into the credential its
+   * adapter sends. Required rather than optional: a default here would be a
+   * second place the secrets chain is configured, and the chain's order is
+   * its whole contract.
+   */
+  secrets: Secrets;
   now: () => number;
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
   deliver: (pluginId: string, file: DownloadedFile) => Promise<void>;
@@ -272,7 +283,7 @@ export function createReconcileHandler(deps: {
     // before any other work, including `readClientConfig`.
     if (!clientRowExists(deps.raw, clientId)) return;
 
-    const config = readClientConfig(deps.raw, clientId);
+    const config = await readClientConfig(deps.raw, clientId, deps.secrets);
     const category = normalizeClientCategory(config.category);
     const adapter = buildReconcileAdapter(config, deps.fetch);
 

@@ -8,6 +8,8 @@ import type { Host } from '../../src/host.ts';
 import { scheduleKnownDownloadClients } from '../../src/main.ts';
 import { buildReconcileAdapter, createReconcileHandler, RECONCILE_INTERVAL_S } from '../../src/clients/reconcile-job.ts';
 import { readClientConfig } from '../../src/clients/config.ts';
+import { createSecrets } from '../../src/secrets/instance.ts';
+import type { Secrets } from '../../src/secrets/instance.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
 import type { Timers } from '../../src/jobs/dispatcher.ts';
 import type { DownloadClients, JobQueue, PluginContext } from '@pickarr/contract';
@@ -26,6 +28,26 @@ const unusedDownloads: DownloadClients = {
 
 /** No test here attaches artwork, so this directory is never created or read. */
 const unusedArtworkDir = '/nonexistent/pickarr-reconcile-job-test-artwork-unused';
+
+/**
+ * The `secret` name every seeded client row carries, and the api key behind
+ * it. A row holds the name; `makeSecrets` puts the value in the `secret`
+ * table, which is where `readClientConfig` resolves it from. The value is a
+ * fixed fake, so nothing real can reach a failure diff.
+ */
+const CLIENT_API_KEY_SECRET = '00000000-0000-4000-8000-000000000001';
+const CLIENT_API_KEY = 'test-key';
+
+/**
+ * A real secrets subsystem over this database, with the seeded clients' api
+ * key already saved. `baseDir` does not exist, so the chain's file link finds
+ * nothing and every value comes from the `secret` table.
+ */
+function makeSecrets(raw: DatabaseSync): Secrets {
+  const secrets = createSecrets({ raw, baseDir: '/nonexistent/pickarr-reconcile-job-test-secrets' });
+  secrets.saveSecret(CLIENT_API_KEY_SECRET, CLIENT_API_KEY);
+  return secrets;
+}
 
 /**
  * A `QueuedFetch` double whose `json` is whatever the test supplies, the
@@ -123,7 +145,8 @@ function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
     raw,
     db,
     fetch: overrides?.fetch ?? unusedFetch,
-    downloads: unusedDownloads,
+    downloads: () => unusedDownloads,
+    secrets: makeSecrets(raw),
     now: overrides?.now ?? (() => 1000),
     artworkDir: unusedArtworkDir,
     timers,
@@ -144,9 +167,10 @@ function insertClient(raw: DatabaseSync, overrides: {
   const implementation = overrides.implementation ?? 'sabnzbd';
   raw.prepare(`
     INSERT INTO download_client
-      (name, type, implementation, url, api_key, username, password, category, import_mode, created_at, updated_at)
-    VALUES (?, ?, ?, 'https://client.example.com', 'test-key', NULL, NULL, ?, 'copy', 1, 1)
-  `).run(name, type, implementation, category);
+      (name, type, implementation, url, api_key_secret_name, username, password_secret_name,
+       category, import_mode, created_at, updated_at)
+    VALUES (?, ?, ?, 'https://client.example.com', ?, NULL, NULL, ?, 'copy', 1, 1)
+  `).run(name, type, implementation, CLIENT_API_KEY_SECRET, category);
   const inserted = raw.prepare('SELECT id FROM download_client WHERE name = ?').get(name);
   return Number((inserted as { id: unknown }).id);
 }
@@ -403,7 +427,7 @@ function readTorrentColumn(raw: DatabaseSync, id: number, column: string): unkno
   return row[column];
 }
 
-test('the adapter built for a torrent client carries no reclaim capability at all', () => {
+test('the adapter built for a torrent client carries no reclaim capability at all', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const clientId = insertClient(raw, { name: 'Torrents', type: 'torrent', implementation: 'qbittorrent' });
@@ -411,7 +435,7 @@ test('the adapter built for a torrent client carries no reclaim capability at al
   // The real config path, not a hand-written literal: `readClientConfig` is
   // what decides `kind`, and the point of this test is what
   // `buildReconcileAdapter` does with the kind a real row produces.
-  const config = readClientConfig(raw, clientId);
+  const config = await readClientConfig(raw, clientId, makeSecrets(raw));
   assert.equal(config.kind, 'qbittorrent-bearer', 'a torrent row with an api key must read as the bearer kind');
 
   const adapter = buildReconcileAdapter(config, unusedFetch);
@@ -428,7 +452,7 @@ test('the adapter built for a torrent client carries no reclaim capability at al
   );
 });
 
-test('the adapter built for an nzb client does carry one', () => {
+test('the adapter built for an nzb client does carry one', async () => {
   // The other side of the same seam: without this, deleting the `remove`
   // from the nzb branch would pass the test above and reclaim nothing,
   // forever, with SABnzbd's history and its files growing for the lifetime
@@ -437,7 +461,7 @@ test('the adapter built for an nzb client does carry one', () => {
   migrateHost(raw);
   const clientId = insertClient(raw, { name: 'Nzbs' });
 
-  const config = readClientConfig(raw, clientId);
+  const config = await readClientConfig(raw, clientId, makeSecrets(raw));
   assert.equal(config.kind, 'sabnzbd');
 
   const adapter = buildReconcileAdapter(config, unusedFetch);
@@ -604,6 +628,7 @@ async function runHandlerOnce(
   const handler = createReconcileHandler({
     raw,
     fetch,
+    secrets: makeSecrets(raw),
     now: () => now,
     log,
     deliver: async () => { throw new Error('deliver: not used by this test'); },

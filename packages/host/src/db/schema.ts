@@ -11,18 +11,30 @@ export const downloadClient = sqliteTable('download_client', {
   name: text('name').notNull(),
   type: text('type').notNull(),
   url: text('url').notNull(),
-  apiKey: text('api_key'),
+  // The `secret` name for this client's api key, not the key -- a
+  // `randomUUID()` resolved through `Secrets.get`. Nullable: a row
+  // authenticating with a username and password has none. Migration 14
+  // replaced the credential columns with these, so a credential lives in
+  // `secret` and in nothing else.
+  apiKeySecretName: text('api_key_secret_name'),
   username: text('username'),
-  password: text('password'),
+  // The `secret` name for this client's password. `username` beside it is
+  // plaintext on purpose: a username is not a credential.
+  passwordSecretName: text('password_secret_name'),
   category: text('category').notNull(),
   importMode: text('import_mode').notNull(),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
   // The product behind this client ('qbittorrent' | 'sabnzbd'), distinct
   // from `type` above (the transport, 'torrent' | 'nzb'). Defaulted only so
-  // the column was legal to add to a table that may already hold rows --
-  // nothing in this tree writes a download_client row yet, so no row has
-  // actually inherited this default silently.
+  // the column was legal to add to a table that may already hold rows. The
+  // one writer of a download_client row outside tests,
+  // `scripts/seed-client.ts`, names this column explicitly and refuses an
+  // implementation that disagrees with `type`, so no row an operator
+  // creates inherits the default silently. Tests are the exception and are
+  // meant to be: 5 of the 22 inserts in this repo omit the column, and
+  // those rows do inherit 'qbittorrent' -- which is what the default is
+  // for.
   implementation: text('implementation').notNull().default('qbittorrent'),
 }, (t) => [
   // A feed names a client by this, so two clients answering to the same name
@@ -627,3 +639,21 @@ export const authVerification = sqliteTable('auth_verification', {
   // The library looks a verification up by its identifier, never by id.
   index('auth_verification_identifier').on(t.identifier),
 ]);
+
+/**
+ * One credential per row, addressed by name — a `randomUUID()` for a
+ * credential the settings UI stored, or a name a human chose like `tvdb_key`
+ * for one they may also supply from the environment.
+ *
+ * `value` is a credential column. Only `src/secrets/store.ts` may select it,
+ * enforced at build time by `scripts/check-test-hygiene.ts` over
+ * `packages/host/src`. It is deliberately *not* `host_state`: that table
+ * holds this host's own facts, while every row here is a third party's
+ * credential, and the two have different readers.
+ */
+export const secret = sqliteTable('secret', {
+  name: text('name').primaryKey(),
+  value: text('value').notNull(),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+});

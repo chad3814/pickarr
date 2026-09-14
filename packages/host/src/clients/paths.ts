@@ -4,8 +4,11 @@ import type { DatabaseSync } from 'node:sqlite';
  * One `filepath_mapping` row, narrowed the way `config.ts`'s `readRow` and
  * `select.ts`'s `readFeedRow` narrow theirs: each field pulled through its
  * own `unknown`-typed accessor, never a wholesale cast. Only `from_path` and
- * `to_path` are selected -- `download_client` carries credentials, and this
- * module never queries that table at all.
+ * `to_path` are selected, and this module never queries `download_client` at
+ * all -- the same rule `rows.ts` and `select.ts` state. Since migration 14
+ * that table holds `secret` *names* rather than credentials, which does not
+ * relax it: a name is safe to log, but a module that selects one is a module
+ * that could resolve it, and only `readClientConfig` may.
  */
 interface MappingRow {
   fromPath: string;

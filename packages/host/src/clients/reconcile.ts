@@ -215,9 +215,11 @@ function walkHistoryEntry(
 
 /**
  * The `rss_item.filename` a `submitting` row with no ref was submitted
- * under -- selecting only `filename`, never the credential columns that
- * live on `download_client`, and never anything this module does not
- * compare against a candidate's `name`.
+ * under -- selecting only `filename`, never a column off `download_client`,
+ * and never anything this module does not compare against a candidate's
+ * `name`. Since migration 14 `download_client` holds no credential at all,
+ * only the `secret` names `readClientConfig` resolves, and this module
+ * selects neither.
  */
 function filenameForItem(raw: DatabaseSync, rssItemId: number): string {
   const row = raw.prepare('SELECT filename FROM rss_item WHERE id = ?').get(rssItemId);

@@ -16,10 +16,12 @@
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@chad3814/secret-provider": "^1.2.0",
     "@pickarr/contract": "*",
     "better-auth": "^1.7.3",
     "drizzle-orm": "1.0.0-rc.4",
     "fast-xml-parser": "^4.5.0",
-    "image-size": "^2.0.2"
+    "image-size": "^2.0.2",
+    "zod": "^4.5.4"
   }
 }

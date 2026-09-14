@@ -190,8 +190,16 @@ export interface ReadServerDeps {
    */
   pluginIdForType: (type: string) => string | undefined;
   /**
-   * The interface to bind, or `undefined` for `DEFAULT_HOST` -- which is what
-   * an unset `PICKARR_READ_API_HOST` means, and what `main` passes for it.
+   * The interface to bind, or `undefined` for `DEFAULT_HOST`.
+   *
+   * **`main` no longer passes `undefined` here.** `HostSettings.readHost`
+   * (`main.ts`'s `resolveSettings`) is typed as a plain `string`: an unset
+   * `PICKARR_READ_API_HOST` now resolves through the config file's `server.host`
+   * and, absent that, `serverConfigSchema`'s own default -- which is this
+   * same value, `'0.0.0.0'`, carried in exactly one place. `undefined`
+   * remains a legal value on this type for any other caller that wants the
+   * listener's own default without naming it (a test, for instance); it is
+   * simply not one `main` reaches for any more.
    *
    * Required-but-nullable rather than optional: `exactOptionalPropertyTypes`
    * is on, so an optional property would make "absent" and "explicitly
