@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { writeSecretValue } from '../secrets/store.ts';
+import { installSyncTriggers } from '../sync/log.ts';
+import { HOST_SYNCED_TABLES } from '../sync/tables.ts';
 
 /**
  * The shared tables, in dependency order so every `REFERENCES` names a table
@@ -852,8 +854,22 @@ function migration14(db: DatabaseSync): void {
  * occasionally -- so a client whose cursor is past that id would never see
  * the row change again. Measured in the design spec §2.1 and §2.10. Do not
  * "tidy" this to match the other tables.
+ *
+ * The six `CREATE INDEX ... (created_at, id)` statements are the backfill's
+ * keyset paging (design spec §3.4: `(created_at DESC, id DESC)`, both
+ * immutable) over every table `HOST_SYNCED_TABLES` names. Every one of them
+ * already carried `created_at` -- confirmed by probing a migrated database
+ * before writing this DDL, not assumed -- so no `ALTER TABLE ... ADD COLUMN`
+ * was needed here. `role` in particular has `created_at` and no
+ * `updated_at` (design spec §2.5); had the probe found it or any other
+ * synced table missing the column, the fix belongs here, before that
+ * table's index:
+ * `ALTER TABLE <t> ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0` -- the
+ * default is what makes adding a NOT NULL column legal on a table that
+ * already holds rows, and a 0 sorts those rows to the end of a newest-first
+ * walk, which is where rows of unknown age belong.
  */
-const MIGRATION_15 = `
+const MIGRATION_15_DDL = `
   CREATE TABLE sync_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     table_name TEXT NOT NULL,
@@ -862,7 +878,26 @@ const MIGRATION_15 = `
     at         INTEGER NOT NULL
   );
   CREATE UNIQUE INDEX sync_log_row ON sync_log (table_name, row_id);
+
+  CREATE INDEX media_item_created ON media_item (created_at, id);
+  CREATE INDEX rss_item_created ON rss_item (created_at, id);
+  CREATE INDEX torrent_download_created ON torrent_download (created_at, id);
+  CREATE INDEX nzb_download_created ON nzb_download (created_at, id);
+  CREATE INDEX person_created ON person (created_at, id);
+  CREATE INDEX role_created ON role (created_at, id);
 `;
+
+/**
+ * Runs the DDL above and then installs the sync triggers for every host
+ * table it declares synced. The triggers come last and outside the DDL
+ * string on purpose: `installSyncTriggers` builds its own SQL per table
+ * (`sync/log.ts`), and folding that into one string here would duplicate the
+ * table list instead of importing it.
+ */
+function migration15(db: DatabaseSync): void {
+  db.exec(MIGRATION_15_DDL);
+  installSyncTriggers(db, HOST_SYNCED_TABLES);
+}
 
 /**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
@@ -884,7 +919,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 12, up: (db) => db.exec(MIGRATION_12) },
   { version: 13, up: (db) => db.exec(MIGRATION_13) },
   { version: 14, up: (db) => migration14(db) },
-  { version: 15, up: (db) => db.exec(MIGRATION_15) },
+  { version: 15, up: (db) => migration15(db) },
 ];
 
 /**
