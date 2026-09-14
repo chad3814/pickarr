@@ -1060,3 +1060,37 @@ test('migration 14 leaves a row with no credential alone', () => {
   assert.equal((row as Record<string, unknown>)['password_secret_name'], null);
   assert.equal(Number(raw.prepare('SELECT count(*) c FROM secret').get()?.c), 0, 'no secret row for a row with no credential');
 });
+
+test('migration 15 creates sync_log with a monotonic id and a unique row key', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const columns = raw.prepare('PRAGMA table_info(sync_log)').all()
+    .map((row) => String((row as { name: unknown }).name));
+  assert.deepEqual(columns, ['id', 'table_name', 'row_id', 'op', 'at']);
+
+  // AUTOINCREMENT is what makes the cursor safe. SQLite records it by
+  // creating `sqlite_sequence`; a bare INTEGER PRIMARY KEY does not.
+  const seq = raw.prepare(
+    "SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'",
+  ).get();
+  assert.equal(Number((seq as { c: unknown }).c), 1, 'sync_log must be AUTOINCREMENT');
+
+  const idx = raw.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='sync_log_row'").get();
+  assert.match(String((idx as { sql: unknown }).sql), /UNIQUE/, 'the row key must be unique');
+});
+
+test('a sync_log id is never handed out twice, though every change deletes a row', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const insert = raw.prepare('INSERT INTO sync_log (table_name, row_id, op, at) VALUES (?, ?, ?, ?)');
+  const remove = raw.prepare('DELETE FROM sync_log WHERE table_name = ? AND row_id = ?');
+
+  insert.run('media_item', 1, 'upsert', 1);
+  const first = Number(raw.prepare('SELECT id FROM sync_log WHERE row_id = 1').get()?.id);
+  remove.run('media_item', 1);
+  insert.run('media_item', 1, 'upsert', 2);
+  const second = Number(raw.prepare('SELECT id FROM sync_log WHERE row_id = 1').get()?.id);
+
+  assert.ok(second > first, `a re-logged row must take a higher id, got ${second} after ${first}`);
+});

@@ -841,6 +841,30 @@ function migration14(db: DatabaseSync): void {
 }
 
 /**
+ * The client's replication log: one row per row that has changed, not one per
+ * change. Every trigger deletes this row's previous entry before inserting a
+ * new one, so the log collapses as it is written and there is no compaction
+ * job (design spec §3.5).
+ *
+ * `id` is `AUTOINCREMENT`, unlike every other table in this schema, and
+ * deliberately. Deleting the previous entry frees its id, and a bare
+ * `INTEGER PRIMARY KEY` would hand it straight back -- on every change, not
+ * occasionally -- so a client whose cursor is past that id would never see
+ * the row change again. Measured in the design spec §2.1 and §2.10. Do not
+ * "tidy" this to match the other tables.
+ */
+const MIGRATION_15 = `
+  CREATE TABLE sync_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    row_id     INTEGER NOT NULL,
+    op         TEXT NOT NULL,
+    at         INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX sync_log_row ON sync_log (table_name, row_id);
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -860,6 +884,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 12, up: (db) => db.exec(MIGRATION_12) },
   { version: 13, up: (db) => db.exec(MIGRATION_13) },
   { version: 14, up: (db) => migration14(db) },
+  { version: 15, up: (db) => db.exec(MIGRATION_15) },
 ];
 
 /**

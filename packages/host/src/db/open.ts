@@ -28,6 +28,13 @@ const relations = defineRelations(schema);
 function wrap(raw: DatabaseSync) {
   raw.exec('PRAGMA foreign_keys = ON');
   raw.exec('PRAGMA journal_mode = WAL');
+  // Without this, an `INSERT OR REPLACE` that displaces a different row
+  // through a unique-index conflict fires the insert trigger and not the
+  // delete one -- so the displaced row's deletion never reaches `sync_log`
+  // and every client keeps it forever, with nothing failing. Measured in the
+  // design spec §2.9. It costs nothing on the common path: an
+  // `ON CONFLICT DO UPDATE` logs identically with it on or off.
+  raw.exec('PRAGMA recursive_triggers = ON');
   return { raw, db: drizzle({ client: raw, relations }) };
 }
 

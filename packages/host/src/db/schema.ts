@@ -657,3 +657,22 @@ export const secret = sqliteTable('secret', {
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 });
+
+/**
+ * The client replication log. One row per changed row: a trigger deletes the
+ * previous entry before inserting, so this table is bounded by how many rows
+ * have ever changed rather than by how often they changed.
+ *
+ * `id` is `AUTOINCREMENT` in the DDL. Drizzle's `.primaryKey({ autoIncrement:
+ * true })` is what mirrors that; a bare `.primaryKey()` would compare equal
+ * on name and type while meaning something the cursor cannot survive.
+ */
+export const syncLog = sqliteTable('sync_log', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  tableName: text('table_name').notNull(),
+  rowId: integer('row_id').notNull(),
+  op: text('op').notNull(),
+  at: integer('at').notNull(),
+}, (t) => [
+  uniqueIndex('sync_log_row').on(t.tableName, t.rowId),
+]);
