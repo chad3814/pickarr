@@ -217,15 +217,3 @@ named in a SQL string outside the one module allowed to name it.
 `CLAUDE.md` records the ways this test suite has been green while proving less than it
 appeared to. Read it before writing tests; each entry is there because it has already
 recurred at least once.
-
-### Measuring the parser against a corpus
-
-1.x's scene parser is judged against real indexer titles rather than invented ones.
-
-```bash
-npm run corpus -- path/to/titles.txt
-```
-
-It prints what parsed, what refused and why, and checks the no-over-collation invariant:
-two different scenes must never share an identity key. The corpus itself is not in the
-repo.

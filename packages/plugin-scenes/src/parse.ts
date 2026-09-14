@@ -782,25 +782,6 @@ export interface Detached {
  * encode information, exactly as the dot-attached form must. That is what
  * stops a run of title words after a stray hyphen being swallowed, since
  * title material never follows the encode section.
- *
- * **No shape rule separates a group tag from an ordinary word, and two
- * stricter ones were tried against real feeds before this was accepted.**
- * `looksLikeGroupTag` asks for 1-12 alphanumerics that are not a listed term,
- * and consults casing not at all. Requiring all caps refused `-FETiSH` and
- * `-Zsex3i`; additionally refusing word-shaped tags refused `-Ghost`,
- * `-Rarbg`, `-rartv` and `-xpost`. All are real groups. Nothing structural
- * separates `Ghost` from `Bonus` — same length, same casing, same character
- * classes — so any shape rule admitting one admits the other, and the only
- * question is which error to take.
- *
- * What guards the position instead is **the resolution, which is a second
- * anchor**: extra content is named *before* the resolution, and only format
- * and a group tag follow it. So `Site.23.04.15.Name.Bonus.XXX.1080p.MP4-WRB`
- * keeps `Bonus` in the identity — a different piece of content, its own group
- * — while `Site.23.04.15.Name.XXX.1080p.MP4-Bonus` reads `Bonus` as a group,
- * because nothing else can be there. Two strings that look alike are
- * unambiguous as positions. `B0NUS` is itself a real group name, which is the
- * clearest argument that a word list could never have done this job.
  */
 const MAX_GROUP_TOKENS = 3;
 
@@ -1103,40 +1084,6 @@ export function isTitleSuffixToken(text: string, previous: string | undefined): 
  * title word without looking past it: `Hiyori JAPANESE 2` keeps its tag because
  * the `2` blocks it. Skipping a kept token to reach something behind it is how
  * words go missing from the middle of a title.
- *
- * # The accepted over-collation
- *
- * **Two names differing only in the tokens this walk drops collate onto one
- * identity key.** A content-type tag, a trailing language tag and a bare
- * catalogue id reach neither half of the key, so
- * `PornMegaLoad.26.08.05.Suki.Sin.Solo.42466...` and
- * `PornMegaLoad.26.08.05.Suki.Sin.Hardcore.42467...` both key as
- * `pornmegaload:2026-08-05:suki-sin`. The cost is structural rather than
- * incidental, and it was measured before it was accepted: across 7,166 parsed
- * corpus titles there are **zero** genuine over-collations from it. The
- * fifteen keys carrying more than one distinct title are all case or spelling
- * variants of one scene (`Mckenzie Mae`/`McKenzie Mae`, `And`/`and`,
- * `Zarina Noir`/`zarina noir`) — `siteComparisonKey` and `slug` doing their
- * job, not this trade-off firing. The alternative is refusing or truncating
- * titles that are overwhelmingly real and distinct, to keep an id or a type
- * tag that in practice never turns out to matter.
- *
- * Two shapes reach the same class by their own route. A **dateless** name has
- * no day in its key at all, so two dateless scenes from one site differing
- * only in these tokens collate — widening an over-collation that shape
- * already accepts by having no date to separate anything. And a **delimited
- * listing whose date has a two-digit year** is not a listing to the parser at
- * all: `26.08.05` matches `DOTTED_DATE_RUN`, so `[Site] Alex - Hardcore 42466
- * 1080p - 26.08.05` is read as a dotted trailing-date name, this walk runs,
- * and it shares `site:2026-08-05:alex` with the same listing for `42467`. The
- * four-digit spelling of that same listing keeps both parts and stays
- * distinct.
- *
- * Both are pinned by name — `suffix-parse.test.ts`'s `'two scenes differing
- * only in dropped tokens share a key, deliberately'` and
- * `parse-date-at-end.test.ts` — rather than guarded against in code, so a
- * change to what gets trimmed here surfaces as a failing test instead of a
- * silent, undiscovered merge.
  */
 export function findTitleEnd(tokens: Token[], minIndex: number, from: number): number {
   let end = Math.min(from, tokens.length);
@@ -1687,8 +1634,8 @@ export function matchSitePrefix(before: Token[], sites: readonly string[]): Site
  * scene half, so no split can make two different scenes collide.
  *
  * The suffix tokens past that bound are a separate matter. They reach neither
- * half, and two names differing only in them collate as one — the accepted
- * cost argued in `findTitleEnd`, unchanged by where the split falls.
+ * half, and two names differing only in them collate as one — an accepted
+ * cost, unchanged by where the split falls.
  */
 /**
  * The pre-date tokens of a date-at-end name, or `null` for anything that is
@@ -2300,9 +2247,9 @@ function splitSegment(segment: string): SegmentSplit {
   // Only a four-digit year reaches here. Written `26.08.05`, the same listing
   // is a dotted name to `DOTTED_DATE_RUN` and goes to the date-at-end shape
   // instead, where the walk does run and the two parts above *do* collapse
-  // onto `site:2026-08-05:alex`. That collision is inside the class
-  // `findTitleEnd` accepts — one site, one date, titles differing only in
-  // dropped tokens — so it is not a defect, but it is not excluded either,
+  // onto `site:2026-08-05:alex`. That collision is inside the accepted class
+  // — one site, one date, titles differing only in the tokens `findTitleEnd`
+  // drops — so it is not a defect, but it is not excluded either,
   // and a comment claiming the shape is safe would be wrong. Both spellings
   // are pinned by tests in `parse-date-at-end.test.ts`.
   let tokens = tokensOf(text);
@@ -2315,9 +2262,8 @@ function splitSegment(segment: string): SegmentSplit {
   // taking the resolution out of `extractQuality`'s reach entirely.
   //
   // The gate is the whole design. `detachReleaseGroup`'s hyphen branch is
-  // deliberately permissive — the `MAX_GROUP_TOKENS` docblock explains at
-  // length why no shape rule separates `-Ghost` from `-Bonus` — and in a
-  // listing a hyphen is
+  // deliberately permissive, because no shape rule separates `-Ghost` from
+  // `-Bonus` — and in a listing a hyphen is
   // ordinary punctuation as well as a group separator, so detaching
   // unconditionally would read `Deep-Throat` as the scene "Deep" from a group
   // called "Throat". Requiring the cut on what remains to be exactly `0` means
