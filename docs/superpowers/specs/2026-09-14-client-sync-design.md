@@ -328,9 +328,19 @@ therefore receives one op per changed row, not one per change, and the query
 is a primary-key range scan.
 
 ```json
-{"op":"upsert","table":"media_item","value":{ "id":123, … }}
+{"op":"upsert","table":"media_item","id":123,"value":{ … }}
 {"op":"delete","table":"media_item","id":123}
 ```
+
+**`id` is on every op, upsert and delete alike, and is the row's primary key
+in `table`.** It is not read out of `value`: the host's own projections
+(`sync/tables.ts`) happen to include `id` in the row they return, and no
+plugin read shape includes one — §6 says why they must not — so a protocol
+that keyed a row from its payload worked for the host's six tables and
+silently failed for all six plugin ones. The client stores a row under the
+op's `id`, which is what makes an upsert and the later delete for the same
+row agree, and what makes a shared parent re-sent once per group (§3.3)
+deduplicate instead of accumulating one unlabelled copy per group.
 
 The client polls this from the moment it has a watermark, and keeps polling
 for the rest of the session. **Nothing about the log's size delays it**: it
@@ -345,8 +355,24 @@ within a page is what stops a client seeing a reference before its target.
 
 Called with no cursor it returns the first page **and `w`, the log's
 high-water mark at that moment**, so the client can start the tail without a
-separate round trip. It returns a null cursor when current state is
-exhausted, and the client retires it — from then on only the tail runs.
+separate round trip. `w` is then carried in the cursor — the wire form is
+`<createdAt>.<id>.<w>` — and returned unchanged on every page of the walk, so
+a client that adopts a later page's `watermark` adopts the first page's and
+skips nothing. It returns a null cursor when current state is exhausted, and
+the client retires it — from then on only the tail runs.
+
+Every page also carries **`asOf`**, the log's high-water mark read when *that*
+page was read, which is a different number. It dates the page: see §5.3 for
+the apply rule that depends on it.
+
+**A page omits any row whose `sync_log` entry sits above `w`.** The tail owns
+that row and will deliver it, so the two streams are disjoint. Skipping is per
+row, not per group: dropping a whole group whose `media_item` changed after
+the walk began would lose that group's *unchanged* rows for good, since the
+keyset cursor advances past the group either way and the tail carries only
+what changed. The cost is that a page may reference a row it did not send —
+an `rss_item` whose `media_item` the tail owns. That reference is forward, not
+dangling: the row is above `w`, and the client's tail starts at `w`.
 
 Ordering is `(created_at DESC, id DESC)`, both immutable, for the reason in
 §3.4.
@@ -354,14 +380,39 @@ Ordering is `(created_at DESC, id DESC)`, both immutable, for the reason in
 ### 5.3 Why concurrency loses nothing
 
 `W` is captured once and never advances; the tail is what advances past it.
-Every case reduces to ops being idempotent (§3.1):
+
+**Idempotence is not the whole argument, and an earlier draft of this section
+claimed it was.** That draft's table reasoned about what each cursor *sends*
+and never about what order a client *applies* it in, and it missed the last
+row below — measured, reproduced, and permanent when it happens. Two
+mechanisms close it: the backfill omits any row the tail owns (§5.2), and
+every page carries `asOf`, the log position its values were read at.
 
 | During the backfill | Backfill | Tail | Result |
 |---|---|---|---|
 | a row is **created** | never reaches it — it is newer than the walk's start | op > `W` | delivered |
-| a row is **modified** | may send an older copy | op > `W` | converges on current state |
+| a row is **modified** before the page that would carry it is read | omits it: its entry is above `W` | op > `W` | delivered once, by the tail |
 | a row is **deleted** before the walk reaches it | absent | delete op > `W` | a delete for a row the client never had: a no-op |
 | a row is **deleted** after the walk sent it | sent | delete op > `W` | removed |
+| a row is **modified or deleted after a page carrying it was read, and that page is applied after the tail op** | sent, with the value as of `asOf` | op > `asOf` | **would overwrite newer state, or resurrect a deleted row, permanently** — see the apply rule below |
+
+**The apply rule: a client may apply a backfill page only while its own tail
+cursor has not passed that page's `asOf`.** Past it the page is stale and must
+be discarded and refetched with the same `before` — which costs nothing, since
+`before` is a keyset the client still holds and the walk has not advanced.
+
+That rule is a client's to honour, and it is here because **no stateless
+server can replace it.** The write that invalidates a page can land after the
+page's response was serialised, so the server has already answered by the time
+there is anything to notice: measured, with page 2 for media item 3 already
+built, an `UPDATE` on it takes a log entry above `W` and the page in hand
+still carries the old title. Omitting rows above `W` cannot see that write.
+Nor is "a backfill op must never overwrite a row the client already holds"
+enough — also measured: make the write a `DELETE` and the tail removes the
+row, then the stale page finds it absent and puts it straight back. What the
+server can do is date its own answer, which is one integer the client compares
+against a number it already has: no per-row version, no `updated_at` — `role`
+has none and no plugin read shape need carry one — and no tombstone.
 
 A client interrupted mid-backfill and resuming days later keeps both cursors:
 its `W` is stale but still valid, because the log keeps only the newest entry
@@ -375,9 +426,9 @@ export interface SyncedTable<T> {
   /** The table's name. Must carry the plugin's id as its prefix, as migrations already must. */
   readonly table: string;
   /** Current state for these row ids, in the shape the client receives. */
-  read(ids: readonly number[]): Promise<Record<number, T>>;
-  /** The media items these rows belong to, so the backfill can hydrate a group. */
-  rowsFor(mediaItemIds: readonly number[]): Promise<readonly number[]>;
+  read(raw: DatabaseSync, ids: readonly number[]): Record<number, T>;
+  /** This table's row ids belonging to those media items, so the backfill can hydrate a group. */
+  rowsFor(raw: DatabaseSync, mediaItemIds: readonly number[]): readonly number[];
 }
 
 export interface MediaPlugin {
@@ -387,12 +438,32 @@ export interface MediaPlugin {
 }
 ```
 
+Both methods take the raw handle and both are synchronous: `node:sqlite` is,
+and a plugin reads through the handle the host already holds rather than one
+of its own. (An earlier draft of this block declared them `async` and without
+the handle; the shipped contract is what is above.)
+
 A plugin never sees an HTTP request. The host calls `read` and `rowsFor`,
 serialises the result, and owns the triggers, the cursor, the paging and the
 guard.
 
-The three categories' read shapes — `TvRead`, `MovieRead`, `XxxRead` — live in
-the contract beside `MediaItemRead`, so slice 2 types against them.
+**Six synced plugin tables means six read shapes in the contract**, not
+three: `TvRead`, `MovieRead` and `XxxRead` for the detail row of each
+category, and `TvSeasonRead`, `TvSeriesRead` and `XxxSiteRead` for the shared
+parents a detail row points at. They live beside `MediaItemRead` so slice 2
+types against them rather than redeclaring them by hand — the field-name drift
+§3.7 calls the worst failure this design can have, moved from triggers to
+types — or importing from a plugin package, which is the boundary
+`packages/contract` exists to enforce. Enumerating three here was an error in
+this spec, not a scope decision: the backfill already emits ops for all six.
+
+**No read shape carries its own row id, deliberately.** The key is on the op
+(§5.1), so it is the protocol's and not each plugin author's. The three detail
+shapes do carry `mediaItemId`, because grouping is a different question from
+keying and `media_item.id` is not the row's own key; the three parent shapes
+carry none, because their tables have no `media_item_id` column — many
+episodes share one season, many scenes one site — and they are reached through
+the detail rows that point at them.
 
 ## 7. What the tests must prove
 
@@ -415,7 +486,9 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
 7. Backfill paging is stable: the same rows in the same order regardless of
    concurrent `updated_at` churn.
 8. Each backfill page is self-consistent — no op references a row the client
-   has not already received in that page or an earlier one.
+   has not already received in that page or an earlier one, with the one
+   exception §5.2 names: a row the page omitted because the tail owns it,
+   which the tail delivers at its log position.
 9. Every synced table has all three triggers, asserted by enumerating
    `sqlite_master` against the declared set, so a table added without them
    fails the suite rather than diverging a client.
@@ -433,6 +506,23 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
     declaration.
 17. No credential and no url reaches a log row or an op — the log stores a
     table name and a row id, and nothing else.
+18. Every op carries its row's key, on an upsert as much as on a delete, for
+    a **plugin** table as much as for a host one — asserted with a plugin
+    table through both cursors, since the host's own projections include
+    `id` in the row and would pass a weaker test.
+19. A backfill page read before a change and applied after the tail delivered
+    it is detectably stale — its `asOf` is below the client's tail cursor —
+    both for a modification and for a deletion, where the second is what
+    rules out "never overwrite a row the client already holds" as a
+    sufficient rule on its own.
+20. A walk's `watermark` is the same number on every page while its `asOf`
+    moves, so adopting either from a later page cannot silently skip ops.
+21. A boot reinstalls the host tables' triggers, so one dropped by a later
+    migration that rebuilt its table is repaired rather than silently absent.
+22. `sync_log.id` is `AUTOINCREMENT` in the DDL *and* in the Drizzle mirror,
+    asserted against `sqlite_master.sql` on both sides — `PRAGMA table_info`
+    cannot report it and `sqlite_sequence`'s existence is not specific to
+    one table.
 
 ## 8. Consequences
 
@@ -455,6 +545,12 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
 - `PRAGMA recursive_triggers = ON` now applies to every trigger in the
   database, not only these. Nothing else defines one today.
 - A fourth plugin gets no client UI for free. §3.6 accepts that.
+- **Slice 2 carries one obligation the server cannot enforce**: §5.3's apply
+  rule, that a backfill page is applied only while the client's tail cursor
+  has not passed the page's `asOf`. Everything else about convergence is the
+  server's. A client that ignores it converges on current state for every row
+  except one modified or deleted while a page was in flight, which it holds
+  stale or resurrected for as long as that install exists.
 - The client must run both cursors concurrently. Running them in sequence is
   correct but defeats the design: a client would see nothing new until its
   whole history had replicated. §5 states this structurally so slice 2 cannot

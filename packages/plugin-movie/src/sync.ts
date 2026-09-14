@@ -26,16 +26,23 @@ function holes(ids: readonly number[]): string {
   return ids.map(() => '?').join(', ');
 }
 
+/**
+ * `mediaItemId` is `movie_detail.media_item_id`, which the client groups by.
+ * This row's own id is not here and must not be: the host puts it on the op
+ * (`sync/tail.ts`'s `SyncOp`), so keying does not depend on each read shape
+ * remembering a field.
+ */
 const detail: SyncedTable<MovieRead> = {
   table: 'movie_detail',
   read(raw: DatabaseSync, ids: readonly number[]): Record<number, MovieRead> {
     if (ids.length === 0) return {};
     const rows = raw.prepare(
-      `SELECT id, runtime_minutes, tagline FROM movie_detail WHERE id IN (${holes(ids)})`,
+      `SELECT id, media_item_id, runtime_minutes, tagline FROM movie_detail WHERE id IN (${holes(ids)})`,
     ).all(...ids);
     const result: Record<number, MovieRead> = {};
     for (const row of rows) {
       result[asNumber(row.id)] = {
+        mediaItemId: asNumber(row.media_item_id),
         runtimeMinutes: asNumberOrNull(row.runtime_minutes),
         tagline: asTextOrNull(row.tagline),
       };

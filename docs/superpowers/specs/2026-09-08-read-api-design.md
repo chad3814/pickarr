@@ -378,9 +378,15 @@ above and neither `type`-scoped -- a client syncs one log and one backwards
 walk over the whole replica, not per media type:
 
 ```
-GET /api/sync?since=<logId>                → one line per op, upsert or delete
-GET /api/sync/backfill?before=<createdAt>.<id> → { ops, cursor, watermark }
+GET /api/sync?since=<logId>                            → { ops, cursor }
+GET /api/sync/backfill?before=<createdAt>.<id>.<w>     → { ops, cursor, watermark, asOf }
 ```
+
+Both answer one JSON object, like every route above -- the first line said
+"one line per op", which would have talked a reader into writing an NDJSON
+reader for a body that has never been one. An op is
+`{ op, table, id, value? }`; `cursor` is a log id on the first route and the
+opaque `<createdAt>.<id>.<w>` string on the second.
 
 Its own design lives in `2026-09-14-client-sync-design.md` §5; this table is
 not updated further as later slices add routes -- see the annotation on

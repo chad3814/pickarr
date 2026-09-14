@@ -1,13 +1,30 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { SyncRegistry } from './registry.ts';
 
+/**
+ * One invalidation, as a client receives it.
+ *
+ * **`id` is on every op, upsert and delete alike, and never only inside
+ * `value`.** It is the row's primary key in `table`, which is what a client
+ * stores the row under -- so an upsert and the delete that later names the
+ * same row agree on one key, and a shared parent re-sent once per group
+ * (`sync/backfill.ts`) deduplicates instead of accumulating a copy per
+ * group. Putting the key on the op rather than inside the payload is what
+ * makes that independent of each read shape: `readHostRows`
+ * (`sync/tables.ts`) happens to project `id` into `value` for all six host
+ * tables, and no plugin read shape carries it at all
+ * (`packages/contract/src/sync.ts`), so a protocol that read the key out of
+ * `value` worked for the host and silently failed for every plugin table --
+ * an upsert a client could not key, group or later delete. The `id` inside a
+ * host `value` is redundant and left alone; this one is the key.
+ */
 export interface SyncOp {
   op: 'upsert' | 'delete';
   table: string;
-  /** Present on an upsert: the row as the client receives it. */
+  /** The row's primary key in `table`. Present on every op; see above. */
+  id: number;
+  /** Present on an upsert: the row as the client receives it. Absent on a delete. */
   value?: unknown;
-  /** Present on a delete: the row id that no longer exists. */
-  id?: number;
 }
 
 /**
@@ -62,7 +79,7 @@ export function tailSince(
     const value = rows.get(entry.table)?.[entry.rowId];
     ops.push(value === undefined
       ? { op: 'delete', table: entry.table, id: entry.rowId }
-      : { op: 'upsert', table: entry.table, value });
+      : { op: 'upsert', table: entry.table, id: entry.rowId, value });
   }
 
   const last = entries[entries.length - 1];

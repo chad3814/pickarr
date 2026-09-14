@@ -1469,3 +1469,35 @@ git commit -m "Serve the two cursors behind the session guard, and give a plugin
 ## After the last task
 
 Check whether `docs/known-issues.md`, the auth spec's §6 configuration table, or the read-api spec now say something false — the sync routes are new guarded routes, and `/api/deletions` now overlaps the log's delete ops. Check, do not assume.
+
+---
+
+## Amendment: what the whole-branch fix wave changed
+
+The task bodies above record the plan as executed and are left as written.
+Three of the interfaces they name have since changed, in the single fix wave
+that followed the whole-branch review — read the spec
+(`docs/superpowers/specs/2026-09-14-client-sync-design.md` §5, §6) for the
+current shapes, not these.
+
+1. **`SyncOp` carries `id` on every op**, upsert as well as delete (Task 5's
+   and Task 6's `{ op, table, value }` upsert is now
+   `{ op, table, id, value }`). Nothing keyed a plugin upsert before: the
+   host's own projections include `id` in the row they return, no plugin read
+   shape does, so the wire format worked for six tables and silently failed
+   for six others.
+2. **`backfillBefore`'s cursor carries the walk's watermark**, and the page
+   carries a second log position: `before: { createdAt, id, watermark } |
+   null` and `{ ops, cursor, watermark, asOf }`. The wire cursor is
+   `<createdAt>.<id>.<watermark>`. The walk also omits any row whose
+   `sync_log` entry is above the watermark, because the tail owns it. Spec
+   §5.3 has the interleaving that forced this and the apply rule `asOf`
+   exists for.
+3. **`main.ts` calls `installSyncTriggers(raw, HOST_SYNCED_TABLES)` after
+   `migrateHost`**, on every boot. Task 1 installed the host's triggers only
+   inside `migration15`, which `migrateHostWith` skips once version 15 is
+   recorded.
+
+The contract also exports six read shapes rather than three
+(`TvSeasonRead`, `TvSeriesRead` and `XxxSiteRead` beside the other three),
+and the three detail shapes gained `mediaItemId`.

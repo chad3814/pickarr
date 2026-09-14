@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { TvRead } from '@pickarr/contract';
 import type { Media, MediaKind, MediaParent } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { TV_SYNCED } from '../src/sync.ts';
@@ -13,6 +14,21 @@ const MARKER = 'TV-DETAILS-MARKER-6f2c1a';
 function harnessWithTables() {
   const harness = createTestHarness();
   for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
+  // Placeholder rows with high, distinct ids, so every row a test then
+  // writes has an `id` that differs from its `media_item_id` and from the
+  // ids of the other two tables. Without them a release's id, its media
+  // item's id, its season's and its series' are all 1 for the first media
+  // item, and a read returning the wrong one of the four would pass every
+  // assertion below. `createTestHarness` runs with
+  // `PRAGMA foreign_keys = OFF`, so nothing these point at need exist.
+  harness.raw.exec(`
+    INSERT INTO tv_series (id, provider, provider_ref, title, created_at, updated_at)
+      VALUES (200, 'tmdb', 'tmdb:series:placeholder', 'Placeholder', 0, 0);
+    INSERT INTO tv_season (id, series_id, provider, provider_ref, created_at, updated_at)
+      VALUES (300, 200, 'tmdb', 'tmdb:season:placeholder', 0, 0);
+    INSERT INTO tv_release (id, media_item_id, kind, series_id, created_at, updated_at)
+      VALUES (100, 900, 'series', 200, 0, 0);
+  `);
   return harness;
 }
 
@@ -87,4 +103,154 @@ test('a read never returns details_json', async () => {
   assert.ok(release !== undefined, 'tv_release must be declared');
   const result = release.read(harness.raw, [releaseId]);
   assert.ok(!JSON.stringify(result).includes(MARKER), "tv_release's read must not return details_json");
+});
+
+/**
+ * The joined reads, asserted on their values rather than only on what they
+ * omit. Nothing did until this wave: a reviewer had traced every alias
+ * against every field access by hand, which is exactly the check that stops
+ * holding the moment these mapping functions are rewritten -- as adding
+ * `mediaItemId` to `TvRead` rewrote them.
+ */
+
+/** A season pack: the answer is the season itself, and it names a series as a parent. */
+function seasonPack(): Media {
+  return {
+    ...parent('season', 'tmdb:season:10', 'Season 3'),
+    overview: null,
+    details: { seasonNumber: 3, marker: MARKER },
+    parents: [parent('series', 'tmdb:series:100', 'The Bear')],
+    people: [],
+  };
+}
+
+/** A series pack: the answer is the series itself, so there is no season at all. */
+function seriesPack(): Media {
+  return {
+    ...parent('series', 'tmdb:series:100', 'The Bear'),
+    overview: 'Carmy comes home.',
+    details: { marker: MARKER },
+    parents: [],
+    people: [],
+  };
+}
+
+function tableNamed(name: string) {
+  const table = TV_SYNCED.find((candidate) => candidate.table === name);
+  assert.ok(table !== undefined, `${name} must be declared`);
+  return table;
+}
+
+function releaseIdFor(harness: ReturnType<typeof harnessWithTables>, mediaItemId: number): number {
+  const row = harness.raw.prepare('SELECT id FROM tv_release WHERE media_item_id = ?').get(mediaItemId) as
+    { id: number } | undefined;
+  assert.ok(row !== undefined, `a release row must exist for media item ${String(mediaItemId)}`);
+  return row.id;
+}
+
+test("a season pack's read carries its season number, and a series pack's carries null", async () => {
+  const harness = harnessWithTables();
+  await applyTv({ media: seasonPack(), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW });
+  await applyTv({ media: seriesPack(), mediaItemId: 2, raw: harness.raw, ctx: harness.ctx, now: NOW });
+
+  const release = tableNamed('tv_release');
+  const packs = release.read(harness.raw, [releaseIdFor(harness, 1), releaseIdFor(harness, 2)]);
+
+  const season = packs[releaseIdFor(harness, 1)] as TvRead | undefined;
+  assert.deepEqual(season, {
+    mediaItemId: 1,
+    kind: 'season',
+    seriesTitle: 'The Bear',
+    seriesRef: 'tmdb:series:100',
+    seasonNumber: 3,
+    episodeNumber: null,
+  });
+
+  const series = packs[releaseIdFor(harness, 2)] as TvRead | undefined;
+  assert.deepEqual(series, {
+    mediaItemId: 2,
+    kind: 'series',
+    seriesTitle: 'The Bear',
+    seriesRef: 'tmdb:series:100',
+    // `tv_release.season_id` is null for a series pack, and the join is left,
+    // so this reads null rather than borrowing another release's season.
+    seasonNumber: null,
+    episodeNumber: null,
+  });
+});
+
+test("an episode's read carries its episode number and its season's number from two different tables", async () => {
+  const harness = harnessWithTables();
+  await applyTv({ media: episode(), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW });
+
+  const read = tableNamed('tv_release').read(harness.raw, [releaseIdFor(harness, 1)]);
+  assert.deepEqual(read[releaseIdFor(harness, 1)], {
+    mediaItemId: 1,
+    kind: 'episode',
+    seriesTitle: 'The Bear',
+    seriesRef: 'tmdb:series:100',
+    seasonNumber: 3,
+    episodeNumber: 1,
+  });
+});
+
+test("a season's and a series' own reads carry their own columns, not a release's", async () => {
+  const harness = harnessWithTables();
+  await applyTv({ media: seasonPack(), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW });
+  await applyTv({ media: seriesPack(), mediaItemId: 2, raw: harness.raw, ctx: harness.ctx, now: NOW });
+
+  const seasonIds = tableNamed('tv_season').rowsFor(harness.raw, [1]);
+  assert.equal(seasonIds.length, 1);
+  const seriesIds = tableNamed('tv_series').rowsFor(harness.raw, [1]);
+  assert.equal(seriesIds.length, 1);
+  const seasonId = seasonIds[0];
+  const seriesId = seriesIds[0];
+  assert.ok(seasonId !== undefined && seriesId !== undefined);
+
+  assert.deepEqual(tableNamed('tv_season').read(harness.raw, [seasonId])[seasonId], {
+    // The season's own `series_id`, which resolves against the id on the
+    // `tv_series` op -- see `packages/contract/src/sync.ts`.
+    seriesId,
+    seasonNumber: 3,
+    title: 'Season 3',
+  });
+
+  assert.deepEqual(tableNamed('tv_series').read(harness.raw, [seriesId])[seriesId], {
+    title: 'The Bear',
+    providerRef: 'tmdb:series:100',
+    firstAirDate: '2024-06-26',
+    // Only a series *pack* contributes an overview, which media item 2 was.
+    overview: 'Carmy comes home.',
+  });
+});
+
+test('rowsFor dedupes a parent shared by two media items', async () => {
+  const harness = harnessWithTables();
+  await applyTv({ media: seasonPack(), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW });
+  await applyTv({ media: episode(), mediaItemId: 2, raw: harness.raw, ctx: harness.ctx, now: NOW });
+
+  // Both releases point at one `tv_series` row and one `tv_season` row --
+  // the `provider_ref` unique indexes make `upsertSeries`/`upsertSeason`
+  // return the same ids -- so each parent must come back once, not twice.
+  // Counted by provider reference, not `count(*)`: `harnessWithTables`
+  // seeds placeholder rows of its own so ids cannot alias.
+  assert.equal(harness.raw.prepare(
+    "SELECT count(*) c FROM tv_series WHERE provider_ref = 'tmdb:series:100'",
+  ).get()?.c, 1, 'fixture sanity: both releases share one series row');
+  assert.equal(harness.raw.prepare(
+    "SELECT count(*) c FROM tv_season WHERE provider_ref = 'tmdb:season:10'",
+  ).get()?.c, 1, 'fixture sanity: both releases share one season row');
+
+  assert.equal(tableNamed('tv_series').rowsFor(harness.raw, [1, 2]).length, 1, 'tv_series rowsFor must dedupe');
+  assert.equal(tableNamed('tv_season').rowsFor(harness.raw, [1, 2]).length, 1, 'tv_season rowsFor must dedupe');
+
+  // A detail table has one row per media item, so its rowsFor must not.
+  assert.equal(tableNamed('tv_release').rowsFor(harness.raw, [1, 2]).length, 2);
+});
+
+test('a season a release does not have is absent from rowsFor rather than null in it', async () => {
+  const harness = harnessWithTables();
+  await applyTv({ media: seriesPack(), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW });
+  assert.deepEqual(tableNamed('tv_season').rowsFor(harness.raw, [1]), [],
+    'a series pack has no season, and `season_id IS NOT NULL` is what keeps a null out of the id list');
 });

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { XxxRead, XxxSiteRead } from '@pickarr/contract';
 import type { Media } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { XXX_SYNCED } from '../src/sync.ts';
@@ -13,6 +14,19 @@ const MARKER = 'XXX-DETAILS-MARKER-3a8f0c';
 function harnessWithTables() {
   const harness = createTestHarness();
   for (const migration of XXX_MIGRATIONS) migration.up(harness.raw);
+  // Placeholder rows with high, distinct ids, so every row a test then
+  // writes has an `id` that differs from its `media_item_id` and from its
+  // site's id. Without them a scene's id and its media item's are both 1 for
+  // the first media item, and a read returning the row's own id where it
+  // means to return the media item's would pass every assertion below.
+  // `createTestHarness` runs with `PRAGMA foreign_keys = OFF`, so nothing
+  // these point at need exist.
+  harness.raw.exec(`
+    INSERT INTO xxx_site (id, provider, provider_ref, name, created_at, updated_at)
+      VALUES (200, 'tpdb', 'tpdb:site:placeholder', 'Placeholder', 0, 0);
+    INSERT INTO xxx_scene (id, media_item_id, site_id, created_at, updated_at)
+      VALUES (100, 900, 200, 0, 0);
+  `);
   return harness;
 }
 
@@ -75,4 +89,102 @@ test('a read never returns details_json', async () => {
   assert.ok(scenes !== undefined, 'xxx_scene must be declared');
   const result = scenes.read(harness.raw, [sceneId]);
   assert.ok(!JSON.stringify(result).includes(MARKER), "xxx_scene's read must not return details_json");
+});
+
+/**
+ * The joined reads, asserted on their values rather than only on what they
+ * omit. Nothing did until this wave; adding `mediaItemId` to `XxxRead`
+ * rewrote exactly these mapping functions, and a hand trace is not a test.
+ */
+
+/** The same scene shape, with the site fields a test wants. */
+function sceneWith(providerRef: string, site: { name: string; ref: string } | null): Media {
+  return {
+    ...scene(),
+    id: `id-${providerRef}`,
+    providerRef,
+    details: site === null
+      ? { durationSeconds: 1_800, marker: MARKER }
+      : { siteName: site.name, siteRef: site.ref, durationSeconds: 1_800, marker: MARKER },
+  };
+}
+
+function tableNamed(name: string) {
+  const table = XXX_SYNCED.find((candidate) => candidate.table === name);
+  assert.ok(table !== undefined, `${name} must be declared`);
+  return table;
+}
+
+function sceneIdFor(harness: ReturnType<typeof harnessWithTables>, mediaItemId: number): number {
+  const row = harness.raw.prepare('SELECT id FROM xxx_scene WHERE media_item_id = ?').get(mediaItemId) as
+    { id: number } | undefined;
+  assert.ok(row !== undefined, `a scene row must exist for media item ${String(mediaItemId)}`);
+  return row.id;
+}
+
+test("a scene's read carries its site's name and reference through the join, and null when it has none", async () => {
+  const harness = harnessWithTables();
+  await applyXxx({
+    media: sceneWith('tpdb:scene:1', { name: 'A Site', ref: 'tpdb:site:7' }),
+    mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW,
+  });
+  await applyXxx({
+    media: sceneWith('tpdb:scene:2', null),
+    mediaItemId: 2, raw: harness.raw, ctx: harness.ctx, now: NOW,
+  });
+
+  const read = tableNamed('xxx_scene').read(harness.raw, [sceneIdFor(harness, 1), sceneIdFor(harness, 2)]);
+
+  assert.deepEqual(read[sceneIdFor(harness, 1)] as XxxRead | undefined, {
+    mediaItemId: 1,
+    siteName: 'A Site',
+    siteRef: 'tpdb:site:7',
+  });
+
+  // `xxx_scene.site_id` is nullable and the join is left, so a scene with no
+  // known site reads both fields null rather than dropping out of the read.
+  assert.deepEqual(read[sceneIdFor(harness, 2)] as XxxRead | undefined, {
+    mediaItemId: 2,
+    siteName: null,
+    siteRef: null,
+  });
+});
+
+test("a site's own read carries its own columns, and rowsFor dedupes a site two scenes share", async () => {
+  const harness = harnessWithTables();
+  const site = { name: 'A Site', ref: 'tpdb:site:7' };
+  await applyXxx({
+    media: sceneWith('tpdb:scene:1', site), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW,
+  });
+  await applyXxx({
+    media: sceneWith('tpdb:scene:2', site), mediaItemId: 2, raw: harness.raw, ctx: harness.ctx, now: NOW,
+  });
+
+  // Counted by provider reference, not `count(*)`: `harnessWithTables` seeds
+  // a placeholder site of its own so ids cannot alias.
+  assert.equal(harness.raw.prepare(
+    "SELECT count(*) c FROM xxx_site WHERE provider_ref = 'tpdb:site:7'",
+  ).get()?.c, 1, 'fixture sanity: the provider_ref unique index makes both scenes share one site row');
+
+  const siteIds = tableNamed('xxx_site').rowsFor(harness.raw, [1, 2]);
+  assert.equal(siteIds.length, 1, 'xxx_site rowsFor must dedupe a shared parent');
+  const siteId = siteIds[0];
+  assert.ok(siteId !== undefined);
+
+  assert.deepEqual(tableNamed('xxx_site').read(harness.raw, [siteId])[siteId] as XxxSiteRead | undefined, {
+    name: 'A Site',
+    providerRef: 'tpdb:site:7',
+  });
+
+  // A detail table has one row per media item, so its rowsFor must not dedupe.
+  assert.equal(tableNamed('xxx_scene').rowsFor(harness.raw, [1, 2]).length, 2);
+});
+
+test('a scene with no site contributes no id to xxx_site rowsFor', async () => {
+  const harness = harnessWithTables();
+  await applyXxx({
+    media: sceneWith('tpdb:scene:2', null), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW,
+  });
+  assert.deepEqual(tableNamed('xxx_site').rowsFor(harness.raw, [1]), [],
+    '`site_id IS NOT NULL` is what keeps a null out of the id list');
 });

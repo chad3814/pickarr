@@ -1,7 +1,7 @@
 /**
  * The two cursors a client runs concurrently (design spec §5): a tail of log
  * ops from the present (`GET /api/sync?since=<n>`), and a backwards walk over
- * current state (`GET /api/sync/backfill?before=<createdAt>.<id>`).
+ * current state (`GET /api/sync/backfill?before=<createdAt>.<id>.<watermark>`).
  *
  * **No SQL here.** Both routes parse and validate their own cursor and call
  * `tailSince`/`backfillBefore` (`sync/tail.ts`, `sync/backfill.ts`) for
@@ -27,7 +27,7 @@ import type { SyncRegistry } from '../sync/registry.ts';
 import { tailSince } from '../sync/tail.ts';
 import { PAGE_SIZE } from './cursor.ts';
 
-/** Matches a cursor half that is exactly one or more decimal digits -- no sign, no decimal point, nothing else. */
+/** Matches one part of a cursor: one or more decimal digits, no sign, no decimal point, nothing else. */
 const DIGITS = /^\d+$/;
 
 /** What both routes below answer, before `server.ts` writes it to a socket. */
@@ -43,8 +43,10 @@ function json(status: number, body: unknown): SyncAnswer {
 /** The fixed 400 for a `since` that is missing or is not a bare non-negative integer. */
 const MALFORMED_SINCE = json(400, { error: 'since must be a non-negative integer' });
 
-/** The fixed 400 for a `before` that was supplied but does not parse as `<createdAt>.<id>`. */
-const MALFORMED_BEFORE = json(400, { error: 'before must be <createdAt>.<id>, both non-negative integers' });
+/** The fixed 400 for a `before` that was supplied but does not parse as `<createdAt>.<id>.<watermark>`. */
+const MALFORMED_BEFORE = json(400, {
+  error: 'before must be <createdAt>.<id>.<watermark>, all three non-negative integers',
+});
 
 /**
  * `since` as `tailSince` wants it, or `null` for anything that is not a bare
@@ -77,31 +79,54 @@ export function syncAnswer(
   return json(200, { ops: page.ops, cursor: page.cursor });
 }
 
-/** `<createdAt>.<id>`, matching `encodeBeforeCursor`'s own encoding below. */
+/**
+ * `<createdAt>.<id>.<watermark>`, matching `encodeBeforeCursor`'s own
+ * encoding below.
+ *
+ * **The watermark is part of the cursor, not a separate parameter, so a
+ * client cannot resume a walk without it.** `backfillBefore` skips any row
+ * the tail owns -- one whose `sync_log` entry sits above the watermark the
+ * walk started from -- and that is what keeps the two streams disjoint, so a
+ * page can never overwrite a newer value the tail already delivered. A
+ * second query parameter would be droppable, and dropping it would silently
+ * re-overlap the streams; one opaque token cannot be half supplied. Three
+ * parts are required for the same reason a two-part `before` is refused
+ * below rather than defaulted: this route has no safe "start from the
+ * beginning" reading of a cursor that was actually supplied.
+ */
 function parseBeforeCursor(raw: string): BackfillCursor | null {
-  const separator = raw.indexOf('.');
-  if (separator === -1) return null;
-  const createdAtPart = raw.slice(0, separator);
-  const idPart = raw.slice(separator + 1);
-  if (!DIGITS.test(createdAtPart) || !DIGITS.test(idPart)) return null;
-  return { createdAt: Number(createdAtPart), id: Number(idPart) };
+  const parts = raw.split('.');
+  if (parts.length !== 3) return null;
+  const [createdAtPart, idPart, watermarkPart] = parts;
+  if (createdAtPart === undefined || idPart === undefined || watermarkPart === undefined) return null;
+  if (!DIGITS.test(createdAtPart) || !DIGITS.test(idPart) || !DIGITS.test(watermarkPart)) return null;
+  return { createdAt: Number(createdAtPart), id: Number(idPart), watermark: Number(watermarkPart) };
 }
 
 /** The wire form of a backfill cursor -- the inverse of `parseBeforeCursor`. */
 function encodeBeforeCursor(cursor: BackfillCursor): string {
-  return `${cursor.createdAt}.${cursor.id}`;
+  return `${cursor.createdAt}.${cursor.id}.${cursor.watermark}`;
 }
 
 /**
- * `GET /api/sync/backfill?before=<createdAt>.<id>`: one page of current
- * state, newest first, plus the log's watermark at the moment the page was
- * read (design spec §5.2).
+ * `GET /api/sync/backfill?before=<createdAt>.<id>.<watermark>`: one page of
+ * current state, newest first, plus the log's watermark the walk is measured
+ * against (design spec §5.2).
  *
  * **No `before` at all is the first page**, not a malformed cursor -- this
  * route's own "start from the beginning" case, and the one place in this
  * file where an absent value is not refused. A `before` that *was* supplied
  * but does not parse is refused all the same, for the reason this module's
  * doc gives.
+ *
+ * The body carries two log positions and they are not the same number.
+ * `watermark` is where the client starts its tail: the first page's
+ * high-water mark, carried forward by the cursor, so adopting it from any
+ * page of the walk adopts page 1's and skips nothing. `asOf` dates *this*
+ * page -- the client may apply the page only while its tail cursor has not
+ * passed `asOf`, and must otherwise discard it and refetch with the same
+ * `before`. `backfillBefore`'s own doc has the measurements for why a
+ * stateless server cannot replace that check with anything it does itself.
  */
 export function backfillAnswer(
   deps: { raw: DatabaseSync; registry: SyncRegistry },
@@ -122,5 +147,6 @@ export function backfillAnswer(
     ops: page.ops,
     cursor: page.cursor === null ? null : encodeBeforeCursor(page.cursor),
     watermark: page.watermark,
+    asOf: page.asOf,
   });
 }

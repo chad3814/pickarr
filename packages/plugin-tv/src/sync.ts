@@ -14,22 +14,7 @@
  * points at.
  */
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
-import type { SyncedTable, TvRead } from '@pickarr/contract';
-
-/** What a client receives for a season, independent of any one release. */
-interface TvSeasonRead {
-  seriesId: number;
-  seasonNumber: number | null;
-  title: string | null;
-}
-
-/** What a client receives for a series, independent of any one release. */
-interface TvSeriesRead {
-  title: string;
-  providerRef: string;
-  firstAirDate: string | null;
-  overview: string | null;
-}
+import type { SyncedTable, TvRead, TvSeasonRead, TvSeriesRead } from '@pickarr/contract';
 
 function asText(value: SQLOutputValue | undefined): string {
   return String(value);
@@ -71,14 +56,19 @@ function holes(ids: readonly number[]): string {
  * is a left join: a series pack and some episodes have no season at all
  * (`apply.ts`'s `checkTv`/`applyTv`), and `seasonNumber` reads `null` rather
  * than a season this release does not have.
+ *
+ * `mediaItemId` is `tv_release.media_item_id`, which the client groups by.
+ * This row's own id is not here and must not be: the host puts it on the op
+ * (`sync/tail.ts`'s `SyncOp`), so keying does not depend on each read shape
+ * remembering a field.
  */
 const release: SyncedTable<TvRead> = {
   table: 'tv_release',
   read(raw: DatabaseSync, ids: readonly number[]): Record<number, TvRead> {
     if (ids.length === 0) return {};
     const rows = raw.prepare(`
-      SELECT r.id, r.kind, r.episode_number, s.title AS series_title, s.provider_ref AS series_ref,
-             n.season_number
+      SELECT r.id, r.media_item_id, r.kind, r.episode_number,
+             s.title AS series_title, s.provider_ref AS series_ref, n.season_number
       FROM tv_release r
       JOIN tv_series s ON s.id = r.series_id
       LEFT JOIN tv_season n ON n.id = r.season_id
@@ -87,6 +77,7 @@ const release: SyncedTable<TvRead> = {
     const result: Record<number, TvRead> = {};
     for (const row of rows) {
       result[asNumber(row.id)] = {
+        mediaItemId: asNumber(row.media_item_id),
         kind: tvKind(row.kind),
         seriesTitle: asText(row.series_title),
         seriesRef: asText(row.series_ref),

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { MovieRead } from '@pickarr/contract';
 import type { Media } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { MOVIE_SYNCED } from '../src/sync.ts';
@@ -13,6 +14,15 @@ const MARKER = 'MOVIE-DETAILS-MARKER-9d4e7b';
 function harnessWithTables() {
   const harness = createTestHarness();
   for (const migration of MOVIE_MIGRATIONS) migration.up(harness.raw);
+  // A placeholder row with a high id, so every row a test then writes has an
+  // `id` that differs from its `media_item_id`. Without it both are 1 for the
+  // first media item, and a read that returned the row's own id where it
+  // means to return the media item's would pass every assertion below.
+  // `createTestHarness` runs with `PRAGMA foreign_keys = OFF`, so the
+  // media item this points at need not exist.
+  harness.raw.prepare(
+    'INSERT INTO movie_detail (id, media_item_id, created_at, updated_at) VALUES (100, 900, 0, 0)',
+  ).run();
   return harness;
 }
 
@@ -72,4 +82,28 @@ test('a read never returns details_json', async () => {
   assert.ok(detail !== undefined, 'movie_detail must be declared');
   const result = detail.read(harness.raw, [detailId]);
   assert.ok(!JSON.stringify(result).includes(MARKER), "movie_detail's read must not return details_json");
+});
+
+test("a detail read carries its media item and its own columns, and rowsFor answers one row per item", async () => {
+  const harness = harnessWithTables();
+  await applyMovie({ media: movie(), mediaItemId: 1, raw: harness.raw, ctx: harness.ctx, now: NOW });
+
+  const detail = MOVIE_SYNCED.find((table) => table.table === 'movie_detail');
+  assert.ok(detail !== undefined, 'movie_detail must be declared');
+
+  const ids = detail.rowsFor(harness.raw, [1]);
+  assert.equal(ids.length, 1, 'one detail row per media item');
+  const id = ids[0];
+  assert.ok(id !== undefined);
+
+  // `mediaItemId` is how a client attaches this row to its group; the row's
+  // own key is on the op, not in here (`packages/contract/src/sync.ts`).
+  assert.deepEqual(detail.read(harness.raw, [id])[id] as MovieRead | undefined, {
+    mediaItemId: 1,
+    runtimeMinutes: 166,
+    tagline: 'Long live the fighters.',
+  });
+
+  assert.deepEqual(detail.read(harness.raw, []), {}, 'an empty id list never reaches SQLite');
+  assert.deepEqual(detail.rowsFor(harness.raw, []), []);
 });

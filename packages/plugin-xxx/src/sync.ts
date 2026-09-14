@@ -10,13 +10,7 @@
  * detail comes before the shared parent.
  */
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
-import type { SyncedTable, XxxRead } from '@pickarr/contract';
-
-/** What a client receives for a site, independent of any one scene. */
-interface XxxSiteRead {
-  name: string;
-  providerRef: string;
-}
+import type { SyncedTable, XxxRead, XxxSiteRead } from '@pickarr/contract';
 
 function asText(value: SQLOutputValue | undefined): string {
   return String(value);
@@ -41,13 +35,18 @@ function holes(ids: readonly number[]): string {
  * not inner -- `xxx_scene.site_id` is nullable (`apply.ts`: "a scene whose
  * site is unknown is still a scene worth having"), so a scene with no known
  * site reads both fields `null` rather than being excluded.
+ *
+ * `mediaItemId` is `xxx_scene.media_item_id`, which the client groups by.
+ * This row's own id is not here and must not be: the host puts it on the op
+ * (`sync/tail.ts`'s `SyncOp`), so keying does not depend on each read shape
+ * remembering a field.
  */
 const scene: SyncedTable<XxxRead> = {
   table: 'xxx_scene',
   read(raw: DatabaseSync, ids: readonly number[]): Record<number, XxxRead> {
     if (ids.length === 0) return {};
     const rows = raw.prepare(`
-      SELECT sc.id, st.name AS site_name, st.provider_ref AS site_ref
+      SELECT sc.id, sc.media_item_id, st.name AS site_name, st.provider_ref AS site_ref
       FROM xxx_scene sc
       LEFT JOIN xxx_site st ON st.id = sc.site_id
       WHERE sc.id IN (${holes(ids)})
@@ -55,6 +54,7 @@ const scene: SyncedTable<XxxRead> = {
     const result: Record<number, XxxRead> = {};
     for (const row of rows) {
       result[asNumber(row.id)] = {
+        mediaItemId: asNumber(row.media_item_id),
         siteName: asTextOrNull(row.site_name),
         siteRef: asTextOrNull(row.site_ref),
       };

@@ -18,5 +18,13 @@ export type {
 export type { HostFetch } from './fetch.ts';
 export type { Migration } from './migrations.ts';
 export type { DownloadClients, DownloadSubmission } from './downloads.ts';
-export type { MovieRead, SyncedTable, TvRead, XxxRead } from './sync.ts';
+export type {
+  MovieRead,
+  SyncedTable,
+  TvRead,
+  TvSeasonRead,
+  TvSeriesRead,
+  XxxRead,
+  XxxSiteRead,
+} from './sync.ts';
 export { assertSyncedTableName } from './sync.ts';

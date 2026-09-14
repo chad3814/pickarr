@@ -23,6 +23,7 @@ import { createSyncRegistry } from '../../src/sync/registry.ts';
 import type { SyncRegistry } from '../../src/sync/registry.ts';
 import type { ReadServer } from '../../src/api/server.ts';
 import { createReadServer } from '../../src/api/server.ts';
+import { PAGE_SIZE } from '../../src/api/cursor.ts';
 
 /** Obviously synthetic, and not a real secret -- see `server.test.ts`'s own doc on these constants. */
 const AUTH_SECRET = 'placeholder-not-a-real-signing-secret-for-tests';
@@ -193,8 +194,52 @@ test('the backfill answers a page, a cursor and a watermark', async () => {
     const ids = mediaItemOps.map((op) => (isRecord(op.value) ? op.value.id : undefined));
     assert.deepEqual(ids, [third, second, first], 'newest media item first, oldest last');
 
+    // Every op carries its key, host or plugin -- `sync/tail.ts`'s `SyncOp`
+    // says why the key is the op's and not the payload's.
+    assert.deepEqual(mediaItemOps.map((op) => op.id), [third, second, first],
+      'the op-level id must be the row id, on an upsert as much as on a delete');
+
     assert.equal(body.cursor, null, 'three rows on one page exhausts current state');
-    assert.equal(typeof body.watermark, 'number', 'the watermark is the log high-water mark at read time');
+    assert.equal(typeof body.watermark, 'number', 'the watermark is where the client starts its tail');
+    assert.equal(typeof body.asOf, 'number', 'asOf dates this page, so a client can tell a stale one');
+    assert.equal(body.asOf, body.watermark, 'on the first page they are one read');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a backfill cursor round-trips, carrying the watermark the walk is measured against', async () => {
+  const { raw, db } = setup();
+  // One more than `PAGE_SIZE`, which is what it takes to get a non-null
+  // cursor out of this route -- the page size is fixed and not a query
+  // parameter. The oldest item is the one left for page two.
+  const oldest = seedMediaItem(raw, 1, 'Oldest');
+  for (let index = 0; index < PAGE_SIZE; index += 1) seedMediaItem(raw, 1000 + index, `Item ${String(index)}`);
+
+  const registry = createSyncRegistry(raw, []);
+  const { server, cookie } = await startSignedIn(raw, db, registry);
+  try {
+    const firstResponse = await get(server, '/api/sync/backfill', cookie);
+    const first: unknown = JSON.parse(await firstResponse.text());
+    if (!isRecord(first) || typeof first.cursor !== 'string') {
+      throw new Error('a page that does not exhaust current state must answer a string cursor');
+    }
+    // `<createdAt>.<id>.<watermark>` -- three parts, the third being the
+    // watermark, so a client cannot resume a walk without the number that
+    // keeps the two streams from overlapping.
+    const parts = first.cursor.split('.');
+    assert.equal(parts.length, 3, `a backfill cursor has three parts, got ${String(parts.length)}`);
+    assert.equal(Number(parts[2]), first.watermark, "the third part is the walk's watermark");
+
+    const nextResponse = await get(server, `/api/sync/backfill?before=${first.cursor}`, cookie);
+    assert.equal(nextResponse.status, 200);
+    const next: unknown = JSON.parse(await nextResponse.text());
+    if (!isRecord(next) || !Array.isArray(next.ops)) throw new Error('the next page must answer ops');
+    assert.equal(next.watermark, first.watermark, 'the walk carries its watermark forward, never re-reads it');
+    const seen = next.ops
+      .filter((op): op is Record<string, unknown> => isRecord(op) && op.table === 'media_item')
+      .map((op) => op.id);
+    assert.deepEqual(seen, [oldest], 'resuming from the cursor skips nothing and repeats nothing');
   } finally {
     await server.close();
   }
@@ -236,7 +281,10 @@ test('a supplied but malformed backfill cursor is refused, though an absent one 
     const noCursor = await get(server, '/api/sync/backfill', cookie);
     assert.equal(noCursor.status, 200, 'no cursor at all means the first page, not an error');
 
-    const cases = ['abc', '1000', '1000.', '.5', '1000.-5'];
+    // `'1000.5'` is the *old* two-part form: it must be refused rather than
+    // read as a walk with no watermark, which would silently put the two
+    // streams back in overlap. `'1.2.3.4'` is one part too many.
+    const cases = ['abc', '1000', '1000.', '.5', '1000.-5', '1000.5', '1.2.3.4', '1000.5.'];
     const responses = await Promise.all(cases.map(async (before) => {
       const response = await get(server, `/api/sync/backfill?before=${before}`, cookie);
       return { before, status: response.status };

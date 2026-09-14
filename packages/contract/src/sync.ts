@@ -47,8 +47,33 @@ export function assertSyncedTableName(pluginId: string, table: string): void {
   }
 }
 
+/**
+ * The six read shapes, one per synced plugin table.
+ *
+ * **Every one of them omits the row's own id, and that is not an
+ * oversight.** A client keys a row by the `id` the host puts on the op that
+ * carries it, beside `op` and `table`, never by a field a read shape
+ * happened to remember to include -- so the key is the protocol's, not each
+ * plugin author's. See `sync/tail.ts`'s `SyncOp` for why: an upsert whose id
+ * lived inside `value` could not be matched against the delete that later
+ * names the same row, and the three shapes here carried no id at all until
+ * the op did, which made every plugin upsert unkeyable and every plugin
+ * delete unappliable.
+ *
+ * The three *detail* shapes -- one row per media item -- do carry
+ * `mediaItemId`, because grouping is a different question from keying: the
+ * client has to attach a detail row to the media item it belongs to, and
+ * `media_item.id` is not this row's key. The three *parent* shapes
+ * (`TvSeasonRead`, `TvSeriesRead`, `XxxSiteRead`) carry no `mediaItemId`,
+ * because their tables have no `media_item_id` column -- many episodes share
+ * one season, many scenes one site -- and they are reached through the
+ * detail rows that point at them.
+ */
+
 /** What a client receives for a television media item. */
 export interface TvRead {
+  /** The media item this release belongs to. Not this row's key; see the note above. */
+  mediaItemId: number;
   kind: 'series' | 'season' | 'episode';
   seriesTitle: string;
   seriesRef: string;
@@ -58,12 +83,44 @@ export interface TvRead {
 
 /** What a client receives for a film media item. */
 export interface MovieRead {
+  /** The media item this detail row belongs to. Not this row's key; see the note above. */
+  mediaItemId: number;
   runtimeMinutes: number | null;
   tagline: string | null;
 }
 
 /** What a client receives for an adult media item. */
 export interface XxxRead {
+  /** The media item this scene belongs to. Not this row's key; see the note above. */
+  mediaItemId: number;
   siteName: string | null;
   siteRef: string | null;
+}
+
+/**
+ * What a client receives for a television season, independent of any one
+ * release.
+ *
+ * `seriesId` is a `tv_series.id`, which resolves against the `id` on the
+ * `tv_series` upsert op -- the op-level key described above is what makes
+ * this reference land on a row the client actually holds.
+ */
+export interface TvSeasonRead {
+  seriesId: number;
+  seasonNumber: number | null;
+  title: string | null;
+}
+
+/** What a client receives for a television series, independent of any one release. */
+export interface TvSeriesRead {
+  title: string;
+  providerRef: string;
+  firstAirDate: string | null;
+  overview: string | null;
+}
+
+/** What a client receives for an adult site, independent of any one scene. */
+export interface XxxSiteRead {
+  name: string;
+  providerRef: string;
 }
