@@ -13,6 +13,7 @@ import type {
   MediaType,
   Migration,
   PluginContext,
+  SyncedTable,
 } from '@pickarr/contract';
 import { eq, inArray } from 'drizzle-orm';
 import { drizzle as createDrizzle } from 'drizzle-orm/node-sqlite';
@@ -285,6 +286,14 @@ export interface LookupPluginSpec {
   check(media: Media): void;
   /** The plugin's own rows for one resolved answer. Must be idempotent. */
   apply(args: ApplyArgs): Promise<void>;
+  /**
+   * The tables this plugin contributes to a client's replica (design spec
+   * §6). Optional and defaulting to none below -- a plugin built on this
+   * engine that declares nothing keeps working unchanged, which is what let
+   * the three plugins here adopt `synced` one at a time rather than all at
+   * once.
+   */
+  readonly synced?: readonly SyncedTable<unknown>[];
 }
 
 export interface LookupPluginDeps {
@@ -496,9 +505,10 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     mediaType: spec.mediaType,
     migrations: [lookupTableMigration(spec.id), ...spec.migrations],
     jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll },
-    // Empty until a plugin built on this engine declares synced tables of its
-    // own; the three plugins here have none yet.
-    synced: [],
+    // Defaults to empty: `LookupPluginSpec.synced` is optional, so a spec
+    // that declares nothing still produces a valid `MediaPlugin`, whose own
+    // `synced` is required.
+    synced: spec.synced ?? [],
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;
