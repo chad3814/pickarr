@@ -323,12 +323,20 @@ const CREDENTIAL_TABLES: readonly string[] = [
  * whose reading is unknown. Carrying that as a flag rather than silently
  * closing the gap with ` ? ` is what lets the rule fail closed over a
  * credential table instead of passing.
+ *
+ * **A count rather than a flag, because one unreadable piece is not the same
+ * as two.** `unknownTableMark` below distinguishes a statement whose *table*
+ * is all this check could not read -- `SELECT id FROM ${table}`, whose column
+ * list is right there -- from one where the column list is unreadable too:
+ * `SELECT ${columns} FROM ${table}` could be selecting anything from
+ * anything, and stays a violation. Every other reader wants the flag, and
+ * spells it `> 0`.
  */
 interface SqlText {
   /** The statement, with every substitution this check could resolve spliced in. */
   text: string;
-  /** Whether any substitution could not be resolved, so `text` is an incomplete reading. */
-  unresolved: boolean;
+  /** How many substitutions could not be resolved, so `text` is an incomplete reading. */
+  unresolved: number;
 }
 
 /**
@@ -399,22 +407,22 @@ function collectBindings(parsed: ts.SourceFile): Bindings {
  */
 function sqlTextOf(node: ts.Node, bindings: Bindings, seen: ReadonlySet<string> = new Set()): SqlText | null {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-    return { text: node.text, unresolved: false };
+    return { text: node.text, unresolved: 0 };
   }
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
     return sqlTextOf(node.expression, bindings, seen);
   }
   if (ts.isTemplateExpression(node)) {
     let text = node.head.text;
-    let unresolved = false;
+    let unresolved = 0;
     for (const span of node.templateSpans) {
       const substituted = sqlTextOf(span.expression, bindings, seen);
       if (substituted === null) {
         text += ' ? ';
-        unresolved = true;
+        unresolved += 1;
       } else {
         text += substituted.text;
-        unresolved = unresolved || substituted.unresolved;
+        unresolved += substituted.unresolved;
       }
       text += span.literal.text;
     }
@@ -426,7 +434,7 @@ function sqlTextOf(node: ts.Node, bindings: Bindings, seen: ReadonlySet<string> 
     if (left === null && right === null) return null;
     return {
       text: (left?.text ?? ' ? ') + (right?.text ?? ' ? '),
-      unresolved: left === null || right === null || left.unresolved || right.unresolved,
+      unresolved: (left === null ? 1 : left.unresolved) + (right === null ? 1 : right.unresolved),
     };
   }
   if (ts.isIdentifier(node)) {
@@ -526,7 +534,7 @@ function readsFrom(sql: string, table: string): boolean {
  * there some other way cannot trip it (`FROM ?` is not valid SQLite anyway).
  */
 function readsFromUnknownTable(sql: SqlText): boolean {
-  return sql.unresolved && /\b(?:from|join|update|into)\s+\?/i.test(normalized(sql.text));
+  return sql.unresolved > 0 && /\b(?:from|join|update|into)\s+\?/i.test(normalized(sql.text));
 }
 
 /**
@@ -538,11 +546,74 @@ function readsFromUnknownTable(sql: SqlText): boolean {
  * reads no column at all, and flagging it would flag `auth/claim.ts`'s own
  * measured-not-to-be-used counterexample. An alias's `s.*` is the same star as
  * a bare one.
+ *
+ * **A star is a select list only where a *column* could stand: at the head of
+ * the list, or straight after a comma, optionally qualified by an alias.** It
+ * is not the multiplication operator, which the earlier form read as a star
+ * because it allowed any whitespace in front -- so
+ * `SELECT unixepoch('subsec') * 1000 FROM t` was reported as selecting every
+ * column of `t`. Measured on `sync/log.ts`'s seed statement, which is exactly
+ * that shape. An operator always has a left operand, and no operand ends in
+ * `^` or `,`, which is what the narrower form keys on.
  */
 function selectsEveryColumn(sql: string): boolean {
   const list = /\bselect\b([\s\S]*?)\bfrom\b/i.exec(normalized(sql))?.[1];
   if (list === undefined) return false;
-  return /(?:^|[\s,])(?:\w+\s*\.\s*)?\*/.test(list);
+  return /(?:^|,)\s*(?:\w+\s*\.\s*)?\*/.test(list);
+}
+
+/**
+ * Whether the statement names a credential column by its bare name, whichever
+ * table it turns out to read.
+ *
+ * The keyed-on-table check (`credentialColumnsIn`'s first branch) cannot ask
+ * this question of a table it could not resolve, and this is the part of the
+ * question that does not need the table: a statement that never writes the
+ * word `token`, `password` or `value` is not selecting one of those columns
+ * out of *any* table. A column reached through an expression
+ * (`substr(token, 1, 4)`) still names it and is still caught.
+ */
+function namesCredentialColumn(sql: string): boolean {
+  const text = normalized(sql);
+  return CREDENTIAL_COLUMNS.some(
+    ({ column }) => new RegExp(String.raw`\b${column}\b`, 'i').test(text),
+  );
+}
+
+/**
+ * How a statement whose *table* this check could not resolve is unreadable, or
+ * `null` when nothing about it could be selecting a credential.
+ *
+ * **Failing closed on the table alone was too coarse, and this is the
+ * narrowing.** The rule's question is whether a credential column is
+ * selected. Three answers keep a statement over an unresolved table a
+ * violation, and each is a case where that question genuinely cannot be
+ * answered:
+ *
+ * - **A star select.** `SELECT * FROM ${table}` selects whatever columns that
+ *   table has, so if it is a credential table it selects the credential.
+ * - **A credential column named.** `SELECT token FROM ${table}` selects
+ *   `token` from *something*, and the rule does not need to know what.
+ * - **More than one unreadable piece.** `SELECT ${columns} FROM ${table}`
+ *   leaves both halves unknown, which is the case the coarse rule existed
+ *   for. One unreadable piece means the table is the only thing this check
+ *   could not read, and the column list beside it is right there in the
+ *   source.
+ *
+ * What that admits, stated rather than left to be discovered: a statement
+ * naming a runtime table and selecting only columns that are a credential in
+ * no table of this schema. `sync/log.ts`'s log seed is the case it was
+ * narrowed for -- `SELECT ?, id, 'upsert', <now> FROM ${table}`, whose one
+ * column is `id` -- and there is no way to write it otherwise, because SQLite
+ * binds no identifiers and a table's rows cannot be enumerated without naming
+ * it after `FROM`. An `INSERT INTO ${table} (a) VALUES (?)` is admitted for
+ * the same reason and by the same test: it names column `a`, which is a
+ * credential nowhere, so it cannot be writing one by name.
+ */
+function unknownTableMark(sql: SqlText): string | null {
+  if (selectsEveryColumn(sql.text)) return '*';
+  if (namesCredentialColumn(sql.text)) return '?';
+  return sql.unresolved > 1 ? '?' : null;
 }
 
 /**
@@ -553,7 +624,7 @@ function selectsEveryColumn(sql: string): boolean {
  */
 function unreadableSelectMark(sql: SqlText): string | null {
   if (selectsEveryColumn(sql.text)) return '*';
-  if (sql.unresolved) return '?';
+  if (sql.unresolved > 0) return '?';
   return null;
 }
 
@@ -579,6 +650,10 @@ function unreadableSelectMark(sql: SqlText): string | null {
  *   `CREDENTIAL_ALLOW_LIST` deliberately and in a diff. A rule that passed
  *   these would be a rule that passes `SELECT *`, which is already the house
  *   style at two sites in `api/reads.ts`.
+ * - **Over a table this check could not resolve at all** — reported as
+ *   `?.*`/`?.?`, and narrower than the three above because the table is
+ *   unknown rather than known-credential. `unknownTableMark` states which
+ *   statements of that shape are still violations and which one it admits.
  *
  * A table that already contributed a named column is not reported a second
  * time for its star, so `SELECT *, token FROM auth_session` reads as one
@@ -591,17 +666,19 @@ function credentialColumnsIn(sql: SqlText): string[] {
   });
   const readable = named.map(({ table, column }) => `${table}.${column}`);
   const unreadable = unreadableSelectMark(sql);
-  if (unreadable === null) return readable;
-  const unread = CREDENTIAL_TABLES
+  const unread = unreadable === null ? [] : CREDENTIAL_TABLES
     .filter((table) => readsFrom(sql.text, table) && !named.some((column) => column.table === table))
     .map((table) => `${table}.${unreadable}`);
   // A table this check could not resolve is reported as `?.*` or `?.?`: it may
   // be a credential table, and nothing above can have matched it by name. Only
   // when no credential table was matched either, so a statement that reads a
   // known credential table *and* an unknown one is reported once for the one
-  // that can be named.
-  const unknown = unread.length === 0 && readable.length === 0 && readsFromUnknownTable(sql)
-    ? [`?.${unreadable}`]
+  // that can be named -- and only for the statements `unknownTableMark` marks,
+  // which is a narrower set than `unreadableSelectMark`'s above precisely
+  // because the table is unknown rather than known to hold a credential.
+  const unknownMark = readsFromUnknownTable(sql) ? unknownTableMark(sql) : null;
+  const unknown = unread.length === 0 && readable.length === 0 && unknownMark !== null
+    ? [`?.${unknownMark}`]
     : [];
   return [...readable, ...unread, ...unknown];
 }

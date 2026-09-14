@@ -411,10 +411,23 @@ test('a table name this check cannot resolve is a violation, because it may be a
   // therefore cannot clear -- and answerable the same way as any other
   // fail-closed finding: name the table, or say in a diff why this module may
   // read a credential.
+  //
+  // **Narrower than "any unresolved table", which is what it was first.** See
+  // `unknownTableMark`: the question the rule asks is whether a credential
+  // column is selected, and a statement whose column list is fully spelled out
+  // answers it whatever the table turns out to be. The test below this one is
+  // the admitted case; everything here is still a violation.
   const dir = await fixtureDir(t, {
     'from-parameter.ts': 'export function q(t: string): string { return `SELECT token FROM ${t}`; }\n',
     'star-from-parameter.ts': 'export function q(t: string): string { return `SELECT * FROM ${t}`; }\n',
-    'insert-into-parameter.ts': 'export function q(t: string): string { return `INSERT INTO ${t} (a) VALUES (?)`; }\n',
+    // A credential column written into an unknown table is the `INTO` half of
+    // the same question, and `password` is what makes it one.
+    'insert-into-parameter.ts':
+      'export function q(t: string): string { return `INSERT INTO ${t} (password) VALUES (?)`; }\n',
+    // Both halves unknown: the column list could be any column and the table
+    // could be any table, which is the case failing closed exists for.
+    'columns-and-table.ts':
+      'export function q(c: string, t: string): string { return `SELECT ${c} FROM ${t}`; }\n',
     // A table that *does* resolve is read as itself, and this one holds no
     // credential -- so resolving it is what makes the difference, not the
     // presence of a substitution.
@@ -432,9 +445,66 @@ test('a table name this check cannot resolve is a violation, because it may be a
   assert.deepEqual(
     (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
     [
+      ['columns-and-table.ts', '?.?'],
       ['from-parameter.ts', '?.?'],
       ['insert-into-parameter.ts', '?.?'],
       ['star-from-parameter.ts', '?.*'],
+    ],
+  );
+});
+
+test('a fully spelled column list over a table this check cannot resolve is a pass', async (t) => {
+  // The one shape the rule above admits, and the reason it was narrowed:
+  // `sync/log.ts` seeds `sync_log` with one entry per live row of a table
+  // named at runtime, and there is no other way to write it -- SQLite binds no
+  // identifiers, so a table's rows cannot be enumerated without naming it
+  // after `FROM`. Its column list is `?`, `id`, a literal and a timestamp
+  // expression: `id` is a credential in no table of this schema, so whichever
+  // table this turns out to read, the statement is not selecting a credential
+  // out of it.
+  //
+  // The multiplication in the timestamp is the second half of what was
+  // measured here: the star matcher allowed any whitespace in front of a `*`,
+  // so `unixepoch('subsec') * 1000` in a select list was read as
+  // `SELECT *` and reported this statement as `?.*`.
+  const dir = await fixtureDir(t, {
+    'seed.ts': [
+      'export function seed(table: string): string {',
+      "  return `INSERT INTO sync_log (table_name, row_id, op, at)",
+      "     SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM ${table}`;",
+      '}',
+      '',
+    ].join('\n'),
+    // The same admission for a write, and for the same reason: column `a` is a
+    // credential nowhere, so this cannot be writing one by name.
+    'insert.ts': 'export function q(t: string): string { return `INSERT INTO ${t} (a) VALUES (?)`; }\n',
+    // And a plain arithmetic select list over a *known* non-credential table,
+    // so the star fix is pinned independently of the unknown-table branch.
+    'arithmetic.ts': `export const Q = 'SELECT updated_at * 1000 FROM media_item';\n`,
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('the star matcher still sees every spelling of a real star select', async (t) => {
+  // The counterweight to the narrowing above: a `*` where a column could
+  // stand is a star select, at the head of the list or after a comma, bare or
+  // alias-qualified. Narrowing it to exclude the multiplication operator must
+  // not have excluded any of these.
+  const dir = await fixtureDir(t, {
+    'head.ts': `export const Q = 'SELECT * FROM auth_session';\n`,
+    'alias.ts': `export const Q = 'SELECT s.* FROM auth_session s';\n`,
+    'after-comma.ts': `export const Q = 'SELECT id, * FROM auth_session';\n`,
+    'newline.ts': ['export const Q = `SELECT', '  *', 'FROM auth_session`;', ''].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['after-comma.ts', 'auth_session.*'],
+      ['alias.ts', 'auth_session.*'],
+      ['head.ts', 'auth_session.*'],
+      ['newline.ts', 'auth_session.*'],
     ],
   );
 });
