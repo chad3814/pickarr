@@ -274,7 +274,9 @@ In this order:
    billingOrder })`, one at a time and in the order the service gave them,
    because `attachRole` needs the id the upsert returns and billing order is
    the order rows should land in. `role` is passed through as the service sends
-   it (`cast`, `director`, …); the engine invents no vocabulary of its own.
+   it (`performer`, `writer`, `director`, `producer`, `author` — observed,
+   see §4.2; the document's own example says `cast`, which the service does
+   not send); the engine invents no vocabulary of its own.
 8. `setResolution(rssItemId, 'resolved', null)`.
 
 Every step is idempotent or keyed, so a handler the runner retries after a
@@ -416,10 +418,39 @@ column holding the object verbatim, so no field the service sends is lost to a
 missing column and learning a key later needs no re-lookup. And the known keys
 are read defensively: present and of the right type, or null.
 
-Implementation begins with one real request per category against the live API,
-with a real key, to learn the tv keys and confirm the two documented sets. The
-observed keys go into this spec as an amendment before the tv tables are
-written.
+**Probed, 2026-09-13**, one live request per category. The tv tables were
+written against guesses before the key was available; the probe confirms them.
+
+| `kind` | `details` keys observed |
+| --- | --- |
+| `episode` | `seasonNumber` (number), `episodeNumber` (number), `airDate` (string) |
+| `movie` | `runtimeMinutes` (number), `imdbId` (string), `tagline` (string), `collectionName` (string) |
+| `scene` | `siteRef` (string), `siteName` (string), `durationSeconds` (number), `releasedOn` (string) |
+
+So `SEASON_NUMBER_KEY` and `EPISODE_NUMBER_KEY` were guessed correctly, and
+both documented sets are confirmed exactly. `airDate` is a fourth episode key
+this slice does not read — it duplicates the media item's own `releaseDate`,
+and `details_json` keeps it either way.
+
+Three things the probe settled that the document does not state, and that
+this spec had assumed:
+
+- **`providerRef` is not uniformly qualified.** tmdb answers
+  `tmdb:movie:693134` and `tmdb:tv:136315:3:1`; tpdb answers a bare uuid,
+  `385d2e30-188f-431c-9769-0a6ab8437a14`, with no provider in it. Nothing
+  breaks — `media_item`'s unique index is on `(provider, provider_ref)` and
+  both halves are written — but `<id>_lookup.provider_ref` below is described
+  as holding `provider:ref`, and for a scene it holds the ref alone. It is a
+  diagnostic column with no reader, so this is a note rather than a change.
+- **A tv episode's parents carry the hierarchy in their refs** —
+  `tmdb:tv:136315:3` for the season, `tmdb:tv:136315` for the series — so
+  `tv_series` and `tv_season`'s unique indexes key on values that are
+  genuinely distinct per level, which §4.3 assumed and did not verify.
+- **The people vocabulary is not the document's.** Its example names `cast`;
+  the service answers `performer`, `writer`, `director`, `producer` and
+  `author`. The engine passes `role` through verbatim, so nothing had to
+  change — but every comment citing `cast` as the example was citing a value
+  the service does not send.
 
 ### 4.3 tv (migration 2)
 

@@ -32,7 +32,12 @@ export interface MediaParent {
 export interface MediaPerson {
   readonly providerRef: string;
   readonly name: string;
-  /** The service's own vocabulary -- `cast`, `director`, and whatever else it sends. */
+  /**
+   * The service's own vocabulary, passed through untouched. Observed:
+   * `performer`, `writer`, `director`, `producer`, `author`. The OpenAPI
+   * document's example says `cast`, which the service does not send -- so
+   * nothing here may key off a particular value.
+   */
   readonly role: string;
   readonly characterName: string | null;
   readonly billingOrder: number | null;

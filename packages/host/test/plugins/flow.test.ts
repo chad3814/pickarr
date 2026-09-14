@@ -62,7 +62,7 @@ const SCRIPT = new Map<string, LookupEnvelope>([
         { id: 's', kind: 'season', title: 'Season 3', releaseDate: null, year: 2024, provider: 'tmdb', providerRef: 'tmdb:season:10' },
         { id: 'e', kind: 'series', title: 'The Bear', releaseDate: null, year: 2022, provider: 'tmdb', providerRef: 'tmdb:series:100' },
       ],
-      people: [{ providerRef: 'tmdb:person:1', name: 'A Actor', role: 'cast', characterName: 'Carmy', billingOrder: 0 }],
+      people: [{ providerRef: 'tmdb:person:1', name: 'A Actor', role: 'performer', characterName: 'Carmy', billingOrder: 0 }],
     }),
   })],
   ['film.mkv', resolvedEnvelope({
