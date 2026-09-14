@@ -30,8 +30,40 @@ import type { SyncRegistry } from '../sync/registry.ts';
 import { tailSince } from '../sync/tail.ts';
 import { PAGE_SIZE } from './cursor.ts';
 
-/** Matches one part of a cursor: one or more decimal digits, no sign, no decimal point, nothing else. */
-const DIGITS = /^\d+$/;
+/**
+ * Matches a cursor: decimal digits, no sign, no decimal point, nothing else
+ * -- and **at most 15 of them**.
+ *
+ * **The bound is not tidiness; without it this route emitted cursors it then
+ * refused.** `/^\d+$/` accepted `since=1000000000000000000000` (22 digits),
+ * `tailSince` returned it unchanged for an empty page, and `JSON.stringify`
+ * serialised the `Number` as `1e+21`. A client echoing its own cursor back --
+ * which is the entire protocol -- got a `400`, permanently. Measured:
+ *
+ * ```
+ * since accepted (22 digits): true
+ * wire body: {"ops":[],"cursor":1e+21}
+ * cursor echoed as: 1e+21 | accepted again by /^\d+$/: false
+ * ```
+ *
+ * Same class, one step earlier: any value above `Number.MAX_SAFE_INTEGER`
+ * (9007199254740991) is bound to `node:sqlite` with silent precision loss
+ * rather than refused, so two distinct cursors can become one query.
+ *
+ * **15, because every 15-digit value is safe on both counts.** The largest is
+ * 999999999999999, below `Number.MAX_SAFE_INTEGER`, so it is exact; and it is
+ * far below 1e21, so `JSON.stringify` writes it as plain digits and this
+ * regex takes it back. A cursor is a `sync_log.id`, one row per changed row,
+ * so 10^15 is more entries than any database will hold by a margin no real
+ * library approaches. Bounding the digit count rather than testing
+ * `Number.isSafeInteger` also refuses the input *up front*, which a
+ * thousand-digit string of leading zeros would otherwise walk past.
+ *
+ * `./cursor.ts`'s own `DIGITS` is deliberately left alone: a malformed cursor
+ * there means "first page", not a `400`, so an over-long one costs a client
+ * a little progress once rather than failing every poll it makes.
+ */
+const DIGITS = /^\d{1,15}$/;
 
 /** What each route below answers, before `server.ts` writes it to a socket. */
 export interface SyncAnswer {

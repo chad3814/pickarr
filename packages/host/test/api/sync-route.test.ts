@@ -311,7 +311,14 @@ test('a malformed cursor is refused rather than treated as zero', async () => {
     // these four requests share nothing and none decides the next, so there
     // is no sequence for a loop to preserve. See `server.test.ts`'s
     // `getAll` for the same shape.
-    const cases = ['abc', '-1', '1.5', ''];
+    // The last two are finding 10: `/^\d+$/` accepted a 22-digit `since`,
+    // `tailSince` returned it unchanged for an empty page, and
+    // `JSON.stringify` wrote it as `1e+21` -- which this same route then
+    // refused, so a client echoing its own cursor back was stuck forever. The
+    // 16-digit case is the quieter half: above `Number.MAX_SAFE_INTEGER`
+    // (9007199254740991) the value is bound to `node:sqlite` with silent
+    // precision loss instead.
+    const cases = ['abc', '-1', '1.5', '', '1000000000000000000000', '9007199254740993'];
     const responses = await Promise.all(cases.map(async (since) => {
       const response = await get(server, `/api/sync?since=${since}`, cookie);
       return { since, status: response.status, body: await response.text() };
@@ -342,7 +349,8 @@ test('a supplied but malformed backfill cursor is refused, though an absent one 
     // having its first component read as a log id, which would silently
     // restart its walk from an arbitrary place. `'1.5'` is a decimal, `'-1'`
     // a sign: `before` is a `sync_log.id`, and nothing else is one.
-    const cases = ['abc', '1000.', '.5', '-1', '1.5', '1000.5', '1000.5.9', '1e3', ' 5'];
+    const cases = ['abc', '1000.', '.5', '-1', '1.5', '1000.5', '1000.5.9', '1e3', ' 5',
+      '1000000000000000000000', '9007199254740993'];
     const responses = await Promise.all(cases.map(async (before) => {
       const response = await get(server, `/api/sync/backfill?before=${before}`, cookie);
       return { before, status: response.status };
@@ -350,6 +358,40 @@ test('a supplied but malformed backfill cursor is refused, though an absent one 
     for (const { before, status } of responses) {
       assert.equal(status, 400, `before=${JSON.stringify(before)} must be refused`);
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test('every cursor this route emits is one it accepts back', async () => {
+  // The property finding 10 broke, asserted as a round trip rather than as a
+  // list of refused strings: a client's whole protocol is echoing the cursor
+  // it was handed. The largest `since` the route accepts is taken through
+  // `JSON.stringify` -- which is what actually writes the wire body -- and
+  // fed back in.
+  const { raw, db } = setup();
+  seedMediaItem(raw, 1000, 'A Movie');
+  const registry = createSyncRegistry(raw, []);
+  const { server, cookie } = await startSignedIn(raw, db, registry);
+  try {
+    const largest = '999999999999999';
+    const response = await get(server, `/api/sync?since=${largest}`, cookie);
+    assert.equal(response.status, 200, 'the largest accepted cursor must be accepted');
+
+    const body: unknown = JSON.parse(await response.text());
+    if (!isRecord(body)) throw new Error('the body must be an object');
+    assert.equal(JSON.stringify(body.cursor), largest,
+      'and must come back as plain digits, not exponential notation');
+
+    const again = await get(server, `/api/sync?since=${JSON.stringify(body.cursor)}`, cookie);
+    assert.equal(again.status, 200, 'a client echoing its own cursor back must not be refused');
+
+    // The boundary from the other side, spelled literally so moving the bound
+    // moves this test: one digit more is where exactness starts to go, since
+    // 1000000000000000 is the first value a 16-digit bound would admit above
+    // which `Number.MAX_SAFE_INTEGER` is reachable.
+    const tooLong = await get(server, `/api/sync?since=${largest}9`, cookie);
+    assert.equal(tooLong.status, 400, 'sixteen digits is past what a cursor may be');
   } finally {
     await server.close();
   }
