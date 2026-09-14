@@ -171,10 +171,13 @@ INSERT INTO sync_log (table_name, row_id, op, at)
 ```
 
 The `DELETE` first is required — `sync_log_row` is a `UNIQUE` index on
-`(table_name, row_id)` — and it is also what makes this work: deleting frees the old
-`AUTOINCREMENT` ids, so the new rows land at *higher* ids than any client's cursor and
-every client re-reads the table. Preserving the old ids would hide the change from
-exactly the clients that need it.
+`(table_name, row_id)` — and that is *all* it is. What makes the relog work is
+`AUTOINCREMENT`: `sync_log.id` is issued as `max_ever + 1` and no id is ever reused, so
+the new rows land at higher ids than any client's cursor whether or not anything was
+deleted first. Measured — with the log holding ids 1, 2 and 4 and rows 1 and 2 live, the
+relog produces ids **5 and 6**, not the freed 1 and 2. An earlier wording of this
+paragraph said deleting "frees the old `AUTOINCREMENT` ids"; it frees nothing, which is
+the whole reason the column carries `AUTOINCREMENT` in the first place.
 
 **This is the mechanism, not just a repair.** `migration15` runs `seedSyncLog` over
 `HOST_SYNCED_TABLES` after installing the triggers, and `host.register` runs

@@ -46,6 +46,28 @@ test('at is a millisecond timestamp, not a second one multiplied by a thousand',
   assert.ok(at <= after, `at ${at} is above the time after the write (${after})`);
 });
 
+test('deleting log entries frees no id, which is the claim the column carries AUTOINCREMENT for', () => {
+  // Pins the mechanism the triggers and the seed actually rely on, because an
+  // earlier docblock in `sync/log.ts`, spec §4 and
+  // `docs/database-migrations.md` all named the wrong one -- "the DELETE frees
+  // those AUTOINCREMENT ids" -- and the schema comment twenty lines from the
+  // DDL says the opposite. Only one of the two can be true.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const insert = (rowId: number) =>
+    raw.prepare("INSERT INTO sync_log (table_name, row_id, op, at) VALUES ('t', ?, 'upsert', 0)").run(rowId);
+  for (const rowId of [1, 2, 3, 4]) insert(rowId);
+  raw.exec('DELETE FROM sync_log WHERE id IN (1, 2, 4)');
+  insert(10);
+  insert(11);
+
+  assert.deepEqual(
+    raw.prepare('SELECT id FROM sync_log ORDER BY id').all().map((r) => Number((r as { id: unknown }).id)),
+    [3, 5, 6],
+    'the next ids are max_ever + 1, not the freed 1, 2 and 4',
+  );
+});
+
 test('a row changed twice takes a higher id the second time', () => {
   const raw = open();
   raw.prepare('INSERT INTO probe (id, v, created_at) VALUES (1, ?, 1)').run('a');
@@ -119,11 +141,11 @@ test('the seed logs one entry per live row, and nothing for a row that is gone',
 });
 
 test('a reseed gives every row a higher log id, so a client already past the old entries re-reads them', () => {
-  // Why the `DELETE` in `seedSyncLog` is load-bearing rather than merely
-  // required by the unique index: freeing the old AUTOINCREMENT ids is what
-  // puts the new entries above any client's cursor. It is also why
-  // `seedSyncLogOnce` exists -- doing this on every boot would make every
-  // client re-read the whole library on every restart.
+  // What puts the reseeded entries above any client's cursor is
+  // `AUTOINCREMENT`, not the `DELETE` -- the delete is there for
+  // `sync_log_row`'s unique index and frees no id, measured in `seedSyncLog`'s
+  // own doc. It is also why `seedSyncLogOnce` exists: doing this on every boot
+  // would make every client re-read the whole library on every restart.
   const { raw } = openTestDatabase();
   migrateHost(raw);
   raw.exec(`

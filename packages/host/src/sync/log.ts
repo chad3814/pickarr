@@ -4,13 +4,26 @@ import { readHostState, writeHostState } from '../db/host-state.ts';
 /**
  * The three triggers that keep one `sync_log` row per changed row.
  *
- * Each deletes the row's existing entry before inserting a new one. That is
- * not an optimisation: the delete is what frees the old `AUTOINCREMENT` id so
- * the insert allocates a higher one, and a higher id is what makes the change
- * visible to a client whose cursor is already past the old entry. An upsert
- * would keep one row per changed row too, and would keep the id -- measured
- * in the design spec §2.10 -- which hides the change from exactly the clients
- * that need it.
+ * Each deletes the row's existing entry before inserting a new one, and the
+ * delete and the higher id are two separate things. The **delete** is what
+ * `sync_log_row` requires: it is UNIQUE on `(table_name, row_id)`, so a
+ * second entry for a row that already has one would conflict. The **higher
+ * id** comes from `AUTOINCREMENT`, which issues `max_ever + 1` and never
+ * reuses an id -- so the new entry lands above the cursor of a client already
+ * past the old one, which is what makes the change visible to it.
+ *
+ * **The delete frees nothing, and an earlier wording here said it did.**
+ * Measured on SQLite 3.53.4: with the log holding ids 1, 2 and 4, deleting
+ * 1, 2 and 4 and inserting twice produces ids **5 and 6**, and
+ * `sqlite_sequence.seq` only ever increases. That is the whole reason
+ * `sync_log.id` is `AUTOINCREMENT` while every other table in this schema is
+ * not -- `migrate.ts`'s `MIGRATION_15_DDL` says so twenty lines of schema
+ * away, and the two claims cannot both be true.
+ *
+ * An upsert would keep one row per changed row too, and would keep the id --
+ * measured in the design spec §2.10 -- which hides the change from exactly
+ * the clients that need it. That is the alternative the delete-then-insert
+ * rules out; freeing an id is not.
  *
  * `DROP TRIGGER IF EXISTS` first, so installation is idempotent, which is
  * what lets `main.ts` call `installSyncTriggers(raw, HOST_SYNCED_TABLES)` on
@@ -112,16 +125,17 @@ export function installSyncTriggers(raw: DatabaseSync, tables: readonly string[]
  * permanently. Seeding is what makes `sync_log` hold exactly one entry per
  * live row, which is the invariant both cursors now read it for.
  *
- * **The `DELETE` first is required, and it also does the work.** Required
+ * **The `DELETE` first is required, and it is *only* required.** Required
  * because `sync_log_row` is UNIQUE on `(table_name, row_id)` (migration 15),
- * so a row that already has an entry would conflict. And load-bearing because
- * deleting frees those `AUTOINCREMENT` ids, so the entries inserted below
- * land at *higher* ids than any client's cursor and every client re-reads the
- * table. Preserving the old ids would hide the seed from exactly the clients
- * that need it -- the same reason the triggers delete before inserting, and
- * the repair `docs/database-migrations.md` already documents for a migration
- * that rebuilds a synced table's rows. On a table with no rows this is two
- * statements that match nothing.
+ * so a row that already has an entry would conflict. It does no other work:
+ * the entries the insert writes land above every client's cursor because
+ * `sync_log.id` is `AUTOINCREMENT` and never reuses an id, whether or not
+ * anything was deleted first. Measured -- with the log holding ids 1, 2 and 4
+ * and rows 1 and 2 live, this produces ids **5 and 6**, not the freed 1 and
+ * 2. An earlier wording here, in spec §4 and in
+ * `docs/database-migrations.md` said the delete "frees those `AUTOINCREMENT`
+ * ids"; it does not, and `migrate.ts`'s own schema comment says as much. On a
+ * table with no rows this is two statements that match nothing.
  *
  * `table` reaches the `FROM` clause as text, for the reason `syncTriggerSql`
  * above gives: a table's rows cannot be enumerated without naming it, and

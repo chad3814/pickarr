@@ -349,9 +349,14 @@ INSERT INTO sync_log (table_name, row_id, op, at)
 rows.** The triggers only log a row that changes after they exist, so a log
 created beside them indexes the changes since its creation — which is exactly
 not what §5.2 reads it as. The `DELETE` is required by `sync_log_row`'s UNIQUE
-index and is also the work: freeing the old `AUTOINCREMENT` ids is what puts
-the seeded entries above every client's cursor. On a fresh install both
-statements match nothing.
+index and by nothing else: what puts the seeded entries above every client's
+cursor is `AUTOINCREMENT`, which issues `max_ever + 1` and never reuses an id,
+with or without a delete in front of it. Measured — with the log holding ids
+1, 2 and 4 and rows 1 and 2 live, the seed produces ids **5 and 6**, not the
+freed 1 and 2, and `sqlite_sequence.seq` only ever increases. An earlier
+wording of this paragraph said the delete "frees the old `AUTOINCREMENT` ids",
+which contradicts the schema comment four screens up in this same section. On
+a fresh install both statements match nothing.
 
 The host's six tables are seeded inside the migration, whose version record is
 the guard. A plugin's declared tables are seeded in `host.register`, where

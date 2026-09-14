@@ -849,11 +849,18 @@ function migration14(db: DatabaseSync): void {
  * job (design spec §3.5).
  *
  * `id` is `AUTOINCREMENT`, unlike every other table in this schema, and
- * deliberately. Deleting the previous entry frees its id, and a bare
- * `INTEGER PRIMARY KEY` would hand it straight back -- on every change, not
- * occasionally -- so a client whose cursor is past that id would never see
- * the row change again. Measured in the design spec §2.1 and §2.10. Do not
- * "tidy" this to match the other tables.
+ * deliberately. A bare `INTEGER PRIMARY KEY` is the rowid, whose next value
+ * is `max(rowid) + 1` over the rows *present* -- so deleting the previous
+ * entry and inserting a new one hands the same id straight back whenever that
+ * entry was the highest in the table, which is every time the row that
+ * changed last changes again. Measured on SQLite 3.53.4: over a bare
+ * `INTEGER PRIMARY KEY` holding ids 2, 3 and 4, re-logging the row at id 4
+ * produces id 4 again. A client whose cursor is past that id would never see
+ * the row change. `AUTOINCREMENT` issues `max_ever + 1` instead and reuses
+ * nothing, which is the guarantee this column needs and the only thing
+ * providing it -- the delete in the triggers and in `seedSyncLog` frees no id
+ * and never did. Measured in the design spec §2.1 and §2.10. Do not "tidy"
+ * this to match the other tables.
  *
  * **One index, and it is `sync_log`'s own.** This migration briefly created
  * six `(created_at, id)` indexes as well, one per synced table, for a
