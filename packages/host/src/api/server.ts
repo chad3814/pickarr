@@ -1,5 +1,5 @@
 /**
- * The read API on a socket: `node:http`, eight routes -- seven behind a
+ * The read API on a socket: `node:http`, nine routes -- eight behind a
  * session and `/api/health` open -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
@@ -7,8 +7,9 @@
  * `ROUTES` itself, where exactly one entry is `open: true` -- contradicts. A
  * one-line summary disagreeing with its own file is the whole class of defect
  * the comments here are written against. (The count grew to eight when the
- * client-sync slice added `/api/sync` and `/api/sync/backfill`, both guarded;
- * the shape of the sentence is what matters and has not changed.)
+ * client-sync slice added `/api/sync` and `/api/sync/backfill`, and to nine
+ * when it added `/api/sync/bootstrap`, all three guarded; the shape of the
+ * sentence is what matters and has not changed.)
  *
  * Everything this file does is routing. Parse a request, call one function
  * from `./reads.ts` or `./artwork-route.ts`, write what came back.
@@ -104,7 +105,7 @@ import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
 import { readArtwork } from './artwork-route.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
-import { backfillAnswer, syncAnswer } from './sync-route.ts';
+import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
 
 /**
  * The port the shipped process listens on when `PICKARR_READ_API_PORT` says nothing.
@@ -484,7 +485,7 @@ interface Route {
 }
 
 /**
- * The eight routes.
+ * The nine routes.
  *
  * Exported because the tests derive their request set from it; nothing else
  * reads it, and nothing may mutate it.
@@ -572,6 +573,17 @@ export const ROUTES: readonly Route[] = [
     // guarded as every other, never a special case.
     answer: ({ deps, params }) => {
       const answer = syncAnswer({ raw: deps.raw, registry: deps.registry }, params);
+      return json(answer.status, answer.body);
+    },
+  },
+  {
+    path: '/api/sync/bootstrap',
+    open: false,
+    // Where an empty client starts both cursors. Guarded like the two it
+    // feeds: the answer is two log positions and nothing else, but a caller
+    // with no session has no business being handed a way into the replica.
+    answer: ({ deps }) => {
+      const answer = bootstrapAnswer({ raw: deps.raw });
       return json(answer.status, answer.body);
     },
   },

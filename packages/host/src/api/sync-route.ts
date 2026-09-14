@@ -1,13 +1,16 @@
 /**
- * The two cursors a client runs concurrently (design spec §5): a tail of log
- * ops from the present (`GET /api/sync?since=<n>`), and a backwards walk over
- * the log (`GET /api/sync/backfill?before=<n>`).
+ * The two cursors a client runs concurrently (design spec §5) -- a tail of
+ * log ops from the present (`GET /api/sync?since=<n>`) and a backwards walk
+ * over the log (`GET /api/sync/backfill?before=<n>`) -- plus the one call
+ * that hands an empty client the pair it starts both from
+ * (`GET /api/sync/bootstrap`).
  *
- * **No SQL here.** Both routes parse and validate their own cursor and call
- * `tailSince`/`backfillBefore` (`sync/tail.ts`, `sync/backfill.ts`) for
- * everything else -- the same split `reads.ts` keeps for every other route,
- * and the reason this file exists rather than the logic living in
- * `server.ts`.
+ * **No SQL here.** Each route parses and validates its own query parameters
+ * -- `/api/sync/bootstrap` has none -- and calls `tailSince`,
+ * `backfillBefore` or `bootstrapCursors` (`sync/tail.ts`,
+ * `sync/backfill.ts`, `sync/bootstrap.ts`) for everything else: the same
+ * split `reads.ts` keeps for every other route, and the reason this file
+ * exists rather than the logic living in `server.ts`.
  *
  * **A malformed cursor is a `400`, never a silent `0`.** `decodeCursor` and
  * `decodeUnionCursor` in `./cursor.ts` treat a malformed value the same as no
@@ -22,6 +25,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { backfillBefore } from '../sync/backfill.ts';
+import { BOOTSTRAP_ITEMS, bootstrapCursors } from '../sync/bootstrap.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import { tailSince } from '../sync/tail.ts';
 import { PAGE_SIZE } from './cursor.ts';
@@ -29,7 +33,7 @@ import { PAGE_SIZE } from './cursor.ts';
 /** Matches one part of a cursor: one or more decimal digits, no sign, no decimal point, nothing else. */
 const DIGITS = /^\d+$/;
 
-/** What both routes below answer, before `server.ts` writes it to a socket. */
+/** What each route below answers, before `server.ts` writes it to a socket. */
 export interface SyncAnswer {
   status: number;
   body: unknown;
@@ -118,4 +122,30 @@ export function backfillAnswer(
 
   const page = backfillBefore(deps.raw, deps.registry, before, PAGE_SIZE);
   return json(200, { ops: page.ops, cursor: page.cursor });
+}
+
+/**
+ * `GET /api/sync/bootstrap`: the cursor pair an empty client starts both
+ * cursors from (design spec §5.4).
+ *
+ * **No parameters, and nothing to get wrong.** The one thing a client with
+ * nothing has to be told is where to start, and it is one number in two
+ * forms -- the pivot itself as `before`, and one below it as `since`, so the
+ * entry at the pivot is the tail's rather than nobody's. A client could
+ * derive neither: computing the floor needs `media_item.updated_at` per
+ * category and two `sync_log` lookups, none of which is on the wire.
+ *
+ * **Both, from one call, rather than the backfill's first page carrying a
+ * watermark.** That is what the old shape did, and it forced the two cursors
+ * to be started in an order: the tail could not begin until a backfill page
+ * had come back with the mark. They are independent now -- a client asks
+ * once, then runs both concurrently from the first request, which is what §5
+ * asks of it.
+ *
+ * `sync/bootstrap.ts` does the computing; this hands it the shipped target
+ * and serialises the answer, keeping this module free of SQL like the two
+ * routes above.
+ */
+export function bootstrapAnswer(deps: { raw: DatabaseSync }): SyncAnswer {
+  return json(200, bootstrapCursors(deps.raw, BOOTSTRAP_ITEMS));
 }

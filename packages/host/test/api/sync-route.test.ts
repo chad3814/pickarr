@@ -1,10 +1,11 @@
 /**
- * `/api/sync` and `/api/sync/backfill`, over a real socket -- the guard, the
- * cursor parsing `sync-route.ts` owns, and the shape of a real page from
- * each. `sync/tail.test.ts` and `sync/backfill.test.ts` already cover the
- * ops themselves in depth; what belongs here is what only the route adds on
- * top of those functions: the session guard, and turning a malformed query
- * parameter into a `400` rather than a silent resync.
+ * `/api/sync`, `/api/sync/backfill` and `/api/sync/bootstrap`, over a real
+ * socket -- the guard, the cursor parsing `sync-route.ts` owns, and the shape
+ * of a real answer from each. `sync/tail.test.ts`, `sync/backfill.test.ts`
+ * and `sync/bootstrap.test.ts` already cover the ops and the pivot themselves
+ * in depth; what belongs here is what only the route adds on top of those
+ * functions: the session guard, turning a malformed query parameter into a
+ * `400` rather than a silent resync, and the wire names of the two cursors.
  *
  * A self-contained harness, duplicated from `server.test.ts` rather than
  * imported -- that file's own comment on `createFakeTimers` gives the reason
@@ -24,6 +25,7 @@ import type { SyncRegistry } from '../../src/sync/registry.ts';
 import type { ReadServer } from '../../src/api/server.ts';
 import { createReadServer } from '../../src/api/server.ts';
 import { PAGE_SIZE } from '../../src/api/cursor.ts';
+import { BOOTSTRAP_ITEMS } from '../../src/sync/bootstrap.ts';
 
 /** Obviously synthetic, and not a real secret -- see `server.test.ts`'s own doc on these constants. */
 const AUTH_SECRET = 'placeholder-not-a-real-signing-secret-for-tests';
@@ -133,7 +135,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-test('both sync routes require a session', async () => {
+test('all three sync routes require a session', async () => {
   const { raw, db } = setup();
   const registry = createSyncRegistry(raw, []);
   const { server } = await start(raw, db, registry);
@@ -143,6 +145,53 @@ test('both sync routes require a session', async () => {
 
     const backfill = await get(server, '/api/sync/backfill', ANONYMOUS);
     assert.equal(backfill.status, 401, '/api/sync/backfill must refuse a caller with no session');
+
+    const bootstrap = await get(server, '/api/sync/bootstrap', ANONYMOUS);
+    assert.equal(bootstrap.status, 401, '/api/sync/bootstrap must refuse a caller with no session');
+  } finally {
+    await server.close();
+  }
+});
+
+test('the bootstrap answers one cursor per stream, and they drive the two routes', async () => {
+  // The route's own job, on top of `sync/bootstrap.ts`: the body's two fields
+  // are named for the query parameters they go into, so a client pastes them
+  // straight back rather than working out which is which.
+  const { raw, db } = setup();
+  // More than `BOOTSTRAP_ITEMS`, which is what it takes for the pivot to land
+  // anywhere but the oldest item: with fewer, every category falls back to its
+  // oldest and the walk has nothing below the pivot at all -- correct, and it
+  // would make the last two assertions here vacuous.
+  for (let index = 0; index <= BOOTSTRAP_ITEMS + 4; index += 1) {
+    seedMediaItem(raw, 1000 + index, `Item ${String(index)}`);
+  }
+  const registry = createSyncRegistry(raw, []);
+  const { server, cookie } = await startSignedIn(raw, db, registry);
+  try {
+    const response = await get(server, '/api/sync/bootstrap', cookie);
+    assert.equal(response.status, 200);
+    const body: unknown = JSON.parse(await response.text());
+    if (!isRecord(body)) throw new Error('the bootstrap must answer an object');
+    assert.deepEqual(Object.keys(body).toSorted(), ['before', 'since'],
+      'exactly the two query parameters the other two routes take, and nothing else');
+    if (typeof body.since !== 'number' || typeof body.before !== 'number') {
+      throw new Error('both cursors must be numbers');
+    }
+    assert.equal(body.since, body.before - 1, 'the pair must meet at the pivot');
+
+    // And both really are accepted by the routes they name, which is the one
+    // thing a body of two bare integers could still get wrong.
+    const tail = await get(server, `/api/sync?since=${String(body.since)}`, cookie);
+    assert.equal(tail.status, 200, 'the `since` it answered must be a cursor the tail accepts');
+    const walk = await get(server, `/api/sync/backfill?before=${String(body.before)}`, cookie);
+    assert.equal(walk.status, 200, 'and the `before` one the backfill accepts');
+
+    const tailBody: unknown = JSON.parse(await tail.text());
+    const walkBody: unknown = JSON.parse(await walk.text());
+    if (!isRecord(tailBody) || !Array.isArray(tailBody.ops)) throw new Error('the tail must answer ops');
+    if (!isRecord(walkBody) || !Array.isArray(walkBody.ops)) throw new Error('the walk must answer ops');
+    assert.ok(tailBody.ops.length > 0, 'the tail is productive from its first request');
+    assert.ok(walkBody.ops.length > 0, 'and so is the walk');
   } finally {
     await server.close();
   }
