@@ -605,7 +605,8 @@ export function createShutdown(
  * this slice has no argument surface beyond `resolveSettings`'s environment
  * variables (`PICKARR_CONFIG`, `PICKARR_DATABASE`, `PICKARR_READ_API_PORT`,
  * `PICKARR_READ_API_HOST`, `PICKARR_PUBLIC_URL`), the lookup plugins'
- * `PICKARR_OPENMETADATA_URL` and `PICKARR_OPENMETADATA_KEY`, and
+ * `PICKARR_OPENMETADATA_URL` (the lookup key reaches the plugins through the
+ * secret store, not through a variable this module reads), and
  * `BETTER_AUTH_SECRET`, so nothing here reads it. `BETTER_AUTH_SECRETS`, the
  * plural, is read by the library itself and by nothing in this package; the
  * auth slice's §6 documents both.

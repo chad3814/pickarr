@@ -96,9 +96,10 @@ export interface LookupBatchResponse {
 
 /**
  * How a credential is obtained. Structurally identical to the host's own
- * `ResolveSecret` (`packages/host/src/secrets.ts`) by design -- this package
- * must not import from `@pickarr/host`, and structural typing is what lets the
- * host pass its resolver in without either side depending on the other.
+ * `Secrets['get']` (`packages/host/src/secrets/instance.ts`) by design --
+ * this package must not import from `@pickarr/host`, and structural typing
+ * is what lets the host pass its resolver in without either side depending
+ * on the other.
  *
  * Async and per-request rather than a resolved string: a store that rotates a
  * credential can, where a value read once at boot cannot.

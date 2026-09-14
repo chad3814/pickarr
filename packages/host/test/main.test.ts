@@ -175,7 +175,7 @@ const MAIN_VARIABLES = [
   // otherwise silence the warning these tests assert on, and one who exports
   // the url would point a boot at a host that does not exist.
   'PICKARR_OPENMETADATA_URL',
-  'PICKARR_OPENMETADATA_KEY',
+  'PICKARR_SECRET_OPENMETADATA_API_KEY',
 ] as const;
 
 /**
@@ -1431,7 +1431,7 @@ test('a boot whose key is present says nothing about it, and neither does one wi
       createReadServer: async () => fakeServer(() => {}),
     });
     assert.equal(
-      injected.some((line) => line.includes('PICKARR_OPENMETADATA_KEY')),
+      injected.some((line) => line.includes(envNameFor(API_KEY_SECRET))),
       false,
       'no plugin asked for the key, so nothing warns about it',
     );
