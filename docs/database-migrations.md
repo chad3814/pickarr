@@ -129,7 +129,7 @@ function migration16(db: DatabaseSync): void {
     INSERT INTO media_item_new SELECT ... FROM media_item;
     DROP TABLE media_item;
     ALTER TABLE media_item_new RENAME TO media_item;
-    CREATE INDEX media_item_created ON media_item (created_at, id);
+    CREATE INDEX media_item_sync ON media_item (plugin_id, updated_at, id);
   `);
   installSyncTriggers(db, ['media_item']);
 }

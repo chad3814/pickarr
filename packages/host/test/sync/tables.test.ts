@@ -49,16 +49,6 @@ test('a log row can hold nothing but a table name, a row id, an op and a time', 
   );
 });
 
-test('every synced table can be paged by an immutable key', () => {
-  const { raw } = openTestDatabase();
-  migrateHost(raw);
-  for (const table of HOST_SYNCED_TABLES) {
-    const columns = raw.prepare(`PRAGMA table_info(${table})`).all()
-      .map((r) => String((r as { name: unknown }).name));
-    assert.ok(columns.includes('created_at'), `${table} needs created_at for the backfill's keyset`);
-  }
-});
-
 test('readHostRows projects the declared columns for media_item, keyed by id', () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);

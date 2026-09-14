@@ -87,11 +87,6 @@ export const mediaItem = sqliteTable('media_item', {
   // Every cursor query in the read API's sync slice orders by
   // (updated_at, id) filtered by plugin, so plugin_id leads.
   index('media_item_sync').on(t.pluginId, t.updatedAt, t.id),
-  // Migration 15: the client-sync backfill's keyset, paging newest-first
-  // over (created_at DESC, id DESC) -- design spec §3.4. Not the same index
-  // as `media_item_sync` above: that one serves a plugin-scoped tail over
-  // `updated_at`, this one an unscoped backfill over `created_at`.
-  index('media_item_created').on(t.createdAt, t.id),
 ]);
 
 export const rssItem = sqliteTable('rss_item', {
@@ -138,11 +133,6 @@ export const rssItem = sqliteTable('rss_item', {
   // `rss_item` write (a feed poll writes one per item, reconcile writes one
   // per delivery) for a query that can only use one of them. The read API
   // uses `rss_item_updated`.
-  // Migration 15: the client-sync backfill's keyset over `created_at`, not
-  // `updated_at` -- design spec §3.4. Distinct from `rss_item_updated`
-  // above, which is keyed on the mutable column and would skip or repeat
-  // rows touched mid-backfill.
-  index('rss_item_created').on(t.createdAt, t.id),
 ]);
 
 /**
@@ -255,9 +245,6 @@ export const torrentDownload = sqliteTable('torrent_download', {
   index('torrent_download_item').on(t.rssItemId),
   // The read API's sync cursor over this table's branch of the union.
   index('torrent_download_sync').on(t.updatedAt, t.id),
-  // Migration 15: the client-sync backfill's keyset over `created_at`, not
-  // `updated_at` -- design spec §3.4.
-  index('torrent_download_created').on(t.createdAt, t.id),
   // Serves `clients/rows.ts`'s `rowsForClientByStatus` -- the reconcile
   // tick's only read shape, asked for non-terminal statuses by the absence
   // sweep, `completed` by delivery, `delivered` by reclaim and `submitting`
@@ -297,9 +284,6 @@ export const nzbDownload = sqliteTable('nzb_download', {
   index('nzb_download_item').on(t.rssItemId),
   // The read API's sync cursor over this table's branch of the union.
   index('nzb_download_sync').on(t.updatedAt, t.id),
-  // Migration 15: the client-sync backfill's keyset over `created_at`, not
-  // `updated_at` -- design spec §3.4.
-  index('nzb_download_created').on(t.createdAt, t.id),
   // See `torrentDownload`'s own `..._status` comment: the same query reads
   // both tables, so both need the index.
   index('nzb_download_status').on(t.status),
@@ -314,8 +298,6 @@ export const person = sqliteTable('person', {
   updatedAt: integer('updated_at').notNull(),
 }, (t) => [
   uniqueIndex('person_provider_ref').on(t.providerRef),
-  // Migration 15: the client-sync backfill's keyset -- design spec §3.4.
-  index('person_created').on(t.createdAt, t.id),
 ]);
 
 /** An alternate name a provider records for a person, e.g. a performer's stage names. */
@@ -342,9 +324,6 @@ export const role = sqliteTable('role', {
   // makes a re-run job handler idempotent. Its leading column is
   // `mediaItemId`, so it also serves "every role on this item".
   uniqueIndex('role_media_item_person_role').on(t.mediaItemId, t.personId, t.role),
-  // Migration 15: the client-sync backfill's keyset -- design spec §3.4.
-  // `role` has `created_at` and no `updated_at` (design spec §2.5).
-  index('role_created').on(t.createdAt, t.id),
 ]);
 
 /**

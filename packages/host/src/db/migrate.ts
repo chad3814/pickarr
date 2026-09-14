@@ -855,19 +855,17 @@ function migration14(db: DatabaseSync): void {
  * the row change again. Measured in the design spec §2.1 and §2.10. Do not
  * "tidy" this to match the other tables.
  *
- * The six `CREATE INDEX ... (created_at, id)` statements are the backfill's
- * keyset paging (design spec §3.4: `(created_at DESC, id DESC)`, both
- * immutable) over every table `HOST_SYNCED_TABLES` names. Every one of them
- * already carried `created_at` -- confirmed by probing a migrated database
- * before writing this DDL, not assumed -- so no `ALTER TABLE ... ADD COLUMN`
- * was needed here. `role` in particular has `created_at` and no
- * `updated_at` (design spec §2.5); had the probe found it or any other
- * synced table missing the column, the fix belongs here, before that
- * table's index:
- * `ALTER TABLE <t> ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0` -- the
- * default is what makes adding a NOT NULL column legal on a table that
- * already holds rows, and a 0 sorts those rows to the end of a newest-first
- * walk, which is where rows of unknown age belong.
+ * **One index, and it is `sync_log`'s own.** This migration briefly created
+ * six `(created_at, id)` indexes as well, one per synced table, for a
+ * backfill that paged current state newest-first on an immutable keyset.
+ * The backfill now walks `sync_log` backwards and hydrates each entry from
+ * current state, so those six had no consumer left anywhere in the repo.
+ * They are deleted rather than kept against a future one: six B-trees
+ * maintained on every write to six of the busiest tables in this schema, for
+ * no reader. The backwards walk needs no new index either -- measured,
+ * `WHERE id < ? AND op != 'delete' ORDER BY id DESC` plans as
+ * `SEARCH sync_log USING INTEGER PRIMARY KEY (rowid<?)`, a seek on the key
+ * this table already has.
  */
 const MIGRATION_15_DDL = `
   CREATE TABLE sync_log (
@@ -878,13 +876,6 @@ const MIGRATION_15_DDL = `
     at         INTEGER NOT NULL
   );
   CREATE UNIQUE INDEX sync_log_row ON sync_log (table_name, row_id);
-
-  CREATE INDEX media_item_created ON media_item (created_at, id);
-  CREATE INDEX rss_item_created ON rss_item (created_at, id);
-  CREATE INDEX torrent_download_created ON torrent_download (created_at, id);
-  CREATE INDEX nzb_download_created ON nzb_download (created_at, id);
-  CREATE INDEX person_created ON person (created_at, id);
-  CREATE INDEX role_created ON role (created_at, id);
 `;
 
 /**
