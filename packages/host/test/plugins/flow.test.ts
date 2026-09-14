@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type { DownloadClients, MediaPlugin, PluginContext } from '@pickarr/contract';
 import { createFakeLookupService, resolvedEnvelope } from '@pickarr/openmetadata/testing';
 import type { LookupEnvelope, Media } from '@pickarr/openmetadata';
@@ -183,15 +183,21 @@ function seedFeed(raw: DatabaseSync, pluginId: string, filename: string): { feed
  * this: they compare a primitive pulled straight off a row, and no prototype
  * is involved in comparing two strings or two numbers.
  */
-function rows(raw: DatabaseSync, sql: string): Record<string, unknown>[] {
-  return (raw.prepare(sql).all() as Record<string, unknown>[]).map((row) => Object.assign({}, row));
+function rows(
+  raw: DatabaseSync,
+  sql: string,
+  ...params: readonly SQLInputValue[]
+): Record<string, unknown>[] {
+  return (raw.prepare(sql).all(...params) as Record<string, unknown>[])
+    .map((row) => Object.assign({}, row));
 }
 
 /** The `lookup` job a plugin's `onNewRssItems` actually wrote, as the dispatcher would read it. */
 function enqueuedLookup(raw: DatabaseSync, pluginId: string): { id: number; kind: string; payload: unknown; attempts: number } {
   const found = rows(
     raw,
-    `SELECT id, kind, payload_json, attempts FROM jobs WHERE plugin_id = '${pluginId}' AND state = 'ready'`,
+    "SELECT id, kind, payload_json, attempts FROM jobs WHERE plugin_id = ? AND state = 'ready'",
+    pluginId,
   );
   assert.equal(found.length, 1, `${pluginId} enqueued exactly one job`);
   const row = found[0];
