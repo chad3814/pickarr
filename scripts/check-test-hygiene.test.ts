@@ -310,6 +310,16 @@ test('a select over a credential table this check cannot read is a violation, no
   const dir = await fixtureDir(t, {
     'star.ts': `export const Q = 'SELECT * FROM auth_session WHERE id = ?';\n`,
     'alias-star.ts': `export const Q = 'SELECT s.* FROM auth_session s WHERE s.id = ?';\n`,
+    // A quantifier stands between the head of the list and the star. Keying the
+    // star rule on `^` alone let all three of these through -- found by
+    // measuring the rule after it was narrowed to stop reading `x * 1000` as a
+    // star, which is the same regex and the opposite error.
+    'distinct-star.ts': `export const Q = 'SELECT DISTINCT * FROM secret';\n`,
+    'distinct-alias-star.ts': `export const Q = 'SELECT DISTINCT s.* FROM secret s';\n`,
+    'all-star.ts': `export const Q = 'SELECT ALL * FROM host_state';\n`,
+    // The quantifier is consumed and the star still has an operand in front of
+    // it, so this is multiplication and stays unreported.
+    'distinct-product.ts': `export const Q = 'SELECT DISTINCT a * b FROM secret';\n`,
     'unresolvable.ts': 'export const Q = `SELECT ${columnsFor(table)} FROM auth_account`;\n',
     'twice-declared.ts': [
       // No scope analysis behind the resolution, so a name declared twice is
@@ -329,6 +339,9 @@ test('a select over a credential table this check cannot read is a violation, no
     ]),
     [
       ['alias-star.ts', 'auth_session.*'],
+      ['all-star.ts', 'host_state.*'],
+      ['distinct-alias-star.ts', 'secret.*'],
+      ['distinct-star.ts', 'secret.*'],
       ['star.ts', 'auth_session.*'],
       ['twice-declared.ts', 'auth_account.?'],
       ['unresolvable.ts', 'auth_account.?'],

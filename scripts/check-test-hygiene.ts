@@ -555,11 +555,19 @@ function readsFromUnknownTable(sql: SqlText): boolean {
  * column of `t`. Measured on `sync/log.ts`'s seed statement, which is exactly
  * that shape. An operator always has a left operand, and no operand ends in
  * `^` or `,`, which is what the narrower form keys on.
+ *
+ * **`DISTINCT` and `ALL` stand between the head of the list and the star**, and
+ * they are the reason this is not just `(?:^|,)\s*`. Keying on `^` alone made
+ * `SELECT DISTINCT * FROM secret` unreported -- measured, along with
+ * `SELECT DISTINCT t.*` and `SELECT ALL *`, none of which the narrowing's own
+ * tests covered. They are the only two quantifiers SQLite accepts there, so
+ * naming both closes it. `SELECT DISTINCT a * b` stays unreported: the
+ * quantifier is consumed and the star still has an operand in front of it.
  */
 function selectsEveryColumn(sql: string): boolean {
   const list = /\bselect\b([\s\S]*?)\bfrom\b/i.exec(normalized(sql))?.[1];
   if (list === undefined) return false;
-  return /(?:^|,)\s*(?:\w+\s*\.\s*)?\*/.test(list);
+  return /(?:^|,)\s*(?:(?:distinct|all)\s+)?(?:\w+\s*\.\s*)?\*/i.test(list);
 }
 
 /**
