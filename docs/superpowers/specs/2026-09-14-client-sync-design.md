@@ -680,9 +680,9 @@ independent now.
    `SELECT id FROM media_item WHERE plugin_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1 OFFSET ?`.
    Measured `SEARCH media_item USING COVERING INDEX media_item_sync
    (plugin_id=?)` — a seek, because `media_item_sync` is
-   `(plugin_id, updated_at, id)`. A category with too few items answers no row
-   and falls back to its oldest, so it contributes a candidate rather than
-   dropping out.
+   `(plugin_id, updated_at, id)`. **A category with fewer items than the
+   offset answers no row and contributes no candidate** — see the ruling
+   below.
 2. The oldest of those candidates, by `(updated_at, id)`, is the floor.
 3. Its latest release: `SELECT MAX(id) FROM rss_item WHERE media_item_id = ?`.
 4. The lower of those two rows' log entries:
@@ -720,11 +720,39 @@ first backfill page is already below it — both cursors productive from the
 first request, which is the reason to pick a floor part-way down rather than
 the top of the log.
 
-**No candidate answers above the whole log.** A library with no media items,
-or a floor whose rows have no log entry (which §4's seed rules out), gives
-`W = max(sync_log.id) + 1`: the tail starts empty and the backfill owns every
-entry there is. Complete, just slower to first render, which is the right way
-to be wrong here.
+**Ruling: a bounded first payload beats every category being represented, and
+step 1 drops a category that cannot reach the offset.** "Roughly right" does
+not extend to the bottom of the log, and an earlier form of step 1 — a short
+category falling back to *its oldest item* — put it there. The two goals are
+in tension and the first draft chose between them silently: "every category
+represented above `W`" and "a bounded first payload" cannot both hold when a
+category's items are all old, because putting them above `W` means pulling
+everything newer above it too. Measured at the shipped `X = 40`, with the
+fallback in place:
+
+| Library | cursors | tail ops | walk ops |
+|---|---|---|---|
+| movie: 5 old items, tv: 1000 newer | `{since: 0, before: 1}` | 1005 | 0 |
+| tv: 1000 old items, movie: 5 newer | `{since: 984, before: 985}` | 21 | 984 |
+
+The first row retires the backfill on its first request and replicates the
+library through the tail alone, which is the serial behaviour §8 says defeats
+the design; a large TV library beside a handful of movies is the common shape,
+not a corner. With the fallback removed both rows measure `{since: 984,
+before: 985}`, 21 tail ops and 984 walk ops.
+
+**What it costs**: a category smaller than the offset has none of its items
+guaranteed above `W`, so a client's first tail page may show nothing of it.
+Those items are not lost — the backfill walks down from `W` and reaches them —
+but on a large library they arrive some pages in. The category that pays is
+the one with least to send.
+
+**No candidate answers above the whole log.** A library with no media items;
+a library where no category reaches the offset, which is now any library
+smaller than `X`; or a floor whose rows have no log entry (which §4's seed
+rules out). All three give `W = max(sync_log.id) + 1`: the tail starts empty
+and the backfill owns every entry there is. Complete, just slower to first
+render — and on a library that small the backfill finishes in one page.
 
 ## 6. The contract change
 
@@ -870,9 +898,12 @@ the detail rows that point at them.
     the max must fail both; dropping the release clause and keeping the
     `media_item`'s entry alone must fail the inverted one, which is the case
     the clause exists for.
-20b. A category with too few items for the offset contributes its oldest
-    rather than dropping out, asserted with that oldest item being the answer
-    — so removing the fallback changes it.
+20b. A category with too few items for the offset contributes nothing, so a
+    library with one small **old** category beside a large newer one keeps its
+    pivot near the head — asserted on the pivot's identity, on the first tail
+    page being bounded, and on the small category still being delivered.
+    Restoring the fallback to its oldest must fail it. A library where no
+    category reaches the offset answers above the log.
 20c. An empty library, and a library whose only synced row is an unattached
     `rss_item`, both answer a pivot the walk can still find everything below.
 20d. The per-category candidate query seeks

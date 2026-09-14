@@ -3,8 +3,10 @@
  *
  * Every test here passes its own `targetItems` rather than the shipped
  * `BOOTSTRAP_ITEMS`: at 40, no fixture small enough to read would ever reach
- * the per-category `OFFSET` branch, so the whole computation would be
- * exercised through its fallback and nothing would pin the offset at all.
+ * the per-category `OFFSET` branch, so every one of them would answer above
+ * the log and nothing would pin the offset at all. (Before the short-category
+ * fallback was removed they would all have gone through *that* instead, which
+ * is the same blindness by a different route.)
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -107,20 +109,85 @@ test('the pivot leaves roughly the newest `targetItems` above itself, per catego
     'the walk starts below item 2, so items 3, 4, 7 and 8 -- and 5, 6 -- are the tail\'s');
 });
 
-test('a category with too few items falls back to its oldest, rather than dropping out', () => {
+test('a category with too few items drops out, and the walk is what serves it', () => {
   const raw = open();
   addItem(raw, 1, 'tv', 100);
   addItem(raw, 2, 'tv', 200);
   addItem(raw, 3, 'tv', 300);
-  // One item only, so an offset of 2 lands past the end of this category --
-  // and it is older than every `tv` item, so it is the answer *only* if the
-  // fallback runs. Without it the short category contributes nothing and
-  // `tv`'s own candidate, item 1, would be the floor instead.
+  // One item only, so an offset of 2 lands past the end of this category. It
+  // is also older than every `tv` item, so while a short category fell back
+  // to *its oldest* it was the floor -- dragging the pivot down to it and
+  // taking every newer row with it onto the tail's side.
   addItem(raw, 9, 'movie', 5);
 
   const cursors = bootstrapCursors(raw, 4);
-  assert.equal(cursors.before, logIdOf(raw, 'media_item', 9),
-    "the short category's oldest item is the oldest candidate, so it is the floor");
+  assert.equal(cursors.before, logIdOf(raw, 'media_item', 1),
+    "only `tv` has the target, so its candidate is the floor and `movie` does not move it");
+
+  // Dropping out of the pivot computation is not dropping out of the sync.
+  // Which cursor carries it is decided by where its entry sits, and nothing
+  // else: `movie` was written last here, so its entry is above the pivot and
+  // the tail has it. The old-category case, where the walk carries it, is the
+  // test below.
+  const registry = createSyncRegistry(raw, []);
+  const delivered = [
+    ...backfillBefore(raw, registry, cursors.before, 100).ops,
+    ...tailSince(raw, registry, cursors.since, 100).ops,
+  ];
+  assert.ok(delivered.some((op) => op.table === 'media_item' && op.id === 9),
+    "the short category's item must still reach the client");
+});
+
+test('one small old category does not drag the pivot to the bottom of the log', () => {
+  // The shape a real library has -- a large category and a handful of items
+  // in another, added earlier -- and the case §7.20's one-category fixture
+  // cannot see. Measured at the shipped `BOOTSTRAP_ITEMS` before this:
+  // movie with 5 old items beside tv with 1000 newer gave `{since: 0,
+  // before: 1}`, so the walk retired on its first request and the tail served
+  // all 1005 rows. Scaled down here to stay readable; the arithmetic is the
+  // same.
+  const raw = open();
+  // `movie` first, so its entries are at the bottom of the log -- which is
+  // what "old" means to a cursor that compares `sync_log.id`.
+  addItem(raw, 1, 'movie', 1);
+  addItem(raw, 2, 'movie', 2);
+  for (let id = 3; id <= 12; id += 1) addItem(raw, id, 'tv', 100 + id);
+
+  // Two categories, target 4, so an offset of 2. `movie` has two items and
+  // answers nothing at that offset; `tv`'s candidate is its third-newest,
+  // item 10.
+  const cursors = bootstrapCursors(raw, 4);
+  assert.equal(cursors.before, logIdOf(raw, 'media_item', 10),
+    'the pivot must sit near the head, at the large category\'s candidate');
+
+  const registry = createSyncRegistry(raw, []);
+  const tailed = tailSince(raw, registry, cursors.since, 100).ops;
+  const walked = backfillBefore(raw, registry, cursors.before, 100).ops;
+  assert.equal(tailed.length, 3, 'the first tail page is bounded by the target, not by the whole library');
+  assert.equal(walked.length, 9, 'and everything below it is the walk\'s, including both `movie` items');
+  assert.ok(walked.some((op) => op.table === 'media_item' && op.id === 1),
+    'the oldest `movie` item is on the walk\'s side');
+});
+
+test('no category reaching the target answers above the log, so the walk owns everything', () => {
+  // The cost of the ruling above, stated as a test: a library smaller than
+  // the target has no candidate at all, and the pivot goes above the log
+  // rather than being placed by a category that cannot support it. The tail
+  // starts empty and the walk serves the lot -- complete, and for a library
+  // this small the walk finishes in one page anyway.
+  const raw = open();
+  addItem(raw, 1, 'tv', 10);
+  addItem(raw, 2, 'movie', 20);
+
+  const cursors = bootstrapCursors(raw, 40);
+  const registry = createSyncRegistry(raw, []);
+  assert.deepEqual(cursors, { since: 2, before: 3 }, 'one above every entry the log holds');
+  assert.deepEqual(tailSince(raw, registry, cursors.since, 100).ops, [], 'the tail starts empty');
+  assert.deepEqual(
+    backfillBefore(raw, registry, cursors.before, 100).ops.map((op) => op.id).toSorted(),
+    [1, 2],
+    'and the walk owns every row there is',
+  );
 });
 
 test('the oldest candidate across categories wins, not the first one asked', () => {
@@ -146,7 +213,12 @@ test('the pivot is the lower of the group row and its latest release, with the m
   addItem(raw, 1, 'tv', 10);
   addRelease(raw, 21, 1);
   addRelease(raw, 22, 1);
-  assert.deepEqual(logOf(raw), ['1:media_item/1', '2:rss_item/21', '3:rss_item/22'], 'fixture: media_item first');
+  // A second, newer item so `tv` reaches the target and item 1 is the
+  // candidate an offset of 1 lands on. A one-item category answers nothing
+  // now and the pivot would go above the log instead.
+  addItem(raw, 2, 'tv', 500);
+  assert.deepEqual(logOf(raw), ['1:media_item/1', '2:rss_item/21', '3:rss_item/22', '4:media_item/2'],
+    'fixture: media_item first');
 
   const cursors = bootstrapCursors(raw, 1);
   assert.equal(cursors.before, 1, "the media_item's own entry is the lower of the two");
@@ -164,7 +236,10 @@ test('the pivot is the lower of the two with a later media_item update inverting
   raw.prepare('UPDATE rss_item SET media_item_id = 1 WHERE id IN (21, 22)').run();
   // And a later touch on the group row, which is what inverts the order.
   raw.prepare('UPDATE media_item SET title = ? WHERE id = 1').run('renamed');
-  assert.deepEqual(logOf(raw), ['4:rss_item/21', '5:rss_item/22', '6:media_item/1'],
+  // A second, newer item so `tv` reaches the target; item 1 is still what an
+  // offset of 1 lands on.
+  addItem(raw, 2, 'tv', 500);
+  assert.deepEqual(logOf(raw), ['4:rss_item/21', '5:rss_item/22', '6:media_item/1', '7:media_item/2'],
     'fixture: the group row now sits above both of its releases');
 
   const cursors = bootstrapCursors(raw, 1);
@@ -182,6 +257,7 @@ test('the pivot is the lower of the two with a later media_item update inverting
 test('a media item with no releases uses its own entry', () => {
   const raw = open();
   addItem(raw, 1, 'tv', 10);
+  addItem(raw, 2, 'tv', 500);   // so `tv` reaches the target; item 1 is the candidate
   const cursors = bootstrapCursors(raw, 1);
   assert.equal(cursors.before, logIdOf(raw, 'media_item', 1),
     'a null `max(rss_item.id)` must leave the media_item clause answering alone');
@@ -217,11 +293,6 @@ test('the shipped target is a number, and the per-category queries seek rather t
   assert.equal(
     plan('SELECT id, updated_at AS updatedAt FROM media_item WHERE plugin_id = ?'
       + ' ORDER BY updated_at DESC, id DESC LIMIT 1 OFFSET ?'),
-    'SEARCH media_item USING COVERING INDEX media_item_sync (plugin_id=?)',
-  );
-  assert.equal(
-    plan('SELECT id, updated_at AS updatedAt FROM media_item WHERE plugin_id = ?'
-      + ' ORDER BY updated_at ASC, id ASC LIMIT 1'),
     'SEARCH media_item USING COVERING INDEX media_item_sync (plugin_id=?)',
   );
   assert.equal(

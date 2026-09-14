@@ -11,10 +11,27 @@ import type { DatabaseSync } from 'node:sqlite';
  * 40 because a media item's group weighs four to six rows -- the item, its
  * releases, what was submitted for them -- so 40 items is roughly one
  * `PAGE_SIZE` tail page (`api/cursor.ts`, 200). That makes the client's first
- * tail response cover about the whole set the pivot was chosen to put above
- * it, while its first backfill response is already walking below. Both
- * cursors do useful work from their first request, which is the reason to
- * choose a floor part-way down the log rather than the top of it.
+ * tail response cover about the set the pivot was chosen to put above it,
+ * while its first backfill response is already walking below. Both cursors do
+ * useful work from their first request, which is the reason to choose a floor
+ * part-way down the log rather than the top of it.
+ *
+ * **"Roughly" is doing real work in that sentence, in two directions.** The
+ * offset is `targetItems / categories`, and the pivot is the *oldest*
+ * candidate, so the set above it is about `offset` items of the category that
+ * produced the floor plus everything newer in the others -- somewhere between
+ * `offset` and `targetItems` items, not `targetItems` exactly. And a category
+ * that does not reach the offset contributes no candidate at all
+ * (`pivotFor`'s ruling), so on a library where only one of two categories
+ * qualifies the set above the pivot is nearer 20 items than 40. Measured on
+ * the asymmetric library in `test/sync/bootstrap.test.ts`, scaled to the
+ * shipped 40: 5 old movies beside 1000 newer tv items gives 21 rows to the
+ * first tail response and 984 to the walk.
+ *
+ * What it must not be is *wildly* out, and it was: with the old step-1
+ * fallback the same library gave `{since: 0, before: 1}` -- 1005 rows to the
+ * tail and none to the walk, 25x this number and the design's degenerate
+ * case. `pivotFor` has that measurement and the ruling that closed it.
  */
 export const BOOTSTRAP_ITEMS = 40;
 
@@ -57,9 +74,10 @@ export function bootstrapCursors(raw: DatabaseSync, targetItems: number): Bootst
  *    from that category's newest. Measured:
  *    `SEARCH media_item USING COVERING INDEX media_item_sync (plugin_id=?)`
  *    -- a seek, because `media_item_sync` is `(plugin_id, updated_at, id)`
- *    and that is exactly the filter and the ordering. A category with too few
- *    items answers no row and falls back to its oldest, so it contributes a
- *    candidate rather than dropping out.
+ *    and that is exactly the filter and the ordering. **A category with fewer
+ *    items than the offset answers no row and contributes nothing.** See the
+ *    ruling below; it used to fall back to its oldest item, and that is what
+ *    collapsed the pivot.
  *
  *    **Not one `ROW_NUMBER() OVER (PARTITION BY plugin_id ...)` query.**
  *    Measured: `SCAN media_item USING COVERING INDEX media_item_sync` plus
@@ -99,14 +117,43 @@ export function bootstrapCursors(raw: DatabaseSync, targetItems: number): Bootst
  *
  * 5. **`W` is that entry.** `bootstrapCursors` turns it into the pair.
  *
+ * **Ruling: a bounded first payload beats every category being represented
+ * above the pivot, and a category smaller than the offset is served by the
+ * walk.** The two goals are in tension and the code used to choose silently.
+ * "Every category represented above the pivot" and "a bounded first payload"
+ * cannot both hold when a category's items are all *old*: putting them above
+ * the pivot means pulling everything newer than them above it too, which is
+ * the whole library. Measured at the shipped `BOOTSTRAP_ITEMS = 40`, with the
+ * step-1 fallback in place:
+ *
+ * | Library | `bootstrapCursors` | tail ops | walk ops |
+ * |---|---|---|---|
+ * | movie: 5 old items, tv: 1000 newer | `{since: 0, before: 1}` | 1005 | 0 |
+ * | tv: 1000 old items, movie: 5 newer | `{since: 984, before: 985}` | 21 | 984 |
+ *
+ * The first row is the degenerate case, not a rounding error: the walk is
+ * retired on its first request and the client replicates the whole library
+ * through the tail alone, which is the serial behaviour design spec §8 says
+ * "defeats the design". A large TV library beside a handful of movies, or a
+ * category added late, is the common shape rather than a corner.
+ *
+ * **What the ruling costs.** A category smaller than the offset contributes
+ * nothing to the pivot, so none of its items is guaranteed to be above it and
+ * a client's first tail page may show nothing of that category at all. Those
+ * items are not lost -- the walk starts immediately below the pivot and
+ * reaches them -- but on a large library they arrive some pages in rather
+ * than at once. That is the price of the payload being bounded, and it is
+ * paid by the category that has least to send.
+ *
  * **Three ways there is no candidate, and all three answer above the log.** A
- * library with no media items at all; a library whose categories all answer
- * nothing (which the fallback in step 1 rules out, and which is cheaper to
- * handle than to prove impossible); and a floor whose rows have no log entry,
- * which `seedSyncLog` (`sync/log.ts`) rules out and which would otherwise be
- * a pivot with nothing behind it. Above the log means the tail starts empty
- * and the walk owns every entry there is -- complete, just slower to first
- * render, which is the right way to be wrong here.
+ * library with no media items at all; a library where no category reaches the
+ * offset, which is now a real case rather than a defensive one -- any library
+ * smaller than `targetItems` is in it; and a floor whose rows have no log
+ * entry, which `seedSyncLog` (`sync/log.ts`) rules out and which would
+ * otherwise be a pivot with nothing behind it. Above the log means the tail
+ * starts empty and the walk owns every entry there is -- complete, just
+ * slower to first render, and on a library that small the walk finishes in
+ * one page anyway.
  */
 function pivotFor(raw: DatabaseSync, targetItems: number): number {
   const categories = raw.prepare('SELECT DISTINCT plugin_id FROM media_item').all()
@@ -134,25 +181,24 @@ function toCandidate(row: unknown): Candidate {
 }
 
 /**
- * This category's item `offset` places down from its newest, or -- for a
- * category with fewer than that -- its oldest.
+ * This category's item `offset` places down from its newest, or `undefined`
+ * for a category that does not have that many.
  *
- * The fallback is a second statement rather than a clamped offset, because
- * clamping needs the category's count, which is a third query over the same
- * index to answer a question the empty result already answers.
+ * **The empty result is the answer, not a case to recover from.** A second
+ * statement here used to return the category's *oldest* item instead, so a
+ * short category contributed a candidate rather than dropping out -- and
+ * because step 2 takes the oldest candidate, one small old category put the
+ * pivot at the bottom of the whole log. `pivotFor`'s ruling has the
+ * measurement. Nothing replaced that query: a clamped offset would need the
+ * category's count, which is another read to answer a question this statement
+ * already answers by returning nothing.
  */
 function candidateIn(raw: DatabaseSync, pluginId: string, offset: number): Candidate | undefined {
   const row = raw.prepare(
     'SELECT id, updated_at AS updatedAt FROM media_item WHERE plugin_id = ?'
     + ' ORDER BY updated_at DESC, id DESC LIMIT 1 OFFSET ?',
   ).get(pluginId, offset);
-  if (row !== undefined) return toCandidate(row);
-
-  const oldest = raw.prepare(
-    'SELECT id, updated_at AS updatedAt FROM media_item WHERE plugin_id = ?'
-    + ' ORDER BY updated_at ASC, id ASC LIMIT 1',
-  ).get(pluginId);
-  return oldest === undefined ? undefined : toCandidate(oldest);
+  return row === undefined ? undefined : toCandidate(row);
 }
 
 /** The oldest of the candidates by `(updated_at, id)`, matching the ordering they were selected on. */
