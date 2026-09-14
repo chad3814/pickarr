@@ -11,8 +11,10 @@ Two implementations live here side by side.
 - **2.0** — `packages/host` (the host: boot, config, secrets, auth, jobs, the read and
   sync APIs), `packages/contract` (what a plugin is), `packages/openmetadata` (the
   lookup-service plugin base), `packages/plugin-tv`, `packages/plugin-movie`,
-  `packages/plugin-xxx`, and `packages/web` (the browser client). This is where new
-  work goes. Specs are `docs/superpowers/specs/2026-09-*`.
+  and `packages/plugin-xxx`. This is where new work goes, and the specs are
+  `docs/superpowers/specs/2026-09-*`.
+- **`packages/web`** — currently 1.x's SPA, being rewritten against 2.0's sync API. The
+  2.0 host does not serve it: the host answers JSON and artwork and nothing else.
 - **1.x** — `packages/core` and `packages/plugin-scenes`. Frozen, and still the only
   thing `Dockerfile` builds. 2.0 is greenfield: it starts on an empty database and
   rebuilds from feeds, so nothing migrates and the two share no schema.
