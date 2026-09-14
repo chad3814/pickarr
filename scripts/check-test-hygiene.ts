@@ -532,24 +532,76 @@ function readsFrom(sql: string, table: string): boolean {
  *
  * Keyed on `unresolved` as well as on the shape, so a literal `?` that got
  * there some other way cannot trip it (`FROM ?` is not valid SQLite anyway).
+ *
+ * **An optional `schema.` in front, for the same reason `readsFrom` has one,
+ * and it mattered more here.** `readsFrom` accepted a qualifier and this did
+ * not, so `FROM main.${table}` matched neither branch -- and because this
+ * predicate gates the *whole* unknown-table arm in `credentialColumnsIn`,
+ * nothing inside `unknownTableMark` could fire behind it. Measured, at HEAD
+ * and at `3d8cb49` alike: `` `SELECT token FROM main.${table}` `` and
+ * `` `SELECT ${columns} FROM main.${table}` `` both passed, the second being
+ * the shape `unknownTableMark`'s docblock says is refused.
+ *
+ * **One hole is left open here deliberately: a table name only *partly*
+ * substituted.** `` `SELECT token FROM auth_${kind}` `` renders as
+ * `FROM auth_ ? `, and the substitution is not immediately after the keyword,
+ * so this returns false and nothing reports it -- even though `${kind}` could
+ * be `session` at runtime. Measured, and measured again with the obvious fix:
+ * allowing `\w*\s*` in front of the `?` does close it, and it also reports
+ * `sync/log.ts`'s `syncTriggerSql` as `?.?`, because
+ * `CREATE TRIGGER x AFTER UPDATE ON ${table}` renders as `UPDATE ON  ? ` and
+ * `update` is one of the four keywords above. That is a correct, shipped,
+ * credential-free DDL string being reported as a possible credential read,
+ * and the cost of a rule that reports those is that someone turns the rule
+ * off. Named here instead. Closing it properly means telling the DML
+ * `UPDATE t SET` from the DDL `AFTER UPDATE ON t`, which this file's regexes
+ * cannot do and a SQL parser could.
  */
 function readsFromUnknownTable(sql: SqlText): boolean {
-  return sql.unresolved > 0 && /\b(?:from|join|update|into)\s+\?/i.test(normalized(sql.text));
+  return sql.unresolved > 0
+    && /\b(?:from|join|update|into)\s+(?:\w+\s*\.\s*)?\?/i.test(normalized(sql.text));
 }
 
 /**
- * Whether the select list is `*` — every column, including whichever of them
- * is the credential.
+ * Whether the statement has a select list that is `*` — every column,
+ * including whichever of them is the credential.
  *
- * Only the text between `SELECT` and the first `FROM` is looked at, and a `*`
- * directly after `(` is not a select list: `SELECT count(*) FROM auth_session`
- * reads no column at all, and flagging it would flag `auth/claim.ts`'s own
- * measured-not-to-be-used counterexample. An alias's `s.*` is the same star as
- * a bare one.
+ * A `*` directly after `(` is not a select list: `SELECT count(*) FROM
+ * auth_session` reads no column at all, and flagging it would flag
+ * `auth/claim.ts`'s own measured-not-to-be-used counterexample. An alias's
+ * `s.*` is the same star as a bare one.
+ *
+ * **Every `SELECT … FROM` pair in the statement, not just the first.** The
+ * earlier form read only the text between the first `SELECT` and the first
+ * `FROM`, so a star anywhere else walked past. Measured against the
+ * unconditional rule at `3d8cb49`, which reported all three:
+ *
+ * ```
+ * `SELECT id FROM media_item WHERE id IN (SELECT * FROM ${t})`
+ * `SELECT id FROM media_item UNION ALL SELECT * FROM ${t}`
+ * `SELECT id FROM media_item EXCEPT SELECT * FROM ${t}`
+ * ```
+ *
+ * Each reads the credential column if `${t}` is `secret` or `auth_session` at
+ * runtime. A literal one -- `SELECT id FROM media_item WHERE id IN (SELECT *
+ * FROM secret)` -- passed at *both* revisions, so this closes a pre-existing
+ * hole as well as the narrowing's own.
+ *
+ * **Every `select` keyword is a starting point, rather than every
+ * non-overlapping `SELECT … FROM` pair.** A single global `SELECT(.*?)FROM`
+ * would consume a nested `SELECT` inside the *outer* statement's list and
+ * then resume past it, so the inner one is never read on its own:
+ * `` `SELECT (SELECT * FROM ${t}) AS c FROM media_item` `` passed that way,
+ * measured, because the outer list reads `(SELECT *` and the star has a `(`
+ * in front of it. Scanning from each keyword to the nearest following `from`
+ * reads the inner list too.
+ *
+ * A select list with no `FROM` after it is not examined, and reads no table,
+ * so there is nothing there to be a credential.
  *
  * **A star is a select list only where a *column* could stand: at the head of
  * the list, or straight after a comma, optionally qualified by an alias.** It
- * is not the multiplication operator, which the earlier form read as a star
+ * is not the multiplication operator, which an earlier form read as a star
  * because it allowed any whitespace in front -- so
  * `SELECT unixepoch('subsec') * 1000 FROM t` was reported as selecting every
  * column of `t`. Measured on `sync/log.ts`'s seed statement, which is exactly
@@ -559,15 +611,25 @@ function readsFromUnknownTable(sql: SqlText): boolean {
  * **`DISTINCT` and `ALL` stand between the head of the list and the star**, and
  * they are the reason this is not just `(?:^|,)\s*`. Keying on `^` alone made
  * `SELECT DISTINCT * FROM secret` unreported -- measured, along with
- * `SELECT DISTINCT t.*` and `SELECT ALL *`, none of which the narrowing's own
- * tests covered. They are the only two quantifiers SQLite accepts there, so
- * naming both closes it. `SELECT DISTINCT a * b` stays unreported: the
- * quantifier is consumed and the star still has an operand in front of it.
+ * `SELECT DISTINCT t.*` and `SELECT ALL *`. They are the only two quantifiers
+ * SQLite accepts there.
+ *
+ * **`\b\s*` after the quantifier, not `\s+`: SQLite requires no whitespace
+ * and neither may this.** Verified through `node:sqlite` --
+ * `SELECT all*FROM secret` and `SELECT distinct*FROM secret` both parse and
+ * both return the row, and both passed while the space was required. The
+ * `\b` is what still refuses an identifier the quantifier is a prefix of:
+ * `SELECT alldata * 2` and `SELECT distinctive * 3` stay unreported, because
+ * `all`/`distinct` there is followed by a word character. `SELECT DISTINCT a
+ * * b` stays unreported too -- the quantifier is consumed and the star still
+ * has an operand in front of it.
  */
 function selectsEveryColumn(sql: string): boolean {
-  const list = /\bselect\b([\s\S]*?)\bfrom\b/i.exec(normalized(sql))?.[1];
-  if (list === undefined) return false;
-  return /(?:^|,)\s*(?:(?:distinct|all)\s+)?(?:\w+\s*\.\s*)?\*/i.test(list);
+  const text = normalized(sql);
+  return [...text.matchAll(/\bselect\b/gi)].some((keyword) => {
+    const list = /^([\s\S]*?)\bfrom\b/i.exec(text.slice(keyword.index + keyword[0].length))?.[1];
+    return list !== undefined && /(?:^|,)\s*(?:(?:distinct|all)\b\s*)?(?:\w+\s*\.\s*)?\*/i.test(list);
+  });
 }
 
 /**
