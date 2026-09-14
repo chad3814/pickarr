@@ -63,8 +63,8 @@ export interface EnvelopeDeps {
   readonly db: LookupDb;
   readonly table: LookupStateTable;
   readonly now: number;
-  /** The plugin's pre-flight, if it has one. See `LookupPluginSpec.check`. */
-  check?(media: Media): void;
+  /** The plugin's pre-flight. See `LookupPluginSpec.check`. */
+  check(media: Media): void;
   apply(args: ApplyArgs): Promise<void>;
 }
 
@@ -130,7 +130,7 @@ async function applyResolved(
   deps: EnvelopeDeps,
 ): Promise<void> {
   const { ctx } = deps;
-  deps.check?.(media);
+  deps.check(media);
 
   const mine = await ctx.media.createMediaItem({
     pluginId: deps.pluginId,
@@ -272,8 +272,17 @@ export interface LookupPluginSpec {
    * else. Anything that could fail for a reason of its own belongs in
    * `apply`, where a failure is a job to retry rather than a verdict on the
    * answer.
+   *
+   * **Required, not optional**, and that is the whole point of it. Every
+   * plugin here also guards inside `apply`, which keeps a direct caller of
+   * `apply` honest -- but it means a plugin that defined `apply` and forgot
+   * `check` would still refuse the answer, just one write too late, and
+   * silently reintroduce the very defect this hook exists to close. An
+   * optional hook makes forgetting it a thing the compiler permits. A plugin
+   * that genuinely refuses nothing writes an empty body and says so in a
+   * comment.
    */
-  check?(media: Media): void;
+  check(media: Media): void;
   /** The plugin's own rows for one resolved answer. Must be idempotent. */
   apply(args: ApplyArgs): Promise<void>;
 }
@@ -423,20 +432,16 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
   const table = lookupTable(spec.id);
 
   function envelopeDeps(ctx: PluginContext, raw: DatabaseSync, db: LookupDb): EnvelopeDeps {
-    const base = {
+    return {
       pluginId: spec.id,
       ctx,
       raw,
       db,
       table,
       now: deps.now(),
+      check: spec.check,
       apply: spec.apply,
     };
-    // Two shapes rather than one literal carrying `check: spec.check`:
-    // `exactOptionalPropertyTypes` makes an explicit `undefined` a different
-    // thing from the property being absent, the same way `clientFor` below
-    // builds its two.
-    return spec.check === undefined ? base : { ...base, check: spec.check };
   }
 
   function clientFor(ctx: PluginContext, signal?: AbortSignal) {

@@ -39,6 +39,10 @@ function fixture(filename = 'item.mkv') {
     db,
     table,
     now: NOW,
+    // These tests drive the branch, not a plugin's refusal: nothing here is
+    // a kind any real plugin would reject, so the pre-flight accepts
+    // everything. The refusal itself is `engine-resolved.test.ts`'s.
+    check: (): void => {},
     apply: async (args: { media: Media; mediaItemId: number }) => {
       applied.push({ media: args.media, mediaItemId: args.mediaItemId });
     },

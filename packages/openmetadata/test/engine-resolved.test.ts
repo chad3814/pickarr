@@ -45,6 +45,8 @@ function fixture() {
     db: drizzle({ client: harness.raw }),
     table: lookupTable(PLUGIN_ID),
     now: NOW,
+    // Accepts everything by default; the mis-kind test below passes its own.
+    check: (): void => {},
     apply: async (args: ApplyArgs) => { applied.push(args); },
   };
   return { harness, deps, rssItemId, applied };

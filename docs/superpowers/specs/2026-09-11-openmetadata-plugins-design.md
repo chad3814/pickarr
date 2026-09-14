@@ -279,7 +279,7 @@ nothing (§3.3's branches 1–3) were the whole of what "created late" was
 weighed against; **a plugin refusing the answer is a fourth**, and the only
 place it costs nothing is before step 1.
 
-So `LookupPluginSpec` carries `check?(media: Media): void`, called here and
+So `LookupPluginSpec` carries `check(media: Media): void`, called here and
 nowhere else. It is synchronous and must stay cheap — it reads the answer and
 touches nothing else, so it has no failure of its own to contribute, which is
 what makes it safe to run before any row exists. Each plugin's `kind` guard
@@ -288,6 +288,16 @@ which needs only `media.parents`. The guards remain inside `apply` as well:
 `apply` is exported and driven directly by each plugin's own tests, and tv's
 also narrows `media.kind` for the branches below it. The copy in `check` is
 the one that matters; the copy in `apply` is the one that cannot be removed.
+
+**`check` is required, not optional**, and the duplication above is exactly
+why. Because every plugin also guards inside `apply`, a plugin that defined
+`apply` and forgot `check` would still refuse the answer — one write too
+late, which is the defect this hook exists to close, reintroduced silently
+and passing every test it has. An optional hook makes that omission
+something the compiler permits; a required one makes it something the
+compiler catches, at the cost of an empty body in a plugin that genuinely
+refuses nothing. No such plugin exists yet: all three refuse at least a
+`kind`.
 
 ### 3.5 `onNewRssItems`
 

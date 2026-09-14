@@ -39,6 +39,9 @@ function build(service?: { fetch: HostFetch }) {
     mediaType: 'xxx',
     category: 'xxx',
     migrations: [],
+    // A scene is all this spec is ever handed, so the pre-flight has nothing
+    // to refuse -- these tests are about jobs, not about what a plugin accepts.
+    check: (): void => {},
     apply: async (args) => { applied.push(args); },
   }, {
     now: () => NOW,
@@ -59,6 +62,7 @@ test('carries the engine state table as migration 1, before the spec migrations'
     mediaType: 'xxx',
     category: 'xxx',
     migrations: [{ version: 2, up: (db) => db.exec('CREATE TABLE xxx_own (id INTEGER PRIMARY KEY)') }],
+    check: (): void => {},
     apply: async () => {},
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
@@ -75,6 +79,7 @@ test('keeps a spec job handler alongside its own two', () => {
     category: 'xxx',
     migrations: [],
     jobs: { sweep: async () => {} },
+    check: (): void => {},
     apply: async () => {},
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
