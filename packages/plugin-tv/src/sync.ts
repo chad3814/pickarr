@@ -7,11 +7,22 @@
  * column added to any of these tables later reaches no client until someone
  * decides it should.
  *
- * `tv_release` is listed first, `tv_season` and `tv_series` after it -- the
- * order a plugin declares its tables in is the order the backfill writes
- * them for one group (`sync/backfill.ts`), and a release row names its
- * season and series, so the detail comes before the shared parents it
- * points at.
+ * **Declaration order is emission order, and a row that names another synced
+ * row must come after it.** The order below is the order the backfill writes
+ * these tables for one group (`sync/backfill.ts`), so naming a row is a
+ * reason to send it *first*, not last -- a client replaying a page in order
+ * has to already hold what an op points at.
+ *
+ * Exactly one of these three shapes names another by row id:
+ * `TvSeasonRead.seriesId` is a `tv_series.id`. So `tv_series` is declared
+ * before `tv_season`, and `TV_SYNCED` at the foot of this file reads
+ * `[release, series, season]`. `TvRead` names neither parent by id -- the
+ * joins below flatten the series' title and reference and the season's
+ * number into the release's own shape (design spec §3.6) -- so `tv_release`
+ * is under no ordering constraint from these two at all, and is declared
+ * first as the row the group is actually about. Its one reference,
+ * `mediaItemId`, is to `media_item`, which the backfill emits before any
+ * plugin table.
  */
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { SyncedTable, TvRead, TvSeasonRead, TvSeriesRead } from '@pickarr/contract';
@@ -160,4 +171,4 @@ const series: SyncedTable<TvSeriesRead> = {
   },
 };
 
-export const TV_SYNCED: readonly SyncedTable<unknown>[] = [release, season, series];
+export const TV_SYNCED: readonly SyncedTable<unknown>[] = [release, series, season];

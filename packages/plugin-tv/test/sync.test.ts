@@ -74,6 +74,22 @@ test('the declared set is exactly the tables the migrations create', () => {
   );
 });
 
+test('tv_series is declared before tv_season, because a season names a series by row id', () => {
+  // Declaration order is the order the backfill emits a plugin's tables for
+  // one group (`sync/backfill.ts`), and `TvSeasonRead.seriesId` is a
+  // `tv_series.id` -- so a client replaying a page in order has to be
+  // holding the series by the time the season op lands. This shipped the
+  // other way round, as `[release, season, series]`, which made a page emit
+  // a `tv_season` op naming `seriesId: 200` before the `tv_series` op with
+  // id 200. Asserted as the ordering *property*, not the literal list, so
+  // adding a fourth table cannot make this test pass by accident.
+  const names = TV_SYNCED.map((table) => table.table);
+  assert.ok(
+    names.indexOf('tv_series') < names.indexOf('tv_season'),
+    `tv_series must precede tv_season, got ${JSON.stringify(names)}`,
+  );
+});
+
 // Step 1's original third assertion inspected the declaration --
 // `JSON.stringify(table)` on the `SyncedTable` object itself -- which cannot
 // fail even if `read` returned `details_json`, since a function's source

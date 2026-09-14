@@ -4,10 +4,16 @@
  * `details_json` is projected away: it is the metadata provider's answer
  * verbatim, unbounded, and nothing in a view reads it (design spec §3.9).
  *
- * `xxx_scene` is listed first, `xxx_site` after it -- the order a plugin
- * declares its tables in is the order the backfill writes them for one group
- * (`sync/backfill.ts`), and a scene names the site it points at, so the
- * detail comes before the shared parent.
+ * **Declaration order is emission order, and a row that names another synced
+ * row must come after it** (`sync/backfill.ts`): naming a row is a reason to
+ * send it *first*, not last, since a client replaying a page in order has to
+ * already hold what an op points at. Neither shape here names the other by
+ * row id -- `XxxRead` flattens the site's name and reference into the
+ * scene's own shape by a join, and `XxxSiteRead` carries no reference at all
+ * -- so the two are under no ordering constraint from each other, and
+ * `xxx_scene` is declared first as the row the group is actually about. Its
+ * one reference, `mediaItemId`, is to `media_item`, which the backfill emits
+ * before any plugin table.
  */
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { SyncedTable, XxxRead, XxxSiteRead } from '@pickarr/contract';
