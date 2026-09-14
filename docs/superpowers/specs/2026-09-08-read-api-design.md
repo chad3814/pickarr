@@ -373,22 +373,34 @@ GET /api/deletions?type=<t>&since=<cursor> → { ids, cursor, done }
 GET /api/artwork/:kind/:mediaItemId      → bytes
 ```
 
-The client-sync slice added two more, both guarded exactly like the six
-above and neither `type`-scoped -- a client syncs one log and one backwards
+The client-sync slice added three more, all guarded exactly like the six
+above and none `type`-scoped -- a client syncs one log and one backwards
 walk over the whole replica, not per media type:
 
 ```
-GET /api/sync?since=<logId>                            → { ops, cursor }
-GET /api/sync/backfill?before=<createdAt>.<id>.<w>     → { ops, cursor, watermark }
+GET /api/sync?since=<logId>            → { ops, cursor }
+GET /api/sync/backfill?before=<logId>  → { ops, cursor }
+GET /api/sync/bootstrap                → { since, before }
 ```
 
-Both answer one JSON object, like every route above -- the first line said
+Each answers one JSON object, like every route above -- the first line said
 "one line per op", which would have talked a reader into writing an NDJSON
 reader for a body that has never been one. An op is
 `{ op, table, id, value? }`, where `op` is `create` on the backfill and
 `upsert` or `delete` on the tail (the design spec's §5.3 has why the two
-differ); `cursor` is a log id on the first route and the opaque
-`<createdAt>.<id>.<w>` string on the second.
+differ). `cursor` is a `sync_log.id` on both routes, and `null` on the
+backfill when the walk below `before` is exhausted.
+
+**An earlier version of this block documented
+`before=<createdAt>.<id>.<w>` and a `watermark` in the backfill's response.**
+That shape is gone: the backfill paged current state on a `(created_at, id)`
+keyset and carried a watermark because it needed a threshold to skip rows the
+tail owned, and it now walks `sync_log` backwards, where disjointness is
+`id < before` against `id > since`. `/api/sync/bootstrap` hands out both
+positions in one call, which is what the per-page watermark used to be for.
+This file's disclaimer below covers it not being updated *as later slices add
+routes*; it did not cover a route it documents changing shape, and this block
+was stale for a wave.
 
 Its own design lives in `2026-09-14-client-sync-design.md` §5; this table is
 not updated further as later slices add routes -- see the annotation on

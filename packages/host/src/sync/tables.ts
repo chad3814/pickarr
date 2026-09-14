@@ -29,12 +29,21 @@ import type { DatabaseSync } from 'node:sqlite';
  * it.** `rss_item.feed_id` and `torrent_download`/`nzb_download`'s
  * `download_client_id` *are* projected below, and both name tables that are
  * out and will stay out. A client therefore receives ids it can never
- * resolve, by design -- which is why `sync/backfill.ts` claims page
- * self-consistency only for rows *within* the synced set, and why design
- * spec §5.2 and §7.8 say so too. Dropping the two columns instead would be
- * the alternative; they are kept because a client grouping releases by feed
- * or downloads by client can do so by id without ever needing the row, and
- * an id is not a url.
+ * resolve, by design. Dropping the two columns instead would be the
+ * alternative; they are kept because a client grouping releases by feed or
+ * downloads by client can do so by id without ever needing the row, and an
+ * id is not a url.
+ *
+ * **This used to say `sync/backfill.ts` "claims page self-consistency only
+ * for rows *within* the synced set", and that claim is retired.**
+ * `backfill.ts` now says the opposite in its own docblock -- "an op may
+ * reference a synced row the client has not received yet" -- because the walk
+ * emits in log order rather than group order. Design spec §5.2 names the
+ * earlier wording as false, and §7.8 pins the loss as a test. A client
+ * already had to tolerate the two ids
+ * above, which resolve to nothing *ever*; what the log walk additionally
+ * costs is the ordering guarantee *inside* the synced set, where the
+ * reference does resolve, just not yet.
  *
  * **A table being in this list is not a promise that every one of its
  * columns is projected.** `selectSql` below names the subset of each
