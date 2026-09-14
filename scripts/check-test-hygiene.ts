@@ -28,7 +28,7 @@
  * **Rule 1**, in full: a web test that hands a live DOM element to
  * `node:assert` as a value it might have to print.
  *
- * The hazard, from `docs/known-issues.md` and issue #40: `node:assert`'s
+ * The hazard, recorded in `CLAUDE.md` and issue #40: `node:assert`'s
  * equality helpers format *both* operands into the failure message, and
  * formatting a live element means deep-inspecting a DOM node. That is slow
  * enough to take the whole file down before it finishes, and it never gets far

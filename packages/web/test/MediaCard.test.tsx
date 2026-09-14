@@ -845,8 +845,8 @@ test('the identity column tolerates a missing poster, synopsis and empty perform
   // this card from a group that was never asked. What is genuinely
   // indistinguishable now is `confirmed`-with-nothing from `none` — the two
   // states `settled` deliberately treats alike — and closing *that* would mean
-  // re-adding the wrapper this task dissolves. Recorded in
-  // `docs/known-issues.md` under "Test-suite blind spots".
+  // re-adding the wrapper this task dissolves. Recorded in `CLAUDE.md` under
+  // "Testing hazards".
   assert.ok(
     screen.getByRole('button', { name: /requery/i }),
     'a confirmed group with no poster, synopsis or cast still renders something identifiable',

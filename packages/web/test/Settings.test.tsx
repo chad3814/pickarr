@@ -58,8 +58,8 @@ function stubFetch(handler: FetchHandler): void {
 }
 
 // Comparing a live DOM element against `null` via `assert.equal` is what
-// `docs/known-issues.md` warns builds an AssertionError message by deep-
-// inspecting the element on failure, OOM-killing the run; computing the
+// `CLAUDE.md` warns builds an AssertionError message by deep-inspecting the
+// element on failure, hanging the run; computing the
 // boolean first and asserting that keeps a failure's message a plain
 // `false`. Named for a label rather than arbitrary text, unlike `Browse.test
 // .tsx`'s `gone`: a download client's "API key" text also lives, unremovable,
