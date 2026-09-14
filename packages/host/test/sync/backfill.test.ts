@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { StatementSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
@@ -108,4 +109,70 @@ test('a row deleted before the walk reaches it is never sent as a create', () =>
   const walked = [...first.ops, ...rest.ops].filter((o) => o.table === 'media_item')
     .map((o) => (o.value as { id: number }).id);
   assert.ok(!walked.includes(1));
+});
+
+test('the watermark is read before the page, not after: a row created while a page is being hydrated is still delivered by the tail', () => {
+  // Design spec §5.2/§5.3: the watermark must be the log's high-water mark
+  // *before* the page's dependent rows are fetched, so anything that changes
+  // during that fetch lands above it and reaches the client through the tail.
+  // Mutation B (task-6-brief.md step 6) moves that read to the end of the
+  // function; the brief predicted no test could tell the two apart because a
+  // single synchronous statement sequence leaves no window for a concurrent
+  // writer. That is wrong about the mechanism, not the conclusion it was
+  // reaching for: there is no *thread* that can land a write mid-function, but
+  // `backfillBefore` takes `raw` as a parameter, and nothing stops a caller's
+  // `prepare` from doing something besides preparing a statement. Wrapping the
+  // handle in a `Proxy` that inserts a row the moment the page's `rss_item`
+  // lookup runs reproduces "changed while the page is being hydrated" with no
+  // concurrency machinery at all -- ordinary dependency injection on a
+  // parameter the function already takes.
+  const { raw, registry } = open();
+  addItem(raw, 1, 100);
+  addItem(raw, 2, 200);
+
+  let injected = false;
+  const spyRaw = new Proxy(raw, {
+    get(target, prop, receiver) {
+      if (prop !== 'prepare') return Reflect.get(target, prop, receiver);
+      return (sql: string): StatementSync => {
+        const statement = target.prepare(sql);
+        // The first statement that reads `rss_item` is the page's
+        // dependent-row lookup (`backfillBefore`'s releases query), run
+        // strictly after both the watermark and the item page are already
+        // read. Injecting here, through the *real* handle -- never the
+        // proxy, which would recurse -- lands the write inside exactly the
+        // window the correctness of §5.3's table depends on.
+        if (!injected && sql.includes('FROM rss_item')) {
+          injected = true;
+          addItem(raw, 9, 999);
+        }
+        return statement;
+      };
+    },
+  });
+
+  const page = backfillBefore(spyRaw, registry, null, 10);
+  assert.ok(injected, 'the interception must actually have fired, or this test proves nothing');
+
+  const concurrentLogRow = raw.prepare(
+    "SELECT id FROM sync_log WHERE table_name = 'media_item' AND row_id = 9",
+  ).get() as { id: unknown };
+  const concurrentLogId = Number(concurrentLogRow.id);
+
+  // First half: the watermark itself must sit below the concurrent write's
+  // log entry. Asserting only the second half (below) would pass for the
+  // wrong reason if the walk happened to pick the row up on its own.
+  assert.ok(
+    page.watermark < concurrentLogId,
+    `watermark (${page.watermark}) must be captured before the concurrent write (log id ${concurrentLogId}), not after`,
+  );
+
+  // Second half: the tail, from that watermark, actually delivers it -- the
+  // walk itself never can, since row 9 (created_at 999) is newer than every
+  // item the walk started from.
+  const tail = tailSince(raw, registry, page.watermark, 100);
+  assert.ok(
+    tail.ops.some((o) => (o.value as { id: number } | undefined)?.id === 9),
+    'the tail, from that watermark, must deliver the row the walk could never have seen',
+  );
 });
