@@ -1634,8 +1634,8 @@ export function matchSitePrefix(before: Token[], sites: readonly string[]): Site
  * scene half, so no split can make two different scenes collide.
  *
  * The suffix tokens past that bound are a separate matter. They reach neither
- * half, and two names differing only in them collate as one — the accepted
- * cost recorded in `docs/known-issues.md`, unchanged by where the split falls.
+ * half, and two names differing only in them collate as one — an accepted
+ * cost, unchanged by where the split falls.
  */
 /**
  * The pre-date tokens of a date-at-end name, or `null` for anything that is
@@ -2247,9 +2247,9 @@ function splitSegment(segment: string): SegmentSplit {
   // Only a four-digit year reaches here. Written `26.08.05`, the same listing
   // is a dotted name to `DOTTED_DATE_RUN` and goes to the date-at-end shape
   // instead, where the walk does run and the two parts above *do* collapse
-  // onto `site:2026-08-05:alex`. That collision is inside the class
-  // `docs/known-issues.md` accepts — one site, one date, titles differing only
-  // in dropped tokens — so it is not a defect, but it is not excluded either,
+  // onto `site:2026-08-05:alex`. That collision is inside the accepted class
+  // — one site, one date, titles differing only in the tokens `findTitleEnd`
+  // drops — so it is not a defect, but it is not excluded either,
   // and a comment claiming the shape is safe would be wrong. Both spellings
   // are pinned by tests in `parse-date-at-end.test.ts`.
   let tokens = tokensOf(text);
@@ -2262,8 +2262,8 @@ function splitSegment(segment: string): SegmentSplit {
   // taking the resolution out of `extractQuality`'s reach entirely.
   //
   // The gate is the whole design. `detachReleaseGroup`'s hyphen branch is
-  // deliberately permissive — `docs/known-issues.md` explains at length why no
-  // shape rule separates `-Ghost` from `-Bonus` — and in a listing a hyphen is
+  // deliberately permissive, because no shape rule separates `-Ghost` from
+  // `-Bonus` — and in a listing a hyphen is
   // ordinary punctuation as well as a group separator, so detaching
   // unconditionally would read `Deep-Throat` as the scene "Deep" from a group
   // called "Throat". Requiring the cut on what remains to be exactly `0` means

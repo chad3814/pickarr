@@ -162,7 +162,10 @@ from a path that survives content changes would be a lie a cache would believe.
 slice shipped it* — slice F moved the bind to every interface. The host has
 no HTTP dependency today and this is not the reason to acquire one. (Slice F
 added a seventh mount, `/api/auth/*`, on the same bare server — still no
-framework, and `toNodeHandler` was measured to work with one.)
+framework, and `toNodeHandler` was measured to work with one. The client-sync
+slice later added two more routes to the table below, `/api/sync` and
+`/api/sync/backfill`, both guarded exactly like the six below — still no
+framework.)
 
 **One query layer, and the HTTP handlers contain no SQL.** Both consumers —
 plugins in-process, the client over HTTP — call the same functions. Two readers
@@ -359,7 +362,7 @@ grow, and a plugin pinned to today's six values would break on the seventh.
 
 ## 5. The HTTP API
 
-Read-only. Six routes.
+Read-only. Six routes, as this slice shipped it.
 
 ```
 GET /api/health                          → { ok: true, version }
@@ -369,6 +372,39 @@ GET /api/downloads?since=<cursor>        → { items, cursor, done }
 GET /api/deletions?type=<t>&since=<cursor> → { ids, cursor, done }
 GET /api/artwork/:kind/:mediaItemId      → bytes
 ```
+
+The client-sync slice added three more, all guarded exactly like the six
+above and none `type`-scoped -- a client syncs one log and one backwards
+walk over the whole replica, not per media type:
+
+```
+GET /api/sync?since=<logId>            → { ops, cursor }
+GET /api/sync/backfill?before=<logId>  → { ops, cursor }
+GET /api/sync/bootstrap                → { since, before }
+```
+
+Each answers one JSON object, like every route above -- the first line said
+"one line per op", which would have talked a reader into writing an NDJSON
+reader for a body that has never been one. An op is
+`{ op, table, id, value? }`, where `op` is `create` on the backfill and
+`upsert` or `delete` on the tail (the design spec's §5.3 has why the two
+differ). `cursor` is a `sync_log.id` on both routes, and `null` on the
+backfill when the walk below `before` is exhausted.
+
+**An earlier version of this block documented
+`before=<createdAt>.<id>.<w>` and a `watermark` in the backfill's response.**
+That shape is gone: the backfill paged current state on a `(created_at, id)`
+keyset and carried a watermark because it needed a threshold to skip rows the
+tail owned, and it now walks `sync_log` backwards, where disjointness is
+`id < before` against `id > since`. `/api/sync/bootstrap` hands out both
+positions in one call, which is what the per-page watermark used to be for.
+This file's disclaimer below covers it not being updated *as later slices add
+routes*; it did not cover a route it documents changing shape, and this block
+was stale for a wave.
+
+Its own design lives in `2026-09-14-client-sync-design.md` §5; this table is
+not updated further as later slices add routes -- see the annotation on
+`server.ts`'s module doc, which is.
 
 `/api/deletions` takes a `type`, and the reason is mechanical rather than a
 confidentiality one: `deletionsSince` is plugin-scoped, and a tombstone
@@ -547,6 +583,15 @@ The properties worth pinning, each because it fails silently:
   to know the oldest cursor any client still holds, and no client registers
   itself. One row per deleted media item is small; the decision to prune belongs
   with whatever first tracks clients.
+
+  **The client-sync slice's log now overlaps this route.** `sync_log`'s delete
+  ops (`2026-09-14-client-sync-design.md` §1, §5.1) cover the same event --
+  a row leaving current state -- for every synced table, `media_item`
+  included, and that log *is* compacted on write (one row per changed row,
+  no accumulation). `/api/deletions` and `deleted_media_item` were not
+  removed: that slice's own §8 records the overlap and leaves the choice
+  between them to whatever consumes the log next, rather than deciding it
+  here.
 - **A media item id reused across plugins erases the first plugin's unread
   deletion.** There is one tombstone row per `media_item_id`, and
   `dropMediaItem`'s upsert sets `plugin_id = excluded.plugin_id`. So: alpha's

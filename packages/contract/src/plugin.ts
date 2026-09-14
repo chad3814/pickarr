@@ -3,6 +3,7 @@ import type { HostFetch } from './fetch.ts';
 import type { JobQueue, JobRecord } from './jobs.ts';
 import type { MediaReader, MediaWriter } from './media.ts';
 import type { Migration } from './migrations.ts';
+import type { SyncedTable } from './sync.ts';
 
 export type MediaType = 'tv' | 'movie' | 'xxx' | 'book';
 
@@ -81,6 +82,16 @@ export interface MediaPlugin {
   readonly mediaType: MediaType;
   readonly migrations: readonly Migration[];
   readonly jobs: Readonly<Record<string, JobHandler>>;
+
+  /**
+   * The tables this plugin contributes to a client's replica. Empty means the
+   * plugin adds nothing beyond the host's own tables.
+   *
+   * The host owns the triggers for these, not the plugin: a trigger a plugin
+   * forgot would diverge every client with nothing failing, so it is not left
+   * to a caller.
+   */
+  readonly synced: readonly SyncedTable<unknown>[];
 
   onNewRssItems(ids: readonly number[], ctx: PluginContext): Promise<void>;
   onDownloadedFile(file: DownloadedFile, ctx: PluginContext): Promise<void>;

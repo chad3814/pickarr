@@ -94,6 +94,7 @@ const ownerPlugin: MediaPlugin = {
   mediaType: 'movie',
   migrations: [],
   jobs: {},
+  synced: [],
   onNewRssItems: async () => { throw new Error('onNewRssItems: not used by this test'); },
   onDownloadedFile: async () => { throw new Error('onDownloadedFile: not used by this test'); },
   onDownloadRequest: async () => { throw new Error('onDownloadRequest: not used by this test'); },
@@ -276,6 +277,12 @@ function seedDatabase(databasePath: string, seed: (raw: DatabaseSync) => void = 
   }
 }
 
+/** How many triggers of that name exist -- 0 or 1, since a name is unique in `sqlite_master`. */
+function triggerCount(raw: DatabaseSync, name: string): number {
+  const row = raw.prepare("SELECT count(*) c FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name);
+  return Number((row as { c: unknown }).c);
+}
+
 /** The one account a claimed install has, inserted directly rather than signed up for. */
 function insertOwner(raw: DatabaseSync): void {
   raw.prepare(`
@@ -435,6 +442,57 @@ test('main boots with no plugin registered, and still schedules a poll for every
         1,
         'a feed known before boot must still get a poll job scheduled, even with no plugin registered',
       );
+    } finally {
+      after.raw.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a boot reinstalls the host tables\' sync triggers, which migration 15 alone would never do again', async () => {
+  // `sync/log.ts` says installation runs on every boot for host tables and
+  // plugin tables alike. Migration 15 is the only thing that ever installed
+  // the host's, and `migrateHostWith` skips it once version 15 is recorded
+  // -- so on a database already at 15, a trigger lost to a later migration
+  // that rebuilt its table would stay lost, and the symptom would be every
+  // client silently missing every subsequent change to that table. Dropping
+  // one by hand reproduces exactly that state; the boot must repair it.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-sync-triggers-'));
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, (raw) => {
+      raw.exec('DROP TRIGGER media_item_sync_upd');
+    });
+
+    const before = openDatabase(databasePath);
+    try {
+      assert.equal(triggerCount(before.raw, 'media_item_sync_upd'), 0, 'fixture sanity: the trigger is gone');
+    } finally {
+      before.raw.close();
+    }
+
+    const { timers } = createFakeTimers();
+    await runMain(databasePath, {
+      plugins: [],
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
+
+    const after = openDatabase(databasePath);
+    try {
+      assert.equal(triggerCount(after.raw, 'media_item_sync_upd'), 1,
+        'the boot must reinstall a host synced table\'s trigger, not leave it to a migration that never runs again');
+      // And it logs, rather than merely existing: an update must land a
+      // fresh `sync_log` entry for the row.
+      after.raw.prepare(
+        'INSERT INTO media_item (id, plugin_id, created_at, updated_at, title) VALUES (1, ?, 1, 1, ?)',
+      ).run('tv', 'a title');
+      after.raw.prepare('UPDATE media_item SET title = ? WHERE id = 1').run('another');
+      const entry = after.raw.prepare(
+        "SELECT count(*) c FROM sync_log WHERE table_name = 'media_item' AND row_id = 1",
+      ).get();
+      assert.equal(Number((entry as { c: unknown }).c), 1, 'the reinstalled trigger must actually log');
     } finally {
       after.raw.close();
     }

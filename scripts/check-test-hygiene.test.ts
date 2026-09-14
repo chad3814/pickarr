@@ -310,6 +310,16 @@ test('a select over a credential table this check cannot read is a violation, no
   const dir = await fixtureDir(t, {
     'star.ts': `export const Q = 'SELECT * FROM auth_session WHERE id = ?';\n`,
     'alias-star.ts': `export const Q = 'SELECT s.* FROM auth_session s WHERE s.id = ?';\n`,
+    // A quantifier stands between the head of the list and the star. Keying the
+    // star rule on `^` alone let all three of these through -- found by
+    // measuring the rule after it was narrowed to stop reading `x * 1000` as a
+    // star, which is the same regex and the opposite error.
+    'distinct-star.ts': `export const Q = 'SELECT DISTINCT * FROM secret';\n`,
+    'distinct-alias-star.ts': `export const Q = 'SELECT DISTINCT s.* FROM secret s';\n`,
+    'all-star.ts': `export const Q = 'SELECT ALL * FROM host_state';\n`,
+    // The quantifier is consumed and the star still has an operand in front of
+    // it, so this is multiplication and stays unreported.
+    'distinct-product.ts': `export const Q = 'SELECT DISTINCT a * b FROM secret';\n`,
     'unresolvable.ts': 'export const Q = `SELECT ${columnsFor(table)} FROM auth_account`;\n',
     'twice-declared.ts': [
       // No scope analysis behind the resolution, so a name declared twice is
@@ -329,6 +339,9 @@ test('a select over a credential table this check cannot read is a violation, no
     ]),
     [
       ['alias-star.ts', 'auth_session.*'],
+      ['all-star.ts', 'host_state.*'],
+      ['distinct-alias-star.ts', 'secret.*'],
+      ['distinct-star.ts', 'secret.*'],
       ['star.ts', 'auth_session.*'],
       ['twice-declared.ts', 'auth_account.?'],
       ['unresolvable.ts', 'auth_account.?'],
@@ -411,10 +424,23 @@ test('a table name this check cannot resolve is a violation, because it may be a
   // therefore cannot clear -- and answerable the same way as any other
   // fail-closed finding: name the table, or say in a diff why this module may
   // read a credential.
+  //
+  // **Narrower than "any unresolved table", which is what it was first.** See
+  // `unknownTableMark`: the question the rule asks is whether a credential
+  // column is selected, and a statement whose column list is fully spelled out
+  // answers it whatever the table turns out to be. The test below this one is
+  // the admitted case; everything here is still a violation.
   const dir = await fixtureDir(t, {
     'from-parameter.ts': 'export function q(t: string): string { return `SELECT token FROM ${t}`; }\n',
     'star-from-parameter.ts': 'export function q(t: string): string { return `SELECT * FROM ${t}`; }\n',
-    'insert-into-parameter.ts': 'export function q(t: string): string { return `INSERT INTO ${t} (a) VALUES (?)`; }\n',
+    // A credential column written into an unknown table is the `INTO` half of
+    // the same question, and `password` is what makes it one.
+    'insert-into-parameter.ts':
+      'export function q(t: string): string { return `INSERT INTO ${t} (password) VALUES (?)`; }\n',
+    // Both halves unknown: the column list could be any column and the table
+    // could be any table, which is the case failing closed exists for.
+    'columns-and-table.ts':
+      'export function q(c: string, t: string): string { return `SELECT ${c} FROM ${t}`; }\n',
     // A table that *does* resolve is read as itself, and this one holds no
     // credential -- so resolving it is what makes the difference, not the
     // presence of a substitution.
@@ -432,11 +458,197 @@ test('a table name this check cannot resolve is a violation, because it may be a
   assert.deepEqual(
     (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
     [
+      ['columns-and-table.ts', '?.?'],
       ['from-parameter.ts', '?.?'],
       ['insert-into-parameter.ts', '?.?'],
       ['star-from-parameter.ts', '?.*'],
     ],
   );
+});
+
+test('a fully spelled column list over a table this check cannot resolve is a pass', async (t) => {
+  // The one shape the rule above admits, and the reason it was narrowed:
+  // `sync/log.ts` seeds `sync_log` with one entry per live row of a table
+  // named at runtime, and there is no other way to write it -- SQLite binds no
+  // identifiers, so a table's rows cannot be enumerated without naming it
+  // after `FROM`. Its column list is `?`, `id`, a literal and a timestamp
+  // expression: `id` is a credential in no table of this schema, so whichever
+  // table this turns out to read, the statement is not selecting a credential
+  // out of it.
+  //
+  // The multiplication in the timestamp is the second half of what was
+  // measured here: the star matcher allowed any whitespace in front of a `*`,
+  // so `unixepoch('subsec') * 1000` in a select list was read as
+  // `SELECT *` and reported this statement as `?.*`.
+  const dir = await fixtureDir(t, {
+    'seed.ts': [
+      'export function seed(table: string): string {',
+      "  return `INSERT INTO sync_log (table_name, row_id, op, at)",
+      "     SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM ${table}`;",
+      '}',
+      '',
+    ].join('\n'),
+    // The same admission for a write, and for the same reason: column `a` is a
+    // credential nowhere, so this cannot be writing one by name.
+    'insert.ts': 'export function q(t: string): string { return `INSERT INTO ${t} (a) VALUES (?)`; }\n',
+    // And a plain arithmetic select list over a *known* non-credential table,
+    // so the star fix is pinned independently of the unknown-table branch.
+    'arithmetic.ts': `export const Q = 'SELECT updated_at * 1000 FROM media_item';\n`,
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('the star matcher still sees every spelling of a real star select', async (t) => {
+  // The counterweight to the narrowing above: a `*` where a column could
+  // stand is a star select, at the head of the list or after a comma, bare or
+  // alias-qualified. Narrowing it to exclude the multiplication operator must
+  // not have excluded any of these.
+  const dir = await fixtureDir(t, {
+    'head.ts': `export const Q = 'SELECT * FROM auth_session';\n`,
+    'alias.ts': `export const Q = 'SELECT s.* FROM auth_session s';\n`,
+    'after-comma.ts': `export const Q = 'SELECT id, * FROM auth_session';\n`,
+    'newline.ts': ['export const Q = `SELECT', '  *', 'FROM auth_session`;', ''].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['after-comma.ts', 'auth_session.*'],
+      ['alias.ts', 'auth_session.*'],
+      ['head.ts', 'auth_session.*'],
+      ['newline.ts', 'auth_session.*'],
+    ],
+  );
+});
+
+test('a star select in any select list of the statement is a star select, not only the first', async (t) => {
+  // The narrowing read only the text between the *first* `SELECT` and the
+  // *first* `FROM`, so a star anywhere else passed -- measured, each of the
+  // three below was reported at `3d8cb49` and passed at HEAD before this. If
+  // the runtime table is `secret` or `auth_session`, each reads the
+  // credential column.
+  //
+  // The fourth needs no substitution at all: a literal credential table
+  // behind a subquery, which passed at both revisions.
+  const dir = await fixtureDir(t, {
+    'subquery.ts':
+      'export function q(t: string): string { return `SELECT id FROM media_item WHERE id IN (SELECT * FROM ${t})`; }\n',
+    'union.ts':
+      'export function q(t: string): string { return `SELECT id FROM media_item UNION ALL SELECT * FROM ${t}`; }\n',
+    'except.ts':
+      'export function q(t: string): string { return `SELECT id FROM media_item EXCEPT SELECT * FROM ${t}`; }\n',
+    'literal-table.ts': `export const Q = 'SELECT id FROM media_item WHERE id IN (SELECT * FROM secret)';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['except.ts', '?.*'],
+      ['literal-table.ts', 'secret.*'],
+      ['subquery.ts', '?.*'],
+      ['union.ts', '?.*'],
+    ],
+  );
+});
+
+test('a quantifier needs no space after it, because SQLite needs none', async (t) => {
+  // The follow-up commit named `DISTINCT` and `ALL` and then required
+  // whitespace after them. SQLite does not: verified through `node:sqlite`,
+  // `SELECT all*FROM secret` and `SELECT distinct*FROM secret` both parse and
+  // both return the row. Both passed this check.
+  const dir = await fixtureDir(t, {
+    'all.ts': 'export function q(t: string): string { return `SELECT all*FROM ${t}`; }\n',
+    'distinct.ts': 'export function q(t: string): string { return `SELECT distinct*FROM ${t}`; }\n',
+    'all-known.ts': `export const Q = 'SELECT all*FROM auth_session';\n`,
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['all-known.ts', 'auth_session.*'],
+      ['all.ts', '?.*'],
+      ['distinct.ts', '?.*'],
+    ],
+  );
+});
+
+test('a word that merely starts with a quantifier is not one, so its multiplication stays unreported', async (t) => {
+  // The counterweight to dropping the required whitespace. `\b` after the
+  // quantifier is what keeps these three out: an identifier the quantifier is
+  // a prefix of, and the quantifier used properly in front of an expression
+  // rather than a star.
+  const dir = await fixtureDir(t, {
+    'alldata.ts': `export const Q = 'SELECT alldata * 2 FROM auth_session';\n`,
+    'distinctive.ts': `export const Q = 'SELECT distinctive * 3 FROM auth_session';\n`,
+    'distinct-expr.ts': `export const Q = 'SELECT DISTINCT a * b FROM auth_session';\n`,
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
+});
+
+test('a schema qualifier does not hide a table this check could not resolve', async (t) => {
+  // Pre-existing, and wider than a naming asymmetry: `readsFromUnknownTable`
+  // matched the substitution only immediately after the keyword, so a
+  // `main.` in between gated the *whole* unknown-table branch and nothing
+  // inside `unknownTableMark` could fire behind it. All three below passed,
+  // including the one `unknownTableMark`'s own docblock says is refused.
+  const dir = await fixtureDir(t, {
+    'qualified-column.ts': 'export function q(t: string): string { return `SELECT token FROM main.${t}`; }\n',
+    'qualified-star.ts': 'export function q(t: string): string { return `SELECT * FROM main.${t}`; }\n',
+    'qualified-columns.ts':
+      'export function q(c: string, t: string): string { return `SELECT ${c} FROM main.${t}`; }\n',
+    // The admitted shape is admitted behind a qualifier too, or the branch
+    // would be reporting more than the unqualified one does rather than the
+    // same.
+    'qualified-seed.ts': [
+      'export function seed(table: string): string {',
+      "  return `INSERT INTO sync_log (table_name, row_id, op, at)",
+      "     SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM main.${table}",
+      "      WHERE id NOT IN (SELECT row_id FROM sync_log WHERE table_name = ?)`;",
+      '}',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    (await findCredentialSelections(dir, [])).map((violation) => [relative(dir, violation.file), violation.text]),
+    [
+      ['qualified-column.ts', '?.?'],
+      ['qualified-columns.ts', '?.?'],
+      ['qualified-star.ts', '?.*'],
+    ],
+  );
+});
+
+test('the shipped seed and relog statements pass, which is what the narrowing is for', async (t) => {
+  // `sync/log.ts`'s two runtime-table statements, verbatim, as the standing
+  // measurement that widening the star matcher to every select list did not
+  // start reporting them. The seed's second select list is `row_id`, which is
+  // a credential column in no table of this schema; the relog's `DELETE`
+  // resolves fully and names no table this check cannot read.
+  const dir = await fixtureDir(t, {
+    'seed.ts': [
+      'export function seed(table: string): string {',
+      "  return `INSERT INTO sync_log (table_name, row_id, op, at)",
+      "     SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM ${table}",
+      "      WHERE id NOT IN (SELECT row_id FROM sync_log WHERE table_name = ?)`;",
+      '}',
+      '',
+    ].join('\n'),
+    'relog.ts': [
+      'export function relog(table: string): string[] {',
+      '  return [',
+      `    "DELETE FROM sync_log WHERE table_name = ? AND op != 'delete'",`,
+      '    `INSERT INTO sync_log (table_name, row_id, op, at)',
+      "       SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM ${table}`,",
+      '  ];',
+      '}',
+      '',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(await findCredentialSelections(dir, []), []);
 });
 
 /**

@@ -1060,3 +1060,130 @@ test('migration 14 leaves a row with no credential alone', () => {
   assert.equal((row as Record<string, unknown>)['password_secret_name'], null);
   assert.equal(Number(raw.prepare('SELECT count(*) c FROM secret').get()?.c), 0, 'no secret row for a row with no credential');
 });
+
+test('migration 15 creates sync_log with a monotonic id and a unique row key', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const columns = raw.prepare('PRAGMA table_info(sync_log)').all()
+    .map((row) => String((row as { name: unknown }).name));
+  assert.deepEqual(columns, ['id', 'table_name', 'row_id', 'op', 'at']);
+
+  // AUTOINCREMENT is what makes the cursor safe. Asserted against
+  // `sync_log`'s own stored DDL, not against the presence of
+  // `sqlite_sequence`: that table exists if *any* table in the database uses
+  // AUTOINCREMENT, so the count below passed even with `sync_log` weakened,
+  // as long as something else had gained it. `PRAGMA table_info` cannot
+  // report it at all -- `test/db/schema.test.ts`'s own doc has the
+  // measurement, and guards the Drizzle mirror against the same weakening.
+  const table = raw.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_log'",
+  ).get();
+  assert.match(String((table as { sql: unknown }).sql), /AUTOINCREMENT/,
+    "sync_log's own DDL must declare AUTOINCREMENT");
+
+  // Kept beside it: SQLite records the declaration by creating
+  // `sqlite_sequence`, so its absence would mean nothing in the database
+  // uses AUTOINCREMENT at all.
+  const seq = raw.prepare(
+    "SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'",
+  ).get();
+  assert.equal(Number((seq as { c: unknown }).c), 1, 'sync_log must be AUTOINCREMENT');
+
+  const idx = raw.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='sync_log_row'").get();
+  assert.match(String((idx as { sql: unknown }).sql), /UNIQUE/, 'the row key must be unique');
+});
+
+test('a sync_log id is never handed out twice, though every change deletes a row', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const insert = raw.prepare('INSERT INTO sync_log (table_name, row_id, op, at) VALUES (?, ?, ?, ?)');
+  const remove = raw.prepare('DELETE FROM sync_log WHERE table_name = ? AND row_id = ?');
+
+  insert.run('media_item', 1, 'upsert', 1);
+  const first = Number(raw.prepare('SELECT id FROM sync_log WHERE row_id = 1').get()?.id);
+  remove.run('media_item', 1);
+  insert.run('media_item', 1, 'upsert', 2);
+  const second = Number(raw.prepare('SELECT id FROM sync_log WHERE row_id = 1').get()?.id);
+
+  assert.ok(second > first, `a re-logged row must take a higher id, got ${second} after ${first}`);
+});
+
+test('migration 15 seeds the log, so rows written before it existed are reachable by a log walk', () => {
+  // The correctness hole the log walk has and the current-state walk did not:
+  // `MIGRATION_15_DDL` creates `sync_log` *empty*, and the triggers it then
+  // installs only ever log a row that changes afterwards. A cursor that reads
+  // the log as an index of which rows exist would therefore serve none of the
+  // rows a real database already holds, permanently -- the log would index
+  // only what has changed since it was created.
+  //
+  // Migrated to 14 and seeded by hand rather than through `migrateHost`, so
+  // these rows are written with no trigger in existence: that is the whole
+  // point, and inserting them after `migrateHost` would log them the ordinary
+  // way and prove nothing.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 14));
+
+  raw.prepare(`
+    INSERT INTO media_item (id, plugin_id, created_at, updated_at, title) VALUES (1, 'tv', 1, 1, 'a'), (2, 'tv', 2, 2, 'b')
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_feed (id, plugin_id, name, url, created_at, updated_at)
+    VALUES (1, 'tv', 'f', 'https://example.test/feed', 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution)
+    VALUES (7, 1, 'x.mkv', 'https://example.test/x', 1, 1, 'torrent', 1, '1080p')
+  `).run();
+  raw.prepare("INSERT INTO person (id, name, provider_ref, created_at, updated_at) VALUES (3, 'P', 'p:3', 1, 1)").run();
+  raw.prepare("INSERT INTO role (id, media_item_id, person_id, role, created_at) VALUES (4, 1, 3, 'cast', 1)").run();
+
+  migrateHostWith(raw, HOST_MIGRATIONS);
+
+  const logged = raw.prepare('SELECT table_name, row_id, op FROM sync_log ORDER BY table_name, row_id').all()
+    .map((row) => {
+      const entry = row as { table_name: unknown; row_id: unknown; op: unknown };
+      return [String(entry.table_name), Number(entry.row_id), String(entry.op)];
+    });
+  assert.deepEqual(logged, [
+    ['media_item', 1, 'upsert'],
+    ['media_item', 2, 'upsert'],
+    ['person', 3, 'upsert'],
+    ['role', 4, 'upsert'],
+    ['rss_item', 7, 'upsert'],
+  ], 'one entry per live row of every synced table, and none for a table that is not synced');
+
+  // `rss_feed` is not synced (`sync/tables.ts`: a feed's url can carry a
+  // passkey), so its row must not be in the log -- the seed is driven off
+  // `HOST_SYNCED_TABLES`, not off every table that happens to hold rows.
+  const feeds = raw.prepare("SELECT count(*) c FROM sync_log WHERE table_name = 'rss_feed'").get();
+  assert.equal(Number((feeds as { c: unknown }).c), 0, 'an unsynced table gets no log entry');
+});
+
+test('the seed stamps `at` in real milliseconds, like the triggers', () => {
+  // The same measurement `sync/log.ts`'s trigger doc records, on the seed's
+  // copy of the expression: `unixepoch()` alone is whole seconds, so a bare
+  // `* 1000` would look like milliseconds and be accurate to a thousand of
+  // them.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 14));
+  raw.prepare("INSERT INTO media_item (id, plugin_id, created_at, updated_at, title) VALUES (1, 'tv', 1, 1, 'a')").run();
+
+  const before = Date.now();
+  migrateHostWith(raw, HOST_MIGRATIONS);
+  const after = Date.now();
+
+  const at = Number((raw.prepare('SELECT at FROM sync_log WHERE row_id = 1').get() as { at: unknown }).at);
+  assert.ok(at >= before - 1 && at <= after + 1,
+    `the seed's at must be milliseconds around now, got ${at} for [${before}, ${after}]`);
+});
+
+test('the seed is a no-op on a fresh install, where every synced table is empty', () => {
+  // A fresh database runs the same statements; they just match nothing. This
+  // is what makes seeding unconditional in the migration rather than
+  // conditional on noticing that rows exist.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const count = raw.prepare('SELECT count(*) c FROM sync_log').get();
+  assert.equal(Number((count as { c: unknown }).c), 0, 'no rows, so nothing to log');
+});

@@ -4,10 +4,12 @@
  *
  * 1. **No web test hands a live DOM element to `node:assert`** as a value it
  *    might have to print. See `findViolations`.
- * 2. **No file under `packages/host/src` names a credential column in a SQL
+ * 2. **No file in a 2.0 source tree names a credential column in a SQL
  *    string, and none reads a credential table through a statement this check
- *    cannot read**, outside an allow-list of paths. See
- *    `findCredentialSelections`.
+ *    cannot read**, outside an allow-list of paths. The trees are
+ *    `CREDENTIAL_SRC_DIRS`, which is the host plus the contract and every
+ *    shipped plugin -- a plugin's projections reach a client replica, and a
+ *    plugin holds the raw connection. See `findCredentialSelections`.
  * 3. **No host test hands a credential to `node:assert`** as a value it might
  *    have to print. See `findCredentialAssertions`.
  *
@@ -28,7 +30,7 @@
  * **Rule 1**, in full: a web test that hands a live DOM element to
  * `node:assert` as a value it might have to print.
  *
- * The hazard, from `docs/known-issues.md` and issue #40: `node:assert`'s
+ * The hazard, recorded in `CLAUDE.md` and issue #40: `node:assert`'s
  * equality helpers format *both* operands into the failure message, and
  * formatting a live element means deep-inspecting a DOM node. That is slow
  * enough to take the whole file down before it finishes, and it never gets far
@@ -42,8 +44,42 @@ import ts from 'typescript';
 /** Where rule 1 applies. Server tests have no DOM to hand anyone. */
 const TEST_DIR = 'packages/web/test';
 
-/** Where rule 2 applies: the host's own source, which is what holds its queries. */
+/** Where rule 2's allow-list paths are rooted, and one of the roots it scans. */
 const HOST_SRC_DIR = 'packages/host/src';
+
+/**
+ * Every 2.0 source tree rule 2 scans.
+ *
+ * It began as `packages/host/src` alone, on the reasoning that the host is
+ * what holds the queries. That stopped being true when plugins gained
+ * `synced` tables: three plugin projections now reach a client replica, and a
+ * plugin holds `PluginContext.db` -- the raw connection -- so it can name any
+ * column the host can. A rule scanning only the host was a rule with a hole
+ * the size of every plugin.
+ *
+ * **1.x is deliberately out**, and it is the one judgement call here.
+ * Measured over every package's `src`: widening to all of them reports
+ * exactly two violations, `packages/core/src/config/load.ts` and
+ * `packages/web/src/routes/Browse.tsx`, and **neither is SQL** -- both are
+ * template literals (`` `Could not read secret for ${field} from ${path}` ``
+ * and `` `Releases moved into ${group.display.title}` ``) that rule 2's
+ * fail-closed arm cannot resolve and so reports rather than assumes harmless.
+ * Admitting them would mean two `CREDENTIAL_ALLOW_LIST` entries exempting
+ * files that name no credential column at all, which is exactly the inert
+ * entry that list's own doc warns about: it would make the allow-list lie
+ * about what it exempts, in frozen code that is going to be deleted.
+ *
+ * Every tree below reports **zero** violations today, the three plugins
+ * included, so this is a tripwire on what gets added rather than a backlog.
+ */
+const CREDENTIAL_SRC_DIRS: readonly string[] = [
+  HOST_SRC_DIR,
+  'packages/contract/src',
+  'packages/openmetadata/src',
+  'packages/plugin-tv/src',
+  'packages/plugin-movie/src',
+  'packages/plugin-xxx/src',
+];
 
 /**
  * Every `node:assert` export that formats its operands into the failure.
@@ -208,9 +244,11 @@ export function findViolations(file: string, source: string): Violation[] {
  *   file-local: an imported constant, a function's return and a parameter are
  *   all unresolvable, which is a violation over a credential table and
  *   silently dropped everywhere else.
- * - **Anything outside `packages/host/src`.** A plugin holding
- *   `PluginContext.db` can select whatever it likes — the same reach
- *   `migratePlugin`'s docblock already records.
+ * - **Anything outside `CREDENTIAL_SRC_DIRS`.** That list now covers the host,
+ *   the contract and all three shipped plugins, so a plugin holding
+ *   `PluginContext.db` is no longer unscanned — but a plugin shipped from
+ *   outside this repo is, and that reach is the one `migratePlugin`'s docblock
+ *   already records. 1.x is out on purpose; see `CREDENTIAL_SRC_DIRS`.
  */
 const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
   { table: 'auth_account', column: 'password' },
@@ -285,12 +323,20 @@ const CREDENTIAL_TABLES: readonly string[] = [
  * whose reading is unknown. Carrying that as a flag rather than silently
  * closing the gap with ` ? ` is what lets the rule fail closed over a
  * credential table instead of passing.
+ *
+ * **A count rather than a flag, because one unreadable piece is not the same
+ * as two.** `unknownTableMark` below distinguishes a statement whose *table*
+ * is all this check could not read -- `SELECT id FROM ${table}`, whose column
+ * list is right there -- from one where the column list is unreadable too:
+ * `SELECT ${columns} FROM ${table}` could be selecting anything from
+ * anything, and stays a violation. Every other reader wants the flag, and
+ * spells it `> 0`.
  */
 interface SqlText {
   /** The statement, with every substitution this check could resolve spliced in. */
   text: string;
-  /** Whether any substitution could not be resolved, so `text` is an incomplete reading. */
-  unresolved: boolean;
+  /** How many substitutions could not be resolved, so `text` is an incomplete reading. */
+  unresolved: number;
 }
 
 /**
@@ -361,22 +407,22 @@ function collectBindings(parsed: ts.SourceFile): Bindings {
  */
 function sqlTextOf(node: ts.Node, bindings: Bindings, seen: ReadonlySet<string> = new Set()): SqlText | null {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-    return { text: node.text, unresolved: false };
+    return { text: node.text, unresolved: 0 };
   }
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
     return sqlTextOf(node.expression, bindings, seen);
   }
   if (ts.isTemplateExpression(node)) {
     let text = node.head.text;
-    let unresolved = false;
+    let unresolved = 0;
     for (const span of node.templateSpans) {
       const substituted = sqlTextOf(span.expression, bindings, seen);
       if (substituted === null) {
         text += ' ? ';
-        unresolved = true;
+        unresolved += 1;
       } else {
         text += substituted.text;
-        unresolved = unresolved || substituted.unresolved;
+        unresolved += substituted.unresolved;
       }
       text += span.literal.text;
     }
@@ -388,7 +434,7 @@ function sqlTextOf(node: ts.Node, bindings: Bindings, seen: ReadonlySet<string> 
     if (left === null && right === null) return null;
     return {
       text: (left?.text ?? ' ? ') + (right?.text ?? ' ? '),
-      unresolved: left === null || right === null || left.unresolved || right.unresolved,
+      unresolved: (left === null ? 1 : left.unresolved) + (right === null ? 1 : right.unresolved),
     };
   }
   if (ts.isIdentifier(node)) {
@@ -486,25 +532,158 @@ function readsFrom(sql: string, table: string): boolean {
  *
  * Keyed on `unresolved` as well as on the shape, so a literal `?` that got
  * there some other way cannot trip it (`FROM ?` is not valid SQLite anyway).
+ *
+ * **An optional `schema.` in front, for the same reason `readsFrom` has one,
+ * and it mattered more here.** `readsFrom` accepted a qualifier and this did
+ * not, so `FROM main.${table}` matched neither branch -- and because this
+ * predicate gates the *whole* unknown-table arm in `credentialColumnsIn`,
+ * nothing inside `unknownTableMark` could fire behind it. Measured, at HEAD
+ * and at `3d8cb49` alike: `` `SELECT token FROM main.${table}` `` and
+ * `` `SELECT ${columns} FROM main.${table}` `` both passed, the second being
+ * the shape `unknownTableMark`'s docblock says is refused.
+ *
+ * **One hole is left open here deliberately: a table name only *partly*
+ * substituted.** `` `SELECT token FROM auth_${kind}` `` renders as
+ * `FROM auth_ ? `, and the substitution is not immediately after the keyword,
+ * so this returns false and nothing reports it -- even though `${kind}` could
+ * be `session` at runtime. Measured, and measured again with the obvious fix:
+ * allowing `\w*\s*` in front of the `?` does close it, and it also reports
+ * `sync/log.ts`'s `syncTriggerSql` as `?.?`, because
+ * `CREATE TRIGGER x AFTER UPDATE ON ${table}` renders as `UPDATE ON  ? ` and
+ * `update` is one of the four keywords above. That is a correct, shipped,
+ * credential-free DDL string being reported as a possible credential read,
+ * and the cost of a rule that reports those is that someone turns the rule
+ * off. Named here instead. Closing it properly means telling the DML
+ * `UPDATE t SET` from the DDL `AFTER UPDATE ON t`, which this file's regexes
+ * cannot do and a SQL parser could.
  */
 function readsFromUnknownTable(sql: SqlText): boolean {
-  return sql.unresolved && /\b(?:from|join|update|into)\s+\?/i.test(normalized(sql.text));
+  return sql.unresolved > 0
+    && /\b(?:from|join|update|into)\s+(?:\w+\s*\.\s*)?\?/i.test(normalized(sql.text));
 }
 
 /**
- * Whether the select list is `*` — every column, including whichever of them
- * is the credential.
+ * Whether the statement has a select list that is `*` — every column,
+ * including whichever of them is the credential.
  *
- * Only the text between `SELECT` and the first `FROM` is looked at, and a `*`
- * directly after `(` is not a select list: `SELECT count(*) FROM auth_session`
- * reads no column at all, and flagging it would flag `auth/claim.ts`'s own
- * measured-not-to-be-used counterexample. An alias's `s.*` is the same star as
- * a bare one.
+ * A `*` directly after `(` is not a select list: `SELECT count(*) FROM
+ * auth_session` reads no column at all, and flagging it would flag
+ * `auth/claim.ts`'s own measured-not-to-be-used counterexample. An alias's
+ * `s.*` is the same star as a bare one.
+ *
+ * **Every `SELECT … FROM` pair in the statement, not just the first.** The
+ * earlier form read only the text between the first `SELECT` and the first
+ * `FROM`, so a star anywhere else walked past. Measured against the
+ * unconditional rule at `3d8cb49`, which reported all three:
+ *
+ * ```
+ * `SELECT id FROM media_item WHERE id IN (SELECT * FROM ${t})`
+ * `SELECT id FROM media_item UNION ALL SELECT * FROM ${t}`
+ * `SELECT id FROM media_item EXCEPT SELECT * FROM ${t}`
+ * ```
+ *
+ * Each reads the credential column if `${t}` is `secret` or `auth_session` at
+ * runtime. A literal one -- `SELECT id FROM media_item WHERE id IN (SELECT *
+ * FROM secret)` -- passed at *both* revisions, so this closes a pre-existing
+ * hole as well as the narrowing's own.
+ *
+ * **Every `select` keyword is a starting point, rather than every
+ * non-overlapping `SELECT … FROM` pair.** A single global `SELECT(.*?)FROM`
+ * would consume a nested `SELECT` inside the *outer* statement's list and
+ * then resume past it, so the inner one is never read on its own:
+ * `` `SELECT (SELECT * FROM ${t}) AS c FROM media_item` `` passed that way,
+ * measured, because the outer list reads `(SELECT *` and the star has a `(`
+ * in front of it. Scanning from each keyword to the nearest following `from`
+ * reads the inner list too.
+ *
+ * A select list with no `FROM` after it is not examined, and reads no table,
+ * so there is nothing there to be a credential.
+ *
+ * **A star is a select list only where a *column* could stand: at the head of
+ * the list, or straight after a comma, optionally qualified by an alias.** It
+ * is not the multiplication operator, which an earlier form read as a star
+ * because it allowed any whitespace in front -- so
+ * `SELECT unixepoch('subsec') * 1000 FROM t` was reported as selecting every
+ * column of `t`. Measured on `sync/log.ts`'s seed statement, which is exactly
+ * that shape. An operator always has a left operand, and no operand ends in
+ * `^` or `,`, which is what the narrower form keys on.
+ *
+ * **`DISTINCT` and `ALL` stand between the head of the list and the star**, and
+ * they are the reason this is not just `(?:^|,)\s*`. Keying on `^` alone made
+ * `SELECT DISTINCT * FROM secret` unreported -- measured, along with
+ * `SELECT DISTINCT t.*` and `SELECT ALL *`. They are the only two quantifiers
+ * SQLite accepts there.
+ *
+ * **`\b\s*` after the quantifier, not `\s+`: SQLite requires no whitespace
+ * and neither may this.** Verified through `node:sqlite` --
+ * `SELECT all*FROM secret` and `SELECT distinct*FROM secret` both parse and
+ * both return the row, and both passed while the space was required. The
+ * `\b` is what still refuses an identifier the quantifier is a prefix of:
+ * `SELECT alldata * 2` and `SELECT distinctive * 3` stay unreported, because
+ * `all`/`distinct` there is followed by a word character. `SELECT DISTINCT a
+ * * b` stays unreported too -- the quantifier is consumed and the star still
+ * has an operand in front of it.
  */
 function selectsEveryColumn(sql: string): boolean {
-  const list = /\bselect\b([\s\S]*?)\bfrom\b/i.exec(normalized(sql))?.[1];
-  if (list === undefined) return false;
-  return /(?:^|[\s,])(?:\w+\s*\.\s*)?\*/.test(list);
+  const text = normalized(sql);
+  return [...text.matchAll(/\bselect\b/gi)].some((keyword) => {
+    const list = /^([\s\S]*?)\bfrom\b/i.exec(text.slice(keyword.index + keyword[0].length))?.[1];
+    return list !== undefined && /(?:^|,)\s*(?:(?:distinct|all)\b\s*)?(?:\w+\s*\.\s*)?\*/i.test(list);
+  });
+}
+
+/**
+ * Whether the statement names a credential column by its bare name, whichever
+ * table it turns out to read.
+ *
+ * The keyed-on-table check (`credentialColumnsIn`'s first branch) cannot ask
+ * this question of a table it could not resolve, and this is the part of the
+ * question that does not need the table: a statement that never writes the
+ * word `token`, `password` or `value` is not selecting one of those columns
+ * out of *any* table. A column reached through an expression
+ * (`substr(token, 1, 4)`) still names it and is still caught.
+ */
+function namesCredentialColumn(sql: string): boolean {
+  const text = normalized(sql);
+  return CREDENTIAL_COLUMNS.some(
+    ({ column }) => new RegExp(String.raw`\b${column}\b`, 'i').test(text),
+  );
+}
+
+/**
+ * How a statement whose *table* this check could not resolve is unreadable, or
+ * `null` when nothing about it could be selecting a credential.
+ *
+ * **Failing closed on the table alone was too coarse, and this is the
+ * narrowing.** The rule's question is whether a credential column is
+ * selected. Three answers keep a statement over an unresolved table a
+ * violation, and each is a case where that question genuinely cannot be
+ * answered:
+ *
+ * - **A star select.** `SELECT * FROM ${table}` selects whatever columns that
+ *   table has, so if it is a credential table it selects the credential.
+ * - **A credential column named.** `SELECT token FROM ${table}` selects
+ *   `token` from *something*, and the rule does not need to know what.
+ * - **More than one unreadable piece.** `SELECT ${columns} FROM ${table}`
+ *   leaves both halves unknown, which is the case the coarse rule existed
+ *   for. One unreadable piece means the table is the only thing this check
+ *   could not read, and the column list beside it is right there in the
+ *   source.
+ *
+ * What that admits, stated rather than left to be discovered: a statement
+ * naming a runtime table and selecting only columns that are a credential in
+ * no table of this schema. `sync/log.ts`'s log seed is the case it was
+ * narrowed for -- `SELECT ?, id, 'upsert', <now> FROM ${table}`, whose one
+ * column is `id` -- and there is no way to write it otherwise, because SQLite
+ * binds no identifiers and a table's rows cannot be enumerated without naming
+ * it after `FROM`. An `INSERT INTO ${table} (a) VALUES (?)` is admitted for
+ * the same reason and by the same test: it names column `a`, which is a
+ * credential nowhere, so it cannot be writing one by name.
+ */
+function unknownTableMark(sql: SqlText): string | null {
+  if (selectsEveryColumn(sql.text)) return '*';
+  if (namesCredentialColumn(sql.text)) return '?';
+  return sql.unresolved > 1 ? '?' : null;
 }
 
 /**
@@ -515,7 +694,7 @@ function selectsEveryColumn(sql: string): boolean {
  */
 function unreadableSelectMark(sql: SqlText): string | null {
   if (selectsEveryColumn(sql.text)) return '*';
-  if (sql.unresolved) return '?';
+  if (sql.unresolved > 0) return '?';
   return null;
 }
 
@@ -541,6 +720,10 @@ function unreadableSelectMark(sql: SqlText): string | null {
  *   `CREDENTIAL_ALLOW_LIST` deliberately and in a diff. A rule that passed
  *   these would be a rule that passes `SELECT *`, which is already the house
  *   style at two sites in `api/reads.ts`.
+ * - **Over a table this check could not resolve at all** — reported as
+ *   `?.*`/`?.?`, and narrower than the three above because the table is
+ *   unknown rather than known-credential. `unknownTableMark` states which
+ *   statements of that shape are still violations and which one it admits.
  *
  * A table that already contributed a named column is not reported a second
  * time for its star, so `SELECT *, token FROM auth_session` reads as one
@@ -553,17 +736,19 @@ function credentialColumnsIn(sql: SqlText): string[] {
   });
   const readable = named.map(({ table, column }) => `${table}.${column}`);
   const unreadable = unreadableSelectMark(sql);
-  if (unreadable === null) return readable;
-  const unread = CREDENTIAL_TABLES
+  const unread = unreadable === null ? [] : CREDENTIAL_TABLES
     .filter((table) => readsFrom(sql.text, table) && !named.some((column) => column.table === table))
     .map((table) => `${table}.${unreadable}`);
   // A table this check could not resolve is reported as `?.*` or `?.?`: it may
   // be a credential table, and nothing above can have matched it by name. Only
   // when no credential table was matched either, so a statement that reads a
   // known credential table *and* an unknown one is reported once for the one
-  // that can be named.
-  const unknown = unread.length === 0 && readable.length === 0 && readsFromUnknownTable(sql)
-    ? [`?.${unreadable}`]
+  // that can be named -- and only for the statements `unknownTableMark` marks,
+  // which is a narrower set than `unreadableSelectMark`'s above precisely
+  // because the table is unknown rather than known to hold a credential.
+  const unknownMark = readsFromUnknownTable(sql) ? unknownTableMark(sql) : null;
+  const unknown = unread.length === 0 && readable.length === 0 && unknownMark !== null
+    ? [`?.${unknownMark}`]
     : [];
   return [...readable, ...unread, ...unknown];
 }
@@ -840,11 +1025,32 @@ async function checkDomAssertions(): Promise<boolean> {
   return false;
 }
 
-/** Rule 2 across `HOST_SRC_DIR`, reported. Resolves `true` when the tree is clean. */
+/**
+ * Rule 2 across every tree in `CREDENTIAL_SRC_DIRS`, reported. Resolves
+ * `true` when all of them are clean.
+ *
+ * A missing tree is not an error: `findCredentialSelections` walks a
+ * directory, and a package added to the list before its `src` exists -- or
+ * one deleted afterwards -- should not fail the build over a path. An absent
+ * tree simply contributes nothing, the same way a stale
+ * `CREDENTIAL_ALLOW_LIST` entry grants nothing.
+ */
 async function checkCredentialColumns(): Promise<boolean> {
-  const violations = await findCredentialSelections(HOST_SRC_DIR);
+  const perDir = await Promise.all(
+    CREDENTIAL_SRC_DIRS.map(async (dir) => {
+      try {
+        return await findCredentialSelections(dir);
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const violations = perDir.flat();
   if (violations.length === 0) {
-    console.log(`test-hygiene: no credential column named in a SQL string under ${HOST_SRC_DIR}`);
+    console.log(
+      `test-hygiene: no credential column named in a SQL string under ` +
+        `${CREDENTIAL_SRC_DIRS.length} source trees`,
+    );
     return true;
   }
 

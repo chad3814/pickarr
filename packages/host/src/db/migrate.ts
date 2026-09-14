@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { writeSecretValue } from '../secrets/store.ts';
+import { installSyncTriggers, seedSyncLog } from '../sync/log.ts';
+import { HOST_SYNCED_TABLES } from '../sync/tables.ts';
 
 /**
  * The shared tables, in dependency order so every `REFERENCES` names a table
@@ -841,6 +843,93 @@ function migration14(db: DatabaseSync): void {
 }
 
 /**
+ * The client's replication log: one row per row that has changed, not one per
+ * change. Every trigger deletes this row's previous entry before inserting a
+ * new one, so the log collapses as it is written and there is no compaction
+ * job (design spec §3.5).
+ *
+ * `id` is `AUTOINCREMENT`, unlike every other table in this schema, and
+ * deliberately. A bare `INTEGER PRIMARY KEY` is the rowid, whose next value
+ * is `max(rowid) + 1` over the rows *present* -- so deleting the previous
+ * entry and inserting a new one hands the same id straight back whenever that
+ * entry was the highest in the table, which is every time the row that
+ * changed last changes again. Measured on SQLite 3.53.4: over a bare
+ * `INTEGER PRIMARY KEY` holding ids 2, 3 and 4, re-logging the row at id 4
+ * produces id 4 again. A client whose cursor is past that id would never see
+ * the row change. `AUTOINCREMENT` issues `max_ever + 1` instead and reuses
+ * nothing, which is the guarantee this column needs and the only thing
+ * providing it -- the delete in the triggers and in `seedSyncLog` frees no id
+ * and never did. Measured in the design spec §2.1 and §2.10. Do not "tidy"
+ * this to match the other tables.
+ *
+ * **One index, and it is `sync_log`'s own.** This migration briefly created
+ * six `(created_at, id)` indexes as well, one per synced table, for a
+ * backfill that paged current state newest-first on an immutable keyset.
+ * The backfill now walks `sync_log` backwards and hydrates each entry from
+ * current state, so those six had no consumer left anywhere in the repo.
+ * They are deleted rather than kept against a future one: six B-trees
+ * maintained on every write to six of the busiest tables in this schema, for
+ * no reader. The backwards walk needs no new index either -- measured,
+ * `WHERE id < ? AND op != 'delete' ORDER BY id DESC` plans as
+ * `SEARCH sync_log USING INTEGER PRIMARY KEY (rowid<?)`, a seek on the key
+ * this table already has.
+ */
+const MIGRATION_15_DDL = `
+  CREATE TABLE sync_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    row_id     INTEGER NOT NULL,
+    op         TEXT NOT NULL,
+    at         INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX sync_log_row ON sync_log (table_name, row_id);
+`;
+
+/**
+ * Runs the DDL above, installs the sync triggers for every host table it
+ * declares synced, and then logs one entry per row those tables already hold.
+ * Neither step is in the DDL string on purpose: `installSyncTriggers` and
+ * `seedSyncLog` each build their own SQL per table (`sync/log.ts`), and
+ * folding either into one string here would duplicate the table list instead
+ * of importing it.
+ *
+ * **The seed is what makes the log usable as an index of which rows exist.**
+ * The DDL above creates `sync_log` empty and the triggers only log a row that
+ * changes afterwards, so without this a client cursor that walks the log
+ * backwards would serve none of the rows an existing database already holds,
+ * permanently. `seedSyncLog`'s own doc has why it has no `DELETE`, and
+ * `docs/database-migrations.md`'s section on rebuilding a synced table has the
+ * *other* statement -- `relogSyncedTables` -- for the different job of
+ * announcing that rows a client already holds have changed.
+ *
+ * **A development database that already ran version 15 will not run this
+ * again**, because `migrateHostWith` skips a recorded version -- so its log
+ * holds only what has changed since it migrated, and its oldest rows are
+ * invisible to every client. There is no migration 16 for this: version 15 is
+ * this branch's own and nothing upstream has applied it. Seed such a database
+ * by hand, once, from a node REPL or a scratch script over the same handle.
+ * That call is safe on a database whose log already holds entries, including
+ * tombstones: it indexes the rows the log does not know about and touches
+ * nothing else. It was not safe while the seed deleted the table's entries
+ * first, which is the defect that shape shipped with on this branch.
+ *
+ * ```ts
+ * import { seedSyncLog } from './packages/host/src/sync/log.ts';
+ * import { HOST_SYNCED_TABLES } from './packages/host/src/sync/tables.ts';
+ * seedSyncLog(raw, HOST_SYNCED_TABLES);
+ * ```
+ *
+ * Deleting the database and re-migrating works too, and is what 2.0 expects
+ * of a development database anyway -- it starts empty and rebuilds from
+ * feeds.
+ */
+function migration15(db: DatabaseSync): void {
+  db.exec(MIGRATION_15_DDL);
+  installSyncTriggers(db, HOST_SYNCED_TABLES);
+  seedSyncLog(db, HOST_SYNCED_TABLES);
+}
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -860,6 +949,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 12, up: (db) => db.exec(MIGRATION_12) },
   { version: 13, up: (db) => db.exec(MIGRATION_13) },
   { version: 14, up: (db) => migration14(db) },
+  { version: 15, up: (db) => migration15(db) },
 ];
 
 /**

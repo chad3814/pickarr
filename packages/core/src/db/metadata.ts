@@ -565,8 +565,8 @@ export function clearGroupMetadata(db: DatabaseSync, groupId: number): void {
   // `group_id REFERENCES media_groups (id)` with no ON DELETE means a group
   // whose scene lookup settled castless and got queued for a performer search
   // fails `deleteGroup` with the identical FOREIGN KEY 500 the four tables
-  // above were added here to prevent. docs/known-issues.md records that defect
-  // shipping twice already; the fix each time was "remember every table that
+  // above were added here to prevent. That defect shipped twice already, and
+  // the fix each time was "remember every table that
   // points at media_groups", which is exactly the class of fix that keeps
   // recurring until it lives in one function every caller already goes
   // through.

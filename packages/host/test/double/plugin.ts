@@ -693,6 +693,7 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     mediaType: MEDIA_TYPE,
     migrations: MIGRATIONS,
     jobs: { lookup, poll, artwork },
+    synced: [],
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;

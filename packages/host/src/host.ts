@@ -10,6 +10,8 @@ import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
+import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
+import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
 import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
 import { createReconcileHandler, scheduleReconcile as scheduleReconcileJob } from './clients/reconcile-job.ts';
@@ -500,6 +502,41 @@ export function createHost(deps: {
         throw new Error(`plugin "${plugin.id}" is already registered`);
       }
       migratePlugin(deps.raw, plugin.id, plugin.migrations);
+      // After the migration, not before: the tables it just created are what
+      // these triggers attach to.
+      //
+      // **Validated here, immediately before installation, rather than only
+      // by whatever later builds a `SyncRegistry`.** `register` is callable
+      // -- and is called, by every real boot -- with no registry ever built
+      // at all, so a check that lived only in `createSyncRegistry` would let
+      // an unprefixed or wrongly-keyed table's triggers install here
+      // regardless: `syncTriggerSql` (`sync/log.ts`) interpolates the table
+      // name into DDL it says plainly it trusts the caller for, and SQLite
+      // does not validate a trigger body's column references at `CREATE`
+      // time, so a table keyed by anything but a lone `id` would install
+      // cleanly and only throw the first time a row actually changes.
+      // `assertSyncable` (`sync/registry.ts`) is the one place both this and
+      // `createSyncRegistry` run that check, so the two callers cannot drift
+      // apart on what "syncable" means.
+      for (const table of plugin.synced) assertSyncable(deps.raw, plugin.id, table.table);
+      // Idempotent (`DROP TRIGGER IF EXISTS` -- `sync/log.ts`), so a plugin
+      // registered on every boot reinstalls its triggers rather than failing
+      // the second time.
+      const syncedTables = plugin.synced.map((table) => table.table);
+      installSyncTriggers(deps.raw, syncedTables);
+      // And, once, one log entry per row those tables already hold. The
+      // triggers just installed only log a row that changes *after* they
+      // exist, so every row `migratePlugin` above wrote -- a migration that
+      // creates a table and fills it from an older one does exactly that --
+      // would be indexed nowhere, and a client cursor that walks the log as
+      // an index of which rows exist would never serve it. `migration15`
+      // (`db/migrate.ts`) does the same for the host's own six tables, where
+      // the migration runner's version record is the guard; a plugin's
+      // declared table list has no version space, so the guard is a recorded
+      // marker per table. **Not unguarded**: this runs on every boot, and a
+      // reseed re-logs every row at a fresh id, which every client reads as
+      // "all of this changed". `seedSyncLogOnce` has both halves of why.
+      seedSyncLogOnce(deps.raw, syncedTables, deps.now());
       plugins.set(plugin.id, plugin);
       handlers.set(plugin.id, new Map(Object.entries(plugin.jobs)));
     },

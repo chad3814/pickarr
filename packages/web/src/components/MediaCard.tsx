@@ -320,8 +320,8 @@ export function MediaCard({
             // on the card. Not all 1,957 with a provider title: on 242 of them
             // the two agree, so the parsed title is on the card as the
             // heading. The announced string and the visible one cannot
-            // drift apart if there is only one of them (`docs/known-issues.md`,
-            // "Test-suite blind spots", on `IdentityChangeConfirm`).
+            // drift apart if there is only one of them (`CLAUDE.md`, "Testing
+            // hazards", on `IdentityChangeConfirm`).
             aria-label={`Browse images for ${title}`}
             onClick={() => setModal({ images, startIndex: 0 })}
           >

@@ -122,8 +122,8 @@ test('the limit is honoured, and it is the oldest request that survives it', () 
 });
 
 test('clearGroupMetadata removes the queue row, so deleting the group cannot fail the foreign key', () => {
-  // docs/known-issues.md records this exact defect shipping twice: the group
-  // tables reference media_groups with no cascade, so a merge's deleteGroup
+  // This exact defect has shipped twice: the group tables reference
+  // media_groups with no cascade, so a merge's deleteGroup
   // returned a 500 for any group holding an invisible queue row. A new table
   // referencing media_groups re-creates it unless the clear hook knows.
   const db = openTestDatabase();

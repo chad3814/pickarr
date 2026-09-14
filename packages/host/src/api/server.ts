@@ -1,12 +1,15 @@
 /**
- * The read API on a socket: `node:http`, six routes -- five behind a session
- * and `/api/health` open -- bound by default to every interface.
+ * The read API on a socket: `node:http`, nine routes -- eight behind a
+ * session and `/api/health` open -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
  * routes behind a session", which the paragraph on the guard below -- and
  * `ROUTES` itself, where exactly one entry is `open: true` -- contradicts. A
  * one-line summary disagreeing with its own file is the whole class of defect
- * the comments here are written against.
+ * the comments here are written against. (The count grew to eight when the
+ * client-sync slice added `/api/sync` and `/api/sync/backfill`, and to nine
+ * when it added `/api/sync/bootstrap`, all three guarded; the shape of the
+ * sentence is what matters and has not changed.)
  *
  * Everything this file does is routing. Parse a request, call one function
  * from `./reads.ts` or `./artwork-route.ts`, write what came back.
@@ -97,10 +100,12 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
+import type { SyncRegistry } from '../sync/registry.ts';
 import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
 import { readArtwork } from './artwork-route.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
+import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
 
 /**
  * The port the shipped process listens on when `PICKARR_READ_API_PORT` says nothing.
@@ -189,6 +194,20 @@ export interface ReadServerDeps {
    * the module doc.
    */
   pluginIdForType: (type: string) => string | undefined;
+  /**
+   * Host tables plus every plugin's declared tables, as one lookup --
+   * `sync/registry.ts`'s `createSyncRegistry(raw, plugins)`. What `/api/sync`
+   * and `/api/sync/backfill` read current state through; see `sync-route.ts`.
+   *
+   * Built by `main`, from the same plugin list `pluginIdForType` is built
+   * from, and passed in rather than reached for here -- `createSyncRegistry`
+   * is `sync/registry.ts`'s, not `host.ts`'s, but importing it from
+   * `src/api` directly would still mean two independent constructions of the
+   * same lookup, from the same list, on every boot. One construction, held
+   * here, is what keeps them from ever disagreeing about what a plugin
+   * declared.
+   */
+  registry: SyncRegistry;
   /**
    * The interface to bind, or `undefined` for `DEFAULT_HOST`.
    *
@@ -466,7 +485,7 @@ interface Route {
 }
 
 /**
- * The six routes.
+ * The nine routes.
  *
  * Exported because the tests derive their request set from it; nothing else
  * reads it, and nothing may mutate it.
@@ -545,6 +564,43 @@ export const ROUTES: readonly Route[] = [
       pathname,
       request.headers['if-none-match'],
     ),
+  },
+  {
+    path: '/api/sync',
+    open: false,
+    // A replica of the whole library is exactly what the session guard
+    // exists to protect (design spec §5) -- this route and the next are as
+    // guarded as every other, never a special case.
+    answer: ({ deps, params }) => {
+      const answer = syncAnswer({ raw: deps.raw, registry: deps.registry }, params);
+      return json(answer.status, answer.body);
+    },
+  },
+  {
+    path: '/api/sync/bootstrap',
+    open: false,
+    // Where an empty client starts both cursors. Guarded like the two it
+    // feeds: the answer is two log positions and nothing else, but a caller
+    // with no session has no business being handed a way into the replica.
+    answer: ({ deps }) => {
+      const answer = bootstrapAnswer({ raw: deps.raw });
+      return json(answer.status, answer.body);
+    },
+  },
+  {
+    path: '/api/sync/backfill',
+    open: false,
+    // Two segments under `/api/sync`, one literal and one -- see
+    // `matchesPath` -- which is what keeps this from shadowing or being
+    // shadowed by the route above: `matchesPath` compares segment *counts*
+    // first, so a three-segment request never matches this four-segment
+    // template and a four-segment request never matches that three-segment
+    // one. `/api/artwork/:kind/:mediaItemId` is the existing precedent for a
+    // multi-segment path coexisting with shorter ones in this same table.
+    answer: ({ deps, params }) => {
+      const answer = backfillAnswer({ raw: deps.raw, registry: deps.registry }, params);
+      return json(answer.status, answer.body);
+    },
   },
 ];
 

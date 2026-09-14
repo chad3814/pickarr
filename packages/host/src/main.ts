@@ -39,6 +39,9 @@ import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { assertOriginOnly } from './origin.ts';
 import { envNameFor } from './secrets/names.ts';
+import { installSyncTriggers } from './sync/log.ts';
+import { createSyncRegistry } from './sync/registry.ts';
+import { HOST_SYNCED_TABLES } from './sync/tables.ts';
 
 /**
  * A log line's structured half, as `key=value` pairs.
@@ -649,6 +652,27 @@ export async function main(
   const { raw, db } = openDatabase(settings.databasePath);
   migrateHost(raw);
 
+  // **After the migrations, on every boot, and not only inside migration
+  // 15.** `installSyncTriggers` drops each trigger before creating it, so
+  // this is idempotent and costs six `DROP`/`CREATE` triples on a schema
+  // that already has them.
+  //
+  // This is **defensive, not corrective**: triggers persist across
+  // connections and boots, measured, so a database already at version 15
+  // logs correctly without this call (`sync/log.ts` has the measurement).
+  // What it buys is the one unrecoverable case: migration 15 installs the
+  // host's triggers once and `migrateHostWith` skips that migration forever
+  // after, so a later migration that rebuilds a synced table by SQLite's
+  // create-copy-drop-rename pattern would drop that table's three triggers
+  // with the old table and nothing would put them back -- and the symptom
+  // is every client silently missing every subsequent change to it.
+  // `test/sync/tables.test.ts` enumerates `sqlite_master` against
+  // `HOST_SYNCED_TABLES` and would fail in CI, but the repair belongs here
+  // rather than in a reviewer's memory. Plugin tables get the same
+  // treatment per boot, in `host.register` (`host.ts`), which is where a
+  // plugin's declared names are known.
+  installSyncTriggers(raw, HOST_SYNCED_TABLES);
+
   const secrets = createSecrets({ raw, baseDir: settings.secretsBaseDir });
 
   // **After the store, not before it.** Two plugins claiming one media type
@@ -738,6 +762,12 @@ export async function main(
 
   for (const plugin of plugins) host.register(plugin);
 
+  // After every `register`, never before: `createSyncRegistry` checks each
+  // declared table's primary key against the real schema
+  // (`assertIntegerIdKey`), and a plugin's own tables do not exist until its
+  // migrations have run inside `register` above.
+  const registry = createSyncRegistry(raw, plugins);
+
   const recovered = host.start();
   const feedIds = scheduleKnownFeeds(host, raw);
   const clientIds = await scheduleKnownDownloadClients(host, raw);
@@ -745,6 +775,7 @@ export async function main(
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
+    registry,
     host: settings.readHost,
     port: settings.port,
     // Built from the address the listener bound rather than here, because
