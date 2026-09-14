@@ -349,8 +349,12 @@ export function resolveConfigPath(env: NodeJS.ProcessEnv): string {
  * the resolvers below only validate a string an operator actually set --
  * a default in both places is one that can disagree with itself.
  *
- * All five variables go through {@link configuredEnvValue}, so "empty is
- * unset" is decided once rather than per variable.
+ * All five variables this function reads go through {@link
+ * configuredEnvValue}, so "empty is unset" is decided once rather than per
+ * variable. `BETTER_AUTH_SECRET` is `main`'s sixth and does not come through
+ * here -- it has no config-file counterpart to fall back to -- but it goes
+ * through the same {@link configuredEnvValue} at its own call site, in
+ * `main` itself.
  */
 export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSettings> {
   const config = await openConfig({ path: resolveConfigPath(env) });
@@ -401,10 +405,17 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
  * The row's other property -- generated once even under a race, so a restart
  * does not log everyone out -- is `ensureGeneratedValue`'s and is untouched.
  *
- * **An empty variable is an unset one**, as it is for the port, the host and
- * the public url: `BETTER_AUTH_SECRET=` is what a compose file with the key
- * and no value passes, and signing every cookie with the empty string is not
- * what that operator asked for.
+ * **An empty variable is an unset one, same as every other variable `main`
+ * reads** -- but that rule is not this function's own anymore. Its caller
+ * passes `configuredEnvValue(process.env['BETTER_AUTH_SECRET'])`, so `''`
+ * has already become `undefined` by the time it reaches here: `configured`
+ * means "the value an operator actually set", exactly {@link
+ * configuredEnvValue}'s own contract, and this function trusts it rather
+ * than checking `=== ''` a second time. This function used to carry that
+ * check itself, alongside {@link configuredEnvValue}'s -- two copies of the
+ * same rule, which is the shape {@link configuredEnvValue}'s own doc names
+ * as the thing to avoid, because a rule written twice is a rule that can be
+ * fixed in one copy and left broken in the other.
  *
  * Takes the variable's value rather than reading `process.env` itself, so the
  * precedence is testable without mutating the environment the whole process
@@ -413,7 +424,7 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
  * business (§6 documents it).
  */
 export function resolveAuthSecret(configured: string | undefined, raw: DatabaseSync, at: number): string {
-  if (configured !== undefined && configured !== '') return configured;
+  if (configured !== undefined) return configured;
   return ensureAuthSecret(raw, at);
 }
 
@@ -628,16 +639,18 @@ export async function main(
     // not need to warn about a deployment that has told it nothing.
     //
     // **The secret is never logged**, here or anywhere it travels; it is
-    // decided by `resolveAuthSecret` above -- `BETTER_AUTH_SECRET` when the
-    // operator set it, else the row `ensureAuthSecret` generates once and
-    // persists -- so the host boots configured either way. Read per
-    // construction rather than once at the top of `main`, on the same
-    // reasoning as `baseURL`: this closure is what the listener calls, and
-    // there is exactly one instance per process.
+    // decided by `resolveAuthSecret` above, from `BETTER_AUTH_SECRET` run
+    // through `configuredEnvValue` first -- so an empty variable reaches it
+    // as `undefined`, same as the other five -- else the row
+    // `ensureAuthSecret` generates once and persists -- so the host boots
+    // configured either way. Read per construction rather than once at the
+    // top of `main`, on the same reasoning as `baseURL`: this closure is
+    // what the listener calls, and there is exactly one instance per
+    // process.
     authFor: (baseURL) => createAuth({
       raw,
       db,
-      secret: resolveAuthSecret(process.env['BETTER_AUTH_SECRET'], raw, Date.now()),
+      secret: resolveAuthSecret(configuredEnvValue(process.env['BETTER_AUTH_SECRET']), raw, Date.now()),
       baseURL: settings.publicUrl ?? baseURL,
       publicUrl: settings.publicUrl,
       log,

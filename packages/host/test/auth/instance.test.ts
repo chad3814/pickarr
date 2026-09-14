@@ -290,9 +290,20 @@ test('BETTER_AUTH_SECRET decides the secret when it is set, and the persisted ro
     'the persisted secret changed while BETTER_AUTH_SECRET was deciding the answer',
   );
 
+  // **`resolveAuthSecret` no longer treats emptiness specially.** That used
+  // to duplicate `configuredEnvValue`'s own rule -- checked here as well as
+  // at `main`'s call site -- and closing that duplicate is the point of this
+  // branch. `configured` means "the value an operator actually set",
+  // already filtered by the caller; calling this function directly with
+  // `''`, bypassing that filter, is now outside its contract, and `''` is
+  // treated as a real (if useless) secret rather than as unset. This pins
+  // that the redundant check stays gone -- a regression that restored it
+  // would make this assertion fail. The property an *empty
+  // `BETTER_AUTH_SECRET` reaching a real boot* behaves as an unset one is
+  // pinned in `main.test.ts` instead, against the actual call site.
   assert.ok(
-    await session(instance('', 4_000)),
-    'an empty variable is an unset one, as it is for every other variable main reads',
+    !await session(instance('', 4_000)),
+    'a literal empty string is not filtered here anymore -- it is the caller\'s job -- so it signs with a secret the persisted row never had',
   );
 });
 

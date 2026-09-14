@@ -959,6 +959,81 @@ test('main binds PICKARR_READ_API_HOST and hands PICKARR_PUBLIC_URL to auth as i
   }
 });
 
+test('an empty BETTER_AUTH_SECRET behaves exactly as an unset one, through the real boot path', async () => {
+  // The other five variables `main` reads each have a test at this level
+  // asserting exactly this ("an empty PICKARR_READ_API_HOST, ... is unset,
+  // not configured emptiness", below) -- reading `resolveSettings`'s return
+  // value, since each has an observable effect there. `BETTER_AUTH_SECRET`
+  // has no such return value to read: its effect is only which secret
+  // `createAuth` was given, which is observable only through a real cookie
+  // round-trip. `auth/instance.test.ts` pins `resolveAuthSecret`'s own
+  // behavior directly; this pins the call site in `main` that feeds it --
+  // `configuredEnvValue(process.env['BETTER_AUTH_SECRET'])` -- which nothing
+  // exercised until now.
+  //
+  // Two boots against the same on-disk database: the first with the
+  // variable unset, so it generates and persists a secret and this test can
+  // sign up and hold a cookie signed with it; the second with the variable
+  // set to `''`. If `''` reached `createAuth` as a literal empty-string
+  // secret rather than as `undefined`, the second boot would sign with a
+  // different secret than the first persisted, and the first boot's cookie
+  // would be refused by the second. Accepted is the only outcome that means
+  // the empty variable was treated as unset -- exactly the property
+  // `auth/instance.test.ts`'s own boot-to-boot test proves for a *truly*
+  // unset variable across two boots of `resolveAuthSecret` directly; this is
+  // that same proof, run through `main`'s real call site instead.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-secret-empty-'));
+  let firstServer: ReadServer | undefined;
+  let secondServer: ReadServer | undefined;
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, (raw) => {
+      writeHostState(raw, CLAIM_TOKEN_KEY, PLACEHOLDER_CLAIM_TOKEN, 0);
+    });
+
+    const first = createFakeTimers();
+    const { server: booted } = await runMainListening(databasePath, { plugins: [], timers: first.timers });
+    firstServer = booted;
+
+    const signUp = await fetch(`http://${booted.host}:${booted.port}/api/auth/sign-up/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://${booted.host}:${booted.port}` },
+      body: JSON.stringify({
+        email: OWNER_EMAIL,
+        password: PASSWORD,
+        name: 'Placeholder Owner',
+        claimToken: PLACEHOLDER_CLAIM_TOKEN,
+      }),
+    });
+    assert.equal(signUp.status, 200, 'sign-up against the first boot, which generated and persisted the secret this test checks survives');
+    const cookie = cookieHeader(signUp);
+
+    await firstServer.close();
+    firstServer = undefined;
+
+    const second = createFakeTimers();
+    const { server: restarted } = await runMainListening(
+      databasePath,
+      { plugins: [], timers: second.timers },
+      { BETTER_AUTH_SECRET: '' },
+    );
+    secondServer = restarted;
+
+    const session = await fetch(`http://${restarted.host}:${restarted.port}/api/auth/get-session`, {
+      headers: { cookie },
+    });
+    assert.equal(session.status, 200, '200 with a body of null is what an unaccepted cookie answers, not 401 -- the design spec\'s §2 measured that');
+    assert.ok(
+      await session.json() !== null,
+      'BETTER_AUTH_SECRET="" must resolve to the same secret as an unset one: a cookie the first boot issued was refused by the second',
+    );
+  } finally {
+    await firstServer?.close();
+    await secondServer?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 /**
  * Writes `document` to a temp config file, points `PICKARR_CONFIG` at it,
  * calls `resolveSettings`, and hands the result to `body` -- then cleans up
