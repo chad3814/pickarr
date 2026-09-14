@@ -1284,8 +1284,8 @@ test('a title ending in a resolution word collides with the scene it is a resolu
   // release, which is wrong for a far larger class of names than this fixes.
   // Accepted and pinned rather than repaired, so that a future change to the
   // anchor rule has to move this test rather than move it silently. The
-  // argument is in the boundary-rule comment at the top of `parse.ts` and in
-  // `docs/known-issues.md`.
+  // argument is in the boundary-rule comment at the top of `parse.ts`, which
+  // works this exact pair through.
   const in4k = parsed('Site.23.01.01.Party.4K.MP4-G');
   const at1080 = parsed('Site.23.01.01.Party.4K.1080p.MP4-G');
   assert.equal(in4k.identityKey, 'site:2023-01-01:party');

@@ -534,8 +534,8 @@ test('the same listing with a two-digit year is not a listing to the parser, and
   // scenes, same names, one character of date format apart, opposite outcome
   // from the test above.
   //
-  // That collision is inside the class `docs/known-issues.md` accepts: one
-  // site, one date, titles differing only in dropped tokens. It is pinned here
+  // That collision is inside the class `findTitleEnd` accepts: one site, one
+  // date, titles differing only in dropped tokens. It is pinned here
   // because the comment in `splitSegment` used to read as though the listing
   // shape itself were excluded, and this is the counter-example.
   const a = parsed('[Site] Alex - Hardcore 42466 1080p - 26.08.05');
@@ -569,9 +569,9 @@ test('a listing collates with and without the group stamped on its quality segme
 });
 
 test('a hyphen inside a title segment stays punctuation, not a group separator', () => {
-  // `detachReleaseGroup`'s hyphen branch is permissive on purpose —
-  // `docs/known-issues.md` explains why no shape rule tells `-Throat` from
-  // `-GRP` — so the detach above is accepted only when `findEncodeSuffixStart`
+  // `detachReleaseGroup`'s hyphen branch is permissive on purpose — the
+  // `MAX_GROUP_TOKENS` docblock explains why no shape rule tells `-Throat`
+  // from `-GRP` — so the detach above is accepted only when `findEncodeSuffixStart`
   // reads what is left as encode information from its very first token, which
   // is to say only when the segment contributed no title at all. `Deep` is
   // title material, so the detach is discarded here. This passes with or
@@ -739,8 +739,8 @@ test('a trailing-date site that matches past the suffix takes the site, not the 
 test('with the site unconfigured the two collide, which is the accepted class and not the site defect', () => {
   // Unconfigured, the site is the first-token guess, so it is `Bang` for both
   // and the titles differ only in the tokens the walk drops. That is exactly
-  // the over-collation `docs/known-issues.md` accepts — one site, one date,
-  // nothing but dropped tokens between them — and it is a different failure
+  // the over-collation `findTitleEnd` accepts — one site, one date, nothing
+  // but dropped tokens between them — and it is a different failure
   // from the one above, where the site itself was wrong. Pinned rather than
   // guarded so a change here surfaces as a failing test.
   const a = parsed('Bang.Bros.42466.1080p.18.12.18');
