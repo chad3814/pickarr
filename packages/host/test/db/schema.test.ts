@@ -6,14 +6,30 @@
  * runs `drizzle-kit`, so these tests are what keeps the two in step: the
  * table set; every column's name, SQL type and nullability; and every
  * index's table, column list (in order) and uniqueness; every column's
- * default; and primary-key membership. They do not compare foreign-key
- * targets or a partial index's `WHERE` condition, so those two could still
- * drift unnoticed.
+ * default; primary-key membership; and, per table, whether the key is
+ * `AUTOINCREMENT`. They do not compare foreign-key targets or a partial
+ * index's `WHERE` condition, so those two could still drift unnoticed.
+ *
+ * **`AUTOINCREMENT` needs `sqlite_master.sql` and cannot be read off
+ * `PRAGMA table_info`.** Measured: for `sync_log.id`, drizzle's
+ * `getSQLType()` is `'integer'` whether or not `autoIncrement` is set,
+ * `notNull` and `pk` compare equal either way, and `table_info`'s `pk` is 1
+ * for both -- so weakening `.primaryKey({ autoIncrement: true })` to
+ * `.primaryKey()` was invisible to every comparison above. It is the one
+ * property the client-sync cursor cannot survive losing: a bare
+ * `INTEGER PRIMARY KEY` hands a deleted id straight back, and the trigger
+ * deletes the previous entry on every change, so a client whose cursor is
+ * past that id would never see the row change again -- silent, per-row data
+ * loss (design spec §2.1, §2.10). `test/db/migrate.test.ts` matches the
+ * same `sqlite_master.sql` from the DDL side; until both existed, neither
+ * side caught a weakening, because the migration-side guard counted
+ * `sqlite_sequence` tables, which exist if *any* table in the database uses
+ * `AUTOINCREMENT`.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getTableColumns, getTableName, is } from 'drizzle-orm';
-import { SQLiteColumn, SQLiteTable, getTableConfig } from 'drizzle-orm/sqlite-core';
+import { SQLiteColumn, SQLiteInteger, SQLiteTable, getTableConfig } from 'drizzle-orm/sqlite-core';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import * as schema from '../../src/db/schema.ts';
@@ -45,6 +61,27 @@ function ddlColumns(raw: ReturnType<typeof openTestDatabase>['raw'], table: stri
       primaryKey: Number(row.pk) > 0,
     };
   });
+}
+
+/**
+ * Whether a table's DDL declares its key `AUTOINCREMENT`, read from the
+ * stored `CREATE TABLE` text because nothing else reports it -- see this
+ * file's own doc for what was measured.
+ */
+function ddlAutoIncrement(raw: ReturnType<typeof openTestDatabase>['raw'], table: string): boolean {
+  const row = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+  if (row === undefined) throw new Error(`${table} is declared in schema.ts and absent from sqlite_master`);
+  return /AUTOINCREMENT/i.test(String((row as { sql: unknown }).sql));
+}
+
+/**
+ * Whether Drizzle declares this table's key `AUTOINCREMENT`. Only an
+ * `integer` column can carry it, and `SQLiteInteger` is where the flag
+ * lives, so the narrowing is what gives typed access to it rather than a
+ * cast.
+ */
+function declaredAutoIncrement(columns: readonly SQLiteColumn[]): boolean {
+  return columns.some((column) => is(column, SQLiteInteger) && column.autoIncrement);
 }
 
 /**
@@ -230,6 +267,14 @@ test('every schema column matches the migration DDL by name, type, nullability a
       if (!declared.some((declaredColumn) => declaredColumn.name === column.name)) {
         disagreements.push(`${name}.${column.name} is in the DDL and absent from schema.ts`);
       }
+    }
+
+    const ddlAuto = ddlAutoIncrement(raw, name);
+    const declaredAuto = declaredAutoIncrement(declared);
+    if (ddlAuto !== declaredAuto) {
+      disagreements.push(
+        `${name}: DDL autoIncrement=${ddlAuto}, schema.ts autoIncrement=${declaredAuto}`,
+      );
     }
   }
 

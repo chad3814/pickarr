@@ -1069,8 +1069,22 @@ test('migration 15 creates sync_log with a monotonic id and a unique row key', (
     .map((row) => String((row as { name: unknown }).name));
   assert.deepEqual(columns, ['id', 'table_name', 'row_id', 'op', 'at']);
 
-  // AUTOINCREMENT is what makes the cursor safe. SQLite records it by
-  // creating `sqlite_sequence`; a bare INTEGER PRIMARY KEY does not.
+  // AUTOINCREMENT is what makes the cursor safe. Asserted against
+  // `sync_log`'s own stored DDL, not against the presence of
+  // `sqlite_sequence`: that table exists if *any* table in the database uses
+  // AUTOINCREMENT, so the count below passed even with `sync_log` weakened,
+  // as long as something else had gained it. `PRAGMA table_info` cannot
+  // report it at all -- `test/db/schema.test.ts`'s own doc has the
+  // measurement, and guards the Drizzle mirror against the same weakening.
+  const table = raw.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_log'",
+  ).get();
+  assert.match(String((table as { sql: unknown }).sql), /AUTOINCREMENT/,
+    "sync_log's own DDL must declare AUTOINCREMENT");
+
+  // Kept beside it: SQLite records the declaration by creating
+  // `sqlite_sequence`, so its absence would mean nothing in the database
+  // uses AUTOINCREMENT at all.
   const seq = raw.prepare(
     "SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'",
   ).get();
