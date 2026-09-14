@@ -111,22 +111,30 @@ packages, then `@pickarr/host` last. Each new package carries the same
 
 ### 2.3 The secret resolver
 
-`packages/host/src/secrets.ts`:
+The plugins are handed `Secrets['get']` from `packages/host/src/secrets/instance.ts`:
 
 ```ts
-export type ResolveSecret = (key: string) => Promise<string>;
+get(name: string): Promise<string>;
 ```
 
-The stub maps a logical key to an environment variable —
-`'openmetadata-api-key'` to `PICKARR_OPENMETADATA_KEY` — and rejects with a
-named error when the variable is absent or empty, so a misconfigured
-deployment fails the first lookup job with a message that says which variable
-to set, rather than sending an `Authorization: Bearer undefined`.
+**This slice originally shipped a stub of that signature**, because the real
+store was being built in parallel and the seam mattered more than what sat
+behind it. The store landed on `pickarr-2` before this branch merged, the
+stub is gone, and the shape did not have to change: the stub was written
+against the signature the store was going to have, and `createSecrets` has
+it.
 
-It is `async` and takes a key rather than being a resolved string, because
-that is the shape the real store will have: an async resolver can rotate a
-credential between requests, where a value read once at boot cannot. The
-plugins await it per request for the same reason.
+What the store adds that the stub could not is where a credential may come
+from. It resolves `openmetadata-api-key` through a chain — the environment
+(`PICKARR_SECRET_OPENMETADATA_API_KEY`, derived by `envNameFor`), then the
+secrets directory, then the `secret` table — with the order as its contract:
+a container deployment overrides what the settings UI stored, and the
+settings UI need not know. Results are memoized per name and the memo is
+dropped on write, so a corrected credential takes effect without a restart.
+
+It remains `async` and per-request, for the reason the stub was: a resolver
+called per request serves a rotated credential where a value read once at
+boot cannot.
 
 **The resolved value is a credential.** It is used only as an `Authorization`
 header. It is never logged, never written to a table, never put in a job
@@ -136,22 +144,29 @@ payload, and never handed to `node:assert` — tests use a fake key.
 `scripts/check-test-hygiene.ts`'s rule 3 enforces for the credentials it knows
 about, and that check *structurally cannot reach this one*: `yieldsCredential`
 matches an operand that is a call to a name on `CREDENTIAL_PRODUCERS`, or a
-local bound to one. This key arrives as `await resolve(…)`, where `resolve` is
-a local bound to a `createEnvSecretResolver(…)` call — and for a call
-expression the check tests the callee's *name* against the list and does not
-follow it to its binding. So adding `createEnvSecretResolver` to the list
-would not help, and adding `resolve` would only match tests that happened to
-choose that identifier. Teaching the check to follow a factory binding
-through to the function it returned is a separate piece of work, and not this
-slice's.
+local bound to one. This key arrives as `await secrets.get(…)` — a call
+through a *property* of a local bound to `createSecrets(…)`, which the check
+does not follow. Adding a name to the list does not help; teaching the check
+to follow a factory binding through to the object it returned is a separate
+piece of work, and not this slice's.
 
-Also **not logged at boot**: `main` warns when `PICKARR_OPENMETADATA_KEY` is
-empty and the real plugins were constructed, because per-request resolution
-means a deployment that never set it boots cleanly and only dead-letters
-lookups minutes later. The warning tests the variable for emptiness in place
-and names the variable, never the value; it is a warning rather than a
-refusal, because a host serving reads with one plugin misconfigured is the
-right behaviour.
+**Plugins are constructed after the store, not before the database.** They
+used to be built first, so that two plugins claiming one media type were
+refused before anything was opened. They cannot be: a plugin takes
+`secrets.get`, the chain ends at the `secret` table, and there is no store
+until there is a connection. The refusal now lands after `migrateHost` and
+before anything is registered or polled — the earliest point that still has a
+resolver to hand.
+
+Also **warned at boot**: when the real plugins were constructed, `main` asks
+the store for the key once and logs a line if the chain cannot answer,
+because per-request resolution alone means a deployment with no key
+configured boots cleanly and only dead-letters lookups minutes later. It asks
+*through the store* rather than of one variable, so an operator who used the
+secrets directory or the table is not warned at for being configured
+correctly. The resolved value is discarded unread; the line names the
+variable, never the value. A warning rather than a refusal, because a host
+serving reads with one plugin misconfigured is the right behaviour.
 
 ### 2.4 The process
 

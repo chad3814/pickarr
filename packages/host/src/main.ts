@@ -16,6 +16,7 @@
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
+import { API_KEY_SECRET } from '@pickarr/openmetadata';
 import { createMoviePlugin } from '@pickarr/plugin-movie';
 import { createTvPlugin } from '@pickarr/plugin-tv';
 import { createXxxPlugin } from '@pickarr/plugin-xxx';
@@ -37,8 +38,7 @@ import { createHost } from './host.ts';
 import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { assertOriginOnly } from './origin.ts';
-import type { ResolveSecret } from './secrets.ts';
-import { OPENMETADATA_API_KEY_VARIABLE, createEnvSecretResolver } from './secrets.ts';
+import { envNameFor } from './secrets/names.ts';
 
 /**
  * A log line's structured half, as `key=value` pairs.
@@ -156,7 +156,7 @@ export async function scheduleKnownDownloadClients(host: Host, raw: DatabaseSync
  */
 export function shippedPlugins(deps: {
   now: () => number;
-  resolveSecret: ResolveSecret;
+  resolveSecret: Secrets['get'];
   baseUrl: string;
 }): readonly MediaPlugin[] {
   return [createTvPlugin(deps), createMoviePlugin(deps), createXxxPlugin(deps)];
@@ -299,6 +299,8 @@ export interface HostSettings {
   publicUrl: string | undefined;
   databasePath: string;
   secretsBaseDir: string;
+  /** Where the lookup plugins ask. See {@link resolveOpenmetadataUrl}. */
+  openmetadataUrl: string;
   config: Config;
 }
 
@@ -379,6 +381,7 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
   const hostRaw = configuredEnvValue(env['PICKARR_READ_API_HOST']);
   const publicUrlRaw = configuredEnvValue(env['PICKARR_PUBLIC_URL']);
   const databasePathRaw = configuredEnvValue(env['PICKARR_DATABASE']);
+  const openmetadataUrlRaw = configuredEnvValue(env['PICKARR_OPENMETADATA_URL']);
 
   return {
     readHost: hostRaw === undefined ? server.current.host : resolveReadHost(hostRaw),
@@ -386,8 +389,11 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
     publicUrl: publicUrlRaw === undefined ? server.current.publicUrl : resolvePublicUrl(publicUrlRaw),
     databasePath: databasePathRaw ?? database.current.path,
     secretsBaseDir: secrets.current.baseDir,
+    openmetadataUrl: resolveOpenmetadataUrl(openmetadataUrlRaw),
     config,
   };
+}
+
 /** The lookup service's origin when nothing says otherwise. */
 const DEFAULT_OPENMETADATA_URL = 'https://openmetadata.nexus';
 
@@ -434,7 +440,7 @@ export function resolveOpenmetadataUrl(configured: string | undefined): string {
   if (parsed.username !== '' || parsed.password !== '') {
     throw new Error(
       'PICKARR_OPENMETADATA_URL must carry no username or password: userinfo in this url would be '
-      + `dropped rather than sent, and the lookup key is set through ${OPENMETADATA_API_KEY_VARIABLE}`,
+      + `dropped rather than sent, and the lookup key is set through ${envNameFor(API_KEY_SECRET)}`,
     );
   }
   if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
@@ -632,49 +638,6 @@ export async function main(
 ): Promise<void> {
   void argv;
 
-  // Resolved before the database is opened, beside the other variables: a
-  // malformed url is a configuration error, and the earliest refusal is the
-  // one that touches least on its way out.
-  const openmetadataUrl = resolveOpenmetadataUrl(process.env['PICKARR_OPENMETADATA_URL']);
-  const plugins = deps.plugins ?? shippedPlugins({
-    now: () => Date.now(),
-    // The key itself is read per request, by the resolver, and never here:
-    // this passes the *means* of getting it, not the credential.
-    resolveSecret: createEnvSecretResolver(process.env),
-    baseUrl: openmetadataUrl,
-  });
-
-  // A presence check, and only when the three real plugins were actually
-  // built -- a caller that injected its own has nothing to authenticate.
-  //
-  // §2.3 resolves the credential per request rather than once at boot, and
-  // that decision stands: an async resolver is what lets the store being
-  // built elsewhere rotate a key between requests. What it never weighed is
-  // that per-request resolution also means a deployment missing the variable
-  // boots perfectly, logs `running:`, schedules every feed, and then
-  // dead-letters every lookup job some minutes later, with the diagnosis
-  // sitting in a job row rather than on the console. This is the likeliest
-  // misconfiguration this slice ships.
-  //
-  // A warning, not a refusal: a host serving reads with one plugin
-  // misconfigured is the right behaviour, and it is the operator who needs
-  // telling, not the process that needs stopping.
-  //
-  // **Nothing here reads the credential into anything.** The variable is
-  // tested for emptiness in place and the line names the variable, never the
-  // value -- the same rule the resolvers above keep for urls, for a value
-  // that is an actual secret.
-  if (deps.plugins === undefined && (process.env[OPENMETADATA_API_KEY_VARIABLE] ?? '') === '') {
-    log(
-      `${OPENMETADATA_API_KEY_VARIABLE} is not set: the tv, movie and xxx plugins will fail every `
-      + 'lookup until it is, leaving each new feed item unidentified with its job dead-lettered',
-    );
-  }
-
-  // Before the database is opened, before anything is migrated: two plugins
-  // claiming one media type is a configuration error, and the earliest
-  // possible refusal is the one that touches least on its way out.
-  const pluginIdForType = createPluginIdForType(plugins);
 
   // Config path from `PICKARR_CONFIG` (default `DEFAULT_CONFIG_PATH`) →
   // config file → database path → database handle → secrets (`raw` plus
@@ -686,6 +649,59 @@ export async function main(
   migrateHost(raw);
 
   const secrets = createSecrets({ raw, baseDir: settings.secretsBaseDir });
+
+  // **After the store, not before it.** Two plugins claiming one media type
+  // is a configuration error and `createPluginIdForType` is what refuses it,
+  // so this used to run before the database was opened -- the earliest
+  // refusal touches least on its way out. It cannot any more: a plugin is
+  // handed `secrets.get`, and the store's chain ends at the `secret` table,
+  // so it does not exist until there is a connection to build it on. The
+  // refusal now lands after the schema is migrated and before anything is
+  // registered or polled, which is the earliest point that still has a
+  // resolver to hand.
+  const plugins = deps.plugins ?? shippedPlugins({
+    now: () => Date.now(),
+    // The store's own `get`, passed as the means of obtaining the key and
+    // never the key itself. It resolves per request, through the chain the
+    // store owns -- environment, then the secrets directory, then the
+    // `secret` table -- so nothing here decides where the credential lives.
+    resolveSecret: secrets.get,
+    baseUrl: settings.openmetadataUrl,
+  });
+  const pluginIdForType = createPluginIdForType(plugins);
+
+  // Asked once, at boot, and only when the three real plugins were built --
+  // a caller that injected its own has nothing to authenticate.
+  //
+  // §2.3 resolves the credential per request and that stands; what it never
+  // weighed is that per-request resolution alone means a deployment with no
+  // key configured boots perfectly, logs `running:`, schedules every feed,
+  // and then dead-letters every lookup job minutes later, with the diagnosis
+  // in a job row rather than on the console.
+  //
+  // Asked **through the store** rather than by reading one variable, because
+  // the store is what decides where a credential may come from: an operator
+  // who put the key in the secrets directory or the `secret` table is
+  // configured correctly, and a check that only knew about the environment
+  // would warn at them anyway. The resolved value is discarded unread and
+  // never bound to anything -- what is wanted here is whether the chain can
+  // answer, not what it answers with, and the line below names the variable
+  // rather than the value.
+  //
+  // A warning, not a refusal: a host serving reads with one plugin
+  // misconfigured is the right behaviour, and it is the operator who needs
+  // telling, not the process that needs stopping.
+  if (deps.plugins === undefined) {
+    try {
+      await secrets.get(API_KEY_SECRET);
+    } catch {
+      log(
+        `no ${API_KEY_SECRET} is configured (set ${envNameFor(API_KEY_SECRET)}, or store it): the `
+        + 'tv, movie and xxx plugins will fail every lookup until one is, leaving each new feed '
+        + 'item unidentified with its job dead-lettered',
+      );
+    }
+  }
   const artworkDir = resolveArtworkDir(settings.databasePath);
   const fetch = createHostFetch({ fetch: globalThis.fetch });
   // A factory, not a built object: `createHost` supplies the `Secrets` it
@@ -771,7 +787,7 @@ export async function main(
 
   log(
     `running: database ${settings.databasePath}, artwork ${artworkDir}, `
-    + `lookups to ${openmetadataUrl}, `
+    + `lookups to ${settings.openmetadataUrl}, `
     + `read api on http://${server.host}:${server.port}, `
     + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
     + `${clientIds.length} download client(s) scheduled`,

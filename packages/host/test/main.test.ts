@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
+import { API_KEY_SECRET } from '@pickarr/openmetadata';
 import type { Host } from '../src/host.ts';
 import { createHost, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from '../src/host.ts';
 import { migrateHost } from '../src/db/migrate.ts';
@@ -15,6 +16,7 @@ import type { ReadServer, ReadServerDeps } from '../src/api/server.ts';
 import { DEFAULT_HOST, DEFAULT_PORT, createReadServer } from '../src/api/server.ts';
 import { isClaimed } from '../src/auth/claim.ts';
 import { AUTH_SECRET_KEY, CLAIM_TOKEN_KEY, readHostState, writeHostState } from '../src/db/host-state.ts';
+import { envNameFor } from '../src/secrets/names.ts';
 import type { HostSettings } from '../src/main.ts';
 import {
   createPluginIdForType,
@@ -1369,9 +1371,12 @@ test('a boot with no lookup key says so, and still boots', async () => {
   // likeliest field misconfiguration there is, and one line at boot is the
   // difference between five minutes and an afternoon.
   //
-  // Presence only: nothing here resolves the key, reads it into a variable
-  // or names its value. Warning rather than fatal, because a host that
-  // serves reads with one plugin misconfigured is the right behaviour.
+  // Asked through the secret store rather than of one variable: an operator
+  // who put the key in the secrets directory or the `secret` table is
+  // configured, and a check that only knew the environment would warn at
+  // them anyway. The resolved value is discarded unread, and no line names
+  // it. Warning rather than fatal, because a host that serves reads with one
+  // plugin misconfigured is the right behaviour.
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-keyless-'));
   try {
     const databasePath = join(dir, 'pickarr.db');
@@ -1385,7 +1390,7 @@ test('a boot with no lookup key says so, and still boots', async () => {
       createReadServer: async () => fakeServer(() => {}),
     });
 
-    const warned = lines.filter((line) => line.includes('PICKARR_OPENMETADATA_KEY'));
+    const warned = lines.filter((line) => line.includes(envNameFor(API_KEY_SECRET)));
     assert.equal(warned.length, 1, 'exactly one line names the variable to set');
     assert.equal(
       lines.some((line) => line.includes('running: database')),
@@ -1407,12 +1412,13 @@ test('a boot whose key is present says nothing about it, and neither does one wi
     const keyed = await runMain(
       databasePath,
       { timers, createReadServer: async () => fakeServer(() => {}) },
-      // An obviously synthetic placeholder, and the only thing asserted
-      // about it is that no line mentions the variable at all.
-      { 'PICKARR_OPENMETADATA_KEY': 'placeholder-not-a-real-key' },
+      // An obviously synthetic placeholder, set through the store's own
+      // environment link. The only thing asserted about it is that no line
+      // mentions the variable at all.
+      { [envNameFor(API_KEY_SECRET)]: 'placeholder-not-a-real-key' },
     );
     assert.equal(
-      keyed.some((line) => line.includes('PICKARR_OPENMETADATA_KEY')),
+      keyed.some((line) => line.includes(envNameFor(API_KEY_SECRET))),
       false,
       'a configured deployment gets no warning -- and no line naming the variable can carry its value',
     );

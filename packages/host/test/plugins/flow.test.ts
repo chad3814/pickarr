@@ -18,6 +18,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DownloadClients, MediaPlugin, PluginContext } from '@pickarr/contract';
 import { createFakeLookupService, resolvedEnvelope } from '@pickarr/openmetadata/testing';
 import type { LookupEnvelope, Media } from '@pickarr/openmetadata';
@@ -26,6 +28,7 @@ import { createMoviePlugin } from '@pickarr/plugin-movie';
 import { createTvPlugin } from '@pickarr/plugin-tv';
 import { createXxxPlugin } from '@pickarr/plugin-xxx';
 import { migrateHost } from '../../src/db/migrate.ts';
+import { createSecrets } from '../../src/secrets/instance.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
 import { createHost } from '../../src/host.ts';
@@ -150,7 +153,12 @@ function fixture() {
     raw,
     db,
     fetch: queued(service.fetch),
-    downloads: unusedDownloads,
+    downloads: () => unusedDownloads,
+    // The real store over this test's own database and a directory that does
+    // not exist: the plugins under test are handed `resolveSecret` directly
+    // by `deps` above, so nothing here ever asks it for anything. It is
+    // present because `createHost` hands one to the reconcile handler.
+    secrets: createSecrets({ raw, baseDir: join(tmpdir(), 'pickarr-flow-no-secrets') }),
     now: () => NOW,
     artworkDir: unusedArtworkDir,
   });
