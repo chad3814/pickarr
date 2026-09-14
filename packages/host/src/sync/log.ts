@@ -13,6 +13,14 @@ import type { DatabaseSync } from 'node:sqlite';
  *
  * `DROP TRIGGER IF EXISTS` first, so installation is idempotent: the host
  * calls this on every boot, for host tables and plugin tables alike.
+ *
+ * `table` reaches the SQL below as text, not as a bound parameter: a trigger
+ * body is DDL, and SQLite binds no parameters there, so there is no
+ * placeholder to put it in. That makes this function unsafe against an
+ * arbitrary string -- safety here comes from the caller, not from anything
+ * below this line. `assertSyncedTableName` in `packages/contract/src/sync.ts`
+ * is what constrains the set of names that may reach this function; check
+ * that it still does before trusting a new caller.
  */
 export function syncTriggerSql(table: string): string {
   const [ins, upd, del] = syncedTriggerNames(table);

@@ -61,6 +61,13 @@ test('a displacing REPLACE logs the deletion it causes', () => {
 test('installing twice is a no-op rather than an error', () => {
   const raw = open();
   assert.doesNotThrow(() => { installSyncTriggers(raw, ['probe']); });
+  // Not throwing proves reinstallation is legal; it does not prove the
+  // triggers still behave. Confirm the effect too: a write after the second
+  // install still produces exactly one log row, not two -- which is what
+  // would happen if reinstalling left the old triggers firing alongside the
+  // new ones instead of replacing them.
+  raw.prepare('INSERT INTO probe (id, v, created_at) VALUES (1, ?, 1)').run('a');
+  assert.deepEqual(ops(raw), ['upsert:1'], 'a reinstalled trigger must not log the same change twice');
 });
 
 test('every named trigger exists after installation', () => {
