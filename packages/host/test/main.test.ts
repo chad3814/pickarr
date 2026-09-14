@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
+import { API_KEY_SECRET } from '@pickarr/openmetadata';
 import type { Host } from '../src/host.ts';
 import { createHost, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from '../src/host.ts';
 import { migrateHost } from '../src/db/migrate.ts';
@@ -15,6 +16,7 @@ import type { ReadServer, ReadServerDeps } from '../src/api/server.ts';
 import { DEFAULT_HOST, DEFAULT_PORT, createReadServer } from '../src/api/server.ts';
 import { isClaimed } from '../src/auth/claim.ts';
 import { AUTH_SECRET_KEY, CLAIM_TOKEN_KEY, readHostState, writeHostState } from '../src/db/host-state.ts';
+import { envNameFor } from '../src/secrets/names.ts';
 import type { HostSettings } from '../src/main.ts';
 import {
   createPluginIdForType,
@@ -23,11 +25,13 @@ import {
   main,
   resolveArtworkDir,
   resolveConfigPath,
+  resolveOpenmetadataUrl,
   resolvePublicUrl,
   resolveReadHost,
   resolveReadPort,
   resolveSettings,
   scheduleKnownFeeds,
+  shippedPlugins,
 } from '../src/main.ts';
 import { DEFAULT_CONFIG_PATH } from '../src/config/schemas.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
@@ -165,6 +169,13 @@ const MAIN_VARIABLES = [
   // signing secret in place of the persisted row, so a developer who happens
   // to export it would change which cookie every test here can present.
   'BETTER_AUTH_SECRET',
+  // The lookup service's origin, and the key the three plugins authenticate
+  // to it with. Both are read by `main`, and the key is the one whose
+  // presence a boot now warns about -- so a developer who exports it would
+  // otherwise silence the warning these tests assert on, and one who exports
+  // the url would point a boot at a host that does not exist.
+  'PICKARR_OPENMETADATA_URL',
+  'PICKARR_SECRET_OPENMETADATA_API_KEY',
 ] as const;
 
 /**
@@ -400,8 +411,8 @@ test('main boots with no plugin registered, and still schedules a poll for every
   // permanently destroyed. `rss_item.delivered_at` (see `feeds/reader.ts`)
   // is what removed that danger -- an unowned row simply stays undelivered
   // and is re-offered once a plugin registers -- so booting with an empty
-  // plugin list, exactly what the shipped `SHIPPED_PLUGINS` is today, must
-  // now succeed rather than throw.
+  // plugin list, passed here through `deps.plugins` rather than the shipped
+  // default, must succeed rather than throw.
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-no-plugin-'));
   try {
     const databasePath = join(dir, 'pickarr.db');
@@ -1296,4 +1307,150 @@ test('formatLogDetail writes key=value pairs, and cannot spill an object it is h
     'row=[object Object]',
     'a row hands over nothing, not even its keys',
   );
+});
+
+test('resolveOpenmetadataUrl defaults, and refuses what is not an origin', () => {
+  assert.equal(resolveOpenmetadataUrl(undefined), 'https://openmetadata.nexus');
+  assert.equal(resolveOpenmetadataUrl(''), 'https://openmetadata.nexus');
+  assert.equal(resolveOpenmetadataUrl('https://metadata.example.test'), 'https://metadata.example.test');
+  // A trailing slash is trimmed, so nothing downstream builds a double slash.
+  assert.equal(resolveOpenmetadataUrl('https://metadata.example.test/'), 'https://metadata.example.test');
+  assert.throws(() => resolveOpenmetadataUrl('metadata.example.test'), /PICKARR_OPENMETADATA_URL/);
+  assert.throws(() => resolveOpenmetadataUrl('https://metadata.example.test/api'), /PICKARR_OPENMETADATA_URL/);
+});
+
+test('resolveOpenmetadataUrl refuses credentials in the url rather than silently dropping them', () => {
+  // `parsed.origin` discards userinfo, so this used to be accepted and then
+  // stripped: the operator's `Authorization` never travelled, every lookup
+  // answered 401, and nothing anywhere said why. Refused instead, on the
+  // branch whose headline invariant is that a credential is never logged.
+  assert.throws(
+    () => resolveOpenmetadataUrl('https://svc:s3cret@proxy.internal'),
+    /PICKARR_OPENMETADATA_URL/,
+  );
+  assert.throws(
+    () => resolveOpenmetadataUrl('https://svc@proxy.internal'),
+    /PICKARR_OPENMETADATA_URL/,
+  );
+});
+
+test('no resolveOpenmetadataUrl refusal names the value it refused', () => {
+  // The same rule `resolvePublicUrl` is held to thirty lines above it, and
+  // the reason this one needs its own test: a url may carry userinfo, so
+  // interpolating the configured value into a boot-time failure prints a
+  // credential into the log.
+  const refused = [
+    'metadata.example.test',
+    'myapp://metadata.example.test',
+    'https://metadata.example.test/api',
+    'https://metadata.example.test/?x=1',
+    'https://metadata.example.test/#frag',
+    'https://svc:s3cret@proxy.internal',
+  ];
+  for (const bad of refused) {
+    assert.throws(
+      () => resolveOpenmetadataUrl(bad),
+      (error: unknown) => {
+        assert.ok(error instanceof Error, 'a refusal is an Error');
+        assert.match(error.message, /^PICKARR_OPENMETADATA_URL /, 'the refusal names the variable first');
+        assert.ok(
+          !error.message.includes(bad),
+          'the refusal quotes the configured value, which no message this repo emits may carry',
+        );
+        return true;
+      },
+    );
+  }
+});
+
+test('a boot with no lookup key says so, and still boots', async () => {
+  // §2.3 resolves the key per request, deliberately, and that stands -- but
+  // per-request resolution means a deployment that never set the variable
+  // starts cleanly, schedules every feed, and only discovers the problem
+  // minutes later as a dead-lettered lookup job per item. This is the
+  // likeliest field misconfiguration there is, and one line at boot is the
+  // difference between five minutes and an afternoon.
+  //
+  // Asked through the secret store rather than of one variable: an operator
+  // who put the key in the secrets directory or the `secret` table is
+  // configured, and a check that only knew the environment would warn at
+  // them anyway. The resolved value is discarded unread, and no line names
+  // it. Warning rather than fatal, because a host that serves reads with one
+  // plugin misconfigured is the right behaviour.
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-keyless-'));
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, insertOwner);
+
+    const { timers } = createFakeTimers();
+    // No `plugins`, so `main` builds the three real ones -- which is the
+    // only case where the key matters at all.
+    const lines = await runMain(databasePath, {
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
+
+    const warned = lines.filter((line) => line.includes(envNameFor(API_KEY_SECRET)));
+    assert.equal(warned.length, 1, 'exactly one line names the variable to set');
+    assert.equal(
+      lines.some((line) => line.includes('running: database')),
+      true,
+      'and the host still finished booting: a missing key is one plugin misconfigured, not a dead process',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a boot whose key is present says nothing about it, and neither does one with injected plugins', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-keyed-'));
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, insertOwner);
+
+    const { timers } = createFakeTimers();
+    const keyed = await runMain(
+      databasePath,
+      { timers, createReadServer: async () => fakeServer(() => {}) },
+      // An obviously synthetic placeholder, set through the store's own
+      // environment link. The only thing asserted about it is that no line
+      // mentions the variable at all.
+      { [envNameFor(API_KEY_SECRET)]: 'placeholder-not-a-real-key' },
+    );
+    assert.equal(
+      keyed.some((line) => line.includes(envNameFor(API_KEY_SECRET))),
+      false,
+      'a configured deployment gets no warning -- and no line naming the variable can carry its value',
+    );
+
+    // And a test that injects its own plugins never constructed the real
+    // ones, so there is nothing for the key to be missing from.
+    const injected = await runMain(databasePath, {
+      plugins: [],
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
+    assert.equal(
+      injected.some((line) => line.includes(envNameFor(API_KEY_SECRET))),
+      false,
+      'no plugin asked for the key, so nothing warns about it',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('shippedPlugins builds one plugin per media type, each with its own prefix', () => {
+  const plugins = shippedPlugins({
+    now: () => 0,
+    resolveSecret: async () => 'test-key',
+    baseUrl: 'https://openmetadata.test',
+  });
+
+  assert.deepEqual(plugins.map((plugin) => plugin.id), ['tv', 'movie', 'xxx']);
+  assert.deepEqual(plugins.map((plugin) => plugin.mediaType), ['tv', 'movie', 'xxx']);
+  // Migration 1 is the engine's state table; each plugin adds its own at 2.
+  for (const plugin of plugins) {
+    assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2]);
+  }
 });

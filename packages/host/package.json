@@ -18,6 +18,10 @@
   "dependencies": {
     "@chad3814/secret-provider": "^1.2.0",
     "@pickarr/contract": "*",
+    "@pickarr/openmetadata": "*",
+    "@pickarr/plugin-movie": "*",
+    "@pickarr/plugin-tv": "*",
+    "@pickarr/plugin-xxx": "*",
     "better-auth": "^1.7.3",
     "drizzle-orm": "1.0.0-rc.4",
     "fast-xml-parser": "^4.5.0",

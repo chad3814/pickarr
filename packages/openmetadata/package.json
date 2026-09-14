@@ -1,0 +1,26 @@
+{
+  "name": "@pickarr/openmetadata",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "development": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts src/testing.ts --bundle --platform=node --format=esm --packages=external --outdir=dist",
+    "typecheck": "tsgo --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pickarr/contract": "*",
+    "drizzle-orm": "1.0.0-rc.4"
+  }
+}
