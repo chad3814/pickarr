@@ -3,7 +3,13 @@ dist/
 *.db
 *.db-wal
 *.db-shm
-.env
+# `.env` alone did not cover `.env.local`, which is where a real key ended
+# up. The negation keeps the one env file that is meant to be committed
+# committable -- `.env*` would otherwise silently ignore a template someone
+# adds later, which is the failure this pair exists to avoid in both
+# directions.
+.env*
+!.env.example
 /config/
 /secrets/
 
