@@ -76,14 +76,17 @@ function fakePlugin(synced: readonly SyncedTable<unknown>[]): MediaPlugin {
 /**
  * A second table for the same plugin, whose read shape names a row in the
  * first -- the shape `tv_season`/`tv_series` have, reduced to what the host
- * needs to see. Declared second, because `detailId` is a `movie_detail.id`.
+ * needs to see.
  *
- * Named `movie_brand` rather than anything sorting after `movie_detail`,
- * deliberately: declared order and alphabetical order then *disagree*, which
- * is what lets the test below tell "honours the plugin's order" apart from
- * "happens to sort the same way". Measured -- under the earlier name
- * `movie_studio` the test passed with a `.toSorted()` spliced into
- * `backfillBefore`'s plugin-table loop.
+ * **Declaration order used to decide emission order and no longer does.**
+ * The walk paged current state and emitted a group's plugin tables in the
+ * order the plugin listed them, so declaring `movie_brand` second was what
+ * kept its `detailId` reference behind the row it names. The walk reads
+ * `sync_log` now, so emission order is write order and a plugin has no handle
+ * on it: `backfillBefore`'s doc records that as one of the two properties the
+ * flip gives up. The name is kept because it still sorts *before*
+ * `movie_detail`, which is what lets the test below tell log order apart from
+ * alphabetical order.
  */
 interface BrandRead { detailId: number; name: string }
 
@@ -109,6 +112,14 @@ const brand: SyncedTable<BrandRead> = {
     `).all(...mediaItemIds).map((row) => Number(row.id));
   },
 };
+
+/**
+ * A pivot above every entry in the log -- what a client bootstrapping right
+ * now would be handed, give or take the floor `sync/bootstrap.ts` picks. The
+ * walk takes `id < pivot`, so `+ 1` is what includes the newest entry.
+ */
+const pivotAboveEverything = (raw: DatabaseSync): number =>
+  Number((raw.prepare('SELECT coalesce(max(id), 0) m FROM sync_log').get() as { m: unknown }).m) + 1;
 
 /** A host schema plus the film plugin's one table, triggers installed, registry built. */
 function open() {
@@ -145,7 +156,7 @@ test('a plugin row is keyed by its row id on both cursors, and its delete names 
   assert.equal(tailUpsert.op, 'upsert');
   assert.equal(tailUpsert.id, 7, 'the tail upsert must carry the row id, not only the row');
 
-  const page = backfillBefore(raw, registry, null, 10);
+  const page = backfillBefore(raw, registry, pivotAboveEverything(raw), 10);
   const walkCreate = page.ops.find((op) => op.table === 'movie_detail');
   assert.ok(walkCreate !== undefined, 'the backfill must carry the plugin row');
   assert.equal(walkCreate.op, 'create', 'the walk emits a create, the tail an upsert (§5.3)');
@@ -174,40 +185,44 @@ test('a shared plugin row re-sent once per group keys identically each time, so 
   seed(raw, 1, 7);
   seed(raw, 2, 8);
 
-  const page = backfillBefore(raw, registry, null, 10);
+  const page = backfillBefore(raw, registry, pivotAboveEverything(raw), 10);
   const keys = page.ops.filter((op) => op.table === 'movie_detail').map((op) => op.id);
   assert.deepEqual(keys.toSorted((a, b) => a - b), [7, 8], 'one key per plugin row, and they differ');
 });
 
-test("a plugin row above the watermark is left to the tail, like a host row", () => {
-  // The disjointness `backfillBefore` establishes is not host-only: a
-  // plugin table reaches it through `rowsFor`/`read`, and the skip is keyed
-  // off `sync_log`, which the plugin's own triggers write.
+test('a plugin row above the pivot is the tail\'s, like a host row', () => {
+  // The disjointness the two cursors establish is not host-only: a plugin
+  // table reaches both of them through `read`, and the partition is keyed off
+  // `sync_log`, which the plugin's own triggers write.
   const { raw, registry } = open();
   seed(raw, 1, 7);
   seed(raw, 2, 8);
-
-  const first = backfillBefore(raw, registry, null, 1);     // media item 2, detail 8
+  const pivot = pivotAboveEverything(raw);
   raw.prepare('UPDATE movie_detail SET tagline = ? WHERE id = 7').run('edited');
 
-  const rest = backfillBefore(raw, registry, first.cursor, 10);
-  assert.deepEqual(rest.ops.filter((op) => op.table === 'movie_detail').map((op) => op.id), [],
-    'detail 7 is above the watermark, so the walk must leave it to the tail');
+  const walked: number[] = [];
+  let cursor: number | null = pivot;
+  while (cursor !== null) {
+    const page = backfillBefore(raw, registry, cursor, 2);
+    walked.push(...page.ops.filter((op) => op.table === 'movie_detail').map((op) => op.id));
+    cursor = page.cursor;
+  }
+  assert.deepEqual(walked, [8], "detail 7's entry moved above the pivot when it changed");
 
-  const tail = tailSince(raw, registry, first.watermark, 100);
+  const tail = tailSince(raw, registry, pivot - 1, 100);
   const delivered = tail.ops.filter((op) => op.table === 'movie_detail' && op.id === 7);
   assert.equal(delivered.length, 1);
   assert.equal((delivered[0]?.value as MovieRead | undefined)?.tagline, 'edited');
 });
 
-test('the backfill emits a plugin\'s tables in the order the plugin declared them', () => {
-  // What makes `packages/plugin-tv/src/sync.ts`'s declaration order the
-  // thing that decides whether a client sees `seriesId: 200` before or
-  // after the `tv_series` op with id 200. The host has no schema knowledge
-  // of a plugin table, so declaration order is the *only* handle a plugin
-  // has on page order -- and this is the assertion that it is honoured
-  // rather than sorted by name, under which `movie_brand` would precede
-  // `movie_detail` and the reference the brand op carries would dangle.
+test('the backfill emits a plugin\'s rows in log order, whatever order they were declared in', () => {
+  // Declaration order used to decide whether a client saw a `movie_brand`
+  // op before or after the `movie_detail` row it names, because the walk
+  // emitted a group's plugin tables in the order the plugin listed them.
+  // The walk reads the log now, so emission order is write order and a
+  // plugin has no handle on it at all. That is the ordering property
+  // `backfillBefore`'s doc records as lost: the reference points forward,
+  // and the same walk resolves it further down.
   const { raw } = openTestDatabase();
   migrateHost(raw);
   raw.exec(`
@@ -234,16 +249,16 @@ test('the backfill emits a plugin\'s tables in the order the plugin declared the
   raw.prepare('INSERT INTO movie_brand (id, detail_id, name, created_at, updated_at) VALUES (?, ?, ?, 1, 1)')
     .run(50, 7, 'a brand');
 
-  const page = backfillBefore(raw, registry, null, 10);
+  const page = backfillBefore(raw, registry, pivotAboveEverything(raw), 10);
   const plugin = page.ops
     .filter((op) => op.table === 'movie_detail' || op.table === 'movie_brand')
     .map((op) => op.table);
-  assert.deepEqual(plugin, ['movie_detail', 'movie_brand'],
-    'declared order; by name this would be brand first, and its reference would dangle');
+  assert.deepEqual(plugin, ['movie_brand', 'movie_detail'],
+    'the brand was written last, so it is emitted first -- ahead of the detail row it names');
 
-  // And the reference the second op carries really does name the row the
-  // first one sent, so the ordering above is load-bearing rather than
-  // cosmetic.
+  // The forward reference, and the op that resolves it, both in one page. The
+  // client applies them in the order given and holds an unresolvable
+  // `detailId` for the length of that page, which is the accepted cost.
   const brandOp = page.ops.find((op) => op.table === 'movie_brand');
   assert.equal((brandOp?.value as BrandRead | undefined)?.detailId, 7);
   assert.equal(page.ops.find((op) => op.table === 'movie_detail')?.id, 7);

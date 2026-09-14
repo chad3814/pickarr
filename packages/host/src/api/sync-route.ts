@@ -1,7 +1,7 @@
 /**
  * The two cursors a client runs concurrently (design spec §5): a tail of log
  * ops from the present (`GET /api/sync?since=<n>`), and a backwards walk over
- * current state (`GET /api/sync/backfill?before=<createdAt>.<id>.<watermark>`).
+ * the log (`GET /api/sync/backfill?before=<n>`).
  *
  * **No SQL here.** Both routes parse and validate their own cursor and call
  * `tailSince`/`backfillBefore` (`sync/tail.ts`, `sync/backfill.ts`) for
@@ -22,7 +22,6 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { backfillBefore } from '../sync/backfill.ts';
-import type { BackfillCursor } from '../sync/backfill.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import { tailSince } from '../sync/tail.ts';
 import { PAGE_SIZE } from './cursor.ts';
@@ -43,10 +42,8 @@ function json(status: number, body: unknown): SyncAnswer {
 /** The fixed 400 for a `since` that is missing or is not a bare non-negative integer. */
 const MALFORMED_SINCE = json(400, { error: 'since must be a non-negative integer' });
 
-/** The fixed 400 for a `before` that was supplied but does not parse as `<createdAt>.<id>.<watermark>`. */
-const MALFORMED_BEFORE = json(400, {
-  error: 'before must be <createdAt>.<id>.<watermark>, all three non-negative integers',
-});
+/** The fixed 400 for a `before` that was supplied and is not a bare non-negative integer. */
+const MALFORMED_BEFORE = json(400, { error: 'before must be a non-negative integer' });
 
 /**
  * `since` as `tailSince` wants it, or `null` for anything that is not a bare
@@ -80,39 +77,18 @@ export function syncAnswer(
 }
 
 /**
- * `<createdAt>.<id>.<watermark>`, matching `encodeBeforeCursor`'s own
- * encoding below.
+ * `GET /api/sync/backfill?before=<n>`: ops below `before`, resolved to
+ * current state (design spec §5.2).
  *
- * **The watermark is part of the cursor, not a separate parameter, so a
- * client cannot resume a walk without it.** `backfillBefore` skips any row
- * the tail owns -- one whose `sync_log` entry sits above the watermark the
- * walk started from -- which is what keeps the two streams disjoint, and
- * holding the mark constant across the walk is what lets a client adopt it
- * from any page rather than only the first. A second query parameter would
- * be droppable, and dropping it would silently re-overlap the streams and
- * make the returned watermark rise per page; one opaque token cannot be half
- * supplied. Three parts are required for the same reason a two-part `before`
- * is refused below rather than defaulted: this route has no safe "start from
- * the beginning" reading of a cursor that was actually supplied.
- */
-function parseBeforeCursor(raw: string): BackfillCursor | null {
-  const parts = raw.split('.');
-  if (parts.length !== 3) return null;
-  const [createdAtPart, idPart, watermarkPart] = parts;
-  if (createdAtPart === undefined || idPart === undefined || watermarkPart === undefined) return null;
-  if (!DIGITS.test(createdAtPart) || !DIGITS.test(idPart) || !DIGITS.test(watermarkPart)) return null;
-  return { createdAt: Number(createdAtPart), id: Number(idPart), watermark: Number(watermarkPart) };
-}
-
-/** The wire form of a backfill cursor -- the inverse of `parseBeforeCursor`. */
-function encodeBeforeCursor(cursor: BackfillCursor): string {
-  return `${cursor.createdAt}.${cursor.id}.${cursor.watermark}`;
-}
-
-/**
- * `GET /api/sync/backfill?before=<createdAt>.<id>.<watermark>`: one page of
- * current state, newest first, plus the log's watermark the walk is measured
- * against (design spec §5.2).
+ * **One bare log position, where this cursor used to be three numbers in one
+ * token.** The walk paged current state on a `(created_at, id)` keyset and
+ * carried a watermark alongside it, because it needed a threshold to skip
+ * rows the tail owned; the walk now reads the log itself, and disjointness is
+ * the arithmetic of `id < before` against the tail's `id > since`. So there
+ * is no keyset to encode, no watermark to thread, and nothing a client can
+ * half supply. `before` and `since` are now the same kind of value -- a
+ * `sync_log.id` -- which is what lets `/api/sync/bootstrap` hand out both in
+ * one answer.
  *
  * **No `before` at all is the first page**, not a malformed cursor -- this
  * route's own "start from the beginning" case, and the one place in this
@@ -120,38 +96,26 @@ function encodeBeforeCursor(cursor: BackfillCursor): string {
  * but does not parse is refused all the same, for the reason this module's
  * doc gives.
  *
- * The body carries one log position, `watermark`: where the client starts
- * its tail. It is the first page's high-water mark, carried forward by the
- * cursor, so adopting it from any page of the walk adopts page 1's and skips
- * nothing.
- *
- * **There is deliberately no second number dating the page.** Every op this
- * route returns is a `create`, which a client applies only if it does not
- * already hold the row, and the tail's `delete` tombstones rather than
- * removes -- so a page read before a write and applied after it is a no-op
- * rather than an overwrite or a resurrection, with nothing for the client to
- * compare. An earlier draft returned an `asOf` per page and asked the client
- * to check it against its own tail cursor; `sync/tail.ts`'s `SyncOp` has why
- * the op kind replaced it.
+ * **The body carries no log position of its own.** It used to return the
+ * watermark, so a client could start its tail without a second round trip;
+ * `/api/sync/bootstrap` answers that question directly now, for both cursors
+ * at once and before either has been called. And there is deliberately no
+ * number dating the page: every op here is a `create`, which a client applies
+ * only if it does not already hold the row, and the tail's `delete`
+ * tombstones rather than removes -- so a page read before a write and applied
+ * after it is a no-op rather than an overwrite or a resurrection, with
+ * nothing for the client to compare. An earlier draft returned an `asOf` per
+ * page and asked the client to check it against its own tail cursor;
+ * `sync/tail.ts`'s `SyncOp` has why the op kind replaced it.
  */
 export function backfillAnswer(
   deps: { raw: DatabaseSync; registry: SyncRegistry },
   params: URLSearchParams,
 ): SyncAnswer {
-  const raw = params.get('before');
-  let before: BackfillCursor | null;
-  if (raw === null) {
-    before = null;
-  } else {
-    const parsed = parseBeforeCursor(raw);
-    if (parsed === null) return MALFORMED_BEFORE;
-    before = parsed;
-  }
+  const supplied = params.get('before');
+  if (supplied !== null && !DIGITS.test(supplied)) return MALFORMED_BEFORE;
+  const before = supplied === null ? null : Number(supplied);
 
   const page = backfillBefore(deps.raw, deps.registry, before, PAGE_SIZE);
-  return json(200, {
-    ops: page.ops,
-    cursor: page.cursor === null ? null : encodeBeforeCursor(page.cursor),
-    watermark: page.watermark,
-  });
+  return json(200, { ops: page.ops, cursor: page.cursor });
 }

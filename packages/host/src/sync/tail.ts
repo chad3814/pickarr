@@ -1,11 +1,12 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { readCurrentState, readLogEntries } from './entries.ts';
 import type { SyncRegistry } from './registry.ts';
 
 /**
  * One invalidation, as a client receives it.
  *
  * **Three op kinds, and each cursor emits its own.** The backwards walk over
- * current state (`sync/backfill.ts`) emits `create` for every row it sends.
+ * the log (`sync/backfill.ts`) emits `create` for every row it sends.
  * `tailSince` below emits `upsert` for a row that still exists and `delete`
  * for one that does not. A `create` means "here is a row you may not have
  * yet"; an `upsert` means "here is what this row is *now*".
@@ -39,17 +40,18 @@ import type { SyncRegistry } from './registry.ts';
  *
  * **`sync_log.op` is a different vocabulary from this one.** The column holds
  * `'upsert'` or `'delete'`, written by the triggers (`sync/log.ts`), and
- * records only which trigger fired. `tailSince` never reads it: current state
- * is the authority on what an entry resolved to. Nothing on the wire is a
- * `create` except a backfill op.
+ * records only which trigger fired. Neither cursor turns it into an op kind:
+ * `tailSince` never reads it at all, and `backfillBefore` reads it only in a
+ * `WHERE` clause, to keep entries that can resolve to nothing out of its
+ * pages. Current state is the authority on what an entry resolved to, and
+ * nothing on the wire is a `create` except a backfill op.
  *
  * **`id` is on every op, whatever its kind, and never only inside `value`.**
  * It is the row's primary key in `table`, which is what a client stores the
  * row under -- so a `create`, the `upsert` that later refreshes the same row
- * and the `delete` that tombstones it all agree on one key, and a shared
- * parent re-sent once per group (`sync/backfill.ts`) deduplicates instead of
- * accumulating a copy per group. Putting the key on the op rather than inside
- * the payload is what makes that independent of each read shape:
+ * and the `delete` that tombstones it all agree on one key. Putting the key
+ * on the op rather than inside the payload is what makes that independent of
+ * each read shape:
  * `readHostRows` (`sync/tables.ts`) happens to project `id` into `value` for
  * all six host tables, and no plugin read shape carries it at all
  * (`packages/contract/src/sync.ts`), so a protocol that read the key out of
@@ -75,9 +77,8 @@ export interface SyncOp {
  *
  * An entry whose row has since vanished becomes a `delete` even if the entry
  * says `upsert` -- the log records that a row changed, and current state is
- * the authority on what it changed to. That is also what makes a torn read
- * impossible: there is one query for the entries and one per table for the
- * rows, and a row deleted between them simply reads as absent.
+ * the authority on what it changed to. `readCurrentState` (`sync/entries.ts`)
+ * is where the absence comes from, and its doc has why that read cannot tear.
  *
  * **This cursor never emits a `create`.** Its ops say what a row is now and
  * are meant to overwrite whatever the client holds; only the backfill's
@@ -89,6 +90,13 @@ export interface SyncOp {
  * A client only ever asks for ids above what it was handed, so returning
  * anything short of the last entry actually read would hand the same
  * skipped entry back on every following page, forever.
+ *
+ * **`backfillBefore` (`sync/backfill.ts`) is this function with the
+ * comparison flipped and the order reversed**, and the two are deliberately
+ * kept the same shape so a reader can see that. What differs is the
+ * predicate, the cursor's exhausted value, and which op kind an entry becomes;
+ * the half they share -- reading a page of entries and resolving it to current
+ * state -- is `sync/entries.ts`, written once.
  */
 export function tailSince(
   raw: DatabaseSync,
@@ -96,31 +104,17 @@ export function tailSince(
   since: number,
   limit: number,
 ): { ops: readonly SyncOp[]; cursor: number } {
-  const entries = raw.prepare(
+  const entries = readLogEntries(raw.prepare(
     'SELECT id, table_name, row_id FROM sync_log WHERE id > ? ORDER BY id LIMIT ?',
-  ).all(since, limit).map((row) => ({
-    id: Number((row as { id: unknown }).id),
-    table: String((row as { table_name: unknown }).table_name),
-    rowId: Number((row as { row_id: unknown }).row_id),
-  }));
+  ).all(since, limit));
 
   if (entries.length === 0) return { ops: [], cursor: since };
 
-  const byTable = new Map<string, number[]>();
-  for (const entry of entries) {
-    const ids = byTable.get(entry.table);
-    if (ids === undefined) byTable.set(entry.table, [entry.rowId]);
-    else ids.push(entry.rowId);
-  }
-
-  const rows = new Map<string, Record<number, unknown>>();
-  for (const [table, ids] of byTable) rows.set(table, registry.readRows(raw, table, ids));
-
-  const known = new Set(registry.tables());
+  const state = readCurrentState(raw, registry, entries);
   const ops: SyncOp[] = [];
   for (const entry of entries) {
-    if (!known.has(entry.table)) continue;
-    const value = rows.get(entry.table)?.[entry.rowId];
+    if (!state.knows(entry.table)) continue;
+    const value = state.rowOf(entry.table, entry.rowId);
     ops.push(value === undefined
       ? { op: 'delete', table: entry.table, id: entry.rowId }
       : { op: 'upsert', table: entry.table, id: entry.rowId, value });

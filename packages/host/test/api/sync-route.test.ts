@@ -173,10 +173,10 @@ test('the tail answers ops and a cursor', async () => {
   }
 });
 
-test('the backfill answers a page, a cursor and a watermark', async () => {
+test('the backfill answers a page and a cursor, and no log position of its own', async () => {
   const { raw, db } = setup();
-  // Distinct `created_at` values, ascending by insertion, so "newest first"
-  // has an unambiguous answer: the last one seeded must come back first.
+  // Inserted in order, so "newest log entry first" has an unambiguous answer:
+  // the last one seeded must come back first.
   const first = seedMediaItem(raw, 1000, 'Oldest');
   const second = seedMediaItem(raw, 2000, 'Middle');
   const third = seedMediaItem(raw, 3000, 'Newest');
@@ -192,7 +192,7 @@ test('the backfill answers a page, a cursor and a watermark', async () => {
       (op): op is Record<string, unknown> => isRecord(op) && op.table === 'media_item',
     );
     const ids = mediaItemOps.map((op) => (isRecord(op.value) ? op.value.id : undefined));
-    assert.deepEqual(ids, [third, second, first], 'newest media item first, oldest last');
+    assert.deepEqual(ids, [third, second, first], 'newest log entry first, oldest last');
 
     // Every op carries its key, host or plugin -- `sync/tail.ts`'s `SyncOp`
     // says why the key is the op's and not the payload's.
@@ -204,23 +204,24 @@ test('the backfill answers a page, a cursor and a watermark', async () => {
     assert.deepEqual([...new Set(mediaItemOps.map((op) => op.op))], ['create'],
       'the walk emits creates; only the tail emits an upsert that overwrites');
 
-    assert.equal(body.cursor, null, 'three rows on one page exhausts current state');
-    assert.equal(typeof body.watermark, 'number', 'the watermark is where the client starts its tail');
-    // And no second log position. `asOf` was a real field on this body for
-    // one commit, with an apply rule attached; §5.3 replaced both with the
-    // op kind, and a field left on the wire is a field slice 2 reads.
-    assert.deepEqual(Object.keys(body).toSorted(), ['cursor', 'ops', 'watermark'],
-      'the backfill body is exactly ops, cursor and watermark -- no asOf, no other dated position');
+    assert.equal(body.cursor, null, 'three rows on one page exhausts the log below the start');
+    // No `watermark` and no `asOf`. Both were real fields on this body, each
+    // for its own reason and each replaced: the watermark by
+    // `/api/sync/bootstrap`, which answers both cursors before either is
+    // called, and `asOf` by the op kind (§5.3). A field left on the wire is a
+    // field slice 2 reads.
+    assert.deepEqual(Object.keys(body).toSorted(), ['cursor', 'ops'],
+      'the backfill body is exactly ops and cursor -- no watermark, no asOf, no dated position');
   } finally {
     await server.close();
   }
 });
 
-test('a backfill cursor round-trips, carrying the watermark the walk is measured against', async () => {
+test('a backfill cursor round-trips as a bare log position', async () => {
   const { raw, db } = setup();
   // One more than `PAGE_SIZE`, which is what it takes to get a non-null
   // cursor out of this route -- the page size is fixed and not a query
-  // parameter. The oldest item is the one left for page two.
+  // parameter. The first item seeded is the one left for page two.
   const oldest = seedMediaItem(raw, 1, 'Oldest');
   for (let index = 0; index < PAGE_SIZE; index += 1) seedMediaItem(raw, 1000 + index, `Item ${String(index)}`);
 
@@ -229,21 +230,19 @@ test('a backfill cursor round-trips, carrying the watermark the walk is measured
   try {
     const firstResponse = await get(server, '/api/sync/backfill', cookie);
     const first: unknown = JSON.parse(await firstResponse.text());
-    if (!isRecord(first) || typeof first.cursor !== 'string') {
-      throw new Error('a page that does not exhaust current state must answer a string cursor');
+    if (!isRecord(first) || typeof first.cursor !== 'number') {
+      throw new Error('a page that does not exhaust the log must answer a numeric cursor');
     }
-    // `<createdAt>.<id>.<watermark>` -- three parts, the third being the
-    // watermark, so a client cannot resume a walk without the number that
-    // keeps the two streams from overlapping.
-    const parts = first.cursor.split('.');
-    assert.equal(parts.length, 3, `a backfill cursor has three parts, got ${String(parts.length)}`);
-    assert.equal(Number(parts[2]), first.watermark, "the third part is the walk's watermark");
+    // A `sync_log.id`, the same kind of value `since` is on the tail -- which
+    // is what makes the two cursors comparable and lets one endpoint hand out
+    // both. It used to be `<createdAt>.<id>.<watermark>`, three numbers in one
+    // token so the watermark could not be dropped; there is no watermark now.
+    assert.ok(first.cursor > 0, 'the cursor is a log id, not an opaque string');
 
-    const nextResponse = await get(server, `/api/sync/backfill?before=${first.cursor}`, cookie);
+    const nextResponse = await get(server, `/api/sync/backfill?before=${String(first.cursor)}`, cookie);
     assert.equal(nextResponse.status, 200);
     const next: unknown = JSON.parse(await nextResponse.text());
     if (!isRecord(next) || !Array.isArray(next.ops)) throw new Error('the next page must answer ops');
-    assert.equal(next.watermark, first.watermark, 'the walk carries its watermark forward, never re-reads it');
     const seen = next.ops
       .filter((op): op is Record<string, unknown> => isRecord(op) && op.table === 'media_item')
       .map((op) => op.id);
@@ -289,10 +288,12 @@ test('a supplied but malformed backfill cursor is refused, though an absent one 
     const noCursor = await get(server, '/api/sync/backfill', cookie);
     assert.equal(noCursor.status, 200, 'no cursor at all means the first page, not an error');
 
-    // `'1000.5'` is the *old* two-part form: it must be refused rather than
-    // read as a walk with no watermark, which would silently put the two
-    // streams back in overlap. `'1.2.3.4'` is one part too many.
-    const cases = ['abc', '1000', '1000.', '.5', '1000.-5', '1000.5', '1.2.3.4', '1000.5.'];
+    // `'1000.5'` and `'1000.5.9'` are the *old* keyset forms, two and three
+    // parts; a client that kept one across an upgrade is refused rather than
+    // having its first component read as a log id, which would silently
+    // restart its walk from an arbitrary place. `'1.5'` is a decimal, `'-1'`
+    // a sign: `before` is a `sync_log.id`, and nothing else is one.
+    const cases = ['abc', '1000.', '.5', '-1', '1.5', '1000.5', '1000.5.9', '1e3', ' 5'];
     const responses = await Promise.all(cases.map(async (before) => {
       const response = await get(server, `/api/sync/backfill?before=${before}`, cookie);
       return { before, status: response.status };
