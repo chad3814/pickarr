@@ -1183,9 +1183,42 @@ Restore by copy-aside, `md5 -q`, re-run.
 
 - [ ] **Step 6: Mutation B — prove the watermark is read before the page**
 
-Copy aside. Move the watermark read to after the items are selected and their dependents gathered, run the focused test.
-Expected: this may **not** fail — a single synchronous statement sequence leaves no window for a change to land between the two reads, so the test cannot observe the difference. If it does not fail, say so and explain that the ordering is a correctness requirement the suite cannot demonstrate from one thread, and that it rests on the comment. Do not invent a kill.
-Restore by copy-aside, `md5 -q`, re-run.
+**Correction, recorded here so the next reader does not repeat the mistake:**
+this step originally read "this may not fail — a single synchronous statement
+sequence leaves no window for a change to land between the two reads, so the
+test cannot observe the difference," and instructed reporting the mutation as
+unobservable. That is wrong about the mechanism. There is no *thread* that can
+interleave with a synchronous function, but `backfillBefore` takes `raw` as a
+parameter, and nothing stops a test from handing it a `raw` whose `.prepare`
+does something besides preparing a statement. A plain `Proxy` around the real
+handle, intercepting `.prepare` and inserting a new row through the *real*
+handle the moment the page's `rss_item` lookup runs, lands a write inside
+exactly the window between "read the watermark" and "finish gathering the
+page" — no `db.function()`, no worker thread, ordinary dependency injection on
+a parameter the function already takes.
+
+Write that test rather than skipping it: seed two media items, wrap `raw` in
+such a `Proxy`, and inside the wrapped `.prepare`, on the first call whose SQL
+touches `rss_item`, insert a third media item (`created_at` newer than
+either) through the unwrapped handle. Assert two things — asserting only the
+second would pass for the wrong reason if the walk happened to pick the row up
+on its own:
+1. the returned `watermark` is strictly below the concurrent write's
+   `sync_log` row id;
+2. `tailSince` from that `watermark` delivers the concurrently-created row.
+
+Measured against this implementation: correct code (watermark read first)
+gives `watermark: 2` against the concurrent write's log id `3`, and the tail
+from `watermark: 2` delivers it. With the watermark read moved to after the
+page and its dependents are gathered, the same scenario gives `watermark: 3`
+— at, not below, the concurrent write's log id — and the first assertion
+above fails cleanly (`watermark (3) must be captured before the concurrent
+write (log id 3), not after`), not a SQLite error or a crash.
+
+Copy aside. Move the watermark read to after the items are selected and their
+dependents gathered, run the focused test.
+Expected: the test above FAILS on its first assertion, as measured. Restore
+by copy-aside, `md5 -q`, re-run.
 
 - [ ] **Step 7: Commit**
 
