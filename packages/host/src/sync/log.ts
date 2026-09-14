@@ -18,11 +18,22 @@ import type { DatabaseSync } from 'node:sqlite';
  * run per boot; the third call site does not. `db/migrate.ts`'s
  * `migration15` installs the host's six tables' triggers too, and
  * `migrateHostWith` skips that migration once version 15 is recorded, so on
- * an existing database the migration never runs again -- which is why the
- * boot call in `main.ts` exists rather than the migration being the only
- * host installation. Without it a later migration that rebuilt a synced
- * table would drop its three triggers with the old table and leave that
- * table unlogged, with nothing failing at runtime.
+ * an existing database the migration never runs again.
+ *
+ * **The per-boot reinstall is defensive, not corrective: a trigger does not
+ * need reinstalling in order to work.** Measured on SQLite 3.53.4 -- a
+ * trigger created on one connection is in `sqlite_master` on the next
+ * connection to the same file and fires there with nothing reinstalled, the
+ * same as any other schema object. So a database migrated to version 15 last
+ * month logs correctly today whether or not `main.ts` calls this. What the
+ * per-boot call buys is the one case that would otherwise be unrecoverable:
+ * a later migration that rebuilds a synced table by SQLite's
+ * create-copy-drop-rename pattern drops that table's three triggers along
+ * with the old table, and, migration 15 having been recorded long ago,
+ * nothing else would ever put them back. The symptom is every client
+ * silently missing every subsequent change to that table, with nothing
+ * failing at runtime -- which is why the repair is unconditional here rather
+ * than conditional on noticing.
  *
  * `table` reaches the SQL below as text, not as a bound parameter: a trigger
  * body is DDL, and SQLite binds no parameters there, so there is no

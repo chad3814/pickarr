@@ -655,9 +655,14 @@ export async function main(
   // **After the migrations, on every boot, and not only inside migration
   // 15.** `installSyncTriggers` drops each trigger before creating it, so
   // this is idempotent and costs six `DROP`/`CREATE` triples on a schema
-  // that already has them. What it buys: migration 15 installs the host's
-  // triggers once and `migrateHostWith` skips that migration forever after,
-  // so a later migration that rebuilds a synced table by SQLite's
+  // that already has them.
+  //
+  // This is **defensive, not corrective**: triggers persist across
+  // connections and boots, measured, so a database already at version 15
+  // logs correctly without this call (`sync/log.ts` has the measurement).
+  // What it buys is the one unrecoverable case: migration 15 installs the
+  // host's triggers once and `migrateHostWith` skips that migration forever
+  // after, so a later migration that rebuilds a synced table by SQLite's
   // create-copy-drop-rename pattern would drop that table's three triggers
   // with the old table and nothing would put them back -- and the symptom
   // is every client silently missing every subsequent change to it.
