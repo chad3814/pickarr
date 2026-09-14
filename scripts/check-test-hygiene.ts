@@ -4,10 +4,12 @@
  *
  * 1. **No web test hands a live DOM element to `node:assert`** as a value it
  *    might have to print. See `findViolations`.
- * 2. **No file under `packages/host/src` names a credential column in a SQL
+ * 2. **No file in a 2.0 source tree names a credential column in a SQL
  *    string, and none reads a credential table through a statement this check
- *    cannot read**, outside an allow-list of paths. See
- *    `findCredentialSelections`.
+ *    cannot read**, outside an allow-list of paths. The trees are
+ *    `CREDENTIAL_SRC_DIRS`, which is the host plus the contract and every
+ *    shipped plugin -- a plugin's projections reach a client replica, and a
+ *    plugin holds the raw connection. See `findCredentialSelections`.
  * 3. **No host test hands a credential to `node:assert`** as a value it might
  *    have to print. See `findCredentialAssertions`.
  *
@@ -42,8 +44,42 @@ import ts from 'typescript';
 /** Where rule 1 applies. Server tests have no DOM to hand anyone. */
 const TEST_DIR = 'packages/web/test';
 
-/** Where rule 2 applies: the host's own source, which is what holds its queries. */
+/** Where rule 2's allow-list paths are rooted, and one of the roots it scans. */
 const HOST_SRC_DIR = 'packages/host/src';
+
+/**
+ * Every 2.0 source tree rule 2 scans.
+ *
+ * It began as `packages/host/src` alone, on the reasoning that the host is
+ * what holds the queries. That stopped being true when plugins gained
+ * `synced` tables: three plugin projections now reach a client replica, and a
+ * plugin holds `PluginContext.db` -- the raw connection -- so it can name any
+ * column the host can. A rule scanning only the host was a rule with a hole
+ * the size of every plugin.
+ *
+ * **1.x is deliberately out**, and it is the one judgement call here.
+ * Measured over every package's `src`: widening to all of them reports
+ * exactly two violations, `packages/core/src/config/load.ts` and
+ * `packages/web/src/routes/Browse.tsx`, and **neither is SQL** -- both are
+ * template literals (`` `Could not read secret for ${field} from ${path}` ``
+ * and `` `Releases moved into ${group.display.title}` ``) that rule 2's
+ * fail-closed arm cannot resolve and so reports rather than assumes harmless.
+ * Admitting them would mean two `CREDENTIAL_ALLOW_LIST` entries exempting
+ * files that name no credential column at all, which is exactly the inert
+ * entry that list's own doc warns about: it would make the allow-list lie
+ * about what it exempts, in frozen code that is going to be deleted.
+ *
+ * Every tree below reports **zero** violations today, the three plugins
+ * included, so this is a tripwire on what gets added rather than a backlog.
+ */
+const CREDENTIAL_SRC_DIRS: readonly string[] = [
+  HOST_SRC_DIR,
+  'packages/contract/src',
+  'packages/openmetadata/src',
+  'packages/plugin-tv/src',
+  'packages/plugin-movie/src',
+  'packages/plugin-xxx/src',
+];
 
 /**
  * Every `node:assert` export that formats its operands into the failure.
@@ -208,9 +244,11 @@ export function findViolations(file: string, source: string): Violation[] {
  *   file-local: an imported constant, a function's return and a parameter are
  *   all unresolvable, which is a violation over a credential table and
  *   silently dropped everywhere else.
- * - **Anything outside `packages/host/src`.** A plugin holding
- *   `PluginContext.db` can select whatever it likes — the same reach
- *   `migratePlugin`'s docblock already records.
+ * - **Anything outside `CREDENTIAL_SRC_DIRS`.** That list now covers the host,
+ *   the contract and all three shipped plugins, so a plugin holding
+ *   `PluginContext.db` is no longer unscanned — but a plugin shipped from
+ *   outside this repo is, and that reach is the one `migratePlugin`'s docblock
+ *   already records. 1.x is out on purpose; see `CREDENTIAL_SRC_DIRS`.
  */
 const CREDENTIAL_COLUMNS: readonly { table: string; column: string }[] = [
   { table: 'auth_account', column: 'password' },
@@ -840,11 +878,32 @@ async function checkDomAssertions(): Promise<boolean> {
   return false;
 }
 
-/** Rule 2 across `HOST_SRC_DIR`, reported. Resolves `true` when the tree is clean. */
+/**
+ * Rule 2 across every tree in `CREDENTIAL_SRC_DIRS`, reported. Resolves
+ * `true` when all of them are clean.
+ *
+ * A missing tree is not an error: `findCredentialSelections` walks a
+ * directory, and a package added to the list before its `src` exists -- or
+ * one deleted afterwards -- should not fail the build over a path. An absent
+ * tree simply contributes nothing, the same way a stale
+ * `CREDENTIAL_ALLOW_LIST` entry grants nothing.
+ */
 async function checkCredentialColumns(): Promise<boolean> {
-  const violations = await findCredentialSelections(HOST_SRC_DIR);
+  const perDir = await Promise.all(
+    CREDENTIAL_SRC_DIRS.map(async (dir) => {
+      try {
+        return await findCredentialSelections(dir);
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const violations = perDir.flat();
   if (violations.length === 0) {
-    console.log(`test-hygiene: no credential column named in a SQL string under ${HOST_SRC_DIR}`);
+    console.log(
+      `test-hygiene: no credential column named in a SQL string under ` +
+        `${CREDENTIAL_SRC_DIRS.length} source trees`,
+    );
     return true;
   }
 
