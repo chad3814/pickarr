@@ -496,6 +496,9 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     mediaType: spec.mediaType,
     migrations: [lookupTableMigration(spec.id), ...spec.migrations],
     jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll },
+    // Empty until a plugin built on this engine declares synced tables of its
+    // own; the three plugins here have none yet.
+    synced: [],
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;

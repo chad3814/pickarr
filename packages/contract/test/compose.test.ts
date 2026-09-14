@@ -46,6 +46,7 @@ const fixture: MediaPlugin = {
   mediaType: 'movie',
   migrations: [{ version: 1, up: () => {} }],
   jobs: { lookup },
+  synced: [],
   onNewRssItems: async (ids, ctx: PluginContext) => {
     await ctx.jobs.enqueue({ kind: 'lookup', payload: { ids } });
   },

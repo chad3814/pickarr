@@ -158,6 +158,7 @@ function makePlugin(overrides: Partial<MediaPlugin> & { id: string }): MediaPlug
     mediaType: 'movie',
     migrations: [],
     jobs: {},
+    synced: [],
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: unusedEntryPoint('onDownloadRequest'),
