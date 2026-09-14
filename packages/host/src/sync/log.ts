@@ -20,18 +20,20 @@ import type { DatabaseSync } from 'node:sqlite';
  * arbitrary string -- safety here comes from the caller, not from anything
  * below this line.
  *
- * `installSyncTriggers`'s only caller today is still `migrate.ts`, which
- * passes the hardcoded `HOST_SYNCED_TABLES` literal -- never a
- * plugin-declared name reaches this function yet. But a plugin-declared name
- * is no longer unvalidated on its way here in principle: `createSyncRegistry`
- * (`sync/registry.ts`) runs every plugin's declared table through
- * `assertSyncedTableName`, plus a check that name does not collide with a
- * table the host already owns and that its primary key is a lone `id`
- * column, before ever adding it to what `SyncRegistry.tables()` returns.
- * Whatever a future caller passes from `registry.tables()` to
- * `installSyncTriggers` has therefore already passed that gate -- this
- * function itself still does nothing to enforce it, and remains unsafe
- * against a name that reaches it by some other route.
+ * `installSyncTriggers` has two real callers. `migrate.ts` passes the
+ * hardcoded `HOST_SYNCED_TABLES` literal, which needs no runtime validation
+ * -- it is a fixed list the host's own schema defines. `host.ts`'s
+ * `register` passes a plugin's own declared table names, and *does* reach
+ * this function with a name nothing here has validated: `register` calls
+ * `sync/registry.ts`'s `assertSyncable` -- name shape
+ * (`assertSyncedTableName`), the host-collision check, and the lone-`id`
+ * primary-key check -- for each of a plugin's declared tables, immediately
+ * before calling this function with them. `createSyncRegistry` calls the
+ * same `assertSyncable` for the same reason, when a running host later
+ * builds the registry its read API serves from -- so a name reaching either
+ * real caller of `installSyncTriggers` has already passed that gate. This
+ * function itself still does nothing to enforce any of it, and remains
+ * unsafe against a name that reaches it by some other route.
  */
 export function syncTriggerSql(table: string): string {
   const [ins, upd, del] = syncedTriggerNames(table);

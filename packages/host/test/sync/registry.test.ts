@@ -131,7 +131,14 @@ test('assertIntegerIdKey refuses a table with a composite primary key', () => {
   assert.throws(() => { assertIntegerIdKey(raw, 'tv_composite'); }, /tv_composite/);
 });
 
-test('a synced table keyed wrong is refused at declaration, before any trigger is installed', () => {
+// Narrowed from "...before any trigger is installed": `createSyncRegistry`
+// never installs a trigger itself, and this test never builds one -- the
+// claim this file can actually prove is about the registry's own
+// validation. Whether the *boot* path (`host.register`, which does install
+// triggers) refuses the same table before installing anything is
+// `host.test.ts`'s own test, over `assertSyncable` at that call site --
+// see that file for why the claim about triggers belongs there and not here.
+test('createSyncRegistry refuses a synced table keyed wrong, via assertSyncable', () => {
   const raw = open();
   raw.exec('CREATE TABLE tv_wrong_key (uuid TEXT PRIMARY KEY)');
   const plugin = fakePlugin('tv', [fakeTable('tv_wrong_key', {})]);

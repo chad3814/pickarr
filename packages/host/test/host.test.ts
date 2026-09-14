@@ -241,6 +241,63 @@ test('plugin tables gain their triggers when the plugin is registered', () => {
   assert.equal(String(logged?.op), 'upsert');
 });
 
+/**
+ * The boot-path counterpart to `registry.test.ts`'s `createSyncRegistry`
+ * tests, over `host.register` instead -- which is the path a real boot
+ * actually takes, and which never builds a `SyncRegistry` at all. Both
+ * halves matter: a throw proves the bad table is refused, and the absent
+ * trigger proves it is refused *before* `installSyncTriggers` ever runs for
+ * it, not after leaving one behind. Before `assertSyncable` was wired into
+ * `register`, this table's triggers installed successfully regardless of
+ * the throw -- `assertIntegerIdKey`/`assertSyncedTableName` only ran inside
+ * `createSyncRegistry`, which `register` never calls.
+ */
+test('a synced table not prefixed with its own plugin id is refused at registration, with no trigger left behind', () => {
+  const { raw, host } = setup();
+  // Created directly, not through this plugin's own migration: `migratePlugin`
+  // already refuses a migration that creates an unprefixed table of its own
+  // (`db/migrate.ts`), so routing the bad name through a migration would kill
+  // this test on that guard instead of on `assertSyncable` -- proving nothing
+  // about the code this test exists for. A table that exists for some other
+  // reason and is merely *declared* as `alpha`'s synced table is the case
+  // `assertSyncedTableName` alone has to catch, with no migration involved.
+  raw.exec('CREATE TABLE rogue_thing (id INTEGER PRIMARY KEY)');
+  const plugin = makePlugin({
+    id: 'alpha',
+    migrations: [],
+    synced: [{ table: 'rogue_thing', read: () => ({}), rowsFor: () => [] }],
+  });
+
+  assert.throws(() => { host.register(plugin); }, /rogue_thing/);
+
+  const present = new Set(
+    raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all()
+      .map((row) => String((row as { name: unknown }).name)),
+  );
+  for (const suffix of ['ins', 'upd', 'del']) {
+    assert.ok(!present.has(`rogue_thing_sync_${suffix}`), `rogue_thing_sync_${suffix} must not exist`);
+  }
+});
+
+test('a synced table keyed by something other than a lone id is refused at registration, with no trigger left behind', () => {
+  const { raw, host } = setup();
+  const plugin = makePlugin({
+    id: 'alpha',
+    migrations: [{ version: 1, up: (db) => db.exec('CREATE TABLE alpha_bad_key (uuid TEXT PRIMARY KEY)') }],
+    synced: [{ table: 'alpha_bad_key', read: () => ({}), rowsFor: () => [] }],
+  });
+
+  assert.throws(() => { host.register(plugin); }, /alpha_bad_key/);
+
+  const present = new Set(
+    raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all()
+      .map((row) => String((row as { name: unknown }).name)),
+  );
+  for (const suffix of ['ins', 'upd', 'del']) {
+    assert.ok(!present.has(`alpha_bad_key_sync_${suffix}`), `alpha_bad_key_sync_${suffix} must not exist`);
+  }
+});
+
 test('new rss items are dispatched to the plugin owning their feed', async () => {
   const { raw, host } = setup();
 

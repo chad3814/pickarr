@@ -31,7 +31,7 @@ export interface SyncRegistry {
  * `HOST_SYNCED_TABLES` only names the *synced* subset of the host's own
  * tables -- `sync_log` itself, `auth_user`, `secret` and the rest are just as
  * real, and just as much the host's to refuse a plugin claiming. This is
- * what `createSyncRegistry` checks a plugin's declared table against, so a
+ * what `assertSyncable` below checks a plugin's declared table against, so a
  * plugin cannot claim any table the host already has, synced or not.
  *
  * Read from `schema.ts`'s own exported table objects via `getTableName`,
@@ -72,40 +72,63 @@ export function assertIntegerIdKey(raw: DatabaseSync, table: string): void {
 }
 
 /**
+ * The full declaration gate for one plugin-declared synced table: its name
+ * carries the plugin's id as a prefix and is a plain identifier
+ * (`assertSyncedTableName`, `@pickarr/contract`), it does not collide with a
+ * table the host already owns, synced or not, and its primary key is a lone
+ * `id` column (`assertIntegerIdKey` above).
+ *
+ * **One function, two real call sites, on purpose.** `createSyncRegistry`
+ * below is one; `host.ts`'s `register` is the other, immediately before it
+ * calls `installSyncTriggers` -- a boot that never builds a registry at all
+ * still validates before it installs a single trigger. Duplicating the
+ * *checks* at two call sites is cheap; duplicating the *definitions* is what
+ * drifts, which is the whole reason this exists as one exported function
+ * rather than two copies that could disagree about what "syncable" means.
+ * `sync/log.ts`'s own doc names both callers.
+ *
+ * This does **not** refuse two plugins declaring the same table -- that
+ * check needs the whole plugin set at once (`createSyncRegistry`'s own
+ * `owned` map), which a single call validating one plugin's one table has no
+ * way to see. `host.register` registers one plugin at a time and has no
+ * cheaper way to learn about a table a *different*, not-yet-registered
+ * plugin will later declare, so that check stays where the full set is
+ * actually gathered.
+ */
+export function assertSyncable(raw: DatabaseSync, pluginId: string, table: string): void {
+  assertSyncedTableName(pluginId, table);
+  if (hostSchemaTableNames().has(table)) {
+    throw new Error(
+      `plugin ${JSON.stringify(pluginId)} declared synced table ${JSON.stringify(table)}, ` +
+      `which the host already owns`,
+    );
+  }
+  assertIntegerIdKey(raw, table);
+}
+
+/**
  * Host tables plus every plugin's declared tables, as one lookup.
  *
  * A table nobody declares reads as empty rather than throwing: `sync_log` can
  * hold a row for a table that was synced by a plugin since removed, and a
  * client asking for it should be told nothing rather than be refused.
  *
- * This is also where a plugin's declared table name is finally checked
- * against reality, not just against its own id. `assertSyncedTableName`
- * (`@pickarr/contract`) only knows whether a name carries the *given*
- * plugin's id as a prefix -- it has no business knowing the host's table
- * names, so `assertSyncedTableName('sync', 'sync_log')` passes; nothing in
- * `packages/contract` can see that `sync_log` is already the host's. This
- * function can, because it is the one place both sets -- the host's own
- * tables (`schema.ts`) and every plugin's declared tables -- are actually
- * gathered, so it refuses a plugin table that collides with either.
+ * Every plugin table here has already passed `assertSyncable` -- name shape,
+ * the host-collision check and the lone-`id` primary key -- and this is also
+ * where the one check `assertSyncable` cannot do alone runs: two plugins
+ * declaring the same table, which needs every plugin's declaration gathered
+ * at once rather than checked one at a time.
  */
 export function createSyncRegistry(raw: DatabaseSync, plugins: readonly MediaPlugin[]): SyncRegistry {
-  const hostTables = hostSchemaTableNames();
   const owned = new Map<string, SyncedTable<unknown>>();
 
   for (const plugin of plugins) {
     for (const table of plugin.synced) {
-      assertSyncedTableName(plugin.id, table.table);
-      if (hostTables.has(table.table)) {
-        throw new Error(
-          `plugin ${JSON.stringify(plugin.id)} declared synced table ${JSON.stringify(table.table)}, ` +
-          `which the host already owns`,
-        );
-      }
+      assertSyncable(raw, plugin.id, table.table);
       const claimed = owned.get(table.table);
       if (claimed !== undefined) {
         throw new Error(`two plugins declare synced table ${JSON.stringify(table.table)}`);
       }
-      assertIntegerIdKey(raw, table.table);
       owned.set(table.table, table);
     }
   }

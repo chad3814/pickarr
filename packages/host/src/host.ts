@@ -11,6 +11,7 @@ import { createDispatcher } from './jobs/dispatcher.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import { installSyncTriggers } from './sync/log.ts';
+import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
 import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
 import { createReconcileHandler, scheduleReconcile as scheduleReconcileJob } from './clients/reconcile-job.ts';
@@ -502,9 +503,25 @@ export function createHost(deps: {
       }
       migratePlugin(deps.raw, plugin.id, plugin.migrations);
       // After the migration, not before: the tables it just created are what
-      // these triggers attach to. Idempotent (`DROP TRIGGER IF EXISTS` --
-      // `sync/log.ts`), so a plugin registered on every boot reinstalls its
-      // triggers rather than failing the second time.
+      // these triggers attach to.
+      //
+      // **Validated here, immediately before installation, rather than only
+      // by whatever later builds a `SyncRegistry`.** `register` is callable
+      // -- and is called, by every real boot -- with no registry ever built
+      // at all, so a check that lived only in `createSyncRegistry` would let
+      // an unprefixed or wrongly-keyed table's triggers install here
+      // regardless: `syncTriggerSql` (`sync/log.ts`) interpolates the table
+      // name into DDL it says plainly it trusts the caller for, and SQLite
+      // does not validate a trigger body's column references at `CREATE`
+      // time, so a table keyed by anything but a lone `id` would install
+      // cleanly and only throw the first time a row actually changes.
+      // `assertSyncable` (`sync/registry.ts`) is the one place both this and
+      // `createSyncRegistry` run that check, so the two callers cannot drift
+      // apart on what "syncable" means.
+      for (const table of plugin.synced) assertSyncable(deps.raw, plugin.id, table.table);
+      // Idempotent (`DROP TRIGGER IF EXISTS` -- `sync/log.ts`), so a plugin
+      // registered on every boot reinstalls its triggers rather than failing
+      // the second time.
       installSyncTriggers(deps.raw, plugin.synced.map((table) => table.table));
       plugins.set(plugin.id, plugin);
       handlers.set(plugin.id, new Map(Object.entries(plugin.jobs)));
