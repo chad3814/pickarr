@@ -379,14 +379,16 @@ walk over the whole replica, not per media type:
 
 ```
 GET /api/sync?since=<logId>                            → { ops, cursor }
-GET /api/sync/backfill?before=<createdAt>.<id>.<w>     → { ops, cursor, watermark, asOf }
+GET /api/sync/backfill?before=<createdAt>.<id>.<w>     → { ops, cursor, watermark }
 ```
 
 Both answer one JSON object, like every route above -- the first line said
 "one line per op", which would have talked a reader into writing an NDJSON
 reader for a body that has never been one. An op is
-`{ op, table, id, value? }`; `cursor` is a log id on the first route and the
-opaque `<createdAt>.<id>.<w>` string on the second.
+`{ op, table, id, value? }`, where `op` is `create` on the backfill and
+`upsert` or `delete` on the tail (the design spec's §5.3 has why the two
+differ); `cursor` is a log id on the first route and the opaque
+`<createdAt>.<id>.<w>` string on the second.
 
 Its own design lives in `2026-09-14-client-sync-design.md` §5; this table is
 not updated further as later slices add routes -- see the annotation on

@@ -15,11 +15,10 @@ import { HOST_SYNCED_TABLES } from './tables.ts';
  * through every page rather than re-read per page. Two things depend on
  * that. It is the threshold this walk skips rows against (see
  * `backfillBefore`), and skipping against a *later* watermark would leave
- * the rows logged between the two thresholds in both streams, which is the
- * overwrite this design exists to make impossible. And it makes the
- * `watermark` every page returns a constant rather than a rising number, so
- * a client that adopts page *n*'s watermark as its tail cursor adopts page
- * 1's and skips nothing.
+ * the rows logged between the two thresholds out of both streams. And it
+ * makes the `watermark` every page returns a constant rather than a rising
+ * number, so a client that adopts page *n*'s watermark as its tail cursor
+ * adopts page 1's and skips nothing.
  */
 export interface BackfillCursor {
   readonly createdAt: number;
@@ -39,16 +38,15 @@ export interface BackfillCursor {
  * `(created_at, id)` index, where the `OR` form scans it (project global
  * constraints).
  *
- * **The watermark is read first**, before the page's rows are selected, so
+ * **On the first page the watermark is read before the page's rows**, so
  * that a row changed while this page is being built lands *above* it and
  * reaches the client through the tail (`tailSince`) rather than through
- * this walk -- §5.3's table of why running the two concurrently loses
+ * this walk -- §5.3's account of why running the two concurrently loses
  * nothing. Reading it after would risk the opposite: a row that changed
  * between the two reads would be neither above the watermark nor caught by
- * this page, and would reach the client only on a later coincidence. Every
- * page reads a mark that way, as its own `asOf`; only the *first* page's
- * becomes the walk's `watermark`, which every page after it carries forward
- * in `before.watermark` for the reason `BackfillCursor` gives.
+ * this page, and would reach the client only on a later coincidence. Only
+ * the first page reads a mark at all; every page after it carries the same
+ * one forward in `before.watermark`, for the reason `BackfillCursor` gives.
  *
  * **The two streams are disjoint: every op below is skipped if that row has
  * a `sync_log` entry above `watermark`.** The tail is then the authority on
@@ -57,46 +55,50 @@ export interface BackfillCursor {
  * log entry at all -- one that predates migration 15 -- is never skipped,
  * because no tail will ever deliver it.
  *
- * **Disjointness alone does not make the two safe to apply in any order,
- * and `asOf` is why this function returns a second number.** §5.3's table
- * reasoned about what is *sent* and never about what order it is *applied*
- * in, and missed this: a page's values are read at one instant and applied
- * at another, and a write in between makes the page stale with nothing in
- * the payload to say so -- a client that applies it ends up holding the
- * older copy, with that row's log entry already consumed, so nothing ever
- * re-sends it. Permanent, silent, one row. The skip above cannot close that
- * case, measured: with the page for media item 3 already built, an `UPDATE`
- * on it takes log entry 7, above a watermark of 6, and the page in hand
- * still carries the old title. Nor does an insert-if-absent apply rule
- * close it, also measured: make the write a `DELETE` and the tail removes
- * the row, then the stale page finds it absent and puts it back.
+ * **Every op this walk emits is a `create`, and that -- not disjointness --
+ * is what makes a page safe to apply however late it lands.** A page's
+ * values are read at one instant and applied at another, and a write in
+ * between makes the page stale with nothing in the payload to say so. The
+ * skip above cannot close that case, measured: with the page for media item
+ * 3 already built, an `UPDATE` on it takes log entry 7, above a watermark of
+ * 6, and the page in hand still carries the old title -- a read-time skip
+ * cannot see a write that has not happened yet. Nor can any stateless
+ * server, whose response was serialised before the write existed.
  *
- * So the page is dated instead. `asOf` is the log's high-water mark read
- * *before* this page's rows, so every value below is current as of at least
- * `asOf`, and **a client may apply this page only while its own tail cursor
- * has not passed `asOf`.** Past it the page is stale and must be discarded
- * and refetched with the same `before`, which costs nothing: `before` is a
- * keyset the client still holds and the walk has not advanced. That is one
- * integer compared against a number the client already has -- no per-row
- * version, no `updated_at` (which `role` has not got, and which no plugin
- * read shape need carry), no tombstone. A stateless server cannot do
- * better than date its own answer, because the write that invalidates a
- * page can land after the response was serialised.
+ * So the op kind carries the rule. A client applying a `create` for a row it
+ * already holds does nothing, and a `delete` tombstones the row rather than
+ * removing it, so "already holds" covers a row the tail deleted too: a stale
+ * page can neither overwrite the newer value the tail delivered nor
+ * resurrect what the tail removed. Both obligations, and what breaks if a
+ * client skips either, are in `sync/tail.ts`'s `SyncOp`. An earlier draft
+ * dated every page with an `asOf` the client compared against its own tail
+ * cursor; the op kind does that work structurally, so the stamp is gone
+ * rather than kept beside it.
  *
- * **Each page is self-consistent, with one named exception.** Ops are
- * emitted in dependency order -- the group's own row, then its releases,
- * then what was submitted for them, then who is in it (people before roles,
- * since a role points at a person), then each plugin table's rows for these
- * items, in the order the plugin declared them. A client replaying a page
- * in order therefore never sees an op reference a row it has not already
- * received, in this page or an earlier one, *except* where the referenced
- * row was skipped above because the tail owns it -- an `rss_item` whose
- * `media_item` changed after the walk began. That reference is forward, not
- * dangling: the row is above the watermark, so the client's tail, which
- * starts at that same watermark, delivers it at its log position. It is
- * never a reference to a row the client will never receive. That exception
- * is the price of disjointness, and is named here rather than left for
- * slice 2 to discover.
+ * **Each page is self-consistent *within the synced set*, with one named
+ * exception.** Ops are emitted so that no row precedes a *synced* row it
+ * names: the group's own row, then its releases, then what was submitted for
+ * them, then who is in it (people before roles, since a role points at a
+ * person), then each plugin table's rows for these items, in the order the
+ * plugin declared them -- an order each plugin chooses so that a shared
+ * parent precedes the rows naming it (`plugin-tv/src/sync.ts`).
+ *
+ * **"Within the synced set" is the honest scope, not a hedge.** Two columns
+ * these projections do send name rows that will never be synced:
+ * `rss_item.feed_id` names an `rss_feed`, and `torrent_download`'s and
+ * `nzb_download`'s `download_client_id` name a `download_client` -- which
+ * holds a service's address and so may not reach a replica at all
+ * (`sync/tables.ts`). A page therefore does contain references a client
+ * cannot resolve, by design and permanently. Earlier wordings of this
+ * paragraph claimed no op references a row the client has not received;
+ * that was false of these two columns from the first commit.
+ *
+ * The one exception *inside* the synced set is a row skipped above because
+ * the tail owns it -- an `rss_item` whose `media_item` changed after the
+ * walk began. That reference is forward, not dangling: the row is above the
+ * watermark, so the client's tail, which starts at that same watermark,
+ * delivers it at its log position. That exception is the price of
+ * disjointness, and is named here rather than left for slice 2 to discover.
  *
  * **Skipping is per row, not per group, and the alternative is unsound
  * rather than merely worse.** Dropping a whole group whose `media_item` sits
@@ -117,12 +119,11 @@ export function backfillBefore(
   registry: SyncRegistry,
   before: BackfillCursor | null,
   limit: number,
-): { ops: readonly SyncOp[]; cursor: BackfillCursor | null; watermark: number; asOf: number } {
-  // One read, two jobs on the first page: `asOf` dates *this* page, and on
-  // the first page it is also the walk's `watermark`, which every page after
-  // it carries forward in its cursor rather than re-reading.
-  const asOf = readWatermark(raw);
-  const watermark = before === null ? asOf : before.watermark;
+): { ops: readonly SyncOp[]; cursor: BackfillCursor | null; watermark: number } {
+  // Read only on the first page, and before that page's rows; every page
+  // after it carries the same mark forward in its cursor rather than
+  // re-reading one. See this function's doc for both halves of why.
+  const watermark = before === null ? readWatermark(raw) : before.watermark;
 
   const itemRows = before === null
     ? raw.prepare(
@@ -138,16 +139,16 @@ export function backfillBefore(
     createdAt: Number((row as { createdAt: unknown }).createdAt),
   }));
 
-  if (items.length === 0) return { ops: [], cursor: null, watermark, asOf };
+  if (items.length === 0) return { ops: [], cursor: null, watermark };
 
   const itemIds = items.map((item) => item.id);
   const itemHoles = itemIds.map(() => '?').join(', ');
   const ops: SyncOp[] = [];
 
-  // The group's own row, first: nothing below may reference an item the
-  // client has not already received, in this page or an earlier one -- or,
-  // where this row is skipped because the tail owns it, will receive from
-  // the tail. See this function's doc on that one exception.
+  // The group's own row, first: nothing below may name an item the client
+  // has not already received, in this page or an earlier one -- or, where
+  // this row is skipped because the tail owns it, will receive from the
+  // tail. See `backfillBefore`'s doc on that one exception.
   pushRows(raw, ops, 'media_item', registry.readRows(raw, 'media_item', itemIds), itemIds, watermark);
 
   // Its releases.
@@ -183,9 +184,11 @@ export function backfillBefore(
   pushRows(raw, ops, 'role', registry.readRows(raw, 'role', roleIds), roleIds, watermark);
 
   // Each plugin table's rows for these items, in the order the plugin
-  // declared them -- which is how a detail row ends up before the shared
-  // parent it points at (§5.2, §3.3). `registry` has no schema knowledge of
-  // its own for a plugin table, so this goes through `rowsFor`, not SQL.
+  // declared them -- which each plugin chooses so that a row naming another
+  // of its synced rows comes after it: `tv_series` before the `tv_season`
+  // rows that carry a `seriesId` (§5.2, §3.3). `registry` has no schema
+  // knowledge of its own for a plugin table, so this goes through `rowsFor`,
+  // not SQL.
   for (const table of registry.tables()) {
     if (HOST_SYNCED_TABLES.includes(table)) continue;
     const ids = registry.rowsFor(raw, table, itemIds);
@@ -198,7 +201,7 @@ export function backfillBefore(
     ? null
     : { createdAt: lastItem.createdAt, id: lastItem.id, watermark };
 
-  return { ops, cursor, watermark, asOf };
+  return { ops, cursor, watermark };
 }
 
 /** The log's high-water mark, or 0 for an empty log. */
@@ -237,12 +240,17 @@ function tailOwns(
 }
 
 /**
- * Appends one upsert per id that resolved to current state *and* that the
+ * Appends one `create` per id that resolved to current state *and* that the
  * tail does not own, in `ids`' order, each keyed by its row id.
  *
- * The key goes on the op, not inside `value` -- see `SyncOp` in
- * `sync/tail.ts` for why that is the protocol's business and not each read
- * shape's.
+ * `create`, never `upsert`: a client applies one of these only if it does
+ * not already hold the row, which is what stops a page that was read before
+ * a write and applied after it from undoing the write. `SyncOp` in
+ * `sync/tail.ts` has the two client obligations that rest on this and what
+ * breaks without them.
+ *
+ * The key goes on the op, not inside `value` -- see `SyncOp` again for why
+ * that is the protocol's business and not each read shape's.
  */
 function pushRows(
   raw: DatabaseSync,
@@ -255,6 +263,6 @@ function pushRows(
   const owned = tailOwns(raw, table, ids, watermark);
   for (const id of ids) {
     const value = rows[id];
-    if (value !== undefined && !owned.has(id)) ops.push({ op: 'upsert', table, id, value });
+    if (value !== undefined && !owned.has(id)) ops.push({ op: 'create', table, id, value });
   }
 }

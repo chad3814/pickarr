@@ -54,11 +54,13 @@ export function assertSyncedTableName(pluginId: string, table: string): void {
  * oversight.** A client keys a row by the `id` the host puts on the op that
  * carries it, beside `op` and `table`, never by a field a read shape
  * happened to remember to include -- so the key is the protocol's, not each
- * plugin author's. See `sync/tail.ts`'s `SyncOp` for why: an upsert whose id
+ * plugin author's. See `sync/tail.ts`'s `SyncOp` for why: an op whose id
  * lived inside `value` could not be matched against the delete that later
  * names the same row, and the three shapes here carried no id at all until
  * the op did, which made every plugin upsert unkeyable and every plugin
- * delete unappliable.
+ * delete unappliable. `SyncOp` is also where the three op kinds
+ * (`create`/`upsert`/`delete`) and the two rules a client applies them by
+ * are stated.
  *
  * The three *detail* shapes -- one row per media item -- do carry
  * `mediaItemId`, because grouping is a different question from keying: the
@@ -102,8 +104,11 @@ export interface XxxRead {
  * release.
  *
  * `seriesId` is a `tv_series.id`, which resolves against the `id` on the
- * `tv_series` upsert op -- the op-level key described above is what makes
- * this reference land on a row the client actually holds.
+ * `tv_series` op -- the op-level key described above is what makes this
+ * reference land on a row the client actually holds. It is also why
+ * `plugin-tv` declares `tv_series` *before* `tv_season`: declaration order
+ * is the order the backfill emits a group's plugin rows, so a client
+ * replaying a page in order holds the series before the season names it.
  */
 export interface TvSeasonRead {
   seriesId: number;

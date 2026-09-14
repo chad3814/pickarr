@@ -11,13 +11,30 @@ import type { DatabaseSync } from 'node:sqlite';
  * **Out, and why:** `auth_user`, `auth_session`, `auth_account`,
  * `auth_verification`, `host_state` and `secret` hold credentials, and no
  * credential leaves this process. `download_client` holds a service's address
- * and the names of its secrets. `jobs` is machinery a client has no use for.
- * `poster`, `background` and `logo` describe files already reachable at
- * `/api/artwork/:kind/:mediaItemId`, so a client asks for the image and
- * handles a 404 rather than replicating rows about files it cannot read.
- * `alias`, `external_reference` and `filepath_mapping` have no consumer.
- * `deleted_media_item` is slice E's tombstone table: the log's delete ops
- * supersede it, and it stays because `/api/deletions` still serves it.
+ * and the names of its secrets. `rss_feed` holds a feed's url, which for a
+ * private tracker carries the passkey -- the same reason `selectSql` below
+ * drops `rss_item.link`, and a url may not be copied into permanent client
+ * storage at all. `jobs` is machinery a client has no use for, and so are
+ * `host_migrations` (schema bookkeeping), `sync_log` (this mechanism's own
+ * log) and `sqlite_sequence` (SQLite's, and present only because `sync_log`
+ * is `AUTOINCREMENT`). `poster`, `background` and `logo` describe
+ * files already reachable at `/api/artwork/:kind/:mediaItemId`, so a client
+ * asks for the image and handles a 404 rather than replicating rows about
+ * files it cannot read. `alias`, `external_reference` and `filepath_mapping`
+ * have no consumer. `deleted_media_item` is slice E's tombstone table: the
+ * log's delete ops supersede it, and it stays because `/api/deletions` still
+ * serves it.
+ *
+ * **One consequence of that list, stated because a page does not hide
+ * it.** `rss_item.feed_id` and `torrent_download`/`nzb_download`'s
+ * `download_client_id` *are* projected below, and both name tables that are
+ * out and will stay out. A client therefore receives ids it can never
+ * resolve, by design -- which is why `sync/backfill.ts` claims page
+ * self-consistency only for rows *within* the synced set, and why design
+ * spec §5.2 and §7.8 say so too. Dropping the two columns instead would be
+ * the alternative; they are kept because a client grouping releases by feed
+ * or downloads by client can do so by id without ever needing the row, and
+ * an id is not a url.
  *
  * **A table being in this list is not a promise that every one of its
  * columns is projected.** `selectSql` below names the subset of each

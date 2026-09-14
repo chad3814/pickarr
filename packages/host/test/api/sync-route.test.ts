@@ -199,10 +199,18 @@ test('the backfill answers a page, a cursor and a watermark', async () => {
     assert.deepEqual(mediaItemOps.map((op) => op.id), [third, second, first],
       'the op-level id must be the row id, on an upsert as much as on a delete');
 
+    // Every backfill op is a `create`, which is what a client is allowed to
+    // drop for a row it already holds (design spec §5.3).
+    assert.deepEqual([...new Set(mediaItemOps.map((op) => op.op))], ['create'],
+      'the walk emits creates; only the tail emits an upsert that overwrites');
+
     assert.equal(body.cursor, null, 'three rows on one page exhausts current state');
     assert.equal(typeof body.watermark, 'number', 'the watermark is where the client starts its tail');
-    assert.equal(typeof body.asOf, 'number', 'asOf dates this page, so a client can tell a stale one');
-    assert.equal(body.asOf, body.watermark, 'on the first page they are one read');
+    // And no second log position. `asOf` was a real field on this body for
+    // one commit, with an apply rule attached; §5.3 replaced both with the
+    // op kind, and a field left on the wire is a field slice 2 reads.
+    assert.deepEqual(Object.keys(body).toSorted(), ['cursor', 'ops', 'watermark'],
+      'the backfill body is exactly ops, cursor and watermark -- no asOf, no other dated position');
   } finally {
     await server.close();
   }

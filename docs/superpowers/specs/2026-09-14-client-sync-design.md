@@ -158,10 +158,20 @@ values.
 proposal. It buys exact history and smaller payloads, and costs
 `OLD.x`/`NEW.x` SQL generated per column per table, storage of every value
 twice, and a retention policy.
-*What it buys here, and this is the load-bearing property:* **delivering an
-op twice is a no-op.** Every guarantee in §5 — a backfill without snapshot
-isolation, backfill concurrent with the live tail, a self-collapsing log with
-no horizon — follows from that single fact. With diffs, none of them hold.
+*What it buys here:* **delivering an op twice is a no-op.** A backfill
+without snapshot isolation, backfill concurrent with the live tail, and a
+self-collapsing log with no horizon each need an op that survives being
+applied twice. With diffs, none of them are even available.
+
+*And it is necessary rather than sufficient.* An earlier draft of this
+paragraph called idempotence "the load-bearing property" and said every
+guarantee in §5 follows from that single fact. That sentence is what invited
+the interleaving §5.3 now closes: two idempotent ops still disagree when they
+carry values read at different instants and land out of order, and
+idempotence says nothing about which of them wins. What settles that is the
+op-kind split — the backfill's `create` never overwrites, the tail's `upsert`
+always does — and **§5.3 is where the rest of the argument lives.** This
+decision buys the foundation, not the building.
 
 **3.2 An empty client is populated from current state, never from the log.**
 A new client is not replayed history; it is served one create per live row by
@@ -264,6 +274,9 @@ CREATE TABLE sync_log (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   table_name TEXT NOT NULL,
   row_id     INTEGER NOT NULL,
+  -- Which trigger fired, and a different vocabulary from the wire's
+  -- `SyncOp.op` (§5.1), which also has 'create'. Never read when serving:
+  -- current state is the authority on what an entry resolved to.
   op         TEXT NOT NULL,          -- 'upsert' | 'delete'
   at         INTEGER NOT NULL
 );
@@ -332,38 +345,66 @@ is a primary-key range scan.
 {"op":"delete","table":"media_item","id":123}
 ```
 
-**`id` is on every op, upsert and delete alike, and is the row's primary key
-in `table`.** It is not read out of `value`: the host's own projections
+**This cursor never emits the third op kind.** `SyncOp.op` is `create`,
+`upsert` or `delete`; `create` belongs to the backfill alone (§5.2), and
+§5.3 is why the two cursors use different words for what looks like the same
+op. `sync_log.op` (§4) is a separate vocabulary — it records which trigger
+fired and is never read when serving, because current state is the authority.
+
+**`id` is on every op, whatever its kind, and is the row's primary key in
+`table`.** It is not read out of `value`: the host's own projections
 (`sync/tables.ts`) happen to include `id` in the row they return, and no
 plugin read shape includes one — §6 says why they must not — so a protocol
 that keyed a row from its payload worked for the host's six tables and
 silently failed for all six plugin ones. The client stores a row under the
-op's `id`, which is what makes an upsert and the later delete for the same
-row agree, and what makes a shared parent re-sent once per group (§3.3)
-deduplicate instead of accumulating one unlabelled copy per group.
+op's `id`, which is what makes a `create`, the `upsert` that later refreshes
+the same row and the `delete` that tombstones it agree on one key, and what
+makes a shared parent re-sent once per group (§3.3) deduplicate instead of
+accumulating one unlabelled copy per group.
 
 The client polls this from the moment it has a watermark, and keeps polling
 for the rest of the session. **Nothing about the log's size delays it**: it
 starts at `W`, which is the present, and only ever moves forward.
 
-### 5.2 Backfill — `GET /api/sync/backfill?before=<createdAt,id>`
+### 5.2 Backfill — `GET /api/sync/backfill?before=<createdAt>.<id>.<w>`
 
 Current state, newest first, paged backwards, in units of **media item, fully
-hydrated**: the group's row, then its releases, the plugin's detail row, the
-shared parents that row points at, and its people and roles. Dependency order
-within a page is what stops a client seeing a reference before its target.
+hydrated**. The emission order within a page is the host's tables first — the
+group's row, then its releases, then the downloads submitted for them, then
+its people and roles (people before roles, since a role names a person) —
+then each plugin's tables in the order that plugin declared them. **Every op
+on this route is a `create`** (§5.3).
+
+The ordering rule is that no op precedes a *synced* row it names by id. It is
+the plugin's job for its own tables: `tv_series` is declared before
+`tv_season`, because `TvSeasonRead.seriesId` is a `tv_series.id`. It is not
+the ordering rule an earlier draft stated, which had a detail row coming
+before "the shared parents that row points at" — naming a row is a reason to
+send it *first*. `TvRead` and `XxxRead` name no parent by id at all (§6
+flattens them), so `tv_release` and `xxx_scene` are declared first freely.
+
+**Two references in a page point outside the synced set and always will.**
+`rss_item.feed_id` names an `rss_feed` and `torrent_download`/`nzb_download`'s
+`download_client_id` names a `download_client`; neither table is synced, and
+`download_client` never will be — it holds a service's address. So a page does
+contain ids a client cannot resolve, by design, and the self-consistency
+property (§7.8) is about rows *within* the synced set. Earlier wordings here
+and in `sync/backfill.ts` claimed no op references an unreceived row; that was
+false of these two columns from the first commit.
 
 Called with no cursor it returns the first page **and `w`, the log's
 high-water mark at that moment**, so the client can start the tail without a
 separate round trip. `w` is then carried in the cursor — the wire form is
 `<createdAt>.<id>.<w>` — and returned unchanged on every page of the walk, so
 a client that adopts a later page's `watermark` adopts the first page's and
-skips nothing. It returns a null cursor when current state is exhausted, and
-the client retires it — from then on only the tail runs.
+skips nothing. A two-part `before` is a 400, not a default: the watermark is
+part of one opaque token precisely so it cannot be dropped. It returns a null
+cursor when current state is exhausted, and the client retires it — from then
+on only the tail runs.
 
-Every page also carries **`asOf`**, the log's high-water mark read when *that*
-page was read, which is a different number. It dates the page: see §5.3 for
-the apply rule that depends on it.
+**The page carries no other log position.** An earlier draft added `asOf`, the
+mark read when *that* page was read, and an apply rule comparing it against
+the client's tail cursor. §5.3 replaced both with the op kind.
 
 **A page omits any row whose `sync_log` entry sits above `w`.** The tail owns
 that row and will deliver it, so the two streams are disjoint. Skipping is per
@@ -381,38 +422,84 @@ Ordering is `(created_at DESC, id DESC)`, both immutable, for the reason in
 
 `W` is captured once and never advances; the tail is what advances past it.
 
-**Idempotence is not the whole argument, and an earlier draft of this section
-claimed it was.** That draft's table reasoned about what each cursor *sends*
-and never about what order a client *applies* it in, and it missed the last
-row below — measured, reproduced, and permanent when it happens. Two
-mechanisms close it: the backfill omits any row the tail owns (§5.2), and
-every page carries `asOf`, the log position its values were read at.
+**Idempotence is not the whole argument, and §3.1 once said it was.** Two
+idempotent ops still disagree when they carry values read at different
+instants and land out of order, and idempotence says nothing about which wins
+— which is the last row of the table below, measured, reproduced, and
+permanent when it happens. **One thing closes it: the op kind says whether an
+op is allowed to overwrite.** The backfill's omission of any row the tail owns
+(§5.2) closes nothing here on its own — measured, since the invalidating write
+can land after the page was built, where a read-time skip cannot see it — and
+is kept for what it does buy: the two streams are disjoint, so a client never
+has two sources for one row at once, and `w` is constant across a walk.
 
 | During the backfill | Backfill | Tail | Result |
 |---|---|---|---|
 | a row is **created** | never reaches it — it is newer than the walk's start | op > `W` | delivered |
 | a row is **modified** before the page that would carry it is read | omits it: its entry is above `W` | op > `W` | delivered once, by the tail |
-| a row is **deleted** before the walk reaches it | absent | delete op > `W` | a delete for a row the client never had: a no-op |
-| a row is **deleted** after the walk sent it | sent | delete op > `W` | removed |
-| a row is **modified or deleted after a page carrying it was read, and that page is applied after the tail op** | sent, with the value as of `asOf` | op > `asOf` | **would overwrite newer state, or resurrect a deleted row, permanently** — see the apply rule below |
+| a row is **deleted** before the walk reaches it | absent | delete op > `W` | tombstoned: a delete for a row the client was never sent |
+| a row is **deleted** after the walk sent it | sent | delete op > `W` | tombstoned |
+| a row is **modified or deleted after a page carrying it was read, and that page is applied after the tail op** | sent, as a `create` with the older value | op > `W` | the `create` is dropped — the client already holds that row |
 
-**The apply rule: a client may apply a backfill page only while its own tail
-cursor has not passed that page's `asOf`.** Past it the page is stale and must
-be discarded and refetched with the same `before` — which costs nothing, since
-`before` is a keyset the client still holds and the walk has not advanced.
+#### The op kinds, and the two obligations they put on a client
 
-That rule is a client's to honour, and it is here because **no stateless
-server can replace it.** The write that invalidates a page can land after the
-page's response was serialised, so the server has already answered by the time
-there is anything to notice: measured, with page 2 for media item 3 already
-built, an `UPDATE` on it takes a log entry above `W` and the page in hand
-still carries the old title. Omitting rows above `W` cannot see that write.
-Nor is "a backfill op must never overwrite a row the client already holds"
-enough — also measured: make the write a `DELETE` and the tail removes the
-row, then the stale page finds it absent and puts it straight back. What the
-server can do is date its own answer, which is one integer the client compares
-against a number it already has: no per-row version, no `updated_at` — `role`
-has none and no plugin read shape need carry one — and no tombstone.
+**`SyncOp.op` is `create`, `upsert` or `delete`.** The backfill emits only
+`create`. The tail emits `upsert` for a row that still exists and `delete` for
+one that does not. Slice 2 owes exactly two rules, stated here because slice 2
+depends on them and the server cannot enforce either:
+
+1. **A `create` never overwrites.** Applying a `create` for a row the client
+   already holds — *including one it holds as a tombstone* — does nothing at
+   all.
+2. **A `delete` writes a tombstone; it does not remove the row.** The
+   tombstone is what makes obligation 1 treat a deleted row as "already
+   held".
+
+**What breaks if either is skipped.** Skip 1 and a stale page overwrites the
+newer value the tail already delivered — permanently, because that row's log
+entry has already been consumed and nothing ever re-sends it. Skip 2 and a
+stale page resurrects a row the tail deleted: obligation 1 finds the row
+absent, so the `create` applies, and the row is back for as long as that
+install exists. Each failure is one row, silent, and terminal.
+
+Measured against a model client driven through the real `tailSince` and
+`backfillBefore` (§7.19), with the page read before the write and applied
+after the tail op:
+
+```
+stale page after a tail UPDATE : replica {"title":"EDITED"}  truth {"title":"EDITED"}
+stale page after a tail DELETE : replica TOMBSTONE           truth deleted
+ordinary order                 : replica {"title":"EDITED"}  truth {"title":"EDITED"}
+```
+
+**Why a stateless server cannot do this itself.** The write that invalidates a
+page can land after the page's response was serialised, so the server has
+already answered by the time there is anything to notice: measured, with page
+2 for media item 3 already built, an `UPDATE` on it takes a log entry above
+`W` and the page in hand still carries the old title. Omitting rows above `W`
+cannot see that write. Nor is obligation 1 sufficient alone — also measured:
+make the write a `DELETE`, and without obligation 2 the tail removes the row,
+then the stale page finds it absent and puts it straight back. Obligation 2 is
+what turns "already holds" into a claim about every row that has ever existed
+on this client.
+
+**Why the rule is an op kind and not a number.** An earlier draft dated every
+page with `asOf` — the log position its values were read at — and asked the
+client to discard and refetch any page its own tail cursor had passed. That
+closes the same case, and it is gone. Two mechanisms for one property is worse
+than one, and of the two this is the better: the op kind is structural, the
+server stating the rule by choosing a word, where `asOf` states it as a
+comparison a client can invert, drop, or run against the wrong cursor — with
+the failure silent in every one of those cases. No `asOf` is on the wire and
+there is no discard-and-refetch rule. Note that neither obligation needs a
+per-row version or an `updated_at`, which `role` has not got and no read shape
+in §6 carries.
+
+**What the tombstones cost.** A client accumulates one tombstone per row
+deleted while it was ever syncing. That is bounded by deletions rather than by
+changes, nothing in this slice reclaims them, and §8 records ageing them out
+as slice 2's call. The host's own `deleted_media_item` (§4) is a different
+thing entirely: these tombstones live only in the client's replica.
 
 A client interrupted mid-backfill and resuming days later keeps both cursors:
 its `W` is stale but still valid, because the log keeps only the newest entry
@@ -475,20 +562,26 @@ the detail rows that point at them.
 2a. `sync_log` holds exactly one row per changed row after N changes to M
    rows — the collapse-on-write property, asserted by count.
 3. Delivering the same op twice leaves the replica identical — idempotence,
-   which everything else rests on.
+   which everything else rests on and which, on its own, settles nothing
+   about apply order (§3.1, §5.3).
 4. A row changed during the backfill is delivered by the tail, whether or not
    the backfill also sent it — asserted with both cursors live, since running
    them in sequence would pass while missing the property.
 5. A row created during the backfill, which the backwards walk can never
    reach, arrives on the tail.
-6. A row deleted during the backfill is never sent as a create by it, and its
-    delete on the tail is a no-op for a client that never had it.
+6. A row deleted during the backfill is never sent as a `create` by it, and
+    its delete on the tail leaves a client that never had the row holding a
+    tombstone and nothing else.
 7. Backfill paging is stable: the same rows in the same order regardless of
    concurrent `updated_at` churn.
-8. Each backfill page is self-consistent — no op references a row the client
-   has not already received in that page or an earlier one, with the one
-   exception §5.2 names: a row the page omitted because the tail owns it,
-   which the tail delivers at its log position.
+8. Each backfill page is self-consistent **within the synced set** — no op
+   names a *synced* row the client has not already received in that page or
+   an earlier one, with the one exception §5.2 names: a row the page omitted
+   because the tail owns it, which the tail delivers at its log position.
+   References out of the synced set are deliberately not covered:
+   `rss_item.feed_id` and `torrent_download`/`nzb_download`'s
+   `download_client_id` name tables §4 does not sync, so a page always
+   contains ids a client cannot resolve.
 9. Every synced table has all three triggers, asserted by enumerating
    `sqlite_master` against the declared set, so a table added without them
    fails the suite rather than diverging a client.
@@ -506,17 +599,25 @@ the detail rows that point at them.
     declaration.
 17. No credential and no url reaches a log row or an op — the log stores a
     table name and a row id, and nothing else.
-18. Every op carries its row's key, on an upsert as much as on a delete, for
-    a **plugin** table as much as for a host one — asserted with a plugin
+18. Every op carries its row's key, on a create and an upsert as much as on
+    a delete, for a **plugin** table as much as for a host one — asserted with a plugin
     table through both cursors, since the host's own projections include
     `id` in the row and would pass a weaker test.
-19. A backfill page read before a change and applied after the tail delivered
-    it is detectably stale — its `asOf` is below the client's tail cursor —
-    both for a modification and for a deletion, where the second is what
-    rules out "never overwrite a row the client already holds" as a
-    sufficient rule on its own.
-20. A walk's `watermark` is the same number on every page while its `asOf`
-    moves, so adopting either from a later page cannot silently skip ops.
+19. The three interleavings §5.3's op-kind split closes, driven through the
+    real `tailSince` and `backfillBefore` rather than a model of them: a page
+    read before a tail `UPDATE` and applied after it leaves the replica on
+    the tail's value; the same page with a `DELETE` leaves the row tombstoned
+    rather than resurrected; and the ordinary order — page applied first,
+    tail op second — still ends on the tail's value. The middle case is what
+    rules out obligation 1 on its own, without the tombstone.
+19a. A backfill op's `op` is `create`, and a tail op's is `upsert` or
+    `delete`, asserted on the wire — so neither cursor's vocabulary can widen
+    without a test saying so.
+19b. The backfill response carries `watermark` and **no** second log
+    position: no `asOf`, no dated page. A dead field on the wire is a field
+    slice 2 reads.
+20. A walk's `watermark` is the same number on every page, so adopting it
+    from a later page cannot silently skip ops.
 21. A boot reinstalls the host tables' triggers, so one dropped by a later
     migration that rebuilt its table is repaired rather than silently absent.
 22. `sync_log.id` is `AUTOINCREMENT` in the DDL *and* in the Drizzle mirror,
@@ -545,12 +646,18 @@ the detail rows that point at them.
 - `PRAGMA recursive_triggers = ON` now applies to every trigger in the
   database, not only these. Nothing else defines one today.
 - A fourth plugin gets no client UI for free. §3.6 accepts that.
-- **Slice 2 carries one obligation the server cannot enforce**: §5.3's apply
-  rule, that a backfill page is applied only while the client's tail cursor
-  has not passed the page's `asOf`. Everything else about convergence is the
-  server's. A client that ignores it converges on current state for every row
-  except one modified or deleted while a page was in flight, which it holds
-  stale or resurrected for as long as that install exists.
+- **Slice 2 carries two obligations the server cannot enforce**, both in
+  §5.3: a `create` never overwrites a row the client already holds, and a
+  `delete` tombstones the row rather than removing it. Everything else about
+  convergence is the server's. A client that skips the first holds a stale
+  value for any row modified while a page was in flight; one that skips the
+  second holds a resurrected row for any row deleted while a page was in
+  flight. Either lasts as long as that install exists.
+- **A client's replica accumulates a tombstone per row ever deleted under
+  it**, which is what the second obligation costs. Bounded by deletions
+  rather than changes, and nothing here reclaims them; ageing them out is
+  slice 2's call, and it cannot be done by forgetting a tombstone whose row a
+  walk still in progress may yet `create`.
 - The client must run both cursors concurrently. Running them in sequence is
   correct but defeats the design: a client would see nothing new until its
   whole history had replicated. §5 states this structurally so slice 2 cannot

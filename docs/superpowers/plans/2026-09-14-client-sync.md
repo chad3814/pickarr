@@ -1480,19 +1480,26 @@ that followed the whole-branch review — read the spec
 (`docs/superpowers/specs/2026-09-14-client-sync-design.md` §5, §6) for the
 current shapes, not these.
 
-1. **`SyncOp` carries `id` on every op**, upsert as well as delete (Task 5's
-   and Task 6's `{ op, table, value }` upsert is now
+1. **`SyncOp` carries `id` on every op**, whatever its kind (Task 5's and
+   Task 6's `{ op, table, value }` upsert is now
    `{ op, table, id, value }`). Nothing keyed a plugin upsert before: the
    host's own projections include `id` in the row they return, no plugin read
    shape does, so the wire format worked for six tables and silently failed
    for six others.
-2. **`backfillBefore`'s cursor carries the walk's watermark**, and the page
-   carries a second log position: `before: { createdAt, id, watermark } |
-   null` and `{ ops, cursor, watermark, asOf }`. The wire cursor is
-   `<createdAt>.<id>.<watermark>`. The walk also omits any row whose
-   `sync_log` entry is above the watermark, because the tail owns it. Spec
-   §5.3 has the interleaving that forced this and the apply rule `asOf`
-   exists for.
+1a. **`SyncOp.op` is `'create' | 'upsert' | 'delete'`.** The backfill emits
+   `create`, the tail emits `upsert` or `delete`. A client applies a `create`
+   only for a row it does not already hold, and a `delete` tombstones rather
+   than removes. That pair of rules is what makes the two cursors safe to
+   apply in either order; spec §5.3 states both obligations and what breaks
+   without them.
+2. **`backfillBefore`'s cursor carries the walk's watermark**:
+   `before: { createdAt, id, watermark } | null` and
+   `{ ops, cursor, watermark }`. The wire cursor is
+   `<createdAt>.<id>.<watermark>` and a two-part `before` is a 400. The walk
+   also omits any row whose `sync_log` entry is above the watermark, because
+   the tail owns it. A short-lived intermediate design added a per-page
+   `asOf` and an apply rule comparing it against the client's tail cursor;
+   item 1a replaced both, and no `asOf` is on the wire.
 3. **`main.ts` calls `installSyncTriggers(raw, HOST_SYNCED_TABLES)` after
    `migrateHost`**, on every boot. Task 1 installed the host's triggers only
    inside `migration15`, which `migrateHostWith` skips once version 15 is

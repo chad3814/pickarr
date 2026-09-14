@@ -86,13 +86,14 @@ export function syncAnswer(
  * **The watermark is part of the cursor, not a separate parameter, so a
  * client cannot resume a walk without it.** `backfillBefore` skips any row
  * the tail owns -- one whose `sync_log` entry sits above the watermark the
- * walk started from -- and that is what keeps the two streams disjoint, so a
- * page can never overwrite a newer value the tail already delivered. A
- * second query parameter would be droppable, and dropping it would silently
- * re-overlap the streams; one opaque token cannot be half supplied. Three
- * parts are required for the same reason a two-part `before` is refused
- * below rather than defaulted: this route has no safe "start from the
- * beginning" reading of a cursor that was actually supplied.
+ * walk started from -- which is what keeps the two streams disjoint, and
+ * holding the mark constant across the walk is what lets a client adopt it
+ * from any page rather than only the first. A second query parameter would
+ * be droppable, and dropping it would silently re-overlap the streams and
+ * make the returned watermark rise per page; one opaque token cannot be half
+ * supplied. Three parts are required for the same reason a two-part `before`
+ * is refused below rather than defaulted: this route has no safe "start from
+ * the beginning" reading of a cursor that was actually supplied.
  */
 function parseBeforeCursor(raw: string): BackfillCursor | null {
   const parts = raw.split('.');
@@ -119,14 +120,19 @@ function encodeBeforeCursor(cursor: BackfillCursor): string {
  * but does not parse is refused all the same, for the reason this module's
  * doc gives.
  *
- * The body carries two log positions and they are not the same number.
- * `watermark` is where the client starts its tail: the first page's
- * high-water mark, carried forward by the cursor, so adopting it from any
- * page of the walk adopts page 1's and skips nothing. `asOf` dates *this*
- * page -- the client may apply the page only while its tail cursor has not
- * passed `asOf`, and must otherwise discard it and refetch with the same
- * `before`. `backfillBefore`'s own doc has the measurements for why a
- * stateless server cannot replace that check with anything it does itself.
+ * The body carries one log position, `watermark`: where the client starts
+ * its tail. It is the first page's high-water mark, carried forward by the
+ * cursor, so adopting it from any page of the walk adopts page 1's and skips
+ * nothing.
+ *
+ * **There is deliberately no second number dating the page.** Every op this
+ * route returns is a `create`, which a client applies only if it does not
+ * already hold the row, and the tail's `delete` tombstones rather than
+ * removes -- so a page read before a write and applied after it is a no-op
+ * rather than an overwrite or a resurrection, with nothing for the client to
+ * compare. An earlier draft returned an `asOf` per page and asked the client
+ * to check it against its own tail cursor; `sync/tail.ts`'s `SyncOp` has why
+ * the op kind replaced it.
  */
 export function backfillAnswer(
   deps: { raw: DatabaseSync; registry: SyncRegistry },
@@ -147,6 +153,5 @@ export function backfillAnswer(
     ops: page.ops,
     cursor: page.cursor === null ? null : encodeBeforeCursor(page.cursor),
     watermark: page.watermark,
-    asOf: page.asOf,
   });
 }
