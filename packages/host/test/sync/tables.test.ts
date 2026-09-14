@@ -113,3 +113,74 @@ test('readHostRows refuses a table outside HOST_SYNCED_TABLES', () => {
   migrateHost(raw);
   assert.throws(() => readHostRows(raw, 'secret', [1]), /secret/);
 });
+
+test('readHostRows never projects a path, a url or a credential-bearing column', () => {
+  // Regression coverage for two review findings: `storage_path` is a
+  // filesystem path (schema.ts's own words), and `link`/`guid` can carry a
+  // private tracker's passkey (`api/server.ts`'s module doc; `guid` falls
+  // back to `link` verbatim in `feeds/parse-rss.ts` when a feed omits its
+  // own `<guid>`). `last_error` is redacted of a credential's *value* only
+  // (`clients/redact.ts`'s `redactUrl`), not of the url or path around it.
+  // Every value below is deliberately shaped like the thing that must never
+  // reach a client, so a regression that reintroduces any of them fails on
+  // its actual content, not only on the key existing.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
+    VALUES (1, 'sab', 'sabnzbd', 'http://localhost:8080', 'movies', 'move', 10, 10)
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_feed (id, plugin_id, name, url, download_client_id, created_at, updated_at, download_type)
+    VALUES (1, 'tv', 'a feed', 'https://example.test/feed?apikey=shh', 1, 10, 10, 'torrent')
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_item (
+      id, feed_id, filename, link, guid, created_at, updated_at, download_type, resolution
+    ) VALUES (
+      1, 1, 'The.Grid.mkv', 'https://tracker.example/dl?passkey=abc123', 'https://tracker.example/dl?passkey=abc123',
+      10, 20, 'torrent', '1080p'
+    )
+  `).run();
+  raw.prepare(`
+    INSERT INTO torrent_download (
+      id, rss_item_id, download_client_id, status, last_error, storage_path, created_at, updated_at
+    ) VALUES (
+      1, 1, 1, 'failed', 'connect to http://tracker.example/announce?apikey=***: /downloads/incomplete/x.mkv not writable',
+      '/downloads/incomplete/x.mkv', 10, 20
+    )
+  `).run();
+  raw.prepare(`
+    INSERT INTO nzb_download (
+      id, rss_item_id, download_client_id, status, last_error, storage_path, created_at, updated_at
+    ) VALUES (
+      1, 1, 1, 'failed', 'connect to http://sab.example/api?apikey=***: /downloads/incomplete/y.nzb not writable',
+      '/downloads/incomplete/y.nzb', 10, 20
+    )
+  `).run();
+
+  const rssItem = readHostRows(raw, 'rss_item', [1])[1] as Record<string, unknown>;
+  assert.deepEqual(Object.keys(rssItem).toSorted(), [
+    'created_at', 'delivered_at', 'download_type', 'feed_id', 'filename',
+    'id', 'media_item_id', 'ranking_score', 'resolution', 'resolution_detail', 'updated_at',
+  ]);
+  assert.ok(!('link' in rssItem), 'rss_item.link must never be projected');
+  assert.ok(!('guid' in rssItem), 'rss_item.guid must never be projected');
+
+  const torrent = readHostRows(raw, 'torrent_download', [1])[1] as Record<string, unknown>;
+  assert.deepEqual(Object.keys(torrent).toSorted(), [
+    'absent_since', 'attempts', 'client_ref', 'created_at', 'delivered_at', 'download_client_id',
+    'id', 'infohash', 'percentage', 'reclaimed_at', 'rss_item_id', 'status', 'updated_at',
+  ]);
+  assert.ok(!('storage_path' in torrent), 'torrent_download.storage_path must never be projected');
+  assert.ok(!('last_error' in torrent), 'torrent_download.last_error must never be projected');
+
+  const nzb = readHostRows(raw, 'nzb_download', [1])[1] as Record<string, unknown>;
+  assert.deepEqual(Object.keys(nzb).toSorted(), [
+    'absent_since', 'attempts', 'client_ref', 'created_at', 'delivered_at', 'download_client_id',
+    'id', 'percentage', 'reclaimed_at', 'rss_item_id', 'status', 'updated_at',
+  ]);
+  assert.ok(!('storage_path' in nzb), 'nzb_download.storage_path must never be projected');
+  assert.ok(!('last_error' in nzb), 'nzb_download.last_error must never be projected');
+});
