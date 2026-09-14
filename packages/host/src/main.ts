@@ -39,6 +39,7 @@ import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { assertOriginOnly } from './origin.ts';
 import { envNameFor } from './secrets/names.ts';
+import { createSyncRegistry } from './sync/registry.ts';
 
 /**
  * A log line's structured half, as `key=value` pairs.
@@ -738,6 +739,12 @@ export async function main(
 
   for (const plugin of plugins) host.register(plugin);
 
+  // After every `register`, never before: `createSyncRegistry` checks each
+  // declared table's primary key against the real schema
+  // (`assertIntegerIdKey`), and a plugin's own tables do not exist until its
+  // migrations have run inside `register` above.
+  const registry = createSyncRegistry(raw, plugins);
+
   const recovered = host.start();
   const feedIds = scheduleKnownFeeds(host, raw);
   const clientIds = await scheduleKnownDownloadClients(host, raw);
@@ -745,6 +752,7 @@ export async function main(
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
+    registry,
     host: settings.readHost,
     port: settings.port,
     // Built from the address the listener bound rather than here, because

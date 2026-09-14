@@ -11,6 +11,7 @@ import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
+import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer } from '../../src/api/server.ts';
 import { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, ROUTES, createReadServer } from '../../src/api/server.ts';
@@ -120,6 +121,11 @@ async function start(
   const server = await createReadServer({
     raw,
     pluginIdForType,
+    // No plugin in this file declares a synced table -- what `/api/sync` and
+    // `/api/sync/backfill` do with a real one is `sync-route.test.ts`'s.
+    // This file only needs the guard on both routes, which an empty registry
+    // answers just as well.
+    registry: createSyncRegistry(raw, []),
     host,
     port: 0,
     authFor: (baseURL) => createAuth({

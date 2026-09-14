@@ -199,6 +199,48 @@ test('registering a plugin applies its migrations', () => {
   assert.ok(names.has('alpha_thing'), 'migration was never applied');
 });
 
+test('plugin tables gain their triggers when the plugin is registered', () => {
+  const { raw, host } = setup();
+  const plugin = makePlugin({
+    id: 'alpha',
+    migrations: [{ version: 1, up: (db) => db.exec('CREATE TABLE alpha_thing (id INTEGER PRIMARY KEY, v TEXT)') }],
+    synced: [{
+      table: 'alpha_thing',
+      read: (rawHandle, ids) => {
+        void rawHandle;
+        void ids;
+        return {};
+      },
+      rowsFor: (rawHandle, mediaItemIds) => {
+        void rawHandle;
+        void mediaItemIds;
+        return [];
+      },
+    }],
+  });
+
+  host.register(plugin);
+
+  const present = new Set(
+    raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all()
+      .map((row) => String((row as { name: unknown }).name)),
+  );
+  for (const suffix of ['ins', 'upd', 'del']) {
+    assert.ok(present.has(`alpha_thing_sync_${suffix}`), `missing alpha_thing_sync_${suffix}`);
+  }
+
+  // Not just present, but wired: an insert against the plugin's own table
+  // must log through `sync_log` exactly as a host table's insert does --
+  // this is the property `installSyncTriggers` is called for, not merely
+  // that a trigger with the right name exists.
+  raw.prepare('INSERT INTO alpha_thing (id, v) VALUES (1, ?)').run('a');
+  const logged = raw.prepare('SELECT table_name, row_id, op FROM sync_log WHERE table_name = ?')
+    .get('alpha_thing') as { table_name: unknown; row_id: unknown; op: unknown } | undefined;
+  assert.ok(logged !== undefined, 'the insert must have logged a sync_log row');
+  assert.equal(Number(logged?.row_id), 1);
+  assert.equal(String(logged?.op), 'upsert');
+});
+
 test('new rss items are dispatched to the plugin owning their feed', async () => {
   const { raw, host } = setup();
 

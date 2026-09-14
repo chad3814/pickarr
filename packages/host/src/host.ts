@@ -10,6 +10,7 @@ import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
+import { installSyncTriggers } from './sync/log.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
 import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
 import { createReconcileHandler, scheduleReconcile as scheduleReconcileJob } from './clients/reconcile-job.ts';
@@ -500,6 +501,11 @@ export function createHost(deps: {
         throw new Error(`plugin "${plugin.id}" is already registered`);
       }
       migratePlugin(deps.raw, plugin.id, plugin.migrations);
+      // After the migration, not before: the tables it just created are what
+      // these triggers attach to. Idempotent (`DROP TRIGGER IF EXISTS` --
+      // `sync/log.ts`), so a plugin registered on every boot reinstalls its
+      // triggers rather than failing the second time.
+      installSyncTriggers(deps.raw, plugin.synced.map((table) => table.table));
       plugins.set(plugin.id, plugin);
       handlers.set(plugin.id, new Map(Object.entries(plugin.jobs)));
     },
