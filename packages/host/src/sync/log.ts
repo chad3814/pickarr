@@ -18,9 +18,19 @@ import type { DatabaseSync } from 'node:sqlite';
  * body is DDL, and SQLite binds no parameters there, so there is no
  * placeholder to put it in. That makes this function unsafe against an
  * arbitrary string -- safety here comes from the caller, not from anything
- * below this line. `assertSyncedTableName` in `packages/contract/src/sync.ts`
- * is what constrains the set of names that may reach this function; check
- * that it still does before trusting a new caller.
+ * below this line.
+ *
+ * Nothing validates that string today. The only caller is
+ * `installSyncTriggers` below, and its only caller is `migrate.ts`, which
+ * passes the hardcoded `HOST_SYNCED_TABLES` literal -- never a plugin-declared
+ * name. `assertSyncedTableName` in `packages/contract/src/sync.ts` exists and
+ * checks the shape a plugin's declaration must have, but nothing calls it yet;
+ * it has no route to this function. The registry in `sync/registry.ts` is
+ * what will close that gap, by running a plugin's declared table names
+ * through `assertSyncedTableName` before ever handing one to
+ * `installSyncTriggers`. Until that registry exists, check this comment
+ * against its actual callers before trusting that a plugin-declared name is
+ * validated anywhere on its way here.
  */
 export function syncTriggerSql(table: string): string {
   const [ins, upd, del] = syncedTriggerNames(table);

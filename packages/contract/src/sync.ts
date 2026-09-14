@@ -14,14 +14,26 @@ export interface SyncedTable<T> {
 const IDENTIFIER = /^[a-z][a-z0-9_]*$/;
 
 /**
- * Refuses a table a plugin may not claim.
+ * Refuses a table name that is malformed, or that does not carry the given
+ * plugin id as a prefix.
  *
- * Two checks, and the second is the load-bearing one. A plugin's tables must
- * carry its id as a prefix, which is the rule its migrations already follow --
- * that stops one plugin replicating another's rows, or the host's. And the
- * name must be a plain identifier, because it is interpolated into a trigger
- * body where SQLite binds no parameters (`sync/log.ts`), so a name is the one
- * place a plugin's declaration reaches SQL as text.
+ * Two checks. The name must be a plain identifier, because it is
+ * interpolated into a trigger body where SQLite binds no parameters
+ * (`sync/log.ts`), so a name is the one place a plugin's declaration reaches
+ * SQL as text -- that is the load-bearing one, refusing e.g.
+ * `tv_a; DROP TABLE media_item`. And it must carry `pluginId` as a prefix,
+ * the rule a plugin's migrations already follow.
+ *
+ * This checks shape and self-consistency only: given the *true* `pluginId`,
+ * does the table it names look like one that plugin owns. It cannot check
+ * more than that -- `packages/contract` has no business knowing the host's
+ * table names, or any other plugin's -- so on its own it does **not** stop a
+ * plugin claiming a table the host or another plugin already owns;
+ * `assertSyncedTableName('media', 'media_item')` passes, because `media_item`
+ * does carry `'media'` as a prefix. Refusing a table already owned elsewhere
+ * is checked separately, by `sync/registry.ts` in the host, which is where
+ * the host's own table names and every plugin's declared tables are actually
+ * gathered.
  */
 export function assertSyncedTableName(pluginId: string, table: string): void {
   if (!IDENTIFIER.test(table)) {
