@@ -18,7 +18,7 @@ Nothing here has a user interface, and everything here is testable without one.
   **concurrently**: a tail of log ops from the present, and a backwards walk
   through current state, newest group first.
 - Typed read shapes for the three categories: `tv`, `movie`, `xxx`.
-- Log compaction: one op per `(table, row_id)`, safe for every live cursor.
+- A log that collapses on write: one row per changed row, no compaction job.
 
 ## 2. Facts, measured rather than assumed
 
@@ -99,6 +99,26 @@ beat extending the existing keyset-cursor pattern to more tables.
 `movie_detail` all have `created_at` and `updated_at`. None has an index on
 `(created_at, id)`, which §4 adds for the backfill's keyset paging.
 
+**2.10 Collapsing on write costs 0.9 µs and removes the compaction job.**
+40,000 updates over 5,000 distinct rows, each changed eight times:
+
+| Trigger | Elapsed | Log rows |
+|---|---|---|
+| none | 21 ms | 0 |
+| append one row per change | 115 ms | **40,000** |
+| delete the row's entry, then insert | 151 ms | **5,000** |
+
+0.9 µs per write buys a log proportional to *rows changed* rather than
+*changes made*, and no compaction job at all. The trigger's `DELETE` seeks:
+`SEARCH sync_log USING INDEX sync_log_row (tbl=? AND row_id=?)`.
+
+**An upsert does not work here, and the reason is why this is written as
+delete-then-insert.** With `UNIQUE (table_name, row_id)` and
+`ON CONFLICT DO UPDATE`, the row keeps its original id — measured, id 1 before
+and id 1 after a second change. A client already past id 1 would never see
+that change. Delete-then-insert allocates a fresh id (1 → 3), which is the
+whole point.
+
 **2.8 The truncate optimisation does not skip delete triggers.** Measured:
 `DELETE FROM t` with no `WHERE` fired 3 of 3 delete triggers, as did
 `DELETE FROM t WHERE 1=1`. SQLite disables the optimisation when a delete
@@ -140,8 +160,8 @@ proposal. It buys exact history and smaller payloads, and costs
 twice, and a retention policy.
 *What it buys here, and this is the load-bearing property:* **delivering an
 op twice is a no-op.** Every guarantee in §5 — a backfill without snapshot
-isolation, backfill concurrent with the live tail, compaction without a
-horizon — follows from that single fact. With diffs, none of them hold.
+isolation, backfill concurrent with the live tail, a self-collapsing log with
+no horizon — follows from that single fact. With diffs, none of them hold.
 
 **3.2 An empty client is populated from current state, never from the log.**
 A new client is not replayed history; it is served one create per live row by
@@ -168,14 +188,21 @@ measured that SQLite reuses the rowids of deleted rows, so id order is not
 chronological.
 Anything touched during the backfill arrives on the live tail regardless.
 
-**3.5 Compaction keeps the newest op per `(table, row_id)`, and needs no
-horizon.** The surviving op has the highest id for that row, so every client
-whose cursor sits below it still receives it, and every client above it
-already has it. Compaction is therefore safe for all live cursors at once.
-*Consequence:* **no client ever needs re-bootstrapping.** Only a genuinely
-empty client bootstraps. An earlier draft of this design claimed retention
-would force lagging clients to re-snapshot; that is false for this scheme and
-the claim is recorded here so it is not reintroduced.
+**3.5 The log collapses on write, so there is no compaction job.** Each
+trigger deletes the row's existing entry and inserts a fresh one, so
+`sync_log` holds exactly one row per changed row, always.
+*Rejected:* appending one row per change and collapsing at read time with a
+`GROUP BY`, plus a periodic compaction job. §2.10 measured the trade: 0.9 µs
+per write against a log eight times larger in that scenario and unboundedly
+larger as change counts grow, a `GROUP BY` on every tail query, and a
+maintenance job that must itself be proven safe for live cursors.
+*Rejected:* an upsert on `(table_name, row_id)`, which leaves the id
+unchanged and so hides the change from any client already past it (§2.10).
+*Consequence:* **no client ever needs re-bootstrapping.** The surviving entry
+for a row always has the highest id that row has ever had, so every client
+below it receives it and every client above it already has it. An earlier
+draft of this design claimed retention would force lagging clients to
+re-snapshot; that was false then and there is now no retention at all.
 
 **3.6 Typed read shapes per category, not declarative field descriptors.**
 Each plugin exposes a concrete read type; the client gets hand-written views
@@ -229,10 +256,11 @@ synced tables; any UI.
 ```sql
 CREATE TABLE sync_log (
   -- AUTOINCREMENT, unlike every other table in this schema, and deliberately.
-  -- Compaction deletes rows from this table; a bare INTEGER PRIMARY KEY would
-  -- then hand the freed id to the next op, and a client past that id would
-  -- never see it. Measured in the design spec section 2.1. Do not "tidy" this
-  -- to match the other tables.
+  -- Every change deletes this row's previous entry and inserts a new one, so
+  -- a bare INTEGER PRIMARY KEY would hand the freed id straight back --
+  -- constantly, not occasionally -- and a client past that id would never see
+  -- the change. Measured in the design spec sections 2.1 and 2.10. Do not
+  -- "tidy" this to match the other tables.
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   table_name TEXT NOT NULL,
   row_id     INTEGER NOT NULL,
@@ -240,11 +268,10 @@ CREATE TABLE sync_log (
   at         INTEGER NOT NULL
 );
 
--- Serves compaction, which finds the older ops for a row it can drop. The
--- tail's own query is a primary-key range scan (`id > ?`) with a GROUP BY,
--- which this index does not serve -- an earlier draft of this comment claimed
--- it did.
-CREATE INDEX sync_log_row ON sync_log (table_name, row_id);
+-- UNIQUE, and on the hot write path: every trigger deletes through it before
+-- inserting, so the log holds one row per changed row. Measured to seek:
+-- SEARCH sync_log USING INDEX sync_log_row (table_name=? AND row_id=?).
+CREATE UNIQUE INDEX sync_log_row ON sync_log (table_name, row_id);
 ```
 
 `db/open.ts` gains one pragma beside the existing `journal_mode = WAL`:
@@ -262,10 +289,13 @@ Per synced table, three triggers the host generates:
 
 ```sql
 CREATE TRIGGER <t>_sync_ins AFTER INSERT ON <t> BEGIN
+  DELETE FROM sync_log WHERE table_name = '<t>' AND row_id = NEW.id;
   INSERT INTO sync_log (table_name, row_id, op, at) VALUES ('<t>', NEW.id, 'upsert', <now>); END;
 CREATE TRIGGER <t>_sync_upd AFTER UPDATE ON <t> BEGIN
+  DELETE FROM sync_log WHERE table_name = '<t>' AND row_id = NEW.id;
   INSERT INTO sync_log (table_name, row_id, op, at) VALUES ('<t>', NEW.id, 'upsert', <now>); END;
 CREATE TRIGGER <t>_sync_del AFTER DELETE ON <t> BEGIN
+  DELETE FROM sync_log WHERE table_name = '<t>' AND row_id = OLD.id;
   INSERT INTO sync_log (table_name, row_id, op, at) VALUES ('<t>', OLD.id, 'delete', <now>); END;
 ```
 
@@ -290,10 +320,12 @@ is shaped the way it is.
 
 ### 5.1 Tail — `GET /api/sync?since=<logId>`
 
-Ops above `since`, collapsed to the newest per `(table_name, row_id)`, each
-resolved to current state: a row that still exists becomes an `upsert`
-carrying it, a row that does not becomes a `delete`. A client far behind
-therefore receives one op per changed row, not one per change.
+Ops above `since`, ordered by id, each resolved to current state: a row that
+still exists becomes an `upsert` carrying it, a row that does not becomes a
+`delete`. No collapse is needed at read time — §3.5 collapsed on write, so
+the log already holds one entry per changed row. A client far behind
+therefore receives one op per changed row, not one per change, and the query
+is a primary-key range scan.
 
 ```json
 {"op":"upsert","table":"media_item","value":{ "id":123, … }}
@@ -332,8 +364,9 @@ Every case reduces to ops being idempotent (§3.1):
 | a row is **deleted** after the walk sent it | sent | delete op > `W` | removed |
 
 A client interrupted mid-backfill and resuming days later keeps both cursors:
-its `W` is stale but still valid, because compaction keeps the newest op per
-row and every op above `W` for a changed row survives (§3.5).
+its `W` is stale but still valid, because the log keeps only the newest entry
+per row and that entry always has the highest id that row has ever had, so it
+sits above `W` whenever the row changed after `W` (§3.5).
 
 ## 6. The contract change
 
@@ -363,10 +396,13 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
 
 ## 7. What the tests must prove
 
-1. `sync_log.id` is never reused after compaction deletes rows — the §2.1
-   measurement, as a test.
-2. A client at cursor `N` receives every op with id greater than `N`, across a
-   compaction that removes older ops for the same rows.
+1. `sync_log.id` is never reused, though every change deletes a log row — the
+   §2.1 and §2.10 measurements, as a test.
+2. A row changed twice gets a *higher* id the second time, and a client whose
+   cursor sits between the two receives it. This is the assertion that fails
+   if anyone rewrites the trigger as an upsert.
+2a. `sync_log` holds exactly one row per changed row after N changes to M
+   rows — the collapse-on-write property, asserted by count.
 3. Delivering the same op twice leaves the replica identical — idempotence,
    which everything else rests on.
 4. A row changed during the backfill is delivered by the tail, whether or not
@@ -384,8 +420,8 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
    `sqlite_master` against the declared set, so a table added without them
    fails the suite rather than diverging a client.
 10. A plugin declaring a table without its id as prefix is refused.
-11. The tail collapses: one op per row for a client far behind, not one per
-    change.
+11. The tail returns one op per row for a client far behind, not one per
+    change — now a property of the log's shape rather than of the query.
 12. A trigger fires for a write made through the Drizzle handle as well as raw
     SQL — the host writes both ways.
 13. `details_json` does not appear in any served read shape.
@@ -404,11 +440,12 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
   is what makes a plain integer safe. A worker thread or a second process
   writing to this database reintroduces the commit-order gap, and the symptom
   is a client quietly missing rows. Re-read this before adding one.
-- Every write in the host now costs 1.4 µs more, and every write produces a
-  log row. The log is the fastest-growing table in the database until
-  compaction runs.
-- Compaction is required for size, not for correctness. Nothing breaks if it
-  never runs; the log simply grows.
+- Every write in the host now costs about 2.3 µs more and rewrites one
+  `sync_log` row.
+- There is no compaction job. The log is bounded by the number of rows that
+  have ever changed, not by how often they changed.
+- Every write now performs a delete as well as an insert against `sync_log`.
+  Measured at 0.9 µs on top of the trigger's own 1.4 µs.
 - A client that has never synced pays a full pass over current state. At
   today's volume — ~20,000 rows, 6.84 MB — that is a handful of pages.
 - The one case §3.8 does not cover: deep-linking to an item older than the
