@@ -153,3 +153,39 @@ test('a partial answer that is also refused still polls -- partial is read first
   assert.equal(harness.enqueued[0]?.kind, POLL_JOB);
   assert.equal(harness.media.resolutions.size, 0);
 });
+
+/**
+ * The one write the resolved path does not own.
+ *
+ * `lookup_id` is recorded at the top of `applyEnvelope`, before the branch
+ * decides anything, so an item that ended `refused` or `unresolved` — or one
+ * still polling — carries the service's own id too. Written only on the
+ * resolved path, as it first was, the column was null for exactly the rows
+ * anyone asks a support question about, which is the opposite of what §4.1
+ * says it is for.
+ *
+ * This test exists to stop that statement being deleted as dead weight: every
+ * case below reads null without it, and the resolved path's own row update
+ * covers none of them.
+ */
+test('every outcome records the service lookup id, not only the resolved one', async () => {
+  const cases = [
+    { outcome: 'refused', envelope: refusedEnvelope({ lookupId: 'lookup-refused', refusal: 'a subtitle' }) },
+    { outcome: 'unresolved', envelope: unresolvedEnvelope({ lookupId: 'lookup-unresolved' }) },
+    { outcome: 'pending', envelope: pendingEnvelope({ lookupId: 'lookup-pending' }) },
+    { outcome: 'partial', envelope: partialEnvelope({ lookupId: 'lookup-partial' }) },
+  ];
+
+  for (const { outcome, envelope } of cases) {
+    const { harness, deps, rssItemId } = fixture();
+    // eslint-disable-next-line no-await-in-loop -- each case owns a fresh in-memory database, so there is nothing here for a parallel run to overlap
+    await applyEnvelope(envelope, { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
+    const row = harness.raw
+      .prepare(`SELECT lookup_id, updated_at FROM ${PLUGIN_ID}_lookup WHERE rss_item_id = ?`)
+      .get(rssItemId);
+    // Single columns read off a row, so no prototype is involved and these
+    // need no normalising — see `rows()` in the flow test for the other case.
+    assert.equal(row?.['lookup_id'], envelope.lookupId, `the ${outcome} outcome records its lookup id`);
+    assert.equal(row?.['updated_at'], NOW, `the ${outcome} outcome stamps the row from the injected clock`);
+  }
+});
