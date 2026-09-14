@@ -185,11 +185,18 @@ stays invisible. So a rebuild that leaves a table's rows unindexed is the same d
 one that leaves it untriggered, and it has the same symptom: a client that never sees
 those rows, with nothing failing.
 
-Skip the relog only when the rebuild left every row's visible content identical *and*
-every row kept its `sync_log` entry — a `RENAME COLUMN` or an `ADD COLUMN`, which touch
-neither. A `DROP TABLE`/rename rebuild keeps the row ids but the entries still point at
-live rows, so the log stays a correct index and a relog would cost every client a full
-re-read for nothing.
+Skip the relog when the rebuild left every row's visible content identical. Nothing
+deletes a `sync_log` row except a trigger and the seed, so a rebuild that preserves row
+ids leaves the log a correct index of which rows exist whatever else it changed — and
+relogging 20,000 unchanged rows costs every client a full re-read for nothing.
+
+**A rebuild that drops rows is fine; one that renumbers them is already forbidden.**
+Entries naming a row id the new table does not have resolve to nothing: the backfill
+skips them, which costs a little page density, and the tail sends a `delete` — right for
+a client that holds the row and harmless for one that does not. An entry naming a
+*reused* id is the shape that would actually break, because the log would then index the
+wrong row — which is the replication half of "a row's `id` is immutable" above, and the
+reason that rule is stated as a rule rather than as advice.
 
 ### Why the triggers are not simply reinstalled from scratch each boot
 

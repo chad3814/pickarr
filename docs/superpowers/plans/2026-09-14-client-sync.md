@@ -10,6 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-14-client-sync-design.md` — read it with this plan. Section numbers below cite it.
 
+> **The backfill half of this plan was replaced after it was executed, and this
+> file is left as the record of what was planned rather than rewritten.** The
+> backfill now walks `sync_log` backwards and hydrates each entry from current
+> state instead of paging `media_item` on a `(created_at, id)` keyset. So the
+> six `<t>_created` indexes this plan creates are deleted, `SyncedTable.rowsFor`
+> is off the contract, `tailOwns` and the per-page watermark are gone, and
+> `GET /api/sync/bootstrap` is new. The spec is current; where the two disagree
+> the spec wins, and §3.2 records what measuring the log walk showed.
+
 ## Global Constraints
 
 - Never the `any` type. Never a cast to silence a type error.
