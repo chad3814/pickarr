@@ -96,18 +96,59 @@ Measured on SQLite 3.53.4 through `node:sqlite`, not assumed:
 | `ADD COLUMN` | survive | yes |
 | `DROP COLUMN` (one no trigger names) | survive | yes |
 | `RENAME COLUMN` | survive, bodies rewritten | yes |
-| `RENAME TABLE` | survive, `ON <new name>` rewritten | **logs under the old name** |
+| `RENAME TABLE` | survive, `ON <new name>` rewritten | **logs under the old name, and twice once you reinstall** |
 | create-copy-drop-rename rebuild | **gone** | **no** |
 
 Two of those rows need spelling out.
 
-**`RENAME TABLE` is the subtle one.** SQLite rewrites the trigger's `ON <table>` clause
-to the new name, so the trigger still fires — but the table name inside the body is a
-*string literal*, and SQLite does not rewrite string literals. So after
-`ALTER TABLE media_item RENAME TO media_row`, the triggers happily write
-`table_name = 'media_item'` for every change. The tail skips entries naming a table it
-does not know and advances its cursor past them, so those changes are not merely
-delayed — they are consumed and discarded.
+**`RENAME TABLE` is the subtle one, and it goes wrong twice.** SQLite rewrites the
+trigger's `ON <table>` clause to the new name, so the trigger still fires — but the
+table name inside the body is a *string literal*, and SQLite does not rewrite string
+literals. So after `ALTER TABLE media_item RENAME TO media_row`, the triggers happily
+write `table_name = 'media_item'` for every change. The tail skips entries naming a
+table it does not know and advances its cursor past them, so those changes are not
+merely delayed — they are consumed and discarded.
+
+Reinstalling does not repair that; it *doubles* it. `installSyncTriggers` drops each
+trigger by name before creating it, and the surviving triggers are still called
+`media_item_sync_ins`/`_upd`/`_del` — the rename does not rename them either. So
+`installSyncTriggers(db, ['media_row'])` drops `media_row_sync_*`, which do not exist,
+creates them, and leaves the old three firing alongside. Measured:
+
+```
+after ALTER TABLE plug RENAME TO plug2:
+  sqlite_master triggers plug_sync_ins/upd/del, tbl_name = plug2
+after installSyncTriggers(db, ['plug2']) and one INSERT:
+  [1: plug2/7 upsert, 2: plug/7 upsert]
+```
+
+Every write to the renamed table produces two log entries for the rest of that
+database's life. The `plug/*` half names a table no registry knows, so both cursors
+skip it and advance — correct, and it permanently consumes page budget and doubles the
+log. `syncTriggerSql`'s "`DROP TRIGGER IF EXISTS` first, so installation is idempotent"
+is true only for the same *name*.
+
+**So the rule for a direct rename is: drop the old triggers by name first, then rename,
+then install the new ones.**
+
+```ts
+import { installSyncTriggers, syncedTriggerNames } from '../sync/log.ts';
+
+function migration16(db: DatabaseSync): void {
+  for (const name of syncedTriggerNames('media_item')) db.exec(`DROP TRIGGER IF EXISTS ${name}`);
+  db.exec('ALTER TABLE media_item RENAME TO media_row');
+  installSyncTriggers(db, ['media_row']);
+}
+```
+
+The create-copy-drop-rename rebuild below does not need this: `DROP TABLE old` takes the
+old triggers with it, so by the time the rename runs there is nothing left to inherit.
+It is the *direct* rename, with no drop in it, that leaves them behind.
+
+And note the wider consequence: renaming a synced table changes the `table_name` every
+client has keyed its replica under, which is not something a trigger reinstall can fix
+at either end. Treat a rename of a synced table as a client-visible schema change, not
+as housekeeping.
 
 **The rebuild is the dangerous one, and it is dangerous in three ways.** `DROP TABLE`
 takes the triggers with it. It does *not* fire the `AFTER DELETE` trigger for the rows it

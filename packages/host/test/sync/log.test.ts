@@ -130,6 +130,48 @@ test('every named trigger exists after installation', () => {
   for (const name of syncedTriggerNames('probe')) assert.ok(present.has(name), `missing ${name}`);
 });
 
+test('a renamed table logs twice until the old triggers are dropped by name', () => {
+  // `ALTER TABLE ... RENAME TO` rewrites a trigger's `ON <table>` clause and
+  // renames neither the trigger nor the string literal in its body. So the
+  // old triggers keep firing under the old table_name, and
+  // `installSyncTriggers` -- which drops only the names it is about to
+  // create -- adds a second set beside them rather than replacing them.
+  // Every write then logs twice, for the rest of that database's life.
+  // `docs/database-migrations.md` carries the rule this pins.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.exec('CREATE TABLE plug (id INTEGER PRIMARY KEY, v TEXT)');
+  installSyncTriggers(raw, ['plug']);
+  raw.exec('ALTER TABLE plug RENAME TO plug2');
+  assert.deepEqual(
+    raw.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'plug%'").all()
+      .map((r) => `${String((r as { name: unknown }).name)}@${String((r as { tbl_name: unknown }).tbl_name)}`),
+    ['plug_sync_ins@plug2', 'plug_sync_upd@plug2', 'plug_sync_del@plug2'],
+    'the rename moves the triggers to the new table and leaves their names and bodies alone',
+  );
+
+  installSyncTriggers(raw, ['plug2']);
+  raw.exec("INSERT INTO plug2 (id, v) VALUES (7, 'x')");
+  assert.deepEqual(
+    raw.prepare('SELECT table_name, row_id FROM sync_log ORDER BY id').all()
+      .map((r) => `${String((r as { table_name: unknown }).table_name)}/${Number((r as { row_id: unknown }).row_id)}`),
+    ['plug2/7', 'plug/7'],
+    'one write, two entries -- the reinstall added a set rather than replacing one',
+  );
+
+  // The rule: drop the old triggers by name. Doing it after the fact repairs
+  // an existing database as well as it prevents a new one.
+  for (const name of syncedTriggerNames('plug')) raw.exec(`DROP TRIGGER IF EXISTS ${name}`);
+  raw.exec('DELETE FROM sync_log');
+  raw.exec("INSERT INTO plug2 (id, v) VALUES (8, 'y')");
+  assert.deepEqual(
+    raw.prepare('SELECT table_name, row_id FROM sync_log ORDER BY id').all()
+      .map((r) => `${String((r as { table_name: unknown }).table_name)}/${Number((r as { row_id: unknown }).row_id)}`),
+    ['plug2/8'],
+    'and one write is one entry again',
+  );
+});
+
 test('the seed logs one entry per live row, and nothing for a row that is gone', () => {
   // Rows inserted before the triggers exist, which is the state a migration
   // that created and populated a table in one step leaves behind.

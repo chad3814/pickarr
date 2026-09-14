@@ -25,14 +25,30 @@ import { readHostState, writeHostState } from '../db/host-state.ts';
  * the clients that need it. That is the alternative the delete-then-insert
  * rules out; freeing an id is not.
  *
- * `DROP TRIGGER IF EXISTS` first, so installation is idempotent, which is
- * what lets `main.ts` call `installSyncTriggers(raw, HOST_SYNCED_TABLES)` on
+ * `DROP TRIGGER IF EXISTS` first, so installation is idempotent **for the
+ * same table name**, which is what lets `main.ts` call
+ * `installSyncTriggers(raw, HOST_SYNCED_TABLES)` on
  * every boot immediately after `migrateHost`, and `host.ts`'s `register`
  * call it on every boot for each plugin's declared tables. Both really do
  * run per boot; the third call site does not. `db/migrate.ts`'s
  * `migration15` installs the host's six tables' triggers too, and
  * `migrateHostWith` skips that migration once version 15 is recorded, so on
  * an existing database the migration never runs again.
+ *
+ * **"For the same table name" is the whole of the qualification, and
+ * `ALTER TABLE ... RENAME TO` is what walks through it.** The rename rewrites
+ * a trigger's `ON <table>` clause and renames neither the trigger nor the
+ * `table_name` string literal in its body, so the old three keep firing under
+ * the old name -- and because the names below are derived from the table,
+ * installing for the *new* name drops three triggers that do not exist and
+ * creates a second set beside the surviving ones. Measured: after
+ * `ALTER TABLE plug RENAME TO plug2` and `installSyncTriggers(raw, ['plug2'])`
+ * one insert logs `[1: plug2/7 upsert, 2: plug/7 upsert]`, and does so for
+ * the rest of that database's life. Drop the old triggers by name -- that is
+ * what `syncedTriggerNames` is exported for -- before renaming.
+ * `docs/database-migrations.md` has the rule and
+ * `test/sync/log.test.ts` pins it. The create-copy-drop-rename rebuild is
+ * safe: `DROP TABLE` takes the old triggers with it.
  *
  * **The per-boot reinstall is defensive, not corrective: a trigger does not
  * need reinstalling in order to work.** Measured on SQLite 3.53.4 -- a
