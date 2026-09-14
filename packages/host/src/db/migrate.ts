@@ -897,16 +897,21 @@ const MIGRATION_15_DDL = `
  * The DDL above creates `sync_log` empty and the triggers only log a row that
  * changes afterwards, so without this a client cursor that walks the log
  * backwards would serve none of the rows an existing database already holds,
- * permanently. `seedSyncLog`'s own doc has why the `DELETE` in it is both
- * required and load-bearing, and `docs/database-migrations.md`'s section on
- * rebuilding a synced table documents the same repair for the same reason.
+ * permanently. `seedSyncLog`'s own doc has why it has no `DELETE`, and
+ * `docs/database-migrations.md`'s section on rebuilding a synced table has the
+ * *other* statement -- `relogSyncedTables` -- for the different job of
+ * announcing that rows a client already holds have changed.
  *
  * **A development database that already ran version 15 will not run this
  * again**, because `migrateHostWith` skips a recorded version -- so its log
  * holds only what has changed since it migrated, and its oldest rows are
  * invisible to every client. There is no migration 16 for this: version 15 is
  * this branch's own and nothing upstream has applied it. Seed such a database
- * by hand, once, from a node REPL or a scratch script over the same handle:
+ * by hand, once, from a node REPL or a scratch script over the same handle.
+ * That call is safe on a database whose log already holds entries, including
+ * tombstones: it indexes the rows the log does not know about and touches
+ * nothing else. It was not safe while the seed deleted the table's entries
+ * first, which is the defect that shape shipped with on this branch.
  *
  * ```ts
  * import { seedSyncLog } from './packages/host/src/sync/log.ts';

@@ -2,7 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
-import { installSyncTriggers, seedSyncLog, seedSyncLogOnce, syncedTriggerNames } from '../../src/sync/log.ts';
+import {
+  installSyncTriggers,
+  relogSyncedTables,
+  seedSyncLog,
+  seedSyncLogOnce,
+  syncedTriggerNames,
+} from '../../src/sync/log.ts';
+import { createSyncRegistry } from '../../src/sync/registry.ts';
+import { tailSince } from '../../src/sync/tail.ts';
 
 const open = () => {
   const { raw } = openTestDatabase();
@@ -140,12 +148,41 @@ test('the seed logs one entry per live row, and nothing for a row that is gone',
     'one entry per row the table holds now -- the log indexes live rows, not history');
 });
 
-test('a reseed gives every row a higher log id, so a client already past the old entries re-reads them', () => {
-  // What puts the reseeded entries above any client's cursor is
-  // `AUTOINCREMENT`, not the `DELETE` -- the delete is there for
-  // `sync_log_row`'s unique index and frees no id, measured in `seedSyncLog`'s
-  // own doc. It is also why `seedSyncLogOnce` exists: doing this on every boot
-  // would make every client re-read the whole library on every restart.
+test('the seed leaves a tombstone alone, so a client below it is still told the row went away', () => {
+  // The blocking defect, end to end and through the real tail. The seed used
+  // to `DELETE FROM sync_log WHERE table_name = ?` and re-log live rows: a
+  // `delete` entry names a row the table no longer has, so the delete removed
+  // it and the `INSERT ... SELECT` could not put it back. Every client whose
+  // cursor sat below that entry kept the deleted row for good -- reachable on
+  // exactly the databases `seedSyncLogOnce`'s "absent means seed" guard was
+  // written for, since those have had triggers running and so may already hold
+  // tombstones.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  const addPerson = (id: number) => raw.prepare(
+    'INSERT INTO person (id, name, provider_ref, created_at, updated_at) VALUES (?, ?, ?, 1, 1)',
+  ).run(id, `p${id}`, `ref${id}`);
+
+  addPerson(1); addPerson(2); addPerson(3);
+  // The cursor a client that has fully synced all three holds.
+  const cursor = Number(raw.prepare('SELECT max(id) m FROM sync_log').get()?.m);
+  raw.prepare('DELETE FROM person WHERE id = 3').run();
+
+  seedSyncLogOnce(raw, ['person'], 999);
+
+  const delivered = tailSince(raw, registry, cursor, 100).ops;
+  assert.ok(
+    delivered.some((op) => op.op === 'delete' && op.table === 'person' && op.id === 3),
+    `the tombstone for person 3 must survive the seed, got ${JSON.stringify(delivered.map((o) => `${o.op}/${o.id}`))}`,
+  );
+});
+
+test('a reseed leaves every entry it already holds at the id it already has', () => {
+  // The seed indexes rows the log does not know about; it does not re-index.
+  // Re-reading a row a client already holds costs that client a full re-read
+  // for nothing, and the previous shape did it to every row of every table on
+  // the boot after a plugin's triggers were installed.
   const { raw } = openTestDatabase();
   migrateHost(raw);
   raw.exec(`
@@ -153,15 +190,44 @@ test('a reseed gives every row a higher log id, so a client already past the old
     INSERT INTO probe (id, v, created_at) VALUES (1, 'a', 1), (2, 'b', 1);
   `);
   seedSyncLog(raw, ['probe']);
-  const first = raw.prepare("SELECT max(id) m FROM sync_log WHERE table_name = 'probe'").get();
+  const entries = () => raw.prepare("SELECT id, row_id FROM sync_log WHERE table_name = 'probe' ORDER BY id").all()
+    .map((r) => `${Number((r as { id: unknown }).id)}:${Number((r as { row_id: unknown }).row_id)}`);
+  const first = entries();
+  assert.deepEqual(first, ['1:1', '2:2'], 'fixture: two rows, two entries');
 
+  // A third row arrives with no trigger to log it -- the case a second seed is
+  // actually for.
+  raw.exec("INSERT INTO probe (id, v, created_at) VALUES (3, 'c', 1)");
   seedSyncLog(raw, ['probe']);
-  const second = raw.prepare("SELECT min(id) m FROM sync_log WHERE table_name = 'probe'").get();
-  assert.ok(Number((second as { m: unknown }).m) > Number((first as { m: unknown }).m),
-    'every reseeded entry must sit above every entry the previous seed wrote');
+  assert.deepEqual(entries(), ['1:1', '2:2', '3:3'],
+    'the new row is indexed and the two already indexed keep their ids');
+});
 
-  const count = raw.prepare("SELECT count(*) c FROM sync_log WHERE table_name = 'probe'").get();
-  assert.equal(Number((count as { c: unknown }).c), 2, 'and the log still holds one entry per row, not two');
+test('the relog re-announces every live row and still leaves a tombstone alone', () => {
+  // `relogSyncedTables` is the other half, and it is not the seed: a rebuild
+  // that rewrote a column has to tell every client the content changed, so it
+  // does re-log live rows at fresh ids. Scoping its `DELETE` with
+  // `op != 'delete'` is what keeps it from taking the tombstones with them --
+  // `DROP TABLE` fires no delete trigger, so a row deleted before the rebuild
+  // still has its entry in the log and is still owed to a client below it.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.exec('CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT, created_at INTEGER NOT NULL)');
+  installSyncTriggers(raw, ['probe']);
+  raw.exec(`
+    INSERT INTO probe (id, v, created_at) VALUES (1, 'a', 1), (2, 'b', 1), (3, 'c', 1);
+    DELETE FROM probe WHERE id = 3;
+  `);
+  const top = Number(raw.prepare('SELECT max(id) m FROM sync_log').get()?.m);
+  assert.deepEqual(ops(raw), ['upsert:1', 'upsert:2', 'delete:3'], 'fixture: two live rows and one tombstone');
+
+  relogSyncedTables(raw, ['probe']);
+
+  assert.deepEqual(ops(raw), ['delete:3', 'upsert:1', 'upsert:2'],
+    'the tombstone stays, at the id it already had, and the two live rows are re-announced above it');
+  const relogged = raw.prepare("SELECT min(id) m FROM sync_log WHERE op = 'upsert'").get();
+  assert.ok(Number((relogged as { m: unknown }).m) > top,
+    'a re-announced row must land above every id the log held, or no client re-reads it');
 });
 
 test('seedSyncLogOnce seeds a table once and leaves the log alone on every boot after', () => {
@@ -200,5 +266,9 @@ test('seedSyncLogOnce still seeds a table whose log entries were written by a tr
   assert.deepEqual(ops(raw), ['upsert:2'], 'fixture: the log holds one entry and row 1 has none');
 
   seedSyncLogOnce(raw, ['probe'], 1000);
-  assert.deepEqual(ops(raw), ['upsert:1', 'upsert:2'], 'row 1 must be indexed too');
+  // Ordered by log id, so the order is itself the assertion: row 2's entry
+  // stays where the trigger put it and row 1's is appended above. The seed
+  // used to re-log both and would have answered `upsert:1, upsert:2` here.
+  assert.deepEqual(ops(raw), ['upsert:2', 'upsert:1'],
+    'row 1 must be indexed too, without moving the entry row 2 already had');
 });

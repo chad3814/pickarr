@@ -337,34 +337,62 @@ CREATE TRIGGER <t>_sync_del AFTER DELETE ON <t> BEGIN
 ```
 
 And, immediately after installing those triggers, one entry per row the table
-already holds:
+already holds **that the log does not already index**:
 
 ```sql
-DELETE FROM sync_log WHERE table_name = '<t>';
 INSERT INTO sync_log (table_name, row_id, op, at)
-  SELECT '<t>', id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM <t>;
+  SELECT '<t>', id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM <t>
+   WHERE id NOT IN (SELECT row_id FROM sync_log WHERE table_name = '<t>');
 ```
 
 **Without this the backfill serves nothing on any database that already has
 rows.** The triggers only log a row that changes after they exist, so a log
 created beside them indexes the changes since its creation — which is exactly
-not what §5.2 reads it as. The `DELETE` is required by `sync_log_row`'s UNIQUE
-index and by nothing else: what puts the seeded entries above every client's
-cursor is `AUTOINCREMENT`, which issues `max_ever + 1` and never reuses an id,
-with or without a delete in front of it. Measured — with the log holding ids
-1, 2 and 4 and rows 1 and 2 live, the seed produces ids **5 and 6**, not the
-freed 1 and 2, and `sqlite_sequence.seq` only ever increases. An earlier
-wording of this paragraph said the delete "frees the old `AUTOINCREMENT` ids",
-which contradicts the schema comment four screens up in this same section. On
-a fresh install both statements match nothing.
+not what §5.2 reads it as. On a fresh install the statement matches nothing.
+
+**There is no `DELETE`, and an earlier draft of this section had one —
+`DELETE FROM sync_log WHERE table_name = '<t>'` — which destroyed tombstones.**
+A `delete` entry names a row the table no longer has, so the delete removed it
+and the `INSERT … SELECT` over live rows could not put it back; every client
+below that entry kept the deleted row for good. Reproduced end to end: three
+rows logged at 1, 2, 3, the third deleted at 4, the seed leaving
+`5:upsert/1 6:upsert/2`, and a client at cursor 3 never told row 3 went away.
+Reachable on exactly the databases the `sync.seeded.<table>` guard below was
+written for, since those have had triggers running and so may already hold
+tombstones. The anti-join is also strictly better than deleting only the
+non-tombstones: it leaves every existing entry's id alone, so no client
+re-reads a row it already holds.
+
+It rests on one invariant — **no live row holds a `delete` entry** — which
+`sync_log_row`'s UNIQUE index plus the insert trigger's own delete-first
+guarantee: re-inserting a row at a deleted row's id replaces the tombstone
+with an `upsert`. Measured, `2:delete/3` becomes `3:upsert/3`.
+
+What puts a *seeded* entry above every client's cursor is `AUTOINCREMENT`,
+which issues `max_ever + 1` and never reuses an id, with or without a delete
+in front of it. Measured — with the log holding ids 1, 2 and 4 and rows 1 and
+2 live, an insert produces ids **5 and 6**, not the freed 1 and 2, and
+`sqlite_sequence.seq` only ever increases. An earlier wording of this
+paragraph said a delete "frees the old `AUTOINCREMENT` ids", which contradicts
+the schema comment four screens up in this same section.
 
 The host's six tables are seeded inside the migration, whose version record is
 the guard. A plugin's declared tables are seeded in `host.register`, where
 their triggers are installed, because a plugin's table list has no version
 space of its own — guarded instead by a `sync.seeded.<table>` key in
-`host_state`, since `register` runs on every boot and a reseed re-logs every
-row at a fresh id. `docs/database-migrations.md` documents the same statements
-as what a migration owes after rebuilding a synced table's rows.
+`host_state`, since `register` runs on every boot and the seed is a scan of
+the whole table. That key is a **cost** guard now, not a correctness one: with
+the anti-join above, a second seed is a no-op.
+
+**A migration that rebuilds a synced table needs the other statement, and it
+is not this one.** Announcing that rows a client already holds have *changed*
+needs entries at fresh ids, which the anti-join deliberately does not write.
+`docs/database-migrations.md` documents that as `relogSyncedTables` —
+`DELETE FROM sync_log WHERE table_name = ? AND op != 'delete'` and then an
+unconditional re-log — where the `op != 'delete'` scope is what keeps *it*
+from repeating the defect above. `DROP TABLE` fires no `AFTER DELETE` trigger
+(measured), so a row deleted before a rebuild still has its entry and is still
+owed to every client below it.
 
 An earlier draft of this section also created a `(created_at, id)` index on
 each synced table, for a keyset the backfill no longer has. All six were

@@ -150,34 +150,49 @@ the update trigger and ordinary edits log perfectly while every delete vanishes 
 client that keeps rows the server deleted, with the update path visibly working. Always
 install all three, which is what passing the table name to `installSyncTriggers` does.
 
-**If the rebuild changed row content, log the rows.** The copy itself is invisible to the
-log, so a rebuild that rewrites a column needs the change announced explicitly. Because
-`sync_log` holds one row per changed row, relogging the whole table is its steady state
-rather than an abuse of it:
+**If the rebuild changed row content, relog the rows.** The copy itself is invisible to
+the log, so a rebuild that rewrites a column needs the change announced explicitly.
+Because `sync_log` holds one row per changed row, relogging the whole table is its
+steady state rather than an abuse of it:
 
 ```ts
-import { seedSyncLog } from '../sync/log.ts';
+import { relogSyncedTables } from '../sync/log.ts';
 
-seedSyncLog(db, ['media_item']);
+relogSyncedTables(db, ['media_item']);
 ```
 
 which is exactly:
 
 ```sql
-DELETE FROM sync_log WHERE table_name = 'media_item';
+DELETE FROM sync_log WHERE table_name = 'media_item' AND op != 'delete';
 INSERT INTO sync_log (table_name, row_id, op, at)
   SELECT 'media_item', id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER)
   FROM media_item;
 ```
 
-The `DELETE` first is required — `sync_log_row` is a `UNIQUE` index on
-`(table_name, row_id)` — and that is *all* it is. What makes the relog work is
-`AUTOINCREMENT`: `sync_log.id` is issued as `max_ever + 1` and no id is ever reused, so
-the new rows land at higher ids than any client's cursor whether or not anything was
-deleted first. Measured — with the log holding ids 1, 2 and 4 and rows 1 and 2 live, the
-relog produces ids **5 and 6**, not the freed 1 and 2. An earlier wording of this
-paragraph said deleting "frees the old `AUTOINCREMENT` ids"; it frees nothing, which is
-the whole reason the column carries `AUTOINCREMENT` in the first place.
+`AND op != 'delete'` is not a refinement, it is the whole correctness of the statement.
+A `delete` entry names a row the table no longer has, so an unscoped `DELETE` removes it
+and the `INSERT … SELECT` over live rows **cannot put it back**. Every client whose
+cursor sits below that entry then keeps the deleted row for good, with nothing failing.
+And those tombstones are exactly what a rebuild leaves behind: `DROP TABLE` fires no
+`AFTER DELETE` trigger, so a row deleted before the rebuild still has its entry, and is
+still owed to every client below it. This is the defect `seedSyncLog` shipped with on
+this branch; `test/sync/log.test.ts` pins both halves.
+
+The `DELETE` is otherwise required only by `sync_log_row`, the `UNIQUE` index on
+`(table_name, row_id)`. What makes the relog *work* is `AUTOINCREMENT`: `sync_log.id` is
+issued as `max_ever + 1` and no id is ever reused, so the new rows land at higher ids
+than any client's cursor whether or not anything was deleted first. Measured — with the
+log holding ids 1, 2 and 4 and rows 1 and 2 live, the relog produces ids **5 and 6**,
+not the freed 1 and 2. An earlier wording of this paragraph said deleting "frees the old
+`AUTOINCREMENT` ids"; it frees nothing, which is the whole reason the column carries
+`AUTOINCREMENT` in the first place.
+
+**`seedSyncLog` is a different function and will not do this.** It indexes rows the log
+does not know about and leaves every entry it already holds at the id it already has —
+right for "this table has rows nothing ever logged", useless for "these rows are not
+what you were told they were". Reach for it when a migration *creates and populates* a
+synced table, and for `relogSyncedTables` when one rewrites rows that already existed.
 
 **This is the mechanism, not just a repair.** `migration15` runs `seedSyncLog` over
 `HOST_SYNCED_TABLES` after installing the triggers, and `host.register` runs
@@ -189,9 +204,10 @@ one that leaves it untriggered, and it has the same symptom: a client that never
 those rows, with nothing failing.
 
 Skip the relog when the rebuild left every row's visible content identical. Nothing
-deletes a `sync_log` row except a trigger and the seed, so a rebuild that preserves row
-ids leaves the log a correct index of which rows exist whatever else it changed — and
-relogging 20,000 unchanged rows costs every client a full re-read for nothing.
+deletes a `sync_log` row except a trigger and `relogSyncedTables`, so a rebuild that
+preserves row ids leaves the log a correct index of which rows exist whatever else it
+changed — and relogging 20,000 unchanged rows costs every client a full re-read for
+nothing.
 
 **A rebuild that drops rows is fine; one that renumbers them is already forbidden.**
 Entries naming a row id the new table does not have resolve to nothing: the backfill

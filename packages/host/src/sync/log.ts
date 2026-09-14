@@ -113,8 +113,8 @@ export function installSyncTriggers(raw: DatabaseSync, tables: readonly string[]
 }
 
 /**
- * One `upsert` entry per live row of each table, replacing whatever the log
- * held for it.
+ * One `upsert` entry for each live row of each table **the log does not
+ * already know about**. It indexes; it does not re-index.
  *
  * **Why a log that indexes rows has to be seeded at all.** The triggers above
  * only log a row that *changes* after they exist, so a log created beside them
@@ -125,28 +125,93 @@ export function installSyncTriggers(raw: DatabaseSync, tables: readonly string[]
  * permanently. Seeding is what makes `sync_log` hold exactly one entry per
  * live row, which is the invariant both cursors now read it for.
  *
- * **The `DELETE` first is required, and it is *only* required.** Required
- * because `sync_log_row` is UNIQUE on `(table_name, row_id)` (migration 15),
- * so a row that already has an entry would conflict. It does no other work:
- * the entries the insert writes land above every client's cursor because
- * `sync_log.id` is `AUTOINCREMENT` and never reuses an id, whether or not
- * anything was deleted first. Measured -- with the log holding ids 1, 2 and 4
- * and rows 1 and 2 live, this produces ids **5 and 6**, not the freed 1 and
- * 2. An earlier wording here, in spec §4 and in
- * `docs/database-migrations.md` said the delete "frees those `AUTOINCREMENT`
- * ids"; it does not, and `migrate.ts`'s own schema comment says as much. On a
- * table with no rows this is two statements that match nothing.
+ * **There is no `DELETE` here, and there was, and it destroyed tombstones.**
+ * The earlier form was `DELETE FROM sync_log WHERE table_name = ?` followed
+ * by a re-log of every live row. A `delete` entry names a row the table no
+ * longer has, so the delete removed it and the `INSERT ... SELECT` over live
+ * rows could not put it back: every client whose cursor sat below that entry
+ * kept the deleted row for good. Reproduced end to end through `tailSince` --
+ * three rows logged at 1, 2, 3, the third deleted at 4, the seed leaving
+ * `5:upsert/1 6:upsert/2` and a client at cursor 3 never told row 3 went
+ * away. Reachable on exactly the databases `seedSyncLogOnce`'s "absent means
+ * seed" guard below exists for, since those have had triggers running and so
+ * may already hold tombstones. `test/sync/log.test.ts` pins it.
+ *
+ * The anti-join is strictly better than deleting only the non-tombstones
+ * would have been: it leaves every existing entry's id alone, so no client
+ * re-reads a row it already holds, and indexing the unindexed is exactly what
+ * this function is *for*. Announcing *changed content* is a different job and
+ * `relogSyncedTables` below is the function for it.
+ *
+ * **It rests on one invariant: no live row holds a `delete` entry**, since
+ * such a row would be skipped here and stay invisible. Confirmed two ways.
+ * `sync_log_row` is UNIQUE on `(table_name, row_id)`, so a row has at most
+ * one entry; and the insert trigger deletes that entry before writing its
+ * own, so re-inserting a row at a previously deleted id replaces the
+ * tombstone with an `upsert` -- measured, `2:delete/3` becomes `3:upsert/3`.
+ * The one way to break it is to recreate a row at a deleted row's id while
+ * the triggers are absent, which is the id reuse
+ * `docs/database-migrations.md` forbids outright under "a row's `id` is
+ * immutable", and which breaks the log as an index whatever this function
+ * does.
  *
  * `table` reaches the `FROM` clause as text, for the reason `syncTriggerSql`
  * above gives: a table's rows cannot be enumerated without naming it, and
  * SQLite binds no identifiers. Safety comes from the caller, which passes
  * either the `HOST_SYNCED_TABLES` literal or a name `assertSyncable`
- * (`sync/registry.ts`) has already checked. `table_name` *is* bound, both
- * here and in the delete: the value is a string, so nothing makes it text.
+ * (`sync/registry.ts`) has already checked. `table_name` *is* bound, in both
+ * the outer statement and the subquery: the value is a string, so nothing
+ * makes it text.
+ *
+ * Measured plan, over `media_item`: `SCAN media_item USING COVERING INDEX
+ * media_item_sync` -- every row has to be considered, which is what a seed
+ * is -- and the anti-join as a `LIST SUBQUERY` built once from
+ * `SEARCH sync_log USING COVERING INDEX sync_log_row (table_name=?)`, with a
+ * `CREATE BLOOM FILTER` over it. So the subquery is one seek into this
+ * table's slice of the log, not a lookup per row and not a second scan.
  */
 export function seedSyncLog(raw: DatabaseSync, tables: readonly string[]): void {
   for (const table of tables) {
-    raw.prepare('DELETE FROM sync_log WHERE table_name = ?').run(table);
+    raw.prepare(
+      `INSERT INTO sync_log (table_name, row_id, op, at)
+         SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM ${table}
+          WHERE id NOT IN (SELECT row_id FROM sync_log WHERE table_name = ?)`,
+    ).run(table, table);
+  }
+}
+
+/**
+ * One *fresh* `upsert` entry per live row of each table, so every client
+ * re-reads them -- what a migration owes after a rebuild that changed row
+ * content.
+ *
+ * **Not the seed, and the difference is the point.** `seedSyncLog` above
+ * answers "which rows exist", and a row the log already indexes needs nothing
+ * from it. This answers "these rows are not what you were told they were",
+ * which only a new, higher entry can say: the copy inside a
+ * create-copy-drop-rename rebuild runs against a table whose triggers were
+ * dropped with the old one, so nothing logged it and no client ever learns.
+ * `docs/database-migrations.md` is where a migration author meets this.
+ *
+ * **`AND op != 'delete'` is why this does not have the seed's old defect.**
+ * `DROP TABLE` does not fire the `AFTER DELETE` trigger -- measured earlier in
+ * this slice -- so a row deleted *before* the rebuild still has its `delete`
+ * entry in the log, and that entry is still owed to every client below it. An
+ * unscoped `DELETE FROM sync_log WHERE table_name = ?` takes those with it and
+ * the re-log cannot regenerate them, because the rows are not there to select.
+ *
+ * The scoped delete leaves exactly the tombstones behind, so the insert
+ * conflicts with `sync_log_row` if a *live* row still holds one. That cannot
+ * happen -- `seedSyncLog`'s doc has the two reasons -- and if it ever does,
+ * this raises inside the migration's savepoint and the boot fails, which is
+ * the loud end of a defect whose quiet end is a client missing a row forever.
+ *
+ * `table` reaches the `FROM` clause as text for `syncTriggerSql`'s reason;
+ * `table_name` is bound in both statements.
+ */
+export function relogSyncedTables(raw: DatabaseSync, tables: readonly string[]): void {
+  for (const table of tables) {
+    raw.prepare("DELETE FROM sync_log WHERE table_name = ? AND op != 'delete'").run(table);
     raw.prepare(
       `INSERT INTO sync_log (table_name, row_id, op, at)
          SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM ${table}`,
@@ -168,22 +233,32 @@ function seededKey(table: string): string {
  * `seedSyncLog` for each table that has not been seeded before, recording
  * each one so a later boot does not do it again.
  *
- * **A guard, because reseeding is not harmless.** `host.ts`'s `register` runs
- * on every boot, and the seed re-logs every row at a fresh id -- so an
- * unguarded call would make every client re-read the whole library each time
- * the host restarts. The host's own six tables need no guard because
- * `migration15` seeds them inside a migration the runner skips once version
- * 15 is recorded; a plugin's declared table list has no version space of its
- * own, which is what this key stands in for.
+ * **A cost guard, and only that.** `host.ts`'s `register` runs on every boot,
+ * and `seedSyncLog` is a scan of the whole table with a `sync_log` seek per
+ * row; the key is what keeps a library-sized anti-join out of every restart.
+ * The host's own six tables need no guard because `migration15` seeds them
+ * inside a migration the runner skips once version 15 is recorded; a plugin's
+ * declared table list has no version space of its own, which is what this key
+ * stands in for.
+ *
+ * **It was a correctness guard, and it is not any more.** While the seed
+ * re-logged every row at a fresh id, an unguarded call made every client
+ * re-read the whole library on every restart; the seed only indexes rows the
+ * log does not know about now, so calling it twice is a no-op and the guard
+ * buys work avoided rather than damage avoided. It stays because the work is
+ * real and because the key also records *that* a table made the transition,
+ * which nothing else does.
  *
  * **Absent means seed**, which is the right way round for the transition this
  * closes: a database that has already booted with a plugin's triggers
  * installed and never been seeded has no key, so it is seeded on the next
- * boot. A predicate over the log instead -- "seed when the log holds nothing
- * for this table" -- reads more self-evident and is wrong in exactly that
- * case: one write to one row after the triggers were installed leaves the log
- * non-empty for the table, and every row that predates it unreachable for
- * good.
+ * boot. A table-level predicate over the log instead -- "seed when the log
+ * holds nothing for this table" -- reads more self-evident and is wrong in
+ * exactly that case: one write to one row after the triggers were installed
+ * leaves the log non-empty for the table, and every row that predates it
+ * unreachable for good. The seed's own `NOT IN` is that predicate asked per
+ * *row*, which is the form that is actually right; this key only decides
+ * whether to ask it at all.
  *
  * The value stored is `at`, so a log being debugged by eye can be dated
  * against the seed that wrote it. Nothing reads it.
