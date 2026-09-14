@@ -11,8 +11,18 @@ import type { DatabaseSync } from 'node:sqlite';
  * in the design spec §2.10 -- which hides the change from exactly the clients
  * that need it.
  *
- * `DROP TRIGGER IF EXISTS` first, so installation is idempotent: the host
- * calls this on every boot, for host tables and plugin tables alike.
+ * `DROP TRIGGER IF EXISTS` first, so installation is idempotent, which is
+ * what lets `main.ts` call `installSyncTriggers(raw, HOST_SYNCED_TABLES)` on
+ * every boot immediately after `migrateHost`, and `host.ts`'s `register`
+ * call it on every boot for each plugin's declared tables. Both really do
+ * run per boot; the third call site does not. `db/migrate.ts`'s
+ * `migration15` installs the host's six tables' triggers too, and
+ * `migrateHostWith` skips that migration once version 15 is recorded, so on
+ * an existing database the migration never runs again -- which is why the
+ * boot call in `main.ts` exists rather than the migration being the only
+ * host installation. Without it a later migration that rebuilt a synced
+ * table would drop its three triggers with the old table and leave that
+ * table unlogged, with nothing failing at runtime.
  *
  * `table` reaches the SQL below as text, not as a bound parameter: a trigger
  * body is DDL, and SQLite binds no parameters there, so there is no
@@ -20,17 +30,19 @@ import type { DatabaseSync } from 'node:sqlite';
  * arbitrary string -- safety here comes from the caller, not from anything
  * below this line.
  *
- * `installSyncTriggers` has two real callers. `migrate.ts` passes the
- * hardcoded `HOST_SYNCED_TABLES` literal, which needs no runtime validation
- * -- it is a fixed list the host's own schema defines. `host.ts`'s
- * `register` passes a plugin's own declared table names, and *does* reach
- * this function with a name nothing here has validated: `register` calls
+ * `installSyncTriggers` has three real callers, and only one of them
+ * reaches this function with a name that needs validating. `migrate.ts`'s
+ * `migration15` and `main.ts`'s boot call both pass the hardcoded
+ * `HOST_SYNCED_TABLES` literal, which needs no runtime validation -- it is
+ * a fixed list the host's own schema defines. `host.ts`'s `register` passes
+ * a plugin's own declared table names, and *does* reach this function with
+ * a name nothing here has validated: `register` calls
  * `sync/registry.ts`'s `assertSyncable` -- name shape
  * (`assertSyncedTableName`), the host-collision check, and the lone-`id`
  * primary-key check -- for each of a plugin's declared tables, immediately
  * before calling this function with them. `createSyncRegistry` calls the
  * same `assertSyncable` for the same reason, when a running host later
- * builds the registry its read API serves from -- so a name reaching either
+ * builds the registry its read API serves from -- so a name reaching any
  * real caller of `installSyncTriggers` has already passed that gate. This
  * function itself still does nothing to enforce any of it, and remains
  * unsafe against a name that reaches it by some other route.
