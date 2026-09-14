@@ -14,8 +14,9 @@ Nothing here has a user interface, and everything here is testable without one.
 - Triggers on every synced table, host-owned and plugin-owned alike.
 - `SyncedTable` on the plugin contract: a plugin declares its synced tables
   and the read shape each produces.
-- `GET /api/sync` — two phases behind one cursor: a bootstrap that synthesises
-  creates from current state newest-group-first, then a tail of log ops.
+- `GET /api/sync` and `GET /api/sync/backfill` — two cursors the client runs
+  **concurrently**: a tail of log ops from the present, and a backwards walk
+  through current state, newest group first.
 - Typed read shapes for the three categories: `tv`, `movie`, `xxx`.
 - Log compaction: one op per `(table, row_id)`, safe for every live cursor.
 
@@ -93,10 +94,10 @@ migration before they could sync at all; an invalidation log does not read
 either column, so they need none. This is the clearest single reason the log
 beat extending the existing keyset-cursor pattern to more tables.
 
-**2.6 The plugin tables already carry what the bootstrap needs.**
+**2.6 The plugin tables already carry what the backfill needs.**
 `tv_series`, `tv_season`, `tv_release`, `xxx_site`, `xxx_scene` and
 `movie_detail` all have `created_at` and `updated_at`. None has an index on
-`(created_at, id)`, which §4 adds for the bootstrap's keyset paging.
+`(created_at, id)`, which §4 adds for the backfill's keyset paging.
 
 **2.8 The truncate optimisation does not skip delete triggers.** Measured:
 `DELETE FROM t` with no `WHERE` fired 3 of 3 delete triggers, as did
@@ -138,18 +139,20 @@ proposal. It buys exact history and smaller payloads, and costs
 `OLD.x`/`NEW.x` SQL generated per column per table, storage of every value
 twice, and a retention policy.
 *What it buys here, and this is the load-bearing property:* **delivering an
-op twice is a no-op.** Every guarantee in §5 — bootstrap without snapshot
+op twice is a no-op.** Every guarantee in §5 — a backfill without snapshot
 isolation, backfill concurrent with the live tail, compaction without a
 horizon — follows from that single fact. With diffs, none of them hold.
 
-**3.2 Bootstrap is the same endpoint, synthesised from current state.** A new
-client is not replayed history; it is served one create per live row, then
-handed to the log. It cannot tell the two phases apart.
+**3.2 An empty client is populated from current state, never from the log.**
+A new client is not replayed history; it is served one create per live row by
+the backfill (§5.2) while the tail (§5.1) runs alongside it. "Bootstrap" below
+means only this: populating a client that has nothing. It is not a phase, and
+there is no moment at which the client is doing one and not the other.
 *Rejected:* a separate snapshot endpoint, which is a second protocol to
 build, test, guard and keep consistent with the first.
 
 **3.3 Newest-first, hydrated by group, backfilled in the background.** The
-bootstrap pages media items newest-first and emits each group's dependent rows
+backfill pages media items newest-first and emits each group's dependent rows
 with it, in dependency order. The client renders after page one and keeps
 paging backwards at idle priority while the live tail runs concurrently.
 *Rejected:* oldest-first (the client waits for the least interesting data),
@@ -158,7 +161,7 @@ protocol for what is the same cursor paged further).
 *Cost:* a shared parent — one `tv_series` across many episodes — is re-sent
 once per group. Harmless by 3.1, and not worth machinery to dedupe.
 
-**3.4 Order the bootstrap by `(created_at DESC, id DESC)`.** Both immutable.
+**3.4 Order the backfill by `(created_at DESC, id DESC)`.** Both immutable.
 *Rejected:* `updated_at`, under which a row touched mid-backfill moves in the
 ordering and can be skipped entirely; and `id DESC` alone, because slice E
 measured that SQLite reuses the rowids of deleted rows, so id order is not
@@ -266,7 +269,7 @@ CREATE TRIGGER <t>_sync_del AFTER DELETE ON <t> BEGIN
   INSERT INTO sync_log (table_name, row_id, op, at) VALUES ('<t>', OLD.id, 'delete', <now>); END;
 ```
 
-And, for the bootstrap's keyset paging, on each synced table that lacks one:
+And, for the backfill's keyset paging, on each synced table that lacks one:
 
 ```sql
 CREATE INDEX <t>_created ON <t> (created_at, id);
@@ -276,41 +279,61 @@ CREATE INDEX <t>_created ON <t> (created_at, id);
 slice: `/api/deletions` still serves it and slice 2 decides whether the log
 supersedes it.
 
-## 5. The endpoint
+## 5. The two endpoints
 
-`GET /api/sync?cursor=<opaque>` — guarded like every route but health.
+Both are guarded like every route but health. **They are two cursors run
+concurrently, not two phases of one.** An earlier draft encoded a phase in a
+single cursor, which reads as "backfill, then tail" -- and under that reading
+a client with a large history waits for the whole backfill before seeing
+anything new. That is the opposite of the intent and the reason this section
+is shaped the way it is.
 
-The cursor encodes which phase the client is in:
+### 5.1 Tail — `GET /api/sync?since=<logId>`
 
-- **absent** — begin. The server records the log's high-water mark `W` and
-  starts the bootstrap.
-- **bootstrap** — `{ phase: 'bootstrap', w: W, after: { createdAt, id } }`.
-- **tail** — `{ phase: 'tail', after: <log id> }`.
-
-A response is a page of ops plus the next cursor:
+Ops above `since`, collapsed to the newest per `(table_name, row_id)`, each
+resolved to current state: a row that still exists becomes an `upsert`
+carrying it, a row that does not becomes a `delete`. A client far behind
+therefore receives one op per changed row, not one per change.
 
 ```json
 {"op":"upsert","table":"media_item","value":{ "id":123, … }}
-{"op":"upsert","table":"tv_release","value":{ "mediaItemId":123, … }}
 {"op":"delete","table":"media_item","id":123}
 ```
 
-**Bootstrap** pages media items by `(created_at DESC, id DESC)` and, for each,
-emits its dependent rows after it — releases, the plugin's detail row, the
-shared parents that row points at, the people and roles. Dependency order
+The client polls this from the moment it has a watermark, and keeps polling
+for the rest of the session. **Nothing about the log's size delays it**: it
+starts at `W`, which is the present, and only ever moves forward.
+
+### 5.2 Backfill — `GET /api/sync/backfill?before=<createdAt,id>`
+
+Current state, newest first, paged backwards, in units of **media item, fully
+hydrated**: the group's row, then its releases, the plugin's detail row, the
+shared parents that row points at, and its people and roles. Dependency order
 within a page is what stops a client seeing a reference before its target.
-When the media items are exhausted the cursor becomes `{ phase: 'tail',
-after: W }`.
 
-**Tail** serves ops above the cursor, collapsed to the newest per
-`(table_name, row_id)`, each resolved to current state: a row that still
-exists becomes an `upsert` carrying it, a row that does not becomes a
-`delete`. A client that has fallen far behind therefore receives one op per
-changed row, not one per change.
+Called with no cursor it returns the first page **and `w`, the log's
+high-water mark at that moment**, so the client can start the tail without a
+separate round trip. It returns a null cursor when current state is
+exhausted, and the client retires it — from then on only the tail runs.
 
-Both phases page at a fixed size and both return a cursor the client stores.
-The two cursors run concurrently in slice 2: the tail from `W` immediately,
-the bootstrap backwards at leisure.
+Ordering is `(created_at DESC, id DESC)`, both immutable, for the reason in
+§3.4.
+
+### 5.3 Why concurrency loses nothing
+
+`W` is captured once and never advances; the tail is what advances past it.
+Every case reduces to ops being idempotent (§3.1):
+
+| During the backfill | Backfill | Tail | Result |
+|---|---|---|---|
+| a row is **created** | never reaches it — it is newer than the walk's start | op > `W` | delivered |
+| a row is **modified** | may send an older copy | op > `W` | converges on current state |
+| a row is **deleted** before the walk reaches it | absent | delete op > `W` | a delete for a row the client never had: a no-op |
+| a row is **deleted** after the walk sent it | sent | delete op > `W` | removed |
+
+A client interrupted mid-backfill and resuming days later keeps both cursors:
+its `W` is stale but still valid, because compaction keeps the newest op per
+row and every op above `W` for a changed row survives (§3.5).
 
 ## 6. The contract change
 
@@ -320,7 +343,7 @@ export interface SyncedTable<T> {
   readonly table: string;
   /** Current state for these row ids, in the shape the client receives. */
   read(ids: readonly number[]): Promise<Record<number, T>>;
-  /** The media items these rows belong to, so the bootstrap can hydrate a group. */
+  /** The media items these rows belong to, so the backfill can hydrate a group. */
   rowsFor(mediaItemIds: readonly number[]): Promise<readonly number[]>;
 }
 
@@ -346,14 +369,16 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
    compaction that removes older ops for the same rows.
 3. Delivering the same op twice leaves the replica identical — idempotence,
    which everything else rests on.
-4. A row changed during the bootstrap is delivered by the tail, whether or not
-   the bootstrap also sent it.
-5. A row created during the bootstrap, before the paging position, is not
-   lost.
-6. A row deleted during the bootstrap is never sent as a create by it.
-7. Bootstrap paging is stable: the same rows in the same order regardless of
+4. A row changed during the backfill is delivered by the tail, whether or not
+   the backfill also sent it — asserted with both cursors live, since running
+   them in sequence would pass while missing the property.
+5. A row created during the backfill, which the backwards walk can never
+   reach, arrives on the tail.
+6. A row deleted during the backfill is never sent as a create by it, and its
+    delete on the tail is a no-op for a client that never had it.
+7. Backfill paging is stable: the same rows in the same order regardless of
    concurrent `updated_at` churn.
-8. Each bootstrap page is self-consistent — no op references a row the client
+8. Each backfill page is self-consistent — no op references a row the client
    has not already received in that page or an earlier one.
 9. Every synced table has all three triggers, asserted by enumerating
    `sqlite_master` against the declared set, so a table added without them
@@ -393,3 +418,7 @@ the contract beside `MediaItemRead`, so slice 2 types against them.
 - `PRAGMA recursive_triggers = ON` now applies to every trigger in the
   database, not only these. Nothing else defines one today.
 - A fourth plugin gets no client UI for free. §3.6 accepts that.
+- The client must run both cursors concurrently. Running them in sequence is
+  correct but defeats the design: a client would see nothing new until its
+  whole history had replicated. §5 states this structurally so slice 2 cannot
+  read it as optional.
