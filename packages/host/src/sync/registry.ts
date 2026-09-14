@@ -35,11 +35,13 @@ export interface SyncRegistry {
  * plugin cannot claim any table the host already has, synced or not.
  *
  * Read from `schema.ts`'s own exported table objects via `getTableName`,
- * not from `sqlite_master`: by the time a real plugin's tables exist in
- * `sqlite_master` too, having already run `migratePlugin`, so a snapshot of
- * "what tables currently exist" would wrongly flag a plugin's own table as
- * a host collision. `schema.ts` is a fixed, host-only set regardless of
- * what has migrated.
+ * not from `sqlite_master`. `sqlite_master` answers "what tables exist in
+ * this database", and by the time this check runs a plugin's own tables
+ * exist there too -- `migratePlugin` has already created them. Checking a
+ * plugin's declared table against that set would flag its own table as a
+ * host collision. `schema.ts` answers the question actually being asked,
+ * "what tables does the host declare", and answers it identically whatever
+ * has migrated.
  */
 function hostSchemaTableNames(): ReadonlySet<string> {
   const names = new Set<string>();
