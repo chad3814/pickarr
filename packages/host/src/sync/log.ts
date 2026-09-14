@@ -20,17 +20,18 @@ import type { DatabaseSync } from 'node:sqlite';
  * arbitrary string -- safety here comes from the caller, not from anything
  * below this line.
  *
- * Nothing validates that string today. The only caller is
- * `installSyncTriggers` below, and its only caller is `migrate.ts`, which
- * passes the hardcoded `HOST_SYNCED_TABLES` literal -- never a plugin-declared
- * name. `assertSyncedTableName` in `packages/contract/src/sync.ts` exists and
- * checks the shape a plugin's declaration must have, but nothing calls it yet;
- * it has no route to this function. The registry in `sync/registry.ts` is
- * what will close that gap, by running a plugin's declared table names
- * through `assertSyncedTableName` before ever handing one to
- * `installSyncTriggers`. Until that registry exists, check this comment
- * against its actual callers before trusting that a plugin-declared name is
- * validated anywhere on its way here.
+ * `installSyncTriggers`'s only caller today is still `migrate.ts`, which
+ * passes the hardcoded `HOST_SYNCED_TABLES` literal -- never a
+ * plugin-declared name reaches this function yet. But a plugin-declared name
+ * is no longer unvalidated on its way here in principle: `createSyncRegistry`
+ * (`sync/registry.ts`) runs every plugin's declared table through
+ * `assertSyncedTableName`, plus a check that name does not collide with a
+ * table the host already owns and that its primary key is a lone `id`
+ * column, before ever adding it to what `SyncRegistry.tables()` returns.
+ * Whatever a future caller passes from `registry.tables()` to
+ * `installSyncTriggers` has therefore already passed that gate -- this
+ * function itself still does nothing to enforce it, and remains unsafe
+ * against a name that reaches it by some other route.
  */
 export function syncTriggerSql(table: string): string {
   const [ins, upd, del] = syncedTriggerNames(table);
