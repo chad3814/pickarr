@@ -155,6 +155,14 @@ log, so a rebuild that rewrites a column needs the change announced explicitly. 
 `sync_log` holds one row per changed row, relogging the whole table is its steady state
 rather than an abuse of it:
 
+```ts
+import { seedSyncLog } from '../sync/log.ts';
+
+seedSyncLog(db, ['media_item']);
+```
+
+which is exactly:
+
 ```sql
 DELETE FROM sync_log WHERE table_name = 'media_item';
 INSERT INTO sync_log (table_name, row_id, op, at)
@@ -168,9 +176,20 @@ The `DELETE` first is required — `sync_log_row` is a `UNIQUE` index on
 every client re-reads the table. Preserving the old ids would hide the change from
 exactly the clients that need it.
 
-Skip this when the rebuild only changed the table's shape and left every row's visible
-content identical. A client reads current state when it is told a row changed, so
-relogging 20,000 unchanged rows costs every client a full re-read for nothing.
+**This is the mechanism, not just a repair.** `migration15` runs `seedSyncLog` over
+`HOST_SYNCED_TABLES` after installing the triggers, and `host.register` runs
+`seedSyncLogOnce` over each plugin's declared tables — because the client's backfill
+walks `sync_log` backwards and reads it as an index of *which rows exist*. A table with
+rows and no log entries is not merely stale to that cursor; it is invisible to it, and
+stays invisible. So a rebuild that leaves a table's rows unindexed is the same defect as
+one that leaves it untriggered, and it has the same symptom: a client that never sees
+those rows, with nothing failing.
+
+Skip the relog only when the rebuild left every row's visible content identical *and*
+every row kept its `sync_log` entry — a `RENAME COLUMN` or an `ADD COLUMN`, which touch
+neither. A `DROP TABLE`/rename rebuild keeps the row ids but the entries still point at
+live rows, so the log stays a correct index and a relog would cost every client a full
+re-read for nothing.
 
 ### Why the triggers are not simply reinstalled from scratch each boot
 

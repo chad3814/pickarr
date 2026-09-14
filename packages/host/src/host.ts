@@ -10,7 +10,7 @@ import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
-import { installSyncTriggers } from './sync/log.ts';
+import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
 import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
 import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
@@ -522,7 +522,21 @@ export function createHost(deps: {
       // Idempotent (`DROP TRIGGER IF EXISTS` -- `sync/log.ts`), so a plugin
       // registered on every boot reinstalls its triggers rather than failing
       // the second time.
-      installSyncTriggers(deps.raw, plugin.synced.map((table) => table.table));
+      const syncedTables = plugin.synced.map((table) => table.table);
+      installSyncTriggers(deps.raw, syncedTables);
+      // And, once, one log entry per row those tables already hold. The
+      // triggers just installed only log a row that changes *after* they
+      // exist, so every row `migratePlugin` above wrote -- a migration that
+      // creates a table and fills it from an older one does exactly that --
+      // would be indexed nowhere, and a client cursor that walks the log as
+      // an index of which rows exist would never serve it. `migration15`
+      // (`db/migrate.ts`) does the same for the host's own six tables, where
+      // the migration runner's version record is the guard; a plugin's
+      // declared table list has no version space, so the guard is a recorded
+      // marker per table. **Not unguarded**: this runs on every boot, and a
+      // reseed re-logs every row at a fresh id, which every client reads as
+      // "all of this changed". `seedSyncLogOnce` has both halves of why.
+      seedSyncLogOnce(deps.raw, syncedTables, deps.now());
       plugins.set(plugin.id, plugin);
       handlers.set(plugin.id, new Map(Object.entries(plugin.jobs)));
     },

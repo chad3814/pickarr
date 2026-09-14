@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { writeSecretValue } from '../secrets/store.ts';
-import { installSyncTriggers } from '../sync/log.ts';
+import { installSyncTriggers, seedSyncLog } from '../sync/log.ts';
 import { HOST_SYNCED_TABLES } from '../sync/tables.ts';
 
 /**
@@ -888,15 +888,42 @@ const MIGRATION_15_DDL = `
 `;
 
 /**
- * Runs the DDL above and then installs the sync triggers for every host
- * table it declares synced. The triggers come last and outside the DDL
- * string on purpose: `installSyncTriggers` builds its own SQL per table
- * (`sync/log.ts`), and folding that into one string here would duplicate the
- * table list instead of importing it.
+ * Runs the DDL above, installs the sync triggers for every host table it
+ * declares synced, and then logs one entry per row those tables already hold.
+ * Neither step is in the DDL string on purpose: `installSyncTriggers` and
+ * `seedSyncLog` each build their own SQL per table (`sync/log.ts`), and
+ * folding either into one string here would duplicate the table list instead
+ * of importing it.
+ *
+ * **The seed is what makes the log usable as an index of which rows exist.**
+ * The DDL above creates `sync_log` empty and the triggers only log a row that
+ * changes afterwards, so without this a client cursor that walks the log
+ * backwards would serve none of the rows an existing database already holds,
+ * permanently. `seedSyncLog`'s own doc has why the `DELETE` in it is both
+ * required and load-bearing, and `docs/database-migrations.md`'s section on
+ * rebuilding a synced table documents the same repair for the same reason.
+ *
+ * **A development database that already ran version 15 will not run this
+ * again**, because `migrateHostWith` skips a recorded version -- so its log
+ * holds only what has changed since it migrated, and its oldest rows are
+ * invisible to every client. There is no migration 16 for this: version 15 is
+ * this branch's own and nothing upstream has applied it. Seed such a database
+ * by hand, once, from a node REPL or a scratch script over the same handle:
+ *
+ * ```ts
+ * import { seedSyncLog } from './packages/host/src/sync/log.ts';
+ * import { HOST_SYNCED_TABLES } from './packages/host/src/sync/tables.ts';
+ * seedSyncLog(raw, HOST_SYNCED_TABLES);
+ * ```
+ *
+ * Deleting the database and re-migrating works too, and is what 2.0 expects
+ * of a development database anyway -- it starts empty and rebuilds from
+ * feeds.
  */
 function migration15(db: DatabaseSync): void {
   db.exec(MIGRATION_15_DDL);
   installSyncTriggers(db, HOST_SYNCED_TABLES);
+  seedSyncLog(db, HOST_SYNCED_TABLES);
 }
 
 /**

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
-import { installSyncTriggers, syncedTriggerNames } from '../../src/sync/log.ts';
+import { installSyncTriggers, seedSyncLog, seedSyncLogOnce, syncedTriggerNames } from '../../src/sync/log.ts';
 
 const open = () => {
   const { raw } = openTestDatabase();
@@ -98,4 +98,85 @@ test('every named trigger exists after installation', () => {
       .map((r) => String((r as { name: unknown }).name)),
   );
   for (const name of syncedTriggerNames('probe')) assert.ok(present.has(name), `missing ${name}`);
+});
+
+test('the seed logs one entry per live row, and nothing for a row that is gone', () => {
+  // Rows inserted before the triggers exist, which is the state a migration
+  // that created and populated a table in one step leaves behind.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.exec(`
+    CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT, created_at INTEGER NOT NULL);
+    INSERT INTO probe (id, v, created_at) VALUES (1, 'a', 1), (2, 'b', 1), (3, 'c', 1);
+    DELETE FROM probe WHERE id = 2;
+  `);
+  installSyncTriggers(raw, ['probe']);
+  assert.deepEqual(ops(raw), [], 'no trigger existed while those rows were written');
+
+  seedSyncLog(raw, ['probe']);
+  assert.deepEqual(ops(raw), ['upsert:1', 'upsert:3'],
+    'one entry per row the table holds now -- the log indexes live rows, not history');
+});
+
+test('a reseed gives every row a higher log id, so a client already past the old entries re-reads them', () => {
+  // Why the `DELETE` in `seedSyncLog` is load-bearing rather than merely
+  // required by the unique index: freeing the old AUTOINCREMENT ids is what
+  // puts the new entries above any client's cursor. It is also why
+  // `seedSyncLogOnce` exists -- doing this on every boot would make every
+  // client re-read the whole library on every restart.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.exec(`
+    CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT, created_at INTEGER NOT NULL);
+    INSERT INTO probe (id, v, created_at) VALUES (1, 'a', 1), (2, 'b', 1);
+  `);
+  seedSyncLog(raw, ['probe']);
+  const first = raw.prepare("SELECT max(id) m FROM sync_log WHERE table_name = 'probe'").get();
+
+  seedSyncLog(raw, ['probe']);
+  const second = raw.prepare("SELECT min(id) m FROM sync_log WHERE table_name = 'probe'").get();
+  assert.ok(Number((second as { m: unknown }).m) > Number((first as { m: unknown }).m),
+    'every reseeded entry must sit above every entry the previous seed wrote');
+
+  const count = raw.prepare("SELECT count(*) c FROM sync_log WHERE table_name = 'probe'").get();
+  assert.equal(Number((count as { c: unknown }).c), 2, 'and the log still holds one entry per row, not two');
+});
+
+test('seedSyncLogOnce seeds a table once and leaves the log alone on every boot after', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.exec(`
+    CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT, created_at INTEGER NOT NULL);
+    INSERT INTO probe (id, v, created_at) VALUES (1, 'a', 1), (2, 'b', 1);
+  `);
+
+  seedSyncLogOnce(raw, ['probe'], 1000);
+  const ids = () => raw.prepare("SELECT id FROM sync_log WHERE table_name = 'probe' ORDER BY id").all()
+    .map((r) => Number((r as { id: unknown }).id));
+  const afterFirst = ids();
+  assert.equal(afterFirst.length, 2, 'the first call seeds');
+
+  seedSyncLogOnce(raw, ['probe'], 2000);
+  seedSyncLogOnce(raw, ['probe'], 3000);
+  assert.deepEqual(ids(), afterFirst,
+    'the same entries at the same ids, so no client is told anything changed');
+});
+
+test('seedSyncLogOnce still seeds a table whose log entries were written by a trigger', () => {
+  // The case a "seed when the log is empty for this table" predicate gets
+  // wrong, and the reason the guard is a recorded marker instead. One write
+  // after the triggers were installed leaves the log non-empty for the table
+  // while every row that predates it is still unindexed.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.exec(`
+    CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT, created_at INTEGER NOT NULL);
+    INSERT INTO probe (id, v, created_at) VALUES (1, 'a', 1), (2, 'b', 1);
+  `);
+  installSyncTriggers(raw, ['probe']);
+  raw.prepare('UPDATE probe SET v = ? WHERE id = 2').run('edited');
+  assert.deepEqual(ops(raw), ['upsert:2'], 'fixture: the log holds one entry and row 1 has none');
+
+  seedSyncLogOnce(raw, ['probe'], 1000);
+  assert.deepEqual(ops(raw), ['upsert:1', 'upsert:2'], 'row 1 must be indexed too');
 });

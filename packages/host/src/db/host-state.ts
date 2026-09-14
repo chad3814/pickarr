@@ -6,8 +6,16 @@ import type { DatabaseSync } from 'node:sqlite';
  * created by migration 12. This module is the only one besides Better
  * Auth's own adapter permitted to name `host_state.value` in a SQL string
  * (`scripts/check-test-hygiene.ts`'s Rule 2 enforces that at build time),
- * because the two facts it currently holds -- the generated signing secret
- * and the first-boot claim token -- are both credentials.
+ * because two of the facts it holds -- the generated signing secret and the
+ * first-boot claim token -- are credentials.
+ *
+ * **Not every fact here is one.** `sync/log.ts` records one
+ * `sync.seeded.<table>` key per synced table, holding the timestamp its log
+ * seed ran at, which is neither secret nor read by anything. The rule is
+ * about the *column*, not about the row: a caller cannot name `value` in SQL
+ * of its own whatever it stores there, so it goes through the readers and
+ * writers below and this module stays the one place that statement is
+ * written.
  *
  * **Nothing here may log a value.** `value` can hold the Better Auth
  * signing secret; a log line naming it would put that secret in the

@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { readHostState, writeHostState } from '../db/host-state.ts';
 
 /**
  * The three triggers that keep one `sync_log` row per changed row.
@@ -96,4 +97,87 @@ export function syncedTriggerNames(table: string): readonly [string, string, str
 /** Installs (or reinstalls) the triggers for each table. */
 export function installSyncTriggers(raw: DatabaseSync, tables: readonly string[]): void {
   for (const table of tables) raw.exec(syncTriggerSql(table));
+}
+
+/**
+ * One `upsert` entry per live row of each table, replacing whatever the log
+ * held for it.
+ *
+ * **Why a log that indexes rows has to be seeded at all.** The triggers above
+ * only log a row that *changes* after they exist, so a log created beside them
+ * indexes the changes since it was created and nothing else. That is enough
+ * for a cursor that walks current state and reads the log only to skip rows;
+ * it is not enough for one that walks the log as an index of which rows exist
+ * -- on a database that already holds rows, such a walk serves none of them,
+ * permanently. Seeding is what makes `sync_log` hold exactly one entry per
+ * live row, which is the invariant both cursors now read it for.
+ *
+ * **The `DELETE` first is required, and it also does the work.** Required
+ * because `sync_log_row` is UNIQUE on `(table_name, row_id)` (migration 15),
+ * so a row that already has an entry would conflict. And load-bearing because
+ * deleting frees those `AUTOINCREMENT` ids, so the entries inserted below
+ * land at *higher* ids than any client's cursor and every client re-reads the
+ * table. Preserving the old ids would hide the seed from exactly the clients
+ * that need it -- the same reason the triggers delete before inserting, and
+ * the repair `docs/database-migrations.md` already documents for a migration
+ * that rebuilds a synced table's rows. On a table with no rows this is two
+ * statements that match nothing.
+ *
+ * `table` reaches the `FROM` clause as text, for the reason `syncTriggerSql`
+ * above gives: a table's rows cannot be enumerated without naming it, and
+ * SQLite binds no identifiers. Safety comes from the caller, which passes
+ * either the `HOST_SYNCED_TABLES` literal or a name `assertSyncable`
+ * (`sync/registry.ts`) has already checked. `table_name` *is* bound, both
+ * here and in the delete: the value is a string, so nothing makes it text.
+ */
+export function seedSyncLog(raw: DatabaseSync, tables: readonly string[]): void {
+  for (const table of tables) {
+    raw.prepare('DELETE FROM sync_log WHERE table_name = ?').run(table);
+    raw.prepare(
+      `INSERT INTO sync_log (table_name, row_id, op, at)
+         SELECT ?, id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER) FROM ${table}`,
+    ).run(table);
+  }
+}
+
+/**
+ * `host_state` key recording that this table's live rows have been logged
+ * once. One key per table rather than one per plugin: a plugin can add a
+ * synced table in a later migration, populated by that migration, and a
+ * per-plugin marker would skip the new table's seed forever.
+ */
+function seededKey(table: string): string {
+  return `sync.seeded.${table}`;
+}
+
+/**
+ * `seedSyncLog` for each table that has not been seeded before, recording
+ * each one so a later boot does not do it again.
+ *
+ * **A guard, because reseeding is not harmless.** `host.ts`'s `register` runs
+ * on every boot, and the seed re-logs every row at a fresh id -- so an
+ * unguarded call would make every client re-read the whole library each time
+ * the host restarts. The host's own six tables need no guard because
+ * `migration15` seeds them inside a migration the runner skips once version
+ * 15 is recorded; a plugin's declared table list has no version space of its
+ * own, which is what this key stands in for.
+ *
+ * **Absent means seed**, which is the right way round for the transition this
+ * closes: a database that has already booted with a plugin's triggers
+ * installed and never been seeded has no key, so it is seeded on the next
+ * boot. A predicate over the log instead -- "seed when the log holds nothing
+ * for this table" -- reads more self-evident and is wrong in exactly that
+ * case: one write to one row after the triggers were installed leaves the log
+ * non-empty for the table, and every row that predates it unreachable for
+ * good.
+ *
+ * The value stored is `at`, so a log being debugged by eye can be dated
+ * against the seed that wrote it. Nothing reads it.
+ */
+export function seedSyncLogOnce(raw: DatabaseSync, tables: readonly string[], at: number): void {
+  for (const table of tables) {
+    if (readHostState(raw, seededKey(table)) !== null) continue;
+    seedSyncLog(raw, [table]);
+    writeHostState(raw, seededKey(table), String(at), at);
+  }
 }

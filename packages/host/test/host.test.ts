@@ -183,6 +183,97 @@ function setup(overrides?: { fetch?: QueuedFetch; now?: () => number }) {
   return { raw, db, host, setTimeoutCalls };
 }
 
+/**
+ * A second `createHost` over the same database -- a restart, which is what
+ * `register`'s once-only seed has to survive. A fresh `setup()` would open a
+ * fresh database and could not tell a reseed from a first seed.
+ */
+function reboot(raw: DatabaseSync, db: ReturnType<typeof openTestDatabase>['db']): Host {
+  return createHost({
+    raw,
+    db,
+    fetch: unusedFetch,
+    downloads: () => unusedDownloads,
+    secrets: unusedSecrets,
+    now: () => 2000,
+    artworkDir: unusedArtworkDir,
+    timers: createFakeTimers().timers,
+  });
+}
+
+/** A synced table declaration whose `read` is never reached by these tests. */
+function syncedTableNamed(table: string) {
+  return {
+    table,
+    read: (rawHandle: DatabaseSync, ids: readonly number[]) => {
+      void rawHandle;
+      void ids;
+      return {};
+    },
+    rowsFor: (rawHandle: DatabaseSync, mediaItemIds: readonly number[]) => {
+      void rawHandle;
+      void mediaItemIds;
+      return [];
+    },
+  };
+}
+
+test("a plugin's rows written by its own migration are logged when it registers", () => {
+  // The seed's plugin half. `migratePlugin` runs before `installSyncTriggers`,
+  // so every row a plugin's migration writes is written with no trigger in
+  // existence -- exactly the state `seedSyncLog` exists for, and not
+  // hypothetical: a plugin migration that creates a table and fills it from an
+  // older one does this on the boot it lands.
+  const { raw, host } = setup();
+  host.register(makePlugin({
+    id: 'alpha',
+    migrations: [{ version: 1, up: (db) => db.exec(`
+      CREATE TABLE alpha_thing (id INTEGER PRIMARY KEY, v TEXT);
+      INSERT INTO alpha_thing (id, v) VALUES (1, 'a'), (2, 'b');
+    `) }],
+    synced: [syncedTableNamed('alpha_thing')],
+  }));
+
+  const logged = raw.prepare(
+    "SELECT row_id, op FROM sync_log WHERE table_name = 'alpha_thing' ORDER BY row_id",
+  ).all().map((row) => {
+    const entry = row as { row_id: unknown; op: unknown };
+    return [Number(entry.row_id), String(entry.op)];
+  });
+  assert.deepEqual(logged, [[1, 'upsert'], [2, 'upsert']],
+    'both pre-existing rows must be indexed, or a client walking the log never sees them');
+});
+
+test('a restart does not reseed a plugin table, so no client is made to re-read the library', () => {
+  // `register` runs on every boot, and a reseed re-logs every row at a fresh
+  // id -- which every client below that id reads as "all of this changed".
+  // `seedSyncLogOnce`'s recorded marker is what stops a restart doing that.
+  const { raw, db, host } = setup();
+  const plugin = makePlugin({
+    id: 'alpha',
+    migrations: [{ version: 1, up: (database) => database.exec(`
+      CREATE TABLE alpha_thing (id INTEGER PRIMARY KEY, v TEXT);
+      INSERT INTO alpha_thing (id, v) VALUES (1, 'a'), (2, 'b');
+    `) }],
+    synced: [syncedTableNamed('alpha_thing')],
+  });
+  host.register(plugin);
+
+  const entries = () => raw.prepare(
+    "SELECT id, row_id FROM sync_log WHERE table_name = 'alpha_thing' ORDER BY id",
+  ).all().map((row) => {
+    const entry = row as { id: unknown; row_id: unknown };
+    return [Number(entry.id), Number(entry.row_id)];
+  });
+  const afterFirstBoot = entries();
+  assert.equal(afterFirstBoot.length, 2, 'fixture: the first boot seeded both rows');
+
+  reboot(raw, db).register(plugin);
+  reboot(raw, db).register(plugin);
+  assert.deepEqual(entries(), afterFirstBoot,
+    'the same entries at the same log ids after two more boots');
+});
+
 test('registering a plugin applies its migrations', () => {
   const { raw, host } = setup();
   const plugin = makePlugin({
