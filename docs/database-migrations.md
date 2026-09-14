@@ -30,6 +30,14 @@ failing. Add a new version instead.
 **Versions are append-only integers.** Never renumber, never reuse, never insert between
 two applied versions.
 
+**A row's `id` is immutable.** No migration may change one, and neither may anything
+else. Every client keyed its copy of a row by that id, and `sync_log` records a change as
+`(table_name, row_id)` — so an `UPDATE` that moves a row from id 4 to id 9 logs id 9 and
+nothing else, and every client keeps its row 4 forever beside a new row 9 with the same
+content. There is no call site that does this today, and this is the reason there must
+not be one. If a row has to move, delete it and insert the replacement: the delete logs a
+tombstone and the insert logs a create, which is a change a client can actually apply.
+
 **Each migration is one transaction, and the runner opens it for you.** The migration
 and the row recording its version are wrapped in a `SAVEPOINT`, so a throw part-way
 through leaves no trace. This is not belt-and-braces: SQLite's DDL autocommits, so
@@ -150,7 +158,8 @@ rather than an abuse of it:
 ```sql
 DELETE FROM sync_log WHERE table_name = 'media_item';
 INSERT INTO sync_log (table_name, row_id, op, at)
-  SELECT 'media_item', id, 'upsert', unixepoch() * 1000 FROM media_item;
+  SELECT 'media_item', id, 'upsert', CAST(unixepoch('subsec') * 1000 AS INTEGER)
+  FROM media_item;
 ```
 
 The `DELETE` first is required — `sync_log_row` is a `UNIQUE` index on
