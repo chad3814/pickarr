@@ -22,6 +22,8 @@ database.
 - A row-level read surface, all of it asynchronous.
 - Per-row change subscriptions, plus the two signals per-row subscriptions cannot
   carry: insertions and resets.
+- The host-owned gatherer of §7 — everything common to a media item — so the slice
+  delivers something a card can be built on rather than only tests.
 
 ### 1.1 Decisions taken before this spec
 
@@ -57,6 +59,10 @@ Recorded because each closes off alternatives a reader would otherwise reopen.
   changes that, and it changes this one too.
 - **No `external_reference`.** The table exists in the schema with no writer; external
   links wait for it.
+- **No per-plugin composition.** §7 describes both halves of the join because that is
+  the architecture, but `plugins/<id>/compose.ts` decides what a *card* shows, and no
+  card exists yet to decide against. The host-owned gatherer ships; its plugin
+  counterparts ship with the screens that need them.
 
 ## 2. Facts, measured rather than assumed
 
@@ -85,6 +91,22 @@ into a name without a read-API call.
 `create` rule is "do nothing if the row is already held, including as a tombstone", so
 a tombstone has to be findable at its key. It must equally be invisible to every
 ordinary read.
+
+**2.7 Web Locks works in Node 26, so the lease is testable for real.** Measured:
+`navigator.locks.request` grants, excludes a second `exclusive` holder, honours
+`ifAvailable` (returning a null lock rather than queueing), and releases on callback
+return. Node's implementation is per-process where the browser's is per-origin, which
+is exactly the model a test wants — two "tabs" are two requesters in one process. So
+the "only the holder fetches" property needs no stub and is not a mock asserting
+itself.
+
+**2.8 `fake-indexeddb` supports all three of §3.2's load-bearing claims.** Measured
+against the real schema before committing to it: a compound `['table','id']` key path;
+a nested index on `value.mediaItemId` answering one `getAll(7)` with rows from *two
+different tables*; and a record with no `value` staying retrievable at its primary key
+while absent from that index. Store tests are `.test.ts`, so they run in the **server**
+suite (`packages/*/test/**/*.test.ts`) and need no happy-dom — IndexedDB and
+`BroadcastChannel` are all they touch, and `indexedDB` is the only one Node lacks.
 
 **2.6 Ops are idempotent, and that is what makes multi-tab safe rather than merely
 wasteful.** Two tabs applying the same page converge. So the lease in §5 is an
