@@ -841,6 +841,17 @@ export function findCredentialViolations(file: string, source: string): Violatio
 const CREDENTIAL_PRODUCERS = new Set([
   // `db/host-state.ts`: the signing secret and the claim token, generated or
   // read straight out of `host_state.value`.
+  //
+  // **`ensureSyncGeneration` is deliberately absent**, though it is that
+  // module's third generated value and calls `ensureGeneratedValue` itself.
+  // It is not a credential: it is an opaque per-database token served on the
+  // body of all three sync routes, so a test printing one leaks nothing a
+  // session holder cannot already read. Listing it would force every
+  // assertion about a sync response's generation onto `assert.ok`, which
+  // formats nothing -- and a rule that hides the value you are debugging, for
+  // a value that is published, is the kind of consistency that gets a rule
+  // switched off. `SYNC_GENERATION_KEY`'s own doc is where the public/credential
+  // split is argued.
   'ensureAuthSecret',
   'ensureGeneratedValue',
   'ensureClaimToken',

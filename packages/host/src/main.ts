@@ -30,7 +30,7 @@ import type { Secrets } from './secrets/instance.ts';
 import type { Config } from './config/instance.ts';
 import { openConfig } from './config/instance.ts';
 import { DEFAULT_CONFIG_PATH, databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from './config/schemas.ts';
-import { ensureAuthSecret } from './db/host-state.ts';
+import { ensureAuthSecret, ensureSyncGeneration } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
@@ -776,6 +776,16 @@ export async function main(
     raw,
     pluginIdForType,
     registry,
+    // Resolved once, here, rather than per request: this value cannot change
+    // while the process holds `raw` open, so a route reading it would be a
+    // query per sync request for a constant. Minted on first boot against a
+    // given database file and persisted, so a *rebuilt* database answers a
+    // new one by construction, which is the whole signal -- see
+    // `db/host-state.ts`'s `ensureSyncGeneration`. Not logged, not because it
+    // is a credential (it is deliberately public, and it goes out on three
+    // response bodies) but because `host_state.value`'s readers take no
+    // logger at all, for its siblings' sake.
+    generation: ensureSyncGeneration(raw, Date.now()),
     host: settings.readHost,
     port: settings.port,
     // Built from the address the listener bound rather than here, because

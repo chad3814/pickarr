@@ -419,6 +419,34 @@ backfill walked current state on a keyset of its own, with a watermark
 threaded between them to keep the two from overlapping. §3.2 records what
 measuring the log walk showed and what it cost.
 
+**Every one of the three bodies carries `generation`, a string.** It is the
+same value on all three, it is opaque to a client, and it says *which
+database* answered — `host_state`'s `sync.generation`, minted lazily through
+`ensureGeneratedValue` and persisted, so it is stable for the life of a
+database file and a rebuilt one answers a new value by construction. No
+migration mints it; that is the point.
+
+A client stores it beside its cursors and compares it on every response. When
+it differs from the one it holds, the replica is of a database that no longer
+exists and must be dropped whole, cursors included, and bootstrapped again.
+
+Without it a rebuild is silent in both directions. 2.0 starts on an empty
+database and rebuilds from feeds (`CLAUDE.md`), so deleting `pickarr.db` is a
+routine operation: a client holding `since = 5000` then asks for ops above
+5000 against a log whose max id is 80, receives nothing for as long as that
+install exists, and shows the old library with no error. At a lower cursor it
+is worse — new rows arrive at ids that collide with the stale replica's keys,
+and two libraries merge into one.
+
+It is on the response rather than beside the ops, because the client that
+needs the signal is exactly the one whose page is **empty**: a generation
+attached to an op would reach every client except that one.
+
+**And it is not on `/api/health`**, which is the one open route. An install
+fingerprint readable with no session lets a scanner tell two hosts apart and
+notice a rebuild for free, and a client has a session by the time it syncs, so
+there is nothing it buys.
+
 ### 5.1 Tail — `GET /api/sync?since=<logId>`
 
 Ops above `since`, ordered by id, each resolved to current state: a row that
@@ -429,8 +457,10 @@ therefore receives one op per changed row, not one per change, and the query
 is a primary-key range scan.
 
 ```json
-{"op":"upsert","table":"media_item","id":123,"value":{ … }}
-{"op":"delete","table":"media_item","id":123}
+{"generation":"m4Xk…","cursor":8500,"ops":[
+  {"op":"upsert","table":"media_item","id":123,"value":{ … }},
+  {"op":"delete","table":"media_item","id":123}
+]}
 ```
 
 **This cursor never emits the third op kind.** `SyncOp.op` is `create`,
@@ -507,11 +537,12 @@ gives — including the old two- and three-part keyset forms, so a client that
 kept one across an upgrade is refused rather than having its first component
 read as a log id.
 
-**The body is `ops` and `cursor`, and nothing else.** No watermark — §5.4
-answers that before either cursor starts, rather than making the client wait
-for a backfill page to learn where its tail begins. No `asOf` either; §5.3 has
-why the op kind replaced it. A dead field on the wire is a field slice 2
-reads.
+**The body is `ops`, `cursor` and `generation`, and nothing else.** No
+watermark — §5.4 answers that before either cursor starts, rather than making
+the client wait for a backfill page to learn where its tail begins. No `asOf`
+either; §5.3 has why the op kind replaced it. A dead field on the wire is a
+field slice 2 reads. `generation` is the one field common to all three bodies;
+§5 has what it is for.
 
 **Two references in a page point outside the synced set and always will.**
 `rss_item.feed_id` names an `rss_feed` and `torrent_download`/`nzb_download`'s
@@ -652,15 +683,18 @@ sits above `W` whenever the row changed after `W` (§3.5).
 
 ### 5.4 Bootstrap — `GET /api/sync/bootstrap`
 
-The pivot, as the pair an empty client starts both cursors from. No
-parameters.
+The pivot, as the pair an empty client starts both cursors from, plus the
+generation the pair belongs to. No parameters.
 
 ```json
-{"since": 8412, "before": 8413}
+{"since": 8412, "before": 8413, "generation": "m4Xk…"}
 ```
 
 `before` is `W` and `since` is `W - 1`, named for the query parameters they go
 into so a client pastes them back rather than working out which is which.
+`generation` is §5's, and this is the call a client reads it from first: the
+two cursors and the database they are cursors *into* arrive together, so a
+client never holds a pivot without knowing which database issued it.
 
 **Why `W - 1` rather than making the tail `>=` at bootstrap.** `since` means
 "I have through here" on every other call a client makes, and one parameter
@@ -806,13 +840,53 @@ types — or importing from a plugin package, which is the boundary
 `packages/contract` exists to enforce. Enumerating three here was an error in
 this spec, not a scope decision: the backfill already emits ops for all six.
 
-**No read shape carries its own row id, deliberately.** The key is on the op
-(§5.1), so it is the protocol's and not each plugin author's. The three detail
-shapes do carry `mediaItemId`, because grouping is a different question from
-keying and `media_item.id` is not the row's own key; the three parent shapes
-carry none, because their tables have no `media_item_id` column — many
+**No *plugin* read shape carries its own row id, deliberately.** The key is on
+the op (§5.1), so it is the protocol's and not each plugin author's. The three
+detail shapes do carry `mediaItemId`, because grouping is a different question
+from keying and `media_item.id` is not the row's own key; the three parent
+shapes carry none, because their tables have no `media_item_id` column — many
 episodes share one season, many scenes one site — and they are reached through
 the detail rows that point at them.
+
+**The host's own six tables have read shapes in the contract too**, and the
+sentence above was written as though they did not. They are
+`MediaItemSyncRead`, `RssItemSyncRead`, `TorrentDownloadSyncRead`,
+`NzbDownloadSyncRead`, `PersonSyncRead` and `RoleSyncRead`, and before they
+existed a client received `unknown` for every host table — six of the twelve
+tables a replica holds, including the one it browses. Three things about them:
+
+- **They do carry `id`**, because `sync/tables.ts`'s projections select it and
+  nothing maps the row on the way out. It is redundant with the op's `id`
+  rather than an alternative to it: the key a client stores a row under is the
+  op's on a host table exactly as on a plugin one, since a `delete` carries no
+  `value` to read an id out of.
+- **The suffix is `SyncRead` and not `Read`** because `MediaItemRead` and
+  `RssItemRead` were already taken, by the plugin-facing `MediaReader` shapes
+  that `/api/media` and `/api/rss-items` serve — and neither matches its sync
+  counterpart: `MediaItemRead` has no `pluginId`, and `RssItemRead` carries
+  `link`, which this wire deliberately never does, and lacks `createdAt`,
+  `updatedAt` and `rankingScore`. All six take the suffix rather than only the
+  two that had to, so the family reads as one.
+- **Nothing generates them from the projections**, so
+  `packages/host/test/sync/tables.test.ts` compares the two: each projection's
+  key set is read off a real row and checked against a
+  `Record<keyof …Read, true>` witness per shape, which the compiler holds to
+  the interface in both directions. That covers names. Declared types are not
+  mechanisable from a TypeScript type at run time and are not covered; what
+  covers them instead is `test/db/schema.test.ts`'s column types against
+  `schema.ts`.
+
+**One naming convention, on every table.** The host's six projections aliased
+every multi-word column to camelCase (`media_item_id AS mediaItemId`, and so
+on through all of them); before that they went straight from SQL and spoke
+snake_case, while all six plugin read shapes spoke camelCase. The same logical
+field was therefore `media_item_id` on three tables and `mediaItemId` on three
+others. That is not cosmetic: the client's replica is one IndexedDB object
+store keyed `['table', 'id']` with sparse indexes on `value.mediaItemId` and
+`value.rssItemId`, and an index key path is a single string for every row in
+the store — so "the media item this row belongs to" could not be one index at
+all. `api/reads.ts`'s read API is a separate surface and unaffected: it maps
+each row into its camelCase `*Read` shape by hand already.
 
 ## 7. What the tests must prove
 
@@ -922,6 +996,17 @@ the detail rows that point at them.
     changed because the host restarted.
 21. A boot reinstalls the host tables' triggers, so one dropped by a later
     migration that rebuilt its table is repaired rather than silently absent.
+21a. All three sync responses carry `generation`, it is the same value on
+    each, and it is the one this database actually minted rather than any
+    other string — asserted on the wire, including on an **empty** tail page,
+    which is the page the client that needs the signal receives. Omitting the
+    field and reporting a wrong one must each fail a test by name.
+21b. `/api/health` does **not** carry it: it is the one open route, and an
+    install fingerprint served without a session is a gift to a scanner.
+21c. A rebuilt database mints a new generation and a restart against the same
+    file does not, so a client resyncs when the database was replaced and not
+    when the host was merely restarted. Both halves, since either alone passes
+    on a value that is constant or random per boot.
 22. `sync_log.id` is `AUTOINCREMENT` in the DDL *and* in the Drizzle mirror,
     asserted against `sqlite_master.sql` on both sides — `PRAGMA table_info`
     cannot report it and `sqlite_sequence`'s existence is not specific to

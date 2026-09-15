@@ -18,6 +18,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { ensureClaimToken } from '../../src/auth/claim.ts';
 import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
+import { ensureSyncGeneration } from '../../src/db/host-state.ts';
 import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
@@ -40,10 +41,27 @@ const dropLine = (): void => {};
 
 interface Running {
   server: ReadServer;
+  /**
+   * The generation the server was started with -- minted from `raw` the way
+   * `main` does, rather than a literal, so a route returning some *other*
+   * `host_state` value would still be caught. See
+   * `db/host-state.ts`'s `ensureSyncGeneration`.
+   */
+  generation: string;
 }
 
 interface SignedIn extends Running {
   cookie: string;
+}
+
+/** The `generation` off a body, or a failure naming what was there instead. */
+function generationOf(body: unknown, route: string): string {
+  if (!isRecord(body)) throw new Error(`${route} must answer an object`);
+  const { generation } = body;
+  if (typeof generation !== 'string') {
+    throw new Error(`${route} answered no string generation, but ${JSON.stringify(generation)}`);
+  }
+  return generation;
 }
 
 function setup(): { raw: DatabaseSync; db: HostDb } {
@@ -61,10 +79,15 @@ const noType = (): string | undefined => undefined;
  * a function of the origin rather than an instance built up front.
  */
 async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Promise<Running> {
+  // Resolved once, before the listener, exactly as `main` does: the value
+  // cannot change while this process holds the database open, so a
+  // per-request read would be a query per sync request for a constant.
+  const generation = ensureSyncGeneration(raw, 1_000);
   const server = await createReadServer({
     raw,
     pluginIdForType: noType,
     registry,
+    generation,
     host: undefined,
     port: 0,
     authFor: (baseURL) => createAuth({
@@ -77,7 +100,7 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     }),
     log: dropLine,
   });
-  return { server };
+  return { server, generation };
 }
 
 function originOf(server: ReadServer): string {
@@ -172,8 +195,8 @@ test('the bootstrap answers one cursor per stream, and they drive the two routes
     assert.equal(response.status, 200);
     const body: unknown = JSON.parse(await response.text());
     if (!isRecord(body)) throw new Error('the bootstrap must answer an object');
-    assert.deepEqual(Object.keys(body).toSorted(), ['before', 'since'],
-      'exactly the two query parameters the other two routes take, and nothing else');
+    assert.deepEqual(Object.keys(body).toSorted(), ['before', 'generation', 'since'],
+      'the two query parameters the other two routes take, plus the generation, and nothing else');
     if (typeof body.since !== 'number' || typeof body.before !== 'number') {
       throw new Error('both cursors must be numbers');
     }
@@ -259,8 +282,8 @@ test('the backfill answers a page and a cursor, and no log position of its own',
     // `/api/sync/bootstrap`, which answers both cursors before either is
     // called, and `asOf` by the op kind (§5.3). A field left on the wire is a
     // field slice 2 reads.
-    assert.deepEqual(Object.keys(body).toSorted(), ['cursor', 'ops'],
-      'the backfill body is exactly ops and cursor -- no watermark, no asOf, no dated position');
+    assert.deepEqual(Object.keys(body).toSorted(), ['cursor', 'generation', 'ops'],
+      'the backfill body is ops, cursor and the generation -- no watermark, no asOf, no dated position');
   } finally {
     await server.close();
   }
@@ -392,6 +415,81 @@ test('every cursor this route emits is one it accepts back', async () => {
     // which `Number.MAX_SAFE_INTEGER` is reachable.
     const tooLong = await get(server, `/api/sync?since=${largest}9`, cookie);
     assert.equal(tooLong.status, 400, 'sixteen digits is past what a cursor may be');
+  } finally {
+    await server.close();
+  }
+});
+
+test('all three sync routes carry this database`s generation, and it is the same one', async () => {
+  // Without it a client cannot tell a rebuilt database from the one it
+  // replicated, and the failure is silent: `pickarr.db` deleted, a client
+  // holding `since = 5000` asking for ops above 5000 against a log whose max
+  // id is 80, receiving nothing forever, showing the old library with no
+  // error. `db/host-state.ts`'s `ensureSyncGeneration` has the mechanism; what
+  // this asserts is that it reaches the wire, on every route a client polls,
+  // as the value this host actually minted rather than any other string.
+  const { raw, db } = setup();
+  seedMediaItem(raw, 1000, 'A Movie');
+  const registry = createSyncRegistry(raw, []);
+  const { server, cookie, generation } = await startSignedIn(raw, db, registry);
+  try {
+    const [tail, walk, bootstrap] = await Promise.all([
+      get(server, '/api/sync?since=0', cookie),
+      get(server, '/api/sync/backfill', cookie),
+      get(server, '/api/sync/bootstrap', cookie),
+    ]);
+    const bodies = await Promise.all([tail.text(), walk.text(), bootstrap.text()]);
+    const [tailBody, walkBody, bootstrapBody] = bodies.map((text): unknown => JSON.parse(text));
+
+    assert.equal(generationOf(tailBody, '/api/sync'), generation,
+      'the tail must report the generation this host minted, not another value');
+    assert.equal(generationOf(walkBody, '/api/sync/backfill'), generation,
+      'and so must the backfill');
+    assert.equal(generationOf(bootstrapBody, '/api/sync/bootstrap'), generation,
+      'and so must the bootstrap, which is the one a client reads first');
+  } finally {
+    await server.close();
+  }
+});
+
+test('an empty tail page still carries the generation', async () => {
+  // The page a client polling a quiet host receives on every request, and the
+  // exact case the value exists for: a cursor above a rebuilt log's max id
+  // answers no ops at all, so an implementation that attached the generation
+  // alongside the ops rather than to the response would leave the one client
+  // that needs the signal without it, permanently.
+  const { raw, db } = setup();
+  const registry = createSyncRegistry(raw, []);
+  const { server, cookie, generation } = await startSignedIn(raw, db, registry);
+  try {
+    const response = await get(server, '/api/sync?since=5000', cookie);
+    assert.equal(response.status, 200);
+    const body: unknown = JSON.parse(await response.text());
+    if (!isRecord(body) || !Array.isArray(body.ops)) throw new Error('the tail must answer an ops array');
+    assert.equal(body.ops.length, 0, 'a cursor past the end of the log answers nothing');
+    assert.equal(generationOf(body, '/api/sync'), generation,
+      'an empty page is the page a stale client gets, so it must still say which database answered');
+  } finally {
+    await server.close();
+  }
+});
+
+test('the health route does not carry the generation', async () => {
+  // `/api/health` is the one open route (`api/server.ts`'s `ROUTES`), so
+  // anything on it is readable without a session. An install fingerprint
+  // there lets a scanner tell two hosts apart and spot a rebuild for free,
+  // which is a gift for no gain: the client that needs the value has a
+  // session by the time it syncs.
+  const { raw, db } = setup();
+  const registry = createSyncRegistry(raw, []);
+  const { server } = await start(raw, db, registry);
+  try {
+    const response = await get(server, '/api/health', ANONYMOUS);
+    assert.equal(response.status, 200, 'health stays open');
+    const body: unknown = JSON.parse(await response.text());
+    if (!isRecord(body)) throw new Error('health must answer an object');
+    assert.ok(!('generation' in body),
+      'health is unauthenticated, and an install fingerprint must not be readable without a session');
   } finally {
     await server.close();
   }
