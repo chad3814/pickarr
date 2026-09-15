@@ -258,21 +258,41 @@ Expected: FAIL, `applyBatch` is not defined.
 
 One `readwrite` transaction over both stores. For each op:
 
+**Read every key the batch touches in one pass, then write in one pass.** Not a
+sequential `await` per op, for three reasons measured rather than assumed: it trips
+`no-await-in-loop`, which would break the exactly-124 gate; `noUncheckedIndexedAccess`
+makes a parallel-array lookup awkward, which the pairing below avoids; and issuing the
+reads synchronously keeps requests in flight, so the transaction cannot commit between
+them. That last one does not bite under `fake-indexeddb` — measured, a sequential
+`await` between requests survives and commits — but the tests are not the
+implementation that ships, and a transaction that commits early loses the cursor write
+that makes this atomic.
+
 ```ts
-if (op.op === 'create') {
-  const held = await request(store.get([op.table, op.id]));
-  if (held !== undefined) continue;            // including a tombstone
-  store.put({ table: op.table, id: op.id, value: op.value });
-  insertedFor(op.table).push(op.id);
-} else if (op.op === 'upsert') {
-  const held = await request(store.get([op.table, op.id]));
-  store.put({ table: op.table, id: op.id, value: op.value });
-  if (held === undefined) insertedFor(op.table).push(op.id);
-} else {
-  store.put({ table: op.table, id: op.id });   // tombstone: no `value`
+const held = await Promise.all(
+  ops.map(async (op) => ({ op, existing: await request(store.get([op.table, op.id])) })),
+);
+
+for (const { op, existing } of held) {
+  if (op.op === 'delete') {
+    store.put({ table: op.table, id: op.id });   // tombstone: no `value` key at all
+  } else {
+    // A create or an upsert carrying no value would write a record that is
+    // indistinguishable from a tombstone -- `value: undefined` is excluded from
+    // every `value.*` index exactly as an absent `value` is (task 1's review
+    // measured all three shapes), so the row would be invisible to every index
+    // *and* would block a later create for the same key. Refuse it instead.
+    if (!('value' in op)) throw new MalformedOpError(op);
+    if (op.op === 'create' && existing !== undefined) continue;   // including a tombstone
+    store.put({ table: op.table, id: op.id, value: op.value });
+    if (existing === undefined) insertedFor(op.table).push(op.id);
+  }
+  touchedFor(op.table).push(op.id);
 }
-touchedFor(op.table).push(op.id);
 ```
+
+`MalformedOpError` names the table and id and **never the value** — a refused op is
+reported, and a row's contents do not go into a message (Global Constraints).
 
 Then write the cursors **into the same transaction**, and only then `await done(tx)`.
 
