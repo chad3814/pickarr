@@ -57,8 +57,12 @@ export function openStore(name: string): Promise<IDBDatabase> {
       db.createObjectStore('meta', { keyPath: 'key' });
     };
 
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error('indexeddb open failed'));
-    req.onblocked = () => reject(new OpenBlockedError(name));
+    req.addEventListener('success', () => resolve(req.result), { once: true });
+    req.addEventListener(
+      'error',
+      () => reject(req.error ?? new Error('indexeddb open failed')),
+      { once: true },
+    );
+    req.addEventListener('blocked', () => reject(new OpenBlockedError(name)), { once: true });
   });
 }

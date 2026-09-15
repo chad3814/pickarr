@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
-import { request } from '../../src/store/idb.ts';
+import { done, request } from '../../src/store/idb.ts';
 import { openStore } from '../../src/store/db.ts';
 import { readCursors, writeCursors, readGeneration, writeGeneration } from '../../src/store/meta.ts';
 
@@ -22,7 +22,7 @@ test('a tombstone is findable by key and invisible to every value index', async 
   const rows = tx.objectStore('rows');
   rows.put({ table: 'rss_item', id: 1, value: { mediaItemId: 7, updatedAt: 5 } });
   rows.put({ table: 'rss_item', id: 2 });
-  await new Promise((r, j) => { tx.oncomplete = () => r(null); tx.onerror = () => j(tx.error); });
+  await done(tx);
 
   const byItem = await request(db.transaction('rows').objectStore('rows')
     .index('by_media_item').getAll(7));
