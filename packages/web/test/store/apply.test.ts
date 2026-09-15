@@ -145,6 +145,53 @@ test('a batch is exactly one transaction, so its rows and its cursor cannot be c
     { op: 'delete', table: 'person', id: 3 },
   ], { since: 9, before: 4 });
 
-  assert.equal(transactions, 1, 'the ops and the cursor advance share one transaction');
+  assert.equal(transactions, 1, 'applyBatch opens exactly one transaction');
+  db.close();
+});
+
+test('an upsert carrying an undefined or null value is refused, not written', async () => {
+  // The first spelling of this guard tested `'value' in op`, which has the key
+  // and so let exactly the record it exists to refuse straight through: one
+  // that is invisible to every value.* index and blocks any later create.
+  const db = await freshDb();
+  // Spelled twice rather than looped: `await` in a loop trips
+  // `no-await-in-loop`, and the two shapes are different claims anyway.
+  await assert.rejects(
+    () => applyBatch(db, [{ op: 'upsert', table: 'person', id: 1, value: undefined }], { since: 1, before: null }),
+    /carries no usable value/,
+  );
+  await assert.rejects(
+    () => applyBatch(db, [{ op: 'upsert', table: 'person', id: 1, value: null }], { since: 1, before: null }),
+    /carries no usable value/,
+  );
+  const held = await request(db.transaction('rows').objectStore('rows').get(['person', 1]));
+  assert.ok(held === undefined, 'nothing was written');
+  db.close();
+});
+
+test('an upsert reviving a tombstone counts as an insert, because a tombstone is invisible to readers', async () => {
+  const db = await freshDb();
+  await applyBatch(db, [{ op: 'delete', table: 'person', id: 1 }], { since: 1, before: null });
+  const changed = await applyBatch(
+    db, [{ op: 'upsert', table: 'person', id: 1, value: { name: 'back' } }], { since: 2, before: null },
+  );
+  assert.deepEqual(changed.inserted.get('person'), [1],
+    'a revive is new data appearing at that key, which is what subscribeInserts announces');
+  db.close();
+});
+
+test('a batch carrying two ops for one key is refused', async () => {
+  // The read pass reads each key once before any write, so two ops for one key
+  // both see pre-batch state and the outcome turns on order. The server cannot
+  // send this -- the log holds one entry per changed row -- which is why it is
+  // checked rather than trusted.
+  const db = await freshDb();
+  await assert.rejects(
+    () => applyBatch(db, [
+      { op: 'delete', table: 'person', id: 1 },
+      { op: 'create', table: 'person', id: 1, value: { name: 'zombie' } },
+    ], { since: 1, before: null }),
+    /more than one op for/,
+  );
   db.close();
 });
