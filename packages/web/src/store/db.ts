@@ -85,7 +85,14 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       const rows = db.createObjectStore('rows', { keyPath: ['table', 'id'] });
       rows.createIndex('by_media_item', 'value.mediaItemId');
       rows.createIndex('by_rss_item', 'value.rssItemId');
-      rows.createIndex('by_table_updated', ['table', 'value.updatedAt']);
+      // `id` is the third component and not decoration: `updatedAt` is not
+      // unique, so a two-part key cannot resume a walk that stops in the
+      // middle of a tie. Measured before this was widened -- paging five
+      // people backwards two at a time, where three shared one `updatedAt`,
+      // served ids [1,4,5] and **never served 2 or 3 from any page**. The
+      // server's own read API keysets on `(updated_at, id)` for exactly this
+      // reason (read-api design §5).
+      rows.createIndex('by_table_updated', ['table', 'value.updatedAt', 'id']);
       rows.createIndex('by_table', 'table');
       db.createObjectStore('meta', { keyPath: 'key' });
     }, { once: true });

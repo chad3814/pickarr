@@ -6,13 +6,19 @@
  *
  * **`getRow` cannot tell "not yet replicated" from "does not exist", and
  * must not pretend to (spec §9).** Both a tombstone (a record with no
- * `value`) and an absent key resolve `row?.value` to `undefined` with no
+ * `value`) and an absent key both resolve to `undefined` with no
  * special-casing required -- optional chaining over a missing property and
  * over a missing record land on the same answer, which is the point.
  * `byMediaItem` and `byRssItem` get the same exclusion for free, a different
  * way: a tombstone has no `value` key at all, so it drops out of
  * `by_media_item` and `by_rss_item` (both `value.*` index key paths) before
  * a query ever sees it (`store/db.ts`'s doc, measured in task 1's review).
+ * A stored `value` of `null` reads as absent too. Task 2 refuses to write one,
+ * so it cannot arrive from the wire any more -- but it is index-invisible
+ * exactly as a tombstone is (measured), and a read surface that returned it
+ * while every index hid it would be the one place in this module where two
+ * reads of the same row disagree.
+ *
  * `listByTable`'s index, `by_table_updated`, is keyed `['table',
  * 'value.updatedAt']` -- also a `value.*` path, so the same exclusion
  * applies -- but its own tests measure that rather than lean on the claim,
@@ -28,20 +34,16 @@ import type { StoredRow } from './db.ts';
  */
 export interface ListByTableOptions {
   /**
-   * Strictly excluded from the page: `direction: 'next'` returns rows whose
-   * `updatedAt` is greater than this, `'prev'` returns rows whose
-   * `updatedAt` is less. Matches the host's own cursor convention
-   * (`packages/host/src/api/reads.ts`: "never `>=` -- the cursor row itself
-   * has already been served"), so a caller can hand the last row's
-   * `updatedAt` straight back to page on without re-fetching it.
+   * Where to resume, as the full key the index is ordered by.
    *
-   * `by_table_updated` carries no id to break a tie on, so two rows sharing
-   * the exact `updatedAt` this cursor lands on cannot both be represented by
-   * one boundary value -- whichever of them the page split between is not
-   * re-offered. Unmeasured in practice: `updatedAt` is millisecond
-   * resolution and this index has no secondary key to widen it.
+   * Both halves, not just `updatedAt`: that column is not unique, so a page
+   * boundary falling inside a tie cannot be resumed from the timestamp alone.
+   * Measured on the two-part version -- five people paged backwards two at a
+   * time with three sharing one `updatedAt` served [1,4,5] and never served 2
+   * or 3 from any page. The row named here is excluded from the next page,
+   * which is what makes a walk neither skip nor repeat.
    */
-  fromUpdatedAt?: number;
+  from?: { updatedAt: number; id: number };
   direction: 'next' | 'prev';
   limit: number;
 }
@@ -72,7 +74,10 @@ function rowsStore(db: IDBDatabase): IDBObjectStore {
 /** `undefined` for a tombstone and for a row never replicated -- spec §9 says the caller cannot tell those apart here, and must not be told it can. */
 export async function getRow(db: IDBDatabase, table: string, id: number): Promise<unknown | undefined> {
   const row = await request<StoredRow | undefined>(rowsStore(db).get([table, id]));
-  return row?.value;
+  // `?? undefined` rather than `row?.value`: a stored `null` is index-
+  // invisible like a tombstone, so returning it would make this the one read
+  // that disagrees with every index. See the module docblock.
+  return row?.value ?? undefined;
 }
 
 /**
@@ -92,7 +97,7 @@ export async function getRows(
   );
   const result = new Map<number, unknown>();
   for (const { id, row } of held) {
-    if (row?.value !== undefined) result.set(id, row.value);
+    if (row?.value !== undefined && row.value !== null) result.set(id, row.value);
   }
   return result;
 }
@@ -112,11 +117,21 @@ export async function byRssItem(db: IDBDatabase, rssItemId: number): Promise<rea
  * table when `fromUpdatedAt` is absent, otherwise the strict far side of it
  * in the direction requested. See {@link ListByTableOptions.fromUpdatedAt}.
  */
-function rangeFor(table: string, fromUpdatedAt: number | undefined, direction: 'next' | 'prev'): IDBKeyRange {
-  if (fromUpdatedAt === undefined) return IDBKeyRange.bound([table, -Infinity], [table, Infinity]);
+function rangeFor(
+  table: string,
+  from: { updatedAt: number; id: number } | undefined,
+  direction: 'next' | 'prev',
+): IDBKeyRange {
+  const low = [table, -Infinity, -Infinity];
+  const high = [table, Infinity, Infinity];
+  if (from === undefined) return IDBKeyRange.bound(low, high);
+  const at = [table, from.updatedAt, from.id];
+  // Exclusive on the named row in whichever direction the walk is going, so
+  // the row that ended the last page is not repeated and its tied siblings
+  // are not skipped.
   return direction === 'next'
-    ? IDBKeyRange.bound([table, fromUpdatedAt], [table, Infinity], true, false)
-    : IDBKeyRange.bound([table, -Infinity], [table, fromUpdatedAt], false, true);
+    ? IDBKeyRange.bound(at, high, true, false)
+    : IDBKeyRange.bound(low, at, false, true);
 }
 
 /**
@@ -162,8 +177,8 @@ export async function listByTable(
       `"${table}" projects no updatedAt, so listByTable cannot list it in modification order (design spec §3.2)`,
     );
   }
-  const { fromUpdatedAt, direction, limit } = opts;
-  const range = rangeFor(table, fromUpdatedAt, direction);
+  const { from, direction, limit } = opts;
+  const range = rangeFor(table, from, direction);
   const index = rowsStore(db).index('by_table_updated');
   return drain(index.openCursor(range, direction), limit);
 }

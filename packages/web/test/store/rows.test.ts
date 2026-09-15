@@ -4,6 +4,15 @@ import { freshDb } from './harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { getRow, getRows, byMediaItem, byRssItem, listByTable } from '../../src/store/rows.ts';
+import { done } from '../../src/store/idb.ts';
+import type { StoredRow } from '../../src/store/db.ts';
+
+/** The resume cursor for the page just served: its last row's full index key. */
+function cursorOf(rows: readonly StoredRow[]): { updatedAt: number; id: number } {
+  const last = rows[rows.length - 1];
+  if (last === undefined) throw new Error('no page to resume from');
+  return { updatedAt: (last.value as { updatedAt: number }).updatedAt, id: last.id };
+}
 
 /** Seeds `ops` into `db` in one batch -- the cursor value has no bearing on these tests. */
 async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
@@ -163,7 +172,7 @@ test('listByTable honours limit', async () => {
   db.close();
 });
 
-test('listByTable resumes from fromUpdatedAt without repeating the boundary row', async () => {
+test('listByTable resumes from a cursor without repeating the boundary row', async () => {
   const db = await freshDb();
   await seed(db, [
     { op: 'upsert', table: 'person', id: 1, value: { updatedAt: 10 } },
@@ -171,9 +180,51 @@ test('listByTable resumes from fromUpdatedAt without repeating the boundary row'
     { op: 'upsert', table: 'person', id: 3, value: { updatedAt: 30 } },
   ]);
 
-  const rows = await listByTable(db, 'person', { direction: 'next', fromUpdatedAt: 20, limit: 10 });
+  const rows = await listByTable(db, 'person', {
+    direction: 'next', from: { updatedAt: 20, id: 2 }, limit: 10,
+  });
 
   assert.deepEqual(rows.map((row) => row.id), [3]);
+  db.close();
+});
+
+test('a walk over rows tied on updatedAt serves every row exactly once', async () => {
+  // The defect this cursor's second half exists for. Measured on the version
+  // that resumed from `updatedAt` alone: paging these five backwards two at a
+  // time served ids [1,4,5] and never served 2 or 3 from any page.
+  //
+  // Three explicit pages rather than a loop: `await` in a loop trips
+  // `no-await-in-loop`, and spelling each page out shows *where* the old
+  // version lost rows rather than only that a set came back short.
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'person', id: 1, value: { updatedAt: 300 } },
+    { op: 'upsert', table: 'person', id: 2, value: { updatedAt: 200 } },
+    { op: 'upsert', table: 'person', id: 3, value: { updatedAt: 200 } },
+    { op: 'upsert', table: 'person', id: 4, value: { updatedAt: 200 } },
+    { op: 'upsert', table: 'person', id: 5, value: { updatedAt: 100 } },
+  ]);
+  const one = await listByTable(db, 'person', { direction: 'prev', limit: 2 });
+  const two = await listByTable(db, 'person', { direction: 'prev', limit: 2, from: cursorOf(one) });
+  const three = await listByTable(db, 'person', { direction: 'prev', limit: 2, from: cursorOf(two) });
+
+  const seen = [...one, ...two, ...three].map((row) => row.id);
+  assert.deepEqual(seen.toSorted((a, b) => a - b), [1, 2, 3, 4, 5], 'every row served');
+  assert.equal(new Set(seen).size, seen.length, 'and none served twice');
+  db.close();
+});
+
+test('a stored null value reads as absent, matching what every index does with it', async () => {
+  // Task 2 refuses to write one now, so this is about a replica that already
+  // holds one: `null` is index-invisible exactly as a tombstone is, and a read
+  // that returned it would be the one place two reads of a row disagree.
+  const db = await freshDb();
+  const tx = db.transaction('rows', 'readwrite');
+  tx.objectStore('rows').put({ table: 'person', id: 1, value: null });
+  await done(tx);
+
+  assert.ok(await getRow(db, 'person', 1) === undefined, 'getRow hides it');
+  assert.equal((await getRows(db, 'person', [1])).size, 0, 'getRows omits it');
   db.close();
 });
 
