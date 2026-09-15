@@ -28,9 +28,9 @@ import { request } from './idb.ts';
 import type { StoredRow } from './db.ts';
 
 /**
- * Options for {@link listByTable}. `fromUpdatedAt` is an `updatedAt` value,
- * not a row id -- named for what it is, because `from` alone reads as a
- * cursor of unstated kind (spec §7).
+ * Options for {@link listByTable}. `from` is the full key
+ * `by_table_updated` is ordered by, not a bare timestamp -- see the property
+ * itself for what a bare one cost (spec §3.2, §7).
  */
 export interface ListByTableOptions {
   /**
@@ -113,9 +113,15 @@ export async function byRssItem(db: IDBDatabase, rssItemId: number): Promise<rea
 }
 
 /**
- * The key range for one table's slice of `by_table_updated`: the whole
- * table when `fromUpdatedAt` is absent, otherwise the strict far side of it
- * in the direction requested. See {@link ListByTableOptions.fromUpdatedAt}.
+ * The key range for one table's slice of `by_table_updated`: the whole table
+ * when `from` is absent, otherwise the strict far side of that *key* in the
+ * direction requested. See {@link ListByTableOptions.from}.
+ *
+ * `-Infinity`/`Infinity` pad both unused components so the bound is the same
+ * arity as the index. A short array compares less than any longer one sharing
+ * its prefix, so a two-element low bound would still work -- but a two-element
+ * *upper* bound would exclude every row in the table, which is the kind of
+ * asymmetry that reads as a missing-data bug rather than a bounds bug.
  */
 function rangeFor(
   table: string,
