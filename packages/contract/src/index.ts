@@ -19,8 +19,14 @@ export type { HostFetch } from './fetch.ts';
 export type { Migration } from './migrations.ts';
 export type { DownloadClients, DownloadSubmission } from './downloads.ts';
 export type {
+  MediaItemSyncRead,
   MovieRead,
+  NzbDownloadSyncRead,
+  PersonSyncRead,
+  RoleSyncRead,
+  RssItemSyncRead,
   SyncedTable,
+  TorrentDownloadSyncRead,
   TvRead,
   TvSeasonRead,
   TvSeriesRead,
