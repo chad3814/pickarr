@@ -238,11 +238,14 @@ getRow(table: string, id: number): Promise<unknown | undefined>   // undefined f
 getRows(table: string, ids: readonly number[]): Promise<Map<number, unknown>>
 byMediaItem(mediaItemId: number): Promise<readonly StoredRow[]>   // every table
 byRssItem(rssItemId: number): Promise<readonly StoredRow[]>
-listByTable(table: string, opts: { fromUpdatedAt?: number; direction: 'next' | 'prev'; limit: number }): Promise<readonly StoredRow[]>
+listByTable(table: string, opts: { from?: { updatedAt: number; id: number }; direction: 'next' | 'prev'; limit: number }): Promise<readonly StoredRow[]>
 ```
 
-`listByTable` walks `by_table_updated`, so `fromUpdatedAt` is an `updatedAt` value and
-not a row id — named for what it is, because `from` read as a cursor of unstated kind.
+`listByTable` walks `by_table_updated`, so `from` is the full key that index is
+ordered by — **both halves**, because `updatedAt` alone cannot resume a walk that
+stopped inside a tie (§3.2). The row it names is excluded from the next page, which
+is what makes a walk neither skip nor repeat. An earlier draft of this section
+specified `fromUpdatedAt?: number`; §3.2 records what that cost.
 It is only callable for the five tables of §3.2; asking for one of the other seven is
 a programming error and throws rather than returning an empty page, which would read
 as "this table is empty".
