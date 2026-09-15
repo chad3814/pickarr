@@ -120,7 +120,19 @@ export async function applyBatch(
     }
     await writeCursors(tx, cursors);
   } catch (err) {
-    tx.abort();
+    // Aborting is best-effort, and the guard is not decoration: `abort()` on a
+    // transaction that has already aborted throws `InvalidStateError`
+    // (measured), and so does a `put` issued after one -- so a transaction
+    // that aborted mid-loop from an error event sends us here with an
+    // `InvalidStateError` in hand, and an unguarded `abort()` would replace it
+    // with a second one. The error that caused the failure is what the caller
+    // needs; the abort is only insurance for the case where nothing has
+    // aborted yet.
+    try {
+      tx.abort();
+    } catch {
+      // Already aborted, which is the outcome this call wanted anyway.
+    }
     throw err;
   }
 

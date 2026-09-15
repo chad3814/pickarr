@@ -116,3 +116,35 @@ test('a create or upsert with no value is refused rather than written as an indi
   assert.equal(held, undefined, 'the refused op wrote nothing');
   db.close();
 });
+
+test('a batch is exactly one transaction, so its rows and its cursor cannot be committed apart', async () => {
+  // The property the task's own mutation 3 could not isolate: a version that
+  // wrote the cursor in a *second* transaction after the first committed left
+  // both end states identical whenever nothing failed, and the one fault the
+  // brief sanctions (a value IndexedDB cannot clone) always fails upstream of
+  // the cursor write. Counting transactions pins it structurally instead --
+  // a typed Proxy, so no cast is needed.
+  const db = await freshDb();
+  let transactions = 0;
+  const counted = new Proxy<IDBDatabase>(db, {
+    get(target, prop, receiver) {
+      if (prop === 'transaction') {
+        return (...args: Parameters<IDBDatabase['transaction']>) => {
+          transactions += 1;
+          return target.transaction(...args);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+
+  await applyBatch(counted, [
+    { op: 'upsert', table: 'person', id: 1, value: { name: 'a' } },
+    { op: 'upsert', table: 'person', id: 2, value: { name: 'b' } },
+    { op: 'delete', table: 'person', id: 3 },
+  ], { since: 9, before: 4 });
+
+  assert.equal(transactions, 1, 'the ops and the cursor advance share one transaction');
+  db.close();
+});
