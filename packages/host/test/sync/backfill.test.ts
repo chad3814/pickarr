@@ -311,7 +311,7 @@ test('the walk emits in log order, so an op may name a synced row that arrives l
   const order = page.ops.map((op) => op.table);
   assert.deepEqual(order, ['rss_item', 'media_item'],
     'the release was written last, so it is emitted first -- ahead of the item it names');
-  assert.equal((page.ops[0]?.value as { media_item_id: number } | undefined)?.media_item_id, 1,
+  assert.equal((page.ops[0]?.value as { mediaItemId: number } | undefined)?.mediaItemId, 1,
     'and it does carry the forward reference');
   assert.ok(idsFor(page.ops, 'media_item').includes(1), 'which the same walk resolves, further down');
 });
