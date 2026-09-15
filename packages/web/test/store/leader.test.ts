@@ -1,0 +1,194 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  holdLease,
+  isLeader,
+  broadcast,
+  onMessage,
+  serializeChanged,
+  deserializeChanged,
+  CHANNEL_NAME,
+} from '../../src/store/leader.ts';
+import type { ChannelMessage } from '../../src/store/leader.ts';
+import type { Changed } from '../../src/store/apply.ts';
+
+/** A lease name no other test in this file shares -- `holdLease` never releases, so a name reused across tests would queue the second test's grant behind the first's forever. */
+let leaseCounter = 0;
+function freshLeaseName(): string {
+  leaseCounter += 1;
+  return `test-lease-${String(leaseCounter)}`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+test('one holder at a time: a second requester is not granted while the first holds', async () => {
+  // Uses ifAvailable so the second returns a null lock rather than queueing.
+  const name = freshLeaseName();
+  await navigator.locks.request(name, { mode: 'exclusive' }, async () => {
+    const second = await navigator.locks.request(
+      name,
+      { mode: 'exclusive', ifAvailable: true },
+      (lock) => lock,
+    );
+    assert.equal(second, null, 'a second exclusive request for the same name is refused, not queued, while the first holds it');
+  });
+});
+
+test('the lease releases when its holder finishes, and the next requester is granted', async () => {
+  const name = freshLeaseName();
+  let secondGranted = false;
+  let finishFirst: (() => void) | undefined;
+  const firstShouldFinish = new Promise<void>((resolve) => {
+    finishFirst = resolve;
+  });
+
+  // Requested first, so it is the one granted; held open until the test
+  // tells it to finish, below.
+  const first = navigator.locks.request(name, { mode: 'exclusive' }, async () => {
+    await firstShouldFinish;
+  });
+
+  // Requested only once the first is certainly already granted, so this one
+  // queues behind it rather than racing it for the grant -- the case
+  // `ifAvailable` above deliberately does not cover.
+  await delay(10);
+  const second = navigator.locks.request(name, { mode: 'exclusive' }, () => {
+    secondGranted = true;
+  });
+
+  await delay(10);
+  assert.equal(secondGranted, false, 'the queued request is not granted while the first holder is still running');
+
+  finishFirst?.();
+  await first;
+  await second;
+  assert.equal(secondGranted, true, 'the queued request is granted once the first holder finishes');
+});
+
+test('holdLease grants the lease and flips isLeader, and the release it hands the caller stays pending', async () => {
+  const name = freshLeaseName();
+
+  await new Promise<void>((resolve) => {
+    holdLease(name, (release) => {
+      assert.equal(isLeader(), true, 'isLeader reflects a grant this tab just received');
+
+      const outcome = Promise.race([
+        release.then(() => 'released' as const),
+        delay(20).then(() => 'still-held' as const),
+      ]);
+      void outcome.then((result) => {
+        assert.equal(result, 'still-held', 'release does not settle while the lease is still held (spec §5: "for its lifetime")');
+        resolve();
+      });
+    });
+  });
+});
+
+test('a second holdLease call for the same name is not granted while the first holds it', async () => {
+  const name = freshLeaseName();
+  let secondGranted = false;
+
+  await new Promise<void>((resolve) => {
+    holdLease(name, () => {
+      holdLease(name, () => {
+        secondGranted = true;
+      });
+      void delay(20).then(() => {
+        assert.equal(secondGranted, false, 'a second holdLease for the same lease name never fires its onGranted while the first still holds it');
+        resolve();
+      });
+    });
+  });
+});
+
+test('a message broadcast reaches another channel listening on the same name', async () => {
+  // Models "the other tab": a raw channel this test owns and must close
+  // itself, exactly as the module's own doc explains a `BroadcastChannel`
+  // needs -- `broadcast` opens and closes its own sender, so this is the
+  // only channel this test is responsible for.
+  const other = new BroadcastChannel(CHANNEL_NAME);
+  try {
+    const received = new Promise<ChannelMessage>((resolve) => {
+      other.addEventListener('message', (event: MessageEvent<ChannelMessage>) => {
+        resolve(event.data);
+      }, { once: true });
+    });
+
+    const msg: ChannelMessage = { type: 'reset', generation: 'gen-1' };
+    broadcast(msg);
+
+    assert.deepEqual(await received, msg);
+  } finally {
+    other.close();
+  }
+});
+
+test('onMessage receives a message posted by another channel, and stops once unsubscribed', async () => {
+  const received: ChannelMessage[] = [];
+  const unsubscribe = onMessage((msg) => {
+    received.push(msg);
+  });
+
+  const other = new BroadcastChannel(CHANNEL_NAME);
+  try {
+    // eslint-disable-next-line unicorn/require-post-message-target-origin -- that argument belongs to `Window.postMessage`; `BroadcastChannel.postMessage` has no origin to name
+    other.postMessage({ type: 'reset', generation: 'gen-2' } satisfies ChannelMessage);
+    await delay(10);
+    assert.deepEqual(received, [{ type: 'reset', generation: 'gen-2' }]);
+
+    unsubscribe();
+    // eslint-disable-next-line unicorn/require-post-message-target-origin -- see above
+    other.postMessage({ type: 'reset', generation: 'gen-3' } satisfies ChannelMessage);
+    await delay(10);
+    assert.deepEqual(received, [{ type: 'reset', generation: 'gen-2' }], 'nothing further arrives once unsubscribed');
+  } finally {
+    other.close();
+  }
+});
+
+test('a Changed round-trips through serializeChanged, a real broadcast, and deserializeChanged', async () => {
+  const changed: Changed = {
+    touched: new Map([['person', [1, 2]], ['media_item', [7]]]),
+    inserted: new Map([['person', [2]]]),
+  };
+
+  const received = new Promise<ChannelMessage>((resolve) => {
+    const unsubscribe = onMessage((msg) => {
+      unsubscribe();
+      resolve(msg);
+    });
+  });
+
+  broadcast({ type: 'changed', changed: serializeChanged(changed) });
+
+  const msg = await received;
+  assert.equal(msg.type, 'changed');
+  if (msg.type !== 'changed') throw new Error('unreachable: asserted above');
+
+  const roundTripped = deserializeChanged(msg.changed);
+  assert.deepEqual(
+    Array.from(roundTripped.touched.entries()).toSorted(),
+    Array.from(changed.touched.entries()).toSorted(),
+  );
+  assert.deepEqual(
+    Array.from(roundTripped.inserted.entries()).toSorted(),
+    Array.from(changed.inserted.entries()).toSorted(),
+  );
+});
+
+test('serializeChanged carries table names and ids only -- no row value ever named', () => {
+  const changed: Changed = {
+    touched: new Map([['person', [1]]]),
+    inserted: new Map(),
+  };
+  const serialized = serializeChanged(changed);
+  assert.deepEqual(serialized, { touched: [['person', [1]]], inserted: [] });
+  // The wire form round-trips through JSON with nothing beyond table names
+  // and numeric ids -- a row's `value` has no field to ride along in, even
+  // by accident, because `Changed` itself never carried one.
+  assert.deepEqual(JSON.parse(JSON.stringify(serialized)), { touched: [['person', [1]]], inserted: [] });
+});
