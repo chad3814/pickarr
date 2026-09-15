@@ -1,7 +1,7 @@
 /**
  * Promise wrappers for IndexedDB's event-emitter API.
  *
- * Four functions, and nothing else in this package may wrap a request: a
+ * Two functions, and nothing else in this package may wrap a request: a
  * second wrapper is where one caller starts forgetting that a rejected
  * transaction still has to be observed, and IndexedDB reports an abort on the
  * transaction rather than on the request that caused it.

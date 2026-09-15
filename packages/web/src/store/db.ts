@@ -6,7 +6,22 @@
  * there is one `rows` store rather than one per table.
  */
 
-/** Bump this to force every client to rebuild its replica from scratch. */
+/**
+ * Bump this to force every client to rebuild its replica from scratch.
+ *
+ * "From scratch" is literal, and it is why `openStore`'s upgrade handler
+ * deletes every existing store before creating them: a replica is disposable
+ * by construction -- every row in it can be fetched again -- so a schema
+ * change discards it rather than migrating it. The server-side rule is the
+ * opposite (`docs/database-migrations.md`: an applied migration is frozen),
+ * and the difference is ownership. The host's database is the only copy of
+ * its data; this one is a copy of the host's.
+ *
+ * Dropping `meta` with the rest is what makes the rebuild happen: the cursors
+ * go with it, so the next start finds none and bootstraps (spec §5). A bump
+ * therefore costs one full re-sync per client and needs no migration code,
+ * which is the trade this constant exists to make.
+ */
 export const SCHEMA_VERSION = 1;
 
 /**
@@ -42,20 +57,38 @@ export class OpenBlockedError extends Error {
   }
 }
 
-/** Opens (and, on first use, creates) the replica database named `name`. */
-export function openStore(name: string): Promise<IDBDatabase> {
+/**
+ * Opens (and, on first use, creates) the replica database named `name`.
+ *
+ * `version` defaults to {@link SCHEMA_VERSION} and exists as a parameter so a
+ * test can drive the two paths a fixed constant cannot reach: an upgrade over
+ * an existing database, and the `blocked` event that an upgrade raises while
+ * another connection is still open.
+ */
+export function openStore(name: string, version: number = SCHEMA_VERSION): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(name, SCHEMA_VERSION);
+    const req = indexedDB.open(name, version);
 
-    req.onupgradeneeded = () => {
+    req.addEventListener('upgradeneeded', () => {
       const db = req.result;
+      // Delete before create, which is what makes SCHEMA_VERSION's promise
+      // true rather than aspirational: against an existing database the bare
+      // `createObjectStore` below throws ConstraintError, so a bump broke
+      // every client that already had a replica instead of rebuilding it.
+      //
+      // Snapshotted first because `objectStoreNames` is a *live* list and the
+      // loop mutates it. Measured under `fake-indexeddb`, iterating it live
+      // skips nothing -- but that is the implementation the tests run against,
+      // not the one that ships, and a snapshot costs one array.
+      const existing = Array.from(db.objectStoreNames);
+      for (const store of existing) db.deleteObjectStore(store);
       const rows = db.createObjectStore('rows', { keyPath: ['table', 'id'] });
       rows.createIndex('by_media_item', 'value.mediaItemId');
       rows.createIndex('by_rss_item', 'value.rssItemId');
       rows.createIndex('by_table_updated', ['table', 'value.updatedAt']);
       rows.createIndex('by_table', 'table');
       db.createObjectStore('meta', { keyPath: 'key' });
-    };
+    }, { once: true });
 
     req.addEventListener('success', () => resolve(req.result), { once: true });
     req.addEventListener(

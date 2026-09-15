@@ -48,3 +48,30 @@ test('cursors and generation survive a close and reopen; a fresh database answer
   assert.equal(await readGeneration(reopened), 'gen-1');
   reopened.close();
 });
+
+test('bumping the schema version rebuilds the replica rather than throwing', async () => {
+  // The reviewer reproduced the opposite: against an existing database the
+  // bare createObjectStore calls raise ConstraintError, so a version bump
+  // broke every client that already held a replica. A replica is disposable,
+  // so the upgrade discards it -- and dropping `meta` with it is what makes
+  // the next start bootstrap instead of resuming a cursor for data that is
+  // gone.
+  const name = `bump-${String(Date.now())}`;
+  const first = await openStore(name, 1);
+  const tx = first.transaction(['rows', 'meta'], 'readwrite');
+  tx.objectStore('rows').put({ table: 'person', id: 1, value: { name: 'before' } });
+  tx.objectStore('meta').put({ key: 'since', value: 42 });
+  await done(tx);
+  first.close();
+
+  const second = await openStore(name, 2);
+  assert.equal(second.version, 2);
+  assert.deepEqual([...second.objectStoreNames].toSorted(), ['meta', 'rows']);
+  const rows = await request(second.transaction('rows').objectStore('rows').getAll());
+  assert.equal(rows.length, 0, 'the replica was discarded, not migrated');
+  const cursors = await request(second.transaction('meta').objectStore('meta').getAll());
+  assert.equal(cursors.length, 0, 'and the cursors went with it, so the next start bootstraps');
+  assert.deepEqual([...second.transaction('rows').objectStore('rows').indexNames].toSorted(),
+    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_updated'], 'indexes are rebuilt too');
+  second.close();
+});
