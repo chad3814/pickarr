@@ -34,6 +34,7 @@ import { request, done } from './idb.ts';
 import type { StoredRow } from './db.ts';
 import { writeCursors, type Cursors } from './meta.ts';
 import type { SyncOp } from './wire.ts';
+import { emit } from './notify.ts';
 
 /**
  * Thrown when a `create` or `upsert` carries no `value`. Names the op's
@@ -207,5 +208,11 @@ export async function applyBatch(
 
   await done(tx);
 
-  return { touched, inserted };
+  // After the commit, never inside it (spec §4's last paragraph): a
+  // subscriber that reads would otherwise re-enter this transaction and see
+  // its own batch half-applied.
+  const changed: Changed = { touched, inserted };
+  emit(changed);
+
+  return changed;
 }
