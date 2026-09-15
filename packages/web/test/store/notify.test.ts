@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
+import { getRow } from '../../src/store/rows.ts';
 import type { Changed } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { subscribe, subscribeInserts, subscribeReset, emit, emitReset } from '../../src/store/notify.ts';
@@ -62,32 +63,29 @@ test('a subscriber reading inside its callback sees the whole batch', async () =
   });
 
   let sawCommitted: boolean | undefined;
-  let sawValue: unknown;
+  // Started inside the callback and settled by the test afterwards. A
+  // subscriber is synchronous by contract, so it cannot await its own read --
+  // and reading through `getRow` rather than a raw request means this needs no
+  // cast, which the plan's Global Constraints forbid. It also exercises the
+  // surface a real component would use.
+  let pending: Promise<unknown> | undefined;
   const unsubscribe = subscribe('person', 1, () => {
     sawCommitted = committed;
-    // A read queued here queues behind nothing: the write transaction has
+    // A read started here queues behind nothing: the write transaction has
     // already committed by the time this callback runs, so a fresh
-    // transaction sees the batch immediately rather than the queued wait a
+    // transaction sees the batch immediately rather than the wait a
     // still-open write transaction would impose.
-    void db
-      .transaction('rows')
-      .objectStore('rows')
-      .get(['person', 1])
-      .addEventListener('success', (event) => {
-        const record = (event.target as IDBRequest<{ value?: { name?: string } } | undefined>).result;
-        sawValue = record?.value?.name;
-      });
+    pending = getRow(db, 'person', 1);
   });
 
   const ops: SyncOp[] = [{ op: 'upsert', table: 'person', id: 1, value: { name: 'batch' } }];
   await applyBatch(watched, ops, { since: 1, before: null });
-  // Let the read queued inside the callback resolve.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  const sawValue = await pending;
 
   unsubscribe();
   db.close();
   assert.equal(sawCommitted, true, "the callback ran only once the transaction's own commit had already fired");
-  assert.equal(sawValue, 'batch', "the callback's read saw the committed batch");
+  assert.deepEqual(sawValue, { name: 'batch' }, "the callback's read saw the committed batch");
 });
 
 test('subscribeInserts reports a row no per-row subscription covered', async () => {
@@ -181,4 +179,29 @@ test('emit looks up only the rows a batch touched: an untouched key in the same 
 
   unsubscribe();
   assert.equal(fired, 0, 'id 2 was never in the touched set');
+});
+
+test('an async subscriber that rejects is contained, not left as an unhandled rejection', async () => {
+  // The case the types invite and do not prevent: a listener is `() => void`,
+  // and TypeScript accepts an `async` function there because `Promise<void>`
+  // is assignable to `void`. Without the promise catch in `invoke`, this
+  // rejection escapes and `node --test` attributes it to whichever test is
+  // running -- measured, it corrupted an unrelated result rather than merely
+  // warning.
+  const db = await freshDb();
+  let other = 0;
+  const offAsync = subscribe('person', 1, async () => {
+    await Promise.resolve();
+    throw new Error('async boom');
+  });
+  const offSync = subscribe('person', 1, () => { other += 1; });
+
+  await applyBatch(db, [{ op: 'upsert', table: 'person', id: 1, value: { n: 1 } }], { since: 1, before: null });
+  // Long enough for a rejection to surface if nothing caught it.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  offAsync();
+  offSync();
+  db.close();
+  assert.equal(other, 1, 'the other handler still ran, and the run was not poisoned');
 });

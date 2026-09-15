@@ -1,5 +1,12 @@
 /**
- * Applies a batch of sync ops to the replica in one `readwrite` transaction.
+ * Applies a batch of sync ops to the replica in one `readwrite` transaction,
+ * and wakes the subscribers the batch affects once that transaction has
+ * committed.
+ *
+ * The firing is part of this function's contract rather than a caller's
+ * follow-up step, because *when* it happens is load-bearing: a subscriber that
+ * reads must see the whole batch, which is only true after the commit. See
+ * `emit` in `notify.ts`, and spec §4's last paragraph.
  *
  * This is the one place that enforces the two rules the server cannot:
  * design spec §4's table, and `packages/host/src/sync/tail.ts`'s `SyncOp`

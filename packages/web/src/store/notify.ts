@@ -63,26 +63,39 @@ function reportSubscriberError(err: unknown): void {
   console.error('pickarr: a store subscriber threw', err);
 }
 
+/**
+ * Runs one handler so that neither a throw nor a rejection escapes.
+ *
+ * The `try` covers a synchronous throw. The promise check covers the case the
+ * types invite and do not prevent: a listener is `() => void`, and TypeScript
+ * accepts an `async` function there because `Promise<void>` is assignable to
+ * `void` -- so a rejecting async handler slips past the `catch` entirely and
+ * becomes an unhandled rejection. Measured under `node --test`, where one
+ * does not merely warn: it was attributed to whichever test happened to be
+ * running, corrupting an unrelated result.
+ *
+ * `instanceof Promise` rather than a duck-typed `.then`, because an `async`
+ * function always returns a native promise and a bare thenable cannot satisfy
+ * the declared `void` return without a cast the caller would have had to
+ * write deliberately.
+ */
+function invoke(run: () => unknown): void {
+  try {
+    const result = run();
+    if (result instanceof Promise) void result.catch(reportSubscriberError);
+  } catch (err) {
+    reportSubscriberError(err);
+  }
+}
+
 function fireRow(cbs: Set<RowListener> | undefined): void {
   if (cbs === undefined) return;
-  for (const cb of cbs) {
-    try {
-      cb();
-    } catch (err) {
-      reportSubscriberError(err);
-    }
-  }
+  for (const cb of cbs) invoke(() => cb());
 }
 
 function fireInsert(cbs: Set<InsertListener> | undefined, ids: readonly number[]): void {
   if (cbs === undefined) return;
-  for (const cb of cbs) {
-    try {
-      cb(ids);
-    } catch (err) {
-      reportSubscriberError(err);
-    }
-  }
+  for (const cb of cbs) invoke(() => cb(ids));
 }
 
 /** Fires on every change to `['table', id]`: an insert, an update, or a delete (spec §8). */
