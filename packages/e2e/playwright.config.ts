@@ -5,10 +5,9 @@ import { defineConfig, devices } from '@playwright/test';
  * bugs between the client and the server — a browser matrix would multiply the
  * runtime without touching the thing under test.
  *
- * There is no `webServer` here: each test gets its own server on its own
- * ephemeral port against its own database, started by the `harness` fixture in
- * `src/harness.ts`. A shared server would mean shared rows, and a suite whose
- * whole point is isolating a cause cannot have tests that fail each other.
+ * There is no `webServer` here: E2E tests were removed in task 3 after the 1.x
+ * web SPA was deleted. This configuration remains as a template for future E2E
+ * work if needed.
  */
 export default defineConfig({
   testDir: './tests',
@@ -29,8 +28,7 @@ export default defineConfig({
       ? [['line'], ['html', { open: 'never' }]]
       : 'list',
   use: {
-    // No `baseURL` here: the harness fixture overrides it per test with the
-    // port its own server was actually assigned.
+    // No `baseURL` here. (E2E tests were removed in task 3.)
     //
     // `retain-on-failure`, not `on-first-retry`: with `retries: 0` there is
     // never a first retry, so `on-first-retry` captured nothing, ever. A
