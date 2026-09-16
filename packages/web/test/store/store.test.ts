@@ -4,6 +4,7 @@ import 'fake-indexeddb/auto';
 import { createStore, type CreateStoreDeps, type Store } from '../../src/store/index.ts';
 import { openStore } from '../../src/store/db.ts';
 import { readCursors } from '../../src/store/meta.ts';
+import { emitReset } from '../../src/store/notify.ts';
 import type { Lease, Schedule, SyncFetch, SyncLoop, SyncResponse } from '../../src/store/sync.ts';
 
 /**
@@ -247,4 +248,31 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
     () => store.getRow('media_item', 7),
     'a read after stop() fails, because stop() closed this store\'s IndexedDB connection rather than only cancelling its sync loops',
   );
+});
+
+test('subscribeReset on the Store reaches the registry a reset announces to', async () => {
+  // Task 8's review found this passthrough unexercised: rebinding it to a
+  // no-op passed the whole suite. It is one line, and a one-line wire that
+  // nothing tests is exactly the shape that survives a refactor broken.
+  const fetch = stubFetch({ '/api/sync/bootstrap': { since: 0, before: null, generation: 'g' } });
+  const sched = manualScheduler();
+  const store: Store = await createStore({
+    dbName: freshDbName(),
+    fetch: fetch.fetch,
+    schedule: sched.schedule,
+    now: (): number => 1000,
+    locks: grantedLease(),
+  });
+  cleanups.push(() => {
+    store.stop();
+  });
+  await settle();
+
+  let announced = 0;
+  const off = store.subscribeReset(() => { announced += 1; });
+  emitReset();
+  off();
+  emitReset();
+
+  assert.equal(announced, 1, 'the Store subscription is wired to the registry, and unsubscribing works through it');
 });

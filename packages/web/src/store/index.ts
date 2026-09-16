@@ -13,8 +13,18 @@
  *
  * This module wires the pieces together and adds nothing of its own: it
  * opens the replica, starts the sync loops over it, and closes over `db` so
- * every read and subscription a caller gets back needs no `db` argument of
- * its own. It invents no new adapter -- `fetch`, `schedule`, `now` and
+ * every *read* a caller gets back needs no `db` argument of its own.
+ *
+ * **The subscriptions need none for a different reason, and the difference
+ * matters.** They are not scoped to a replica at all: `notify.ts`'s
+ * registries are module state, so two `Store`s in one process share them and
+ * a subscriber on one will fire for the other's write to the same
+ * `table:id`. Reads and the database stay correctly isolated; only the wake-up
+ * crosses. Harmless under the one-replica-per-tab model this is built for,
+ * and stated here rather than left for whoever first creates two stores in
+ * one test file to find. An earlier version of this paragraph credited the
+ * `db` closure for both, which was true of the reads and false of the
+ * subscriptions. It invents no new adapter -- `fetch`, `schedule`, `now` and
  * `locks` are the same seams `sync.ts` already defined, handed through
  * unchanged, because the browser-facing choice of a real `fetch`, a real
  * `requestIdleCallback`-based scheduler and `webLocksLease` belongs to
