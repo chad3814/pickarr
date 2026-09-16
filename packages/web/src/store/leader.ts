@@ -222,7 +222,24 @@ export function onMessage(cb: (msg: ChannelMessage) => void): () => void {
     }
   };
   ch.addEventListener('message', listener);
+  let unsubscribed = false;
   return () => {
+    // **Idempotent, and that is load-bearing rather than tidy.** The count
+    // below is shared by every subscriber, so a closure that decremented on
+    // each call would take it negative the second time -- and then the *next*
+    // `onMessage` brings it back to 0, opens a channel, and its own
+    // unsubscribe finds `subscribers === -1` instead of `0` and never closes
+    // it. An open `BroadcastChannel` keeps the Node process alive, so the
+    // symptom is a test file that passes every test and never exits, with no
+    // test name attached.
+    //
+    // Measured exactly that way: `sync.test.ts`'s "stop cancels both loops"
+    // calls `handle.stop()` twice to assert a second stop is harmless, and
+    // with an unguarded closure it was the opposite -- the file hung as soon
+    // as any later test started sync. The test asserting the property was the
+    // thing violating it.
+    if (unsubscribed) return;
+    unsubscribed = true;
     ch.removeEventListener('message', listener);
     subscribers -= 1;
     if (subscribers === 0) {

@@ -227,3 +227,31 @@ test('serializeChanged round-trips an empty map and an empty id list', async () 
   assert.deepEqual(back.touched.get('person'), []);
   assert.equal(back.inserted.size, 0);
 });
+
+test('unsubscribing twice does not corrupt the shared subscriber count', async () => {
+  // The bug this pins hung a whole test file with every test passing and no
+  // test name attached. `subscribers` is shared by every caller, so an
+  // unsubscribe that decremented on each call took it to -1 -- and the *next*
+  // `onMessage` then brought it back to 0, opened a channel, and its own
+  // unsubscribe saw -1 instead of 0 and never closed it. An open
+  // BroadcastChannel keeps the Node process alive.
+  //
+  // Asserted through the observable consequence rather than by reading the
+  // counter: after a double unsubscribe, a fresh subscriber must still be
+  // able to receive, and its own unsubscribe must still close things down.
+  const offTwice = onMessage(() => { /* ignored */ });
+  offTwice();
+  offTwice();
+
+  const seen: ChannelMessage[] = [];
+  const off = onMessage((msg) => { seen.push(msg); });
+  const sender = new BroadcastChannel(CHANNEL_NAME);
+  // eslint-disable-next-line unicorn/require-post-message-target-origin -- see above
+  sender.postMessage({ type: 'reset', generation: 'after-double-unsubscribe' } satisfies ChannelMessage);
+  sender.close();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  off();
+
+  assert.deepEqual(seen, [{ type: 'reset', generation: 'after-double-unsubscribe' }],
+    'a subscriber registered after a double unsubscribe still receives');
+});

@@ -133,3 +133,40 @@ test('feedId and downloadClientId are surfaced as ids, because the replica canno
   assert.equal(gathered.releases[0]?.downloads[0]?.row.downloadClientId, 77);
   db.close();
 });
+
+test('a row that does not match its contract shape is declined, not asserted into place', async () => {
+  // The blocking finding from task 7's review: this module used to cast
+  // `unknown` to each contract type. A replica persists across client builds,
+  // and neither SCHEMA_VERSION nor the generation token fires when a *wire
+  // shape* changes -- so a row written by an older build reaches a newer one
+  // with a field renamed away. A cast turns that into a crash somewhere
+  // downstream; a check turns it into a row this gatherer declines.
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
+    // A release from a build that had not named `feedId` yet.
+    { op: 'upsert', table: 'rss_item', id: 1, value: { mediaItemId: 7, filename: 'old-shape' } },
+    { op: 'upsert', table: 'rss_item', id: 2, value: { mediaItemId: 7, feedId: 40, filename: 'current' } },
+    // A role from a build that spelled the person link differently.
+    { op: 'upsert', table: 'role', id: 3, value: { mediaItemId: 7, role: 'actor' } },
+    { op: 'upsert', table: 'role', id: 4, value: { mediaItemId: 7, personId: 9, role: 'actor' } },
+  ]);
+
+  const gathered = await gatherMediaItem(db, 7);
+  assert.ok(gathered !== undefined, 'the item itself still matches, so it is still assembled');
+  assert.deepEqual(gathered.releases.map((release) => release.id), [2], 'the unshaped release is left out');
+  assert.deepEqual(gathered.roles.map((role) => role.id), [4], 'and so is the unshaped role');
+  db.close();
+});
+
+test('a media item that does not match its shape reads as absent', async () => {
+  // Answered the same way as a tombstone or a row that has not arrived. The
+  // alternative is handing a caller an object whose `pluginId` is undefined,
+  // which fails somewhere with no connection to the cause.
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { title: 'no pluginId' } },
+  ]);
+  assert.equal(await gatherMediaItem(db, 7), undefined);
+  db.close();
+});

@@ -730,3 +730,39 @@ test('stop cancels both loops', async () => {
   handle.stop();
   assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'and a second stop is harmless');
 });
+
+test('a reset un-retires the walk, so a rebuilt library is backfilled again', async () => {
+  // Finding 2 of task 6's review: the reset's restart of the backfill was
+  // unpinned -- deleting `schedule('backfill', ...)` left every test green,
+  // because `pendingFor('backfill')` was satisfied by a task scheduled
+  // *before* the reset. So this drives the walk to retirement first, which
+  // leaves nothing pending for it, and only then forces the reset. Without
+  // the restart the walk stays dead and the rebuilt library is never
+  // backfilled -- silent, permanent, and indistinguishable from an empty
+  // server.
+  const db = await freshDb();
+  await writeCursors(db, { since: 10, before: 5 });
+  await writeGeneration(db, 'gen-old');
+
+  const answers = routes({
+    // The walk retires: a null cursor means current state is exhausted.
+    '/api/sync/backfill?before=5': { ops: [], cursor: null, generation: 'gen-old' },
+    // Then the tail sees a different database.
+    '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-new' },
+    '/api/sync/bootstrap': { since: 0, before: 9, generation: 'gen-new' },
+  });
+  const fetch = stubFetch(answers);
+  const { sched } = start(db, fetch.fetch, grantedLease());
+  await settle();
+
+  await sched.drive('backfill');
+  await settle();
+  assert.equal(sched.pendingFor('backfill'), undefined, 'the walk retired, so nothing is queued for it');
+  assert.equal((await readCursors(db))?.before, null, 'and retirement is recorded, not merely remembered');
+
+  await sched.drive('tail');
+  await settle();
+
+  assert.deepEqual(await readCursors(db), { since: 0, before: 9 }, 'the reset wrote a fresh pivot');
+  assert.ok(sched.pendingFor('backfill'), 'and queued the walk again, which nothing else would have done');
+});

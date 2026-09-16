@@ -219,13 +219,13 @@ function parseBootstrap(url: string, body: unknown): Bootstrap {
 /**
  * One op off the wire, rebuilt field by field.
  *
- * `value` is carried across when it is present and dropped when it is not.
- * Checked by value rather than by key presence, which is the same call
- * `store/apply.ts`'s malformed-op guard gets wrong when it is spelled the
- * other way: `{ op: 'upsert', value: undefined }` has the key, so forwarding
- * on key presence would hand `applyBatch` an op it has to refuse anyway,
- * one step further from where the defect is. Dropping the key reaches
- * `applyBatch`'s refusal by the same route a missing field does.
+ * `value` is carried across when it is present and dropped when it is not,
+ * checked by value rather than by key presence. Either spelling ends in the
+ * same place -- `applyBatch` refuses a create or upsert carrying no usable
+ * value whichever route it arrives by -- so this is not a second guard and
+ * does not need to be: it exists so that a wire response with an explicit
+ * `"value": null` is described here, at the boundary that parses the
+ * response, rather than reaching a function whose subject is the replica.
  */
 function parseOp(url: string, raw: unknown): SyncOp {
   if (!isRecord(raw)) throw new MalformedResponseError(url, 'an op is not an object');
@@ -313,12 +313,23 @@ export function startSync(deps: SyncDeps): SyncHandle {
   /**
    * Serialises the read-modify-write half of a tick against the other loop's.
    *
-   * The *fetch* stays outside it, which is what keeps the two cursors
-   * concurrent in the sense spec §5 means: neither waits for the other's
-   * request. Only the moment where a tick re-reads `cursors` and writes the
-   * pair back is exclusive -- because `Cursors` is a pair and each loop owns
-   * one half of it, so an interleaved read-then-write loses the other half's
+   * **A page fetch stays outside it**, which is what keeps the two cursors
+   * concurrent in the sense spec §5 means: neither loop waits for the other's
+   * page. Only the moment where a tick re-reads `cursors` and writes the pair
+   * back is exclusive -- because `Cursors` is a pair and each loop owns one
+   * half of it, so an interleaved read-then-write loses the other half's
    * advance (see this module's doc comment).
+   *
+   * **Two fetches do run inside it, and both are bootstraps.** The one in
+   * `ensureBootstrapped` and the one in `reset` are deliberately serialised:
+   * they decide the pivot *both* loops descend from and ascend from, so two
+   * of them racing would leave each loop walking from a different origin.
+   * That is the right trade and it has a cost worth naming rather than
+   * discovering: while a bootstrap is in flight, **both** loops are blocked,
+   * so a `/api/sync/bootstrap` that never answers stalls the whole store
+   * silently -- no timeout, no log line, and `stop()` does not revive it.
+   * An earlier version of this comment said the fetch stays outside, full
+   * stop, which was false of half the call sites and hid exactly that.
    */
   let queue: Promise<void> = Promise.resolve();
   function exclusive<T>(body: () => Promise<T>): Promise<T> {

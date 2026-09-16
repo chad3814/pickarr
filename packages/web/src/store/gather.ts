@@ -39,12 +39,60 @@ import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
  * This gatherer does know, for exactly the six tables it names, because
  * `@pickarr/contract`'s six `*SyncRead` interfaces are pinned to the
  * projections the host actually emits (`packages/host/test/sync/tables.test.ts`
- * is what keeps the two from drifting). One named assertion here rather than
- * one at each call site, and the same trust the host's own `readHostRows`
- * places on a raw row it cannot type any more precisely than this.
+ * is what keeps the two from drifting).
+ *
+ * **Knowing the shape is not the same as having checked it, so these check.**
+ * An earlier version of this module asserted instead -- one `trusted<T>`
+ * helper casting `unknown` to each interface, seven times -- which the plan's
+ * Global Constraints forbid and which review rated blocking. The constraint
+ * is right, and not only on principle: a replica *persists across client
+ * builds*. `SCHEMA_VERSION` rebuilds it when the store's own schema changes
+ * and the generation token rebuilds it when the server's database changes,
+ * but neither fires when a **wire shape** changes -- a renamed field, a new
+ * required one -- so a row written by build N is read by build N+1 against
+ * whatever `*SyncRead` means by then. A cast makes that a crash somewhere
+ * downstream; a check makes it a row this gatherer declines to assemble.
+ *
+ * **Each predicate checks the fields this module itself dereferences, and no
+ * more.** That is `pluginId` on a media item, `feedId` on a release, and
+ * `personId` on a role -- the three values the gatherer reads rather than
+ * forwards. Everything else is passed through to a consumer, which is
+ * trusting `@pickarr/contract` exactly as it did before; verifying fields
+ * nobody here touches would only move that trust, at the cost of rejecting
+ * rows over a field no screen reads.
+ *
+ * Note also what a stored value does **not** carry: the row's `id` lives on
+ * the op envelope and is the store's key, never inside `value` (storage
+ * design §2.2, sync design's `SyncOp`). So no predicate looks for one -- an
+ * earlier draft of these did, and rejected every well-formed fixture in the
+ * suite.
  */
-function trusted<T>(value: unknown): T {
-  return value as T;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isMediaItem(value: unknown): value is MediaItemSyncRead {
+  return isRecord(value) && typeof value.pluginId === 'string';
+}
+
+function isRssItem(value: unknown): value is RssItemSyncRead {
+  return isRecord(value) && typeof value.feedId === 'number';
+}
+
+function isTorrentDownload(value: unknown): value is TorrentDownloadSyncRead {
+  return isRecord(value);
+}
+
+function isNzbDownload(value: unknown): value is NzbDownloadSyncRead {
+  return isRecord(value);
+}
+
+function isPerson(value: unknown): value is PersonSyncRead {
+  return isRecord(value);
+}
+
+function isRole(value: unknown): value is RoleSyncRead {
+  return isRecord(value) && typeof value.personId === 'number';
 }
 
 /** `poster`, `background` or `logo` -- the three kinds a media item has artwork for (design spec §1.2, #79). */
@@ -103,24 +151,46 @@ export interface GatheredItem {
   readonly feedIds: readonly number[];
 }
 
-async function gatherRelease(db: IDBDatabase, id: number, value: unknown): Promise<GatheredRelease> {
+/**
+ * A release and its downloads, or `undefined` when the release row does not
+ * match its contract shape -- see the predicates above for when that happens
+ * and why declining beats asserting.
+ */
+async function gatherRelease(
+  db: IDBDatabase,
+  id: number,
+  value: unknown,
+): Promise<GatheredRelease | undefined> {
+  if (!isRssItem(value)) return undefined;
   const downloadRows = await byRssItem(db, id);
   const downloads: GatheredDownload[] = downloadRows.flatMap((row): GatheredDownload[] => {
-    if (row.table === 'torrent_download') {
-      return [{ table: 'torrent_download' as const, id: row.id, row: trusted<TorrentDownloadSyncRead>(row.value) }];
+    if (row.table === 'torrent_download' && isTorrentDownload(row.value)) {
+      return [{ table: 'torrent_download' as const, id: row.id, row: row.value }];
     }
-    if (row.table === 'nzb_download') {
-      return [{ table: 'nzb_download' as const, id: row.id, row: trusted<NzbDownloadSyncRead>(row.value) }];
+    if (row.table === 'nzb_download' && isNzbDownload(row.value)) {
+      return [{ table: 'nzb_download' as const, id: row.id, row: row.value }];
     }
     return [];
   });
-  return { id, row: trusted<RssItemSyncRead>(value), downloads };
+  return { id, row: value, downloads };
 }
 
-function gatherRole(id: number, value: unknown, people: ReadonlyMap<number, unknown>): GatheredRole {
-  const row = trusted<RoleSyncRead>(value);
-  const personValue = people.get(row.personId);
-  return { id, row, person: personValue === undefined ? undefined : trusted<PersonSyncRead>(personValue) };
+function gatherRole(
+  id: number,
+  value: unknown,
+  people: ReadonlyMap<number, unknown>,
+): GatheredRole | undefined {
+  if (!isRole(value)) return undefined;
+  const personValue = people.get(value.personId);
+  // A role whose person has not arrived is kept, because log order is not
+  // group order (sync design §5.2) and dropping it makes a cast silently
+  // short. A person that arrived *malformed* is treated the same way as one
+  // that has not arrived: absent, rather than a reason to drop the role.
+  return {
+    id,
+    row: value,
+    person: personValue !== undefined && isPerson(personValue) ? personValue : undefined,
+  };
 }
 
 /**
@@ -137,17 +207,27 @@ function gatherRole(id: number, value: unknown, people: ReadonlyMap<number, unkn
 export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Promise<GatheredItem | undefined> {
   const mediaItemValue = await getRow(db, 'media_item', mediaItemId);
   if (mediaItemValue === undefined) return undefined;
-  const mediaItem = trusted<MediaItemSyncRead>(mediaItemValue);
+  // A media item that does not match its contract shape is answered the same
+  // way as one that is not there. The alternative is handing a caller an
+  // object it will read `pluginId` off and get `undefined` from, which fails
+  // somewhere else entirely.
+  if (!isMediaItem(mediaItemValue)) return undefined;
+  const mediaItem = mediaItemValue;
 
   const rows = await byMediaItem(db, mediaItemId);
   const releaseRows = rows.filter((row) => row.table === 'rss_item');
   const roleRows = rows.filter((row) => row.table === 'role');
 
-  const personIds = [...new Set(roleRows.map((row) => trusted<RoleSyncRead>(row.value).personId))];
+  const personIds = [...new Set(
+    roleRows.flatMap((row) => (isRole(row.value) ? [row.value.personId] : [])),
+  )];
   const people = await getRows(db, 'person', personIds);
 
-  const releases = await Promise.all(releaseRows.map((row) => gatherRelease(db, row.id, row.value)));
-  const roles = roleRows.map((row) => gatherRole(row.id, row.value, people));
+  const gathered = await Promise.all(releaseRows.map((row) => gatherRelease(db, row.id, row.value)));
+  const releases = gathered.filter((release): release is GatheredRelease => release !== undefined);
+  const roles = roleRows
+    .map((row) => gatherRole(row.id, row.value, people))
+    .filter((role): role is GatheredRole => role !== undefined);
   const feedIds = [...new Set(releases.map((release) => release.row.feedId))].toSorted((a, b) => a - b);
 
   return { mediaItem, pluginId: mediaItem.pluginId, releases, roles, artwork: artworkUrls(mediaItemId), feedIds };
