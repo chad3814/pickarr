@@ -11,11 +11,12 @@ import type { DatabaseSync } from 'node:sqlite';
  *
  * **Not every fact here is one.** `sync/log.ts` records one
  * `sync.seeded.<table>` key per synced table, holding the timestamp its log
- * seed ran at, which is neither secret nor read by anything. The rule is
- * about the *column*, not about the row: a caller cannot name `value` in SQL
- * of its own whatever it stores there, so it goes through the readers and
- * writers below and this module stays the one place that statement is
- * written.
+ * seed ran at, which is neither secret nor read by anything; and
+ * `SYNC_GENERATION_KEY` below holds a value that is deliberately *published*,
+ * on all three sync responses. The rule is about the *column*, not about the
+ * row: a caller cannot name `value` in SQL of its own whatever it stores
+ * there, so it goes through the readers and writers below and this module
+ * stays the one place that statement is written.
  *
  * **Nothing here may log a value.** `value` can hold the Better Auth
  * signing secret; a log line naming it would put that secret in the
@@ -27,6 +28,30 @@ export const AUTH_SECRET_KEY = 'auth.secret';
 
 /** Key under which the first-boot claim token is stored. */
 export const CLAIM_TOKEN_KEY = 'auth.claimToken';
+
+/**
+ * Key under which this database's sync generation is stored.
+ *
+ * **This value is deliberately public, and it is the only one of the three
+ * keys this module declares that is.** It goes out on the body of
+ * `GET /api/sync`, `/api/sync/backfill` and `/api/sync/bootstrap` -- guarded
+ * routes, but a client reads it, stores it and keeps it. The other two are
+ * credentials
+ * (`AUTH_SECRET_KEY` is what Better Auth signs cookies with,
+ * `CLAIM_TOKEN_KEY` is a one-shot ownership grant), and the module doc above
+ * explains why `host_state.value` is a credential column and why this is the
+ * one module allowed to name it. So: nothing about *this* key generalises to
+ * those, and a later change that exposes them "for consistency" has this
+ * comment to read first. What makes the difference is what the value is for,
+ * not where it is stored -- an opaque random token that says which database
+ * you are talking to tells a session holder nothing it could not learn by
+ * syncing, whereas either of the others is an escalation.
+ *
+ * It is **not** on `/api/health`, which is the one open route: an install
+ * fingerprint reachable without a session lets a scanner tell two hosts
+ * apart, and fingerprint a rebuild, for free.
+ */
+export const SYNC_GENERATION_KEY = 'sync.generation';
 
 /**
  * `randomBytes` reads this many bytes; base64url of 32 bytes is 43
@@ -135,6 +160,40 @@ export function ensureGeneratedValue(raw: DatabaseSync, key: string, at: number)
     throw new Error(`ensureGeneratedValue: nothing on record under ${key} immediately after inserting it`);
   }
   return stored;
+}
+
+/**
+ * This database's sync generation, generating and persisting one on first
+ * call -- which is the whole mechanism, and the reason there is no migration
+ * behind it.
+ *
+ * **What it answers.** 2.0 starts on an empty database and rebuilds from
+ * feeds, so deleting `pickarr.db` is a routine operation. Nothing else on the
+ * sync wire says which database a client is talking to, and the failure is
+ * silent in both directions: a client holding `since = 5000` against a
+ * rebuilt log whose max id is 80 asks for ops above 5000, receives nothing
+ * for as long as that install exists, and shows the old library with no
+ * error; at a lower cursor it is worse, because new rows arrive at ids that
+ * collide with the stale replica's keys and two libraries merge into one. A
+ * client compares this value against the one it stored and discards its
+ * replica when they differ.
+ *
+ * **Lazily minted rather than written by a migration**, and that is what
+ * makes it correct rather than merely cheap. A rebuilt database has no
+ * `host_state` row under this key, so the first call after the rebuild mints
+ * a fresh value by construction -- which is exactly the signal wanted. A
+ * migration would have to choose a value at migration time and would then
+ * need a second mechanism to notice a rebuild; `ensureGeneratedValue` already
+ * is that mechanism, for the same reason it serves the signing secret.
+ *
+ * Stable across restarts of the same file, because a restart is not a rebuild
+ * and a host that re-minted on every boot would order every client to resync
+ * on every boot.
+ *
+ * **Public, unlike its two siblings.** See `SYNC_GENERATION_KEY`.
+ */
+export function ensureSyncGeneration(raw: DatabaseSync, at: number): string {
+  return ensureGeneratedValue(raw, SYNC_GENERATION_KEY, at);
 }
 
 /**

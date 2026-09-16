@@ -126,6 +126,11 @@ async function start(
     // This file only needs the guard on both routes, which an empty registry
     // answers just as well.
     registry: createSyncRegistry(raw, []),
+    // A fixed placeholder, not `ensureSyncGeneration`: nothing in this file
+    // asserts on the value, and what the three sync routes do with it is
+    // `sync-route.test.ts`'s, where it is minted from the database the way
+    // `main` does. Obviously synthetic, like the other constants above.
+    generation: 'placeholder-generation',
     host,
     port: 0,
     authFor: (baseURL) => createAuth({

@@ -209,6 +209,22 @@ export interface ReadServerDeps {
    */
   registry: SyncRegistry;
   /**
+   * This database's sync generation, on the body of all three sync routes and
+   * on none of the others -- `db/host-state.ts`'s `ensureSyncGeneration`, and
+   * `sync-route.ts`'s `GenerationDeps` for what a client does with it.
+   *
+   * **Resolved once by `main` and held here, not read per request.** It
+   * cannot change while this process holds the database open -- it is minted
+   * on first read and persisted, and a value that changed would mean a
+   * different database -- so reading it per request would be one query per
+   * sync request for a constant a client polls for.
+   *
+   * A `string` and not the reader itself, for the same reason: there is
+   * nothing here to defer. `authFor` is a function because `baseURL` is not
+   * known until the listener has bound; this is known before it.
+   */
+  generation: string;
+  /**
    * The interface to bind, or `undefined` for `DEFAULT_HOST`.
    *
    * **`main` no longer passes `undefined` here.** `HostSettings.readHost`
@@ -495,6 +511,10 @@ export const ROUTES: readonly Route[] = [
     path: '/api/health',
     // The one open route: a container health check has no credential to
     // offer, and the body it answers names nothing a caller could not guess.
+    // **No `generation` here**, deliberately: it is on all three sync routes
+    // and it is an install fingerprint, so serving it without a session would
+    // let a scanner tell two hosts apart and notice a rebuild. See
+    // `sync-route.ts`'s `GenerationDeps`.
     open: true,
     answer: () => json(200, { ok: true, version: API_VERSION }),
   },
@@ -572,7 +592,10 @@ export const ROUTES: readonly Route[] = [
     // exists to protect (design spec §5) -- this route and the next are as
     // guarded as every other, never a special case.
     answer: ({ deps, params }) => {
-      const answer = syncAnswer({ raw: deps.raw, registry: deps.registry }, params);
+      const answer = syncAnswer(
+        { raw: deps.raw, registry: deps.registry, generation: deps.generation },
+        params,
+      );
       return json(answer.status, answer.body);
     },
   },
@@ -580,10 +603,11 @@ export const ROUTES: readonly Route[] = [
     path: '/api/sync/bootstrap',
     open: false,
     // Where an empty client starts both cursors. Guarded like the two it
-    // feeds: the answer is two log positions and nothing else, but a caller
-    // with no session has no business being handed a way into the replica.
+    // feeds: the answer is two log positions and the sync generation, but a
+    // caller with no session has no business being handed a way into the
+    // replica -- nor, for the generation, an install fingerprint.
     answer: ({ deps }) => {
-      const answer = bootstrapAnswer({ raw: deps.raw });
+      const answer = bootstrapAnswer({ raw: deps.raw, generation: deps.generation });
       return json(answer.status, answer.body);
     },
   },
@@ -598,7 +622,10 @@ export const ROUTES: readonly Route[] = [
     // one. `/api/artwork/:kind/:mediaItemId` is the existing precedent for a
     // multi-segment path coexisting with shorter ones in this same table.
     answer: ({ deps, params }) => {
-      const answer = backfillAnswer({ raw: deps.raw, registry: deps.registry }, params);
+      const answer = backfillAnswer(
+        { raw: deps.raw, registry: deps.registry, generation: deps.generation },
+        params,
+      );
       return json(answer.status, answer.body);
     },
   },

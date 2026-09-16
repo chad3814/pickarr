@@ -7,8 +7,10 @@ import { openDatabase, openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import {
   AUTH_SECRET_KEY,
+  SYNC_GENERATION_KEY,
   clearHostState,
   ensureAuthSecret,
+  ensureSyncGeneration,
   readHostState,
   writeHostState,
 } from '../../src/db/host-state.ts';
@@ -133,4 +135,90 @@ test('clearing a key removes it', () => {
   assert.ok(readHostState(raw, 'auth.claimToken') === null, 'the cleared key still reads back a value');
   const rows = raw.prepare('SELECT key FROM host_state WHERE key = ?').all('auth.claimToken');
   assert.equal(rows.length, 0);
+});
+
+test('a sync generation is minted once and returned unchanged', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const generation = ensureSyncGeneration(raw, 1_000);
+  const generationAgain = ensureSyncGeneration(raw, 2_000);
+
+  // `assert.equal` over two generations, where this file uses `assert.ok` for
+  // two signing secrets: a generation is deliberately public -- it goes out
+  // on the body of all three sync routes -- so printing one in a failure
+  // message leaks nothing a session holder cannot already read, and the value
+  // is worth seeing when it disagrees. See `SYNC_GENERATION_KEY`.
+  assert.equal(generationAgain, generation,
+    'the second call minted a new generation instead of returning the first');
+  // `assert.ok` here all the same, and not for the value's sake: the *other*
+  // operand is a `readHostState` call, which is what reads the signing
+  // secret's row too, and `scripts/check-test-hygiene.ts`'s rule 3 tracks
+  // that function by name rather than by which key it was handed.
+  assert.ok(readHostState(raw, SYNC_GENERATION_KEY) === generation,
+    'the generation is not persisted under its own key');
+});
+
+test('a rebuilt database mints a different sync generation', async () => {
+  // The whole point of the value. 2.0 starts empty and rebuilds from feeds, so
+  // `pickarr.db` being deleted is a routine operation rather than a disaster --
+  // and without this a client holding `since = 5000` would ask for ops above
+  // 5000 against a log whose max id is 80, receive nothing forever, and show a
+  // stale library with no error at all. Two databases, so this is the real
+  // deletion rather than a cleared row.
+  const directory = await mkdtemp(join(tmpdir(), 'pickarr-generation-'));
+  try {
+    const original = openDatabase(join(directory, 'original.db'));
+    migrateHost(original.raw);
+    const originalGeneration = ensureSyncGeneration(original.raw, 1_000);
+    original.raw.close();
+
+    const replacement = openDatabase(join(directory, 'replacement.db'));
+    migrateHost(replacement.raw);
+    const rebuiltGeneration = ensureSyncGeneration(replacement.raw, 2_000);
+    replacement.raw.close();
+
+    assert.notEqual(rebuiltGeneration, originalGeneration,
+      'a rebuilt database must not claim to be the one a client replicated');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a sync generation survives a fresh connection to the same file', async () => {
+  // The other half: a restart is *not* a rebuild, and a host that minted a new
+  // generation on every boot would make every client resync on every restart.
+  const directory = await mkdtemp(join(tmpdir(), 'pickarr-generation-'));
+  try {
+    const path = join(directory, 'host.db');
+    const booted = openDatabase(path);
+    migrateHost(booted.raw);
+    const minted = ensureSyncGeneration(booted.raw, 1_000);
+    booted.raw.close();
+
+    const rebooted = openDatabase(path);
+    const afterRestart = ensureSyncGeneration(rebooted.raw, 2_000);
+    rebooted.raw.close();
+
+    assert.equal(afterRestart, minted, 'a restart against the same file must keep the generation');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('the sync generation and the signing secret are separate keys', () => {
+  // Same generator, same race behaviour, different facts -- and one of them is
+  // public. A generation that read the signing secret's row would put that
+  // secret on three unauthenticated-client-facing response bodies.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const published = ensureSyncGeneration(raw, 1_000);
+  ensureAuthSecret(raw, 1_000);
+
+  assert.notEqual(SYNC_GENERATION_KEY, AUTH_SECRET_KEY, 'two facts, two keys');
+  // `assert.ok`, because the other operand is the signing secret: this file's
+  // own doc says why nothing here formats one.
+  assert.ok(published !== readHostState(raw, AUTH_SECRET_KEY),
+    'the generation must not be the signing secret under another name');
 });

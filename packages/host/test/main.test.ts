@@ -15,7 +15,13 @@ import type { Timers } from '../src/jobs/dispatcher.ts';
 import type { ReadServer, ReadServerDeps } from '../src/api/server.ts';
 import { DEFAULT_HOST, DEFAULT_PORT, createReadServer } from '../src/api/server.ts';
 import { isClaimed } from '../src/auth/claim.ts';
-import { AUTH_SECRET_KEY, CLAIM_TOKEN_KEY, readHostState, writeHostState } from '../src/db/host-state.ts';
+import {
+  AUTH_SECRET_KEY,
+  CLAIM_TOKEN_KEY,
+  ensureSyncGeneration,
+  readHostState,
+  writeHostState,
+} from '../src/db/host-state.ts';
 import { envNameFor } from '../src/secrets/names.ts';
 import type { HostSettings } from '../src/main.ts';
 import {
@@ -692,6 +698,22 @@ test('main starts the server after the host and closes it before stopping', asyn
       'the type mapping is built from main\'s own plugin list, which is what keeps src/api off host.ts',
     );
     assert.equal(serverDeps.pluginIdForType('book'), undefined, 'and answers nothing for a type no plugin claims');
+
+    // The sync generation `main` hands the listener is **this database's**,
+    // read out of it once at boot rather than made up per process. Asserted
+    // by reopening the file after `main` returned and asking for the
+    // generation again: `ensureSyncGeneration` mints on first call and reads
+    // back on every call after, so the value below is the persisted row. A
+    // `main` that generated its own string per boot would order every client
+    // to resync on every restart, and would pass this test's other
+    // assertions untouched.
+    const persisted = openDatabase(databasePath);
+    try {
+      assert.equal(serverDeps.generation, ensureSyncGeneration(persisted.raw, 1_000),
+        'main must pass the generation persisted in this database, not one of its own');
+    } finally {
+      persisted.raw.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -4,6 +4,14 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { HOST_SYNCED_TABLES, readHostRows } from '../../src/sync/tables.ts';
 import { syncedTriggerNames } from '../../src/sync/log.ts';
+import type {
+  MediaItemSyncRead,
+  NzbDownloadSyncRead,
+  PersonSyncRead,
+  RoleSyncRead,
+  RssItemSyncRead,
+  TorrentDownloadSyncRead,
+} from '@pickarr/contract';
 
 test('every host synced table has all three triggers after migration', () => {
   const { raw } = openTestDatabase();
@@ -64,14 +72,14 @@ test('readHostRows projects the declared columns for media_item, keyed by id', (
   const rows = readHostRows(raw, 'media_item', [1, 2]);
   assert.deepEqual(Object.keys(rows).toSorted(), ['1', '2']);
   assert.deepEqual(rows[1], {
-    id: 1, plugin_id: 'alpha', created_at: 10, updated_at: 20,
-    provider: 'tmdb', provider_ref: 'movie:512', title: 'The Grid',
-    release_date: null, description: null,
+    id: 1, pluginId: 'alpha', createdAt: 10, updatedAt: 20,
+    provider: 'tmdb', providerRef: 'movie:512', title: 'The Grid',
+    releaseDate: null, description: null,
   });
   assert.deepEqual(rows[2], {
-    id: 2, plugin_id: 'alpha', created_at: 30, updated_at: 40,
-    provider: null, provider_ref: null, title: 'Encom',
-    release_date: null, description: null,
+    id: 2, pluginId: 'alpha', createdAt: 30, updatedAt: 40,
+    provider: null, providerRef: null, title: 'Encom',
+    releaseDate: null, description: null,
   });
 });
 
@@ -86,7 +94,7 @@ test('readHostRows projects the declared columns for person, and skips an id tha
   const rows = readHostRows(raw, 'person', [1, 999]);
   assert.deepEqual(Object.keys(rows), ['1']);
   assert.deepEqual(rows[1], {
-    id: 1, name: 'Kevin Flynn', provider_ref: 'tmdb:1', created_at: 10, updated_at: 20,
+    id: 1, name: 'Kevin Flynn', providerRef: 'tmdb:1', createdAt: 10, updatedAt: 20,
   });
 });
 
@@ -152,25 +160,219 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
 
   const rssItem = readHostRows(raw, 'rss_item', [1])[1] as Record<string, unknown>;
   assert.deepEqual(Object.keys(rssItem).toSorted(), [
-    'created_at', 'delivered_at', 'download_type', 'feed_id', 'filename',
-    'id', 'media_item_id', 'ranking_score', 'resolution', 'resolution_detail', 'updated_at',
+    'createdAt', 'deliveredAt', 'downloadType', 'feedId', 'filename',
+    'id', 'mediaItemId', 'rankingScore', 'resolution', 'resolutionDetail', 'updatedAt',
   ]);
   assert.ok(!('link' in rssItem), 'rss_item.link must never be projected');
   assert.ok(!('guid' in rssItem), 'rss_item.guid must never be projected');
 
   const torrent = readHostRows(raw, 'torrent_download', [1])[1] as Record<string, unknown>;
   assert.deepEqual(Object.keys(torrent).toSorted(), [
-    'absent_since', 'attempts', 'client_ref', 'created_at', 'delivered_at', 'download_client_id',
-    'id', 'infohash', 'percentage', 'reclaimed_at', 'rss_item_id', 'status', 'updated_at',
+    'absentSince', 'attempts', 'clientRef', 'createdAt', 'deliveredAt', 'downloadClientId',
+    'id', 'infohash', 'percentage', 'reclaimedAt', 'rssItemId', 'status', 'updatedAt',
   ]);
-  assert.ok(!('storage_path' in torrent), 'torrent_download.storage_path must never be projected');
-  assert.ok(!('last_error' in torrent), 'torrent_download.last_error must never be projected');
+  assert.ok(!('storagePath' in torrent), 'torrent_download.storage_path must never be projected');
+  assert.ok(!('lastError' in torrent), 'torrent_download.last_error must never be projected');
 
   const nzb = readHostRows(raw, 'nzb_download', [1])[1] as Record<string, unknown>;
   assert.deepEqual(Object.keys(nzb).toSorted(), [
-    'absent_since', 'attempts', 'client_ref', 'created_at', 'delivered_at', 'download_client_id',
-    'id', 'percentage', 'reclaimed_at', 'rss_item_id', 'status', 'updated_at',
+    'absentSince', 'attempts', 'clientRef', 'createdAt', 'deliveredAt', 'downloadClientId',
+    'id', 'percentage', 'reclaimedAt', 'rssItemId', 'status', 'updatedAt',
   ]);
-  assert.ok(!('storage_path' in nzb), 'nzb_download.storage_path must never be projected');
-  assert.ok(!('last_error' in nzb), 'nzb_download.last_error must never be projected');
+  assert.ok(!('storagePath' in nzb), 'nzb_download.storage_path must never be projected');
+  assert.ok(!('lastError' in nzb), 'nzb_download.last_error must never be projected');
+});
+
+/**
+ * One row in every host synced table, with every nullable column filled, so a
+ * projection's key set can be read off a real row rather than declared.
+ *
+ * Every value is non-null on purpose. `node:sqlite` returns a key for a null
+ * column too, so `Object.keys` would be the same either way -- but the
+ * read-shape comparison below is about names, and a fixture whose nulls were
+ * accidental would make a *type* mismatch on a nullable field invisible if
+ * that comparison is ever widened past names. The FK parents (`download_client`,
+ * `rss_feed`) are seeded because `rss_item.feed_id` and the two downloads'
+ * `download_client_id` are `NOT NULL` references; neither parent table is
+ * synced, which is the point `feedId`/`downloadClientId` carry in the contract.
+ */
+function seedOneRowPerSyncedTable(raw: ReturnType<typeof openTestDatabase>['raw']): void {
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
+    VALUES (1, 'sab', 'sabnzbd', 'http://localhost:8080', 'movies', 'move', 10, 10)
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_feed (id, plugin_id, name, url, download_client_id, created_at, updated_at, download_type)
+    VALUES (1, 'tv', 'a feed', 'https://example.test/feed', 1, 10, 10, 'torrent')
+  `).run();
+  raw.prepare(`
+    INSERT INTO media_item (
+      id, plugin_id, created_at, updated_at, provider, provider_ref, title, release_date, description
+    ) VALUES (1, 'tv', 10, 20, 'tmdb', 'show:512', 'The Grid', '1982-07-09', 'A programmer.')
+  `).run();
+  raw.prepare(`
+    INSERT INTO rss_item (
+      id, feed_id, filename, link, guid, created_at, updated_at, download_type, media_item_id,
+      ranking_score, resolution, resolution_detail, delivered_at
+    ) VALUES (
+      1, 1, 'The.Grid.mkv', 'https://tracker.example/dl', 'guid-1', 10, 20, 'torrent', 1,
+      42, 'resolved', 'season pack', 30
+    )
+  `).run();
+  raw.prepare(`
+    INSERT INTO torrent_download (
+      id, rss_item_id, download_client_id, infohash, client_ref, status, attempts, last_error,
+      storage_path, created_at, updated_at, percentage, absent_since, delivered_at, reclaimed_at
+    ) VALUES (1, 1, 1, 'abc123', 'ref-1', 'completed', 1, 'none', '/downloads/x.mkv', 10, 20, 100, 30, 40, 50)
+  `).run();
+  raw.prepare(`
+    INSERT INTO nzb_download (
+      id, rss_item_id, download_client_id, client_ref, status, attempts, last_error,
+      storage_path, created_at, updated_at, percentage, absent_since, delivered_at, reclaimed_at
+    ) VALUES (1, 1, 1, 'ref-2', 'completed', 1, 'none', '/downloads/y.nzb', 10, 20, 100, 30, 40, 50)
+  `).run();
+  raw.prepare(`
+    INSERT INTO person (id, name, provider_ref, created_at, updated_at)
+    VALUES (1, 'Kevin Flynn', 'tmdb:1', 10, 20)
+  `).run();
+  raw.prepare(`
+    INSERT INTO role (id, media_item_id, person_id, role, name, billing_order, created_at)
+    VALUES (1, 1, 1, 'actor', 'Flynn', 0, 10)
+  `).run();
+}
+
+/** The projection of row 1 from each host synced table, keyed by table name. */
+function projectionsOf(raw: ReturnType<typeof openTestDatabase>['raw']): Map<string, Record<string, unknown>> {
+  const projections = new Map<string, Record<string, unknown>>();
+  for (const table of HOST_SYNCED_TABLES) {
+    const row = readHostRows(raw, table, [1])[1];
+    if (row === undefined) throw new Error(`${table} has no row 1, so its projection cannot be read`);
+    projections.set(table, row as Record<string, unknown>);
+  }
+  return projections;
+}
+
+test('every column a host table projects reaches the wire in camelCase', () => {
+  // The whole reason these `SELECT`s carry aliases. The client's storage
+  // provider is designed as one IndexedDB object store with sparse indexes on
+  // `value.mediaItemId` and `value.rssItemId`, and an index key path is one
+  // string for every row in the store -- so a host table spelling the field
+  // `media_item_id` while a plugin table spells it `mediaItemId` cannot be
+  // indexed by one path at all.
+  // Asserted over every projected name rather than over the ids alone, since
+  // a convention with exceptions is what a key path cannot survive.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedOneRowPerSyncedTable(raw);
+
+  for (const [table, row] of projectionsOf(raw)) {
+    for (const name of Object.keys(row)) {
+      assert.ok(/^[a-z][A-Za-z0-9]*$/.test(name),
+        `${table} projects ${JSON.stringify(name)}, which is not camelCase -- alias it in selectSql`);
+    }
+  }
+});
+
+test('the media item a row belongs to has one name across every table that names it', () => {
+  // `mediaItemId` on the host's `rss_item` and `role`, and on the three plugin
+  // detail shapes (`TvRead`, `MovieRead`, `XxxRead`) -- the one index key path
+  // the client storage provider is planned around. `rssItemId` is the second,
+  // on both download tables.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedOneRowPerSyncedTable(raw);
+  const projections = projectionsOf(raw);
+
+  for (const table of ['rss_item', 'role']) {
+    assert.ok('mediaItemId' in (projections.get(table) ?? {}),
+      `${table} points at a media item and must spell it mediaItemId`);
+  }
+  for (const table of ['torrent_download', 'nzb_download']) {
+    assert.ok('rssItemId' in (projections.get(table) ?? {}),
+      `${table} points at an rss item and must spell it rssItemId`);
+  }
+});
+
+/**
+ * One witness object per host read shape: `Record<keyof T, true>`, which the
+ * compiler makes exhaustive in both directions for an object literal -- a
+ * missing key is an error, and an extra one is an excess property. So the
+ * *names* in these six objects are `@pickarr/contract`'s six host shapes,
+ * mechanically, and the test below compares them against what the six
+ * `SELECT`s actually project.
+ *
+ * This is `test/db/schema.test.ts`'s pattern applied to the other pair that
+ * declares one thing twice. That file compares migration DDL against
+ * `schema.ts` in both directions; this compares `sync/tables.ts`'s
+ * projections against the read shapes a client types against, and it is the
+ * only thing standing between them and the field-name drift design spec §3.7
+ * calls the worst failure this design can have.
+ *
+ * **Which direction is mechanisable, and which is not.** Names are, and both
+ * ways: the compiler holds the witness to the interface, and the assertion
+ * holds the witness to the projection. Declared *types* are not -- a
+ * TypeScript interface is gone at run time, so nothing here can check that
+ * `RoleSyncRead.billingOrder` is `number | null` rather than `string`. Typing
+ * the projection's return would not close it either: `readHostRows` hands
+ * back whatever `node:sqlite` read, so a declared type there is an assertion
+ * about the schema and not a check of it. What covers the types instead is
+ * `test/db/schema.test.ts`, which pins every column's SQL type and
+ * nullability against `schema.ts`; the gap left is a shape here disagreeing
+ * with the column's type in `schema.ts`, and it is reviewed rather than
+ * enforced.
+ */
+const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, true>>>> = {
+  media_item: {
+    id: true, pluginId: true, createdAt: true, updatedAt: true, provider: true,
+    providerRef: true, title: true, releaseDate: true, description: true,
+  } satisfies Record<keyof MediaItemSyncRead, true>,
+  rss_item: {
+    id: true, feedId: true, filename: true, createdAt: true, updatedAt: true,
+    downloadType: true, mediaItemId: true, rankingScore: true, resolution: true,
+    resolutionDetail: true, deliveredAt: true,
+  } satisfies Record<keyof RssItemSyncRead, true>,
+  torrent_download: {
+    id: true, rssItemId: true, downloadClientId: true, infohash: true, clientRef: true,
+    status: true, attempts: true, createdAt: true, updatedAt: true, percentage: true,
+    absentSince: true, deliveredAt: true, reclaimedAt: true,
+  } satisfies Record<keyof TorrentDownloadSyncRead, true>,
+  nzb_download: {
+    id: true, rssItemId: true, downloadClientId: true, clientRef: true,
+    status: true, attempts: true, createdAt: true, updatedAt: true, percentage: true,
+    absentSince: true, deliveredAt: true, reclaimedAt: true,
+  } satisfies Record<keyof NzbDownloadSyncRead, true>,
+  person: {
+    id: true, name: true, providerRef: true, createdAt: true, updatedAt: true,
+  } satisfies Record<keyof PersonSyncRead, true>,
+  role: {
+    id: true, mediaItemId: true, personId: true, role: true, name: true,
+    billingOrder: true, createdAt: true,
+  } satisfies Record<keyof RoleSyncRead, true>,
+};
+
+test('every host synced table has a read shape in the contract', () => {
+  // The set, before the fields: a seventh synced table added with no shape
+  // would leave a client back on `unknown` for it, which is the state this
+  // whole comparison exists to end.
+  assert.deepEqual(
+    Object.keys(HOST_READ_SHAPE_FIELDS).toSorted(),
+    [...HOST_SYNCED_TABLES].toSorted(),
+    'HOST_SYNCED_TABLES and the contract`s host read shapes must name the same six tables',
+  );
+});
+
+test('each host projection and its contract read shape name exactly the same fields', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedOneRowPerSyncedTable(raw);
+
+  for (const [table, row] of projectionsOf(raw)) {
+    const declared = HOST_READ_SHAPE_FIELDS[table];
+    if (declared === undefined) throw new Error(`${table} has no read shape witness`);
+    assert.deepEqual(
+      Object.keys(row).toSorted(),
+      Object.keys(declared).toSorted(),
+      `${table}'s projection and its read shape must name the same fields`,
+    );
+  }
 });

@@ -5,6 +5,10 @@
  * that hands an empty client the pair it starts both from
  * (`GET /api/sync/bootstrap`).
  *
+ * **All three bodies carry `generation`**, the one field they share, which
+ * says which database answered -- see `GenerationDeps` below for why, and
+ * why `/api/health` does not carry it.
+ *
  * **No SQL here.** Each route parses and validates its own query parameters
  * -- `/api/sync/bootstrap` has none -- and calls `tailSince`,
  * `backfillBefore` or `bootstrapCursors` (`sync/tail.ts`,
@@ -71,6 +75,39 @@ export interface SyncAnswer {
   body: unknown;
 }
 
+/**
+ * **Every one of the three answers carries `generation`, and it is the same
+ * opaque string on all three** -- `db/host-state.ts`'s `ensureSyncGeneration`,
+ * resolved once at boot and threaded in through `ReadServerDeps` rather than
+ * read per request, because it cannot change while this process holds the
+ * database open.
+ *
+ * It says *which database* answered. Nothing else on this wire does, and
+ * without it a rebuild is silent in both directions: 2.0 starts empty and
+ * rebuilds from feeds, so delete `pickarr.db` and a client holding
+ * `since = 5000` asks for ops above 5000 against a log whose max id is 80,
+ * receives nothing for as long as that install exists, and shows the old
+ * library with no error at all. At a lower cursor it is worse -- new rows
+ * arrive at ids that collide with the stale replica's keys, and two libraries
+ * merge. A client compares this against the value it stored and drops its
+ * replica when they differ.
+ *
+ * **On these three and not on `/api/health`.** Health is the one open route
+ * (`server.ts`'s `ROUTES`), and an install fingerprint readable with no
+ * session lets a scanner tell two hosts apart and spot a rebuild for nothing,
+ * and it answers no need: a client already has a session by the time it
+ * reaches any of these three.
+ *
+ * It is on the response rather than beside the ops, which matters for the one
+ * case the value exists for: a stale client's page is *empty*, so a
+ * generation attached to an op would reach every client except the one that
+ * needs it.
+ */
+interface GenerationDeps {
+  /** See above. Opaque to a client: it compares it and never parses it. */
+  generation: string;
+}
+
 function json(status: number, body: unknown): SyncAnswer {
   return { status, body };
 }
@@ -102,14 +139,14 @@ function parseSince(raw: string | null): number | null {
  * start from except a watermark the client already holds.
  */
 export function syncAnswer(
-  deps: { raw: DatabaseSync; registry: SyncRegistry },
+  deps: { raw: DatabaseSync; registry: SyncRegistry } & GenerationDeps,
   params: URLSearchParams,
 ): SyncAnswer {
   const since = parseSince(params.get('since'));
   if (since === null) return MALFORMED_SINCE;
 
   const page = tailSince(deps.raw, deps.registry, since, PAGE_SIZE);
-  return json(200, { ops: page.ops, cursor: page.cursor });
+  return json(200, { ops: page.ops, cursor: page.cursor, generation: deps.generation });
 }
 
 /**
@@ -132,8 +169,10 @@ export function syncAnswer(
  * but does not parse is refused all the same, for the reason this module's
  * doc gives.
  *
- * **The body carries no log position of its own.** It used to return the
- * watermark, so a client could start its tail without a second round trip;
+ * **The body carries no log position of its own** -- `ops`, `cursor` and the
+ * `generation` every sync response carries, and nothing else. It used to
+ * return the watermark, so a client could start its tail without a second
+ * round trip;
  * `/api/sync/bootstrap` answers that question directly now, for both cursors
  * at once and before either has been called. And there is deliberately no
  * number dating the page: every op here is a `create`, which a client applies
@@ -145,7 +184,7 @@ export function syncAnswer(
  * `sync/tail.ts`'s `SyncOp` has why the op kind replaced it.
  */
 export function backfillAnswer(
-  deps: { raw: DatabaseSync; registry: SyncRegistry },
+  deps: { raw: DatabaseSync; registry: SyncRegistry } & GenerationDeps,
   params: URLSearchParams,
 ): SyncAnswer {
   const supplied = params.get('before');
@@ -153,15 +192,16 @@ export function backfillAnswer(
   const before = supplied === null ? null : Number(supplied);
 
   const page = backfillBefore(deps.raw, deps.registry, before, PAGE_SIZE);
-  return json(200, { ops: page.ops, cursor: page.cursor });
+  return json(200, { ops: page.ops, cursor: page.cursor, generation: deps.generation });
 }
 
 /**
  * `GET /api/sync/bootstrap`: the cursor pair an empty client starts both
  * cursors from (design spec §5.4).
  *
- * **No parameters, and nothing to get wrong.** The one thing a client with
- * nothing has to be told is where to start, and it is one number in two
+ * **No parameters, and nothing to get wrong.** The two cursors, plus the
+ * `generation` every sync response carries. What a client with nothing has to
+ * be told is where to start, and that is one number in two
  * forms -- the pivot itself as `before`, and one below it as `since`, so the
  * entry at the pivot is the tail's rather than nobody's. A client could
  * derive neither: computing the floor needs `media_item.updated_at` per
@@ -178,6 +218,6 @@ export function backfillAnswer(
  * and serialises the answer, keeping this module free of SQL like the two
  * routes above.
  */
-export function bootstrapAnswer(deps: { raw: DatabaseSync }): SyncAnswer {
-  return json(200, bootstrapCursors(deps.raw, BOOTSTRAP_ITEMS));
+export function bootstrapAnswer(deps: { raw: DatabaseSync } & GenerationDeps): SyncAnswer {
+  return json(200, { ...bootstrapCursors(deps.raw, BOOTSTRAP_ITEMS), generation: deps.generation });
 }

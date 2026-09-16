@@ -61,10 +61,11 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
 
 /**
  * One `SELECT ... FROM <table>` per host synced table, every column named
- * explicitly and the table spelled as a literal rather than assembled from a
- * variable -- never `SELECT *`, and never `FROM ${table}`.
+ * explicitly, **every multi-word column aliased to camelCase**, and the table
+ * spelled as a literal rather than assembled from a variable -- never
+ * `SELECT *`, and never `FROM ${table}`.
  *
- * Both halves of that are load-bearing, and for different reasons. A star
+ * **Those last two are load-bearing, and for different reasons.** A star
  * reads whatever the table happens to hold today, including a column added
  * tomorrow for a reason that has nothing to do with a client; naming every
  * column is what keeps that addition from reaching a client until someone
@@ -76,6 +77,24 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * makes this check fail closed and demand `CREDENTIAL_ALLOW_LIST` grow a
  * third entry, which the project's global constraints fix at exactly two.
  * Six short, literal, unremarkable `SELECT`s cost less than that entry would.
+ *
+ * **The aliases are the wire's naming convention, and they exist for one
+ * concrete reason.** A column name reaches a client verbatim: `readHostRows`
+ * spreads the row `node:sqlite` hands back, and the result is serialised as
+ * an op's `value` with no mapping step anywhere between. Unaliased, these six
+ * tables spoke snake_case while all six plugin read shapes
+ * (`packages/contract/src/sync.ts`) speak camelCase, so the same logical
+ * field was `media_item_id` on three host tables and `mediaItemId` on three
+ * plugin ones. The client's storage provider is designed (and not yet
+ * written) as one IndexedDB object store keyed `['table', 'id']`, with sparse
+ * indexes on `value.mediaItemId` and `value.rssItemId`; an index key path is
+ * a single string for every row in the store, so under two spellings "the
+ * media item this row belongs to" could not be one index at all. Aliasing here rather than mapping in JavaScript keeps this
+ * module the one statement of what a host row looks like on the wire; the
+ * plugins map by hand because each of theirs joins and renames anyway.
+ *
+ * `id` needs no alias and gets none: it is already camelCase, and it is the
+ * key `readHostRows` reads the row back out under -- see its doc.
  *
  * **Four columns that exist on these tables are deliberately not named
  * below, and each is named here so the next person to add a column sees the
@@ -130,25 +149,37 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
 function selectSql(table: string, placeholders: string): string | undefined {
   switch (table) {
     case 'media_item':
-      return `SELECT id, plugin_id, created_at, updated_at, provider, provider_ref, title, release_date, description
+      return `SELECT id, plugin_id AS pluginId, created_at AS createdAt, updated_at AS updatedAt,
+                      provider, provider_ref AS providerRef, title,
+                      release_date AS releaseDate, description
                  FROM media_item WHERE id IN (${placeholders})`;
     case 'rss_item':
-      return `SELECT id, feed_id, filename, created_at, updated_at, download_type, media_item_id,
-                      ranking_score, resolution, resolution_detail, delivered_at
+      return `SELECT id, feed_id AS feedId, filename, created_at AS createdAt,
+                      updated_at AS updatedAt, download_type AS downloadType,
+                      media_item_id AS mediaItemId, ranking_score AS rankingScore, resolution,
+                      resolution_detail AS resolutionDetail, delivered_at AS deliveredAt
                  FROM rss_item WHERE id IN (${placeholders})`;
     case 'torrent_download':
-      return `SELECT id, rss_item_id, download_client_id, infohash, client_ref, status, attempts,
-                      created_at, updated_at, percentage, absent_since, delivered_at, reclaimed_at
+      return `SELECT id, rss_item_id AS rssItemId, download_client_id AS downloadClientId,
+                      infohash, client_ref AS clientRef, status, attempts,
+                      created_at AS createdAt, updated_at AS updatedAt, percentage,
+                      absent_since AS absentSince, delivered_at AS deliveredAt,
+                      reclaimed_at AS reclaimedAt
                  FROM torrent_download WHERE id IN (${placeholders})`;
     case 'nzb_download':
-      return `SELECT id, rss_item_id, download_client_id, client_ref, status, attempts,
-                      created_at, updated_at, percentage, absent_since, delivered_at, reclaimed_at
+      return `SELECT id, rss_item_id AS rssItemId, download_client_id AS downloadClientId,
+                      client_ref AS clientRef, status, attempts,
+                      created_at AS createdAt, updated_at AS updatedAt, percentage,
+                      absent_since AS absentSince, delivered_at AS deliveredAt,
+                      reclaimed_at AS reclaimedAt
                  FROM nzb_download WHERE id IN (${placeholders})`;
     case 'person':
-      return `SELECT id, name, provider_ref, created_at, updated_at
+      return `SELECT id, name, provider_ref AS providerRef,
+                      created_at AS createdAt, updated_at AS updatedAt
                  FROM person WHERE id IN (${placeholders})`;
     case 'role':
-      return `SELECT id, media_item_id, person_id, role, name, billing_order, created_at
+      return `SELECT id, media_item_id AS mediaItemId, person_id AS personId, role, name,
+                      billing_order AS billingOrder, created_at AS createdAt
                  FROM role WHERE id IN (${placeholders})`;
     default:
       return undefined;
@@ -158,6 +189,14 @@ function selectSql(table: string, placeholders: string): string | undefined {
 /**
  * Reads the current state of `ids` from `table`, projected to that table's
  * declared columns (`selectSql` above), keyed by row id.
+ *
+ * **The key survives the aliasing because `id` is the one column not
+ * aliased.** This reads `row.id`, which is the result-column name, not the
+ * table's -- so an `id AS something` in `selectSql` would read `undefined`,
+ * and `Number(undefined)` is `NaN`: measured, a page of two rows collapses
+ * to `{"NaN": <the last row>}`, values intact and every key gone. `id` is
+ * already camelCase, so there is nothing to rename and nothing to keep in
+ * step.
  *
  * An empty `ids` never reaches SQLite at all: the backfill and the tail both
  * call this with whatever ids one page of `sync_log` names, and an empty page
