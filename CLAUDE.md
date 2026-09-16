@@ -40,7 +40,7 @@ Two shapes have cost time here, and the second is why this is not scoped to the 
 `assert.equal(screen.queryByText(x), null)`, and `assert.equal(document.activeElement,
 screen.getByRole(…))` — an identity comparison between two live nodes, with no `null`
 and no `queryBy*` anywhere. One instance of that second shape sat in
-`SecretField.test.tsx` and no pattern written for the first would have found it.
+`SecretField.test.tsx` (historical example, deleted in task 3) and no pattern written for the first would have found it.
 
 `scripts/check-test-hygiene.ts` fails `npm run check` on both, so this is a build error
 rather than something to remember. It parses rather than pattern-matches, because this
@@ -54,7 +54,7 @@ first assertion: React's own effect flush schedules through `setTimeout`, so rep
 it means the effect under test never runs and the test times out with nothing to point
 at. This is not the hang above — it presents as a plain timeout, which reads like the
 code being wrong rather than the harness. Assert on the *arguments* to the real
-`setTimeout` instead: `packages/web/test/useGroupMetadata.test.tsx` pins an exact
+`setTimeout` instead: `packages/web/test/useGroupMetadata.test.tsx` (historical example, deleted in task 3) pins an exact
 backoff ladder and a clamped five-minute sleep that way, without waiting five real
 minutes or replacing any timer behaviour. Server-side tests reach the same place by a
 different route: `packages/core/test/abort-timeout.ts` replaces `AbortSignal.timeout`
