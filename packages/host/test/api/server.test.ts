@@ -127,6 +127,7 @@ async function start(
   db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
   host?: string,
+  webRoot: string = MISSING_WEB_ROOT,
 ): Promise<Running> {
   const logs: LogLine[] = [];
   const server = await createReadServer({
@@ -144,7 +145,7 @@ async function start(
     generation: 'placeholder-generation',
     host,
     port: 0,
-    webRoot: MISSING_WEB_ROOT,
+    webRoot,
     authFor: (baseURL) => createAuth({
       raw,
       db,
@@ -240,8 +241,9 @@ async function startSignedIn(
   raw: DatabaseSync,
   db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
+  webRoot?: string,
 ): Promise<SignedIn> {
-  const running = await start(raw, db, pluginIdForType);
+  const running = await start(raw, db, pluginIdForType, undefined, webRoot);
   try {
     return { ...running, cookie: await signUpOwner(running.server, raw) };
   } catch (error) {
@@ -1467,5 +1469,71 @@ test('the auth routes are reachable without a session', async () => {
     assert.equal(check.status, 200, 'the session check is dispatched too, rather than guarded');
   } finally {
     await server.close();
+  }
+});
+
+/**
+ * A web root with a real `index.html` in it, which these two tests need and
+ * the rest of the file deliberately does without.
+ *
+ * Every other test here points at `MISSING_WEB_ROOT`, and that is right for
+ * them -- they assert on `/api`, and a bundle on disk would only add a way for
+ * the fixture to be wrong. These two are the exception because the property
+ * under test is *which* of two answers an `/api`-shaped request receives, and
+ * with no bundle present both answers are 404 for different reasons. Reverting
+ * `targetOf`'s origin check against `MISSING_WEB_ROOT` was measured: the
+ * anonymous test failed on its status and the signed-in one passed, because
+ * there was no html anywhere for the assertion to catch.
+ */
+async function bundleRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-bundle-'));
+  await writeFile(join(root, 'index.html'), '<html lang="en"><body>pickarr</body></html>');
+  return root;
+}
+
+test('a protocol-relative target is refused, never answered with the bundle', async () => {
+  const { raw, db } = setup();
+  const webRoot = await bundleRoot();
+  const { server } = await start(raw, db, moviesOnly, undefined, webRoot);
+  try {
+    // `fetch` sends these verbatim -- measured, it does not collapse the
+    // doubled slash -- so the server really does see `//api/health`. Resolved
+    // against a base, that string is protocol-relative: its first segment is
+    // read as the authority, leaving pathname `/health`, which is not an api
+    // path. Before `targetOf` compared origins, the open static route answered
+    // every one of these with the bundle at 200.
+    const answers = await getAll(server, ['//api/health', '//api/media', '/.//api/media'], null);
+    for (const answer of answers) {
+      assert.equal(answer.status, 401, `${answer.path} is refused for want of a session`);
+      assert.ok(!answer.text.includes('<html'), `${answer.path} must not answer the bundle`);
+    }
+  } finally {
+    // Every test in this file closes its own listener in a `finally`, and all
+    // 24 of them did before this one. A live listener keeps the event loop
+    // open, so skipping it does not fail the test -- it hangs the file with no
+    // test name attached, which is the hazard `CLAUDE.md` records.
+    await server.close();
+    await rm(webRoot, { recursive: true, force: true });
+  }
+});
+
+test('a signed-in protocol-relative target is an unknown route, not the bundle', async () => {
+  const { raw, db } = setup();
+  const webRoot = await bundleRoot();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, webRoot);
+  try {
+    // With the session supplied, the refusal above is out of the way and what
+    // is left is the route lookup: a null target has no pathname to match, so
+    // it is unknown rather than open. This is the half that proves the 401
+    // above is a guard rather than the only thing standing between a
+    // protocol-relative path and the bundle.
+    const answers = await getAll(server, ['//api/health', '//api/media'], cookie);
+    for (const answer of answers) {
+      assert.equal(answer.status, 404, `${answer.path} matches no route`);
+      assert.ok(!answer.text.includes('<html'), `${answer.path} must not answer the bundle`);
+    }
+  } finally {
+    await server.close();
+    await rm(webRoot, { recursive: true, force: true });
   }
 });

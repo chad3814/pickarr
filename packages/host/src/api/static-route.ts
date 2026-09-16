@@ -67,9 +67,19 @@ export interface StaticDeps {
  * Exported so `server.ts`'s route table can exclude the same set of paths
  * from the static route's own match, rather than restating the rule as a
  * second regular expression that could drift from this one.
+ *
+ * **Leading slashes are collapsed first, and that is not tidiness.** `new URL`
+ * preserves a doubled slash inside a path: a target of `/.//api/media`
+ * normalises to the pathname `//api/media`, which a literal `/api` prefix test
+ * calls non-API — so it reached the static route and answered the bundle with
+ * a 200 where an `/api` path must answer JSON or a 404. No guarded data was
+ * served (the static route only reads the bundle), but a client asking for an
+ * endpoint and receiving markup parses HTML as JSON and reports something
+ * unrelated to what went wrong, which is what the rule exists to prevent.
  */
 export function isApiPath(pathname: string): boolean {
-  return pathname === '/api' || pathname.startsWith('/api/');
+  const collapsed = pathname.replace(/^\/+/, '/');
+  return collapsed === '/api' || collapsed.startsWith('/api/');
 }
 
 /** The fixed 404 an `/api` miss and a refused traversal both answer -- `server.ts`'s own `UNKNOWN_ROUTE`, restated here rather than imported, so this module has no dependency on the router it is routed by. */

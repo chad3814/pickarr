@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { StaticDeps, StaticResponse } from '../../src/api/static-route.ts';
-import { staticAnswer, warnIfWebRootMissing } from '../../src/api/static-route.ts';
+import { isApiPath, staticAnswer, warnIfWebRootMissing } from '../../src/api/static-route.ts';
 
 /** Never a real filesystem, on `artwork-route.test.ts`'s own `fakeDeps` pattern. */
 interface FakeFile {
@@ -189,4 +189,18 @@ test('no answer carries a filesystem path', async () => {
     assert.ok(!value.includes(secretRoot), `no answer or log line may contain the web root's path: ${value}`);
     assert.ok(!value.includes('marker-path-nobody-should-see'), `nor any fragment of it: ${value}`);
   }
+});
+
+test('a pathname with doubled leading slashes is still an api path', () => {
+  // Task 1's review found this: `new URL` preserves a doubled slash inside a
+  // path, so a target of `/.//api/media` normalises to the pathname
+  // `//api/media` -- which a literal `/api` prefix test calls non-API. It
+  // reached the static route and answered the bundle with a 200 where an
+  // `/api` path must answer JSON or a 404.
+  assert.ok(isApiPath('//api/media'), 'a doubled slash does not make it a page');
+  assert.ok(isApiPath('///api'), 'nor does a tripled one');
+  assert.ok(isApiPath('/api'), 'and the ordinary forms still hold');
+  assert.ok(isApiPath('/api/sync/backfill'));
+  assert.ok(!isApiPath('/apiary'), 'a path that merely starts with the letters is a page');
+  assert.ok(!isApiPath('/'), 'and so is the root');
 });

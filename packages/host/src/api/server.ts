@@ -380,13 +380,32 @@ const STATIC_FILES = {
  */
 const REQUEST_BASE = 'http://127.0.0.1';
 
-/** `null` for a target `new URL` cannot parse, which is answered as an unknown route rather than a 500. */
+/**
+ * `null` for a target `new URL` cannot parse, which is answered as an unknown
+ * route rather than a 500 -- and `null` too for one it parses into a
+ * *different origin* than the base.
+ *
+ * That second case is why this is more than a `try`. A target beginning `//`
+ * is protocol-relative, so `new URL('//api/health', base)` yields host `api`
+ * and pathname `/health`: the first segment is eaten as an authority and the
+ * server never sees the `/api` it was asked for. Since nothing here reads the
+ * host back, that loss was silent, and `//api/media` answered the bundle
+ * instead of the guarded route's 401. Refusing a reinterpreted origin is the
+ * fix at the boundary, rather than teaching every downstream check about a
+ * shape that should never have got past parsing.
+ *
+ * This server only ever receives origin-form targets. Absolute-form is legal
+ * in HTTP/1.1 for proxies and is not something a browser sends here, so
+ * refusing it costs nothing a real client does.
+ */
 function targetOf(url: string | undefined): URL | null {
+  let parsed: URL;
   try {
-    return new URL(url ?? '/', REQUEST_BASE);
+    parsed = new URL(url ?? '/', REQUEST_BASE);
   } catch {
     return null;
   }
+  return parsed.origin === REQUEST_BASE ? parsed : null;
 }
 
 /** A cursor as it arrived on the query string: absent and empty are both "no cursor". */
