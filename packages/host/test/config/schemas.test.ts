@@ -34,3 +34,13 @@ test('a port outside the legal range is refused', () => {
 test('an unknown key inside a namespace is refused rather than silently dropped', () => {
   assert.throws(() => serverConfigSchema.parse({ prot: 8787 }), /unrecognized|unknown/i);
 });
+
+test('webRoot is absent by default, and a configured one passes through unmodified', () => {
+  // Absent means "derive it" (design spec §3) -- a value this schema cannot
+  // compute, since the default lives beside wherever the running process's
+  // own code happens to be. `main.ts`'s `defaultWebRoot` is what computes
+  // it; this schema only validates a value an operator actually set.
+  assert.equal(serverConfigSchema.parse(undefined).webRoot, undefined);
+  assert.equal(serverConfigSchema.parse({ webRoot: '/srv/web' }).webRoot, '/srv/web');
+  assert.throws(() => serverConfigSchema.parse({ webRoot: '' }), 'an empty string is not a path');
+});

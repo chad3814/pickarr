@@ -13,8 +13,10 @@
  * collapsed this module into `dist/index.js` therefore cannot turn the
  * library face of the package into a process that migrates a database.
  */
+import { stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
 import { API_KEY_SECRET } from '@pickarr/openmetadata';
 import { createMoviePlugin } from '@pickarr/plugin-movie';
@@ -22,6 +24,7 @@ import { createTvPlugin } from '@pickarr/plugin-tv';
 import { createXxxPlugin } from '@pickarr/plugin-xxx';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
 import { createReadServer } from './api/server.ts';
+import { warnIfWebRootMissing } from './api/static-route.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
@@ -96,6 +99,36 @@ function log(message: string, detail?: Readonly<Record<string, unknown>>): void 
  */
 export function resolveArtworkDir(databasePath: string): string {
   return join(dirname(databasePath), 'artwork');
+}
+
+/**
+ * `server.webRoot`'s default when the config file names none: `web`, in the
+ * same directory as whatever file is running right now (design spec §3).
+ *
+ * **This is `dist`-relative, not literally "beside `dist`".** `moduleUrl` is
+ * always `import.meta.url` of *this* module, and where that resolves depends
+ * on how the process was started, not on anything this function reads. In
+ * production the build bundles this module into `packages/host/dist/bin.js`
+ * (`package.json`'s `build` script), so `moduleUrl` names a file inside
+ * `dist` and this returns `packages/host/dist/web` -- which is exactly where
+ * the image's runtime stage copies `packages/web/dist` (design spec §6.5).
+ * In development `npm start` runs `src/bin.ts` directly
+ * (`--conditions development`), so `moduleUrl` names a file inside `src` and
+ * this returns `packages/host/src/web`, which does not exist on any checkout
+ * -- **and that is correct, not a gap**: development serves the app through
+ * vite's own dev server, which proxies `/api` to this host and never asks it
+ * for a static file at all, so nothing here ever needs to find that
+ * directory. `warnIfWebRootMissing` is what tells a developer running this
+ * host directly, since a missing directory would otherwise be silent right
+ * up until the one request nothing in development ever sends.
+ *
+ * Takes `moduleUrl` as an argument rather than reading `import.meta.url`
+ * itself so a test can assert the production and development cases both,
+ * neither of which is the URL this file actually loads from during a test
+ * run (`--import tsx`, a third location again).
+ */
+export function defaultWebRoot(moduleUrl: string): string {
+  return join(dirname(fileURLToPath(moduleUrl)), 'web');
 }
 
 /**
@@ -304,6 +337,15 @@ export interface HostSettings {
   secretsBaseDir: string;
   /** Where the lookup plugins ask. See {@link resolveOpenmetadataUrl}. */
   openmetadataUrl: string;
+  /**
+   * `ReadServerDeps.webRoot`: the config file's `server.webRoot`, or
+   * {@link defaultWebRoot} of this module's own `import.meta.url` when the
+   * file names none. Always a concrete string, on the same reasoning
+   * `readHost` already gives for its own field -- there is no variable to
+   * check here (unlike the other five), since this is `server.webRoot` alone
+   * with no environment override.
+   */
+  webRoot: string;
   config: Config;
 }
 
@@ -372,7 +414,10 @@ export function resolveConfigPath(env: NodeJS.ProcessEnv): string {
  * variable. `BETTER_AUTH_SECRET` is `main`'s sixth and does not come through
  * here -- it has no config-file counterpart to fall back to -- but it goes
  * through the same {@link configuredEnvValue} at its own call site, in
- * `main` itself.
+ * `main` itself. `webRoot` is neither of those: it has no environment
+ * variable at all (design spec §3 names only `server.webRoot`), so it is
+ * file, then {@link defaultWebRoot}, with nothing for the environment to
+ * beat.
  */
 export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSettings> {
   const config = await openConfig({ path: resolveConfigPath(env) });
@@ -393,6 +438,7 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
     databasePath: databasePathRaw ?? database.current.path,
     secretsBaseDir: secrets.current.baseDir,
     openmetadataUrl: resolveOpenmetadataUrl(openmetadataUrlRaw),
+    webRoot: server.current.webRoot ?? defaultWebRoot(import.meta.url),
     config,
   };
 }
@@ -772,6 +818,13 @@ export async function main(
   const feedIds = scheduleKnownFeeds(host, raw);
   const clientIds = await scheduleKnownDownloadClients(host, raw);
 
+  // Once, here, before the listener opens -- not per request, and not
+  // fatal either way (design spec §3). A development host reaches this with
+  // `settings.webRoot` pointing at `src/web`, which never exists, and this
+  // is the only place that ever says so: vite's own dev server proxies
+  // `/api` here and never asks this host for a static file.
+  await warnIfWebRootMissing(settings.webRoot, stat, log);
+
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
@@ -788,6 +841,7 @@ export async function main(
     generation: ensureSyncGeneration(raw, Date.now()),
     host: settings.readHost,
     port: settings.port,
+    webRoot: settings.webRoot,
     // Built from the address the listener bound rather than here, because
     // `baseURL` has to be the origin requests arrive at and `port` may be 0 --
     // see `ReadServerDeps.authFor`.

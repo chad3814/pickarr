@@ -58,6 +58,17 @@ const BOGUS_COOKIE = 'better-auth.session_token=placeholder.not-a-real-signature
 /** A log that drops every line, for the instance whose lines this file does not assert. */
 const dropLine = (): void => {};
 
+/**
+ * A web root this file never has to build or clean up, because it never
+ * exists: this file's job is the router and the guard, not content-serving
+ * fidelity (`static-route.test.ts` owns that, fully injected). Passing a
+ * real absent path here also exercises the property design spec §3 promises
+ * for it -- a missing web root does not crash the server or take `/api` down
+ * with it, which every request this file makes to the static route's own
+ * path implicitly proves by getting an answer at all.
+ */
+const MISSING_WEB_ROOT = '/nonexistent/pickarr-web-root-for-server-test';
+
 /** One `log` call, as the fake below records it. */
 interface LogLine {
   message: string;
@@ -133,6 +144,7 @@ async function start(
     generation: 'placeholder-generation',
     host,
     port: 0,
+    webRoot: MISSING_WEB_ROOT,
     authFor: (baseURL) => createAuth({
       raw,
       db,
@@ -558,9 +570,14 @@ test('an unknown route is 404, not a 500', async () => {
   const { raw, db } = setup();
   const { server, logs, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
+    // `/` is deliberately absent from this list: since the static route
+    // exists, `/` is no longer unmatched -- it is the static route's own
+    // territory, and `static-route.test.ts` covers what it answers there.
+    // Every probe below stays under `/api`, which the static route excludes
+    // from its own match (`matchesPath`'s `STATIC_ROUTE_PATH` case), so each
+    // one is still a path no route claims.
     const answers = await getAll(server, [
       '/api/nope',
-      '/',
       '/api/media/1',
       '/api/artwork/poster',
       '/api/artwork/statue/1',
@@ -1129,7 +1146,7 @@ test('every route except health refuses without a session', async () => {
     // Both halves of the table's shape, because the filter above is what a
     // route wrongly marked open would slip through: flipping one `open` would
     // otherwise *remove* that route from this test rather than fail it.
-    assert.equal(guarded.length, ROUTES.length - 1, 'exactly one route in the table is open');
+    assert.equal(guarded.length, ROUTES.length - 2, 'exactly two routes in the table are open');
     assert.ok(guarded.length >= 5, 'and the table is the real one, not a list this test passed over');
 
     const refused = await getAll(server, guarded.map(probeFor), ANONYMOUS);
@@ -1149,23 +1166,31 @@ test('every route except health refuses without a session', async () => {
   }
 });
 
-test('health answers without a session, and is the only route that does', async () => {
-  // A container health check has no credential to offer, so this one route
-  // stays open -- and *only* this one, which is why the assertion is over the
-  // whole table rather than over health alone.
+test('health and the static bundle answer without a session, and nothing else does', async () => {
+  // A container health check has no credential to offer, and the bundle is
+  // the same bytes for every caller and the one thing a browser must load
+  // before it can even render a sign-in form -- so those two stay open, and
+  // *only* those two, which is why the assertion is over the whole table
+  // rather than over health alone.
   const { raw, db } = setup();
   const { server } = await start(raw, db, moviesOnly);
   try {
+    const openPaths = ROUTES.filter((route) => route.open).map((route) => route.path);
     assert.deepEqual(
-      ROUTES.filter((route) => route.open).map((route) => route.path),
-      ['/api/health'],
-      'one open route, and it is the health check',
+      openPaths,
+      // '/*' is `server.ts`'s own `STATIC_ROUTE_PATH` sentinel, not a real
+      // request target -- see that module's doc on the constant.
+      ['/api/health', '/*'],
+      'two open routes: the health check and the bundle',
     );
 
     const answers = await getAll(server, ROUTES.map(probeFor), ANONYMOUS);
     for (const { path, status } of answers) {
-      const expected = path === '/api/health' ? 200 : 401;
-      assert.equal(status, expected, `${path} answers ${expected} to a caller with no session`);
+      if (openPaths.includes(path)) {
+        assert.notEqual(status, 401, `${path} must answer without a session`);
+      } else {
+        assert.equal(status, 401, `${path} must refuse a caller with no session`);
+      }
     }
 
     const health = await get(server, '/api/health', ANONYMOUS);
