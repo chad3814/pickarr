@@ -31,11 +31,13 @@
  * skip one, which is silent permanent data loss (spec §4).
  *
  * Every key the batch touches is read in one `Promise.all` pass before any
- * write, rather than a sequential `await` per op: the latter trips
- * `no-await-in-loop`, and issuing the writes only after every read has
- * settled keeps requests continuously in flight, which is what keeps the
- * transaction alive until `done(tx)` -- an IndexedDB transaction commits as
- * soon as it has no pending request and control returns to the event loop.
+ * write, rather than a sequential `await` per op. The reason is narrower than
+ * it looks and the body of this function states it in full: the sequential
+ * form trips `no-await-in-loop`, and `noUncheckedIndexedAccess` makes the
+ * parallel-array alternative awkward. It is **not** that the batch keeps
+ * requests in flight -- that claim stood here for two commits and is false,
+ * measured: nothing is in flight once `Promise.all` settles, the sequential
+ * form commits identically, and what ends a transaction is a macrotask gap.
  */
 import { request, done } from './idb.ts';
 import type { StoredRow } from './db.ts';
@@ -43,23 +45,6 @@ import { writeCursors, type Cursors } from './meta.ts';
 import type { SyncOp } from './wire.ts';
 import { emit } from './notify.ts';
 
-/**
- * Thrown when a `create` or `upsert` carries no `value`. Names the op's
- * table and id, and never its value (Global Constraints: no row contents in
- * a message) -- there is none to name anyway, that being the defect.
- *
- * `value: undefined` is excluded from every `value.*` index exactly as an
- * absent `value` is, so a create or upsert with no value would write a
- * record indistinguishable from a tombstone: invisible to every index, and
- * blocking any later `create` for the same key. Refusing it here is cheaper
- * than debugging that later.
- *
- * **The check is on the value, not on the key.** `'value' in op` was the
- * first spelling and it was wrong: `{ op: 'upsert', value: undefined }` has
- * the key and fails the test, so exactly the record this exists to refuse
- * went straight through. `null` is refused for the same reason -- measured,
- * it is index-invisible too, and no read shape is a bare `null`.
- */
 /**
  * A batch carried two ops for one key, which this function cannot apply.
  *
@@ -83,6 +68,23 @@ export class DuplicateOpError extends Error {
   }
 }
 
+/**
+ * Thrown when a `create` or `upsert` carries no `value`. Names the op's
+ * table and id, and never its value (Global Constraints: no row contents in
+ * a message) -- there is none to name anyway, that being the defect.
+ *
+ * `value: undefined` is excluded from every `value.*` index exactly as an
+ * absent `value` is, so a create or upsert with no value would write a
+ * record indistinguishable from a tombstone: invisible to every index, and
+ * blocking any later `create` for the same key. Refusing it here is cheaper
+ * than debugging that later.
+ *
+ * **The check is on the value, not on the key.** `'value' in op` was the
+ * first spelling and it was wrong: `{ op: 'upsert', value: undefined }` has
+ * the key and fails the test, so exactly the record this exists to refuse
+ * went straight through. `null` is refused for the same reason -- measured,
+ * it is index-invisible too, and no read shape is a bare `null`.
+ */
 export class MalformedOpError extends Error {
   constructor(op: { table: string; id: number }) {
     super(`sync op for ["${op.table}", ${String(op.id)}] carries no usable value`);

@@ -766,3 +766,62 @@ test('a reset un-retires the walk, so a rebuilt library is backfilled again', as
   assert.deepEqual(await readCursors(db), { since: 0, before: 9 }, 'the reset wrote a fresh pivot');
   assert.ok(sched.pendingFor('backfill'), 'and queued the walk again, which nothing else would have done');
 });
+
+test('a bootstrap that has not answered yet blocks both loops and announces nothing', async () => {
+  // Two properties in one test, both of which I had recorded as untestable or
+  // accepted, and the whole-branch review was right that a deferred response
+  // reaches them.
+  //
+  // Ruling 21's accepted cost, now pinned: the bootstrap fetch runs *inside*
+  // the mutex -- deliberately, since it decides the pivot both loops use --
+  // so while it is in flight neither loop can make progress. That is a real
+  // stall with no timeout behind it, and a test is how it stops being
+  // folklore.
+  //
+  // Ruling 20's ordering, partly: nothing is announced while the bootstrap is
+  // pending. That pins the announcements as *after* the fetch. It does not
+  // pin them after the meta commit -- the review's mutant moves the broadcast
+  // inside `bootstrapCursors`, between its fetch and its write, and both
+  // orders look identical from out here once the response lands. The
+  // sibling test above pins `emitReset` against a synchronous read; this is
+  // the half that was reachable.
+  const db = await freshDb();
+  await writeCursors(db, { since: 10, before: null });
+  await writeGeneration(db, 'gen-old');
+
+  const held = deferred<SyncResponse>();
+  const announced: ('emitReset' | 'broadcast')[] = [];
+  cleanups.push(subscribeReset(() => { announced.push('emitReset'); }));
+  const other = new BroadcastChannel(CHANNEL_NAME);
+  cleanups.push(() => { other.close(); });
+  other.addEventListener('message', () => { announced.push('broadcast'); });
+
+  const fetch = stubFetch((url: string): Promise<SyncResponse> | SyncResponse => {
+    if (url === '/api/sync/bootstrap') return held.promise;
+    return ok({ ops: [], cursor: 10, generation: 'gen-new' });
+  });
+  const { sched } = start(db, fetch.fetch, grantedLease());
+  await settle();
+
+  await sched.drive('tail');
+  await settle();
+
+  // `assert.equal(length, 0)` rather than `deepEqual(announced, [])`: the
+  // latter narrows `announced` to `never[]` for the rest of the function, so
+  // the `includes` below stops compiling.
+  assert.equal(announced.length, 0, 'nothing is announced while the bootstrap is still in flight');
+  // Sharper than ruling 21 recorded, and measured here rather than reasoned:
+  // `reset()` wipes *before* it bootstraps, so a stalled bootstrap does not
+  // merely block both loops -- it leaves the replica already emptied, with no
+  // cursors and no announcement that anything happened. A tab reading during
+  // the stall sees an empty library and has been told nothing about it.
+  assert.equal(await readCursors(db), undefined,
+    'the wipe has already committed, so the stall is not a pause -- it is an empty replica');
+
+  held.resolve(ok({ since: 0, before: 9, generation: 'gen-new' }));
+  await settle();
+
+  assert.deepEqual(await readCursors(db), { since: 0, before: 9 }, 'the pivot lands once the bootstrap answers');
+  assert.ok(announced.includes('emitReset'), 'and only then is it announced');
+  db.close();
+});

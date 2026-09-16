@@ -51,9 +51,29 @@ function add<K, L>(registry: Map<K, Set<L>>, key: K, cb: L): () => void {
     registry.set(key, set);
   }
   set.add(cb);
+  let removed = false;
   return () => {
-    set.delete(cb);
-    if (set.size === 0) registry.delete(key);
+    // **Idempotent, and it looks the set up again rather than trusting the one
+    // it captured.** Either guard alone closes the hole -- measured, removing
+    // one at a time leaves every test green and only removing both
+    // reintroduces the defect -- so this is deliberately belt and braces on a
+    // public surface, not two halves of one fix. The hole was real: the
+    // closure captured the `Set` that existed at
+    // subscribe time, so once that set was emptied and dropped from the
+    // registry, a second call re-ran `registry.delete(key)` against whatever
+    // set had been created there *since* -- silently detaching other
+    // components' live subscribers. Reproduced: subscribe, unsubscribe,
+    // subscribe twice more, unsubscribe the first one again, and a change to
+    // that row woke nobody at all.
+    //
+    // This is the same defect `leader.ts`'s `onMessage` had, in the file whose
+    // own commit message said the lesson generalises. It did not, until here.
+    if (removed) return;
+    removed = true;
+    const current = registry.get(key);
+    if (current === undefined) return;
+    current.delete(cb);
+    if (current.size === 0) registry.delete(key);
   };
 }
 

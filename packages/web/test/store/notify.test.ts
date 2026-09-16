@@ -205,3 +205,41 @@ test('an async subscriber that rejects is contained, not left as an unhandled re
   db.close();
   assert.equal(other, 1, 'the other handler still ran, and the run was not poisoned');
 });
+
+test('unsubscribing twice does not detach subscribers that arrived in between', async () => {
+  // The whole-branch review's blocking finding, and the silent twin of the
+  // BroadcastChannel bug two commits earlier. The unsubscribe closure captured
+  // the Set that existed when it was made; once that set emptied and was
+  // dropped from the registry, a second call deleted the *key* -- taking with
+  // it whatever set had been created there since. Reproduced before fixing:
+  // this woke nobody at all.
+  const db = await freshDb();
+  const fired: string[] = [];
+  const first = subscribe('person', 1, () => { fired.push('first'); });
+  first();
+  const second = subscribe('person', 1, () => { fired.push('second'); });
+  const third = subscribe('person', 1, () => { fired.push('third'); });
+  first();
+
+  await applyBatch(db, [{ op: 'upsert', table: 'person', id: 1, value: { n: 1 } }], { since: 1, before: null });
+
+  assert.deepEqual(fired, ['second', 'third'], 'the later subscribers are still attached');
+  second();
+  third();
+  db.close();
+});
+
+test('the same holds for subscribeInserts, which shares the registry helper', async () => {
+  const db = await freshDb();
+  const seen: string[] = [];
+  const first = subscribeInserts('person', () => { seen.push('first'); });
+  first();
+  const second = subscribeInserts('person', () => { seen.push('second'); });
+  first();
+
+  await applyBatch(db, [{ op: 'upsert', table: 'person', id: 5, value: { n: 5 } }], { since: 1, before: null });
+
+  assert.deepEqual(seen, ['second']);
+  second();
+  db.close();
+});

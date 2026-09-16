@@ -89,9 +89,13 @@ export type ChannelMessage =
  * module's own tests use distinct names purely so one test's lease cannot
  * queue behind another's, not to model one tab wanting two leases at once.
  *
- * Never reset back to `false`: `holdLease` never releases (see its own
- * doc), so there is no moment in this tab's lifetime after a grant at which
- * it is honest to say this tab is no longer leading.
+ * Reset to `false` in exactly one place, and only there: when the callback
+ * handed the lease throws. `holdLease` otherwise never releases (see its own
+ * doc), so there is no moment after a *successful* grant at which it is
+ * honest to say this tab is no longer leading -- but a holder that could not
+ * start is not leading, and saying otherwise let a second tab take the lease
+ * while this one still claimed it. This paragraph said "never reset" until
+ * that fix landed beneath it.
  */
 let leading = false;
 

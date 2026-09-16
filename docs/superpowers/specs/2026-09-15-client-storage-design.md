@@ -144,8 +144,16 @@ Indexes:
 |---|---|---|
 | `by_media_item` | `value.mediaItemId` | every row of every table belonging to one media item |
 | `by_rss_item` | `value.rssItemId` | a release's downloads |
-| `by_table_updated` | `['table', 'value.updatedAt']` | a table in browse order |
+| `by_table_updated` | `['table', 'value.updatedAt', 'id']` | a table in browse order |
 | `by_table` | `table` | a whole table, tombstones included |
+
+`by_table_updated` carries `id` as its third component, and that is a correctness
+requirement rather than a convenience: `updatedAt` is not unique, so a two-part key
+cannot resume a walk that stopped inside a tie. Measured on the two-part version — five
+rows paged backwards two at a time, three sharing one `updatedAt` — the walk served ids
+[1, 4, 5] and **never served 2 or 3 from any page**. The server's read API keysets on
+`(updated_at, id)` for exactly this reason, and the sync design rejected a single
+mutable column outright; this design specified one anyway and review caught it.
 
 `by_table_updated` covers **five of the twelve tables**, and that is measured rather
 than intended: `media_item`, `rss_item`, `torrent_download`, `nzb_download` and

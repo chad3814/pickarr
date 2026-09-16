@@ -20,9 +20,10 @@
  * reads of the same row disagree.
  *
  * `listByTable`'s index, `by_table_updated`, is keyed `['table',
- * 'value.updatedAt']` -- also a `value.*` path, so the same exclusion
- * applies -- but its own tests measure that rather than lean on the claim,
- * per this task's brief.
+ * 'value.updatedAt', 'id']` -- its middle component is a `value.*` path, so
+ * the same exclusion applies -- but its own tests measure that rather than
+ * lean on the claim. The third component is not decoration; see
+ * {@link ListByTableOptions.from} for the rows a two-part key lost.
  */
 import { request } from './idb.ts';
 import type { StoredRow } from './db.ts';
