@@ -129,7 +129,22 @@ export function holdLease(name: string, onGranted: (release: Promise<void>) => v
       const release = new Promise<void>(() => {
         // Never settles -- see this function's doc comment.
       });
-      onGranted(release);
+      try {
+        onGranted(release);
+      } catch (err) {
+        // A caller that throws on being handed the lease cannot sync, so
+        // holding the lock would keep every other tab from trying. Clearing
+        // the flag and returning releases it, which is the only outcome that
+        // leaves the module honest: without this, `leading` stayed `true`
+        // forever while the callback had failed, so `isLeader()` contradicted
+        // its own doc comment and -- in a browser, which releases the lock on
+        // a synchronous throw -- a second tab could take the lease while this
+        // one still claimed to hold it. Two tabs fetching is the one thing the
+        // lease exists to prevent.
+        leading = false;
+        console.error('pickarr: the lease holder threw on being granted', name, err);
+        return;
+      }
       return release;
     })
     .catch((err: unknown) => {

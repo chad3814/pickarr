@@ -192,3 +192,38 @@ test('serializeChanged carries table names and ids only -- no row value ever nam
   // by accident, because `Changed` itself never carried one.
   assert.deepEqual(JSON.parse(JSON.stringify(serialized)), { touched: [['person', [1]]], inserted: [] });
 });
+
+test('a holder that throws on being granted stops claiming leadership', async () => {
+  // Without this, `leading` stayed true forever while the callback had failed
+  // -- so `isLeader()` contradicted its own doc comment, and in a browser
+  // (which releases the lock on a synchronous throw) a second tab could take
+  // the lease while this one still claimed it. Two tabs fetching is the one
+  // thing the lease exists to prevent.
+  const name = `throw-${String(process.hrtime.bigint())}`;
+  holdLease(name, () => { throw new Error('cannot sync'); });
+  // Long enough for the lock to be granted and the callback to run.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(isLeader(), false, 'a failed holder does not report itself leader');
+
+  // And the lock is free for someone else.
+  const second = await navigator.locks.request(name, { ifAvailable: true }, (lock) => lock !== null);
+  assert.equal(second, true, 'the lease was released rather than held by a holder that failed');
+});
+
+test('serializeChanged round-trips an empty map and an empty id list', async () => {
+  // Neither edge was in the shipped suite, and both are reachable: a batch of
+  // only skipped creates touches nothing, and `bucket` creates an array before
+  // anything is pushed into it.
+  const empty = { touched: new Map(), inserted: new Map() };
+  const backEmpty = deserializeChanged(serializeChanged(empty));
+  assert.equal(backEmpty.touched.size, 0);
+  assert.equal(backEmpty.inserted.size, 0);
+
+  const withEmptyList = {
+    touched: new Map([['person', []]]),
+    inserted: new Map<string, readonly number[]>(),
+  };
+  const back = deserializeChanged(serializeChanged(withEmptyList));
+  assert.deepEqual(back.touched.get('person'), []);
+  assert.equal(back.inserted.size, 0);
+});
