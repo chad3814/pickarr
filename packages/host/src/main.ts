@@ -376,8 +376,13 @@ export interface HostSettings {
  * **One function, every variable.** Do not inline `?? default` or
  * `=== undefined` for a new variable: a rule that differs by variable is the
  * shape that produced this twice.
+ *
+ * Exported so `healthcheck.ts` can apply the same rule to
+ * `PICKARR_READ_API_PORT` when it resolves the port outside `resolveSettings`
+ * entirely -- reusing this function is what keeps that a second call site
+ * for one rule rather than a second rule.
  */
-function configuredEnvValue(raw: string | undefined): string | undefined {
+export function configuredEnvValue(raw: string | undefined): string | undefined {
   return raw === undefined || raw === '' ? undefined : raw;
 }
 
