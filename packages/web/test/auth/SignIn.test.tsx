@@ -41,9 +41,19 @@ function stubFetchCalls(handler: (url: string, init?: RequestInit) => Promise<Re
  * debug statement, so the fix is the surface, not the one method that got
  * caught.
  *
- * `assert`, `table`, `count` and the `group*` family are left out on purpose:
- * their signatures are not "arbitrary values", and a leak would have to be
- * written deliberately to use one.
+ * The four left out -- `assert`, `table`, `count` and the `group*` family --
+ * are caught anyway, but not by this list and not for any reason of mine. A
+ * re-review measured it: leaking through each of them still fails this test,
+ * because Node's `Console` delegates them internally to `log` and `warn`,
+ * which are on the list. My first version of this comment claimed they were
+ * excluded because "their signatures are not arbitrary values", which was
+ * reasoning invented after the fact and is simply wrong.
+ *
+ * Worth knowing rather than glossing, because the delegation is a property of
+ * the runtime these tests use and not a guarantee: a browser's
+ * `console.table` does not funnel through `console.log`. The net holds where
+ * it is deployed -- `node --test` -- and anything added to the seven above
+ * would hold everywhere.
  */
 const CAPTURED_CONSOLE = ['debug', 'error', 'info', 'log', 'trace', 'warn', 'dir'] as const;
 
