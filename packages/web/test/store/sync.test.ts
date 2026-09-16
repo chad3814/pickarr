@@ -177,10 +177,11 @@ function start(
   db: IDBDatabase,
   fetch: SyncFetch,
   locks: Lease,
-  overrides: Partial<Pick<SyncDeps, 'now'>> = {},
+  overrides: Partial<Pick<SyncDeps, 'now' | 'fetchDeadlineMs'>> = {},
 ): { sched: ManualScheduler; handle: SyncHandle } {
   const sched = manualScheduler();
   const handle = startSync({
+    ...(overrides.fetchDeadlineMs === undefined ? {} : { fetchDeadlineMs: overrides.fetchDeadlineMs }),
     db,
     fetch,
     schedule: sched.schedule,
@@ -823,5 +824,88 @@ test('a bootstrap that has not answered yet blocks both loops and announces noth
 
   assert.deepEqual(await readCursors(db), { since: 0, before: 9 }, 'the pivot lands once the bootstrap answers');
   assert.ok(announced.includes('emitReset'), 'and only then is it announced');
+  db.close();
+});
+
+test('refusals are retried, but stop after the limit rather than forever', async () => {
+  // The whole-branch review's finding 2. Retrying a refusal is right -- the
+  // request is identical, but the *server's* state can change, and the
+  // sibling test above says so in its own message. What was wrong is that it
+  // never stopped: a genuinely bad endpoint was polled every thirty seconds
+  // for the life of the tab, reported only to the console, looking healthy
+  // from outside.
+  const db = await freshDb();
+  await writeCursors(db, { since: 10, before: null });
+  await writeGeneration(db, 'g');
+
+  // A `create` on the tail: the server may not send one there, ever.
+  const fetch = stubFetch(routes({
+    '/api/sync?since=10': {
+      ops: [{ op: 'create', table: 'person', id: 1, value: { name: 'x' } }],
+      cursor: 11,
+      generation: 'g',
+    },
+  }));
+  const { sched } = start(db, fetch.fetch, grantedLease());
+  await settle();
+
+  // Four refusals: still asking, because the row behind it might be fixed.
+  await sched.drive('tail');
+  await settle();
+  assert.ok(sched.pendingFor('tail'), 'retried once');
+  await sched.drive('tail');
+  await settle();
+  await sched.drive('tail');
+  await settle();
+  await sched.drive('tail');
+  await settle();
+  assert.ok(sched.pendingFor('tail'), 'still asking at four');
+
+  // The fifth stops it.
+  await sched.drive('tail');
+  await settle();
+  assert.equal(sched.pendingFor('tail'), undefined, 'and the fifth stops asking rather than polling forever');
+  assert.deepEqual(await readCursors(db), { since: 10, before: null }, 'no refused page ever moved a cursor');
+  db.close();
+});
+
+test('a transient failure still backs off and retries', async () => {
+  // The other side of the split: an HTTP failure is exactly what a retry is
+  // for, and must keep the ladder it had before.
+  const db = await freshDb();
+  await writeCursors(db, { since: 10, before: null });
+  await writeGeneration(db, 'g');
+  const fetch = stubFetch((): SyncResponse => ({ ok: false, status: 503, json: () => Promise.resolve({}) }));
+  const { sched } = start(db, fetch.fetch, grantedLease());
+  await settle();
+
+  await sched.drive('tail');
+  await settle();
+
+  assert.ok(sched.pendingFor('tail'), 'a 503 is retried');
+});
+
+test('a request that outlives the deadline is aborted rather than stalling both loops', async () => {
+  // Ruling 21's gap, closed. The two bootstrap fetches run inside the mutex,
+  // so before this an unanswered request stalled *both* loops indefinitely --
+  // with the replica already wiped and nothing announced. The deadline is
+  // injected so this does not take a real minute.
+  const db = await freshDb();
+  let sawSignal: AbortSignal | undefined;
+  const fetch: SyncFetch = (_url: string, signal: AbortSignal) => {
+    sawSignal = signal;
+    // Never answers on its own: only the signal can end it.
+    return new Promise<SyncResponse>((_resolve, reject) => {
+      signal.addEventListener('abort', () => { reject(signal.reason); }, { once: true });
+    });
+  };
+  const { sched } = start(db, fetch, grantedLease(), { fetchDeadlineMs: 20 });
+  await settle();
+  await delay(60);
+
+  assert.ok(sawSignal !== undefined, 'the fetch is handed a signal');
+  assert.ok(sawSignal.aborted, 'which aborts once the deadline passes');
+  // The loop recovered into its backoff rather than sitting in the mutex.
+  assert.ok(sched.pendingFor('tail'), 'so the loop is retrying rather than stalled');
   db.close();
 });
