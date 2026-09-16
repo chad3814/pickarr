@@ -1,0 +1,120 @@
+/**
+ * `createStore`: the public surface, and the only file in this package a
+ * consumer outside `store/` should import from.
+ *
+ * A factory, not a module-level singleton. Every other module in this
+ * directory was built to be driven by a test -- `sync.ts`'s injected
+ * `fetch`/`schedule`/`now`/`locks`, `db.ts`'s `openStore(name)` taking the
+ * name rather than assuming one -- and a singleton would throw that away at
+ * the last step: a second `createStore` call in the same process (this
+ * suite's own end-to-end test needs exactly that, since `node --test` runs a
+ * whole file in one process) would either collide with the first tab's
+ * database and lease, or silently reuse the first instance's state.
+ *
+ * This module wires the pieces together and adds nothing of its own: it
+ * opens the replica, starts the sync loops over it, and closes over `db` so
+ * every read and subscription a caller gets back needs no `db` argument of
+ * its own. It invents no new adapter -- `fetch`, `schedule`, `now` and
+ * `locks` are the same seams `sync.ts` already defined, handed through
+ * unchanged, because the browser-facing choice of a real `fetch`, a real
+ * `requestIdleCallback`-based scheduler and `webLocksLease` belongs to
+ * whichever slice first has a route to run them from (design spec §1.2,
+ * this task's brief).
+ */
+import { openStore } from './db.ts';
+import type { StoredRow } from './db.ts';
+import { getRow, getRows, byMediaItem, byRssItem, listByTable, type ListByTableOptions } from './rows.ts';
+import { subscribe, subscribeInserts, subscribeReset } from './notify.ts';
+import { gatherMediaItem, type GatheredItem } from './gather.ts';
+import { startSync, type Lease, type Schedule, type SyncFetch } from './sync.ts';
+
+/**
+ * What `createStore` needs, and nothing it does not: the replica's name, and
+ * the four seams `sync.ts` already requires of its caller. Nothing here
+ * defaults, for the same reason `sync.ts` itself takes all four rather than
+ * reaching for a global -- a caller that wants `globalThis.fetch`,
+ * `webLocksLease()` or a `requestIdleCallback` scheduler supplies them
+ * explicitly, and a test supplies its own stubs the same way `sync.test.ts`
+ * already does.
+ */
+export interface CreateStoreDeps {
+  /** The IndexedDB database name -- `openStore`'s own parameter, passed through so two stores in one process (this task's own test) do not share a replica. */
+  dbName: string;
+  fetch: SyncFetch;
+  schedule: Schedule;
+  /** Milliseconds, monotonic-ish. See `sync.ts`'s `SyncDeps.now`. */
+  now: () => number;
+  locks: Lease;
+}
+
+/**
+ * The five reads (`store/rows.ts`), the three subscriptions
+ * (`store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
+ * `stop()` -- everything a consumer of the replica needs, with `db` already
+ * bound so none of it takes one.
+ *
+ * The three subscriptions are `store/notify.ts`'s own module-level
+ * registries, keyed by table and id rather than by store instance --
+ * unchanged here, and deliberately: nothing in this slice's design keys a
+ * subscription off which replica raised it (there is exactly one replica per
+ * tab in production), and rebinding them per instance would be new behaviour
+ * this task was not asked to add.
+ */
+export interface Store {
+  getRow(table: string, id: number): Promise<unknown | undefined>;
+  getRows(table: string, ids: readonly number[]): Promise<Map<number, unknown>>;
+  byMediaItem(mediaItemId: number): Promise<readonly StoredRow[]>;
+  byRssItem(rssItemId: number): Promise<readonly StoredRow[]>;
+  listByTable(table: string, opts: ListByTableOptions): Promise<readonly StoredRow[]>;
+  subscribe(table: string, id: number, cb: () => void): () => void;
+  subscribeInserts(table: string, cb: (ids: readonly number[]) => void): () => void;
+  subscribeReset(cb: () => void): () => void;
+  gatherMediaItem(mediaItemId: number): Promise<GatheredItem | undefined>;
+  /**
+   * Cancels both sync loops, stops relaying other tabs' messages, and closes
+   * this store's IndexedDB connection. Safe to call more than once --
+   * `SyncHandle.stop()` already is, and `IDBDatabase.close()` is idempotent
+   * by the standard.
+   *
+   * Closing `db` here, and not before, is what makes this store's `stop()`
+   * actually stop things end to end: `sync.ts`'s own `SyncHandle.stop()`
+   * only cancels the two scheduled tasks and the `BroadcastChannel` relay,
+   * because it never opened the database and has no business closing a
+   * handle a caller might still be reading from mid-shutdown. This module
+   * did open it, so closing it here is what leaves nothing of this store's
+   * for the process to hang on.
+   */
+  stop(): void;
+}
+
+/**
+ * Opens the replica named `deps.dbName` and starts syncing it. Returns once
+ * the database is open -- not once anything has been fetched, since fetching
+ * waits on the lease exactly as `startSync` documents.
+ */
+export async function createStore(deps: CreateStoreDeps): Promise<Store> {
+  const db = await openStore(deps.dbName);
+  const handle = startSync({
+    db,
+    fetch: deps.fetch,
+    schedule: deps.schedule,
+    now: deps.now,
+    locks: deps.locks,
+  });
+
+  return {
+    getRow: (table, id) => getRow(db, table, id),
+    getRows: (table, ids) => getRows(db, table, ids),
+    byMediaItem: (mediaItemId) => byMediaItem(db, mediaItemId),
+    byRssItem: (rssItemId) => byRssItem(db, rssItemId),
+    listByTable: (table, opts) => listByTable(db, table, opts),
+    subscribe,
+    subscribeInserts,
+    subscribeReset,
+    gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
+    stop(): void {
+      handle.stop();
+      db.close();
+    },
+  };
+}
