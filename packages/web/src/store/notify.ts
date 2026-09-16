@@ -1,5 +1,5 @@
 /**
- * The subscription registry, and the only consumer of `applyBatch`'s
+ * The subscription registry, and the first consumer of `applyBatch`'s
  * `Changed` return value (design spec §8).
  *
  * Three registries, because the three subscription kinds key on different
@@ -7,9 +7,16 @@
  * table (a row that did not exist when the caller subscribed has no `id` to
  * key on yet), `subscribeReset` on nothing at all.
  *
- * `emit` and `emitReset` are the write side, called by `store/apply.ts`
- * (task 2) and the reset path (task 6) respectively -- never by a test
- * pretending to be either, except to prove this module's own contract.
+ * `emit` and `emitReset` are the write side, and each has two callers rather
+ * than one. `store/apply.ts` emits after its own commit, for the tab that did
+ * the writing; `store/sync.ts` emits again on a *follower* tab when a
+ * broadcast arrives, which is the only thing that ever wakes a non-leader's
+ * subscribers. `emitReset` fires from `sync.ts` both when this tab detects a
+ * generation change and when it hears one -- again, the second is the only
+ * path a follower has.
+ *
+ * Nothing else may call either, and a test may only call them to prove this
+ * module's own contract.
  *
  * **Fired after the transaction commits, never inside it** (spec §4's last
  * paragraph). `applyBatch` awaits `done(tx)` before calling `emit`; a

@@ -167,11 +167,22 @@ function sharedChannel(): BroadcastChannel {
 }
 
 /**
- * Sends `msg` to every other tab listening on {@link CHANNEL_NAME} -- never
- * this one. A `BroadcastChannel` does not deliver a channel's own posted
- * messages back to itself (measured), which is why proving delivery needs a
- * second channel standing in for "the other tab", in this module's own
- * tests and in the browser alike.
+ * Sends `msg` to every channel listening on {@link CHANNEL_NAME} **including
+ * the ones in this tab**, and that last part is the trap.
+ *
+ * A `BroadcastChannel` does not deliver a channel object's own posts back to
+ * *that object* (measured), which is why proving delivery needs a second
+ * channel standing in for "the other tab". But this function opens a channel
+ * of its own per call, so {@link onMessage}'s shared channel -- in this very
+ * tab -- is a different object and does receive every post. Measured both
+ * ways: a channel posting to itself receives nothing, and a second channel in
+ * the same process receives everything.
+ *
+ * An earlier version of this comment said "never this one", and a consumer
+ * that believed it woke every subscriber twice and announced every reset
+ * twice. A tab that both broadcasts and listens has to drop its own messages
+ * itself; `store/sync.ts` does that by ignoring anything that arrives while
+ * it holds the lease.
  *
  * Opens a fresh channel, posts, and closes it in the same call rather than
  * reusing {@link onMessage}'s shared one: delivery to other channels does
