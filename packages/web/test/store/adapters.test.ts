@@ -97,12 +97,20 @@ function spyOnRealTimer(): {
   const clearedHandles: (NodeJS.Timeout | string | number | undefined)[] = [];
   const spySetTimeout = (handler: TimerHandler, ms?: number, ...args: unknown[]) => {
     setTimeoutCalls.push([handler, ms]);
-    return originalSetTimeout(handler as never, ms, ...args);
+    return originalSetTimeout(handler, ms, ...args);
   };
+  // The one cast in this file, and it is not a type error being silenced: in
+  // this tsconfig `globalThis.setTimeout` is Node's, returning `Timeout`,
+  // while the call expression above resolves to the DOM overload, returning
+  // `number`. So the two ends of the assignment disagree about the platform.
+  // Two honest routes were measured and are worse: dropping the cast fails
+  // TS2741 for a missing `__promisify__`, and carrying that property forward
+  // with `Object.assign` then fails TS2322 on `number` vs `Timeout`. The spy
+  // itself is correct; the environment declares one global twice.
   globalThis.setTimeout = spySetTimeout as unknown as typeof setTimeout;
   globalThis.clearTimeout = (handle?: NodeJS.Timeout | string | number) => {
     clearedHandles.push(handle);
-    originalClearTimeout(handle as never);
+    originalClearTimeout(handle);
   };
   cleanups.push(() => {
     globalThis.setTimeout = originalSetTimeout;
