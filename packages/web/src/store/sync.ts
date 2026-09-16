@@ -34,7 +34,7 @@
  *   other's current value rather than a stale one.
  */
 import { request, done } from './idb.ts';
-import { applyBatch } from './apply.ts';
+import { DuplicateOpError, MalformedOpError, applyBatch } from './apply.ts';
 import {
   readCursors,
   writeCursors,
@@ -74,6 +74,29 @@ const BACKFILL_IDLE_MS = 0;
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_CEILING_MS = 30_000;
 
+/**
+ * How long one request may take before its signal aborts.
+ *
+ * A minute, which is generous for an endpoint on the same host and still
+ * finite -- and finite is the whole point. Two of the four fetch sites are
+ * bootstraps that run inside the mutex (see `exclusive`), so before this an
+ * unanswered request stalled **both** loops indefinitely, with the replica
+ * already wiped by `reset` and nothing announced. Overridable per store
+ * through {@link SyncDeps.fetchDeadlineMs}, because a test proving the
+ * deadline fires should not take a real minute to do it.
+ */
+export const FETCH_DEADLINE_MS = 60_000;
+
+/**
+ * How many consecutive refusals a loop tolerates before it stops asking.
+ *
+ * Five, which with the ladder above is about thirty seconds of retrying --
+ * long enough for a server-side row to be corrected, short enough that a
+ * genuinely broken endpoint is not polled for the life of the tab. The count
+ * is the same one the backoff uses, so a single success clears it.
+ */
+const REFUSAL_LIMIT = 5;
+
 /** Which of the two cursors a scheduled task belongs to. The scheduler needs it to choose a priority. */
 export type SyncLoop = 'tail' | 'backfill';
 
@@ -93,7 +116,17 @@ export interface SyncResponse {
   json(): Promise<unknown>;
 }
 
-export type SyncFetch = (url: string) => Promise<SyncResponse>;
+/**
+ * Fetches one sync url.
+ *
+ * `signal` aborts when the request outlives {@link SyncDeps.fetchDeadlineMs}.
+ * A caller that ignores it still works -- every test stub does -- but then
+ * nothing bounds the request, and an unbounded one is not merely slow here:
+ * the two bootstrap fetches run inside the mutex, so a request that never
+ * answers stalls **both** loops, with the replica already wiped. See
+ * `exclusive`.
+ */
+export type SyncFetch = (url: string, signal: AbortSignal) => Promise<SyncResponse>;
 
 /** Cancels a scheduled task that has not run yet. Calling it after the task ran does nothing. */
 export type Cancel = () => void;
@@ -135,6 +168,12 @@ export interface SyncDeps {
   schedule: Schedule;
   /** Milliseconds, monotonic-ish. Used only to hold the tail to a fixed *rate* rather than a fixed delay. */
   now: () => number;
+  /**
+   * How long a single request may take before its signal aborts. Defaults to
+   * {@link FETCH_DEADLINE_MS}; a test overrides it so it need not wait a real
+   * minute to prove the deadline fires.
+   */
+  fetchDeadlineMs?: number;
   locks: Lease;
 }
 
@@ -306,6 +345,8 @@ export function startSync(deps: SyncDeps): SyncHandle {
   const pending = new Map<SyncLoop, Cancel>();
   const failures = new Map<SyncLoop, number>();
 
+  const deadlineMs = deps.fetchDeadlineMs ?? FETCH_DEADLINE_MS;
+
   function mayFetch(): boolean {
     return leading && !stopped;
   }
@@ -398,10 +439,70 @@ export function startSync(deps: SyncDeps): SyncHandle {
    * failing layer's own words about its own failure, exactly as
    * `store/notify.ts` reports a subscriber's.
    */
+  /**
+   * Whether `err` means the server sent a response this client refused,
+   * rather than one that failed to arrive.
+   *
+   * All four say the body was *wrong*: an op kind the cursor may not carry,
+   * two ops for one key, an op with no usable value, a body that does not
+   * parse.
+   *
+   * Deliberately not including {@link SyncHttpError}. A 503 is exactly what a
+   * retry is for, and this cannot tell it from a 400 without deciding which
+   * statuses are permanent -- a judgement that belongs with whoever has a
+   * route returning one.
+   */
+  function isRefusal(err: unknown): boolean {
+    return err instanceof WrongOpKindError
+      || err instanceof MalformedResponseError
+      || err instanceof DuplicateOpError
+      || err instanceof MalformedOpError;
+  }
+
+  /**
+   * Reports, and schedules a retry unless retrying has stopped being worth
+   * it. Never handed a row -- only the error, which is the failing layer's
+   * own words about its own failure, exactly as `store/notify.ts` reports a
+   * subscriber's.
+   *
+   * **A refusal is retried, but a bounded number of times.** The request is
+   * byte-identical, so the retry can only succeed if the *server's* state
+   * changed -- and it can: a page is refused because one row in it is
+   * malformed, and that row may be corrected or deleted, after which the same
+   * request answers cleanly. That is why refusing is not fatal, and the test
+   * covering it says so in its own message.
+   *
+   * What was wrong before was that it never stopped. A genuinely bad endpoint
+   * was polled every thirty seconds for the life of the tab, reported only to
+   * the console, with the loop appearing healthy from outside. After
+   * {@link REFUSAL_LIMIT} consecutive refusals this stops scheduling and says
+   * so once, plainly. A reset restarts both loops -- and a server whose
+   * database changed is a plausible server to have been redeployed -- so
+   * recovery does not require a reload, only a reason.
+   *
+   * A transient failure keeps the unbounded ladder it had: those are the
+   * failures a retry is actually for, and a client that stopped syncing
+   * because the network blinked would be worse than one that keeps asking.
+   */
   function reportFailure(loop: SyncLoop, err: unknown): void {
     const count = (failures.get(loop) ?? 0) + 1;
     failures.set(loop, count);
-    console.error(`pickarr: the ${loop} sync loop failed (attempt ${String(count)})`, err);
+    const refused = isRefusal(err);
+    if (refused && count >= REFUSAL_LIMIT) {
+      console.error(
+        `pickarr: the ${loop} sync loop has refused the server's response `
+        + `${String(count)} times and has stopped asking. The request is identical each `
+        + 'time, so it will not recover on its own -- it needs the server fixed, then a '
+        + 'reset or a reload.',
+        err,
+      );
+      return;
+    }
+    console.error(
+      `pickarr: the ${loop} sync loop ${refused ? 'refused the response' : 'failed'} `
+      + `(attempt ${String(count)})`,
+      err,
+    );
     schedule(loop, backoffFor(count));
   }
 
@@ -424,7 +525,7 @@ export function startSync(deps: SyncDeps): SyncHandle {
   }
 
   async function fetchJson(url: string): Promise<unknown> {
-    const res = await deps.fetch(url);
+    const res = await deps.fetch(url, AbortSignal.timeout(deadlineMs));
     // Refused before the body is touched. A failed response's body is the
     // most likely place for a row to be echoed back, and nothing here needs
     // it -- the status is the whole of what a retry decision turns on.
