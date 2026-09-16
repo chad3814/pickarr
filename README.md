@@ -127,8 +127,11 @@ running both would have one variable meaning two things.
 
 An empty value is not a value. `PICKARR_READ_API_HOST=''` would bind every interface if
 it reached the listener, and `PICKARR_CONFIG=''` would mean "read the file `''`", so
-every one of these treats empty as unset and falls back — except `PICKARR_READ_API_PORT`,
-which throws, because a port with no digits in it is a mistake rather than a default.
+every one of these treats empty as unset and falls back to its default.
+
+A value that is present but is not a port is a different matter, and only
+`PICKARR_READ_API_PORT` can be one: it refuses `0`, `70000`, `abc`, and even `' 8787'`
+with a leading space, rather than starting on a port the operator did not ask for.
 
 ## Secrets
 
