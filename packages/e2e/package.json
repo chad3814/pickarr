@@ -7,6 +7,9 @@
     "e2e": "playwright test",
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
+  "dependencies": {
+    "@pickarr/host": "*"
+  },
   "devDependencies": {
     "@playwright/test": "^1.49.0"
   }
