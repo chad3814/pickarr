@@ -3,10 +3,19 @@
  * in a declared layer.
  *
  * The layer order is what lets component rules stop being written defensively.
- * Before layers, `.card-head-main .fields { margin-bottom: 0 }` had to out-specify
- * `.fields { margin: 0.5rem 0 }` with a second class, and every such rule was a bet
- * that no future selector outranked it. A rule in `components` now beats a rule in
- * `base` whatever its specificity, so the bet is off the table.
+ * Without layers, a component rule that needs to override a base one has to
+ * out-specify it, and every such rule is a bet that no future selector
+ * outranks it. A rule in `components` beats a rule in `base` whatever its
+ * specificity, so the bet is off the table.
+ *
+ * **`components` is declared and currently empty.** 1.x's six component
+ * stylesheets were deleted in the 2.0 rewrite: no 2.0 component sets a class,
+ * so not one of their selectors could match, and they were shipping about
+ * 10KB to every client. They are worth reading before writing 2.0's card or
+ * dialog -- they were tuned against `tokens.css` -- and `git show
+ * bbce069:packages/web/src/styles/card.css` is how, for any of `nav`, `card`,
+ * `browse`, `rows`, `forms` and `dialog`. The layer stays declared because
+ * the order is the contract, not the membership.
  */
 @layer tokens, base, components;
 
@@ -16,9 +25,3 @@
 
 @import './tokens.css' layer(tokens);
 @import './base.css' layer(base);
-@import './nav.css' layer(components);
-@import './card.css' layer(components);
-@import './browse.css' layer(components);
-@import './rows.css' layer(components);
-@import './forms.css' layer(components);
-@import './dialog.css' layer(components);
