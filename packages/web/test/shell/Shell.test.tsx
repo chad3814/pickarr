@@ -4,6 +4,7 @@ import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { Shell } from '../../src/shell/Shell.tsx';
 import type { CreateStoreDeps } from '../../src/store/index.ts';
+import type { SyncFetch } from '../../src/store/sync.ts';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
 import {
   settle,
@@ -98,6 +99,101 @@ test('sign-out stops the store', async () => {
 
   assert.equal(unauthenticated, 1, 'App is told to show SignIn again');
   assert.equal(sched.hasPending('tail'), false, 'store.stop() cancelled the tail task that was pending');
+});
+
+test('an offline sign-out does not escape as an unhandled promise rejection', async () => {
+  // The identical defect shape task 5's review found in
+  // `SignIn.handleSubmit` (`4283bb6` fixed it there with `REQUEST_FAILED`):
+  // `session.ts`'s `signOut` is a bare `fetch`, which rejects on any
+  // transport failure -- offline, DNS, a reset connection -- and `void`
+  // does not contain a rejection. Proven here the way `session.test.ts`'s
+  // own stubs model a rejection: the sign-out fetch throws, the way an
+  // offline tab's real one would.
+  globalThis.fetch = fetchStub(async () => {
+    throw new Error('offline');
+  });
+  const { deps, sched } = testDeps();
+
+  const escaped: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    escaped.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  const originalConsoleError = console.error;
+  console.error = (): void => {};
+
+  try {
+    let unauthenticated = 0;
+    render(<Shell deps={deps} onUnauthenticated={() => { unauthenticated += 1; }} />);
+
+    await waitFor(() => {
+      assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await settle();
+
+    assert.deepEqual(escaped, [], 'the failed sign-out network call was caught, not left to escape as an unhandled rejection');
+    assert.equal(unauthenticated, 1, 'App is still told to show SignIn again even though the network call failed');
+  } finally {
+    console.error = originalConsoleError;
+    process.off('unhandledRejection', onUnhandledRejection);
+  }
+});
+
+test('a 401 on the tail poll -- the ordinary way a client discovers a dead session (design spec §4) -- calls onUnauthenticated', async () => {
+  // `withUnauthenticatedCheck` (`Shell.tsx`) is the mechanism spec §4 is
+  // built on, and it had no unit test at all before this one: removing its
+  // one `if` left every other test in `test:web` green, and only the e2e
+  // suite caught the gap -- by failing all five specs at once, since with no
+  // demote the app never reaches `SignIn` and nothing can claim the install.
+  // That is the least diagnostic signal available ("everything is red"); this
+  // test exists so the same defect fails one named test instead.
+  const bootstrapAnswer = { since: 0, before: 0, generation: 'g' };
+  const fetch: SyncFetch = async (url) => {
+    if (url === '/api/sync/bootstrap') {
+      return { ok: true, status: 200, json: () => Promise.resolve(bootstrapAnswer) };
+    }
+    // Every other sync url -- the tail's `/api/sync?since=...` included --
+    // answers the guard's fixed 401, never a body this test has to read.
+    return { ok: false, status: 401, json: () => Promise.resolve({}) };
+  };
+  const sched = manualScheduler();
+
+  // `sync.ts`'s own loop still sees a 401 as a failed request once
+  // `withUnauthenticatedCheck` has told `Shell` about it, and logs it on the
+  // same path any other failed request takes -- expected, and captured
+  // rather than left to print, on `sync.test.ts`'s own `captureErrors`
+  // pattern, so this test's output stays pristine.
+  const originalConsoleError = console.error;
+  console.error = (): void => {};
+
+  let unauthenticated = 0;
+  try {
+    render(
+      <Shell
+        deps={{
+          dbName: freshDbName('shell-401'),
+          fetch,
+          schedule: sched.schedule,
+          now: (): number => 1000,
+          locks: grantedLease(),
+          fetchDeadlineMs: TEST_FETCH_DEADLINE_MS,
+        }}
+        onUnauthenticated={() => { unauthenticated += 1; }}
+      />,
+    );
+
+    await waitFor(() => {
+      assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+    });
+    await sched.drive('tail');
+
+    assert.equal(unauthenticated, 1, 'a 401 read anywhere in the sync loops -- not just sign-in or sign-out -- is enough to demote');
+  } finally {
+    console.error = originalConsoleError;
+  }
 });
 
 test('a store that fails to open is reported, not left as an unhandled rejection', async () => {

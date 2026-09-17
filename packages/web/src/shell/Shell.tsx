@@ -6,13 +6,14 @@
  * store would ship `store/` without ever exercising it in a browser, which is
  * the largest blind spot the storage slice's whole-branch review named.
  *
- * **Sign-out ends the session and stops the store**, in that order, and both
- * unconditionally (design spec §4). A store left running against a dead
- * session retries a 401 on the backoff ladder forever -- the previous slice
- * bounded how long, not whether. Stopping does not wait on the network call:
- * the local half of sign-out (no more polling) has no reason to depend on the
- * remote half succeeding, and a caller who is offline still gets a store that
- * stops.
+ * **Sign-out stops the store and ends the session**, in that order, and both
+ * unconditionally (design spec §4). The store stops first so no in-flight
+ * sync request can race the session teardown; a store left running against a
+ * dead session retries a 401 on the backoff ladder forever -- the previous
+ * slice bounded how long, not whether. Stopping does not wait on the network
+ * call: the local half of sign-out (no more polling) has no reason to depend
+ * on the remote half succeeding, and a caller who is offline still gets a
+ * store that stops.
  *
  * **A 401 on any read means the same thing sign-out does.** `session.ts`'s
  * `isUnauthenticated` doc calls this "the ordinary way" a client discovers it
@@ -115,7 +116,19 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
 
   function handleSignOut(): void {
     store?.stop();
-    void signOut();
+    signOut().catch(() => {
+      // `session.ts`'s `signOut` is a bare `fetch`, which rejects for
+      // transport reasons -- offline, DNS, a reset connection -- and `void`
+      // does not contain a rejection; task 5's review found the identical
+      // shape in `SignIn.handleSubmit` and `4283bb6` fixed it there with
+      // `REQUEST_FAILED`. The rejection is deliberately not inspected here
+      // either: its own message can name a host or a port (Global
+      // Constraint). Unlike `SignIn`, there is no error banner to show a
+      // human -- the local half of sign-out (stopping the store, already
+      // done above) is what this tab actually needed, and the remote call is
+      // best-effort from here on.
+      console.error('pickarr: could not reach the sign-out endpoint');
+    });
     onUnauthenticated();
   }
 

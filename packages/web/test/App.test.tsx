@@ -69,7 +69,14 @@ test('App renders Shell first, with no sign-in step in between', async () => {
   });
 });
 
-test('App falls back to SignIn once Shell reports the session is unauthenticated', async () => {
+test('App falls back to SignIn once Shell calls onUnauthenticated, driven here via Sign out', async () => {
+  // Named for what this drives, not for the mechanism spec §4 describes: a
+  // click on "Sign out" reaches `onUnauthenticated` through `handleSignOut`,
+  // never through the 401 demote (`withUnauthenticatedCheck`). This test's
+  // old name claimed the latter and exercised only the former -- the whole-
+  // branch review found that gap, and `Shell.test.tsx`'s own "a 401 on the
+  // tail poll ... calls onUnauthenticated" is the test that actually covers
+  // the 401 path this name used to claim.
   globalThis.fetch = fetchStub(async () => jsonResponse({}, 200));
   const { deps, sched } = testShellDeps();
   render(<App shellDeps={deps} />);
