@@ -13,10 +13,12 @@ Two implementations live here side by side.
   lookup-service plugin base), `packages/plugin-tv`, `packages/plugin-movie`,
   and `packages/plugin-xxx`. This is where new work goes, and the specs are
   `docs/superpowers/specs/2026-09-*`.
-- **`packages/web`** — currently 1.x's SPA, being rewritten against 2.0's sync API. The
-  2.0 host does not serve it: the host answers JSON and artwork and nothing else.
-- **1.x** — `packages/core` and `packages/plugin-scenes`. Frozen, and still the only
-  thing `Dockerfile` builds. 2.0 is greenfield: it starts on an empty database and
+- **`packages/web`** — 2.0's browser client, built against 2.0's sync API. The 2.0 host
+  serves it directly, alongside the JSON and artwork routes: a static route answers the
+  built bundle, and falls back to `index.html` on any path it does not recognise, so a
+  client-side route survives a refresh.
+- **1.x** — `packages/core` and `packages/plugin-scenes`. Frozen, and no longer what
+  `Dockerfile` builds — 2.0 is. 2.0 is greenfield: it starts on an empty database and
   rebuilds from feeds, so nothing migrates and the two share no schema.
 
 `docs/database-migrations.md` is required reading before you write a migration — a
@@ -27,7 +29,8 @@ migration that rebuilds a table silently stops that table replicating to every c
 These are not product defects. They are ways this repo's tests have been green while
 proving less than they appeared to, each found by mutating the source and watching
 nothing fail. Every one of them has already recurred at least once, which is why they
-are written down here rather than left to be rediscovered.
+are written down here rather than left to be rediscovered. Several name files the 2.0
+rewrite has since deleted; the lesson outlives the example, so the citation stays.
 
 **Handing a live DOM element to `node:assert` kills the web test run — now enforced,
 not remembered.** `node:assert`'s equality helpers format *both* operands into the
@@ -40,7 +43,7 @@ Two shapes have cost time here, and the second is why this is not scoped to the 
 `assert.equal(screen.queryByText(x), null)`, and `assert.equal(document.activeElement,
 screen.getByRole(…))` — an identity comparison between two live nodes, with no `null`
 and no `queryBy*` anywhere. One instance of that second shape sat in
-`SecretField.test.tsx` (historical example; the file no longer exists — see git history) and no pattern written for the first would have found it.
+`SecretField.test.tsx` and no pattern written for the first would have found it.
 
 `scripts/check-test-hygiene.ts` fails `npm run check` on both, so this is a build error
 rather than something to remember. It parses rather than pattern-matches, because this
@@ -54,7 +57,7 @@ first assertion: React's own effect flush schedules through `setTimeout`, so rep
 it means the effect under test never runs and the test times out with nothing to point
 at. This is not the hang above — it presents as a plain timeout, which reads like the
 code being wrong rather than the harness. Assert on the *arguments* to the real
-`setTimeout` instead: `packages/web/test/useGroupMetadata.test.tsx` (historical example; the file no longer exists — see git history) pins an exact
+`setTimeout` instead: `packages/web/test/useGroupMetadata.test.tsx` pins an exact
 backoff ladder and a clamped five-minute sleep that way, without waiting five real
 minutes or replacing any timer behaviour. Server-side tests reach the same place by a
 different route: `packages/core/test/abort-timeout.ts` replaces `AbortSignal.timeout`
@@ -71,7 +74,7 @@ threw — every file in `packages/web/test` does. Per-test `cleanup()` calls onl
 the happy path, which is the path that did not need them.
 
 **A test whose expected value is computed by the code under test cannot detect that
-code changing.** `groupAnchor` (historical example; the file no longer exists — see git history) was mutated to return a constant `group-x` — every card
+code changing.** `groupAnchor` was mutated to return a constant `group-x` — every card
 claiming one DOM id, so a Downloads link scrolls to whichever card renders first — and
 **all 70 web tests passed, the end-to-end one included.** Eight separate sites, across
 three files, built their expectation by calling `groupAnchor(...)`. Nothing asserted
@@ -140,7 +143,7 @@ confirmation, an error, a warning — assert the visible affordance too: a real 
 the visible one cannot drift apart. Playwright's `toBeVisible()` does not close this gap
 either: an unstyled `<div>` full of text is genuinely visible.
 
-**Before accepting a coverage loss, enumerate what does still differ.** `MediaCard` (historical example; the file no longer exists — see git history)'s
+**Before accepting a coverage loss, enumerate what does still differ.** `MediaCard`'s
 scene panel was a `section.metadata`, and a test could assert its presence to prove a
 group's answer was `confirmed` even when the answer carried no poster, no synopsis and no
 cast. The poster-led card moved the panel's children into the identity column and deleted
