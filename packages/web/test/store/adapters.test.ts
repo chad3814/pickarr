@@ -152,6 +152,35 @@ test('realFetch answers a SyncResponse, not a Response', async () => {
   assert.deepEqual(await response.json(), { queued: 3 });
 });
 
+test('realFetch rejects when handed an already-aborted signal', async () => {
+  // Deliberately no `stubFetch`: this is the only test in the file that runs
+  // against the platform's own `fetch`. The three above stub it, so they pin
+  // the *shape* of the call -- that the identical signal object is forwarded
+  // -- and can say nothing about what an abort does. Design spec §7 item 1
+  // specifies both halves ("passes the caller's `AbortSignal` to
+  // `window.fetch`, and an aborted signal rejects rather than resolving"),
+  // and `sync.ts`'s `FETCH_DEADLINE_MS` rests on the second: were an aborted
+  // signal ever to resolve, the deadline would silently stop bounding
+  // anything and every stubbed-fetch test in that suite would still pass.
+  await assert.rejects(
+    realFetch('https://test.invalid/api/sync/tail', AbortSignal.abort()),
+    // The rejection's *name*, not merely that it rejected. A bare "it
+    // rejects" passes with the signal dropped entirely: `test.invalid` is a
+    // reserved name that resolves nowhere, so an unsignalled request to it
+    // rejects too -- with `TypeError: fetch failed`, once DNS gives up. That
+    // is the hollow assertion CLAUDE.md's testing-hazards section is about,
+    // reached here by a different route, and it was checked the way that
+    // section asks: dropping `signal` from `realFetch` turns this red.
+    // `AbortError` is reachable only through the signal.
+    { name: 'AbortError' },
+    'an aborted signal must reject rather than resolve, or the store\'s one-minute deadline bounds nothing (design spec §7 item 1)',
+  );
+  // No network is reached, so this stays a unit test and needs no host:
+  // `fetch` rejects on an already-aborted signal before it resolves a name
+  // or opens a socket -- which is itself what the `AbortError` above, rather
+  // than a `TypeError`, proves happened.
+});
+
 /** A real timer, not `t.mock.timers` (CLAUDE.md: fake timers hang this suite). Kept short throughout this file's idleScheduler tests so waiting for a real floor to elapse stays a unit test, not an integration one. */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
