@@ -19,6 +19,17 @@ body {
    the nav off the screen instead of wrapping. */
 main { flex: 1; min-width: 0; }
 
+/* **`<nav>` is deliberately unstyled, and that is a gap rather than a
+   decision.** 1.x styled it with a bare type selector in `nav.css` --
+   `display: flex`, `flex-direction: column`, `gap`, and `position: sticky`
+   with a `top` and a scroll cap -- and that rule was the one thing in those
+   six deleted stylesheets that actually reached 2.0's markup, because
+   `Shell.tsx` renders a plain `<nav>` needing no class. Most of it was already
+   inert: `flex` and `align-self` need a flex parent, and `.app` never applied
+   to 2.0 either. What genuinely went is the sticky positioning, on a nav of
+   three items. Whoever lays out the shell should style this on purpose rather
+   than restore a rule measured against 1.x's five-link column. */
+
 /* Unstyled until now, so it rendered at the UA's 2em. */
 h1 { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.015em; margin: 0 0 var(--space-4); }
 
