@@ -600,6 +600,13 @@ export function createShutdown(
     void server.close();
     host.stop();
     raw.close();
+    // Load-bearing: this synchronous `exit(0)` is what stops an in-flight
+    // query abandoned by `server.close()` above from ever resuming and
+    // logging its own bound parameters against a closed `raw` -- a pending
+    // promise continuation cannot run after a synchronous `process.exit()`.
+    // Do not make this handler `await` anything before dealing with that
+    // (task 8's e2e harness hit exactly this shape and leaked a session
+    // token to the console because its own teardown does not exit).
     exit(0);
   };
 }

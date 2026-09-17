@@ -120,11 +120,13 @@ test('two tabs: exactly one fetches, and the follower still sees counts climb', 
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
   await expect(page.getByTestId('count-tv')).toHaveText('0');
 
-  // This tab requested the lease first and holds it for as long as it stays
-  // open (`leader.ts`'s `release` never settles), so waiting for its first
-  // sync request before the second tab even opens is what makes it the
-  // leader deterministically, rather than by which of two racing requests
-  // the browser happened to grant first.
+  // This tab requested the lease first, and nothing in this test ever calls
+  // `stop()` on it -- `leader.ts`'s lease is releasable since the fix round
+  // (`stop()` calls it), but this leader simply never releases during the
+  // test's life -- so waiting for its first sync request before the second
+  // tab even opens is what makes it the leader deterministically, rather
+  // than by which of two racing requests the browser happened to grant
+  // first.
   await expect.poll(() => leaderSyncPaths.length).toBeGreaterThan(0);
 
   // The same browser context, not a second one: two contexts are two

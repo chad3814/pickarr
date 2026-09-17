@@ -550,6 +550,42 @@ test('stopping the leader releases the lease so a queued follower is promoted an
   );
 });
 
+test('a lease released for a reason other than this instance\'s own stop() still cancels both loops', async () => {
+  // `manualLease`'s `release()` exists for exactly this: `leader.ts`'s own
+  // doc names a lease settling out from under its holder -- a browser
+  // tearing a Web Lock down when the tab itself closes -- as a case
+  // `stop()` never has to run for at all. `stop()` already cancels both
+  // loops directly and *also* releases the lease, so a test built only
+  // around `stop()` (the one above) cannot tell "releasing stops the loops"
+  // apart from "stop() stops the loops and happens to release too". Driving
+  // `release()` without ever calling `handle.stop()` isolates the property
+  // `sync.ts`'s own `release.then(() => { leading = false; stopLoops(); })`
+  // exists for.
+  const db = await freshDb();
+  const answers = routes({
+    '/api/sync/bootstrap': { since: 40, before: 41, generation: 'gen-1' },
+    '/api/sync?since=40': { ops: [], cursor: 40, generation: 'gen-1' },
+  });
+  const fetch = stubFetch(answers);
+  const { lease, grant, release } = manualLease();
+  const { sched } = start(db, fetch.fetch, lease);
+
+  grant();
+  await settle();
+  assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'granted, so this instance leads and bootstraps');
+  assert.ok(sched.pendingFor('tail'), 'and schedules its poll');
+
+  release();
+  await settle();
+
+  assert.equal(
+    sched.pendingFor('tail'),
+    undefined,
+    'the lease releasing on its own -- never through this instance\'s own stop() -- still cancels the pending tail task',
+  );
+  assert.equal(sched.pendingFor('backfill'), undefined, 'and the backfill');
+});
+
 test('a follower relays what the leader broadcasts to its own subscribers', async () => {
   const db = await freshDb();
   const { lease } = manualLease();
