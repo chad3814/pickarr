@@ -1,7 +1,7 @@
 /* `accent-color` inherits, so one declaration here covers every native
    checkbox and radio in the app — including the theme toggle's own radios in
-   `nav.css`, which is why that file's `.theme-toggle input` declaration is now
-   redundant but left in place. */
+   1.x's `nav.css`, which is why this one carried a note about a redundant
+   declaration there; that file is gone. */
 :root { font-family: 'IBM Plex Sans', system-ui, sans-serif; accent-color: var(--color-accent); }
 
 body {
@@ -14,27 +14,9 @@ body {
    column: the tabs stay next to what they navigate instead of drifting to a far
    window edge on a wide screen. */
 .app { display: flex; gap: var(--space-5); max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
-/* Split view divides `<main>` between two panes, and 60rem is not enough for
-   both. `card.css`'s own measured note puts `<main>`'s content box at
-   811.3px at this cap — its 777.3px no-slot card column plus the card's own
-   32px of padding *and* its 1px border on each side, which `card.css`
-   itself flags: nothing in this directory resets `box-sizing`, so a border
-   counts. Nav and its gap take the other ~148.7px of `.app`'s 960px content
-   width, not nothing: subtracting the list's 22rem and its gap from `.app`'s
-   own width instead of `<main>`'s overstates what the detail pane would get
-   by that much. Split inside 60rem and the pane lands around 435px, and
-   after the card's own padding and border, its 98px artwork frame and its
-   gap, a with-slot text column around 287px — well past the point where
-   `card.css`'s `68ch` cap even applies. A column that narrow isn't at the
-   cap's threshold, it is simply too narrow on its own, in the regime phase
-   2's `card-layout` guard does not cover because that guard measures the
-   widest card shape. Widening avoids walking into it. Keyed off the view
-   rather than a media query because the view is a preference: a reader in
-   the card list gets the 60rem column at any window size. */
-.app:has([data-browse-view='split']) { max-width: 90rem; }
-/* `min-width: 0` for the reason `.card-head-main` gives: a flex item refuses to
-   shrink below its content by default, so one long unbroken release name would
-   push the nav off the screen instead of wrapping. */
+/* `min-width: 0` because a flex item refuses to shrink below its content by
+   default, so one long unbroken word -- a release name, a title -- would push
+   the nav off the screen instead of wrapping. */
 main { flex: 1; min-width: 0; }
 
 /* Unstyled until now, so it rendered at the UA's 2em. */
@@ -44,17 +26,18 @@ h1 { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.015em; ma
  * A bare `h2` is a section heading beneath a route's `h1` and has to read as
  * subordinate to it, not louder than it: unstyled, it renders at the UA's
  * 1.5em/700, which is bigger than `h1`'s own `--text-page` at 600. This rule
- * sits in the `base` layer, so `.media-card h2`, `.failed-card h2` and
- * `.confirm h2` in `components` still win wherever a card, a failed card or
- * the dialog gives its `h2` a different treatment — that is the layering
- * working as intended, not a gap in this rule.
+ * sits in the `base` layer, so any `components` rule giving an `h2` a
+ * different treatment still wins whatever its specificity — that is the
+ * layering working as intended, not a gap in this rule.
  */
 h2 { font-size: var(--text-title); font-weight: 600; margin: 0 0 var(--space-4); }
 
 /*
- * One decision for every link in the app. Nav links are the exception and are
- * coloured by `nav.css`: five accent-coloured links stacked in a column read as
- * five calls to action.
+ * One decision for every link in the app. 1.x made nav links the exception
+ * and coloured them in its own `nav.css`, on the grounds that five
+ * accent-coloured links stacked in a column read as five calls to action --
+ * worth knowing if 2.0's shell grows a nav, since this rule will catch those
+ * links until something in `components` says otherwise.
  */
 a { color: var(--color-accent-text); }
 
@@ -63,10 +46,9 @@ a { color: var(--color-accent-text); }
 
    This lives in the `base` layer, so a `components`-layer rule beats it
    regardless of specificity — layer order decides, not selector weight. It
-   holds today only because nothing in `components` overlaps it on the
-   properties that do the clipping: `forms.css`'s `legend` sets only
-   font-weight, size and colour. The theme toggle's group name depends on
-   this clip; whoever later adds a `legend` or `fieldset` declaration in
+   holds today trivially, because `components` is empty -- 1.x's `forms.css`
+   overlapped it on nothing that clips, setting only font-weight, size and
+   colour. Whoever later adds a `legend` or `fieldset` declaration in
    `components` that touches `position`, `width`, `height`, `margin`,
    `padding`, `border`, `overflow`, `clip-path` or `white-space` should know
    this utility does not automatically outrank it. */
@@ -92,14 +74,18 @@ a { color: var(--color-accent-text); }
  * Native controls on a #121110 ground do not read as unstyled, they read as
  * broken, and `color-scheme: dark` alone only gets them to a grey slab.
  *
- * A bare `button` is the secondary treatment because that is what almost every
- * button in the app is — Edit, Cancel, Retry, Load more. Pick is the one that
- * is genuinely primary, and it is distinguished in markup: it carries
- * `className="pick"` (see `ReleaseRow.tsx`), which `rows.css` targets with
- * `.release-row button.pick` for its fill. The confirm dialog's own confirm
- * gets no fill at all, and that is deliberate rather than an oversight:
- * confirming an identity change moves files on disk, and an action with that
- * consequence should not be the loudest thing in the dialog.
+ * A bare `button` is the secondary treatment, because that is what almost
+ * every button in an app is — Cancel, Retry, Load more, Sign out. The primary
+ * treatment is opted into from markup rather than inherited: 1.x gave its one
+ * genuinely primary action a class and filled it from `rows.css`, and
+ * everything else got this rule by default. 2.0 sets no classes yet, so
+ * everything gets this rule.
+ *
+ * One decision from 1.x worth carrying forward rather than rediscovering: its
+ * confirmation dialog's confirm button got no fill *deliberately*. Confirming
+ * moved files on disk, and an action with that consequence should not be the
+ * loudest thing on screen. Fill marks the action you want people to take, not
+ * the one that is hardest to undo.
  */
 button {
   font: inherit;
