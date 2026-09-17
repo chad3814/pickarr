@@ -164,6 +164,15 @@ export function isLeader(): boolean {
 export function holdLease(name: string, onGranted: (release: Promise<void>) => void): () => void {
   let resolveRelease: (() => void) | undefined;
   let released = false;
+  // Whether *this* holder is the one that set `leading = true` -- distinct
+  // from `released`, which only says whether this holder has given up its
+  // own claim. Guards the returned `release` function below: without it, a
+  // holder still queued behind another one's genuine grant could clear
+  // `leading` out from under that other holder purely by being released
+  // first, making `isLeader()` answer `false` while a holder that actually
+  // leads still holds the lock -- contradicting `isLeader`'s own docblock.
+  // Set alongside `leading` in the callback below, never independently.
+  let grantedHere = false;
 
   navigator.locks
     .request(name, { mode: 'exclusive' }, () => {
@@ -173,6 +182,7 @@ export function holdLease(name: string, onGranted: (release: Promise<void>) => v
       // ever led must not report itself leading now that the grant has
       // finally arrived.
       leading = !released;
+      grantedHere = !released;
       const release = new Promise<void>((resolve) => {
         resolveRelease = resolve;
         if (released) resolve();
@@ -209,7 +219,11 @@ export function holdLease(name: string, onGranted: (release: Promise<void>) => v
   return function release(): void {
     if (released) return;
     released = true;
-    leading = false;
+    // Only this holder's own grant may clear the module-global flag -- a
+    // release fired while still queued (`grantedHere` still `false`) has
+    // nothing of its own to give up, and must not clear a different,
+    // already-granted holder's `leading = true` out from under it.
+    if (grantedHere) leading = false;
     resolveRelease?.();
   };
 }

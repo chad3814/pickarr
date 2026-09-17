@@ -137,6 +137,42 @@ test('releasing lets a second holdLease call for the same name be granted', asyn
   assert.equal(secondGranted, true, 'releasing the first holder lets the queued second one be granted');
 });
 
+test('releasing a still-queued holder does not clear leading claimed by a different, already-granted holder', async () => {
+  // Finding 9: `release()` used to clear the module-global `leading`
+  // unconditionally, even when the holder calling it was never the one that
+  // set it. A lease released while still queued behind a genuine holder
+  // therefore made `isLeader()` answer `false` while that other holder was
+  // still actively leading -- contradicting `isLeader`'s own docblock
+  // ("whether *this* tab is the one holding a lease").
+  const name = freshLeaseName();
+  let firstGranted = false;
+  const releaseFirst = holdLease(name, () => {
+    firstGranted = true;
+  });
+  await delay(20);
+  assert.equal(firstGranted, true, 'the first holder must actually be granted before this test proceeds');
+  assert.equal(isLeader(), true, 'the first holder is leading while it holds the lease');
+
+  // A second holdLease call for the same name queues behind the first and is
+  // never granted during this test's life.
+  let secondGranted = false;
+  const releaseSecond = holdLease(name, () => {
+    secondGranted = true;
+  });
+  await delay(20);
+  assert.equal(secondGranted, false, 'the second holder is still queued, not granted');
+
+  releaseSecond();
+  assert.equal(
+    isLeader(),
+    true,
+    'a still-queued holder\'s release must not clear leading claimed by the still-active first holder',
+  );
+
+  releaseFirst();
+  assert.equal(isLeader(), false, 'the first holder\'s own release does clear leading');
+});
+
 test('releasing a lease is idempotent, and a second call does not reach into a later holder of the same name', async () => {
   // This module has already been bitten twice by a release-style closure
   // that was not idempotent -- `onMessage`'s own shared subscriber count,
