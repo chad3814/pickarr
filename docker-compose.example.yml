@@ -2,16 +2,13 @@ services:
   pickarr:
     build: .
     ports:
-      - "8080:8080"
+      - "8787:8787"
     volumes:
       - ./config:/config
-      - /srv/downloads:/data/downloads
-      - /srv/media/scenes:/media/scenes
-      - /srv/trash:/data/trash
     secrets:
-      - sabnzbd_api_key
+      - openmetadata-api-key
     restart: unless-stopped
 
 secrets:
-  sabnzbd_api_key:
-    file: ./secrets/sabnzbd_api_key
+  openmetadata-api-key:
+    file: ./secrets/openmetadata-api-key

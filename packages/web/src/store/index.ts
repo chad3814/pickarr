@@ -55,6 +55,18 @@ export interface CreateStoreDeps {
   /** Milliseconds, monotonic-ish. See `sync.ts`'s `SyncDeps.now`. */
   now: () => number;
   locks: Lease;
+  /**
+   * How long a single sync request may take before its signal aborts.
+   * Forwarded to `startSync`'s `SyncDeps.fetchDeadlineMs` unchanged; see that
+   * field for the default and why it exists. Absent here until a caller
+   * through `createStore` needed it (task 6's fix round, review-found): every
+   * `fetchJson` call creates a real `AbortSignal.timeout`, and that timer
+   * outlives the request it bounds -- 60 real seconds per `node --test` file
+   * that boots a store through the default, measured directly by shortening
+   * it and watching a 60-second run become a one-second one. Production
+   * leaves this unset, which is the existing 60-second default unchanged.
+   */
+  fetchDeadlineMs?: number;
 }
 
 /**
@@ -81,18 +93,25 @@ export interface Store {
   subscribeReset(cb: () => void): () => void;
   gatherMediaItem(mediaItemId: number): Promise<GatheredItem | undefined>;
   /**
-   * Cancels both sync loops, stops relaying other tabs' messages, and closes
-   * this store's IndexedDB connection. Safe to call more than once --
-   * `SyncHandle.stop()` already is, and `IDBDatabase.close()` is idempotent
-   * by the standard.
+   * Cancels both sync loops, releases this store's Web Lock lease if it
+   * holds one, stops relaying other tabs' messages, and closes this store's
+   * IndexedDB connection. Safe to call more than once -- `SyncHandle.stop()`
+   * already is, and `IDBDatabase.close()` is idempotent by the standard.
+   *
+   * The lease release is what makes a second `Store` opened later in the
+   * same tab able to lead: `Shell.tsx`'s sign-in and sign-out journeys both
+   * open one after this one has stopped, and until `SyncHandle.stop()`
+   * released the underlying Web Lock, that second `Store` queued behind this
+   * one forever and never fetched anything (`leader.ts`'s module doc has the
+   * full account).
    *
    * Closing `db` here, and not before, is what makes this store's `stop()`
    * actually stop things end to end: `sync.ts`'s own `SyncHandle.stop()`
-   * only cancels the two scheduled tasks and the `BroadcastChannel` relay,
-   * because it never opened the database and has no business closing a
-   * handle a caller might still be reading from mid-shutdown. This module
-   * did open it, so closing it here is what leaves nothing of this store's
-   * for the process to hang on.
+   * only cancels the two scheduled tasks, releases the lease and the
+   * `BroadcastChannel` relay, because it never opened the database and has
+   * no business closing a handle a caller might still be reading from
+   * mid-shutdown. This module did open it, so closing it here is what leaves
+   * nothing of this store's for the process to hang on.
    */
   stop(): void;
 }
@@ -110,6 +129,11 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     schedule: deps.schedule,
     now: deps.now,
     locks: deps.locks,
+    // Omitted entirely rather than set to `undefined` when absent:
+    // `exactOptionalPropertyTypes` treats an explicit `undefined` differently
+    // from an absent key, and `SyncDeps.fetchDeadlineMs` is typed `number`,
+    // not `number | undefined`.
+    ...(deps.fetchDeadlineMs === undefined ? {} : { fetchDeadlineMs: deps.fetchDeadlineMs }),
   });
 
   return {

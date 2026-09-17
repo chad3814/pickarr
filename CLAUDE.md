@@ -13,10 +13,12 @@ Two implementations live here side by side.
   lookup-service plugin base), `packages/plugin-tv`, `packages/plugin-movie`,
   and `packages/plugin-xxx`. This is where new work goes, and the specs are
   `docs/superpowers/specs/2026-09-*`.
-- **`packages/web`** — currently 1.x's SPA, being rewritten against 2.0's sync API. The
-  2.0 host does not serve it: the host answers JSON and artwork and nothing else.
-- **1.x** — `packages/core` and `packages/plugin-scenes`. Frozen, and still the only
-  thing `Dockerfile` builds. 2.0 is greenfield: it starts on an empty database and
+- **`packages/web`** — 2.0's browser client, built against 2.0's sync API. The 2.0 host
+  serves it directly, alongside the JSON and artwork routes: a static route answers the
+  built bundle, and falls back to `index.html` on any path it does not recognise, so a
+  client-side route survives a refresh.
+- **1.x** — `packages/core` and `packages/plugin-scenes`. Frozen, and no longer what
+  `Dockerfile` builds — 2.0 is. 2.0 is greenfield: it starts on an empty database and
   rebuilds from feeds, so nothing migrates and the two share no schema.
 
 `docs/database-migrations.md` is required reading before you write a migration — a
@@ -27,7 +29,8 @@ migration that rebuilds a table silently stops that table replicating to every c
 These are not product defects. They are ways this repo's tests have been green while
 proving less than they appeared to, each found by mutating the source and watching
 nothing fail. Every one of them has already recurred at least once, which is why they
-are written down here rather than left to be rediscovered.
+are written down here rather than left to be rediscovered. Several name files the 2.0
+rewrite has since deleted; the lesson outlives the example, so the citation stays.
 
 **Handing a live DOM element to `node:assert` kills the web test run — now enforced,
 not remembered.** `node:assert`'s equality helpers format *both* operands into the

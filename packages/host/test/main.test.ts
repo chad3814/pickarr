@@ -27,6 +27,7 @@ import type { HostSettings } from '../src/main.ts';
 import {
   createPluginIdForType,
   createShutdown,
+  defaultWebRoot,
   formatLogDetail,
   main,
   resolveArtworkDir,
@@ -698,6 +699,11 @@ test('main starts the server after the host and closes it before stopping', asyn
       'the type mapping is built from main\'s own plugin list, which is what keeps src/api off host.ts',
     );
     assert.equal(serverDeps.pluginIdForType('book'), undefined, 'and answers nothing for a type no plugin claims');
+    assert.equal(
+      serverDeps.webRoot,
+      defaultWebRoot(new URL('../src/main.ts', import.meta.url).href),
+      'an unset server.webRoot resolves to the derived default -- src/web here, since this test runs the source directly',
+    );
 
     // The sync generation `main` hands the listener is **this database's**,
     // read out of it once at boot rather than made up per process. Asserted
@@ -1518,6 +1524,78 @@ test('a boot whose key is present says nothing about it, and neither does one wi
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('a boot with no built bundle says so once, names no path, and still boots', async () => {
+  // No test in this file ever sets `server.webRoot`, so every boot here
+  // resolves the derived default -- `src/web`, since the suite runs the
+  // source directly -- which does not exist on any checkout (design spec §3:
+  // development serves the app through vite's own dev server instead, and
+  // never asks this host for a static file). That absence is not fatal: the
+  // host still finishes booting and serves the rest of the api, and this is
+  // the one test that pins "not fatal" against a real `main()` run rather
+  // than against `warnIfWebRootMissing` alone (`static-route.test.ts` has
+  // that unit).
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-no-bundle-'));
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    seedDatabase(databasePath, insertOwner);
+
+    const { timers } = createFakeTimers();
+    const lines = await runMain(databasePath, {
+      plugins: [],
+      timers,
+      createReadServer: async () => fakeServer(() => {}),
+    });
+
+    const warned = lines.filter((line) => line.includes('no web bundle found'));
+    assert.equal(warned.length, 1, 'exactly one line for one missing root');
+    assert.ok(
+      lines.some((line) => line.includes('running: database')),
+      'a missing bundle is one plugin-shaped misconfiguration, not a dead process',
+    );
+
+    const webRoot = defaultWebRoot(new URL('../src/main.ts', import.meta.url).href);
+    for (const line of lines) {
+      assert.ok(!line.includes(webRoot), `no log line may name the web root's path: ${line}`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultWebRoot is dist-relative: production and development resolve to different, both-correct, directories', () => {
+  // Production: the build bundles this module into `dist/bin.js` (or
+  // `dist/index.js`), so `import.meta.url` at runtime names a file inside
+  // `dist`, and `web` lands beside it -- exactly where the image's runtime
+  // stage copies `packages/web/dist` (design spec §6.5).
+  assert.equal(
+    defaultWebRoot('file:///app/packages/host/dist/bin.js'),
+    '/app/packages/host/dist/web',
+  );
+
+  // Development: `npm start` runs `src/bin.ts` directly, so `import.meta.url`
+  // names a file inside `src`, and the derived path does not exist on any
+  // checkout -- correctly, since vite's own dev server serves the app in
+  // development and never asks this host for a static file.
+  assert.equal(
+    defaultWebRoot('file:///app/packages/host/src/bin.ts'),
+    '/app/packages/host/src/web',
+  );
+});
+
+test('server.webRoot in the config file wins over the derived default', async () => {
+  await withConfigFile({ server: { webRoot: '/srv/pickarr/web' } }, async (settings) => {
+    assert.equal(settings.webRoot, '/srv/pickarr/web');
+  });
+
+  await withConfigFile({}, async (settings) => {
+    assert.equal(
+      settings.webRoot,
+      defaultWebRoot(new URL('../src/main.ts', import.meta.url).href),
+      'absent in the file falls back to the derived default, never undefined',
+    );
+  });
 });
 
 test('shippedPlugins builds one plugin per media type, each with its own prefix', () => {

@@ -1,6 +1,5 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter } from 'react-router';
 import { App } from './App.tsx';
 import './styles/index.css';
 
@@ -9,8 +8,6 @@ if (container === null) throw new Error('No #root element in the document');
 
 createRoot(container).render(
   <StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <App />
   </StrictMode>,
 );

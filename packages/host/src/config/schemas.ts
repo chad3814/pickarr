@@ -31,6 +31,12 @@ export const serverConfigSchema = z.object({
       }
     })
     .optional(),
+  // Optional with no default, on the same reasoning as `publicUrl`: absent
+  // means "derive it", and `web` beside the host's own `dist` (design spec
+  // §3) is not a value this schema can compute -- `main.ts`'s
+  // `defaultWebRoot` does, from where the running process's own code lives,
+  // which this file has no way to see.
+  webRoot: z.string().min(1).optional(),
 }).strict().prefault({});
 
 export const databaseConfigSchema = z.object({

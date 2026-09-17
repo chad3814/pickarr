@@ -8,23 +8,14 @@ const run = promisify(execFile);
 /**
  * Builds every workspace once for the whole run.
  *
- * Once, not per test: the build is fast but not free, and per-test it would be
- * the dominant cost of every spec. The output is immutable for the duration of
- * a run, so every worker shares it.
- *
- * The whole build rather than just the SPA, because two different things need
- * building and only one of them is obvious. The browser needs `web`'s bundle.
- * But the harness imports `plugin-scenes/src/index.ts`, which reaches
- * `@pickarr/plugin-api` through a *package specifier* — and Playwright does not
- * run under the `development` export condition that points those at `src/*.ts`,
- * so they resolve to `dist/`. A machine that has never run `npm run build` then
- * fails with `Cannot find module …/plugin-api/dist/index.js`, which names a
- * path rather than the reason. That is exactly how this first met CI: green on
- * a developer's machine, where a build had happened for unrelated reasons, and
- * red on a clean checkout.
- *
- * It is the real `npm run build`, not a hand-rolled bundler invocation, so
- * nothing under test can drift from what ships.
+ * The 1.x E2E suite this ran for was deleted in task 3, and for a while
+ * afterward this function had nothing to build for -- but that is no longer
+ * true: `packages/e2e/tests/shell.spec.ts`'s five specs are the live 2.0
+ * suite, and every one of them needs the real built SPA, since
+ * `../src/harness-2.ts`'s `harness` fixture serves `webDist` (below) as the
+ * host's `webRoot`. Building once here, rather than per test, is what the
+ * root `playwright.config.ts`'s own refusal-to-run-from-root guarantees a
+ * bare `npx playwright test` cannot skip.
  */
 export default async function globalSetup(): Promise<void> {
   await run('npm', ['run', 'build'], { cwd: repoRoot });

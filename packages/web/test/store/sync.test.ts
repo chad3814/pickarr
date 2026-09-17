@@ -140,34 +140,55 @@ function routes(table: Readonly<Record<string, unknown>>): (url: string) => Sync
   };
 }
 
-/** A lease granted the moment it is asked for, whose release never settles -- `store/leader.ts`'s production behaviour. */
+/**
+ * A lease granted the moment it is asked for. `hold` must now return a
+ * release function (`Lease`'s own doc in `sync.ts`); this fixture's is a
+ * no-op, so the promise `onGranted` receives stays pending exactly as it
+ * always did -- nothing in the tests that use this fixture ever calls
+ * release, which is `manualLease` and the real `webLocksLease` tests' job
+ * below.
+ */
 function grantedLease(): Lease {
   return {
-    hold(onGranted): void {
+    hold(onGranted): () => void {
       onGranted(
         new Promise<void>(() => {
-          // Never settles: a browser tears the lock down with the tab.
+          // Never settles in this fixture: nothing here ever releases.
         }),
       );
+      return () => {
+        // Nothing to release: see this function's own doc.
+      };
     },
   };
 }
 
-/** A lease the test grants when it chooses -- how a follower's promotion is driven. */
-function manualLease(): { lease: Lease; grant: () => void } {
+/**
+ * A lease the test grants when it chooses -- how a follower's promotion is
+ * driven -- and can release when it chooses, driving `stop()`'s own release
+ * path without a real Web Lock.
+ */
+function manualLease(): { lease: Lease; grant: () => void; release: () => void } {
   let granted: ((release: Promise<void>) => void) | undefined;
+  let resolveRelease: (() => void) | undefined;
   return {
     lease: {
-      hold(onGranted): void {
+      hold(onGranted): () => void {
         granted = onGranted;
+        return () => {
+          resolveRelease?.();
+        };
       },
     },
     grant(): void {
       granted?.(
-        new Promise<void>(() => {
-          // Never settles -- see `grantedLease`.
+        new Promise<void>((resolve) => {
+          resolveRelease = resolve;
         }),
       );
+    },
+    release(): void {
+      resolveRelease?.();
     },
   };
 }
@@ -477,6 +498,92 @@ test('only the lease holder fetches', async () => {
 
   await leader.sched.drive('tail');
   assert.deepEqual(second.urls, [], 'still nothing, while the holder keeps fetching');
+});
+
+test('stopping the leader releases the lease so a queued follower is promoted and fetches', async () => {
+  // The defect this fix exists for, reproduced with two real `Store`-level
+  // instances instead of two tabs: `Shell.tsx`'s ordinary sign-in journey
+  // (mount, 401, demote to `SignIn`, sign back in) creates exactly this
+  // shape in one tab -- a first `Store` that stops, and a second one already
+  // queued behind its lease. Before `holdLease` became releasable, `stop()`
+  // freed nothing and the second instance queued forever, never fetching --
+  // which is why `packages/e2e/tests/shell.spec.ts` is what first caught it.
+  // `node --test`'s `navigator.locks` being per-process is what lets this
+  // file model the same shape directly, the same way `only the lease holder
+  // fetches` above does for the non-releasing half of the story.
+  const db = await freshDb();
+  const name = freshLeaseName();
+  const answers = routes({
+    '/api/sync/bootstrap': { since: 40, before: 41, generation: 'gen-1' },
+    '/api/sync?since=40': { ops: [], cursor: 40, generation: 'gen-1' },
+  });
+
+  const first = stubFetch(answers);
+  const leader = start(db, first.fetch, webLocksLease(name));
+  await settle();
+  assert.deepEqual(first.urls, ['/api/sync/bootstrap'], 'the first instance leads and bootstraps');
+
+  const second = stubFetch(answers);
+  const follower = start(db, second.fetch, webLocksLease(name));
+  await settle();
+  assert.deepEqual(second.urls, [], 'queued behind the first, exactly as a second Store in one tab would be');
+
+  leader.handle.stop();
+  await settle();
+
+  // Not a second `/api/sync/bootstrap`: the leader's own bootstrap already
+  // wrote the cursors to this shared `db` (`ensureBootstrapped` only
+  // bootstraps when nothing is stored), and the follower reads that same
+  // meta once promoted. The property this test is for is that it schedules
+  // and fetches *at all* -- before this fix it never got this far, queued
+  // behind a lease `stop()` could not release.
+  assert.ok(
+    follower.sched.pendingFor('tail'),
+    'once the leader stops and releases the lease, the queued instance is promoted and schedules its own tail loop',
+  );
+
+  await follower.sched.drive('tail');
+  assert.deepEqual(
+    second.urls,
+    ['/api/sync?since=40'],
+    'and the promoted instance actually fetches -- the property this fix exists for',
+  );
+});
+
+test('a lease released for a reason other than this instance\'s own stop() still cancels both loops', async () => {
+  // `manualLease`'s `release()` exists for exactly this: `leader.ts`'s own
+  // doc names a lease settling out from under its holder -- a browser
+  // tearing a Web Lock down when the tab itself closes -- as a case
+  // `stop()` never has to run for at all. `stop()` already cancels both
+  // loops directly and *also* releases the lease, so a test built only
+  // around `stop()` (the one above) cannot tell "releasing stops the loops"
+  // apart from "stop() stops the loops and happens to release too". Driving
+  // `release()` without ever calling `handle.stop()` isolates the property
+  // `sync.ts`'s own `release.then(() => { leading = false; stopLoops(); })`
+  // exists for.
+  const db = await freshDb();
+  const answers = routes({
+    '/api/sync/bootstrap': { since: 40, before: 41, generation: 'gen-1' },
+    '/api/sync?since=40': { ops: [], cursor: 40, generation: 'gen-1' },
+  });
+  const fetch = stubFetch(answers);
+  const { lease, grant, release } = manualLease();
+  const { sched } = start(db, fetch.fetch, lease);
+
+  grant();
+  await settle();
+  assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'granted, so this instance leads and bootstraps');
+  assert.ok(sched.pendingFor('tail'), 'and schedules its poll');
+
+  release();
+  await settle();
+
+  assert.equal(
+    sched.pendingFor('tail'),
+    undefined,
+    'the lease releasing on its own -- never through this instance\'s own stop() -- still cancels the pending tail task',
+  );
+  assert.equal(sched.pendingFor('backfill'), undefined, 'and the backfill');
 });
 
 test('a follower relays what the leader broadcasts to its own subscribers', async () => {

@@ -1,18 +1,22 @@
 /**
- * The read API on a socket: `node:http`, nine routes -- eight behind a
- * session and `/api/health` open -- bound by default to every interface.
+ * The read API on a socket: `node:http`, ten routes -- eight behind a
+ * session and two open (`/api/health` and the static bundle) -- bound by
+ * default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
  * routes behind a session", which the paragraph on the guard below -- and
- * `ROUTES` itself, where exactly one entry is `open: true` -- contradicts. A
- * one-line summary disagreeing with its own file is the whole class of defect
- * the comments here are written against. (The count grew to eight when the
- * client-sync slice added `/api/sync` and `/api/sync/backfill`, and to nine
- * when it added `/api/sync/bootstrap`, all three guarded; the shape of the
- * sentence is what matters and has not changed.)
+ * `ROUTES` itself, where exactly two entries are `open: true` -- contradicts.
+ * A one-line summary disagreeing with its own file is the whole class of
+ * defect the comments here are written against. (The count grew to eight
+ * when the client-sync slice added `/api/sync` and `/api/sync/backfill`, to
+ * nine when it added `/api/sync/bootstrap`, and to ten when the shell slice
+ * added the static route -- guarded like the other eight except `/api/health`
+ * and that one; the shape of the sentence is what matters and has not
+ * changed.)
  *
  * Everything this file does is routing. Parse a request, call one function
- * from `./reads.ts` or `./artwork-route.ts`, write what came back.
+ * from `./reads.ts`, `./artwork-route.ts` or `./static-route.ts`, write what
+ * came back.
  *
  * **No SQL here.** Every read is a `reads.ts` call, so the keyset predicates,
  * the page size and the plan-tested statements live in one module with one
@@ -57,19 +61,23 @@
  * constraint is about bodies this repo emits, and the module doc had stopped
  * being true of the responses that leave this socket.
  *
- * **Every route requires a session except `/api/health`.** Slice E shipped
- * this API unauthenticated, with loopback binding as the whole of the
- * protection; the auth slice's §5 closes it -- and its §6 then reverses the
- * bind, so a session is not the second of two defences but the only one (see
- * `DEFAULT_HOST`). The guard is `refusalFor` below, and it tests the *value*
- * `auth.api.getSession` resolves to, never a status code -- an
- * unauthenticated session check answers `200` with a body of `null` (that
- * slice's §2, measured against better-auth 1.7.3), so a guard written
- * against the status lets every anonymous caller through. Health
- * stays open so a container health check needs no credential, and it is the
- * only route that is: *which* routes are open is a property of `ROUTES`
- * below rather than of a list written anywhere else, and the tests enumerate
- * that table so a route added later is guarded or the test fails.
+ * **Every route requires a session except `/api/health` and the static
+ * bundle.** Slice E shipped this API unauthenticated, with loopback binding
+ * as the whole of the protection; the auth slice's §5 closes it -- and its
+ * §6 then reverses the bind, so a session is not the second of two defences
+ * but the only one (see `DEFAULT_HOST`). The guard is `refusalFor` below, and
+ * it tests the *value* `auth.api.getSession` resolves to, never a status
+ * code -- an unauthenticated session check answers `200` with a body of
+ * `null` (that slice's §2, measured against better-auth 1.7.3), so a guard
+ * written against the status lets every anonymous caller through. Health
+ * stays open so a container health check needs no credential; the static
+ * route (the shell slice's Task 1) stays open for a different reason -- it
+ * is the same bytes for every caller, and it is what a browser has to load
+ * before it can render a sign-in form at all, so guarding it would make
+ * signing in impossible rather than merely inconvenient. Those are the only
+ * two: *which* routes are open is a property of `ROUTES` below rather than
+ * of a list written anywhere else, and the tests enumerate that table so a
+ * route added later is guarded or the test fails.
  *
  * **The guard is taken in `handle`, ahead of the router.** A table can only
  * speak for the routes in it, and a route mounted beside the auth dispatch is
@@ -105,6 +113,8 @@ import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
 import { readArtwork } from './artwork-route.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
+import type { StaticResponse } from './static-route.ts';
+import { isApiPath, staticAnswer } from './static-route.ts';
 import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
 
 /**
@@ -245,6 +255,22 @@ export interface ReadServerDeps {
   /** 0 asks the kernel for a free port, which `ReadServer.port` then reports. */
   port: number;
   /**
+   * The built bundle's own directory, as `static-route.ts`'s `staticAnswer`
+   * reads it -- `server.webRoot`, already resolved to a concrete string.
+   *
+   * `main` never passes an absent value here, the same way it no longer
+   * passes one for `host`: `HostSettings.webRoot` derives a default (`web`
+   * beside the host's own `dist`) when the config file names none, so this
+   * is always a real path to try, even on a development host where that
+   * derived path does not exist -- see `warnIfWebRootMissing`, which `main`
+   * calls once at boot precisely because this field cannot say "there is no
+   * bundle" on its own. A required `string` rather than `string | undefined`
+   * for the same reason `generation` below is a plain `string`: nothing here
+   * would do anything useful with an absent value that `staticAnswer`'s own
+   * graceful fallback does not already do with a present-but-wrong one.
+   */
+  webRoot: string;
+  /**
    * Better Auth, built **from the origin the listener actually bound**.
    *
    * A function rather than an instance because of an ordering constraint the
@@ -267,15 +293,16 @@ export interface ReadServerDeps {
 /**
  * What a route answers, before anything is written to a socket.
  *
- * Two shapes because artwork is the one route that does not answer JSON, and
- * it already returns a status/headers/body triple of its own
- * (`ArtworkResponse`) that this module has no business reinterpreting.
- * Keeping routing separate from writing is what lets every route be a
- * function of its request.
+ * Three shapes because artwork and the static bundle are the two routes that
+ * do not answer JSON, and each already returns a status/headers/body triple
+ * of its own (`ArtworkResponse`, `StaticResponse`) that this module has no
+ * business reinterpreting. Keeping routing separate from writing is what
+ * lets every route be a function of its request.
  */
 type Answer =
   | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'artwork'; artwork: ArtworkResponse };
+  | { kind: 'artwork'; artwork: ArtworkResponse }
+  | { kind: 'static'; file: StaticResponse };
 
 function json(status: number, body: unknown): Answer {
   return { kind: 'json', status, body };
@@ -333,19 +360,52 @@ const ARTWORK_FILES = {
 };
 
 /**
+ * `staticAnswer`'s pair, on the same reasoning as `ARTWORK_FILES` -- real,
+ * async, never the `*Sync` twins, and a separate object rather than the same
+ * one because these serve the built bundle, not artwork, even though the
+ * wrapped calls happen to be identical.
+ */
+const STATIC_FILES = {
+  readFile,
+  stat: async (path: string): Promise<{ mtimeMs: number; size: number }> => {
+    const info = await stat(path);
+    return { mtimeMs: info.mtimeMs, size: info.size };
+  },
+};
+
+/**
  * The base a request target is resolved against. A request line carries a
  * path, not an absolute url, and `new URL` needs one; nothing reads the host
  * back off this -- only `pathname` and `searchParams` are ever used.
  */
 const REQUEST_BASE = 'http://127.0.0.1';
 
-/** `null` for a target `new URL` cannot parse, which is answered as an unknown route rather than a 500. */
+/**
+ * `null` for a target `new URL` cannot parse, which is answered as an unknown
+ * route rather than a 500 -- and `null` too for one it parses into a
+ * *different origin* than the base.
+ *
+ * That second case is why this is more than a `try`. A target beginning `//`
+ * is protocol-relative, so `new URL('//api/health', base)` yields host `api`
+ * and pathname `/health`: the first segment is eaten as an authority and the
+ * server never sees the `/api` it was asked for. Since nothing here reads the
+ * host back, that loss was silent, and `//api/media` answered the bundle
+ * instead of the guarded route's 401. Refusing a reinterpreted origin is the
+ * fix at the boundary, rather than teaching every downstream check about a
+ * shape that should never have got past parsing.
+ *
+ * This server only ever receives origin-form targets. Absolute-form is legal
+ * in HTTP/1.1 for proxies and is not something a browser sends here, so
+ * refusing it costs nothing a real client does.
+ */
 function targetOf(url: string | undefined): URL | null {
+  let parsed: URL;
   try {
-    return new URL(url ?? '/', REQUEST_BASE);
+    parsed = new URL(url ?? '/', REQUEST_BASE);
   } catch {
     return null;
   }
+  return parsed.origin === REQUEST_BASE ? parsed : null;
 }
 
 /** A cursor as it arrived on the query string: absent and empty are both "no cursor". */
@@ -414,6 +474,24 @@ async function artworkAnswer(
   return {
     kind: 'artwork',
     artwork: await readArtwork(raw, kind, mediaItemId, ARTWORK_FILES, ifNoneMatch),
+  };
+}
+
+/**
+ * `/*` -- everything `routeFor` reaches this route for, which `matchesPath`
+ * has already confined to paths outside `/api` (see that function). Wraps
+ * `static-route.ts`'s `staticAnswer` into an `Answer` the same way
+ * `artworkAnswer` wraps `readArtwork`: the filesystem shape lives one file
+ * over, tested without a socket, and this is only the routing glue.
+ */
+async function staticRouteAnswer(
+  webRoot: string,
+  pathname: string,
+  ifNoneMatch: string | undefined,
+): Promise<Answer> {
+  return {
+    kind: 'static',
+    file: await staticAnswer({ webRoot, readFile: STATIC_FILES.readFile, stat: STATIC_FILES.stat }, pathname, ifNoneMatch),
   };
 }
 
@@ -493,15 +571,26 @@ interface Route {
    */
   readonly path: string;
   /**
-   * Whether a caller with no session may reach it. `true` on exactly one
-   * route, and the tests assert that count rather than trusting it.
+   * Whether a caller with no session may reach it. `true` on exactly two
+   * routes, and the tests assert that count rather than trusting it.
    */
   readonly open: boolean;
   readonly answer: (route: RouteRequest) => Answer | Promise<Answer>;
 }
 
 /**
- * The nine routes.
+ * The static route's own `path`, in `ROUTES` -- a sentinel `matchesPath`
+ * recognises and handles before its ordinary segment comparison ever runs,
+ * not a template built from `:name` segments the way every other route's is
+ * (see that function). `probeFor` in the tests also sends it as a literal
+ * request path, which is harmless: `/*` names no real file under any web
+ * root, so `staticAnswer` answers it with `index.html`, exactly as it would
+ * any other path nothing on disk matches.
+ */
+const STATIC_ROUTE_PATH = '/*';
+
+/**
+ * The ten routes.
  *
  * Exported because the tests derive their request set from it; nothing else
  * reads it, and nothing may mutate it.
@@ -509,7 +598,7 @@ interface Route {
 export const ROUTES: readonly Route[] = [
   {
     path: '/api/health',
-    // The one open route: a container health check has no credential to
+    // One of two open routes: a container health check has no credential to
     // offer, and the body it answers names nothing a caller could not guess.
     // **No `generation` here**, deliberately: it is on all three sync routes
     // and it is an install fingerprint, so serving it without a session would
@@ -629,17 +718,52 @@ export const ROUTES: readonly Route[] = [
       return json(answer.status, answer.body);
     },
   },
+  {
+    path: STATIC_ROUTE_PATH,
+    // The other of two open routes (design spec §3, and the shell slice's
+    // Task 1). It has to be: the bundle is the same bytes for every caller,
+    // and it is what a browser must load and run *before* it can render the
+    // sign-in form that would otherwise establish a session -- guarding it
+    // would not protect anything, since there is nothing caller-specific in
+    // an `index.html` or a hashed asset file, and it would make signing in
+    // to a fresh install impossible rather than merely inconvenient.
+    //
+    // `matchesPath` excludes every `/api` path from this template already,
+    // so an unmatched `/api/*` request still falls through to "no route
+    // claims this", which `refusalFor` guards -- exactly as it did before
+    // this route existed. `staticAnswer` refuses `/api` again on its own,
+    // defensively, in case it is ever called from somewhere that skipped
+    // that exclusion.
+    open: true,
+    answer: ({ deps, request, pathname }) => staticRouteAnswer(
+      deps.webRoot,
+      pathname,
+      request.headers['if-none-match'],
+    ),
+  },
 ];
 
 /**
  * Whether `pathname` is the route `template` describes.
  *
- * Segment counts must match, every literal segment must be equal, and a
- * `:name` segment matches anything but the empty string -- a path with the
- * right number of slashes and an empty segment is a real request a client can
- * send, and it is not this route.
+ * `STATIC_ROUTE_PATH` is handled first and separately, because it is not a
+ * segment template at all: it matches every path of any depth *except* one
+ * under `/api`, which the segment-count comparison below has no way to
+ * express (a fixed template only ever matches paths of its own segment
+ * count). Excluding `/api` here, rather than leaving it to `staticAnswer`
+ * alone, is what keeps an unmatched `/api/*` path guarded exactly as it was
+ * before this route existed: `routeFor` finding no match for it is what
+ * sends it to `refusalFor`'s "a path no route claims is guarded" branch,
+ * where `staticAnswer`'s own defensive check on the same rule never runs at
+ * all because `staticAnswer` is never called for it.
+ *
+ * For every other template, segment counts must match, every literal
+ * segment must be equal, and a `:name` segment matches anything but the
+ * empty string -- a path with the right number of slashes and an empty
+ * segment is a real request a client can send, and it is not this route.
  */
 function matchesPath(template: string, pathname: string): boolean {
+  if (template === STATIC_ROUTE_PATH) return !isApiPath(pathname);
   const wanted = template.split('/');
   const got = pathname.split('/');
   if (wanted.length !== got.length) return false;
@@ -729,12 +853,19 @@ function write(response: ServerResponse, answer: Answer): void {
     writeJson(response, answer.status, answer.body);
     return;
   }
-  // Written exactly as `readArtwork` composed it, including a 404 or a 304
-  // carrying no body at all: that function has already decided what the
-  // caller may know, and it deliberately names neither the path it looked
-  // for nor whether the row or the file was the thing missing.
-  response.writeHead(answer.artwork.status, answer.artwork.headers);
-  response.end(answer.artwork.body ?? undefined);
+  if (answer.kind === 'artwork') {
+    // Written exactly as `readArtwork` composed it, including a 404 or a 304
+    // carrying no body at all: that function has already decided what the
+    // caller may know, and it deliberately names neither the path it looked
+    // for nor whether the row or the file was the thing missing.
+    response.writeHead(answer.artwork.status, answer.artwork.headers);
+    response.end(answer.artwork.body ?? undefined);
+    return;
+  }
+  // `answer.kind === 'static'`, written exactly as `staticAnswer` composed
+  // it, on the same reasoning as the artwork branch above.
+  response.writeHead(answer.file.status, answer.file.headers);
+  response.end(answer.file.body ?? undefined);
 }
 
 /** An error's message, whatever was thrown -- a non-`Error` stringifies rather than vanishing. */

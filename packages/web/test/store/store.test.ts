@@ -101,15 +101,24 @@ function stubFetch(table: Readonly<Record<string, unknown>>): StubFetch {
   };
 }
 
-/** Granted the moment it is asked for, whose release never settles -- `store/leader.ts`'s production behaviour, and what makes this store "the leader" that fetches. */
+/**
+ * Granted the moment it is asked for, and what makes this store "the leader"
+ * that fetches. The release function `hold` now must return (`Lease`'s own
+ * doc) is a no-op here: nothing in this file ever calls it, so the release
+ * promise handed to `onGranted` behaves exactly as it always did for these
+ * tests -- pending for as long as the test runs.
+ */
 function grantedLease(): Lease {
   return {
-    hold(onGranted): void {
+    hold(onGranted): () => void {
       onGranted(
         new Promise<void>(() => {
-          // Never settles: a browser tears the lock down with the tab.
+          // Never settles in this fixture: nothing here ever releases.
         }),
       );
+      return () => {
+        // Nothing to release: see this function's own doc.
+      };
     },
   };
 }

@@ -58,6 +58,17 @@ const BOGUS_COOKIE = 'better-auth.session_token=placeholder.not-a-real-signature
 /** A log that drops every line, for the instance whose lines this file does not assert. */
 const dropLine = (): void => {};
 
+/**
+ * A web root this file never has to build or clean up, because it never
+ * exists: this file's job is the router and the guard, not content-serving
+ * fidelity (`static-route.test.ts` owns that, fully injected). Passing a
+ * real absent path here also exercises the property design spec §3 promises
+ * for it -- a missing web root does not crash the server or take `/api` down
+ * with it, which every request this file makes to the static route's own
+ * path implicitly proves by getting an answer at all.
+ */
+const MISSING_WEB_ROOT = '/nonexistent/pickarr-web-root-for-server-test';
+
 /** One `log` call, as the fake below records it. */
 interface LogLine {
   message: string;
@@ -116,6 +127,7 @@ async function start(
   db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
   host?: string,
+  webRoot: string = MISSING_WEB_ROOT,
 ): Promise<Running> {
   const logs: LogLine[] = [];
   const server = await createReadServer({
@@ -133,6 +145,7 @@ async function start(
     generation: 'placeholder-generation',
     host,
     port: 0,
+    webRoot,
     authFor: (baseURL) => createAuth({
       raw,
       db,
@@ -228,8 +241,9 @@ async function startSignedIn(
   raw: DatabaseSync,
   db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
+  webRoot?: string,
 ): Promise<SignedIn> {
-  const running = await start(raw, db, pluginIdForType);
+  const running = await start(raw, db, pluginIdForType, undefined, webRoot);
   try {
     return { ...running, cookie: await signUpOwner(running.server, raw) };
   } catch (error) {
@@ -558,9 +572,14 @@ test('an unknown route is 404, not a 500', async () => {
   const { raw, db } = setup();
   const { server, logs, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
+    // `/` is deliberately absent from this list: since the static route
+    // exists, `/` is no longer unmatched -- it is the static route's own
+    // territory, and `static-route.test.ts` covers what it answers there.
+    // Every probe below stays under `/api`, which the static route excludes
+    // from its own match (`matchesPath`'s `STATIC_ROUTE_PATH` case), so each
+    // one is still a path no route claims.
     const answers = await getAll(server, [
       '/api/nope',
-      '/',
       '/api/media/1',
       '/api/artwork/poster',
       '/api/artwork/statue/1',
@@ -1129,7 +1148,7 @@ test('every route except health refuses without a session', async () => {
     // Both halves of the table's shape, because the filter above is what a
     // route wrongly marked open would slip through: flipping one `open` would
     // otherwise *remove* that route from this test rather than fail it.
-    assert.equal(guarded.length, ROUTES.length - 1, 'exactly one route in the table is open');
+    assert.equal(guarded.length, ROUTES.length - 2, 'exactly two routes in the table are open');
     assert.ok(guarded.length >= 5, 'and the table is the real one, not a list this test passed over');
 
     const refused = await getAll(server, guarded.map(probeFor), ANONYMOUS);
@@ -1149,23 +1168,31 @@ test('every route except health refuses without a session', async () => {
   }
 });
 
-test('health answers without a session, and is the only route that does', async () => {
-  // A container health check has no credential to offer, so this one route
-  // stays open -- and *only* this one, which is why the assertion is over the
-  // whole table rather than over health alone.
+test('health and the static bundle answer without a session, and nothing else does', async () => {
+  // A container health check has no credential to offer, and the bundle is
+  // the same bytes for every caller and the one thing a browser must load
+  // before it can even render a sign-in form -- so those two stay open, and
+  // *only* those two, which is why the assertion is over the whole table
+  // rather than over health alone.
   const { raw, db } = setup();
   const { server } = await start(raw, db, moviesOnly);
   try {
+    const openPaths = ROUTES.filter((route) => route.open).map((route) => route.path);
     assert.deepEqual(
-      ROUTES.filter((route) => route.open).map((route) => route.path),
-      ['/api/health'],
-      'one open route, and it is the health check',
+      openPaths,
+      // '/*' is `server.ts`'s own `STATIC_ROUTE_PATH` sentinel, not a real
+      // request target -- see that module's doc on the constant.
+      ['/api/health', '/*'],
+      'two open routes: the health check and the bundle',
     );
 
     const answers = await getAll(server, ROUTES.map(probeFor), ANONYMOUS);
     for (const { path, status } of answers) {
-      const expected = path === '/api/health' ? 200 : 401;
-      assert.equal(status, expected, `${path} answers ${expected} to a caller with no session`);
+      if (openPaths.includes(path)) {
+        assert.notEqual(status, 401, `${path} must answer without a session`);
+      } else {
+        assert.equal(status, 401, `${path} must refuse a caller with no session`);
+      }
     }
 
     const health = await get(server, '/api/health', ANONYMOUS);
@@ -1442,5 +1469,71 @@ test('the auth routes are reachable without a session', async () => {
     assert.equal(check.status, 200, 'the session check is dispatched too, rather than guarded');
   } finally {
     await server.close();
+  }
+});
+
+/**
+ * A web root with a real `index.html` in it, which these two tests need and
+ * the rest of the file deliberately does without.
+ *
+ * Every other test here points at `MISSING_WEB_ROOT`, and that is right for
+ * them -- they assert on `/api`, and a bundle on disk would only add a way for
+ * the fixture to be wrong. These two are the exception because the property
+ * under test is *which* of two answers an `/api`-shaped request receives, and
+ * with no bundle present both answers are 404 for different reasons. Reverting
+ * `targetOf`'s origin check against `MISSING_WEB_ROOT` was measured: the
+ * anonymous test failed on its status and the signed-in one passed, because
+ * there was no html anywhere for the assertion to catch.
+ */
+async function bundleRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'pickarr-bundle-'));
+  await writeFile(join(root, 'index.html'), '<html lang="en"><body>pickarr</body></html>');
+  return root;
+}
+
+test('a protocol-relative target is refused, never answered with the bundle', async () => {
+  const { raw, db } = setup();
+  const webRoot = await bundleRoot();
+  const { server } = await start(raw, db, moviesOnly, undefined, webRoot);
+  try {
+    // `fetch` sends these verbatim -- measured, it does not collapse the
+    // doubled slash -- so the server really does see `//api/health`. Resolved
+    // against a base, that string is protocol-relative: its first segment is
+    // read as the authority, leaving pathname `/health`, which is not an api
+    // path. Before `targetOf` compared origins, the open static route answered
+    // every one of these with the bundle at 200.
+    const answers = await getAll(server, ['//api/health', '//api/media', '/.//api/media'], null);
+    for (const answer of answers) {
+      assert.equal(answer.status, 401, `${answer.path} is refused for want of a session`);
+      assert.ok(!answer.text.includes('<html'), `${answer.path} must not answer the bundle`);
+    }
+  } finally {
+    // Every test in this file closes its own listener in a `finally`, and all
+    // 24 of them did before this one. A live listener keeps the event loop
+    // open, so skipping it does not fail the test -- it hangs the file with no
+    // test name attached, which is the hazard `CLAUDE.md` records.
+    await server.close();
+    await rm(webRoot, { recursive: true, force: true });
+  }
+});
+
+test('a signed-in protocol-relative target is an unknown route, not the bundle', async () => {
+  const { raw, db } = setup();
+  const webRoot = await bundleRoot();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, webRoot);
+  try {
+    // With the session supplied, the refusal above is out of the way and what
+    // is left is the route lookup: a null target has no pathname to match, so
+    // it is unknown rather than open. This is the half that proves the 401
+    // above is a guard rather than the only thing standing between a
+    // protocol-relative path and the bundle.
+    const answers = await getAll(server, ['//api/health', '//api/media'], cookie);
+    for (const answer of answers) {
+      assert.equal(answer.status, 404, `${answer.path} matches no route`);
+      assert.ok(!answer.text.includes('<html'), `${answer.path} must not answer the bundle`);
+    }
+  } finally {
+    await server.close();
+    await rm(webRoot, { recursive: true, force: true });
   }
 });

@@ -1,48 +1,59 @@
-import { NavLink, Route, Routes } from 'react-router';
-import { Browse } from './routes/Browse.tsx';
-import { Picks } from './routes/Picks.tsx';
-import { Dismissed } from './routes/Dismissed.tsx';
-import { Settings } from './routes/Settings.tsx';
-import { ThemeToggle } from './components/ThemeToggle.tsx';
+/**
+ * The whole client: `Shell` first, `SignIn` once a read answers 401 (design
+ * spec §4, §7 item 14).
+ *
+ * **Starts optimistically, not unconditionally signed out.** Spec §4's full
+ * sentence is: "The client discovers it is unauthenticated the ordinary way:
+ * a read answers 401, and the app renders the form. No probe, no new
+ * endpoint." That names a *mechanism* -- start by reading, let a 401 demote
+ * you -- and the clause forbids only *adding an endpoint* to ask the
+ * question first, not asking at all. Starting in `SignIn` unconditionally
+ * (an earlier version of this file did exactly that) reads the same
+ * sentence backwards: a visitor holding a valid session cookie who reloads
+ * would be sent back to the sign-in form every time, and spec §7 item 14
+ * ("Reload: counts are immediately non-zero, because the replica persisted")
+ * could never pass at all, for anyone.
+ *
+ * `Shell` owns the read that makes the discovery: `withUnauthenticatedCheck`
+ * (`shell/Shell.tsx`) routes a 401 from anywhere in its sync loops to
+ * `onUnauthenticated`, which is this component's cue to fall back to
+ * `SignIn` -- the same callback an explicit "Sign out" click uses, because
+ * `App`'s response to either is identical.
+ */
+import { useCallback, useState, type ReactElement } from 'react';
+import { SignIn } from './auth/SignIn.tsx';
+import { Shell } from './shell/Shell.tsx';
+import type { CreateStoreDeps } from './store/index.ts';
 
-export function App() {
-  return (
-    <div className="app">
-      <nav>
-        <NavLink to="/">Browse</NavLink>
-        <NavLink to="/picks">Picks</NavLink>
-        <NavLink to="/dismissed">Dismissed</NavLink>
-        {/*
-          Settings is not a view of the library, it is a view of the
-          installation, and this rule is what says so.
+type Phase = 'authenticated' | 'unauthenticated';
 
-          An `<hr>` rather than the em dash it replaces, and not only because a
-          dash between two stacked links reads as a stray character once the nav
-          is a column. The dash carried `aria-hidden="true"` because a screen
-          reader announcing "em dash" is noise — which meant the grouping was
-          conveyed to sighted readers and to nobody else. An `<hr>` is a thematic
-          break with an implicit `role="separator"`, so it announces the division
-          itself. That is the whole reason there is no `aria-hidden` here: hiding
-          it would throw away the one thing this element can express that the
-          dash could not.
-        */}
-        <hr className="nav-separator" />
-        <NavLink to="/settings">Settings</NavLink>
-        {/*
-          Below the rule that separates the library from the installation,
-          because it is neither: it is a per-browser preference, and the foot of
-          the chrome is where a reader looks for one.
-        */}
-        <ThemeToggle />
-      </nav>
-      <main>
-        <Routes>
-          <Route path="/" element={<Browse />} />
-          <Route path="/picks" element={<Picks />} />
-          <Route path="/dismissed" element={<Dismissed />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
-      </main>
-    </div>
+export interface AppProps {
+  /**
+   * Overridable for tests, forwarded straight to `Shell`'s own `deps` prop --
+   * see that prop's doc for why a test needs it. `main.tsx` renders `App`
+   * with none, which is the real browser adapters.
+   */
+  shellDeps?: CreateStoreDeps;
+}
+
+export function App({ shellDeps }: AppProps): ReactElement {
+  const [phase, setPhase] = useState<Phase>('authenticated');
+
+  const handleSignedIn = useCallback((): void => {
+    setPhase('authenticated');
+  }, []);
+
+  const handleUnauthenticated = useCallback((): void => {
+    setPhase('unauthenticated');
+  }, []);
+
+  // `deps` is spread only when present rather than always passed (even as
+  // `undefined`): `ShellProps.deps` is typed `CreateStoreDeps | undefined`
+  // as a prop that may be *omitted*, and `exactOptionalPropertyTypes`
+  // distinguishes that from a key explicitly set to `undefined`.
+  return phase === 'authenticated' ? (
+    <Shell {...(shellDeps === undefined ? {} : { deps: shellDeps })} onUnauthenticated={handleUnauthenticated} />
+  ) : (
+    <SignIn onSignedIn={handleSignedIn} />
   );
 }

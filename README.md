@@ -11,8 +11,10 @@ upgrade, and you decide whether to take it.
 
 ## The state of play
 
-This documents **2.0**, which is a rewrite in progress and not yet a thing you can
-deploy.
+This documents **2.0**, a rewrite in progress. It builds, it containerises, and it
+runs -- but the browser client so far is one sign-in form and three counts that climb
+as the replica fills. There is nothing to browse and nothing to pick yet, so run it to
+watch 2.0 work, not to replace 1.x.
 
 2.0 is greenfield: it starts on an empty database and rebuilds from feeds, so it shares
 no schema with 1.x and nothing migrates. The two implementations sit side by side in
@@ -24,13 +26,14 @@ this repo.
 | | `packages/contract` | What a plugin is: the types the host and plugins agree on |
 | | `packages/openmetadata` | The base every shipped plugin is built from: one lookup service, one API key |
 | | `packages/plugin-tv`, `packages/plugin-movie`, `packages/plugin-xxx` | The three shipped plugins |
-| **1.x** | `packages/core` | Frozen. The whole 1.x application, and the only thing `Dockerfile` builds |
+| | `packages/web` | The browser client, built against 2.0's sync API and served by the host |
+| **1.x** | `packages/core` | Frozen. The whole 1.x application; no longer what `Dockerfile` builds |
 | | `packages/plugin-scenes` | Frozen. 1.x's scene parser, against the old plugin interface |
-| **Shared** | `packages/web` | Currently 1.x's SPA. Being rewritten against 2.0's sync API |
 
-**There is no 2.0 container.** `Dockerfile` and `docker-compose.example.yml` build and
-run `packages/core`, which is 1.x. The 2.0 host runs from source today, and its web UI
-is not wired up at all: the host serves JSON and artwork, and nothing serves the SPA.
+`Dockerfile` builds 2.0, not 1.x: `packages/contract`, `packages/openmetadata`, the three
+plugins, `packages/host`, and `packages/web`'s built bundle, which the host serves itself
+from a static route alongside its JSON and artwork routes. 1.x does not ship in this
+image at all — there is no container for it here.
 
 The design documents are in `docs/superpowers/specs/`. Everything dated `2026-09` is
 2.0, in slice order; `docs/database-migrations.md` is required reading before you write
@@ -127,8 +130,11 @@ running both would have one variable meaning two things.
 
 An empty value is not a value. `PICKARR_READ_API_HOST=''` would bind every interface if
 it reached the listener, and `PICKARR_CONFIG=''` would mean "read the file `''`", so
-every one of these treats empty as unset and falls back — except `PICKARR_READ_API_PORT`,
-which throws, because a port with no digits in it is a mistake rather than a default.
+every one of these treats empty as unset and falls back to its default.
+
+A value that is present but is not a port is a different matter, and only
+`PICKARR_READ_API_PORT` can be one: it refuses `0`, `70000`, `abc`, and even `' 8787'`
+with a leading space, rather than starting on a port the operator did not ask for.
 
 ## Secrets
 

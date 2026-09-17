@@ -9,15 +9,30 @@
  * `onMessage` without ever holding the lease, and `holdLease` never touches
  * the channel.
  *
+ * **`holdLease` releases on request, and used not to.** This module's own
+ * doc used to say the lease is held "for its lifetime" (spec §5) and that
+ * costs nothing to leave unreleasable, on the theory that a browser tears
+ * the lock down when the tab does and nothing else ever needs to end it.
+ * That theory assumed exactly one `Store` per tab, for the tab's whole life
+ * -- `store/index.ts`'s own doc names the assumption. It does not hold:
+ * `Shell.tsx`'s ordinary sign-in journey (mount, 401, demote to `SignIn`,
+ * sign back in, mount a *second* `Store` in the same tab) and its ordinary
+ * sign-out journey (stop one `Store`, later mount another) both create a
+ * second lease request in one tab while the first is still queued or still
+ * held, and an unreleasable lease left that second request permanently
+ * behind the first -- every count stuck at zero for the rest of the tab's
+ * life, caught by `packages/e2e/tests/shell.spec.ts`. `holdLease` now
+ * returns a function that settles the same `release` promise `onGranted` is
+ * handed, so a caller that is done leading (`sync.ts`'s `stop()`) can say so
+ * without needing the tab itself to close.
+ *
  * **A `BroadcastChannel` keeps whatever process holds it alive until it is
  * closed** (measured: an open one with no listeners left a Node process
  * running past its own last line, killed only by an external signal).
  * `broadcast` and `onMessage` are written so every channel this module
  * opens is closed by the same call that stops needing it -- see each for
- * how. `holdLease` opens none, and needs no matching close: measured, a
- * `navigator.locks.request` whose callback's promise never settles does not
- * keep a process alive the way an open channel does, so the lease this
- * module holds "for its lifetime" (spec §5) costs nothing to leave that way.
+ * how. `holdLease` opens none, so it has no matching close of that kind to
+ * worry about; releasing the lease is a different question, answered above.
  */
 import type { Changed } from './apply.ts';
 
@@ -89,13 +104,14 @@ export type ChannelMessage =
  * module's own tests use distinct names purely so one test's lease cannot
  * queue behind another's, not to model one tab wanting two leases at once.
  *
- * Reset to `false` in exactly one place, and only there: when the callback
- * handed the lease throws. `holdLease` otherwise never releases (see its own
- * doc), so there is no moment after a *successful* grant at which it is
- * honest to say this tab is no longer leading -- but a holder that could not
- * start is not leading, and saying otherwise let a second tab take the lease
- * while this one still claimed it. This paragraph said "never reset" until
- * that fix landed beneath it.
+ * Reset to `false` in two places: when the callback handed the lease throws,
+ * and when the release function {@link holdLease} returns is called. Both
+ * are "this tab is no longer leading" -- a holder that could not start was
+ * never leading, and a holder that gave the lease up on purpose stops being
+ * one -- and saying otherwise in either case let a second tab take the lease
+ * while this one still claimed it. This paragraph said "reset in exactly one
+ * place" until the second one was added, to close exactly that gap for a
+ * voluntary release.
  */
 let leading = false;
 
@@ -106,7 +122,8 @@ export function isLeader(): boolean {
 /**
  * Requests the exclusive Web Lock named `name`, and calls `onGranted` once
  * this tab holds it -- design spec §5: one tab fetches, and holding this
- * lock is what decides which one.
+ * lock is what decides which one. Returns a function the caller can call to
+ * give the lease up voluntarily.
  *
  * Requested with no `ifAvailable`: a caller behind the current holder
  * queues rather than being told no, because a follower has nothing more
@@ -117,21 +134,58 @@ export function isLeader(): boolean {
  * manager the process has, exactly as two tabs would on the one their
  * shared origin has.
  *
- * `release`, the promise handed to `onGranted`, never settles. Spec §5 holds
- * the lease "for its lifetime": a browser tears the lock down when the tab
- * itself is torn down, and no line of this module ever runs at that moment
- * to resolve anything, in production or in this suite. It exists so a
- * caller that wants a hook for "notice if I am ever no longer leader" --
- * task 6's sync loop, stopping its timers -- has one to attach `.then()`
- * to; this module's own tests prove it *stays* pending for as long as the
- * lease is held, not that it eventually settles, because it does not.
+ * `release`, the promise handed to `onGranted`, settles exactly when the
+ * returned function is called, and not otherwise -- a browser also tears
+ * the lock down when the tab itself is torn down, but nothing in this module
+ * needs to run at that moment, since there is nothing left to notify. Before
+ * this function returned a way to call that promise's resolver directly, the
+ * comment here said the promise "never settles" and called that fact a
+ * feature: spec §5 holds the lease "for its lifetime", and a lease released
+ * only by the tab closing costs nothing to leave that way. That reasoning
+ * assumed one `Store` per tab, forever (`store/index.ts`'s own doc names the
+ * assumption); this module's own doc above explains why it does not hold and
+ * points at the spec that caught it.
+ *
+ * The returned function is idempotent: a second call, or a call after the
+ * lease was already given up some other way (the callback threw), does
+ * nothing. This module has already been bitten twice by a release-style
+ * closure that was not -- `onMessage`'s own doc tells that story for a
+ * shared subscriber count -- so the guard here is a `released` flag checked
+ * before anything else runs, the same shape.
+ *
+ * A caller that releases before this tab's request has even been granted is
+ * honoured, not ignored: the lease is still requested and still eventually
+ * granted (this module has no way to withdraw a `navigator.locks.request`
+ * once made), but the `release` promise `onGranted` receives is already
+ * resolved, so a caller reading `mayFetch()`-style state off it after that
+ * point sees "not leading" immediately rather than after a further release
+ * call nobody would think to make twice.
  */
-export function holdLease(name: string, onGranted: (release: Promise<void>) => void): void {
+export function holdLease(name: string, onGranted: (release: Promise<void>) => void): () => void {
+  let resolveRelease: (() => void) | undefined;
+  let released = false;
+  // Whether *this* holder is the one that set `leading = true` -- distinct
+  // from `released`, which only says whether this holder has given up its
+  // own claim. Guards the returned `release` function below: without it, a
+  // holder still queued behind another one's genuine grant could clear
+  // `leading` out from under that other holder purely by being released
+  // first, making `isLeader()` answer `false` while a holder that actually
+  // leads still holds the lock -- contradicting `isLeader`'s own docblock.
+  // Set alongside `leading` in the callback below, never independently.
+  let grantedHere = false;
+
   navigator.locks
     .request(name, { mode: 'exclusive' }, () => {
-      leading = true;
-      const release = new Promise<void>(() => {
-        // Never settles -- see this function's doc comment.
+      // Not unconditionally `true`: the returned function may already have
+      // been called while this request was still queued (see this
+      // function's own doc), and a holder that gave the lease up before it
+      // ever led must not report itself leading now that the grant has
+      // finally arrived.
+      leading = !released;
+      grantedHere = !released;
+      const release = new Promise<void>((resolve) => {
+        resolveRelease = resolve;
+        if (released) resolve();
       });
       try {
         onGranted(release);
@@ -146,6 +200,7 @@ export function holdLease(name: string, onGranted: (release: Promise<void>) => v
         // one still claimed to hold it. Two tabs fetching is the one thing the
         // lease exists to prevent.
         leading = false;
+        released = true;
         console.error('pickarr: the lease holder threw on being granted', name, err);
         return;
       }
@@ -154,12 +209,23 @@ export function holdLease(name: string, onGranted: (release: Promise<void>) => v
     .catch((err: unknown) => {
       // A rejection here means the browser refused or aborted the request
       // itself (e.g. an invalid `name`), not that leadership was lost --
-      // `release` above never rejects, only never settling. Reported rather
+      // `release` above only ever resolves, never rejects. Reported rather
       // than thrown into nothing, matching `store/notify.ts`'s subscriber
       // errors: one failed lease request is not a reason the rest of the
       // module goes silent.
       console.error('pickarr: requesting lease', name, 'failed', err);
     });
+
+  return function release(): void {
+    if (released) return;
+    released = true;
+    // Only this holder's own grant may clear the module-global flag -- a
+    // release fired while still queued (`grantedHere` still `false`) has
+    // nothing of its own to give up, and must not clear a different,
+    // already-granted holder's `leading = true` out from under it.
+    if (grantedHere) leading = false;
+    resolveRelease?.();
+  };
 }
 
 let channel: BroadcastChannel | undefined;

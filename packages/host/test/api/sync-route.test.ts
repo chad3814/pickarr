@@ -39,6 +39,9 @@ const ANONYMOUS = null;
 /** A `log` that drops every line -- nothing in this file asserts on it. */
 const dropLine = (): void => {};
 
+/** See `server.test.ts`'s own doc: a web root this file never has to build, because this file's job is sync, not static serving. */
+const MISSING_WEB_ROOT = '/nonexistent/pickarr-web-root-for-sync-route-test';
+
 interface Running {
   server: ReadServer;
   /**
@@ -90,6 +93,7 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     generation,
     host: undefined,
     port: 0,
+    webRoot: MISSING_WEB_ROOT,
     authFor: (baseURL) => createAuth({
       raw,
       db,

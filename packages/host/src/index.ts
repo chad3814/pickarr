@@ -1,9 +1,21 @@
 export type { ReadServer, ReadServerDeps } from './api/server.ts';
 export { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, createReadServer } from './api/server.ts';
+// `createAuth` and `ensureClaimToken` are the two pieces `createReadServer`'s
+// own `authFor` needs that this package otherwise keeps internal -- exported
+// for the same reason `Timers` below is: an external caller assembling a real
+// `ReadServerDeps` (task 8's browser e2e harness, which boots the read API
+// in-process rather than through `main`) cannot build an `Auth` instance or
+// read the install's claim token any other way.
+export { createAuth } from './auth/instance.ts';
+export { ensureClaimToken } from './auth/claim.ts';
 export { createDownloadClients } from './clients/downloads.ts';
 export type { HostDb } from './db/open.ts';
 export { openDatabase, openTestDatabase } from './db/open.ts';
 export { migrateHost, migratePlugin } from './db/migrate.ts';
+// `ensureSyncGeneration`, for the same external caller as `createAuth` above:
+// `ReadServerDeps.generation` is minted from the database exactly this way in
+// `main`, and there is no other public path to it.
+export { ensureSyncGeneration } from './db/host-state.ts';
 export type { FetchLimits, QueuedFetch } from './fetch/queue.ts';
 export { createHostFetch } from './fetch/queue.ts';
 export type { Host, NotifyOutcome } from './host.ts';
@@ -16,3 +28,9 @@ export type { Timers } from './jobs/dispatcher.ts';
 export type { PollResult } from './feeds/reader.ts';
 export { createFeedReader } from './feeds/reader.ts';
 export { main } from './main.ts';
+// `createSyncRegistry`, for the same external caller once more:
+// `ReadServerDeps.registry` needs one, and `media_item` (the table task 8's
+// harness seeds and the shell's counts read) is a host table synced with no
+// plugin involved at all, so an empty plugin list is a legitimate registry to
+// build.
+export { createSyncRegistry } from './sync/registry.ts';
