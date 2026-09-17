@@ -17,6 +17,18 @@ afterEach(() => {
 type Call = [url: string, init: RequestInit | undefined];
 
 /**
+ * Narrows a parsed JSON body to a plain object, so a test can read its fields
+ * without a cast (Global Constraint: no cast to silence a type error). An
+ * assertion function rather than a `value is Record<...>` type guard used in
+ * an `if`: this reads once, right after `JSON.parse`, and there is nothing
+ * else the caller would do with a `false` result other than fail the test --
+ * which `assert.ok` already does, with a message naming what went wrong.
+ */
+function assertRecord(value: unknown): asserts value is Record<string, unknown> {
+  assert.ok(typeof value === 'object' && value !== null, 'the request body is a JSON object');
+}
+
+/**
  * Replaces `globalThis.fetch` for the duration of one test and records every
  * call. Restored by `afterEach` via `cleanups`, the same shape
  * `adapters.test.ts` uses for the same reason.
@@ -53,10 +65,13 @@ test('signIn posts credentials to the mounted sign-in route with the browser coo
   assert.equal(url, '/api/auth/sign-in/email', 'the mounted path, verified against the host source rather than guessed');
   assert.equal(init?.method, 'POST');
   assert.equal(init?.credentials, 'same-origin', 'the session cookie travels via the browser\'s own jar, never read or forwarded by this module');
-  assert.equal(
-    init?.headers instanceof Headers ? init.headers.get('content-type') : (init?.headers as Record<string, string> | undefined)?.['content-type'],
-    'application/json',
-  );
+  // `Headers`, not a cast: `RequestInit['headers']` is `HeadersInit`, which
+  // also allows a plain object or a `[string, string][]` -- a cast to
+  // `Record<string, string>` would silently drop that third arm rather than
+  // reading it. `new Headers(...)` normalises whichever shape `init.headers`
+  // actually is, including the one already-`Headers` case, into the one
+  // lookup this needs.
+  assert.equal(new Headers(init?.headers).get('content-type'), 'application/json');
   assert.deepEqual(JSON.parse(String(init?.body)), { email: 'owner@example.invalid', password: 'correct horse' });
 });
 
@@ -71,12 +86,11 @@ test('signUp posts the claim token under the field Better Auth reads, alongside 
   assert.equal(init?.method, 'POST');
   assert.equal(init?.credentials, 'same-origin');
   const body: unknown = JSON.parse(String(init?.body));
-  assert.ok(typeof body === 'object' && body !== null, 'the body is a JSON object');
-  const record = body as Record<string, unknown>;
-  assert.equal(record.email, 'owner@example.invalid');
-  assert.equal(record.password, 'correct horse');
-  assert.equal(record.claimToken, 'the-claim-token', 'the exact field name Better Auth\'s sign-up hook reads (CLAIM_TOKEN_FIELD)');
-  assert.equal(typeof record.name, 'string', 'Better Auth\'s sign-up schema requires a name; the form collects none, so one is supplied');
+  assertRecord(body);
+  assert.equal(body.email, 'owner@example.invalid');
+  assert.equal(body.password, 'correct horse');
+  assert.equal(body.claimToken, 'the-claim-token', 'the exact field name Better Auth\'s sign-up hook reads (CLAIM_TOKEN_FIELD)');
+  assert.equal(typeof body.name, 'string', 'Better Auth\'s sign-up schema requires a name; the form collects none, so one is supplied');
 });
 
 test('signOut posts to the mounted sign-out route with the browser cookie jar, no body required', async () => {

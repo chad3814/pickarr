@@ -19,6 +19,18 @@ afterEach(() => {
 /** One recorded call: the url the stubbed `fetch` was given, and its init. */
 type Call = [url: string, init: RequestInit | undefined];
 
+/**
+ * Narrows a parsed JSON body to a plain object, so a test can read its fields
+ * without a cast (Global Constraint: no cast to silence a type error). An
+ * assertion function rather than a `value is Record<...>` type guard used in
+ * an `if`: this reads once, right after `JSON.parse`, and there is nothing
+ * else the caller would do with a `false` result other than fail the test --
+ * which `assert.ok` already does, with a message naming what went wrong.
+ */
+function assertRecord(value: unknown): asserts value is Record<string, unknown> {
+  assert.ok(typeof value === 'object' && value !== null, 'the request body is a JSON object');
+}
+
 function stubFetchCalls(handler: (url: string, init?: RequestInit) => Promise<Response>): { calls: Call[] } {
   const calls: Call[] = [];
   globalThis.fetch = fetchStub((url, init) => {
@@ -123,10 +135,10 @@ test('the claim affordance reveals a token field and posts sign-up instead', asy
   const [url, init] = calls[0] ?? ['', undefined];
   assert.equal(url, '/api/auth/sign-up/email');
   const body: unknown = JSON.parse(String(init?.body));
-  const record = body as Record<string, unknown>;
-  assert.equal(record.email, 'owner@example.invalid');
-  assert.equal(record.password, 'correct horse');
-  assert.equal(record.claimToken, 'the-claim-token');
+  assertRecord(body);
+  assert.equal(body.email, 'owner@example.invalid');
+  assert.equal(body.password, 'correct horse');
+  assert.equal(body.claimToken, 'the-claim-token');
 });
 
 test('a refused sign-in shows why, and the form stays usable', async () => {
