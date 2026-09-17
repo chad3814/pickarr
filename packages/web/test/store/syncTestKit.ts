@@ -89,15 +89,25 @@ export function stubSyncFetch(table: Readonly<Record<string, unknown>>): StubFet
   };
 }
 
-/** Granted the moment it is asked for, whose release never settles -- `store/leader.ts`'s production behaviour. */
+/**
+ * Granted the moment it is asked for. `hold` now must return a release
+ * function (`Lease`'s own doc); this fixture's is a no-op, so the promise
+ * `onGranted` receives stays pending exactly as it always did here -- no
+ * caller in the files that use this fixture ever exercises release, that
+ * being `sync.test.ts`'s own `manualLease` and the `leader.ts`-level tests'
+ * business.
+ */
 export function grantedLease(): Lease {
   return {
-    hold(onGranted): void {
+    hold(onGranted): () => void {
       onGranted(
         new Promise<void>(() => {
-          // Never settles: a browser tears the lock down with the tab.
+          // Never settles in this fixture: nothing here ever releases.
         }),
       );
+      return () => {
+        // Nothing to release: see this function's own doc.
+      };
     },
   };
 }

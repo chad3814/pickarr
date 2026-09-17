@@ -93,18 +93,25 @@ export interface Store {
   subscribeReset(cb: () => void): () => void;
   gatherMediaItem(mediaItemId: number): Promise<GatheredItem | undefined>;
   /**
-   * Cancels both sync loops, stops relaying other tabs' messages, and closes
-   * this store's IndexedDB connection. Safe to call more than once --
-   * `SyncHandle.stop()` already is, and `IDBDatabase.close()` is idempotent
-   * by the standard.
+   * Cancels both sync loops, releases this store's Web Lock lease if it
+   * holds one, stops relaying other tabs' messages, and closes this store's
+   * IndexedDB connection. Safe to call more than once -- `SyncHandle.stop()`
+   * already is, and `IDBDatabase.close()` is idempotent by the standard.
+   *
+   * The lease release is what makes a second `Store` opened later in the
+   * same tab able to lead: `Shell.tsx`'s sign-in and sign-out journeys both
+   * open one after this one has stopped, and until `SyncHandle.stop()`
+   * released the underlying Web Lock, that second `Store` queued behind this
+   * one forever and never fetched anything (`leader.ts`'s module doc has the
+   * full account).
    *
    * Closing `db` here, and not before, is what makes this store's `stop()`
    * actually stop things end to end: `sync.ts`'s own `SyncHandle.stop()`
-   * only cancels the two scheduled tasks and the `BroadcastChannel` relay,
-   * because it never opened the database and has no business closing a
-   * handle a caller might still be reading from mid-shutdown. This module
-   * did open it, so closing it here is what leaves nothing of this store's
-   * for the process to hang on.
+   * only cancels the two scheduled tasks, releases the lease and the
+   * `BroadcastChannel` relay, because it never opened the database and has
+   * no business closing a handle a caller might still be reading from
+   * mid-shutdown. This module did open it, so closing it here is what leaves
+   * nothing of this store's for the process to hang on.
    */
   stop(): void;
 }

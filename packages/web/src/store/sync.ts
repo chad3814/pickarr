@@ -145,7 +145,7 @@ export type Schedule = (loop: SyncLoop, delayMs: number, run: () => void) => Can
 
 /**
  * The lease, as the loops need it: one method, which calls back once this
- * instance holds it.
+ * instance holds it, and returns a function to give the lease up again.
  *
  * Injected rather than taken from `store/leader.ts` directly, and the reason
  * is spec §11 -- "a test that cannot deny the lock cannot assert it". It also
@@ -157,9 +157,17 @@ export type Schedule = (loop: SyncLoop, delayMs: number, run: () => void) => Can
  * not a question the loops ask -- they do not exist until `onGranted` fires,
  * which is a stronger guarantee than a guard that could be read at the wrong
  * moment.
+ *
+ * **The returned function is what makes `stop()` below able to give the
+ * lease up.** It used to return nothing, on the theory that a lease is held
+ * for a tab's whole life and only the tab closing ever ends it --
+ * `store/leader.ts`'s module doc tells the story of why that theory was
+ * wrong: `Shell.tsx`'s ordinary sign-in and sign-out journeys both create a
+ * second `Store` (and so a second `hold` call) in one tab, and an
+ * unreleasable lease left the second one queued forever behind the first.
  */
 export interface Lease {
-  hold(onGranted: (release: Promise<void>) => void): void;
+  hold(onGranted: (release: Promise<void>) => void): () => void;
 }
 
 export interface SyncDeps {
@@ -178,7 +186,7 @@ export interface SyncDeps {
 }
 
 export interface SyncHandle {
-  /** Cancels both loops and stops relaying other tabs' messages. Safe to call more than once. */
+  /** Cancels both loops, releases the lease if this instance holds it, and stops relaying other tabs' messages. Safe to call more than once. */
   stop(): void;
 }
 
@@ -702,13 +710,16 @@ export function startSync(deps: SyncDeps): SyncHandle {
     }
   }
 
-  deps.locks.hold((release) => {
+  const releaseLease = deps.locks.hold((release) => {
     leading = true;
-    // `leader.ts`'s `release` never settles, which is the production case:
-    // a browser tears the lock down with the tab. A lease that *does* release
-    // means this tab is no longer the one that fetches, so the loops stop --
-    // but the channel relay above does not, because a demoted tab still
-    // displays rows and still needs to hear about them.
+    // `release` settles once something calls the function `deps.locks.hold`
+    // returned -- `stop()` below is the only caller in this module, but
+    // `leader.ts`'s own `holdLease` can also settle it on a browser tearing
+    // the tab down, which is why this is still driven by the promise rather
+    // than by `stop()` alone. Either way, this tab is no longer the one that
+    // fetches, so the loops stop -- but the channel relay above does not,
+    // because a demoted tab still displays rows and still needs to hear
+    // about them.
     void release.then(
       () => {
         leading = false;
@@ -727,6 +738,13 @@ export function startSync(deps: SyncDeps): SyncHandle {
       leading = false;
       stopLoops();
       unsubscribe();
+      // Gives the underlying Web Lock up, not just this instance's own
+      // bookkeeping -- without this, a second `Store` in the same tab
+      // (`Shell.tsx`'s ordinary sign-in and sign-out journeys both create
+      // one) queued behind this lease forever and never fetched anything.
+      // Idempotent (`leader.ts`'s own doc on `holdLease`'s return value), so
+      // calling `stop()` twice is still safe.
+      releaseLease();
     },
   };
 }
@@ -740,8 +758,8 @@ export function startSync(deps: SyncDeps): SyncHandle {
  */
 export function webLocksLease(name: string = LEASE_NAME): Lease {
   return {
-    hold(onGranted: (release: Promise<void>) => void): void {
-      holdLease(name, onGranted);
+    hold(onGranted: (release: Promise<void>) => void): () => void {
+      return holdLease(name, onGranted);
     },
   };
 }
