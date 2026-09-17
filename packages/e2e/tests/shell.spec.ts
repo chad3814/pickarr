@@ -194,10 +194,13 @@ test('a healthy tab does not poll the tail far faster than its 3-second rate', a
   // no sooner than" floor), so an idle browser ran it almost immediately
   // every time.
   //
-  // The bound below is nowhere near that tight -- it does not need to be to
-  // catch a two-orders-of-magnitude regression, and a loose bound is what
-  // keeps this from flaking on a slow CI runner while still failing hard the
-  // moment the floor stops holding.
+  // The window and the bound are both deliberately loose, and the window is
+  // deliberately *short*. A re-review measured both versions over one second:
+  // the floor honoured gives **1** poll, the floor removed gives **481**. So
+  // two seconds is already twenty times the separation this needs, and the six
+  // seconds this first used cost the whole e2e suite about five of them to
+  // learn nothing more. A bound that loose also cannot flake on a slow CI
+  // runner, while still failing hard the moment the floor stops holding.
   const tailRequestPathnames: string[] = [];
   page.on('request', (request) => {
     const { pathname } = new URL(request.url());
@@ -211,7 +214,7 @@ test('a healthy tab does not poll the tail far faster than its 3-second rate', a
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
 
-  await page.waitForTimeout(6_000);
+  await page.waitForTimeout(2_000);
 
-  expect(tailRequestPathnames.length).toBeLessThan(20);
+  expect(tailRequestPathnames.length).toBeLessThan(10);
 });
