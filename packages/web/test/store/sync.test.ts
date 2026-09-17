@@ -1,6 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
+import { eventually } from './syncTestKit.ts';
 import {
   startSync,
   webLocksLease,
@@ -92,6 +93,40 @@ function manualScheduler(): ManualScheduler {
   function pendingFor(loop: SyncLoop): ScheduledTask | undefined {
     return tasks.find((task) => task.loop === loop && !task.ran && !task.cancelled);
   }
+  /**
+   * Waits for the tick `drive` just started to *finish*, instead of trusting a
+   * fixed sleep to outlast it.
+   *
+   * `tick` calls `schedule(loop, ...)` only after `await runOnce(loop)` has
+   * returned, and `runOnce` awaits `applyBatch` -- which is also what wakes
+   * the leader's own subscribers. So a *fresh* pending task for this loop is a
+   * positive marker that the whole tick landed: page applied, cursor written,
+   * subscribers woken, backoff recomputed. It cannot be mistaken for the task
+   * just fired, because `sync.ts` keeps at most one pending task per loop and
+   * the driven one is already marked `ran`.
+   *
+   * The three outcomes that schedule nothing on purpose -- a retired backfill,
+   * a stopped handle, and a refusal ladder that has given up -- leave no
+   * marker, and they are exactly what this file's `pendingFor(loop) ===
+   * undefined` assertions are about. Those fall through to the sleep they
+   * always had, so nothing here waits *less* than it used to and no assertion
+   * changes meaning; the budget only bounds how long a missing marker costs.
+   *
+   * Why this is not a sleep with a bigger number: a tick needs about nine
+   * event-loop turns, which 15ms clears on an idle machine and does not clear
+   * when `node --test` is running eleven other files beside this one. That is
+   * issue #81 in `store/store.test.ts`, and it surfaced here too -- "the
+   * backfill retires on a null cursor and the tail keeps running" and "a
+   * failed response is not read for its body" both failed on
+   * `pendingFor('tail')` being `undefined` when two full suites ran at once.
+   */
+  const MARKER_BUDGET_MS = 150;
+  async function landed(loop: SyncLoop): Promise<void> {
+    const deadline = Date.now() + MARKER_BUDGET_MS;
+    while (pendingFor(loop) === undefined && Date.now() < deadline) await delay(2);
+    await settle();
+  }
+
   return {
     schedule,
     pendingFor,
@@ -107,7 +142,7 @@ function manualScheduler(): ManualScheduler {
       // wrapper returns `undefined`; an `async` one returns a promise.
       const returned: unknown = task.run();
       assert.equal(returned, undefined, 'the loop hands the scheduler a synchronous wrapper, not an async function whose rejection would escape');
-      await settle();
+      await landed(loop);
     },
   };
 }
@@ -270,11 +305,13 @@ test('an empty client bootstraps, then runs both cursors', async () => {
     }),
   );
   const { sched } = start(db, fetch.fetch, grantedLease());
-  await settle();
-
-  assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'no cursors in meta, so the one call before either loop runs is the bootstrap');
-  assert.deepEqual(await readCursors(db), { since: 40, before: 41 }, 'both cursors come from the pivot the bootstrap named: since = W - 1 and before = W');
-  assert.equal(await readGeneration(db), 'gen-1');
+  // The eager bootstrap is in flight, so these are conditions rather than
+  // facts: `start` returns before it has been answered.
+  await eventually(async () => {
+    assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'no cursors in meta, so the one call before either loop runs is the bootstrap');
+    assert.deepEqual(await readCursors(db), { since: 40, before: 41 }, 'both cursors come from the pivot the bootstrap named: since = W - 1 and before = W');
+    assert.equal(await readGeneration(db), 'gen-1');
+  }, 'the eager bootstrap to land');
 
   let wakes = 0;
   cleanups.push(
@@ -571,19 +608,24 @@ test('a lease released for a reason other than this instance\'s own stop() still
   const { sched } = start(db, fetch.fetch, lease);
 
   grant();
-  await settle();
-  assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'granted, so this instance leads and bootstraps');
-  assert.ok(sched.pendingFor('tail'), 'and schedules its poll');
+  await eventually(() => {
+    assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'granted, so this instance leads and bootstraps');
+    assert.ok(sched.pendingFor('tail'), 'and schedules its poll');
+  }, 'the grant to bootstrap and schedule');
 
   release();
-  await settle();
-
-  assert.equal(
-    sched.pendingFor('tail'),
-    undefined,
-    'the lease releasing on its own -- never through this instance\'s own stop() -- still cancels the pending tail task',
-  );
-  assert.equal(sched.pendingFor('backfill'), undefined, 'and the backfill');
+  // Waiting for an absence, which is normally the trap this file's sibling
+  // fix is about -- safe only because the assertion just above established
+  // that the task *did* exist. So its disappearance can only be the
+  // cancellation under test, never "not scheduled yet".
+  await eventually(() => {
+    assert.equal(
+      sched.pendingFor('tail'),
+      undefined,
+      'the lease releasing on its own -- never through this instance\'s own stop() -- still cancels the pending tail task',
+    );
+    assert.equal(sched.pendingFor('backfill'), undefined, 'and the backfill');
+  }, 'the release to cancel both loops');
 });
 
 test('a follower relays what the leader broadcasts to its own subscribers', async () => {
@@ -718,7 +760,11 @@ test('a rejected fetch is contained, reported and retried', async () => {
   const fetch = stubFetch(() => Promise.reject(new Error('network down')));
   const messages = captureErrors();
   const { sched } = start(db, fetch.fetch, grantedLease());
-  await settle();
+  // `drive` throws outright if the loop it is handed has nothing pending, so
+  // this waits for the bootstrap to have scheduled one.
+  await eventually(() => {
+    assert.ok(sched.pendingFor('tail'), 'the bootstrap scheduled the tail');
+  }, 'the loops to be scheduled');
   await sched.drive('tail');
 
   assert.equal(messages.length, 1, 'a rejection inside the tick is caught rather than escaping as an unhandled rejection');

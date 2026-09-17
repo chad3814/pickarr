@@ -7,10 +7,10 @@
  * added by task 6's fix round for `Shell.test.tsx` and `App.test.tsx`) before
  * being pulled out here: the second copy was tolerable, the third was the
  * signal that this had stopped being one test file's private fixture.
- * `store/store.test.ts` keeps its own copy rather than importing this one --
- * it predates this file and its version does not need `hasPending` -- but
- * anything new that needs to drive a store by hand should reach for this
- * module first.
+ * `store/store.test.ts` kept its own copy for a while longer, on the grounds
+ * that it predated this file and did not need `hasPending`; fixing issue #81
+ * is what made it need `hasPending`, so it now imports this module like
+ * everything else and there is one copy again.
  */
 import assert from 'node:assert/strict';
 import type { Lease, Schedule, SyncFetch, SyncLoop, SyncResponse } from '../../src/store/sync.ts';
@@ -24,6 +24,69 @@ export function delay(ms: number): Promise<void> {
 /** A real timer, not fake ones -- fake timers hang this suite (`CLAUDE.md`). */
 export function settle(): Promise<void> {
   return delay(15);
+}
+
+/**
+ * Retries `assertion` until it stops throwing, and fails with what it last
+ * said if it never does. For every assertion about something a driven tick
+ * did, because `drive()` returns before the tick it started has finished.
+ *
+ * **Why this exists, and why `settle()` is not enough.** `drive()`
+ * hands the loop's tick to the scheduler and then sleeps for a fixed 15ms,
+ * because `Schedule` takes a synchronous `run` on purpose (see `drive`) and so
+ * there is no promise for the harness to await. So everything a tick does --
+ * reading `meta`, fetching, applying, and only then notifying -- lands some
+ * unknown number of event-loop turns after `drive` has already returned.
+ * Measured on an idle machine, the tail's page needs about nine of those
+ * turns; 15ms covers them with roughly 6ms to spare, and does not cover them
+ * when `node --test` is running eleven other files beside this one. That is
+ * issue #81: an assertion on a subscriber that had not fired yet, reading as a
+ * replica that applied nothing, about one full-suite run in six.
+ *
+ * Notifications are the worst case, because one fires only when the apply
+ * transaction **completes**. A read is usually safer -- IndexedDB runs
+ * transactions with overlapping scope in creation order -- but it is not safe
+ * either, and assuming it was cost a round here: a tick whose own `readMeta`
+ * has to complete before it can open the write transaction has not opened one
+ * yet, so a read can beat it and legitimately see nothing.
+ *
+ * So: assert against a condition, never against a sleep. And make the
+ * condition a *positive* one -- that what was expected is now there. Waiting
+ * for an absence is issue #80: `!hasPending(loop)` is true both after a loop
+ * retires and before it has been rescheduled, so it settles on the wrong state
+ * and the assertion after it runs too early.
+ */
+export async function eventually(
+  assertion: () => void | Promise<void>,
+  description: string,
+  timeoutMs = 2000,
+): Promise<void> {
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      await assertion();
+      return;
+    } catch (err) {
+      if (Date.now() - startedAt >= timeoutMs) {
+        // Both halves, in a *new* error rather than by appending to the old
+        // one's `message`. `node --test` renders a failure from `err.stack`,
+        // which is a string built when the error was constructed, so mutating
+        // `message` afterwards changes nothing that is ever printed -- the
+        // description would have been silently dropped. An `AssertionError`'s
+        // `message` already carries its own diff, so quoting it here keeps
+        // what the assertion said, and `cause` keeps the assertion itself.
+        throw new Error(
+          `timed out after ${String(timeoutMs)}ms waiting for ${description}\n`
+          + `  last failure: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+      // Short, because what is being waited for is a handful of event-loop
+      // turns rather than anything with real latency: a 10ms poll would more
+      // than double the wait it is measuring.
+      await delay(2);
+    }
+  }
 }
 
 interface ScheduledTask {

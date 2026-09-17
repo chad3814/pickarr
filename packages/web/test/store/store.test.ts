@@ -5,7 +5,13 @@ import { createStore, type CreateStoreDeps, type Store } from '../../src/store/i
 import { openStore } from '../../src/store/db.ts';
 import { readCursors } from '../../src/store/meta.ts';
 import { emitReset } from '../../src/store/notify.ts';
-import type { Lease, Schedule, SyncFetch, SyncLoop, SyncResponse } from '../../src/store/sync.ts';
+import {
+  eventually,
+  freshDbName,
+  grantedLease,
+  manualScheduler,
+  stubSyncFetch,
+} from './syncTestKit.ts';
 
 /**
  * The one test the whole slice has been building toward: everything wired
@@ -28,110 +34,13 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/** A real timer, not fake ones -- fake timers hang this suite (`CLAUDE.md`). Nothing here waits on wall-clock duration; the scheduler is driven by hand. */
-function settle(): Promise<void> {
-  return delay(15);
-}
-
-interface ScheduledTask {
-  loop: SyncLoop;
-  run: () => void;
-  ran: boolean;
-  cancelled: boolean;
-}
-
-interface ManualScheduler {
-  schedule: Schedule;
-  drive(loop: SyncLoop): Promise<void>;
-}
-
-/** The scheduler seam `sync.ts` was built to take, driven by hand so the two loops can be stepped in the order this test chooses. */
-function manualScheduler(): ManualScheduler {
-  const tasks: ScheduledTask[] = [];
-  const schedule: Schedule = (loop, _delayMs, run) => {
-    const task: ScheduledTask = { loop, run, ran: false, cancelled: false };
-    tasks.push(task);
-    return () => {
-      task.cancelled = true;
-    };
-  };
-  return {
-    schedule,
-    async drive(loop: SyncLoop): Promise<void> {
-      const task = tasks.find((t) => t.loop === loop && !t.ran && !t.cancelled);
-      if (task === undefined) throw new Error(`no pending ${loop} task to drive`);
-      task.ran = true;
-      const returned: unknown = task.run();
-      assert.equal(returned, undefined, 'the loop hands the scheduler a synchronous wrapper');
-      await settle();
-    },
-  };
-}
-
 /** `[table, id]` pairs, sorted by id -- so an assertion does not depend on the order a query happened to answer rows in. */
 function byId(rows: readonly { table: string; id: number }[]): (readonly [string, number])[] {
   return rows.map((row): readonly [string, number] => [row.table, row.id]).toSorted((a, b) => a[1] - b[1]);
 }
 
-function ok(body: unknown): SyncResponse {
-  return { ok: true, status: 200, json: () => Promise.resolve(body) };
-}
-
-interface StubFetch {
-  fetch: SyncFetch;
-  urls: string[];
-}
-
-/** Routes by exact url, and fails loudly on anything unrouted rather than answering a default that would hide a wrong request. */
-function stubFetch(table: Readonly<Record<string, unknown>>): StubFetch {
-  const urls: string[] = [];
-  return {
-    urls,
-    fetch: (url: string): Promise<SyncResponse> => {
-      urls.push(url);
-      if (!Object.hasOwn(table, url)) throw new Error(`unrouted sync request: ${url}`);
-      return Promise.resolve(ok(table[url]));
-    },
-  };
-}
-
-/**
- * Granted the moment it is asked for, and what makes this store "the leader"
- * that fetches. The release function `hold` now must return (`Lease`'s own
- * doc) is a no-op here: nothing in this file ever calls it, so the release
- * promise handed to `onGranted` behaves exactly as it always did for these
- * tests -- pending for as long as the test runs.
- */
-function grantedLease(): Lease {
-  return {
-    hold(onGranted): () => void {
-      onGranted(
-        new Promise<void>(() => {
-          // Never settles in this fixture: nothing here ever releases.
-        }),
-      );
-      return () => {
-        // Nothing to release: see this function's own doc.
-      };
-    },
-  };
-}
-
-let dbCounter = 0;
-/** A database name no other test in this process shares. */
-function freshDbName(): string {
-  dbCounter += 1;
-  return `store-e2e-${String(dbCounter)}`;
-}
-
 test('createStore wires a replica end to end: bootstrap, a tail page, a retiring backfill, every read, the gatherer, a subscriber, and stop', async () => {
-  const dbName = freshDbName();
+  const dbName = freshDbName('store-e2e');
 
   // The pivot: since = 10 (W - 1), before = 11 (W). Every table `listByTable`
   // can walk carries an `updatedAt`, so that read is exercised too, not just
@@ -143,7 +52,7 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
   const torrent = { rssItemId: 1, downloadClientId: 5, status: 'downloading', updatedAt: 1002 };
   const nzb = { rssItemId: 1, downloadClientId: 6, status: 'queued', updatedAt: 1003 };
 
-  const fetch = stubFetch({
+  const fetch = stubSyncFetch({
     '/api/sync/bootstrap': { since: 10, before: 11, generation: 'gen-1' },
     '/api/sync?since=10': {
       ops: [
@@ -181,9 +90,14 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
   cleanups.push(() => {
     store.stop();
   });
-  await settle();
-
-  assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'the only request before either loop has run');
+  // Waited for, not slept through. `createStore` resolves before its bootstrap
+  // has been answered and the loops it schedules on the way out do not exist
+  // yet, so both halves of this are conditions rather than facts: without the
+  // wait, `drive('tail')` below has no task to find.
+  await eventually(() => {
+    assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'the only request before either loop has run');
+    assert.ok(sched.hasPending('tail'), 'and the loops are scheduled once the bootstrap lands');
+  }, 'the bootstrap to be requested and the loops to be scheduled');
 
   let rowWakes = 0;
   cleanups.push(
@@ -199,14 +113,25 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
   );
 
   await sched.drive('tail');
-  assert.equal(rowWakes, 1, 'a subscriber on the row the tail just wrote fired');
+  // Waited for rather than asserted straight after `drive`, because a
+  // subscriber fires when the apply transaction *completes* and `drive` only
+  // sleeps: see `eventually`'s doc, and issue #81, which is this assertion
+  // reading 0 about one full-suite run in six.
+  await eventually(() => {
+    assert.equal(rowWakes, 1, 'a subscriber on the row the tail just wrote fired');
+  }, "the tail's page to reach the row subscriber");
 
   await sched.drive('backfill'); // page 1: role + torrent_download
-  assert.deepEqual(insertedRoles, [2], 'subscribeInserts reported the role the backfill just created');
+  await eventually(() => {
+    assert.deepEqual(insertedRoles, [2], 'subscribeInserts reported the role the backfill just created');
+  }, "the backfill's first page to reach the insert subscriber");
 
   await sched.drive('backfill'); // page 2: nzb_download, retires
 
-  // Every row is queryable, through every one of the five reads.
+  // Every row is queryable, through every one of the five reads. The ones that
+  // want only the tail's page or the backfill's first page need no `eventually`
+  // of their own: both were waited for above, so their writes have already
+  // committed and any read here is ordered behind them.
   assert.deepEqual(await store.getRow('media_item', 7), mediaItem);
   assert.deepEqual(await store.getRows('person', [100]), new Map([[100, person]]));
   const owned = await store.byMediaItem(7);
@@ -214,11 +139,19 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
     ['rss_item', 1],
     ['role', 2],
   ]);
-  const downloads = await store.byRssItem(1);
-  assert.deepEqual(byId(downloads), [
-    ['torrent_download', 10],
-    ['nzb_download', 11],
-  ]);
+  // This one waits, and it is the only read here that has to. It is the first
+  // assertion that depends on the backfill's *second* page, and that page's
+  // tick has to complete its own `readMeta` before it can even open the write
+  // transaction -- so unlike the reads above it is not ordered behind a
+  // transaction that already exists. A positive condition, not
+  // `!hasPending('backfill')`: that is true before the retirement as well as
+  // after it (issue #80's shape).
+  await eventually(async () => {
+    assert.deepEqual(byId(await store.byRssItem(1)), [
+      ['torrent_download', 10],
+      ['nzb_download', 11],
+    ]);
+  }, "the backfill's last page to be applied");
   const listed = await store.listByTable('media_item', { direction: 'next', limit: 10 });
   assert.deepEqual(listed.map((row) => row.id), [7]);
 
@@ -263,10 +196,10 @@ test('subscribeReset on the Store reaches the registry a reset announces to', as
   // Task 8's review found this passthrough unexercised: rebinding it to a
   // no-op passed the whole suite. It is one line, and a one-line wire that
   // nothing tests is exactly the shape that survives a refactor broken.
-  const fetch = stubFetch({ '/api/sync/bootstrap': { since: 0, before: null, generation: 'g' } });
+  const fetch = stubSyncFetch({ '/api/sync/bootstrap': { since: 0, before: null, generation: 'g' } });
   const sched = manualScheduler();
   const store: Store = await createStore({
-    dbName: freshDbName(),
+    dbName: freshDbName('store-e2e'),
     fetch: fetch.fetch,
     schedule: sched.schedule,
     now: (): number => 1000,
@@ -275,7 +208,13 @@ test('subscribeReset on the Store reaches the registry a reset announces to', as
   cleanups.push(() => {
     store.stop();
   });
-  await settle();
+  // Nothing below waits on the sync loops -- `subscribeReset` is a synchronous
+  // passthrough to the registry -- but the store's own bootstrap is in flight,
+  // and letting it land here keeps its refusal (this fixture's `before` is
+  // deliberately `null`) inside this test rather than in whatever runs next.
+  await eventually(() => {
+    assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'the bootstrap was requested');
+  }, 'the bootstrap to be requested');
 
   let announced = 0;
   const off = store.subscribeReset(() => { announced += 1; });
