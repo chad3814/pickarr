@@ -62,6 +62,11 @@ test('an asset is served with its content type and a weak etag', async () => {
   assert.equal(response.headers['Content-Type'], 'text/javascript; charset=utf-8');
   assert.equal(response.headers.ETag, `W/"1000-${APP_JS.length}"`);
   assert.ok(response.headers['Last-Modified'], 'a Last-Modified header is present');
+  assert.equal(
+    response.headers['Cache-Control'],
+    'public, max-age=31536000, immutable',
+    'a content-hashed asset is safe to cache forever -- the name changes if the bytes ever do',
+  );
   assert.equal(text(response), 'console.log("app");');
 });
 
@@ -88,7 +93,32 @@ test('an unmatched non-api path answers index.html, so a deep link survives a re
 
   assert.equal(response.status, 200);
   assert.equal(response.headers['Content-Type'], 'text/html; charset=utf-8');
+  assert.equal(
+    response.headers['Cache-Control'],
+    'no-cache',
+    'index.html decides which hashed assets a tab asks for next, so it must always revalidate',
+  );
   assert.equal(text(response), '<!doctype html><title>pickarr</title>');
+});
+
+test('a missing /assets/* file is a 404, never the index.html fallback', async () => {
+  // Finding 5: `/assets/*` names are content-hashed, so a miss there is a
+  // stale reference (most often a tab that loaded an `index.html` from
+  // before an upgrade), not a client-side route. Falling back would answer
+  // `200 text/html` for a `<script type="module">`, which a browser refuses
+  // on MIME grounds -- a blank page and a console error, in place of a clean
+  // 404. `index.html` is present in the fixture, so this proves the
+  // `/assets/*` refusal wins over the fallback that would otherwise serve it,
+  // rather than merely proving no file exists.
+  const { deps, readFileCalls } = fakeDeps(WEB_ROOT, {
+    [`${WEB_ROOT}/index.html`]: { bytes: INDEX_HTML, mtimeMs: 2_000, size: INDEX_HTML.length },
+  });
+
+  const response = await staticAnswer(deps, '/assets/missing.js', undefined);
+
+  assert.equal(response.status, 404);
+  assert.equal(response.body, null);
+  assert.deepEqual(readFileCalls, [], 'index.html is never read to answer a missing asset');
 });
 
 test('an unmatched /api path is still an unknown-route 404, not html', async () => {
@@ -181,6 +211,13 @@ test('no answer carries a filesystem path', async () => {
     staticAnswer(deps, '/api/unknown', undefined),
     staticAnswer(deps, '/../etc/passwd', undefined),
   ]);
+
+  // A missing `/assets/*` file is a 404 with no body, not the `index.html`
+  // fallback -- pinned by status here too, not only by "no path leaked"
+  // below (Finding 12's own lesson: a passing assertion should validate the
+  // thing it names).
+  assert.equal(answers[1]?.status, 404, 'a missing asset does not fall back to index.html');
+  assert.equal(answers[1]?.body, null);
 
   const logged: string[] = [];
   await warnIfWebRootMissing(`${secretRoot}-absent`, deps.stat, (message) => { logged.push(message); });

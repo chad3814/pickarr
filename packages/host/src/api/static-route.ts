@@ -3,6 +3,24 @@
  * anything else that is not `/api/*` as `index.html`, so a client-side route
  * survives a refresh.
  *
+ * **A missing `/assets/*` file is a 404, never the `index.html` fallback.**
+ * `/assets/*` names are content-hashed by the bundler, so a request for one
+ * that does not exist under the current `webRoot` is not a client-side route
+ * -- it is a stale reference, most often a tab that loaded an `index.html`
+ * from before an upgrade and is now asking for an asset the new build no
+ * longer ships. Falling back would answer `200 text/html` for a
+ * `<script type="module">`, which a browser refuses on MIME grounds: a blank
+ * page and a console error, in place of a clean 404 a client could act on.
+ *
+ * **Every 200 and 304 this module answers carries a `Cache-Control`.**
+ * Without one, a response with `Last-Modified` and no explicit freshness is
+ * heuristically cacheable (RFC 9111 §4.2.2), so a browser can treat a
+ * weeks-old `index.html` as fresh for days after a fresh image is pulled.
+ * `index.html` (and anything else outside `/assets/*`, since none of it is
+ * content-hashed) answers `no-cache` -- always revalidate. `/assets/*`
+ * answers `immutable` -- safe only because those names are content-hashed, so
+ * the bytes behind one never change without the name changing too.
+ *
  * The shape is `artwork-route.ts`'s, deliberately not a second one (design
  * spec §2.2, and Task 1's own brief): an injected `readFile` and `stat`,
  * never `node:fs`'s real ones directly, so a test needs no filesystem at
@@ -30,7 +48,8 @@
  * *encoded* slash (`%2f`) alone, precisely so a path segment cannot be
  * confused with a separator. That is what makes `%2e%2e%2f` safe at that
  * stage and dangerous one step later: this module still has to
- * `decodeURIComponent` each segment itself, to recover a real filename that
+ * `decodeURIComponent` the pathname itself (`withinRoot`, in one call over
+ * the whole string, not segment by segment), to recover a real filename that
  * happens to need escaping (a space, a `#`), and *that* decode turns
  * `%2e%2e%2f` into a genuine `../`. Checking the string for `..` before this
  * second decode would check the wrong string -- `%2e%2e%2fetc` contains no
@@ -82,6 +101,21 @@ export function isApiPath(pathname: string): boolean {
   return collapsed === '/api' || collapsed.startsWith('/api/');
 }
 
+/**
+ * Whether `pathname` names a content-hashed bundle asset rather than a
+ * client-side route or `index.html` itself.
+ *
+ * Leading slashes collapsed first, on `isApiPath`'s own reasoning: `new URL`
+ * preserves a doubled slash, and this module's answer to a miss differs by
+ * this predicate (Finding 5: a missing `/assets/*` file is a 404, never the
+ * `index.html` fallback), so it has to survive the same doubling `isApiPath`
+ * already guards against.
+ */
+function isAssetPath(pathname: string): boolean {
+  const collapsed = pathname.replace(/^\/+/, '/');
+  return collapsed === '/assets' || collapsed.startsWith('/assets/');
+}
+
 /** The fixed 404 an `/api` miss and a refused traversal both answer -- `server.ts`'s own `UNKNOWN_ROUTE`, restated here rather than imported, so this module has no dependency on the router it is routed by. */
 const UNKNOWN_ROUTE: StaticResponse = {
   status: 404,
@@ -89,8 +123,24 @@ const UNKNOWN_ROUTE: StaticResponse = {
   body: new TextEncoder().encode(JSON.stringify({ error: 'unknown route' })),
 };
 
-/** The plain 404 an absent or unreadable web root answers -- no body, since there is nothing to say that does not name a path. */
+/** The plain 404 an absent or unreadable web root, and a missing `/assets/*` file, both answer -- no body, since there is nothing to say that does not name a path. */
 const NOT_FOUND: StaticResponse = { status: 404, headers: {}, body: null };
+
+/**
+ * `/assets/*` is content-hashed by the bundler -- the same bytes forever
+ * under one name -- so a client (or an intermediate cache) may hold onto it
+ * indefinitely without ever revalidating.
+ */
+const ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
+/**
+ * `index.html`, and anything else this route serves outside `/assets/*`,
+ * names no hash and can change under the same url on every deploy -- `no-cache`
+ * forces revalidation on every request rather than trusting `Last-Modified`'s
+ * heuristic freshness (RFC 9111 §4.2.2), which would otherwise let a browser
+ * treat a stale `index.html` as fresh for days after a fresh image is pulled.
+ */
+const INDEX_CACHE_CONTROL = 'no-cache';
 
 /**
  * Content type by extension, not by sniffing -- unlike `artwork-route.ts`'s
@@ -164,11 +214,17 @@ function withinRoot(root: string, pathname: string): string | null {
  * sniffed. `null` when the file cannot be served at all (missing, a
  * directory, unreadable), which is the caller's cue to try the next
  * candidate rather than the request's final answer.
+ *
+ * `cacheControl` is the caller's to choose (`ASSET_CACHE_CONTROL` or
+ * `INDEX_CACHE_CONTROL`), not this function's: it knows nothing about which
+ * candidate it was handed, only how to answer one file, and `staticAnswer`
+ * is the one place that knows whether `path` is a hashed asset or not.
  */
 async function fileAnswer(
   deps: Pick<StaticDeps, 'readFile' | 'stat'>,
   path: string,
   ifNoneMatch: string | undefined,
+  cacheControl: string,
 ): Promise<StaticResponse | null> {
   let info: { mtimeMs: number; size: number };
   try {
@@ -185,7 +241,7 @@ async function fileAnswer(
   const lastModified = new Date(info.mtimeMs).toUTCString();
 
   if (ifNoneMatch !== undefined && ifNoneMatch === etag) {
-    return { status: 304, headers: { ETag: etag, 'Last-Modified': lastModified }, body: null };
+    return { status: 304, headers: { ETag: etag, 'Last-Modified': lastModified, 'Cache-Control': cacheControl }, body: null };
   }
 
   let bytes: Uint8Array;
@@ -202,7 +258,7 @@ async function fileAnswer(
 
   return {
     status: 200,
-    headers: { 'Content-Type': contentTypeFor(path), ETag: etag, 'Last-Modified': lastModified },
+    headers: { 'Content-Type': contentTypeFor(path), ETag: etag, 'Last-Modified': lastModified, 'Cache-Control': cacheControl },
     body: bytes,
   };
 }
@@ -213,6 +269,11 @@ async function fileAnswer(
  * that means "there is nothing here to serve" -- never a throw, so a
  * missing or unreadable web root leaves every `/api` route answering
  * exactly as it did before this route existed (design spec §3).
+ *
+ * **A miss under `/assets/*` never reaches the `index.html` fallback**
+ * (Finding 5, this module's own doc): those names are content-hashed, so a
+ * missing one is a stale reference, not a client-side route, and answering
+ * it with markup is worse than answering it with nothing.
  *
  * `ifNoneMatch` is a fifth-parameter-shaped optional argument rather than a
  * `deps` field, on `readArtwork`'s own reasoning: `deps` is the pair of
@@ -230,14 +291,17 @@ export async function staticAnswer(
   const requested = withinRoot(root, pathname);
   if (requested === null) return UNKNOWN_ROUTE;
 
-  const asset = await fileAnswer(deps, requested, ifNoneMatch);
+  const underAssets = isAssetPath(pathname);
+  const asset = await fileAnswer(deps, requested, ifNoneMatch, underAssets ? ASSET_CACHE_CONTROL : INDEX_CACHE_CONTROL);
   if (asset !== null) return asset;
+
+  if (underAssets) return NOT_FOUND;
 
   // No real file at that path: either a client-side route with no file of
   // its own (`/`, `/library/42`, ...), or a traversal target that resolved
   // inside `root` but names nothing real there. Both get the same fallback
   // a browser needs to survive a refresh on a deep link -- `index.html`.
-  const index = await fileAnswer(deps, join(root, 'index.html'), ifNoneMatch);
+  const index = await fileAnswer(deps, join(root, 'index.html'), ifNoneMatch, INDEX_CACHE_CONTROL);
   return index ?? NOT_FOUND;
 }
 
