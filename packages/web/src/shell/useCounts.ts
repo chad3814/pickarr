@@ -56,6 +56,22 @@ function categoryOf(value: unknown): Category | undefined {
 }
 
 /**
+ * Whether `err` is IndexedDB's own complaint that the connection underneath
+ * a request is already closed -- `DOMException`'s `name`, `'InvalidStateError'`
+ * (measured directly: `store/index.ts`'s `stop()` closing `db` mid-read
+ * produces exactly this). Narrow on purpose (task 6's fix round,
+ * review-found): an earlier version of `safeRefresh` below caught *any*
+ * rejection, which is what let a stray `fetch()` call inside `refresh`
+ * (this hook's own "no network fallback" Global Constraint, violated) pass
+ * silently -- the catch could not tell "the store I was reading from closed
+ * out from under me" from "something else entirely went wrong". Checked
+ * without a cast, the same way `categoryOf` above checks `value`.
+ */
+function isStoreClosed(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'name' in err && err.name === 'InvalidStateError';
+}
+
+/**
  * Large enough to cover every media item a real install will ever hold, and a
  * literal rather than `Infinity`: `listByTable`'s cursor walk stops once
  * `results.length >= limit`, and `Infinity >= Infinity` is `false` in
@@ -104,19 +120,28 @@ export function useCounts(store: CountsSource | undefined): Counts {
     }
 
     /**
-     * Caught rather than left to reject into nothing. `Shell` owns this
-     * store's lifetime and can close it (sign-out, or a 401) while this
-     * effect is still mounted -- `store/index.ts`'s own `stop()` doc says a
-     * read afterwards is refused because the connection is gone, and that is
-     * exactly the shape a still-mounted subscriber can race. An uncaught
-     * rejection here would not merely warn: under `node --test` it is
-     * attributed to whichever test happens to be running, corrupting an
-     * unrelated result -- the same failure mode `store/notify.ts`'s own
-     * subscriber-error handling exists to avoid.
+     * A store-closed rejection is caught rather than left to reject into
+     * nothing. `Shell` owns this store's lifetime and can close it
+     * (sign-out, or a 401) while this effect is still mounted --
+     * `store/index.ts`'s own `stop()` doc says a read afterwards is refused
+     * because the connection is gone, and that is exactly the shape a
+     * still-mounted subscriber can race. An uncaught rejection here would
+     * not merely warn: under `node --test` it is attributed to whichever
+     * test happens to be running, corrupting an unrelated result -- the same
+     * failure mode `store/notify.ts`'s own subscriber-error handling exists
+     * to avoid.
+     *
+     * **Anything else is rethrown, deliberately.** Swallowing every
+     * rejection here -- the previous version of this function -- hid a
+     * genuine failure exactly as well as it hid a benign one, and "genuine
+     * failure" includes the one this hook's whole existence is built to
+     * refuse: a network call. Letting an unrecognised error surface is what
+     * keeps that refusal honest.
      */
     function safeRefresh(): void {
       refresh().catch((err: unknown) => {
-        console.error('pickarr: useCounts failed to read the replica', err);
+        if (isStoreClosed(err)) return;
+        throw err;
       });
     }
 

@@ -18,6 +18,17 @@ import { useCounts, CATEGORIES, type CountsSource } from '../../src/shell/useCou
  */
 afterEach(cleanup);
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** A real timer, not fake ones -- fake timers hang this suite (`CLAUDE.md`). */
+function settle(): Promise<void> {
+  return delay(15);
+}
+
 /** Seeds `ops` into `db` in one batch, the way `applyBatch`'s own tests do -- the cursor value has no bearing on these tests. */
 async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
   await applyBatch(db, ops, { since: 1, before: null });
@@ -83,12 +94,27 @@ test('a tombstoned row is not counted', async () => {
 });
 
 test('the count does not fall back to the network when the replica is empty', async () => {
-  // Spec §6. Zero is an answer. A count that quietly fetched would make the
-  // one screen proving offline capability the screen hiding its absence.
+  // Spec §6, Global Constraint. Zero is an answer. A count that quietly
+  // fetched would make the one screen proving offline capability the screen
+  // hiding its absence.
+  //
+  // Asserted as a call count on `fetch`, independent of what `counts`
+  // renders -- not by making the stub throw and trusting the throw to
+  // surface. A fix-round review mutated `refresh()` to add an unconditional
+  // `await fetch(...)` and this test still passed under the throwing form:
+  // `safeRefresh`'s catch (added for a different, legitimate reason -- see
+  // `useCounts.ts`'s own doc) absorbed the stub's throw and left `counts` at
+  // the same `ZERO_COUNTS` an honestly empty replica produces, so the
+  // assertion below could not tell "read zero rows" from "crashed before
+  // reading at all". A call count cannot be fooled the same way: it does not
+  // matter whether a stray `fetch()` throws, resolves, or is itself caught --
+  // if it happened at all, this fails.
   const db = await freshDb();
+  let fetchCalls = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (): Promise<Response> => {
-    throw new Error('useCounts must never call fetch: counts come from the replica only');
+    fetchCalls += 1;
+    return Promise.resolve(new Response('{}', { status: 200 }));
   };
 
   try {
@@ -99,6 +125,7 @@ test('the count does not fall back to the network when the replica is empty', as
     });
     assert.equal(textOf('movie'), '0');
     assert.equal(textOf('xxx'), '0');
+    assert.equal(fetchCalls, 0, 'useCounts never called fetch: counts come from the replica only');
   } finally {
     globalThis.fetch = originalFetch;
     db.close();
@@ -123,4 +150,47 @@ test('each category is counted separately', async () => {
   assert.equal(textOf('xxx'), '1', 'one xxx media item, not conflated with the other two');
 
   db.close();
+});
+
+test('a store-closed rejection during refresh is caught, not left as an unhandled rejection', async () => {
+  // `useCounts.ts`'s own `safeRefresh` catch, proved directly rather than
+  // asserted by doc comment: a fix-round review found the original (broad)
+  // version of this catch had zero test coverage -- removing it produced no
+  // failures anywhere in this file. This constructs the exact race `Shell`
+  // can cause (its store closing while a read is still in flight) without
+  // needing `Shell` at all: `listByTable` is held open on a promise this
+  // test controls, and rejected with the same `InvalidStateError` shape
+  // IndexedDB actually produces when the connection underneath it is gone
+  // (measured directly against `Shell.test.tsx`'s own race, task 6's report).
+  let rejectRead: ((err: unknown) => void) | undefined;
+  const source: CountsSource = {
+    listByTable: () =>
+      new Promise((_resolve, reject) => {
+        rejectRead = reject;
+      }),
+    subscribeInserts,
+  };
+
+  const escaped: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    escaped.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  try {
+    render(<Counts store={source} />);
+
+    await waitFor(() => {
+      assert.ok(rejectRead !== undefined, 'the first read is in flight');
+    });
+
+    const storeClosed = Object.assign(new Error('connection is closing or closed'), { name: 'InvalidStateError' });
+    rejectRead?.(storeClosed);
+    await settle();
+
+    assert.deepEqual(escaped, [], 'the rejection was caught, not left to escape as an unhandled rejection');
+    assert.equal(textOf('tv'), '0', 'the failed read left the count at its initial value, and the component is still alive');
+  } finally {
+    process.off('unhandledRejection', onUnhandledRejection);
+  }
 });

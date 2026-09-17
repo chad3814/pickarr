@@ -55,6 +55,18 @@ export interface CreateStoreDeps {
   /** Milliseconds, monotonic-ish. See `sync.ts`'s `SyncDeps.now`. */
   now: () => number;
   locks: Lease;
+  /**
+   * How long a single sync request may take before its signal aborts.
+   * Forwarded to `startSync`'s `SyncDeps.fetchDeadlineMs` unchanged; see that
+   * field for the default and why it exists. Absent here until a caller
+   * through `createStore` needed it (task 6's fix round, review-found): every
+   * `fetchJson` call creates a real `AbortSignal.timeout`, and that timer
+   * outlives the request it bounds -- 60 real seconds per `node --test` file
+   * that boots a store through the default, measured directly by shortening
+   * it and watching a 60-second run become a one-second one. Production
+   * leaves this unset, which is the existing 60-second default unchanged.
+   */
+  fetchDeadlineMs?: number;
 }
 
 /**
@@ -110,6 +122,11 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     schedule: deps.schedule,
     now: deps.now,
     locks: deps.locks,
+    // Omitted entirely rather than set to `undefined` when absent:
+    // `exactOptionalPropertyTypes` treats an explicit `undefined` differently
+    // from an absent key, and `SyncDeps.fetchDeadlineMs` is typed `number`,
+    // not `number | undefined`.
+    ...(deps.fetchDeadlineMs === undefined ? {} : { fetchDeadlineMs: deps.fetchDeadlineMs }),
   });
 
   return {

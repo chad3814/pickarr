@@ -4,8 +4,16 @@ import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { Shell } from '../../src/shell/Shell.tsx';
 import type { CreateStoreDeps } from '../../src/store/index.ts';
-import type { Lease, Schedule, SyncFetch, SyncLoop, SyncResponse } from '../../src/store/sync.ts';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
+import {
+  settle,
+  manualScheduler,
+  stubSyncFetch,
+  grantedLease,
+  freshDbName,
+  type ManualScheduler,
+  type StubFetch,
+} from '../store/syncTestKit.ts';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`).
@@ -28,100 +36,20 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/** A real timer, not fake ones -- fake timers hang this suite (`CLAUDE.md`). */
-function settle(): Promise<void> {
-  return delay(15);
-}
-
-interface ScheduledTask {
-  loop: SyncLoop;
-  run: () => void;
-  ran: boolean;
-  cancelled: boolean;
-}
-
-interface ManualScheduler {
-  schedule: Schedule;
-  drive(loop: SyncLoop): Promise<void>;
-  /** Whether `loop` currently has a task that was scheduled and neither driven nor cancelled -- a test's way to wait for one to exist before it acts, and to check it stopped existing afterwards, without running it. */
-  hasPending(loop: SyncLoop): boolean;
-}
-
-/** The scheduler seam `sync.ts` was built to take, driven by hand -- the same technique `store/store.test.ts` uses for the same reason. */
-function manualScheduler(): ManualScheduler {
-  const tasks: ScheduledTask[] = [];
-  const schedule: Schedule = (loop, _delayMs, run) => {
-    const task: ScheduledTask = { loop, run, ran: false, cancelled: false };
-    tasks.push(task);
-    return () => {
-      task.cancelled = true;
-    };
-  };
-  function pendingTask(loop: SyncLoop): ScheduledTask | undefined {
-    return tasks.find((t) => t.loop === loop && !t.ran && !t.cancelled);
-  }
-  return {
-    schedule,
-    async drive(loop: SyncLoop): Promise<void> {
-      const task = pendingTask(loop);
-      if (task === undefined) throw new Error(`no pending ${loop} task to drive`);
-      task.ran = true;
-      task.run();
-      await settle();
-    },
-    hasPending(loop: SyncLoop): boolean {
-      return pendingTask(loop) !== undefined;
-    },
-  };
-}
-
-function ok(body: unknown): SyncResponse {
-  return { ok: true, status: 200, json: () => Promise.resolve(body) };
-}
-
-interface StubFetch {
-  fetch: SyncFetch;
-  urls: string[];
-}
-
-/** Routes by exact url, and fails loudly on anything unrouted. */
-function stubSyncFetch(table: Readonly<Record<string, unknown>>): StubFetch {
-  const urls: string[] = [];
-  return {
-    urls,
-    fetch: (url: string): Promise<SyncResponse> => {
-      urls.push(url);
-      if (!Object.hasOwn(table, url)) throw new Error(`unrouted sync request: ${url}`);
-      return Promise.resolve(ok(table[url]));
-    },
-  };
-}
-
-/** Granted the moment it is asked for, whose release never settles -- `store/leader.ts`'s production behaviour. */
-function grantedLease(): Lease {
-  return {
-    hold(onGranted): void {
-      onGranted(
-        new Promise<void>(() => {
-          // Never settles: a browser tears the lock down with the tab.
-        }),
-      );
-    },
-  };
-}
-
-let dbCounter = 0;
-/** A database name no other test in this process shares. */
-function freshDbName(): string {
-  dbCounter += 1;
-  return `shell-test-${String(dbCounter)}`;
-}
+/**
+ * A short deadline, not the production 60 seconds (task 6's fix round,
+ * review-found): every sync fetch bounds itself with a real
+ * `AbortSignal.timeout`, and that timer outlives the request it bounds under
+ * this suite's `happy-dom` environment, holding the process open until it
+ * fires. Left at the default, this file alone took `test:web` from under a
+ * second to about 60 seconds -- one `AbortSignal.timeout(60_000)` per test
+ * that boots a store, none of them ever needing to fire. `sync.test.ts`
+ * (an earlier task) already overrides `SyncDeps.fetchDeadlineMs` the same
+ * way; this is `CreateStoreDeps`'s own version of that seam, added in this
+ * fix round specifically so callers through `createStore` -- which is every
+ * caller now that `Shell` exists -- have it too.
+ */
+const TEST_FETCH_DEADLINE_MS = 200;
 
 function testDeps(): { deps: CreateStoreDeps; fetch: StubFetch; sched: ManualScheduler } {
   const fetch = stubSyncFetch({ '/api/sync/bootstrap': { since: 0, before: 0, generation: 'g' } });
@@ -130,11 +58,12 @@ function testDeps(): { deps: CreateStoreDeps; fetch: StubFetch; sched: ManualSch
     fetch,
     sched,
     deps: {
-      dbName: freshDbName(),
+      dbName: freshDbName('shell-test'),
       fetch: fetch.fetch,
       schedule: sched.schedule,
       now: (): number => 1000,
       locks: grantedLease(),
+      fetchDeadlineMs: TEST_FETCH_DEADLINE_MS,
     },
   };
 }
@@ -169,4 +98,48 @@ test('sign-out stops the store', async () => {
 
   assert.equal(unauthenticated, 1, 'App is told to show SignIn again');
   assert.equal(sched.hasPending('tail'), false, 'store.stop() cancelled the tail task that was pending');
+});
+
+test('a store that fails to open is reported, not left as an unhandled rejection', async () => {
+  // `Shell.tsx`'s own `createStore(wired).catch(...)` was added alongside
+  // `useCounts.ts`'s `safeRefresh` catch and, per this fix round's review,
+  // was equally untested: removing it produced zero test failures. Proven
+  // here by forcing `openStore`'s own request to fail the way IndexedDB
+  // actually fails it -- opening at a version *lower* than one already on
+  // disk answers a `VersionError`, per the standard -- rather than by
+  // injecting a fake rejection `Shell` never has to handle in production.
+  const dbName = freshDbName('shell-open-fail');
+  const preexisting = await new Promise<IDBDatabase>((resolve, reject) => {
+    const req = indexedDB.open(dbName, 2);
+    req.addEventListener('success', () => { resolve(req.result); }, { once: true });
+    req.addEventListener('error', () => { reject(req.error ?? new Error('open failed')); }, { once: true });
+  });
+  preexisting.close();
+
+  const escaped: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    escaped.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  const reported: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]): void => {
+    reported.push(args);
+  };
+
+  try {
+    const { deps } = testDeps();
+    render(<Shell deps={{ ...deps, dbName }} onUnauthenticated={() => {}} />);
+    await settle();
+
+    assert.deepEqual(escaped, [], 'the failed open was caught, not left to escape as an unhandled rejection');
+    assert.ok(
+      reported.some((call) => call.some((value) => String(value).includes('failed to open the replica'))),
+      'the failure was reported rather than swallowed silently',
+    );
+  } finally {
+    console.error = originalConsoleError;
+    process.off('unhandledRejection', onUnhandledRejection);
+  }
 });
