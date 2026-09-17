@@ -181,3 +181,37 @@ test('a reload finds the replica already populated', async ({ page, harness }) =
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
   await expect(page.getByTestId('count-tv')).toHaveText('1');
 });
+
+test('a healthy tab does not poll the tail far faster than its 3-second rate', async ({ page, harness }) => {
+  // The whole-branch review's Finding 1, pinned in a real browser rather
+  // than only against `manualScheduler`'s stubbed clock (`adapters.test.ts`'s
+  // own unit test covers that half). `sync.ts`'s `TAIL_INTERVAL_MS = 3000` is
+  // documented as a fixed *rate*, not a fixed delay -- about two `/api/sync`
+  // polls in six seconds -- and that only holds if `idleScheduler` treats its
+  // `delayMs` as a floor. Measured before this fix: an idle Chromium tab
+  // polled the tail **1015 times in 6 seconds**, because `delayMs` was handed
+  // to `requestIdleCallback` as its own `timeout` (a "run by" cap, not a "run
+  // no sooner than" floor), so an idle browser ran it almost immediately
+  // every time.
+  //
+  // The bound below is nowhere near that tight -- it does not need to be to
+  // catch a two-orders-of-magnitude regression, and a loose bound is what
+  // keeps this from flaking on a slow CI runner while still failing hard the
+  // moment the floor stops holding.
+  const tailRequestPathnames: string[] = [];
+  page.on('request', (request) => {
+    const { pathname } = new URL(request.url());
+    // The tail's own url (`/api/sync?since=...`), not the one-shot
+    // `/api/sync/bootstrap` or `/api/sync/backfill` -- both different
+    // pathnames, so neither is counted here.
+    if (pathname === '/api/sync') tailRequestPathnames.push(pathname);
+  });
+
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await page.waitForTimeout(6_000);
+
+  expect(tailRequestPathnames.length).toBeLessThan(20);
+});

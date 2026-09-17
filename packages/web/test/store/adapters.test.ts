@@ -152,25 +152,40 @@ test('realFetch answers a SyncResponse, not a Response', async () => {
   assert.deepEqual(await response.json(), { queued: 3 });
 });
 
-test('idleScheduler uses requestIdleCallback when it exists', () => {
+/** A real timer, not `t.mock.timers` (CLAUDE.md: fake timers hang this suite). Kept short throughout this file's idleScheduler tests so waiting for a real floor to elapse stays a unit test, not an integration one. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+test('idleScheduler waits out delayMs before ever asking requestIdleCallback for idle time', async () => {
   const idle = stubIdleCallback();
   const timer = spyOnRealTimer();
   let ran = false;
 
-  idleScheduler('backfill', 5000, () => {
+  idleScheduler('backfill', 100, () => {
     ran = true;
   });
 
-  assert.equal(idle.calls.length, 1, 'requestIdleCallback is called once');
-  assert.equal(timer.setTimeoutCalls.length, 0, 'setTimeout is not used when requestIdleCallback exists');
+  assert.equal(timer.setTimeoutCalls.length, 1, 'the floor is a real setTimeout');
+  assert.equal(timer.setTimeoutCalls[0]?.[1], 100, 'the schedule delay is the floor the real setTimeout waits out');
+  assert.equal(idle.calls.length, 0, 'requestIdleCallback is not asked for until the floor has elapsed -- this is the fix: it used to be asked immediately, with delayMs handed to it as its own timeout');
+
+  await delay(120);
+
+  assert.equal(idle.calls.length, 1, 'requestIdleCallback is asked for once the floor elapses');
   const [callback, options] = idle.calls[0] ?? [undefined, undefined];
-  assert.equal(options?.timeout, 5000, 'the schedule delay is passed through as the idle callback\'s timeout');
-  assert.equal(ran, false, 'run is not called until the idle callback fires');
+  assert.ok(
+    typeof options?.timeout === 'number' && options.timeout > 0 && options.timeout < 100,
+    'the idle phase has its own small ceiling, independent of and smaller than the schedule delay',
+  );
+  assert.equal(ran, false, 'run is not called until the idle callback itself fires');
   callback?.({ didTimeout: false, timeRemaining: () => 0 });
   assert.equal(ran, true, 'run is called once the idle callback fires');
 });
 
-test('idleScheduler falls back to setTimeout when it does not exist', async () => {
+test('idleScheduler runs at the floor when requestIdleCallback does not exist', async () => {
   // No stubIdleCallback() here: this test:server environment has neither
   // requestIdleCallback nor cancelIdleCallback, which is exactly the
   // condition this test exercises.
@@ -182,36 +197,85 @@ test('idleScheduler falls back to setTimeout when it does not exist', async () =
     ran = true;
   });
 
-  assert.equal(timer.setTimeoutCalls.length, 1, 'setTimeout is used when requestIdleCallback does not exist');
+  assert.equal(timer.setTimeoutCalls.length, 1, 'the floor is a real setTimeout even with no idle callback available');
   assert.equal(timer.setTimeoutCalls[0]?.[1], 25, 'the schedule delay is passed through as the real setTimeout\'s delay');
 
-  await new Promise((resolve) => {
-    setTimeout(resolve, 40);
-  });
-  assert.equal(ran, true, 'run is called once the real timer fires');
+  await delay(40);
+  assert.equal(ran, true, 'run is called once the real timer fires, with no idle phase to wait through');
   cancel();
 });
 
-test('cancelling works on both paths', () => {
+test('cancelling during the floor clears the pending setTimeout and never reaches the idle phase', async () => {
   const idle = stubIdleCallback();
-  let ranOnIdlePath = false;
-  const cancelIdle = idleScheduler('backfill', 5000, () => {
-    ranOnIdlePath = true;
+  const timer = spyOnRealTimer();
+  let ran = false;
+
+  const cancel = idleScheduler('backfill', 20, () => {
+    ran = true;
   });
-  cancelIdle();
-  assert.equal(idle.cancelled.length, 1, 'cancelling the idle-callback path calls cancelIdleCallback');
+  cancel();
+
+  assert.equal(timer.clearedHandles.length, 1, 'cancelling during the floor clears the setTimeout');
+  assert.equal(idle.calls.length, 0, 'the idle phase was never entered, so there is nothing there yet to cancel');
+
+  await delay(35);
+
+  assert.equal(idle.calls.length, 0, 'a cancelled floor never goes on to ask for idle time');
+  assert.equal(ran, false, 'a cancelled floor never runs');
+});
+
+test('cancelling during the idle wait clears the idle callback', async () => {
+  const idle = stubIdleCallback();
+  let ran = false;
+
+  const cancel = idleScheduler('backfill', 20, () => {
+    ran = true;
+  });
+
+  await delay(35);
+  assert.equal(idle.calls.length, 1, 'the idle phase has been entered');
+
+  cancel();
+  assert.equal(idle.cancelled.length, 1, 'cancelling during the idle wait calls cancelIdleCallback');
+
   const [callback] = idle.calls[0] ?? [undefined];
   callback?.({ didTimeout: false, timeRemaining: () => 0 });
-  assert.equal(ranOnIdlePath, true, 'the stub itself does not honour cancellation -- only that idleScheduler asked it to');
+  assert.equal(ran, true, 'the stub itself does not honour cancellation -- only that idleScheduler asked it to, same as before the fix');
+});
 
-  Reflect.deleteProperty(globalThis, 'requestIdleCallback');
-  Reflect.deleteProperty(globalThis, 'cancelIdleCallback');
-  const timer = spyOnRealTimer();
-  let ranOnTimerPath = false;
-  const cancelTimer = idleScheduler('tail', 5000, () => {
-    ranOnTimerPath = true;
+test('idleScheduler honours delayMs as a floor even when the browser is immediately idle', async () => {
+  // Models the most-idle a browser can be: requestIdleCallback's own
+  // callback fires on the very next microtask, the way it would on a tab
+  // doing nothing else at all. That is exactly the condition that exposed
+  // the defect this test pins -- measured in Chromium, an idle tab polled a
+  // tail 1015 times in 6 seconds where the design calls for 2, because
+  // `delayMs` used to be handed to requestIdleCallback as its own timeout
+  // rather than waited out first. A real clock, not `t.mock.timers`
+  // (CLAUDE.md: fake timers hang this suite), kept fast (tens of
+  // milliseconds) so this stays a unit test rather than the e2e spec that
+  // pins the same property in a real browser.
+  cleanups.push(() => {
+    Reflect.deleteProperty(globalThis, 'requestIdleCallback');
+    Reflect.deleteProperty(globalThis, 'cancelIdleCallback');
   });
-  cancelTimer();
-  assert.equal(timer.clearedHandles.length, 1, 'cancelling the setTimeout path calls clearTimeout');
-  assert.equal(ranOnTimerPath, false, 'a cancelled real setTimeout does not run its callback');
+  globalThis.requestIdleCallback = (callback: IdleRequestCallback): number => {
+    queueMicrotask(() => {
+      callback({ didTimeout: false, timeRemaining: () => 50 });
+    });
+    return 1;
+  };
+  globalThis.cancelIdleCallback = (): void => {};
+
+  const delayMs = 30;
+  const startedAt = Date.now();
+  const elapsedMs = await new Promise<number>((resolve) => {
+    idleScheduler('tail', delayMs, () => {
+      resolve(Date.now() - startedAt);
+    });
+  });
+
+  assert.ok(
+    elapsedMs >= delayMs,
+    `run fired after ${elapsedMs}ms, before its ${delayMs}ms floor had elapsed -- an immediately-idle browser must not be able to skip the floor`,
+  );
 });
