@@ -1,8 +1,8 @@
 /*
  * Every colour, size, space and radius in the app. Past this file, no rule in
- * `styles/` declares a raw value — with one documented exception: `dialog.css`'s
- * `::backdrop` rules and its modal close button, where the rationale lives next
- * to the declarations themselves.
+ * `styles/` declares a raw value, and there is now no exception: 1.x's
+ * `dialog.css` had one for its `::backdrop` and modal close button, and that
+ * file went with the 2.0 rewrite.
  *
  * Both palettes are keyed on `[data-theme]` and nothing resolves in CSS. The
  * alternative — `@media (prefers-color-scheme: light)` for the automatic case and

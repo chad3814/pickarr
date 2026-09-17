@@ -15,9 +15,30 @@
 export type ThemePreference = 'system' | 'light' | 'dark';
 export type ResolvedTheme = 'light' | 'dark';
 
-const STORAGE_KEY = 'pickarr.theme';
+/**
+ * The key the preference persists under, exported for the same reason as
+ * {@link LIGHT_QUERY}.
+ *
+ * `index.html`'s pre-paint script copies this value rather than importing it,
+ * and says in its own comment that both contract values are "stated in one
+ * place" here. That was half true while this was private: the key was written
+ * out in two files with nothing comparing them, and renaming it here would
+ * have failed nothing while quietly discarding the stored preference of every
+ * existing browser. `theme.test.tsx` now reads both values from this module
+ * and looks for them in the html, so the copy cannot drift unnoticed.
+ */
+export const STORAGE_KEY = 'pickarr.theme';
 
-/** Exported so the tests, the toggle and `index.html` all ask the same question. */
+/**
+ * The query `tokens.css` keys its light palette on, and the one
+ * `index.html`'s pre-paint script asks before React exists. Exported so the
+ * module, that script and the tests all name it in one place.
+ *
+ * 1.x's `ThemeToggle` was a third caller; 2.0 has no toggle component yet, so
+ * `applyTheme` currently has no production caller either -- the pre-paint
+ * script is what paints the theme today. This module is the canonical
+ * statement of the contract regardless of who is calling it this week.
+ */
 export const LIGHT_QUERY = '(prefers-color-scheme: light)';
 
 /**
