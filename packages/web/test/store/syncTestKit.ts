@@ -12,6 +12,7 @@
  * anything new that needs to drive a store by hand should reach for this
  * module first.
  */
+import assert from 'node:assert/strict';
 import type { Lease, Schedule, SyncFetch, SyncLoop, SyncResponse } from '../../src/store/sync.ts';
 
 export function delay(ms: number): Promise<void> {
@@ -58,7 +59,14 @@ export function manualScheduler(): ManualScheduler {
       const task = pendingTask(loop);
       if (task === undefined) throw new Error(`no pending ${loop} task to drive`);
       task.ran = true;
-      task.run();
+      const returned: unknown = task.run();
+      // Both copies this module was extracted from carry this assertion
+      // (`store.test.ts`, `sync.test.ts`); dropping it here was Finding 10.
+      // `sync.ts` hands `deps.schedule` a synchronous wrapper specifically so
+      // an `async` function's rejection can never be handed straight to a
+      // scheduler and escape every `catch` (`Schedule`'s own doc) -- this is
+      // what pins that the wrapper this kit drives is still that shape.
+      assert.equal(returned, undefined, 'the loop hands the scheduler a synchronous wrapper, not an async function whose rejection would escape');
       await settle();
     },
     hasPending(loop: SyncLoop): boolean {

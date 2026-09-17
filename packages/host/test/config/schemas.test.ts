@@ -42,5 +42,9 @@ test('webRoot is absent by default, and a configured one passes through unmodifi
   // it; this schema only validates a value an operator actually set.
   assert.equal(serverConfigSchema.parse(undefined).webRoot, undefined);
   assert.equal(serverConfigSchema.parse({ webRoot: '/srv/web' }).webRoot, '/srv/web');
-  assert.throws(() => serverConfigSchema.parse({ webRoot: '' }), 'an empty string is not a path');
+  // A bare string second argument is `assert.throws`'s failure *message*,
+  // not a matcher against the thrown error -- Finding 12: this used to pass
+  // for any thrown value at all, proving only that something threw. A
+  // `RegExp` is validated against `error.message`.
+  assert.throws(() => serverConfigSchema.parse({ webRoot: '' }), /too_small/, 'an empty string is not a path');
 });

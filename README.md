@@ -11,8 +11,10 @@ upgrade, and you decide whether to take it.
 
 ## The state of play
 
-This documents **2.0**, which is a rewrite in progress and not yet a thing you can
-deploy.
+This documents **2.0**, a rewrite in progress. It builds, it containerises, and it
+runs -- but the browser client so far is one sign-in form and three counts that climb
+as the replica fills. There is nothing to browse and nothing to pick yet, so run it to
+watch 2.0 work, not to replace 1.x.
 
 2.0 is greenfield: it starts on an empty database and rebuilds from feeds, so it shares
 no schema with 1.x and nothing migrates. The two implementations sit side by side in
