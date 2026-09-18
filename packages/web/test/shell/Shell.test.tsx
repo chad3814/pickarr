@@ -303,13 +303,17 @@ test('the nav links to each category, and marks the current one', async () => {
  * test in this file before these three existed (review-found, task 4's fix
  * round).
  *
- * Asserting a placeholder's rendered *content* is otherwise exactly what a
- * test here should not do -- `Shell.tsx`'s own doc says the placeholder text
- * is not part of this task's contract -- but here the mapping is the thing
- * under test, and the placeholder text is the only thing on screen that
- * names which route matched. **Tasks 5-7 should keep this assertion while
- * swapping what it looks for**, once each placeholder becomes a real
- * screen, rather than deleting it as placeholder-only noise.
+ * Asserts on each placeholder's `data-testid={`category-${category}`}`
+ * marker, not its prose (round 2 of task 4's fix round, review-found: the
+ * first version of these three asserted the exact placeholder text, which
+ * pinned the mapping today but would have broken all three the moment tasks
+ * 5-7 replaced a placeholder's wording with a real screen -- three later
+ * tasks each stopping to repair a test this round added, rather than this
+ * round choosing a marker that survives that swap). `data-testid` is the
+ * house pattern for exactly this, already used by `Shell.tsx`'s own
+ * `count-${category}` -- see `CategoryPlaceholder`'s own doc, which states
+ * the `data-testid` as the route-mapping contract a later task's real
+ * component must keep.
  *
  * One test per category rather than a loop over `CATEGORIES`: a `for`-loop
  * body awaiting the tail-scheduled check on every iteration is exactly the
@@ -324,9 +328,9 @@ test('the /tv route renders the tv category, not another one', async () => {
     </MemoryRouter>,
   );
 
-  assert.ok(screen.getByText('TV category screen goes here (task 5).'), '/tv renders the tv placeholder');
-  assert.ok(!screen.queryByText('Movies category screen goes here (task 5).'), 'not the movie placeholder');
-  assert.ok(!screen.queryByText('XXX category screen goes here (task 5).'), 'not the xxx placeholder');
+  assert.ok(screen.getByTestId('category-tv'), '/tv renders the tv placeholder');
+  assert.ok(!screen.queryByTestId('category-movie'), 'not the movie placeholder');
+  assert.ok(!screen.queryByTestId('category-xxx'), 'not the xxx placeholder');
 
   await waitFor(() => {
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
@@ -341,9 +345,9 @@ test('the /movie route renders the movie category, not another one', async () =>
     </MemoryRouter>,
   );
 
-  assert.ok(screen.getByText('Movies category screen goes here (task 5).'), '/movie renders the movie placeholder');
-  assert.ok(!screen.queryByText('TV category screen goes here (task 5).'), 'not the tv placeholder');
-  assert.ok(!screen.queryByText('XXX category screen goes here (task 5).'), 'not the xxx placeholder');
+  assert.ok(screen.getByTestId('category-movie'), '/movie renders the movie placeholder');
+  assert.ok(!screen.queryByTestId('category-tv'), 'not the tv placeholder');
+  assert.ok(!screen.queryByTestId('category-xxx'), 'not the xxx placeholder');
 
   await waitFor(() => {
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
@@ -358,9 +362,9 @@ test('the /xxx route renders the xxx category, not another one', async () => {
     </MemoryRouter>,
   );
 
-  assert.ok(screen.getByText('XXX category screen goes here (task 5).'), '/xxx renders the xxx placeholder');
-  assert.ok(!screen.queryByText('TV category screen goes here (task 5).'), 'not the tv placeholder');
-  assert.ok(!screen.queryByText('Movies category screen goes here (task 5).'), 'not the movie placeholder');
+  assert.ok(screen.getByTestId('category-xxx'), '/xxx renders the xxx placeholder');
+  assert.ok(!screen.queryByTestId('category-tv'), 'not the tv placeholder');
+  assert.ok(!screen.queryByTestId('category-movie'), 'not the movie placeholder');
 
   await waitFor(() => {
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
