@@ -23,11 +23,14 @@
  * which is the trade this constant exists to make.
  *
  * Version 2 added `by_table_plugin_updated`, the per-category index the
- * browse screens page and count against. No reader of it existed yet when
- * this bumped, so every client paid a full resync for an index nothing used
- * -- acceptable here because 2.0 is greenfield (one operator, an empty
- * database, a tested backfill), and not a precedent for doing this once real
- * usage exists.
+ * browse screens page and count against. No reader of it existed yet at the
+ * moment this bumped -- tasks 2, 3 and 5 added them in the same branch, so
+ * `rows.ts`'s `listByTablePlugin` and `countByPlugin`, `shell/useCounts.ts`
+ * and `library/useMediaItems.ts` are those readers by the time anyone
+ * reaches `pickarr-2`. Every client still paid a full resync for the bump,
+ * which is acceptable here because 2.0 is greenfield (one operator, an
+ * empty database, a tested backfill), and is not a precedent for doing this
+ * once real usage exists.
  */
 export const SCHEMA_VERSION = 2;
 

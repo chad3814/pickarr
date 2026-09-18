@@ -11,7 +11,7 @@
  *
  * **The window, not the cursor, is what a live insert re-reads.** This hook
  * tracks how many rows the current window has asked for in total
- * (`windowRef`, starting at `pageSize` and growing by `pageSize` on every
+ * (`windowSizeRef`, starting at `pageSize` and growing by `pageSize` on every
  * `loadMore`), and a `subscribeInserts` wake re-issues *that* request from
  * the top (`from` absent) rather than resuming from wherever the last page
  * left off. A cursor-based resume on a wake would need to reconcile a page

@@ -175,10 +175,11 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           `store` is `undefined` until `createStore` resolves (this component's
           own effect, above); `Unmatched`'s `source` prop is not optional, so
           this route renders nothing for that brief window rather than handing
-          it a store that is not there yet. No marker ever pinned `/unmatched`
-          to a placeholder -- unlike the three category routes,
-          `Shell.test.tsx` has never asserted this route's rendered content,
-          only that the route exists.
+          it a store that is not there yet. No marker pinned `/unmatched` while
+          it was a placeholder, unlike the three category routes -- task 7's
+          fix round closed that, and `Shell.test.tsx`'s "the /unmatched route
+          renders Unmatched, not a category" now asserts this route's rendered
+          content through `Unmatched`'s own `data-testid`.
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/* Keeps the chrome on screen for any other path -- see this file's doc. */}

@@ -13,10 +13,12 @@
  * not be the screen that quietly hides its own absence.
  *
  * A category is `media_item.pluginId` (`'tv' | 'movie' | 'xxx'`), not a
- * table of its own: `by_table_plugin_updated` has one entry per
- * `(table, pluginId)` pair, so the three counts come from three range counts
- * against that index -- one per `pluginId` -- rather than one read of
- * `media_item` split in memory by its own `pluginId` field.
+ * table of its own: `by_table_plugin_updated` has one entry per *row*, keyed
+ * `[table, pluginId, updatedAt, id]`, so `(table, pluginId)` is a key prefix
+ * naming a contiguous range rather than a single entry. The three counts are
+ * therefore three range counts against that index -- one per `pluginId` --
+ * rather than one read of `media_item` split in memory by its own `pluginId`
+ * field.
  */
 import { useEffect, useState } from 'react';
 import type { Store } from '../store/index.ts';

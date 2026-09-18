@@ -4,13 +4,15 @@
  * (design spec §6, §7).
  *
  * **`data-testid={`category-${pluginId}`}` on the root element carries task
- * 4's route-mapping contract forward.** `Shell.tsx`'s own doc on
- * `CategoryPlaceholder` -- the screen this component replaces -- says
- * `Shell.test.tsx`'s three mapping tests find whichever screen renders at
- * `/tv`, `/movie` and `/xxx` by this marker, not by its rendered prose, so
- * this component's own text and layout are free to change without touching
- * those tests. The marker is on this outer element regardless of whether
- * `store` has arrived yet, so it is present the instant the route matches.
+ * 4's route-mapping contract forward.** `Shell.test.tsx`'s three mapping
+ * tests find whichever screen renders at `/tv`, `/movie` and `/xxx` by this
+ * marker, not by its rendered prose, so this component's own text and
+ * layout are free to change without touching those tests. That was the
+ * point of choosing a marker: task 4 put it on the placeholder this
+ * component replaced -- the placeholder and its docblock are gone, but the
+ * contract is the marker, and it is kept here. The marker is on this outer
+ * element regardless of whether `store` has arrived yet, so it is present
+ * the instant the route matches.
  *
  * **`store` is `undefined` until `Shell`'s own store finishes opening**
  * (`Shell.tsx`'s state starts there, same as `useCounts`'s). Nothing is

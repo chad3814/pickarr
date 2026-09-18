@@ -351,21 +351,19 @@ test('the nav links to each category, and marks the current one', async () => {
  * Pins the `<Route>` table's path-to-element mapping itself. The nav's own
  * hrefs and `aria-current` (asserted above) are derived from `CATEGORIES`
  * independently of the `<Route>` tree, so they cannot see this: swapping
- * which `CategoryPlaceholder` renders at `/tv` against `/movie` passed every
- * test in this file before these three existed (review-found, task 4's fix
- * round).
+ * which screen renders at `/tv` against `/movie` passed every test in this
+ * file before these three existed (review-found, task 4's fix round).
  *
- * Asserts on each placeholder's `data-testid={`category-${category}`}`
- * marker, not its prose (round 2 of task 4's fix round, review-found: the
- * first version of these three asserted the exact placeholder text, which
- * pinned the mapping today but would have broken all three the moment tasks
+ * Asserts on each screen's `data-testid={`category-${category}`}` marker,
+ * not its prose (round 2 of task 4's fix round, review-found: the first
+ * version of these three asserted the exact placeholder text, which pinned
+ * the mapping at the time but would have broken all three the moment tasks
  * 5-7 replaced a placeholder's wording with a real screen -- three later
  * tasks each stopping to repair a test this round added, rather than this
  * round choosing a marker that survives that swap). `data-testid` is the
  * house pattern for exactly this, already used by `Shell.tsx`'s own
- * `count-${category}` -- see `CategoryPlaceholder`'s own doc, which states
- * the `data-testid` as the route-mapping contract a later task's real
- * component must keep.
+ * `count-${category}`. The marker survived the swap it was chosen for:
+ * `Category.tsx` carries it now, and its docblock says why.
  *
  * One test per category rather than a loop over `CATEGORIES`: a `for`-loop
  * body awaiting the tail-scheduled check on every iteration is exactly the
@@ -426,10 +424,11 @@ test('the /xxx route renders the xxx category, not another one', async () => {
 /**
  * `/unmatched`'s own mapping test, alongside the three category ones above.
  * Task 7's own report found nothing pinning this route before this test --
- * unlike the three category placeholders, `UnmatchedPlaceholder` carried no
- * `data-testid`, so swapping what `/unmatched` rendered could have gone
- * unnoticed the way the three category ones no longer can. `Unmatched`'s
- * root now carries `data-testid="unmatched"` for exactly this.
+ * unlike the three category placeholders, the one that stood at
+ * `/unmatched` carried no `data-testid`, so swapping what this route
+ * rendered could have gone unnoticed the way the three category ones no
+ * longer can. `Unmatched`'s root now carries `data-testid="unmatched"` for
+ * exactly this.
  *
  * `waitFor`, not a synchronous assertion like the three tests above: unlike
  * `Category`, whose `data-testid` sits on an outer element that renders
