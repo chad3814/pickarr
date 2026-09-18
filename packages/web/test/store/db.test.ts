@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
 import { done, request } from '../../src/store/idb.ts';
-import { openStore, SCHEMA_VERSION } from '../../src/store/db.ts';
+import { openStore, SCHEMA_VERSION, type StoredRow } from '../../src/store/db.ts';
 import { readCursors, writeCursors, readGeneration, writeGeneration } from '../../src/store/meta.ts';
 
 let dbNameCounter = 0;
@@ -94,6 +94,30 @@ test('the per-category index exists, and holds only rows that project a pluginId
       ['table', 'value.pluginId', 'value.updatedAt', 'id'],
       'four parts: pluginId partitions, updatedAt orders, id breaks ties',
     );
+
+    // The keyPath alone says nothing about what actually lands in the
+    // index -- that is the self-filtering property design spec §3.2 calls
+    // load-bearing, and it has to be observed by inserting rows and reading
+    // the index back, not asserted by inspecting its definition.
+    const tx = db.transaction('rows', 'readwrite');
+    const rows = tx.objectStore('rows');
+    rows.put({ table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 5 } });
+    // No `pluginId` -- this table projects `feedId` instead -- so this row
+    // has no `value.pluginId` and IndexedDB omits it from the index.
+    rows.put({ table: 'rss_item', id: 2, value: { feedId: 9, updatedAt: 5 } });
+    // A tombstone: no `value` at all, so no `value.pluginId` either.
+    rows.put({ table: 'media_item', id: 3 });
+    await done(tx);
+
+    const inIndex = await request<StoredRow[]>(
+      db.transaction('rows').objectStore('rows').index('by_table_plugin_updated').getAll(),
+    );
+    assert.deepEqual(
+      inIndex.map((row) => row.id).toSorted(),
+      [1],
+      'only the media_item row that actually carries a pluginId is in the index -- '
+      + 'the rss_item row (no pluginId) and the tombstone (no value at all) are both excluded',
+    );
   } finally {
     db.close();
   }
@@ -103,6 +127,13 @@ test('a v1 replica opening at v2 is rebuilt, not half-migrated', async () => {
   const name = freshDbName();
   // A replica as it existed before the bump: v1 had no `by_table_plugin_updated`.
   const old = await openStore(name, 1);
+  // A row this replica held before the bump. Rebuilt and half-migrated agree
+  // on every index name -- design spec §7 says what tells them apart is
+  // this row's fate: gone after a rebuild (refilled later through bootstrap
+  // and backfill), still there after an in-place migration.
+  const seedTx = old.transaction('rows', 'readwrite');
+  seedTx.objectStore('rows').put({ table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 5 } });
+  await done(seedTx);
   old.close();
   const upgraded = await openStore(name);
   try {
@@ -110,6 +141,9 @@ test('a v1 replica opening at v2 is rebuilt, not half-migrated', async () => {
     assert.ok(names.has('by_table_plugin_updated'), 'the new index is present after the bump');
     assert.ok(names.has('by_table_updated'), 'and the old ones were recreated, not dropped');
     assert.equal(upgraded.version, 2);
+
+    const row = await request(upgraded.transaction('rows').objectStore('rows').get(['media_item', 1]));
+    assert.equal(row, undefined, 'the pre-bump row is gone -- a rebuild discards it rather than carrying it forward');
   } finally {
     upgraded.close();
   }
