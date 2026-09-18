@@ -135,10 +135,28 @@ export function useMediaItems(
   const windowSizeRef = useRef(pageSize);
   const cursorRef = useRef<{ updatedAt: number; id: number } | undefined>(undefined);
 
+  /**
+   * Whether a `loadMore` request is already in flight. A ref, not state,
+   * for the same reason `cursorRef` is: `loadMore` itself must read and set
+   * it without waiting on a render.
+   *
+   * **A real defect this guards, not a theoretical one (review-found).** A
+   * second click before the first page resolves used to fire a second
+   * request from the *same* cursor -- both requests answer the same page,
+   * and both `.then` handlers append it, producing a duplicate row (and a
+   * duplicate React key). The cursor itself recovers on the next click
+   * (both handlers advance it to the same next boundary), but `items` does
+   * not: nothing removes the row the second handler already appended.
+   * Guarding the call itself, so the second click is a no-op, is what
+   * keeps `items` from seeing that request at all.
+   */
+  const loadingMoreRef = useRef(false);
+
   useEffect(() => {
     let cancelled = false;
     windowSizeRef.current = pageSize;
     cursorRef.current = undefined;
+    loadingMoreRef.current = false;
     setItems([]);
     setDone(false);
     setResolved(false);
@@ -174,8 +192,10 @@ export function useMediaItems(
   }, [source, pluginId, pageSize]);
 
   const loadMore = useCallback(() => {
+    if (loadingMoreRef.current) return; // a request is already in flight; a second click is a no-op (see loadingMoreRef's own doc)
     const cursor = cursorRef.current;
     if (cursor === undefined) return; // already exhausted, or the first page has not resolved yet
+    loadingMoreRef.current = true;
     windowSizeRef.current += pageSize;
 
     source
@@ -188,6 +208,9 @@ export function useMediaItems(
       .catch((err: unknown) => {
         if (isStoreClosed(err)) return;
         throw err;
+      })
+      .finally(() => {
+        loadingMoreRef.current = false;
       });
   }, [source, pluginId, pageSize]);
 
