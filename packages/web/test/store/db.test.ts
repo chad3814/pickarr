@@ -140,11 +140,32 @@ test('a v1 replica opening at v2 is rebuilt, not half-migrated', async () => {
     const names = new Set(upgraded.transaction('rows').objectStore('rows').indexNames);
     assert.ok(names.has('by_table_plugin_updated'), 'the new index is present after the bump');
     assert.ok(names.has('by_table_updated'), 'and the old ones were recreated, not dropped');
-    assert.equal(upgraded.version, 2);
+    assert.equal(upgraded.version, SCHEMA_VERSION);
 
     const row = await request(upgraded.transaction('rows').objectStore('rows').get(['media_item', 1]));
     assert.equal(row, undefined, 'the pre-bump row is gone -- a rebuild discards it rather than carrying it forward');
   } finally {
     upgraded.close();
+  }
+});
+
+test('a tab still holding the old version open steps aside instead of blocking the bump', async () => {
+  // The two-tab case across a deploy, which is this branch's own: the 1->2
+  // bump is the first this codebase has ever made, and before `openStore`
+  // listened for `versionchange` a second tab holding v1 open made the
+  // upgrading tab's open fire `blocked` -- `OpenBlockedError`, which
+  // `Shell` can only report, leaving that tab with no replica at all.
+  // Nothing in this suite opened two connections to one name before, which
+  // is why the gap survived.
+  const name = freshDbName();
+  const firstTab = await openStore(name, 1);
+  try {
+    const secondTab = await openStore(name, 2);
+    assert.equal(secondTab.version, 2, 'the upgrade went through rather than blocking on the open connection');
+    secondTab.close();
+  } finally {
+    // Idempotent by the standard, and the point of the test is that the
+    // `versionchange` handler already did this.
+    firstTab.close();
   }
 });

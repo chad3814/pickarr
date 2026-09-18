@@ -170,3 +170,95 @@ test('no fetch is issued while listing', async () => {
     globalThis.fetch = original;
   }
 });
+
+/** The filename the cost test below gives release `id`. */
+function costFixtureFilename(id: number): string {
+  return `release-${String(id)}.mkv`;
+}
+
+/**
+ * Polls until `read()` has stopped changing across `stable` consecutive
+ * macrotasks, or `limit` of them have passed, and answers its final value. A
+ * screen whose every wake starts another walk has no quiet point to
+ * `waitFor`, so the number the test below asserts on is only knowable once
+ * the screen has actually stopped reading.
+ */
+async function quiesce(read: () => number, stable = 60, limit = 4000): Promise<number> {
+  let last = read();
+  let unchanged = 0;
+  for (let tick = 0; tick < limit && unchanged < stable; tick += 1) {
+    // eslint-disable-next-line no-await-in-loop -- each tick has to land before the next is scheduled; that is the whole of what "has stopped" means here
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+    const now = read();
+    unchanged = now === last ? unchanged + 1 : 0;
+    last = now;
+  }
+  return last;
+}
+
+test('a batch that matches every listed release costs one re-read, not one per listed row', async () => {
+  // Cost, asserted directly. Every other test in this file checks what
+  // finally rendered, and a screen that re-read the whole table once per
+  // listed row renders exactly what one that re-read it once renders --
+  // which is why the fan-out survived a fix round aimed at this very screen
+  // (whole-branch review §1: 400 rows with 24 listed cost 408 full-table
+  // page reads for a single batch, because `store/notify.ts`'s `emit` fires
+  // `fireRow` once per touched row and each fire started its own walk).
+  //
+  // A walk is counted by its first read, the one carrying no `from`: every
+  // walk starts with exactly one of those and resumes with a `from`
+  // thereafter, so counting them needs nothing of `readUnmatched`'s
+  // internals.
+  const db = await freshDb();
+  const total = 400;
+  const listed = 24;
+  const seedOps: SyncOp[] = [];
+  for (let id = 1; id <= total; id += 1) {
+    // The newest `listed` rows are the unmatched ones: the short tail this
+    // screen exists to show, and exactly one screenful of it.
+    seedOps.push(rssOp({
+      id,
+      filename: costFixtureFilename(id),
+      mediaItemId: id > total - listed ? null : 7,
+      updatedAt: id,
+    }));
+  }
+  await seed(db, seedOps);
+
+  const real = sourceFor(db);
+  let walks = 0;
+  let pageReads = 0;
+  const source: UnmatchedSource = {
+    ...real,
+    listByTable: (table, opts) => {
+      pageReads += 1;
+      if (opts.from === undefined) walks += 1;
+      return real.listByTable(table, opts);
+    },
+  };
+
+  render(<Unmatched source={source} />);
+  await waitFor(() => {
+    assert.equal(filenamesShown().length, listed, 'one screenful of unmatched releases');
+  });
+  const walksAfterFirstRender = walks;
+
+  // A lookup batch matches every listed release at once -- the exact
+  // transition this screen exists to show. `emit` runs all `listed` row
+  // subscriptions synchronously before `applyBatch` resolves, so the
+  // fan-out is already fully visible the moment this `await` returns.
+  const matched: SyncOp[] = [];
+  for (let id = total - listed + 1; id <= total; id += 1) {
+    matched.push(rssOp({ id, filename: costFixtureFilename(id), mediaItemId: 7, updatedAt: id + total }));
+  }
+  await seed(db, matched);
+
+  assert.equal(walks - walksAfterFirstRender, 1, 'the batch started one walk, not one per listed row');
+
+  await waitFor(() => {
+    assert.equal(filenamesShown().length, 0, 'every listed release left the screen');
+  });
+  const settled = await quiesce(() => walks) - walksAfterFirstRender;
+  assert.ok(settled <= 2, `one batch settles in at most two walks, not ${String(settled)}`);
+  assert.ok(pageReads > 0, 'and the screen really did read the replica');
+});

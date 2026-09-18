@@ -11,7 +11,7 @@
  *
  * **The window, not the cursor, is what a live insert re-reads.** This hook
  * tracks how many rows the current window has asked for in total
- * (`windowRef`, starting at `pageSize` and growing by `pageSize` on every
+ * (`windowSizeRef`, starting at `pageSize` and growing by `pageSize` on every
  * `loadMore`), and a `subscribeInserts` wake re-issues *that* request from
  * the top (`from` absent) rather than resuming from wherever the last page
  * left off. A cursor-based resume on a wake would need to reconcile a page
@@ -149,20 +149,54 @@ export function useMediaItems(
    * not: nothing removes the row the second handler already appended.
    * Guarding the call itself, so the second click is a no-op, is what
    * keeps `items` from seeing that request at all.
+   *
+   * **This guards re-entrant calls and nothing else**, which is why
+   * {@link windowGenerationRef} exists alongside it.
    */
   const loadingMoreRef = useRef(false);
+
+  /**
+   * Bumped every time the window is replaced from the top -- by `apply`
+   * below, and by this effect re-running for a new `source`/`pluginId`.
+   * `loadMore` captures it before issuing its request and discards the
+   * answer if it has moved since.
+   *
+   * **A second real defect, and the one `loadingMoreRef` above cannot
+   * reach (whole-branch review §2).** That ref stops a second *call*; it
+   * says nothing about a page resolving into a list that was replaced
+   * underneath it. A live `media_item` insert arriving while a page is in
+   * flight wakes `reloadWindow`, which re-reads the *whole* window --
+   * `windowSizeRef` was already grown by the `loadMore` that is still in
+   * flight, so the reload's answer already contains that page. The held
+   * `.then` then appended it a second time: measured as
+   * ['Brand New','Newest','Middle','Oldest','Oldest'] with a React
+   * duplicate-key warning, and `setDone` from the same held page removed
+   * "Load more" at the same moment, leaving the duplicate and no way past
+   * it. Not theoretical: this branch's own `SCHEMA_VERSION` bump forces
+   * every client through a resync, which is a continuous stream of exactly
+   * those inserts.
+   *
+   * Discarding is right rather than merely safe: the reload that bumped
+   * this already asked for, and answered with, everything the held page
+   * was going to add.
+   */
+  const windowGenerationRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     windowSizeRef.current = pageSize;
     cursorRef.current = undefined;
     loadingMoreRef.current = false;
+    windowGenerationRef.current += 1;
     setItems([]);
     setDone(false);
     setResolved(false);
 
     function apply(rows: readonly StoredRow[], requested: number): void {
       if (cancelled) return;
+      // Before the state writes, so a `loadMore` whose `.then` is already
+      // queued behind this one still sees the new generation.
+      windowGenerationRef.current += 1;
       setItems(toMediaItems(rows));
       setDone(rows.length < requested);
       cursorRef.current = cursorFor(rows.at(-1));
@@ -197,10 +231,17 @@ export function useMediaItems(
     if (cursor === undefined) return; // already exhausted, or the first page has not resolved yet
     loadingMoreRef.current = true;
     windowSizeRef.current += pageSize;
+    const generation = windowGenerationRef.current;
 
     source
       .listByTablePlugin(TABLE, pluginId, { direction: 'prev', from: cursor, limit: pageSize })
       .then((rows) => {
+        // The window was replaced while this page was in flight, and the
+        // replacement already covers it -- see `windowGenerationRef`. All
+        // three writes are skipped together: appending would duplicate a
+        // row, `setDone` would strand the list on a short held page, and
+        // `cursorRef` would clobber the boundary the reload just set.
+        if (generation !== windowGenerationRef.current) return;
         setItems((current) => [...current, ...toMediaItems(rows)]);
         setDone(rows.length < pageSize);
         cursorRef.current = cursorFor(rows.at(-1)) ?? cursor;

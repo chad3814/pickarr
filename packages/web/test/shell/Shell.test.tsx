@@ -208,24 +208,33 @@ test('a 401 on the tail poll -- the ordinary way a client discovers a dead sessi
   }
 });
 
-test('a store that fails to open is reported, not left as an unhandled rejection', async () => {
-  // `Shell.tsx`'s own `createStore(wired).catch(...)` was added alongside
-  // `useCounts.ts`'s `safeRefresh` catch and, per this fix round's review,
-  // was equally untested: removing it produced zero test failures. Proven
-  // here by forcing `openStore`'s own request to fail the way IndexedDB
-  // actually fails it -- opening at a version *lower* than one already on
-  // disk answers a `VersionError`, per the standard -- rather than by
-  // injecting a fake rejection `Shell` never has to handle in production.
-  // One version ahead of `SCHEMA_VERSION`, not a literal, so the next bump
-  // does not silently turn this back into an equal-version open with no
-  // `VersionError` and no failing assertion to say why.
-  const dbName = freshDbName('shell-open-fail');
+/**
+ * A replica name `openStore` cannot open, and the reason it cannot.
+ *
+ * Forces the failure the way IndexedDB actually produces one -- opening at a
+ * version *lower* than one already on disk answers a `VersionError`, per the
+ * standard -- rather than injecting a fake rejection `Shell` never has to
+ * handle in production. One version ahead of `SCHEMA_VERSION`, not a
+ * literal, so the next bump does not silently turn this back into an
+ * equal-version open with no `VersionError` and no failing assertion to say
+ * why.
+ */
+async function unopenableDbName(label: string): Promise<string> {
+  const dbName = freshDbName(label);
   const preexisting = await new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(dbName, SCHEMA_VERSION + 1);
     req.addEventListener('success', () => { resolve(req.result); }, { once: true });
     req.addEventListener('error', () => { reject(req.error ?? new Error('open failed')); }, { once: true });
   });
   preexisting.close();
+  return dbName;
+}
+
+test('a store that fails to open is reported, not left as an unhandled rejection', async () => {
+  // `Shell.tsx`'s own `createStore(wired).catch(...)` was added alongside
+  // `useCounts.ts`'s `safeRefresh` catch and, per this fix round's review,
+  // was equally untested: removing it produced zero test failures.
+  const dbName = await unopenableDbName('shell-open-fail');
 
   const escaped: unknown[] = [];
   const onUnhandledRejection = (reason: unknown): void => {
@@ -256,6 +265,49 @@ test('a store that fails to open is reported, not left as an unhandled rejection
   } finally {
     console.error = originalConsoleError;
     process.off('unhandledRejection', onUnhandledRejection);
+  }
+});
+
+test('a replica that cannot be opened says so on screen, rather than rendering a confident blank', async () => {
+  // The test above proves the *handler ran*. It says nothing about whether
+  // anyone is told, and the answer was nobody (whole-branch review §3):
+  // `/tv`'s section had an innerHTML of `""`, the three counts read 0/0/0,
+  // and no alert of any kind appeared -- total failure rendering exactly
+  // like "still loading", and exactly like the correct empty replica that
+  // this branch's "zero is an answer" constraint makes a normal state.
+  //
+  // Asserted on a real visible heading, not on a `role`/`aria-label` pair
+  // (`CLAUDE.md`'s longest hazard entry: a query that would still pass with
+  // every stylesheet deleted is not evidence anyone can read the thing), and
+  // the section takes its accessible name from that same heading through
+  // `aria-labelledby`, so the announced string and the visible one cannot
+  // drift apart.
+  const dbName = await unopenableDbName('shell-open-fail-visible');
+
+  const originalConsoleError = console.error;
+  console.error = (): void => {};
+  try {
+    const { deps } = testDeps();
+    render(
+      <MemoryRouter initialEntries={['/tv']}>
+        <Shell deps={{ ...deps, dbName }} onUnauthenticated={() => {}} />
+      </MemoryRouter>,
+    );
+    await settle();
+
+    const heading = screen.getByRole('heading', { name: /cannot open its local database/i });
+    assert.ok(heading.textContent !== null && heading.textContent.length > 0, 'the failure is spelled out in visible text');
+    assert.ok(
+      screen.getByRole('region', { name: /cannot open its local database/i }),
+      'and the region is named by that heading rather than by a duplicated aria-label',
+    );
+    assert.ok(
+      screen.getByText(/close it, then reload/i),
+      'and it says what to do about it, not merely that something went wrong',
+    );
+    assert.ok(!screen.queryByTestId('category-tv'), 'the blank category section is not shown alongside it');
+  } finally {
+    console.error = originalConsoleError;
   }
 });
 
@@ -299,21 +351,19 @@ test('the nav links to each category, and marks the current one', async () => {
  * Pins the `<Route>` table's path-to-element mapping itself. The nav's own
  * hrefs and `aria-current` (asserted above) are derived from `CATEGORIES`
  * independently of the `<Route>` tree, so they cannot see this: swapping
- * which `CategoryPlaceholder` renders at `/tv` against `/movie` passed every
- * test in this file before these three existed (review-found, task 4's fix
- * round).
+ * which screen renders at `/tv` against `/movie` passed every test in this
+ * file before these three existed (review-found, task 4's fix round).
  *
- * Asserts on each placeholder's `data-testid={`category-${category}`}`
- * marker, not its prose (round 2 of task 4's fix round, review-found: the
- * first version of these three asserted the exact placeholder text, which
- * pinned the mapping today but would have broken all three the moment tasks
+ * Asserts on each screen's `data-testid={`category-${category}`}` marker,
+ * not its prose (round 2 of task 4's fix round, review-found: the first
+ * version of these three asserted the exact placeholder text, which pinned
+ * the mapping at the time but would have broken all three the moment tasks
  * 5-7 replaced a placeholder's wording with a real screen -- three later
  * tasks each stopping to repair a test this round added, rather than this
  * round choosing a marker that survives that swap). `data-testid` is the
  * house pattern for exactly this, already used by `Shell.tsx`'s own
- * `count-${category}` -- see `CategoryPlaceholder`'s own doc, which states
- * the `data-testid` as the route-mapping contract a later task's real
- * component must keep.
+ * `count-${category}`. The marker survived the swap it was chosen for:
+ * `Category.tsx` carries it now, and its docblock says why.
  *
  * One test per category rather than a loop over `CATEGORIES`: a `for`-loop
  * body awaiting the tail-scheduled check on every iteration is exactly the
@@ -374,10 +424,11 @@ test('the /xxx route renders the xxx category, not another one', async () => {
 /**
  * `/unmatched`'s own mapping test, alongside the three category ones above.
  * Task 7's own report found nothing pinning this route before this test --
- * unlike the three category placeholders, `UnmatchedPlaceholder` carried no
- * `data-testid`, so swapping what `/unmatched` rendered could have gone
- * unnoticed the way the three category ones no longer can. `Unmatched`'s
- * root now carries `data-testid="unmatched"` for exactly this.
+ * unlike the three category placeholders, the one that stood at
+ * `/unmatched` carried no `data-testid`, so swapping what this route
+ * rendered could have gone unnoticed the way the three category ones no
+ * longer can. `Unmatched`'s root now carries `data-testid="unmatched"` for
+ * exactly this.
  *
  * `waitFor`, not a synchronous assertion like the three tests above: unlike
  * `Category`, whose `data-testid` sits on an outer element that renders

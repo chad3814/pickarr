@@ -73,7 +73,7 @@ export interface CreateStoreDeps {
 }
 
 /**
- * The five reads (`store/rows.ts`), the three subscriptions
+ * The seven reads (`store/rows.ts`), the three subscriptions
  * (`store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
  * `stop()` -- everything a consumer of the replica needs, with `db` already
  * bound so none of it takes one.

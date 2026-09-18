@@ -98,6 +98,17 @@ export interface ShellProps {
 
 export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
   const [store, setStore] = useState<Store | undefined>(undefined);
+  /**
+   * Whether `createStore` rejected -- the one state that is neither "still
+   * opening" nor "open", and which every screen below would otherwise
+   * render identically to both (whole-branch review §3: `/tv`'s section had
+   * an innerHTML of `""`, the counts read `0/0/0`, and no alert appeared,
+   * indefinitely). A boolean, not the error: a `VersionError`'s or an
+   * `OpenBlockedError`'s message names the database, and nothing this
+   * component renders may carry one (Global Constraints). The error itself
+   * still reaches `console.error` below, where a developer can read it.
+   */
+  const [storeFailed, setStoreFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,11 +126,12 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         setStore(opened);
       })
       .catch((err: unknown) => {
-        // Reported rather than left as an unhandled rejection -- the same
-        // reasoning `useCounts.ts` documents for its own `catch`. `openStore`
-        // can genuinely reject (`OpenBlockedError`, or IndexedDB refusing
-        // outright), and there is no reader here yet to hand the failure to.
+        // Reported to the console *and* to the person looking at the tab.
+        // `openStore` can genuinely reject (`OpenBlockedError`, or
+        // IndexedDB refusing outright), and a console line is not a report
+        // to anyone who is not already watching one.
         console.error('pickarr: failed to open the replica', err);
+        if (!cancelled) setStoreFailed(true);
       });
 
     return () => {
@@ -154,7 +166,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
 
   return (
     <Routes>
-      <Route element={<ShellChrome counts={counts} onSignOut={handleSignOut} />}>
+      <Route element={<ShellChrome counts={counts} onSignOut={handleSignOut} storeFailed={storeFailed} />}>
         <Route index element={<Navigate to="/tv" replace />} />
         <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" />} />
         <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" />} />
@@ -163,10 +175,11 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           `store` is `undefined` until `createStore` resolves (this component's
           own effect, above); `Unmatched`'s `source` prop is not optional, so
           this route renders nothing for that brief window rather than handing
-          it a store that is not there yet. No marker ever pinned `/unmatched`
-          to a placeholder -- unlike the three category routes,
-          `Shell.test.tsx` has never asserted this route's rendered content,
-          only that the route exists.
+          it a store that is not there yet. No marker pinned `/unmatched` while
+          it was a placeholder, unlike the three category routes -- task 7's
+          fix round closed that, and `Shell.test.tsx`'s "the /unmatched route
+          renders Unmatched, not a category" now asserts this route's rendered
+          content through `Unmatched`'s own `data-testid`.
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/* Keeps the chrome on screen for any other path -- see this file's doc. */}
@@ -179,17 +192,51 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
 interface ShellChromeProps {
   counts: Counts;
   onSignOut: () => void;
+  /** See `Shell`'s own `storeFailed` state: when true, {@link StoreFailed} takes the `<Outlet />`'s place. */
+  storeFailed: boolean;
+}
+
+/**
+ * The one thing a tab with no replica can honestly show.
+ *
+ * **A real heading, not a `role="alert"` with an `aria-label`**
+ * (`CLAUDE.md`'s longest testing hazard: `IdentityChangeConfirm` shipped a
+ * named `role="dialog"` that ten tests asserted on and nobody could read).
+ * The `<section>` takes its accessible name from the heading through
+ * `aria-labelledby`, so the announced string and the visible one are the
+ * same string and cannot drift.
+ *
+ * **It names no database, url or error.** A `VersionError`'s or an
+ * `OpenBlockedError`'s own message carries the replica's name (Global
+ * Constraints); the console line in `Shell`'s `catch` is where a developer
+ * reads the detail. What a user needs instead is the one action that
+ * actually resolves the overwhelmingly likely cause -- another tab holding
+ * an older version of the app open, which is what blocks a version bump.
+ */
+function StoreFailed(): ReactElement {
+  return (
+    <section aria-labelledby="store-failed-heading">
+      <h2 id="store-failed-heading">Pickarr cannot open its local database</h2>
+      <p>
+        Nothing can be shown until it can. Another tab may still have an older version of Pickarr
+        open — close it, then reload this page.
+      </p>
+    </section>
+  );
 }
 
 /**
  * The nav and header, rendered once regardless of which category route
- * matched, plus the `<Outlet />` that renders whichever one did. Hoisted out
- * of `Shell` (rather than defined inline in its render) so this component's
- * identity stays stable across `Shell` renders -- an inline layout component
- * would remount on every render, which is wasteful even though nothing here
- * currently has state.
+ * matched, plus the `<Outlet />` that renders whichever one did -- or
+ * {@link StoreFailed} in its place when there is no replica to render from.
+ * The chrome itself stays either way, so "Sign out" is still reachable from
+ * a tab whose replica never opened. Hoisted out of `Shell` (rather than
+ * defined inline in its render) so this component's identity stays stable
+ * across `Shell` renders -- an inline layout component would remount on
+ * every render, which is wasteful even though nothing here currently has
+ * state.
  */
-function ShellChrome({ counts, onSignOut }: ShellChromeProps): ReactElement {
+function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): ReactElement {
   return (
     <div>
       <header>
@@ -209,7 +256,7 @@ function ShellChrome({ counts, onSignOut }: ShellChromeProps): ReactElement {
           ))}
         </ul>
       </nav>
-      <Outlet />
+      {storeFailed ? <StoreFailed /> : <Outlet />}
     </div>
   );
 }

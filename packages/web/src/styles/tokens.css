@@ -1,8 +1,29 @@
 /*
- * Every colour, size, space and radius in the app. Past this file, no rule in
- * `styles/` declares a raw value, and there is now no exception: 1.x's
- * `dialog.css` had one for its `::backdrop` and modal close button, and that
- * file went with the 2.0 rewrite.
+ * Every design decision the app makes about colour, space, type size, radius,
+ * elevation and fixed component dimension is named here, and a rule elsewhere
+ * in `styles/` references it rather than restating it.
+ *
+ * Rules outside this file may still declare *structural and idiomatic* values,
+ * which name no design decision and have nothing here to reference: the six
+ * `1px` hairline borders across `base.css` and `library.css` (a `--hairline`
+ * token would be a token for the number 1) and the three more `1px` values in
+ * the visually-hidden clip idiom, `100%` and `1 0 100%` fills, `100vh`,
+ * `60rem`, the poster's `2 / 3` aspect ratio, `font-weight: 600`, `h1`'s
+ * `-0.015em` tracking, `clip-path: inset(50%)`, and the two-pixel focus
+ * outline, offset and inset marker. That is a rule a future author can
+ * actually obey.
+ *
+ * An earlier version of this paragraph claimed "no rule in `styles/` declares
+ * a raw value, and there is now no exception". It was false the day it was
+ * written — `base.css` already carried every value listed above bar the
+ * poster's aspect ratio and `width: 100%` — and `library.css` then added
+ * seven raw declarations of its own. Tokenizing was considered and refused:
+ * `60rem` and `2px` are the only two genuine design values in that list, and
+ * converting just those would have left the sentence exactly as false while
+ * implying it had been fixed, which is how it came to be written in the first
+ * place. The history is recorded rather than
+ * quietly replaced because "true when written" is this project's most
+ * repeated defect.
  *
  * Both palettes are keyed on `[data-theme]` and nothing resolves in CSS. The
  * alternative — `@media (prefers-color-scheme: light)` for the automatic case and

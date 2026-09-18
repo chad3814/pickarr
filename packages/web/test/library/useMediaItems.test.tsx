@@ -61,6 +61,19 @@ function sourceFor(db: IDBDatabase): MediaItemsSource {
   };
 }
 
+/**
+ * Lets every already-scheduled continuation and the React commit that
+ * follows it land. Needed only where the property under test is that
+ * *nothing* changed, which `waitFor` -- which polls until something does --
+ * cannot express.
+ */
+async function settleRenders(): Promise<void> {
+  for (let tick = 0; tick < 5; tick += 1) {
+    // eslint-disable-next-line no-await-in-loop -- each tick has to land before the next is scheduled; that is the whole of what settling is
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+  }
+}
+
 /** The rendered headings' text, in the order they appear. */
 function titlesShown(): string[] {
   return screen.getAllByRole('heading').map((heading) => heading.textContent ?? '');
@@ -290,4 +303,75 @@ test('no fetch is issued when loading more', async () => {
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test('a row arriving while a page is in flight neither duplicates a row nor strands the list', async () => {
+  // The `loadingMoreRef` guard above covers a second *click*. It cannot
+  // cover a page resolving into a list that was replaced underneath it,
+  // which is the same defect reached through the channel this whole branch
+  // exists to serve (whole-branch review §2): a real `media_item` insert
+  // committing while `loadMore`'s page is held produced
+  // ['Brand New','Newest','Middle','Oldest','Oldest'] and a React
+  // duplicate-key warning -- and `setDone` from that held page then removed
+  // "Load more", leaving no way past the duplicate.
+  //
+  // Only the `from`-bearing read is held: the insert's own wake reloads the
+  // window from the top (`from: undefined`), which must go straight
+  // through, or this would be testing a stalled store rather than a race.
+  const db = await freshDb();
+  await seed(db, [
+    mediaItem({ id: 1, pluginId: 'tv', title: 'Oldest', updatedAt: 10 }),
+    mediaItem({ id: 2, pluginId: 'tv', title: 'Middle', updatedAt: 20 }),
+    mediaItem({ id: 3, pluginId: 'tv', title: 'Newest', updatedAt: 30 }),
+  ]);
+  const real = sourceFor(db);
+  // Answers once the held read has really been served, so the assertions
+  // below run after the component has seen it rather than merely after it
+  // was released -- a `waitFor` cannot stand in here, since a correctly
+  // discarded page changes nothing on screen to wait for.
+  let releasePage: (() => Promise<void>) | undefined;
+  const source: MediaItemsSource = {
+    subscribeInserts: real.subscribeInserts,
+    listByTablePlugin: (table, pluginId, opts) => {
+      if (opts.from === undefined) return real.listByTablePlugin(table, pluginId, opts);
+      return new Promise((resolve) => {
+        releasePage = async () => {
+          resolve(await real.listByTablePlugin(table, pluginId, opts));
+        };
+      });
+    },
+  };
+
+  render(<Listing source={source} pluginId="tv" pageSize={2} />);
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['Newest', 'Middle']);
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => {
+    assert.ok(releasePage !== undefined, 'the paging read is in flight and held');
+  });
+
+  // A real insert, applied and emitted exactly as the sync loops would --
+  // the continuous stream every client sees during this branch's own forced
+  // resync.
+  await seed(db, [mediaItem({ id: 4, pluginId: 'tv', title: 'Brand New', updatedAt: 40 })]);
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['Brand New', 'Newest', 'Middle', 'Oldest'], 'the wake reloaded the grown window');
+  });
+
+  await releasePage?.();
+  await settleRenders();
+
+  assert.deepEqual(
+    titlesShown(),
+    ['Brand New', 'Newest', 'Middle', 'Oldest'],
+    'the held page was discarded rather than appended a second time',
+  );
+  assert.ok(
+    screen.queryByRole('button', { name: /load more/i }) !== null,
+    'and it did not take "Load more" with it, stranding the list',
+  );
+
+  db.close();
 });

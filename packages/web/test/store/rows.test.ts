@@ -316,7 +316,7 @@ test('a category sees only its own rows', async () => {
   db.close();
 });
 
-test('counting a category reads no rows and excludes tombstones', async () => {
+test('counting a category excludes tombstones', async () => {
   const db = await freshDb();
   await seed(db, [
     { op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 1 } },
@@ -328,5 +328,64 @@ test('counting a category reads no rows and excludes tombstones', async () => {
   assert.equal(await countByPlugin(db, 'media_item', 'tv'), 1, 'the tombstoned row is not counted');
   assert.equal(await countByPlugin(db, 'media_item', 'movie'), 1);
   assert.equal(await countByPlugin(db, 'media_item', 'xxx'), 0, 'zero is an answer');
+  db.close();
+});
+
+test('listByTablePlugin refuses a table that projects no pluginId', async () => {
+  // `TABLES_WITH_UPDATED_AT`'s own doc gives the reason this guard exists:
+  // an empty page "would read as 'this table is empty' -- a lie a caller
+  // has no way to catch". Both readers of `by_table_plugin_updated`
+  // inherited the `updatedAt` guard, which admits five tables of which
+  // only `media_item` projects a `pluginId` -- so for the other four they
+  // told exactly that lie. Measured against a store holding two real
+  // `rss_item` rows: `listByTablePlugin` answered `[]` and `countByPlugin`
+  // answered `0`.
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'rss_item', id: 1, value: { feedId: 1, mediaItemId: null, updatedAt: 1 } },
+    { op: 'upsert', table: 'rss_item', id: 2, value: { feedId: 1, mediaItemId: null, updatedAt: 2 } },
+  ]);
+
+  await assert.rejects(
+    () => listByTablePlugin(db, 'rss_item', 'tv', { direction: 'prev', limit: 10 }),
+    /projects no pluginId/,
+    'a table with rows in it must not answer "empty"',
+  );
+  await assert.rejects(
+    () => countByPlugin(db, 'rss_item', 'tv'),
+    /projects no pluginId/,
+    'and the count must refuse it the same way its sibling does',
+  );
+  db.close();
+});
+
+test('the count comes from the index, not from a filtered scan', async () => {
+  // The claim the test above was named for and could not check: that a
+  // count reads the index rather than every `media_item` row. Spying on
+  // `rowsStore(db).index(...)` would couple this to a call shape, and a
+  // timing assertion is flaky by construction -- but there is a third way,
+  // which needs neither, because the two mechanisms genuinely disagree
+  // about one row.
+  //
+  // `by_table_plugin_updated`'s key path is
+  // ['table', 'value.pluginId', 'value.updatedAt', 'id'], and IndexedDB
+  // omits any record whose key path does not fully resolve. So a row
+  // carrying `pluginId` but no `updatedAt` is in `by_table` and *not* in
+  // `by_table_plugin_updated`, while any scan filtering rows on "has a
+  // value, and value.pluginId === 'tv'" counts it. That difference is
+  // observable through `countByPlugin`'s public signature alone.
+  //
+  // Hand-built, because the wire cannot produce it -- `MediaItemSyncRead`
+  // requires `updatedAt` -- which is exactly the case `CLAUDE.md` names:
+  // "when behaviour changes and stored data does not, hand-build a fixture
+  // in the old shape". It also documents, at the count layer, the
+  // self-filtering property spec §3.2 calls load-bearing.
+  const db = await freshDb();
+  await seed(db, [{ op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 1 } }]);
+  const tx = db.transaction('rows', 'readwrite');
+  tx.objectStore('rows').put({ table: 'media_item', id: 2, value: { pluginId: 'tv' } });
+  await done(tx);
+
+  assert.equal(await countByPlugin(db, 'media_item', 'tv'), 1, 'the row the index omits is not counted');
   db.close();
 });

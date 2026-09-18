@@ -23,11 +23,14 @@
  * which is the trade this constant exists to make.
  *
  * Version 2 added `by_table_plugin_updated`, the per-category index the
- * browse screens page and count against. No reader of it existed yet when
- * this bumped, so every client paid a full resync for an index nothing used
- * -- acceptable here because 2.0 is greenfield (one operator, an empty
- * database, a tested backfill), and not a precedent for doing this once real
- * usage exists.
+ * browse screens page and count against. No reader of it existed yet at the
+ * moment this bumped -- tasks 2, 3 and 5 added them in the same branch, so
+ * `rows.ts`'s `listByTablePlugin` and `countByPlugin`, `shell/useCounts.ts`
+ * and `library/useMediaItems.ts` are those readers by the time anyone
+ * reaches `pickarr-2`. Every client still paid a full resync for the bump,
+ * which is acceptable here because 2.0 is greenfield (one operator, an
+ * empty database, a tested backfill), and is not a precedent for doing this
+ * once real usage exists.
  */
 export const SCHEMA_VERSION = 2;
 
@@ -118,7 +121,29 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       db.createObjectStore('meta', { keyPath: 'key' });
     }, { once: true });
 
-    req.addEventListener('success', () => resolve(req.result), { once: true });
+    req.addEventListener('success', () => {
+      const db = req.result;
+      // **What makes a version bump survivable in a second tab.** IndexedDB
+      // fires `versionchange` on every *other* open connection when one tab
+      // asks for a higher version; a connection that ignores it blocks the
+      // upgrade, and the upgrading tab's own open fires `blocked` and
+      // rejects with {@link OpenBlockedError} -- a tab left with no replica
+      // at all, for as long as the old tab stays open. That is the ordinary
+      // two-tab case across a deploy, and this codebase's 1->2 bump is the
+      // first ever made, so nothing had exercised it (measured: without this
+      // listener, a second `openStore(name, 2)` against a held v1 connection
+      // rejects `OpenBlockedError`; with it, it resolves).
+      //
+      // Closing is the whole remedy and it is deliberately unconditional.
+      // Reads in flight on this connection reject with `InvalidStateError`,
+      // which every consumer of this store already treats as "the store I
+      // was reading from went away" -- `useCounts.ts`, `useGatheredItem.ts`,
+      // `useMediaItems.ts` and `Unmatched.tsx` each carry an `isStoreClosed`
+      // guard for exactly that. The alternative -- holding the connection
+      // and prompting -- would need UI this module has no business owning.
+      db.addEventListener('versionchange', () => { db.close(); });
+      resolve(db);
+    }, { once: true });
     req.addEventListener(
       'error',
       () => reject(req.error ?? new Error('indexeddb open failed')),

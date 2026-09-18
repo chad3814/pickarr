@@ -67,8 +67,10 @@ function titlesShown(): string[] {
 }
 
 test('the category screen carries the route-mapping marker on its root element', async () => {
-  // `Shell.tsx`'s own doc on `CategoryPlaceholder`: task 4's mapping tests
-  // find whichever category screen renders by this marker alone.
+  // `Category.tsx`'s own doc: task 4's three mapping tests in
+  // `Shell.test.tsx` find whichever category screen renders by this marker
+  // alone, so it is a contract this component inherited rather than
+  // decoration it is free to drop.
   const db = await freshDb();
   render(<Category store={sourceFor(db)} pluginId="tv" />);
   assert.ok(screen.getByTestId('category-tv'), 'the marker names this category');
