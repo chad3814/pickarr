@@ -17,9 +17,10 @@ function cursorOf(rows: readonly StoredRow[]): { updatedAt: number; id: number }
 }
 
 /**
- * `updatedAt` off a `StoredRow`'s `value`, narrowed the way `useCounts.ts`'s
- * `categoryOf` narrows `pluginId` -- `typeof`/`in` checks rather than a cast
- * (Global Constraint: no cast to silence a type error).
+ * `updatedAt` off a `StoredRow`'s `value`, narrowed with `typeof`/`in`
+ * checks rather than a cast (Global Constraint: no cast to silence a type
+ * error) -- the same technique any guard over an `unknown` value uses, such
+ * as `useCounts.ts`'s own `isStoreClosed`.
  */
 function updatedAtOf(row: StoredRow): number {
   const { value } = row;
