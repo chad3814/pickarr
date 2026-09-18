@@ -118,7 +118,29 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       db.createObjectStore('meta', { keyPath: 'key' });
     }, { once: true });
 
-    req.addEventListener('success', () => resolve(req.result), { once: true });
+    req.addEventListener('success', () => {
+      const db = req.result;
+      // **What makes a version bump survivable in a second tab.** IndexedDB
+      // fires `versionchange` on every *other* open connection when one tab
+      // asks for a higher version; a connection that ignores it blocks the
+      // upgrade, and the upgrading tab's own open fires `blocked` and
+      // rejects with {@link OpenBlockedError} -- a tab left with no replica
+      // at all, for as long as the old tab stays open. That is the ordinary
+      // two-tab case across a deploy, and this codebase's 1->2 bump is the
+      // first ever made, so nothing had exercised it (measured: without this
+      // listener, a second `openStore(name, 2)` against a held v1 connection
+      // rejects `OpenBlockedError`; with it, it resolves).
+      //
+      // Closing is the whole remedy and it is deliberately unconditional.
+      // Reads in flight on this connection reject with `InvalidStateError`,
+      // which every consumer of this store already treats as "the store I
+      // was reading from went away" -- `useCounts.ts`, `useGatheredItem.ts`,
+      // `useMediaItems.ts` and `Unmatched.tsx` each carry an `isStoreClosed`
+      // guard for exactly that. The alternative -- holding the connection
+      // and prompting -- would need UI this module has no business owning.
+      db.addEventListener('versionchange', () => { db.close(); });
+      resolve(db);
+    }, { once: true });
     req.addEventListener(
       'error',
       () => reject(req.error ?? new Error('indexeddb open failed')),
