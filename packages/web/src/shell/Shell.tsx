@@ -43,6 +43,7 @@ import { createStore, type CreateStoreDeps, type Store } from '../store/index.ts
 import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
+import { Unmatched } from '../library/Unmatched.tsx';
 import { useCounts, CATEGORIES, type Category, type Counts } from './useCounts.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
@@ -154,7 +155,18 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         <Route path="tv" element={<CategoryPlaceholder category="tv" />} />
         <Route path="movie" element={<CategoryPlaceholder category="movie" />} />
         <Route path="xxx" element={<CategoryPlaceholder category="xxx" />} />
-        <Route path="unmatched" element={<UnmatchedPlaceholder />} />
+        {/*
+          `store` is `undefined` until `createStore` resolves (this
+          component's own effect, above); `Unmatched`'s `source` prop is not
+          optional, so this route renders nothing for that brief window
+          rather than handing it a store that is not there yet. No marker
+          pinned `/unmatched` to `UnmatchedPlaceholder` before this change --
+          unlike the three category routes, `Shell.test.tsx` has never
+          asserted on this route's rendered content, only on its existence
+          reachable through the nav (task 4's own tests). See task 7's report
+          for the search that confirmed this.
+        */}
+        <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/* Keeps the chrome on screen for any other path -- see this file's doc. */}
         <Route path="*" element={null} />
       </Route>
@@ -215,9 +227,4 @@ function ShellChrome({ counts, onSignOut }: ShellChromeProps): ReactElement {
  */
 function CategoryPlaceholder({ category }: { category: Category }): ReactElement {
   return <p data-testid={`category-${category}`}>{CATEGORY_LABELS[category]} category screen goes here (task 5).</p>;
-}
-
-/** Stands in for task 7's `Unmatched` screen; see {@link CategoryPlaceholder}. */
-function UnmatchedPlaceholder(): ReactElement {
-  return <p>Unmatched screen goes here (task 7).</p>;
 }
