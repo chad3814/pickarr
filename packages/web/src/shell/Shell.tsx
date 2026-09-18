@@ -204,9 +204,17 @@ function ShellChrome({ counts, onSignOut }: ShellChromeProps): ReactElement {
  * Stands in for task 5's `Category` screen. Names its category and nothing
  * else -- this task's job is the route existing and the nav reaching it, not
  * what the category screen looks like.
+ *
+ * **`data-testid={`category-${category}`}` on the root element is the
+ * route-mapping contract, not incidental.** `Shell.test.tsx`'s mapping tests
+ * assert on this marker rather than on this placeholder's prose, precisely
+ * so that swapping the prose does not look like swapping the mapping.
+ * Whichever task (5) replaces this placeholder with the real `Category`
+ * screen must carry the same `data-testid` onto that screen's own root
+ * element, or the mapping tests lose the one thing they can still see.
  */
 function CategoryPlaceholder({ category }: { category: Category }): ReactElement {
-  return <p>{CATEGORY_LABELS[category]} category screen goes here (task 5).</p>;
+  return <p data-testid={`category-${category}`}>{CATEGORY_LABELS[category]} category screen goes here (task 5).</p>;
 }
 
 /** Stands in for task 7's `Unmatched` screen; see {@link CategoryPlaceholder}. */
