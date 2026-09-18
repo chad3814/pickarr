@@ -15,7 +15,7 @@
  * actually call.
  *
  * **No plugin is registered, and none is needed.** `media_item` -- the one
- * table the shell's three counts read (`useCounts.ts`'s `categoryOf`) -- is a
+ * table the shell's three counts read (`useCounts.ts`'s `CATEGORIES`) -- is a
  * *host* synced table (`HOST_SYNCED_TABLES`), synced with no plugin involved
  * at all. `seedMediaItem` below inserts into it directly, the same seam
  * `packages/host/test/api/sync-route.test.ts`'s own `seedMediaItem` uses, so
@@ -83,9 +83,11 @@ export interface Harness {
   /**
    * Inserts one `media_item` row directly and returns its id. `pluginId` is
    * one of the shell's three real categories, not the host suite's synthetic
-   * `'alpha'`: `useCounts.ts`'s `categoryOf` keys on exactly `'tv'`,
-   * `'movie'` and `'xxx'`, and a row under any other value would be counted
-   * by none of the three tabs.
+   * `'alpha'`: `useCounts.ts` only ever calls `countByPlugin('media_item',
+   * category)` for `category` in `CATEGORIES` (`'tv' | 'movie' | 'xxx'`), so
+   * a row under any other `pluginId` value matches none of the three
+   * `by_table_plugin_updated` key ranges those calls count over, and would
+   * be counted by none of the three tabs.
    */
   seedMediaItem(pluginId: Category, title: string): number;
 }
