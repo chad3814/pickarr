@@ -2,6 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { App } from '../src/App.tsx';
 import type { CreateStoreDeps } from '../src/store/index.ts';
 import { fetchStub, jsonResponse } from './fetchStub.ts';
@@ -18,6 +19,11 @@ import { manualScheduler, stubSyncFetch, grantedLease, freshDbName, type ManualS
  * `signOut` (reached through `Shell`'s "Sign out" button) calls the real
  * global `fetch` with a relative url, which has no document to resolve
  * against here.
+ *
+ * Every render is wrapped in `MemoryRouter` (task 4): `Shell`'s nav and
+ * routes are real `react-router` components now, which throw without a
+ * `Router` ancestor -- `main.tsx` supplies `BrowserRouter` in production,
+ * and this file supplies `MemoryRouter` the same way `Shell.test.tsx` does.
  */
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -51,7 +57,11 @@ test('App renders Shell first, with no sign-in step in between', async () => {
   // sees on the very first render, before any read has even had a chance to
   // answer.
   const { deps, sched } = testShellDeps();
-  render(<App shellDeps={deps} />);
+  render(
+    <MemoryRouter>
+      <App shellDeps={deps} />
+    </MemoryRouter>,
+  );
 
   const signOutButton = screen.getByRole('button', { name: 'Sign out' });
   assert.ok(signOutButton, 'Shell is on screen immediately, not after a sign-in step');
@@ -79,7 +89,11 @@ test('App falls back to SignIn once Shell calls onUnauthenticated, driven here v
   // the 401 path this name used to claim.
   globalThis.fetch = fetchStub(async () => jsonResponse({}, 200));
   const { deps, sched } = testShellDeps();
-  render(<App shellDeps={deps} />);
+  render(
+    <MemoryRouter>
+      <App shellDeps={deps} />
+    </MemoryRouter>,
+  );
 
   // Waits for `Shell`'s own boot sequence to actually finish before acting --
   // `Shell.test.tsx`'s "sign-out stops the store" documents why: clicking

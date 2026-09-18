@@ -33,7 +33,10 @@
  */
 import { openStore } from './db.ts';
 import type { StoredRow } from './db.ts';
-import { getRow, getRows, byMediaItem, byRssItem, listByTable, type ListByTableOptions } from './rows.ts';
+import {
+  getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
+  type ListByTableOptions,
+} from './rows.ts';
 import { subscribe, subscribeInserts, subscribeReset } from './notify.ts';
 import { gatherMediaItem, type GatheredItem } from './gather.ts';
 import { startSync, type Lease, type Schedule, type SyncFetch } from './sync.ts';
@@ -70,7 +73,7 @@ export interface CreateStoreDeps {
 }
 
 /**
- * The five reads (`store/rows.ts`), the three subscriptions
+ * The seven reads (`store/rows.ts`), the three subscriptions
  * (`store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
  * `stop()` -- everything a consumer of the replica needs, with `db` already
  * bound so none of it takes one.
@@ -88,6 +91,8 @@ export interface Store {
   byMediaItem(mediaItemId: number): Promise<readonly StoredRow[]>;
   byRssItem(rssItemId: number): Promise<readonly StoredRow[]>;
   listByTable(table: string, opts: ListByTableOptions): Promise<readonly StoredRow[]>;
+  listByTablePlugin(table: string, pluginId: string, opts: ListByTableOptions): Promise<readonly StoredRow[]>;
+  countByPlugin(table: string, pluginId: string): Promise<number>;
   subscribe(table: string, id: number, cb: () => void): () => void;
   subscribeInserts(table: string, cb: (ids: readonly number[]) => void): () => void;
   subscribeReset(cb: () => void): () => void;
@@ -142,6 +147,8 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     byMediaItem: (mediaItemId) => byMediaItem(db, mediaItemId),
     byRssItem: (rssItemId) => byRssItem(db, rssItemId),
     listByTable: (table, opts) => listByTable(db, table, opts),
+    listByTablePlugin: (table, pluginId, opts) => listByTablePlugin(db, table, pluginId, opts),
+    countByPlugin: (table, pluginId) => countByPlugin(db, table, pluginId),
     subscribe,
     subscribeInserts,
     subscribeReset,

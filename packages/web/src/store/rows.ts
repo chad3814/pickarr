@@ -1,8 +1,13 @@
 /**
- * The row-level read surface: five functions, none of which knows what a
- * plugin is. Design spec §7 says why the seam sits here -- joining across
- * tables is `store/gather.ts`'s job and a plugin's `compose.ts`'s, both
- * built on top of this rather than folded into it.
+ * The row-level read surface: seven functions. Five of them -- `getRow`,
+ * `getRows`, `byMediaItem`, `byRssItem` and `listByTable` -- do not know
+ * what a plugin is; `listByTablePlugin` and `countByPlugin` take a
+ * `pluginId`, because the index they read (`by_table_plugin_updated`)
+ * partitions on one. Even those two know nothing *about* a plugin: the id
+ * is a key component they pass through, not a behaviour they switch on.
+ * Design spec §7 says why the seam sits here -- joining across tables is
+ * `store/gather.ts`'s job and a plugin's `compose.ts`'s, both built on top
+ * of this rather than folded into it.
  *
  * **`getRow` cannot tell "not yet replicated" from "does not exist", and
  * must not pretend to (spec §9).** Both a tombstone (a record with no
@@ -67,6 +72,28 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'nzb_download',
   'person',
 ]);
+
+/**
+ * The tables `by_table_plugin_updated` covers, and no others -- measured
+ * rather than intended, the same way {@link TABLES_WITH_UPDATED_AT} is
+ * (`store/db.test.ts`'s "the per-category index exists, and holds only rows
+ * that project a pluginId" inserts a `media_item`, an `rss_item` and a
+ * tombstone and reads the index back). Exactly one member today:
+ * `media_item` is the only synced read shape carrying `pluginId`, and
+ * `rss_item` carries `feedId` instead, which is why that index is
+ * self-filtering at all (`store/db.ts`'s own note).
+ *
+ * **Separate from `TABLES_WITH_UPDATED_AT`, because they disagree.** That
+ * set admits five tables and only the first of them projects a `pluginId`;
+ * the two readers below originally reused it, so for `rss_item`,
+ * `torrent_download`, `nzb_download` and `person` the guard passed and the
+ * index answered nothing -- measured as `listByTablePlugin('rss_item','tv')
+ * -> []` and `countByPlugin('rss_item','tv') -> 0` against a store holding
+ * two real `rss_item` rows. That is precisely the lie the other set's own
+ * doc exists to refuse: an empty answer reading as "this table is empty",
+ * which a caller has no way to catch.
+ */
+const TABLES_WITH_PLUGIN_ID: ReadonlySet<string> = new Set(['media_item']);
 
 function rowsStore(db: IDBDatabase): IDBObjectStore {
   return db.transaction('rows').objectStore('rows');
@@ -188,4 +215,78 @@ export async function listByTable(
   const range = rangeFor(table, from, direction);
   const index = rowsStore(db).index('by_table_updated');
   return drain(index.openCursor(range, direction), limit);
+}
+
+/**
+ * `rangeFor`'s four-part sibling. Same exclusivity rule and same reason: the
+ * row that ended the last page is excluded in whichever direction the walk is
+ * going, so a page boundary landing inside an `updatedAt` tie neither repeats
+ * that row nor skips its siblings.
+ */
+function pluginRangeFor(
+  table: string,
+  pluginId: string,
+  from: { updatedAt: number; id: number } | undefined,
+  direction: 'next' | 'prev',
+): IDBKeyRange {
+  const low = [table, pluginId, -Infinity, -Infinity];
+  const high = [table, pluginId, Infinity, Infinity];
+  if (from === undefined) return IDBKeyRange.bound(low, high);
+  const at = [table, pluginId, from.updatedAt, from.id];
+  return direction === 'next'
+    ? IDBKeyRange.bound(at, high, true, false)
+    : IDBKeyRange.bound(low, at, false, true);
+}
+
+/**
+ * One category's rows in modification order. A sibling of {@link listByTable}
+ * rather than a flag on it, so which index a call uses is visible where the
+ * call is written.
+ *
+ * Throws for any table {@link TABLES_WITH_PLUGIN_ID} excludes -- see that
+ * constant for why it is not `TABLES_WITH_UPDATED_AT`.
+ */
+export async function listByTablePlugin(
+  db: IDBDatabase,
+  table: string,
+  pluginId: string,
+  opts: ListByTableOptions,
+): Promise<readonly StoredRow[]> {
+  if (!TABLES_WITH_PLUGIN_ID.has(table)) {
+    throw new Error(
+      `"${table}" projects no pluginId, so listByTablePlugin cannot list one of its categories (design spec §3.2)`,
+    );
+  }
+  const { from, direction, limit } = opts;
+  const index = rowsStore(db).index('by_table_plugin_updated');
+  return drain(index.openCursor(pluginRangeFor(table, pluginId, from, direction), direction), limit);
+}
+
+/**
+ * How many rows one category has, counted by the index rather than read.
+ *
+ * This replaces reading every `media_item` row to produce three numbers.
+ * Tombstones are absent from the index (`db.ts`'s own note on why), so a
+ * deleted row leaves the count without this having to filter for it.
+ *
+ * Throws for a table projecting no `pluginId`, exactly as
+ * {@link listByTablePlugin} does and for the same reason: a count of zero
+ * over a table full of rows is a lie a caller cannot catch. This one had no
+ * guard at all until the whole-branch review measured it answering `0` for
+ * `rss_item`. `async` despite awaiting nothing, so that refusal arrives as
+ * a rejection rather than as a synchronous throw out of a function whose
+ * signature promises a promise -- the same shape its sibling already has.
+ */
+export async function countByPlugin(db: IDBDatabase, table: string, pluginId: string): Promise<number> {
+  if (!TABLES_WITH_PLUGIN_ID.has(table)) {
+    throw new Error(
+      `"${table}" projects no pluginId, so countByPlugin cannot count one of its categories (design spec §3.2)`,
+    );
+  }
+  const index = rowsStore(db).index('by_table_plugin_updated');
+  const req = index.count(pluginRangeFor(table, pluginId, undefined, 'next'));
+  return new Promise((resolve, reject) => {
+    req.addEventListener('success', () => resolve(req.result), { once: true });
+    req.addEventListener('error', () => reject(req.error ?? new Error('indexeddb count failed')), { once: true });
+  });
 }

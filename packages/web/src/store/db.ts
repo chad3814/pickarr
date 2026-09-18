@@ -21,8 +21,18 @@
  * go with it, so the next start finds none and bootstraps (spec §5). A bump
  * therefore costs one full re-sync per client and needs no migration code,
  * which is the trade this constant exists to make.
+ *
+ * Version 2 added `by_table_plugin_updated`, the per-category index the
+ * browse screens page and count against. No reader of it existed yet at the
+ * moment this bumped -- tasks 2, 3 and 5 added them in the same branch, so
+ * `rows.ts`'s `listByTablePlugin` and `countByPlugin`, `shell/useCounts.ts`
+ * and `library/useMediaItems.ts` are those readers by the time anyone
+ * reaches `pickarr-2`. Every client still paid a full resync for the bump,
+ * which is acceptable here because 2.0 is greenfield (one operator, an
+ * empty database, a tested backfill), and is not a precedent for doing this
+ * once real usage exists.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * A row of the replica, keyed by `['table', 'id']`.
@@ -93,11 +103,47 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       // server's own read API keysets on `(updated_at, id)` for exactly this
       // reason (read-api design §5).
       rows.createIndex('by_table_updated', ['table', 'value.updatedAt', 'id']);
+      // Per-category paging and the shell's three counts. `pluginId`
+      // partitions, `updatedAt` orders within a category, and `id` breaks
+      // ties for the same measured reason `by_table_updated` carries one --
+      // a key without it served [1,4,5] and never served 2 or 3.
+      //
+      // **This index is self-filtering, and that is load-bearing rather than
+      // incidental.** IndexedDB omits any record missing a component of the
+      // key path, so only rows projecting `pluginId` enter it: today exactly
+      // `media_item`, since `rss_item` carries `feedId` and no `pluginId`.
+      // A tombstone nests its row under `value` and so has no
+      // `value.pluginId` either, which is why a deleted row leaves the
+      // counts without anything having to remember to remove it -- the same
+      // mechanism every other `value.*` index here already relies on.
+      rows.createIndex('by_table_plugin_updated', ['table', 'value.pluginId', 'value.updatedAt', 'id']);
       rows.createIndex('by_table', 'table');
       db.createObjectStore('meta', { keyPath: 'key' });
     }, { once: true });
 
-    req.addEventListener('success', () => resolve(req.result), { once: true });
+    req.addEventListener('success', () => {
+      const db = req.result;
+      // **What makes a version bump survivable in a second tab.** IndexedDB
+      // fires `versionchange` on every *other* open connection when one tab
+      // asks for a higher version; a connection that ignores it blocks the
+      // upgrade, and the upgrading tab's own open fires `blocked` and
+      // rejects with {@link OpenBlockedError} -- a tab left with no replica
+      // at all, for as long as the old tab stays open. That is the ordinary
+      // two-tab case across a deploy, and this codebase's 1->2 bump is the
+      // first ever made, so nothing had exercised it (measured: without this
+      // listener, a second `openStore(name, 2)` against a held v1 connection
+      // rejects `OpenBlockedError`; with it, it resolves).
+      //
+      // Closing is the whole remedy and it is deliberately unconditional.
+      // Reads in flight on this connection reject with `InvalidStateError`,
+      // which every consumer of this store already treats as "the store I
+      // was reading from went away" -- `useCounts.ts`, `useGatheredItem.ts`,
+      // `useMediaItems.ts` and `Unmatched.tsx` each carry an `isStoreClosed`
+      // guard for exactly that. The alternative -- holding the connection
+      // and prompting -- would need UI this module has no business owning.
+      db.addEventListener('versionchange', () => { db.close(); });
+      resolve(db);
+    }, { once: true });
     req.addEventListener(
       'error',
       () => reject(req.error ?? new Error('indexeddb open failed')),

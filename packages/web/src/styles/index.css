@@ -8,14 +8,17 @@
  * outranks it. A rule in `components` beats a rule in `base` whatever its
  * specificity, so the bet is off the table.
  *
- * **`components` is declared and currently empty.** 1.x's six component
- * stylesheets were deleted in the 2.0 rewrite: no 2.0 component sets a class,
- * so not one of their selectors could match, and they were shipping about
- * 10KB to every client. They are worth reading before writing 2.0's card or
- * dialog -- they were tuned against `tokens.css` -- and `git show
- * bbce069:packages/web/src/styles/card.css` is how, for any of `nav`, `card`,
- * `browse`, `rows`, `forms` and `dialog`. The layer stays declared because
- * the order is the contract, not the membership.
+ * **`components` was declared and empty from the 2.0 rewrite until task 8.**
+ * 1.x's six component stylesheets were deleted then: no 2.0 component set a
+ * class, so not one of their selectors could match, and they were shipping
+ * about 10KB to every client. `library.css` below is the layer's first
+ * member -- keyed on structure rather than on a class, since no 2.0
+ * component sets one even now -- and it is worth reading the six deleted
+ * files before adding a second: they were tuned against `tokens.css`, and
+ * `git show bbce069:packages/web/src/styles/card.css` is how, for any of
+ * `nav`, `card`, `browse`, `rows`, `forms` and `dialog`. The layer stayed
+ * declared while empty because the order is the contract, not the
+ * membership, and that is still true now that it is not.
  */
 @layer tokens, base, components;
 
@@ -25,3 +28,4 @@
 
 @import './tokens.css' layer(tokens);
 @import './base.css' layer(base);
+@import './library.css' layer(components);

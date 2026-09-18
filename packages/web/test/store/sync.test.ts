@@ -123,6 +123,7 @@ function manualScheduler(): ManualScheduler {
   const MARKER_BUDGET_MS = 150;
   async function landed(loop: SyncLoop): Promise<void> {
     const deadline = Date.now() + MARKER_BUDGET_MS;
+    // eslint-disable-next-line no-await-in-loop -- a poll loop bounded by MARKER_BUDGET_MS: each turn's sleep has to finish before the deadline check that decides whether to loop again
     while (pendingFor(loop) === undefined && Date.now() < deadline) await delay(2);
     await settle();
   }

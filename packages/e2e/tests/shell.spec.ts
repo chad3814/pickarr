@@ -218,3 +218,75 @@ test('a healthy tab does not poll the tail far faster than its 3-second rate', a
 
   expect(tailRequestPathnames.length).toBeLessThan(10);
 });
+
+/*
+ * Task 8: `library.css`'s own pin. Nothing before this task asserted
+ * anything about layout -- the deep-link spec's `font-weight` check above is
+ * the only computed-style assertion this suite had, and it covers `base.css`
+ * alone. Each spec below is a computed style a real browser resolves through
+ * the cascade, one per screen `library.css` styles, chosen so that deleting
+ * its stylesheet breaks it (task 8's own acceptance step, run and reported
+ * separately from this diff): `getByRole` and `toBeVisible()` are satisfied
+ * by an unstyled block of text just as well as a styled one (`CLAUDE.md`'s
+ * own testing hazard on this exact gap), so none of these reach for either.
+ */
+
+test('the nav is pinned to the viewport, not just present', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  // `toBeVisible()` would still pass against a nav that never left normal
+  // document flow. `base.css`'s bare `nav` rule sets `position: sticky`,
+  // which the UA default never does.
+  await expect(page.getByRole('navigation')).toHaveCSS('position', 'sticky');
+});
+
+test('a media item renders as a card, not a bare block of text', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  harness.seedMediaItem('tv', 'A Show');
+
+  // `library.css`'s bare `article` rule gives the card a border radius the
+  // UA default never applies to an `<article>`.
+  const card = page.getByRole('article');
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(card).toHaveCSS('border-radius', '10px');
+});
+
+test("a media item's release list is laid out as a list, not just present", async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  harness.seedMediaItem('tv', 'A Show');
+
+  const disclosure = page.getByRole('button', { name: 'A Show' });
+  await expect(disclosure).toBeVisible({ timeout: 15_000 });
+  await disclosure.click();
+
+  // `library.css`'s `ul[aria-label='releases']` rule sets `list-style-type:
+  // none`, which the UA default (`disc`) never does.
+  const releases = page.getByRole('list', { name: 'releases' });
+  await expect(releases).toHaveCSS('list-style-type', 'none');
+});
+
+test('the empty state reads as an aside, not as content waiting to be filled in', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  // `/unmatched` has no nav link of its own (`Shell.tsx`'s nav only maps
+  // over the three categories), so this is a direct navigation rather than a
+  // click -- the same deep-link path the first spec in this file exercises,
+  // now while already signed in.
+  await page.goto(`${harness.origin}/unmatched`);
+
+  // `library.css`'s `section > p` rule sets `font-style: italic`, which the
+  // UA default never does.
+  const empty = page.getByText('Everything has been matched.');
+  await expect(empty).toBeVisible();
+  await expect(empty).toHaveCSS('font-style', 'italic');
+});
