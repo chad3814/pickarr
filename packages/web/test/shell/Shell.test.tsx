@@ -291,6 +291,78 @@ test('the nav links to each category, and marks the current one', async () => {
   });
 });
 
+/**
+ * Pins the `<Route>` table's path-to-element mapping itself. The nav's own
+ * hrefs and `aria-current` (asserted above) are derived from `CATEGORIES`
+ * independently of the `<Route>` tree, so they cannot see this: swapping
+ * which `CategoryPlaceholder` renders at `/tv` against `/movie` passed every
+ * test in this file before these three existed (review-found, task 4's fix
+ * round).
+ *
+ * Asserting a placeholder's rendered *content* is otherwise exactly what a
+ * test here should not do -- `Shell.tsx`'s own doc says the placeholder text
+ * is not part of this task's contract -- but here the mapping is the thing
+ * under test, and the placeholder text is the only thing on screen that
+ * names which route matched. **Tasks 5-7 should keep this assertion while
+ * swapping what it looks for**, once each placeholder becomes a real
+ * screen, rather than deleting it as placeholder-only noise.
+ *
+ * One test per category rather than a loop over `CATEGORIES`: a `for`-loop
+ * body awaiting the tail-scheduled check on every iteration is exactly the
+ * shape `no-await-in-loop` exists to flag, and three named tests are no less
+ * clear for it.
+ */
+test('the /tv route renders the tv category, not another one', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/tv']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  assert.ok(screen.getByText('TV category screen goes here (task 5).'), '/tv renders the tv placeholder');
+  assert.ok(!screen.queryByText('Movies category screen goes here (task 5).'), 'not the movie placeholder');
+  assert.ok(!screen.queryByText('XXX category screen goes here (task 5).'), 'not the xxx placeholder');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
+test('the /movie route renders the movie category, not another one', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/movie']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  assert.ok(screen.getByText('Movies category screen goes here (task 5).'), '/movie renders the movie placeholder');
+  assert.ok(!screen.queryByText('TV category screen goes here (task 5).'), 'not the tv placeholder');
+  assert.ok(!screen.queryByText('XXX category screen goes here (task 5).'), 'not the xxx placeholder');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
+test('the /xxx route renders the xxx category, not another one', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/xxx']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  assert.ok(screen.getByText('XXX category screen goes here (task 5).'), '/xxx renders the xxx placeholder');
+  assert.ok(!screen.queryByText('TV category screen goes here (task 5).'), 'not the tv placeholder');
+  assert.ok(!screen.queryByText('Movies category screen goes here (task 5).'), 'not the movie placeholder');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
 test('/ redirects to /tv rather than rendering an empty shell', async () => {
   const { deps, sched } = testDeps();
   render(
@@ -320,6 +392,20 @@ test('an unknown path inside the shell still renders the shell, not a blank page
 
   assert.ok(screen.getByRole('heading', { name: 'Pickarr' }), 'the shell renders');
   assert.ok(screen.getByRole('navigation'), 'including its nav');
+
+  // Pins the catch-all's own behaviour, not just that *something* rendered:
+  // review-found (task 4's fix round), replacing `element={null}` with a
+  // silent redirect to `/tv` passed every test above and in this file --
+  // the exact failure mode this route exists to avoid, a typo'd url quietly
+  // landing on the default category as though it had worked. A `Navigate`
+  // to `/tv` would make the `TV` link `aria-current="page"` exactly as a
+  // real `/tv` visit does, so asserting that none of the nav's links carry
+  // it is what tells the two apart.
+  const links = screen.getAllByRole<HTMLAnchorElement>('link');
+  assert.ok(
+    links.every((link) => !link.hasAttribute('aria-current')),
+    'no category is announced as current when the path matches none of them',
+  );
 
   await waitFor(() => {
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
