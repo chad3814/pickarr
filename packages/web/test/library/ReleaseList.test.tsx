@@ -7,8 +7,18 @@ import type { GatheredDownload, GatheredRelease } from '../../src/store/gather.t
 
 afterEach(cleanup);
 
-/** An `RssItemSyncRead` with everything but `id`, `filename` and `resolution` defaulted. */
-function rssItem({ id, filename, resolution }: { id: number; filename: string; resolution: string }): RssItemSyncRead {
+/** An `RssItemSyncRead` with everything but `id`, `filename`, `resolution` and `rankingScore` defaulted. */
+function rssItem({
+  id,
+  filename,
+  resolution,
+  rankingScore = null,
+}: {
+  id: number;
+  filename: string;
+  resolution: string;
+  rankingScore?: number | null;
+}): RssItemSyncRead {
   return {
     id,
     feedId: 1,
@@ -17,7 +27,7 @@ function rssItem({ id, filename, resolution }: { id: number; filename: string; r
     updatedAt: 0,
     downloadType: 'torrent',
     mediaItemId: null,
-    rankingScore: null,
+    rankingScore,
     resolution,
     resolutionDetail: null,
     deliveredAt: null,
@@ -141,4 +151,47 @@ test('a release with a download but no percentage shows the status without one',
   const item = screen.getByRole('listitem', { name: /the.thing.720p.mkv/ });
   assert.ok(item.textContent?.includes('queued'));
   assert.ok(!item.textContent?.includes('%'), 'nothing to show when the download carries no percentage');
+});
+
+test('a release shows its ranking score', () => {
+  // Design spec §5 names the ranking score alongside the resolution and the
+  // download status. It was dropped in the spec-to-plan translation and
+  // nothing downstream caught it, because every downstream seat checked
+  // against the plan.
+  const release: GatheredRelease = {
+    id: 3,
+    row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv', resolution: '2160p', rankingScore: 84 }),
+    downloads: [],
+  };
+  render(<ReleaseList releases={[release]} />);
+
+  const item = screen.getByRole('listitem', { name: /the.thing.2160p.mkv/ });
+  assert.ok(item.textContent?.includes('Score: 84'), 'the ranking score is shown');
+});
+
+test('a ranking score of zero is shown, and an absent one shows nothing', () => {
+  // Zero is an answer (Global Constraint): a ranker that scored this
+  // release 0 said something, and a falsy check would hide it behind the
+  // same blank as a release nothing has ranked. Both in one test, because
+  // the property is the distinction between them.
+  const scoredZero: GatheredRelease = {
+    id: 1,
+    row: rssItem({ id: 1, filename: 'scored.zero.mkv', resolution: '1080p', rankingScore: 0 }),
+    downloads: [],
+  };
+  const unranked: GatheredRelease = {
+    id: 2,
+    row: rssItem({ id: 2, filename: 'unranked.mkv', resolution: '1080p' }),
+    downloads: [],
+  };
+  render(<ReleaseList releases={[scoredZero, unranked]} />);
+
+  assert.ok(
+    screen.getByRole('listitem', { name: /scored.zero.mkv/ }).textContent?.includes('Score: 0'),
+    'a score of zero is a score',
+  );
+  assert.ok(
+    !/score/i.test(screen.getByRole('listitem', { name: /unranked.mkv/ }).textContent ?? ''),
+    'and a release nothing has ranked shows no score label at all',
+  );
 });
