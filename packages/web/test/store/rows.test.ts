@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { getRow, getRows, byMediaItem, byRssItem, listByTable } from '../../src/store/rows.ts';
+import {
+  getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
+} from '../../src/store/rows.ts';
 import { done } from '../../src/store/idb.ts';
 import type { StoredRow } from '../../src/store/db.ts';
 
@@ -12,6 +14,20 @@ function cursorOf(rows: readonly StoredRow[]): { updatedAt: number; id: number }
   const last = rows[rows.length - 1];
   if (last === undefined) throw new Error('no page to resume from');
   return { updatedAt: (last.value as { updatedAt: number }).updatedAt, id: last.id };
+}
+
+/**
+ * `updatedAt` off a `StoredRow`'s `value`, narrowed the way `useCounts.ts`'s
+ * `categoryOf` narrows `pluginId` -- `typeof`/`in` checks rather than a cast
+ * (Global Constraint: no cast to silence a type error).
+ */
+function updatedAtOf(row: StoredRow): number {
+  const { value } = row;
+  if (typeof value !== 'object' || value === null) throw new Error('row has no value to read updatedAt from');
+  if (!('updatedAt' in value)) throw new Error('row value carries no updatedAt');
+  const { updatedAt } = value;
+  if (typeof updatedAt !== 'number') throw new Error('row value\'s updatedAt is not a number');
+  return updatedAt;
 }
 
 /** Seeds `ops` into `db` in one batch -- the cursor value has no bearing on these tests. */
@@ -252,5 +268,64 @@ test('listByTable excludes a tombstone from a permitted table, measured rather t
   const rows = await listByTable(db, 'person', { direction: 'next', limit: 10 });
 
   assert.deepEqual(rows.map((row) => row.id), [1]);
+  db.close();
+});
+
+test('paging a category neither skips nor repeats a row tied on updatedAt', async () => {
+  // Five media items, three sharing one `updatedAt`. The two-part version of
+  // this key was measured serving [1,4,5] and never serving 2 or 3.
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 10 } },
+    { op: 'upsert', table: 'media_item', id: 2, value: { pluginId: 'tv', updatedAt: 20 } },
+    { op: 'upsert', table: 'media_item', id: 3, value: { pluginId: 'tv', updatedAt: 20 } },
+    { op: 'upsert', table: 'media_item', id: 4, value: { pluginId: 'tv', updatedAt: 20 } },
+    { op: 'upsert', table: 'media_item', id: 5, value: { pluginId: 'tv', updatedAt: 30 } },
+  ]);
+
+  const seen: number[] = [];
+  let from: { updatedAt: number; id: number } | undefined;
+  for (let page = 0; page < 5; page += 1) {
+    // eslint-disable-next-line no-await-in-loop -- each page's cursor comes from the previous page's last row, so the walk is inherently sequential
+    const got = await listByTablePlugin(db, 'media_item', 'tv', {
+      direction: 'prev', limit: 2, ...(from === undefined ? {} : { from }),
+    });
+    if (got.length === 0) break;
+    for (const row of got) seen.push(row.id);
+    const last = got.at(-1);
+    from = last === undefined ? undefined : { updatedAt: updatedAtOf(last), id: last.id };
+  }
+
+  assert.deepEqual(seen.toSorted((a, b) => a - b), [1, 2, 3, 4, 5], 'every row exactly once');
+  assert.equal(new Set(seen).size, seen.length, 'and none served twice');
+  db.close();
+});
+
+test('a category sees only its own rows', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 1 } },
+    { op: 'upsert', table: 'media_item', id: 2, value: { pluginId: 'movie', updatedAt: 1 } },
+    { op: 'upsert', table: 'media_item', id: 3, value: { pluginId: 'xxx', updatedAt: 1 } },
+  ]);
+
+  const tv = await listByTablePlugin(db, 'media_item', 'tv', { direction: 'next', limit: 10 });
+
+  assert.deepEqual(tv.map((r) => r.id), [1], 'movie and xxx are not in tv');
+  db.close();
+});
+
+test('counting a category reads no rows and excludes tombstones', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 1 } },
+    { op: 'upsert', table: 'media_item', id: 2, value: { pluginId: 'tv', updatedAt: 2 } },
+    { op: 'upsert', table: 'media_item', id: 3, value: { pluginId: 'movie', updatedAt: 1 } },
+  ]);
+  await seed(db, [{ op: 'delete', table: 'media_item', id: 2 }]);
+
+  assert.equal(await countByPlugin(db, 'media_item', 'tv'), 1, 'the tombstoned row is not counted');
+  assert.equal(await countByPlugin(db, 'media_item', 'movie'), 1);
+  assert.equal(await countByPlugin(db, 'media_item', 'xxx'), 0, 'zero is an answer');
   db.close();
 });
