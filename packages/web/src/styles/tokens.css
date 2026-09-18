@@ -33,6 +33,15 @@
   --radius-md: 6px;
   --radius-lg: 10px;
 
+  /* A fixed component dimension, not a margin or a gap, which is why it is
+     its own family rather than a seventh `--space-*`: the scale above is for
+     the distance *between* things, and this is the width of one specific
+     thing. One member for now -- the poster frame `library.css`'s `article
+     img` crops to, at the fixed 2:3 aspect ratio 1.x's `card.css` measured,
+     so every card's frame is the same shape regardless of the source
+     image's own aspect ratio. */
+  --size-poster: 6rem;
+
   /* One elevation, for dialogs. Cards are separated by surface and hairline, so a
      second shadow token would be speculative. */
   --shadow-dialog: 0 0.5rem 1.5rem rgb(0 0 0 / 30%);

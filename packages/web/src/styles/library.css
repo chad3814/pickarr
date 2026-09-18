@@ -27,12 +27,11 @@ article {
   margin-bottom: var(--space-4);
 }
 
-/* The poster, at the same fixed 2:3 frame 1.x's `card.css` measured -- a
-   crop, not a bound, so every card's frame is the same shape regardless of
-   the source image's own aspect ratio. The only `<img>` in this app. */
+/* The poster. `--size-poster` (`tokens.css`) carries the crop reasoning now,
+   since that is where the number lives. The only `<img>` in this app. */
 article img {
   display: block;
-  width: 6rem;
+  width: var(--size-poster);
   aspect-ratio: 2 / 3;
   object-fit: cover;
   border: 1px solid var(--color-line);
