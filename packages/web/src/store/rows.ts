@@ -189,3 +189,61 @@ export async function listByTable(
   const index = rowsStore(db).index('by_table_updated');
   return drain(index.openCursor(range, direction), limit);
 }
+
+/**
+ * `rangeFor`'s four-part sibling. Same exclusivity rule and same reason: the
+ * row that ended the last page is excluded in whichever direction the walk is
+ * going, so a page boundary landing inside an `updatedAt` tie neither repeats
+ * that row nor skips its siblings.
+ */
+function pluginRangeFor(
+  table: string,
+  pluginId: string,
+  from: { updatedAt: number; id: number } | undefined,
+  direction: 'next' | 'prev',
+): IDBKeyRange {
+  const low = [table, pluginId, -Infinity, -Infinity];
+  const high = [table, pluginId, Infinity, Infinity];
+  if (from === undefined) return IDBKeyRange.bound(low, high);
+  const at = [table, pluginId, from.updatedAt, from.id];
+  return direction === 'next'
+    ? IDBKeyRange.bound(at, high, true, false)
+    : IDBKeyRange.bound(low, at, false, true);
+}
+
+/**
+ * One category's rows in modification order. A sibling of {@link listByTable}
+ * rather than a flag on it, so which index a call uses is visible where the
+ * call is written.
+ */
+export async function listByTablePlugin(
+  db: IDBDatabase,
+  table: string,
+  pluginId: string,
+  opts: ListByTableOptions,
+): Promise<readonly StoredRow[]> {
+  if (!TABLES_WITH_UPDATED_AT.has(table)) {
+    throw new Error(
+      `"${table}" projects no updatedAt, so listByTablePlugin cannot list it in modification order (design spec §3.2)`,
+    );
+  }
+  const { from, direction, limit } = opts;
+  const index = rowsStore(db).index('by_table_plugin_updated');
+  return drain(index.openCursor(pluginRangeFor(table, pluginId, from, direction), direction), limit);
+}
+
+/**
+ * How many rows one category has, counted by the index rather than read.
+ *
+ * This replaces reading every `media_item` row to produce three numbers.
+ * Tombstones are absent from the index (`db.ts`'s own note on why), so a
+ * deleted row leaves the count without this having to filter for it.
+ */
+export function countByPlugin(db: IDBDatabase, table: string, pluginId: string): Promise<number> {
+  const index = rowsStore(db).index('by_table_plugin_updated');
+  const req = index.count(pluginRangeFor(table, pluginId, undefined, 'next'));
+  return new Promise((resolve, reject) => {
+    req.addEventListener('success', () => resolve(req.result), { once: true });
+    req.addEventListener('error', () => reject(req.error ?? new Error('indexeddb count failed')), { once: true });
+  });
+}
