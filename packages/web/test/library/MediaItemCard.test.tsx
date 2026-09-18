@@ -224,4 +224,11 @@ test('a card whose artwork 404s still renders', () => {
   const image = screen.getByRole('img', { name: /The Thing/ });
   fireEvent.error(image);
   assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the card survives its poster failing');
+  // Review round 1: the heading assertion above holds whether or not the
+  // image is ever removed, since the heading is never conditioned on it --
+  // deleting `onError`/`posterFailed` outright left every test green. This
+  // observes what the handling actually does: the failed `<img>` comes out
+  // of the DOM rather than sitting there broken. A boolean comparison, never
+  // `assert.equal(image, ...)` against the live node itself (`CLAUDE.md`).
+  assert.ok(screen.queryByRole('img', { name: /The Thing/ }) === null, 'the failed poster is removed, not left broken');
 });
