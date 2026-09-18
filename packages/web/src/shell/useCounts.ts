@@ -1,9 +1,10 @@
 /**
  * The shell's whole relationship with the replica: one count per category,
- * read through `listByTable` and kept current by `subscribeInserts` (design
- * spec §6). This is `by_table_updated`'s first reader -- the storage slice's
- * whole-branch review flagged that index as having none, and this hook is the
- * answer rather than a coincidence.
+ * read through `countByPlugin` and kept current by `subscribeInserts`
+ * (design spec §6). `countByPlugin` counts the `by_table_plugin_updated`
+ * index -- `IDBIndex.count()` over a key range scoped to one `pluginId` --
+ * so this hook never reads a row to produce a number, only three index
+ * counts.
  *
  * **Counts come from the replica only. There is no remote fallback**
  * (Global Constraint; storage design spec §9). A media item table with
@@ -12,9 +13,10 @@
  * not be the screen that quietly hides its own absence.
  *
  * A category is `media_item.pluginId` (`'tv' | 'movie' | 'xxx'`), not a
- * table of its own: `by_table_updated` has one entry per table, not per
- * plugin, so three counts come from one read of `media_item` split by its own
- * `pluginId` field, rather than three separate table reads.
+ * table of its own: `by_table_plugin_updated` has one entry per
+ * `(table, pluginId)` pair, so the three counts come from three range counts
+ * against that index -- one per `pluginId` -- rather than one read of
+ * `media_item` split in memory by its own `pluginId` field.
  */
 import { useEffect, useState } from 'react';
 import type { Store } from '../store/index.ts';
@@ -29,30 +31,16 @@ export type Counts = Readonly<Record<Category, number>>;
 const ZERO_COUNTS: Counts = { tv: 0, movie: 0, xxx: 0 };
 
 /**
- * The two reads this hook needs, and nothing else `Store` offers. Narrower
- * than `Store` itself so a test can hand it a bare database's `listByTable`
- * and `subscribeInserts` directly, without assembling a whole `Store` around
- * them (see `useCounts.test.tsx`). A real `Store` satisfies this by
- * structural assignment, so `Shell` passes one through unchanged.
+ * The two operations this hook needs, and nothing else `Store` offers.
+ * Narrower than `Store` itself so a test can hand it a bare database's
+ * `countByPlugin` and `subscribeInserts` directly, without assembling a
+ * whole `Store` around them (see `useCounts.test.tsx`). A real `Store`
+ * satisfies this by structural assignment, so `Shell` passes one through
+ * unchanged.
  */
 export interface CountsSource {
-  listByTable: Store['listByTable'];
+  countByPlugin: Store['countByPlugin'];
   subscribeInserts: Store['subscribeInserts'];
-}
-
-/**
- * `value.pluginId` if it names one of the three categories, else `undefined`
- * -- a media item belonging to a plugin the shell has no tab for (or a value
- * that is not even an object, which a malformed row cannot be per
- * `applyBatch`'s own guards, but this hook does not get to assume that of
- * every row it is ever handed) is silently left out of every count rather
- * than crashing the shell over it.
- */
-function categoryOf(value: unknown): Category | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  if (!('pluginId' in value)) return undefined;
-  const { pluginId } = value;
-  return pluginId === 'tv' || pluginId === 'movie' || pluginId === 'xxx' ? pluginId : undefined;
 }
 
 /**
@@ -65,28 +53,21 @@ function categoryOf(value: unknown): Category | undefined {
  * (this hook's own "no network fallback" Global Constraint, violated) pass
  * silently -- the catch could not tell "the store I was reading from closed
  * out from under me" from "something else entirely went wrong". Checked
- * without a cast, the same way `categoryOf` above checks `value`.
+ * without a cast, the same way a narrowing guard would check any other
+ * `unknown` value.
  */
 function isStoreClosed(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'name' in err && err.name === 'InvalidStateError';
 }
 
 /**
- * Large enough to cover every media item a real install will ever hold, and a
- * literal rather than `Infinity`: `listByTable`'s cursor walk stops once
- * `results.length >= limit`, and `Infinity >= Infinity` is `false` in
- * JavaScript, so `Infinity` here would never stop the walk at all.
- */
-const ALL_ROWS = Number.MAX_SAFE_INTEGER;
-
-/**
- * Reads every `media_item` the replica holds and tallies it into three
- * buckets by `pluginId`. Re-reads the whole table on every
- * `subscribeInserts('media_item', …)` wake, rather than adjusting the
- * previous count incrementally -- `listByTable` is the only surface this hook
- * is built on, and a whole re-read is what keeps a tombstone's exclusion
- * (already enforced by the index itself, per `rows.ts`) automatic rather than
- * something this hook has to reason about a second time.
+ * Three index counts, one per category, kept current by re-counting on
+ * every `subscribeInserts('media_item', …)` wake rather than adjusting the
+ * previous counts incrementally. `countByPlugin` is an `IDBIndex.count()`
+ * over a key range -- it reads no rows -- so a full re-count on each wake
+ * costs nothing worth optimising away, and it keeps a tombstone's exclusion
+ * (already enforced by the index itself, per `rows.ts`) automatic rather
+ * than something this hook has to reason about a second time.
  *
  * `undefined` means "no store yet" -- `Shell` has none until `createStore`
  * resolves -- and reads as {@link ZERO_COUNTS}, the same reading an empty
@@ -109,13 +90,12 @@ export function useCounts(store: CountsSource | undefined): Counts {
     let cancelled = false;
 
     async function refresh(): Promise<void> {
-      const rows = await source.listByTable('media_item', { direction: 'next', limit: ALL_ROWS });
+      const counted = await Promise.all(
+        CATEGORIES.map(async (category) => [category, await source.countByPlugin('media_item', category)] as const),
+      );
       if (cancelled) return;
-      const next = { tv: 0, movie: 0, xxx: 0 };
-      for (const row of rows) {
-        const category = categoryOf(row.value);
-        if (category !== undefined) next[category] += 1;
-      }
+      const next = { ...ZERO_COUNTS };
+      for (const [category, count] of counted) next[category] = count;
       setCounts(next);
     }
 
