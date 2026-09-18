@@ -12,6 +12,11 @@ dist/
 !.env.example
 /config/
 /secrets/
+# The host derives its artwork directory from the database path, so the
+# `npm run dev` database at the repo root puts artwork here rather than beside
+# a container's `/config/pickarr.db`. Created on the first artwork fetch, not
+# at boot, so it appears partway through a dev session.
+/artwork/
 
 # Playwright run output (traces, screenshots, HTML report)
 test-results/

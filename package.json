@@ -9,6 +9,8 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "concurrently -k -n web,host -c cyan,magenta \"npm run dev -w @pickarr/web\" \"npm run dev:host\"",
+    "dev:host": "PICKARR_DATABASE=./pickarr.dev.db PICKARR_PUBLIC_URL=http://localhost:5173 node --watch --env-file-if-exists=.env.local --import tsx --conditions development packages/host/src/bin.ts",
     "lint": "oxlint",
     "test-hygiene": "node --import tsx --conditions development scripts/check-test-hygiene.ts",
     "typecheck": "npm run typecheck --workspaces --if-present && tsgo --noEmit -p scripts",
@@ -26,6 +28,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@typescript/native-preview": "latest",
+    "concurrently": "^10.0.5",
     "esbuild": "^0.25.0",
     "oxlint": "^1.0.0",
     "tsx": "^4.19.0",
