@@ -21,54 +21,51 @@
  * raw rows at a time, costs an occasional page read that turns up nothing
  * and buys back a migration nobody needs.
  *
- * **What "reactive" means here, and its edge.** This screen's `source` is
- * `{ listByTable, subscribeInserts }`, not a full `Store`, so
- * `subscribeInserts('rss_item', ...)` is the only wake-up channel it has.
- * That fires only when a row becomes newly visible at a key that held
- * nothing before -- a fresh release arriving, or a tombstone revived
- * (`store/apply.ts`: "a revive is still new data appearing at that key") --
- * and it does **not** fire for a plain field update to a row this screen
- * already holds. That is exactly the shape a live lookup match takes on the
- * wire: `sync/tail.ts`'s `tailSince` never emits `create`, only `upsert` for
- * a row's *current* state, and `store/apply.ts` counts an `upsert` over a
- * row that already carried a value as "touched", never "inserted" -- the
- * same distinction `Changed`'s own doc draws. So a release that gets matched
- * while nothing else changes on `rss_item` stays visible here until some
- * *other* qualifying event on the table wakes this screen to re-read --
- * at which point the read is a fresh `listByTable` call straight from
- * IndexedDB, and reflects every row's true current state, matched one
- * included. The same honestly-scoped gap `useGatheredItem.ts` documents for
- * its own row, reached by a different route.
+ * **Two wake-up channels, for two different shapes of change.**
+ * `subscribeInserts('rss_item', ...)` fires only when a row becomes newly
+ * visible at a key that held nothing before -- a fresh release arriving, or
+ * a tombstone revived (`store/apply.ts`: "a revive is still new data
+ * appearing at that key") -- and it does **not** fire for a plain field
+ * update to a row this screen already holds a value for. That is exactly
+ * the shape a live lookup match takes on the wire: `sync/tail.ts`'s
+ * `tailSince` never emits `create`, only `upsert` for a row's *current*
+ * state, and `store/apply.ts` counts an `upsert` over a row that already
+ * carried a value as "touched", never "inserted" -- the same distinction
+ * `Changed`'s own doc draws. **This was a real gap in an earlier version of
+ * this screen**, found and proven (both by tracing `apply.ts`/`notify.ts`
+ * and by an empirical repro) during task 7's review: a matched release
+ * could sit on this screen indefinitely with nothing to wake a re-read.
+ *
+ * The fix is `source.subscribe(table, id, cb)` -- `store/notify.ts`'s
+ * per-row channel, which fires on *any* change to `['table', id]`, touched
+ * or inserted alike -- subscribed to every id currently on screen, the same
+ * mechanism `useGatheredItem.ts` uses for a single media item's own row,
+ * applied here to a whole visible list rather than one item. Each time the
+ * filtered result changes, the previous page's row subscriptions are torn
+ * down and a fresh set is put up for the new page, so a row that drops off
+ * (matched) or a row that was never watched (page not yet read) is never
+ * silently missed or double-subscribed.
  */
 import { useEffect, useState, type ReactElement } from 'react';
 import type { RssItemSyncRead } from '@pickarr/contract';
 import type { Store } from '../store/index.ts';
+import { PAGE_SIZE } from './useMediaItems.ts';
 
 /**
- * The two `Store` members this screen needs, and nothing else -- so a test
- * can hand it a bare database's `listByTable` and `subscribeInserts`
- * directly, the way `useCounts.test.tsx`'s `sourceFor` does. A real `Store`
- * satisfies this by structural assignment.
+ * The three `Store` members this screen needs, and nothing else -- so a
+ * test can hand it a bare database's `listByTable`, `subscribeInserts` and
+ * `subscribe` directly, the way `useCounts.test.tsx`'s `sourceFor` does. A
+ * real `Store` satisfies this by structural assignment.
  */
 export interface UnmatchedSource {
   listByTable: Store['listByTable'];
   subscribeInserts: Store['subscribeInserts'];
+  subscribe: Store['subscribe'];
 }
 
 export interface UnmatchedProps {
   source: UnmatchedSource;
 }
-
-/**
- * The raw page size this screen reads `rss_item` in, before filtering.
- *
- * `useMediaItems.ts` (task 5, landing in parallel) exports its own
- * `PAGE_SIZE = 24` for the category screens' paging, and the two constants
- * are meant to be the same number -- reconcile them into one export once
- * both exist. Defined locally here rather than importing one that may not
- * exist yet in this worktree.
- */
-const PAGE_SIZE = 24;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -153,25 +150,46 @@ async function readUnmatched(source: UnmatchedSource): Promise<readonly Unmatche
   return collected;
 }
 
+/**
+ * Builds a `safeRefresh` closure: re-reads `source` and applies the result
+ * through `apply`, unless the effect that owns it has since been cancelled.
+ * A store-closed rejection is swallowed (the same race `useCounts.ts`'s and
+ * `useGatheredItem.ts`'s own `isStoreClosed` guards this screen can hit --
+ * `Unmatched` can still be mounted and subscribed when the store it reads
+ * from stops, sign-out or a 401); anything else is rethrown. Shared by both
+ * of `Unmatched`'s effects below rather than written out twice, so the two
+ * wake-up channels cannot drift into reading the replica two different ways.
+ */
+function makeSafeRefresh(
+  source: UnmatchedSource,
+  apply: (rows: readonly UnmatchedRow[]) => void,
+  isCancelled: () => boolean,
+): () => void {
+  return () => {
+    readUnmatched(source)
+      .then((next) => {
+        if (!isCancelled()) apply(next);
+      })
+      .catch((err: unknown) => {
+        if (isStoreClosed(err)) return;
+        throw err;
+      });
+  };
+}
+
 export function Unmatched({ source }: UnmatchedProps): ReactElement {
   // `undefined` means "still loading" -- distinct from an empty array, which
   // means "loaded, and there is nothing" (Global Constraint: zero is an
   // answer, and the two must not render the same way).
   const [rows, setRows] = useState<readonly UnmatchedRow[] | undefined>(undefined);
 
+  // Wakes on a fresh or revived `rss_item` row -- see this file's docblock
+  // for exactly which changes this channel does and does not see. Runs for
+  // the whole life of this component; `source` is fixed for that lifetime,
+  // matching every other screen's own `[store]`-only effect.
   useEffect(() => {
     let cancelled = false;
-
-    function safeRefresh(): void {
-      readUnmatched(source)
-        .then((next) => {
-          if (!cancelled) setRows(next);
-        })
-        .catch((err: unknown) => {
-          if (isStoreClosed(err)) return;
-          throw err;
-        });
-    }
+    const safeRefresh = makeSafeRefresh(source, setRows, () => cancelled);
 
     safeRefresh();
     const unsubscribe = source.subscribeInserts('rss_item', safeRefresh);
@@ -181,8 +199,26 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
     };
   }, [source]);
 
+  // Wakes on a plain update to any release *currently listed here* -- the
+  // one shape `subscribeInserts` cannot see (this file's docblock). Torn
+  // down and rebuilt whenever `rows` changes, so the subscribed set always
+  // matches what is actually on screen: a row that just dropped off is not
+  // still watched, and a row that just appeared is watched from the moment
+  // it does.
+  useEffect(() => {
+    if (rows === undefined) return undefined;
+    let cancelled = false;
+    const safeRefresh = makeSafeRefresh(source, setRows, () => cancelled);
+
+    const unsubscribes = rows.map((row) => source.subscribe('rss_item', row.id, safeRefresh));
+    return () => {
+      cancelled = true;
+      for (const unsubscribe of unsubscribes) unsubscribe();
+    };
+  }, [source, rows]);
+
   return (
-    <section aria-labelledby="unmatched-heading">
+    <section aria-labelledby="unmatched-heading" data-testid="unmatched">
       <h1 id="unmatched-heading">Unmatched</h1>
       {rows !== undefined &&
         (rows.length === 0 ? (
