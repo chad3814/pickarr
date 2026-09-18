@@ -4,6 +4,7 @@ import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { Shell } from '../../src/shell/Shell.tsx';
 import type { CreateStoreDeps } from '../../src/store/index.ts';
+import { SCHEMA_VERSION } from '../../src/store/db.ts';
 import type { SyncFetch } from '../../src/store/sync.ts';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
 import {
@@ -204,9 +205,12 @@ test('a store that fails to open is reported, not left as an unhandled rejection
   // actually fails it -- opening at a version *lower* than one already on
   // disk answers a `VersionError`, per the standard -- rather than by
   // injecting a fake rejection `Shell` never has to handle in production.
+  // One version ahead of `SCHEMA_VERSION`, not a literal, so the next bump
+  // does not silently turn this back into an equal-version open with no
+  // `VersionError` and no failing assertion to say why.
   const dbName = freshDbName('shell-open-fail');
   const preexisting = await new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(dbName, 2);
+    const req = indexedDB.open(dbName, SCHEMA_VERSION + 1);
     req.addEventListener('success', () => { resolve(req.result); }, { once: true });
     req.addEventListener('error', () => { reject(req.error ?? new Error('open failed')); }, { once: true });
   });

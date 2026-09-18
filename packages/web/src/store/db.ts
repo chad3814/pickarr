@@ -21,8 +21,15 @@
  * go with it, so the next start finds none and bootstraps (spec §5). A bump
  * therefore costs one full re-sync per client and needs no migration code,
  * which is the trade this constant exists to make.
+ *
+ * Version 2 added `by_table_plugin_updated`, the per-category index the
+ * browse screens page and count against. No reader of it existed yet when
+ * this bumped, so every client paid a full resync for an index nothing used
+ * -- acceptable here because 2.0 is greenfield (one operator, an empty
+ * database, a tested backfill), and not a precedent for doing this once real
+ * usage exists.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * A row of the replica, keyed by `['table', 'id']`.
@@ -93,6 +100,20 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       // server's own read API keysets on `(updated_at, id)` for exactly this
       // reason (read-api design §5).
       rows.createIndex('by_table_updated', ['table', 'value.updatedAt', 'id']);
+      // Per-category paging and the shell's three counts. `pluginId`
+      // partitions, `updatedAt` orders within a category, and `id` breaks
+      // ties for the same measured reason `by_table_updated` carries one --
+      // a key without it served [1,4,5] and never served 2 or 3.
+      //
+      // **This index is self-filtering, and that is load-bearing rather than
+      // incidental.** IndexedDB omits any record missing a component of the
+      // key path, so only rows projecting `pluginId` enter it: today exactly
+      // `media_item`, since `rss_item` carries `feedId` and no `pluginId`.
+      // A tombstone nests its row under `value` and so has no
+      // `value.pluginId` either, which is why a deleted row leaves the
+      // counts without anything having to remember to remove it -- the same
+      // mechanism every other `value.*` index here already relies on.
+      rows.createIndex('by_table_plugin_updated', ['table', 'value.pluginId', 'value.updatedAt', 'id']);
       rows.createIndex('by_table', 'table');
       db.createObjectStore('meta', { keyPath: 'key' });
     }, { once: true });

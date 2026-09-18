@@ -64,6 +64,7 @@ export async function eventually(
   const startedAt = Date.now();
   for (;;) {
     try {
+      // eslint-disable-next-line no-await-in-loop -- a poll loop: whether there is another turn depends on whether this one throws, so the turns cannot be collected and awaited together
       await assertion();
       return;
     } catch (err) {
@@ -84,6 +85,7 @@ export async function eventually(
       // Short, because what is being waited for is a handful of event-loop
       // turns rather than anything with real latency: a 10ms poll would more
       // than double the wait it is measuring.
+      // eslint-disable-next-line no-await-in-loop -- the same poll loop as above: this turn's sleep has to finish before the next retry of `assertion` can run
       await delay(2);
     }
   }

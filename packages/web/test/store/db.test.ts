@@ -2,8 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
 import { done, request } from '../../src/store/idb.ts';
-import { openStore } from '../../src/store/db.ts';
+import { openStore, SCHEMA_VERSION } from '../../src/store/db.ts';
 import { readCursors, writeCursors, readGeneration, writeGeneration } from '../../src/store/meta.ts';
+
+let dbNameCounter = 0;
+/** A database name no other test in this file shares. */
+function freshDbName(): string {
+  dbNameCounter += 1;
+  return `db-test-${String(dbNameCounter)}`;
+}
 
 test('the store is keyed by table and id together', async () => {
   const db = await freshDb();
@@ -12,7 +19,7 @@ test('the store is keyed by table and id together', async () => {
   const rows = db.transaction('rows').objectStore('rows');
   assert.deepEqual(rows.keyPath, ['table', 'id']);
   assert.deepEqual([...rows.indexNames].toSorted(),
-    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_updated']);
+    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated']);
   db.close();
 });
 
@@ -72,6 +79,38 @@ test('bumping the schema version rebuilds the replica rather than throwing', asy
   const cursors = await request(second.transaction('meta').objectStore('meta').getAll());
   assert.equal(cursors.length, 0, 'and the cursors went with it, so the next start bootstraps');
   assert.deepEqual([...second.transaction('rows').objectStore('rows').indexNames].toSorted(),
-    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_updated'], 'indexes are rebuilt too');
+    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated'],
+    'indexes are rebuilt too');
   second.close();
+});
+
+test('the per-category index exists, and holds only rows that project a pluginId', async () => {
+  const db = await openStore(freshDbName());
+  try {
+    assert.equal(SCHEMA_VERSION, 2, 'the bump that creates this index');
+    const index = db.transaction('rows').objectStore('rows').index('by_table_plugin_updated');
+    assert.deepEqual(
+      [...index.keyPath],
+      ['table', 'value.pluginId', 'value.updatedAt', 'id'],
+      'four parts: pluginId partitions, updatedAt orders, id breaks ties',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('a v1 replica opening at v2 is rebuilt, not half-migrated', async () => {
+  const name = freshDbName();
+  // A replica as it existed before the bump: v1 had no `by_table_plugin_updated`.
+  const old = await openStore(name, 1);
+  old.close();
+  const upgraded = await openStore(name);
+  try {
+    const names = new Set(upgraded.transaction('rows').objectStore('rows').indexNames);
+    assert.ok(names.has('by_table_plugin_updated'), 'the new index is present after the bump');
+    assert.ok(names.has('by_table_updated'), 'and the old ones were recreated, not dropped');
+    assert.equal(upgraded.version, 2);
+  } finally {
+    upgraded.close();
+  }
 });
