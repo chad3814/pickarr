@@ -2,6 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { Shell } from '../../src/shell/Shell.tsx';
 import type { CreateStoreDeps } from '../../src/store/index.ts';
 import { SCHEMA_VERSION } from '../../src/store/db.ts';
@@ -78,7 +79,11 @@ test('sign-out stops the store', async () => {
   const { deps, sched } = testDeps();
 
   let unauthenticated = 0;
-  render(<Shell deps={deps} onUnauthenticated={() => { unauthenticated += 1; }} />);
+  render(
+    <MemoryRouter>
+      <Shell deps={deps} onUnauthenticated={() => { unauthenticated += 1; }} />
+    </MemoryRouter>,
+  );
 
   // Waits for two independent things to have actually happened before acting,
   // rather than a fixed delay standing in for both: `useCounts`'s own first
@@ -126,7 +131,11 @@ test('an offline sign-out does not escape as an unhandled promise rejection', as
 
   try {
     let unauthenticated = 0;
-    render(<Shell deps={deps} onUnauthenticated={() => { unauthenticated += 1; }} />);
+    render(
+      <MemoryRouter>
+        <Shell deps={deps} onUnauthenticated={() => { unauthenticated += 1; }} />
+      </MemoryRouter>,
+    );
 
     await waitFor(() => {
       assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
@@ -173,17 +182,19 @@ test('a 401 on the tail poll -- the ordinary way a client discovers a dead sessi
   let unauthenticated = 0;
   try {
     render(
-      <Shell
-        deps={{
-          dbName: freshDbName('shell-401'),
-          fetch,
-          schedule: sched.schedule,
-          now: (): number => 1000,
-          locks: grantedLease(),
-          fetchDeadlineMs: TEST_FETCH_DEADLINE_MS,
-        }}
-        onUnauthenticated={() => { unauthenticated += 1; }}
-      />,
+      <MemoryRouter>
+        <Shell
+          deps={{
+            dbName: freshDbName('shell-401'),
+            fetch,
+            schedule: sched.schedule,
+            now: (): number => 1000,
+            locks: grantedLease(),
+            fetchDeadlineMs: TEST_FETCH_DEADLINE_MS,
+          }}
+          onUnauthenticated={() => { unauthenticated += 1; }}
+        />
+      </MemoryRouter>,
     );
 
     await waitFor(() => {
@@ -230,7 +241,11 @@ test('a store that fails to open is reported, not left as an unhandled rejection
 
   try {
     const { deps } = testDeps();
-    render(<Shell deps={{ ...deps, dbName }} onUnauthenticated={() => {}} />);
+    render(
+      <MemoryRouter>
+        <Shell deps={{ ...deps, dbName }} onUnauthenticated={() => {}} />
+      </MemoryRouter>,
+    );
     await settle();
 
     assert.deepEqual(escaped, [], 'the failed open was caught, not left to escape as an unhandled rejection');
@@ -242,4 +257,75 @@ test('a store that fails to open is reported, not left as an unhandled rejection
     console.error = originalConsoleError;
     process.off('unhandledRejection', onUnhandledRejection);
   }
+});
+
+/**
+ * Task 4's own tests: the nav is real `NavLink`s now, not plain text, and
+ * `Shell` owns the four routes (`/tv`, `/movie`, `/xxx`, `/unmatched`, with
+ * `/` redirecting to `/tv`). Each renders through `MemoryRouter` so a test
+ * can choose the starting path directly, and each passes `deps` from
+ * `testDeps()` -- the fixture every other test in this file uses -- rather
+ * than defaulting `Shell` to the real browser adapters (`ShellProps.deps`'s
+ * own doc on why a test must not do that).
+ *
+ * Each also waits for the tail loop to be scheduled before its assertions
+ * run out: `createStore`'s own initial bootstrap read is in flight the
+ * moment `render` returns, and ending the test (`afterEach(cleanup)`
+ * unmounts, which closes the store) before it settles races that read
+ * against the close -- the same race this file's other tests wait out, and
+ * the reason for `sched` in `testDeps()`'s own return type.
+ */
+test('the nav links to each category, and marks the current one', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/movie']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  const link = screen.getByRole<HTMLAnchorElement>('link', { name: /Movies/ });
+  assert.equal(link.getAttribute('href'), '/movie');
+  assert.equal(link.getAttribute('aria-current'), 'page', 'the current category is announced, not only coloured');
+
+  const other = screen.getByRole<HTMLAnchorElement>('link', { name: /TV/ });
+  assert.ok(!other.hasAttribute('aria-current'), 'a category that is not current is not announced as the page');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
+test('/ redirects to /tv rather than rendering an empty shell', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  const tv = await screen.findByRole<HTMLAnchorElement>('link', { name: /TV/ });
+  assert.equal(tv.getAttribute('aria-current'), 'page', '/ lands on the tv category');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
+test('an unknown path inside the shell still renders the shell, not a blank page', async () => {
+  // The host answers index.html for any non-api path, so this is a path the
+  // router sees rather than a 404. The shell's own chrome must survive it --
+  // the e2e deep-link spec asserts the same property against a real server.
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/library/some/deep/link']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  assert.ok(screen.getByRole('heading', { name: 'Pickarr' }), 'the shell renders');
+  assert.ok(screen.getByRole('navigation'), 'including its nav');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
 });

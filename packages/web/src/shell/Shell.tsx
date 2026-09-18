@@ -22,13 +22,28 @@
  * reads be "any read": it wraps whatever `fetch` `createStore` is given so a
  * 401 anywhere in the sync loops reaches `onUnauthenticated`, without this
  * component or `sync.ts` ever inspecting a response body.
+ *
+ * **Routing (task 4).** `Shell` is also where the app's four routes live --
+ * `/tv`, `/movie`, `/xxx`, `/unmatched`, with `/` redirecting to `/tv` -- via
+ * a pathless layout `Route` (`ShellChrome`, below) that renders the header
+ * and nav once and an `<Outlet />` for whichever category matched. A
+ * trailing `path="*"` route keeps that chrome on screen for any path this
+ * router does not otherwise recognise, rather than rendering nothing: the
+ * host falls back to `index.html` for every non-`/api` path (`App.tsx`'s own
+ * doc, `packages/e2e/tests/shell.spec.ts`'s deep-link spec), so a stale or
+ * hand-typed deep link reaches the router as an unmatched path, not a 404,
+ * and this is what keeps that case looking like the app rather than a blank
+ * page. `Category`, `Unmatched` and `MediaItemCard` do not exist yet --
+ * tasks 5 through 7 replace `CategoryPlaceholder` and `UnmatchedPlaceholder`
+ * below with the real screens; nothing here should be read as their design.
  */
 import { useEffect, useState, type ReactElement } from 'react';
+import { NavLink, Navigate, Outlet, Route, Routes } from 'react-router';
 import { createStore, type CreateStoreDeps, type Store } from '../store/index.ts';
 import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
-import { useCounts, CATEGORIES, type Category } from './useCounts.ts';
+import { useCounts, CATEGORIES, type Category, type Counts } from './useCounts.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
@@ -133,10 +148,39 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
   }
 
   return (
+    <Routes>
+      <Route element={<ShellChrome counts={counts} onSignOut={handleSignOut} />}>
+        <Route index element={<Navigate to="/tv" replace />} />
+        <Route path="tv" element={<CategoryPlaceholder category="tv" />} />
+        <Route path="movie" element={<CategoryPlaceholder category="movie" />} />
+        <Route path="xxx" element={<CategoryPlaceholder category="xxx" />} />
+        <Route path="unmatched" element={<UnmatchedPlaceholder />} />
+        {/* Keeps the chrome on screen for any other path -- see this file's doc. */}
+        <Route path="*" element={null} />
+      </Route>
+    </Routes>
+  );
+}
+
+interface ShellChromeProps {
+  counts: Counts;
+  onSignOut: () => void;
+}
+
+/**
+ * The nav and header, rendered once regardless of which category route
+ * matched, plus the `<Outlet />` that renders whichever one did. Hoisted out
+ * of `Shell` (rather than defined inline in its render) so this component's
+ * identity stays stable across `Shell` renders -- an inline layout component
+ * would remount on every render, which is wasteful even though nothing here
+ * currently has state.
+ */
+function ShellChrome({ counts, onSignOut }: ShellChromeProps): ReactElement {
+  return (
     <div>
       <header>
         <h1>Pickarr</h1>
-        <button type="button" onClick={handleSignOut}>
+        <button type="button" onClick={onSignOut}>
           Sign out
         </button>
       </header>
@@ -144,12 +188,28 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         <ul>
           {CATEGORIES.map((category) => (
             <li key={category}>
-              <span>{CATEGORY_LABELS[category]}</span>{' '}
-              <span data-testid={`count-${category}`}>{counts[category]}</span>
+              <NavLink to={`/${category}`}>
+                {CATEGORY_LABELS[category]} <span data-testid={`count-${category}`}>{counts[category]}</span>
+              </NavLink>
             </li>
           ))}
         </ul>
       </nav>
+      <Outlet />
     </div>
   );
+}
+
+/**
+ * Stands in for task 5's `Category` screen. Names its category and nothing
+ * else -- this task's job is the route existing and the nav reaching it, not
+ * what the category screen looks like.
+ */
+function CategoryPlaceholder({ category }: { category: Category }): ReactElement {
+  return <p>{CATEGORY_LABELS[category]} category screen goes here (task 5).</p>;
+}
+
+/** Stands in for task 7's `Unmatched` screen; see {@link CategoryPlaceholder}. */
+function UnmatchedPlaceholder(): ReactElement {
+  return <p>Unmatched screen goes here (task 7).</p>;
 }
