@@ -7,6 +7,7 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTablePlugin } from '../../src/store/rows.ts';
+import type { StoredRow } from '../../src/store/db.ts';
 import { subscribeInserts } from '../../src/store/notify.ts';
 import { useMediaItems, type MediaItemsSource } from '../../src/library/useMediaItems.ts';
 
@@ -179,4 +180,114 @@ test('a category is scoped to its own pluginId, not another category\'s', async 
   });
 
   db.close();
+});
+
+test('clicking load more twice before the first page resolves issues only one request', async () => {
+  // Review-found: the cursor recovers from a double-click (both requests
+  // answer the same page and advance it identically), but `items` does
+  // not -- nothing removes the row a second, redundant `.then` already
+  // appended. Asserted here as a call count on the *paging* read, not on
+  // what eventually renders: a duplicate request that happens to answer
+  // with the same rows would still duplicate `items`, and a call count
+  // catches that even if a later render coincidentally looked right.
+  const db = await freshDb();
+  await seed(db, [
+    mediaItem({ id: 1, pluginId: 'tv', title: 'Oldest', updatedAt: 10 }),
+    mediaItem({ id: 2, pluginId: 'tv', title: 'Middle', updatedAt: 20 }),
+    mediaItem({ id: 3, pluginId: 'tv', title: 'Newest', updatedAt: 30 }),
+  ]);
+  const real = sourceFor(db);
+  let pagingCalls = 0;
+  let releasePage: (() => void) | undefined;
+  const source: MediaItemsSource = {
+    subscribeInserts: real.subscribeInserts,
+    listByTablePlugin: (table, pluginId, opts) => {
+      if (opts.from === undefined) return real.listByTablePlugin(table, pluginId, opts);
+      pagingCalls += 1;
+      return new Promise((resolve) => {
+        releasePage = () => {
+          resolve(real.listByTablePlugin(table, pluginId, opts));
+        };
+      });
+    },
+  };
+
+  render(<Listing source={source} pluginId="tv" pageSize={2} />);
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['Newest', 'Middle']);
+  });
+
+  const button = screen.getByRole('button', { name: /load more/i });
+  fireEvent.click(button);
+  fireEvent.click(button);
+  assert.equal(pagingCalls, 1, 'a second click while the first page request is still in flight is a no-op');
+
+  releasePage?.();
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['Newest', 'Middle', 'Oldest'], 'the one request that was issued still completes the page');
+  });
+
+  db.close();
+});
+
+test('before the first page resolves, neither the empty message nor a list appears', async () => {
+  // `empty` (`useMediaItems.ts`'s own doc) is `resolved && items.length ===
+  // 0` -- distinct from "still loading", which also has `items.length ===
+  // 0`. Review-found: dropping the `resolved` guard passed every other test
+  // in this file, because none of them observed the state *before* the
+  // first read settles. This one holds the read open and asserts
+  // synchronously, before releasing it.
+  let releaseFirstLoad: ((rows: readonly StoredRow[]) => void) | undefined;
+  const source: MediaItemsSource = {
+    listByTablePlugin: () =>
+      new Promise((resolve) => {
+        releaseFirstLoad = resolve;
+      }),
+    subscribeInserts: () => () => {},
+  };
+
+  render(<Listing source={source} pluginId="tv" pageSize={2} />);
+
+  assert.ok(!screen.queryByText(/nothing here yet/i), 'not yet knowable whether the category is empty');
+  assert.equal(screen.queryAllByRole('heading').length, 0, 'and no items are shown either');
+
+  releaseFirstLoad?.([]);
+  await waitFor(() => {
+    assert.ok(screen.getByText(/nothing here yet/i), 'once the read actually resolves empty, it is reported');
+  });
+});
+
+test('no fetch is issued when loading more', async () => {
+  // The no-fetch tests above cover the initial load and the insert-driven
+  // reload; review-found that neither exercises `loadMore` itself, which is
+  // a separate call to `listByTablePlugin` with its own call site a stray
+  // `fetch` could hide behind.
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = () => {
+    calls += 1;
+    throw new Error('no fetch may be issued while loading more');
+  };
+  try {
+    const db = await freshDb();
+    await seed(db, [
+      mediaItem({ id: 1, pluginId: 'tv', title: 'Oldest', updatedAt: 10 }),
+      mediaItem({ id: 2, pluginId: 'tv', title: 'Middle', updatedAt: 20 }),
+      mediaItem({ id: 3, pluginId: 'tv', title: 'Newest', updatedAt: 30 }),
+    ]);
+    render(<Listing source={sourceFor(db)} pluginId="tv" pageSize={2} />);
+    await waitFor(() => {
+      assert.deepEqual(titlesShown(), ['Newest', 'Middle']);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    await waitFor(() => {
+      assert.deepEqual(titlesShown(), ['Newest', 'Middle', 'Oldest']);
+    });
+
+    assert.equal(calls, 0, 'loadMore answered from the replica without the network');
+    db.close();
+  } finally {
+    globalThis.fetch = original;
+  }
 });
