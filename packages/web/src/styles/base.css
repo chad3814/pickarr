@@ -10,25 +10,97 @@ body {
   color: var(--color-text);
 }
 
-/* Nav beside the content rather than above it, both inside the one centred
-   column: the tabs stay next to what they navigate instead of drifting to a far
-   window edge on a wide screen. */
-.app { display: flex; gap: var(--space-5); max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
-/* `min-width: 0` because a flex item refuses to shrink below its content by
+/*
+ * Nav beside the content rather than above it, both inside the one centred
+ * column: the tabs stay next to what they navigate instead of drifting to a
+ * far window edge on a wide screen.
+ *
+ * `#root > div`, not `.app` -- `Shell.tsx`'s `ShellChrome` renders this
+ * wrapper with no class (task 8's brief: every 2.0 component before this
+ * stylesheet sets none, and this rule does not become the first exception),
+ * so this is keyed on the one thing that is guaranteed instead: it is the
+ * sole child `main.tsx` mounts into `#root` while signed in. `flex-wrap`
+ * plus giving the header the whole first row (below) is what keeps the
+ * header a full-width band above nav and content, rather than a third item
+ * squeezed onto the same row.
+ */
+#root > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: var(--space-4);
+}
+/* The header claims the entire row on its own -- `flex-basis: 100%` leaves no
+   room for anything else beside it -- so nav and the routed content below
+   share the row that is actually left. */
+#root > div > header { flex: 1 0 100%; }
+/* The routed screen -- `Category` or `Unmatched`, the app's only two
+   `<section>` roots -- rather than a `<main>` this task does not add.
+   `min-width: 0` because a flex item refuses to shrink below its content by
    default, so one long unbroken word -- a release name, a title -- would push
    the nav off the screen instead of wrapping. */
-main { flex: 1; min-width: 0; }
+#root > div > section { flex: 1; min-width: 0; }
 
-/* **`<nav>` is deliberately unstyled, and that is a gap rather than a
-   decision.** 1.x styled it with a bare type selector in `nav.css` --
-   `display: flex`, `flex-direction: column`, `gap`, and `position: sticky`
-   with a `top` and a scroll cap -- and that rule was the one thing in those
-   six deleted stylesheets that actually reached 2.0's markup, because
-   `Shell.tsx` renders a plain `<nav>` needing no class. Most of it was already
-   inert: `flex` and `align-self` need a flex parent, and `.app` never applied
-   to 2.0 either. What genuinely went is the sticky positioning, on a nav of
-   three items. Whoever lays out the shell should style this on purpose rather
-   than restore a rule measured against 1.x's five-link column. */
+/*
+ * The nav as a column beside the content, pinned to the viewport rather than
+ * scrolling away with it. 1.x styled `<nav>` with exactly this bare type
+ * selector in its own `nav.css` -- `display: flex`, `flex-direction:
+ * column`, `gap`, and `position: sticky` with a `top` and a scroll cap -- and
+ * sticky positioning was the one thing that rule did that genuinely reached
+ * 2.0's markup and then got lost when the six deleted stylesheets went
+ * (`styles/index.css`'s own doc). This closes that gap on purpose rather than
+ * restoring the old rule unexamined: `#root > div` above finally gives nav a
+ * flex parent, so `align-self: flex-start` is load-bearing, not tidiness -- a
+ * flex child stretches to its container's height by default, and a nav as
+ * tall as the whole page has nowhere to stick to, which would make
+ * `position: sticky` silently do nothing. `top` matches `#root > div`'s own
+ * padding, so the pinned nav lines up with the row it sits in rather than
+ * floating below it. `max-height`/`overflow-y` leave the same gap at the
+ * bottom and only engage once the nav is taller than the window -- nothing
+ * to scroll at three tabs, and the last one still reachable the day there
+ * are more.
+ */
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  align-self: flex-start;
+  position: sticky;
+  top: var(--space-4);
+  max-height: calc(100vh - var(--space-6));
+  overflow-y: auto;
+}
+
+nav ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-1); }
+
+nav a {
+  display: block;
+  text-decoration: none;
+  /* `dim`, not `faint`: an inactive tab is essential text and
+     `--color-text-faint` is below the 4.5:1 floor that applies to it -- see
+     1.x's `nav.css`, which drew the same distinction. */
+  color: var(--color-text-dim);
+  font-size: var(--text-body);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+}
+
+nav a:hover { color: var(--color-text); background: var(--color-surface-2); }
+
+/* `[aria-current='page']`, not a class: `NavLink` sets the attribute itself
+   (`Shell.test.tsx` already asserts it), so the current tab is reachable
+   without this task adding one. A filled surface plus an accent rule on the
+   leading edge, the same pairing 1.x's `nav.css` used and measured against
+   WCAG 1.4.11 for exactly this token pair. */
+nav a[aria-current='page'] {
+  font-weight: 600;
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  box-shadow: inset 2px 0 0 var(--color-accent-text);
+}
 
 /* Unstyled until now, so it rendered at the UA's 2em. */
 h1 { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.015em; margin: 0 0 var(--space-4); }

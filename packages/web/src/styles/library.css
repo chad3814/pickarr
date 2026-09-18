@@ -1,0 +1,148 @@
+/*
+ * `components`'s first member (`styles/index.css`'s own doc on why the layer
+ * stayed declared while empty). Legibility, not a visual design pass (task
+ * 8's brief, design spec §6): every selector below is keyed on structure --
+ * a type, an ARIA attribute already load-bearing for accessibility, or a
+ * parent/child relationship -- because no component this stylesheet reaches
+ * sets a class, and this file does not become the first exception. Verified
+ * against the actual 2.0 markup, not assumed: `<article>`, `<img>` and
+ * `ul[aria-label='releases']` each appear exactly once in `packages/web/src`
+ * outside `styles/` and `test/`, and `<p>` appears exactly twice -- both
+ * empty-list states. 1.x's six deleted component stylesheets (`git show
+ * bbce069:packages/web/src/styles/card.css` and its five siblings) were
+ * tuned against these same tokens and are worth reading before touching this
+ * file again, even though their class-based selectors do not carry over.
+ */
+
+/*
+ * One media item, collapsed to its title and poster until expanded
+ * (`MediaItemCard.tsx`'s own doc). `<article>` is the only one in this app,
+ * so this reaches it without a class this task would be the first to add.
+ */
+article {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+/* The poster, at the same fixed 2:3 frame 1.x's `card.css` measured -- a
+   crop, not a bound, so every card's frame is the same shape regardless of
+   the source image's own aspect ratio. The only `<img>` in this app. */
+article img {
+  display: block;
+  width: 6rem;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-2);
+}
+
+article h2 { margin: 0; font-size: var(--text-title); font-weight: 600; }
+
+/* The disclosure control that expands a card into its releases
+   (`MediaItemCard.tsx`'s `aria-expanded` button) reads as the card's own
+   title, not as a bordered form control: `base.css`'s `button` rule is in
+   the `base` layer, so this rule beats it regardless of specificity
+   (`styles/index.css`'s own doc on why that bet is off the table). */
+article h2 button {
+  display: block;
+  width: 100%;
+  font: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/*
+ * One media item's releases, each with whatever download it has, or none
+ * (`ReleaseList.tsx`'s own doc). `ul[aria-label='releases']` rather than a
+ * class: the attribute is already load-bearing for accessibility, so this
+ * reuses it instead of adding a hook that would exist for styling alone.
+ */
+ul[aria-label='releases'] {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+
+ul[aria-label='releases'] li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-body);
+}
+
+/* The filename -- always the row's first `<span>`, and the one the `<li>`'s
+   own `aria-labelledby` already points at (`ReleaseList.tsx`'s own doc on
+   why) -- runs in mono so a column of similar names lines up on the
+   characters that differ, the same reasoning 1.x's `rows.css` gave
+   `.release-name`. */
+ul[aria-label='releases'] li > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  color: var(--color-text);
+}
+
+/* The resolution and every download's status line: secondary detail after
+   the filename, dimmed the same way `base.css`'s own `.loading` dims a
+   transient state. */
+ul[aria-label='releases'] li > span:not(:first-child) {
+  flex: none;
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+}
+
+/*
+ * `Unmatched`'s own list of filenames -- a release a feed delivered that no
+ * lookup has attached to a media item yet (`Unmatched.tsx`'s own doc).
+ * `aria-label='unmatched releases'` distinguishes it from `ReleaseList`'s
+ * `aria-label='releases'` above, and both are already load-bearing for
+ * accessibility rather than added for this rule's sake. `overflow-wrap:
+ * anywhere` rather than an ellipsis: a filename here is exactly what the
+ * screen exists to show in full, the same call 1.x's `dialog.css` made for
+ * `.confirm`'s own file lists.
+ */
+ul[aria-label='unmatched releases'] {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+
+ul[aria-label='unmatched releases'] li {
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-line);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: var(--text-body);
+  color: var(--color-text-dim);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The empty-list states: `Category`'s "Nothing here yet." and `Unmatched`'s
+ * "Everything has been matched." -- the two, and only two, `<p>` elements in
+ * this app, and both a direct child of the screen's own `<section>`. Same
+ * italic-and-dimmed treatment as `base.css`'s own `.loading`, so a list that
+ * has genuinely finished loading with nothing in it reads as a different
+ * state from one still in flight, not as an ordinary line of text about to
+ * be followed by more.
+ */
+section > p {
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+  font-style: italic;
+}
