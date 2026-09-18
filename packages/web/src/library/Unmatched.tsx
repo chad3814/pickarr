@@ -6,20 +6,31 @@
  * projects `feedId` and no `pluginId` at all and therefore never enters that
  * index -- task 1's own note on why it is self-filtering. This screen reads
  * `rss_item` in modification order through `Store['listByTable']` instead
- * (`by_table_updated`), the same index `useCounts.ts` and the category
- * screens page against, and does the "`mediaItemId` is null" filtering
- * itself, in memory, over each raw page that index hands back.
+ * (`by_table_updated`), and does the "`mediaItemId` is null" filtering
+ * itself, in memory, over each raw page that index hands back. It is the
+ * only production reader of `listByTable` and so of `by_table_updated`
+ * anywhere in `packages/web/src`: `useCounts.ts` moved to
+ * `by_table_plugin_updated` when counts stopped reading rows, and the
+ * category screens page against that index too.
  *
  * **There is no index on "`mediaItemId` is null", and that is a deliberate
  * choice, not an oversight** (design spec §3.1 weighs the same three options
  * for the category screens; this is the fourth case the same reasoning
  * applies to). Adding one would be a third schema bump -- another full
- * client resync, `SCHEMA_VERSION`'s own cost -- to speed up a screen that
- * should normally hold *few* rows: most releases get matched quickly, so the
- * unmatched set is the short tail, not the common case. Filtering
- * client-side over `by_table_updated`'s existing keyset, `PAGE_SIZE` (24)
- * raw rows at a time, costs an occasional page read that turns up nothing
- * and buys back a migration nobody needs.
+ * client resync, `SCHEMA_VERSION`'s own cost -- and it is not bought here.
+ *
+ * **What the scan actually costs, measured rather than argued.** An earlier
+ * version of this paragraph claimed the walk "costs an occasional page read
+ * that turns up nothing", and its own premise refutes it: if the unmatched
+ * set really is the short tail, the walk never reaches its 24-row break and
+ * therefore **always runs the table to exhaustion**. Measured against
+ * `fake-indexeddb` (whole-branch review §1): 500 `rss_item` rows with one
+ * unmatched cost 21 page reads per refresh, every time, and a single further
+ * insert cost 21 more. That is the normal case, not the bad one. The cost is
+ * accepted here -- one cursor walk of a table one client's feeds filled, in
+ * exchange for not bumping the schema a third time -- but it is linear in
+ * the whole table and it is paid on *every* wake, which is why the number of
+ * wakes is what this screen controls instead (see {@link makeRefresh}).
  *
  * **Two wake-up channels, for two different shapes of change.**
  * `subscribeInserts('rss_item', ...)` fires only when a row becomes newly
@@ -45,8 +56,21 @@
  * down and a fresh set is put up for the new page, so a row that drops off
  * (matched) or a row that was never watched (page not yet read) is never
  * silently missed or double-subscribed.
+ *
+ * **That fix bought a fan-out, which is why both channels share one
+ * coalescing refresher.** `store/notify.ts`'s `emit` calls `fireRow` once
+ * per touched row, so a batch that matches every listed release wakes this
+ * screen once per listed row -- and an uncoalesced refresher answered each
+ * wake with its own full-table walk. Measured before the coalescing below
+ * existed: 400 `rss_item` rows with 24 listed cost **408** page reads (24
+ * independent walks of 17 pages each) for one batch, plus 24 renders each
+ * tearing down and rebuilding 24 subscriptions. {@link makeRefresh} turns
+ * that into at most two. This matters most during exactly the event this
+ * branch creates: `SCHEMA_VERSION`'s 1->2 bump forces every client through a
+ * bootstrap and backfill of `rss_item`, a continuous stream of batches into
+ * the one table this screen walks.
  */
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { RssItemSyncRead } from '@pickarr/contract';
 import type { Store } from '../store/index.ts';
 import { PAGE_SIZE } from './useMediaItems.ts';
@@ -151,21 +175,38 @@ async function readUnmatched(source: UnmatchedSource): Promise<readonly Unmatche
 }
 
 /**
- * Builds a `safeRefresh` closure: re-reads `source` and applies the result
- * through `apply`, unless the effect that owns it has since been cancelled.
- * A store-closed rejection is swallowed (the same race `useCounts.ts`'s and
- * `useGatheredItem.ts`'s own `isStoreClosed` guards this screen can hit --
+ * Builds the one refresher both of this screen's wake-up channels call:
+ * re-read `source`, apply the result through `apply`, unless the component
+ * has since unmounted. A store-closed rejection is swallowed (the same race
+ * `useCounts.ts`'s and `useGatheredItem.ts`'s own `isStoreClosed` guards --
  * `Unmatched` can still be mounted and subscribed when the store it reads
- * from stops, sign-out or a 401); anything else is rethrown. Shared by both
- * of `Unmatched`'s effects below rather than written out twice, so the two
- * wake-up channels cannot drift into reading the replica two different ways.
+ * from stops, sign-out or a 401); anything else is rethrown.
+ *
+ * **Wakes coalesce; they do not queue.** A wake arriving while a walk is
+ * already in flight sets a "read again when this one finishes" flag rather
+ * than starting a second walk, and the flag is one bit rather than a count
+ * because {@link readUnmatched} is idempotent -- ten wakes and one wake want
+ * the same single re-read of the same table. So one batch costs at most two
+ * walks whatever it touched: the one already running, which may have started
+ * before the batch committed and so cannot be trusted to have seen it, and
+ * one more after it, which necessarily has. See this file's docblock for the
+ * 408-page-read measurement that made this necessary.
+ *
+ * Shared by both effects rather than written out twice, so the two channels
+ * cannot drift into reading the replica two different ways -- and, now that
+ * they share it, cannot walk the table concurrently and apply their two
+ * answers in whichever order finished last.
  */
-function makeSafeRefresh(
+function makeRefresh(
   source: UnmatchedSource,
   apply: (rows: readonly UnmatchedRow[]) => void,
   isCancelled: () => boolean,
 ): () => void {
-  return () => {
+  let walking = false;
+  let wakeArrivedWhileWalking = false;
+
+  function walk(): void {
+    walking = true;
     readUnmatched(source)
       .then((next) => {
         if (!isCancelled()) apply(next);
@@ -173,7 +214,21 @@ function makeSafeRefresh(
       .catch((err: unknown) => {
         if (isStoreClosed(err)) return;
         throw err;
+      })
+      .finally(() => {
+        walking = false;
+        if (!wakeArrivedWhileWalking) return;
+        wakeArrivedWhileWalking = false;
+        if (!isCancelled()) walk();
       });
+  }
+
+  return () => {
+    if (walking) {
+      wakeArrivedWhileWalking = true;
+      return;
+    }
+    walk();
   };
 }
 
@@ -183,18 +238,31 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
   // answer, and the two must not render the same way).
   const [rows, setRows] = useState<readonly UnmatchedRow[] | undefined>(undefined);
 
+  // The one refresher, held across the row-subscription effect's many
+  // re-runs -- coalescing is worthless if each re-run builds its own, since
+  // the fan-out being coalesced arrives through those very subscriptions.
+  // `undefined` between unmount and the effect below re-establishing it, so
+  // a wake that somehow outlives its own unsubscribe does nothing rather
+  // than reading from a store this screen no longer owns.
+  const refreshRef = useRef<(() => void) | undefined>(undefined);
+
   // Wakes on a fresh or revived `rss_item` row -- see this file's docblock
   // for exactly which changes this channel does and does not see. Runs for
   // the whole life of this component; `source` is fixed for that lifetime,
-  // matching every other screen's own `[store]`-only effect.
+  // matching every other screen's own `[store]`-only effect. This is also
+  // where the shared refresher is created and torn down, so its "cancelled"
+  // means unmounted rather than "the listed set changed", which is what
+  // lets a walk started under one page of rows still apply under the next.
   useEffect(() => {
     let cancelled = false;
-    const safeRefresh = makeSafeRefresh(source, setRows, () => cancelled);
+    const refresh = makeRefresh(source, setRows, () => cancelled);
+    refreshRef.current = refresh;
 
-    safeRefresh();
-    const unsubscribe = source.subscribeInserts('rss_item', safeRefresh);
+    refresh();
+    const unsubscribe = source.subscribeInserts('rss_item', refresh);
     return () => {
       cancelled = true;
+      refreshRef.current = undefined;
       unsubscribe();
     };
   }, [source]);
@@ -204,15 +272,15 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
   // down and rebuilt whenever `rows` changes, so the subscribed set always
   // matches what is actually on screen: a row that just dropped off is not
   // still watched, and a row that just appeared is watched from the moment
-  // it does.
+  // it does. Every one of these subscriptions calls the *shared* refresher,
+  // which is what turns a batch touching all of them into one re-read.
   useEffect(() => {
     if (rows === undefined) return undefined;
-    let cancelled = false;
-    const safeRefresh = makeSafeRefresh(source, setRows, () => cancelled);
 
-    const unsubscribes = rows.map((row) => source.subscribe('rss_item', row.id, safeRefresh));
+    const unsubscribes = rows.map((row) => source.subscribe('rss_item', row.id, () => {
+      refreshRef.current?.();
+    }));
     return () => {
-      cancelled = true;
       for (const unsubscribe of unsubscribes) unsubscribe();
     };
   }, [source, rows]);
