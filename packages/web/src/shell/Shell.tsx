@@ -35,9 +35,10 @@
  * and this is what keeps that case looking like the app rather than a blank
  * page. `MediaItemCard` (task 6) already exists and is what task 5's
  * `Category` (`../library/Category.tsx`, imported below as `CategoryScreen`)
- * renders one per media item; `Unmatched` does not exist yet -- task 7
- * replaces `UnmatchedPlaceholder` below with the real screen; nothing here
- * should be read as its design.
+ * renders one per media item, and `Unmatched` (`../library/Unmatched.tsx`)
+ * is what `/unmatched` renders. Every route now reaches a real screen; the
+ * placeholders this file carried while those screens were being built are
+ * gone.
  */
 import { useEffect, useState, type ReactElement } from 'react';
 import { NavLink, Navigate, Outlet, Route, Routes } from 'react-router';
@@ -45,6 +46,7 @@ import { createStore, type CreateStoreDeps, type Store } from '../store/index.ts
 import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
+import { Unmatched } from '../library/Unmatched.tsx';
 import { useCounts, CATEGORIES, type Category, type Counts } from './useCounts.ts';
 import { Category as CategoryScreen } from '../library/Category.tsx';
 
@@ -157,7 +159,16 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" />} />
         <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" />} />
         <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" />} />
-        <Route path="unmatched" element={<UnmatchedPlaceholder />} />
+        {/*
+          `store` is `undefined` until `createStore` resolves (this component's
+          own effect, above); `Unmatched`'s `source` prop is not optional, so
+          this route renders nothing for that brief window rather than handing
+          it a store that is not there yet. No marker ever pinned `/unmatched`
+          to a placeholder -- unlike the three category routes,
+          `Shell.test.tsx` has never asserted this route's rendered content,
+          only that the route exists.
+        */}
+        <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/* Keeps the chrome on screen for any other path -- see this file's doc. */}
         <Route path="*" element={null} />
       </Route>
@@ -203,14 +214,3 @@ function ShellChrome({ counts, onSignOut }: ShellChromeProps): ReactElement {
   );
 }
 
-/**
- * Stands in for task 7's `Unmatched` screen. Task 5's `Category` (imported
- * above as `CategoryScreen`) already replaced this file's own
- * `CategoryPlaceholder`, and carries its `data-testid={`category-${category}`}`
- * marker forward onto its own root element -- see `Category.tsx`'s own doc
- * for why that marker matters and `Shell.test.tsx`'s three mapping tests for
- * what still finds it there.
- */
-function UnmatchedPlaceholder(): ReactElement {
-  return <p>Unmatched screen goes here (task 7).</p>;
-}
