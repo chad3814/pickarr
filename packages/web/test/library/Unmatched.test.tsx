@@ -7,7 +7,7 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
-import { subscribeInserts } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import { Unmatched, type UnmatchedSource } from '../../src/library/Unmatched.tsx';
 
 /**
@@ -61,11 +61,12 @@ function rssOp({
   return { op: 'upsert', table: 'rss_item', id, value };
 }
 
-/** The two reads `Unmatched` needs, bound straight to a raw database -- no `Store`, no sync loop, nothing this suite would have to stop afterwards. */
+/** The three reads/subscriptions `Unmatched` needs, bound straight to a raw database -- no `Store`, no sync loop, nothing this suite would have to stop afterwards. */
 function sourceFor(db: IDBDatabase): UnmatchedSource {
   return {
     listByTable: (table, opts) => listByTable(db, table, opts),
     subscribeInserts,
+    subscribe,
   };
 }
 
@@ -103,22 +104,14 @@ test('a release that has since been matched drops off the list', async () => {
     assert.deepEqual(filenamesShown(), ['pending.mkv']);
   });
 
-  // A lookup finished: the same row arrives again with a mediaItemId.
-  //
-  // Driven as a delete followed by a revival rather than a second plain
-  // `rssOp` upsert, and that split is load-bearing, not incidental --
-  // `Unmatched.tsx`'s own docblock states why. A live match on the wire is
-  // an `upsert` over a row this screen already holds a value for, which
-  // `store/apply.ts` counts as "touched" but never "inserted", so
-  // `subscribeInserts('rss_item', ...)` -- the only channel `Unmatched`'s
-  // `source` gives it -- would not fire and this screen would have no
-  // reason to re-read. A tombstone's later revival is the one update shape
-  // `subscribeInserts` *does* see ("a revive is still new data appearing at
-  // that key", `store/apply.ts`), so this test drives the screen through
-  // the channel it actually has, in two separate batches -- one `delete`,
-  // one `upsert` -- since a single batch may not carry two ops for the same
-  // key (`DuplicateOpError`).
-  await seed(db, [{ op: 'delete', table: 'rss_item', id: 1 }]);
+  // A lookup finished: the same row arrives again with a mediaItemId, as a
+  // single in-place `upsert` -- exactly what `sync/tail.ts`'s `tailSince`
+  // actually sends for a live match, and exactly the shape `subscribeInserts`
+  // alone cannot see (`Unmatched.tsx`'s own docblock). This is provable now
+  // that `Unmatched` also subscribes per-row through `source.subscribe`:
+  // `store/notify.ts`'s `touched` channel fires on *any* change to a row it
+  // already holds, `upsert` included, which is what wakes this screen to
+  // re-read and drop the now-matched release.
   await seed(db, [rssOp({ id: 1, filename: 'pending.mkv', mediaItemId: 99, updatedAt: 20 })]);
 
   await waitFor(() => {

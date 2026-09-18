@@ -371,6 +371,40 @@ test('the /xxx route renders the xxx category, not another one', async () => {
   });
 });
 
+/**
+ * `/unmatched`'s own mapping test, alongside the three category ones above.
+ * Task 7's own report found nothing pinning this route before this test --
+ * unlike the three category placeholders, `UnmatchedPlaceholder` carried no
+ * `data-testid`, so swapping what `/unmatched` rendered could have gone
+ * unnoticed the way the three category ones no longer can. `Unmatched`'s
+ * root now carries `data-testid="unmatched"` for exactly this.
+ *
+ * `waitFor`, not a synchronous assertion like the three tests above: unlike
+ * `Category`, whose `data-testid` sits on an outer element that renders
+ * regardless of `store` (`Category.tsx`'s own doc), `Shell.tsx`'s
+ * `/unmatched` route is `store === undefined ? null : <Unmatched .../>`, so
+ * the marker is not there until `createStore` resolves.
+ */
+test('the /unmatched route renders Unmatched, not a category', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/unmatched']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => {
+    assert.ok(screen.getByTestId('unmatched'), '/unmatched renders Unmatched');
+  });
+  assert.ok(!screen.queryByTestId('category-tv'), 'not the tv category');
+  assert.ok(!screen.queryByTestId('category-movie'), 'not the movie category');
+  assert.ok(!screen.queryByTestId('category-xxx'), 'not the xxx category');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
 test('/ redirects to /tv rather than rendering an empty shell', async () => {
   const { deps, sched } = testDeps();
   render(
