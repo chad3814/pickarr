@@ -6,7 +6,7 @@ import type { ReactElement } from 'react';
 import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { listByTable } from '../../src/store/rows.ts';
+import { countByPlugin } from '../../src/store/rows.ts';
 import { subscribeInserts } from '../../src/store/notify.ts';
 import { useCounts, CATEGORIES, type CountsSource } from '../../src/shell/useCounts.ts';
 
@@ -34,10 +34,10 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
   await applyBatch(db, ops, { since: 1, before: null });
 }
 
-/** The two reads `useCounts` needs, bound straight to a raw database -- no `Store`, no sync loop, nothing this suite would have to stop afterwards. */
+/** The two operations `useCounts` needs, bound straight to a raw database -- no `Store`, no sync loop, nothing this suite would have to stop afterwards. */
 function sourceFor(db: IDBDatabase): CountsSource {
   return {
-    listByTable: (table, opts) => listByTable(db, table, opts),
+    countByPlugin: (table, pluginId) => countByPlugin(db, table, pluginId),
     subscribeInserts,
   };
 }
@@ -152,19 +152,44 @@ test('each category is counted separately', async () => {
   db.close();
 });
 
+test('counting asks the index once per category and reads no rows', async () => {
+  // Pins the shape of `refresh` itself, not just its output: three calls to
+  // `countByPlugin`, one per category, and nothing else -- `listByTable`
+  // (or any row read) is not part of this source at all, so a regression
+  // back to reading rows would fail this test by having no such method to
+  // call, not merely by producing a wrong number.
+  const calls: string[] = [];
+  const source: CountsSource = {
+    countByPlugin: async (table, pluginId) => {
+      calls.push(`${table}:${pluginId}`);
+      return pluginId === 'tv' ? 2 : 0;
+    },
+    subscribeInserts: () => () => {},
+  };
+
+  render(<Counts store={source} />);
+
+  await waitFor(() => {
+    assert.equal(textOf('tv'), '2', 'the tv count settled from the stub');
+  });
+  assert.equal(textOf('movie'), '0');
+  assert.equal(textOf('xxx'), '0');
+  assert.deepEqual(calls, ['media_item:tv', 'media_item:movie', 'media_item:xxx']);
+});
+
 test('a store-closed rejection during refresh is caught, not left as an unhandled rejection', async () => {
   // `useCounts.ts`'s own `safeRefresh` catch, proved directly rather than
   // asserted by doc comment: a fix-round review found the original (broad)
   // version of this catch had zero test coverage -- removing it produced no
   // failures anywhere in this file. This constructs the exact race `Shell`
   // can cause (its store closing while a read is still in flight) without
-  // needing `Shell` at all: `listByTable` is held open on a promise this
+  // needing `Shell` at all: `countByPlugin` is held open on a promise this
   // test controls, and rejected with the same `InvalidStateError` shape
   // IndexedDB actually produces when the connection underneath it is gone
   // (measured directly against `Shell.test.tsx`'s own race, task 6's report).
   let rejectRead: ((err: unknown) => void) | undefined;
   const source: CountsSource = {
-    listByTable: () =>
+    countByPlugin: () =>
       new Promise((_resolve, reject) => {
         rejectRead = reject;
       }),
