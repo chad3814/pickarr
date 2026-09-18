@@ -33,9 +33,11 @@
  * doc, `packages/e2e/tests/shell.spec.ts`'s deep-link spec), so a stale or
  * hand-typed deep link reaches the router as an unmatched path, not a 404,
  * and this is what keeps that case looking like the app rather than a blank
- * page. `Category`, `Unmatched` and `MediaItemCard` do not exist yet --
- * tasks 5 through 7 replace `CategoryPlaceholder` and `UnmatchedPlaceholder`
- * below with the real screens; nothing here should be read as their design.
+ * page. `MediaItemCard` (task 6) already exists and is what task 5's
+ * `Category` (`../library/Category.tsx`, imported below as `CategoryScreen`)
+ * renders one per media item; `Unmatched` does not exist yet -- task 7
+ * replaces `UnmatchedPlaceholder` below with the real screen; nothing here
+ * should be read as its design.
  */
 import { useEffect, useState, type ReactElement } from 'react';
 import { NavLink, Navigate, Outlet, Route, Routes } from 'react-router';
@@ -44,6 +46,7 @@ import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { useCounts, CATEGORIES, type Category, type Counts } from './useCounts.ts';
+import { Category as CategoryScreen } from '../library/Category.tsx';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
@@ -151,9 +154,9 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
     <Routes>
       <Route element={<ShellChrome counts={counts} onSignOut={handleSignOut} />}>
         <Route index element={<Navigate to="/tv" replace />} />
-        <Route path="tv" element={<CategoryPlaceholder category="tv" />} />
-        <Route path="movie" element={<CategoryPlaceholder category="movie" />} />
-        <Route path="xxx" element={<CategoryPlaceholder category="xxx" />} />
+        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" />} />
+        <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" />} />
+        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" />} />
         <Route path="unmatched" element={<UnmatchedPlaceholder />} />
         {/* Keeps the chrome on screen for any other path -- see this file's doc. */}
         <Route path="*" element={null} />
@@ -201,23 +204,13 @@ function ShellChrome({ counts, onSignOut }: ShellChromeProps): ReactElement {
 }
 
 /**
- * Stands in for task 5's `Category` screen. Names its category and nothing
- * else -- this task's job is the route existing and the nav reaching it, not
- * what the category screen looks like.
- *
- * **`data-testid={`category-${category}`}` on the root element is the
- * route-mapping contract, not incidental.** `Shell.test.tsx`'s mapping tests
- * assert on this marker rather than on this placeholder's prose, precisely
- * so that swapping the prose does not look like swapping the mapping.
- * Whichever task (5) replaces this placeholder with the real `Category`
- * screen must carry the same `data-testid` onto that screen's own root
- * element, or the mapping tests lose the one thing they can still see.
+ * Stands in for task 7's `Unmatched` screen. Task 5's `Category` (imported
+ * above as `CategoryScreen`) already replaced this file's own
+ * `CategoryPlaceholder`, and carries its `data-testid={`category-${category}`}`
+ * marker forward onto its own root element -- see `Category.tsx`'s own doc
+ * for why that marker matters and `Shell.test.tsx`'s three mapping tests for
+ * what still finds it there.
  */
-function CategoryPlaceholder({ category }: { category: Category }): ReactElement {
-  return <p data-testid={`category-${category}`}>{CATEGORY_LABELS[category]} category screen goes here (task 5).</p>;
-}
-
-/** Stands in for task 7's `Unmatched` screen; see {@link CategoryPlaceholder}. */
 function UnmatchedPlaceholder(): ReactElement {
   return <p>Unmatched screen goes here (task 7).</p>;
 }
