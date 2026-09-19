@@ -11,7 +11,9 @@
  * this paragraph was written -- `Category`'s and `Unmatched`'s empty-list
  * states, and `Shell`'s store-failure explanation -- and the feed-settings
  * slice added two more in `Feeds.tsx`: see `section > p`'s own comment
- * below for which of the five that rule actually reaches now. 1.x's six deleted component stylesheets (`git show
+ * below for which of the ten that rule actually reaches now -- the
+ * download clients slice added five more in `DownloadClients.tsx`, which
+ * is what moved that number from five. 1.x's six deleted component stylesheets (`git show
  * bbce069:packages/web/src/styles/card.css` and its five siblings) were
  * tuned against these same tokens and are worth reading before touching this
  * file again, even though their class-based selectors do not carry over.
@@ -147,14 +149,16 @@ ul[aria-label='unmatched releases'] li {
 /*
  * A short line of prose standing where a list would be: `Category`'s
  * "Nothing here yet.", `Unmatched`'s "Everything has been matched.",
- * `Shell`'s explanation of a replica that would not open, and -- since the
- * feed-settings slice -- `Feeds`'s own "No feeds yet.". Each of those four
+ * `Shell`'s explanation of a replica that would not open, `Feeds`'s own
+ * "No feeds yet." (the feed-settings slice) and `DownloadClients`'s "No
+ * download clients yet." (the download clients slice). Each of those five
  * is a direct child of its screen's own `<section>`, which is what this
  * selector actually reaches; that was every `<p>` in the app when this
- * paragraph was first written; it no longer is. `Feeds.tsx`'s *other* `<p>`
- * -- a listed feed's own url -- is a grandchild of the section (`<section>
- * ul li p`), not a direct child, so this rule does not reach it, and
- * `settings.css` gives that one its own treatment instead. Same
+ * paragraph was first written; it no longer is. The other five `<p>`s --
+ * a listed feed's url, and a listed client's implementation, address,
+ * category and username -- are grandchildren of a section (`<section> ul
+ * li p`), not direct children, so this rule reaches none of them, and
+ * `settings.css` gives them their own treatment instead. Same
  * italic-and-dimmed treatment as `base.css`'s own `.loading`, so a list
  * that has genuinely finished loading with nothing in it reads as a
  * different state from one still in flight, not as an ordinary line of
@@ -163,9 +167,9 @@ ul[aria-label='unmatched releases'] li {
  * The store-failure paragraph takes the same treatment deliberately: the
  * heading above it is what carries the weight (`Shell.tsx`'s `StoreFailed`,
  * and `CLAUDE.md`'s hazard on asserting a `role` instead of a visible
- * heading), and this line is the remedy rather than the alarm. `Feeds`'s
- * empty state is the ordinary case the rule was written for in the first
- * place, the same as `Category`'s and `Unmatched`'s.
+ * heading), and this line is the remedy rather than the alarm. The two
+ * settings empty states are the ordinary case the rule was written for in
+ * the first place, the same as `Category`'s and `Unmatched`'s.
  */
 section > p {
   color: var(--color-text-dim);

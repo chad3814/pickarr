@@ -11,10 +11,12 @@
  * This file is the first thing that actually opens two tabs.
  *
  * **No spec here reads a session cookie's value.** Every credential this
- * suite ever holds -- the claim token, a password -- is typed into a form or
- * read off the database directly (`harness-2.ts`'s own doc); the cookie
- * itself lives entirely in the browser's jar, exactly as production leaves
- * it (Global Constraint).
+ * suite ever holds -- the claim token, a password, and since the download
+ * clients slice a download client's api key -- is typed into a form or read
+ * off the database directly (`harness-2.ts`'s own doc); the cookie itself
+ * lives entirely in the browser's jar, exactly as production leaves it
+ * (Global Constraint). None of the three is ever asserted on, echoed into
+ * a test name, or read back out of the page.
  */
 import { expect, type Page } from '@playwright/test';
 import { test } from '../src/harness-2.ts';
@@ -28,6 +30,45 @@ async function claimInstall(page: Page, email: string, claimToken: string): Prom
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByLabel('Claim token').fill(claimToken);
   await page.getByRole('button', { name: 'Claim this install' }).click();
+}
+
+/** What {@link borderTopAgainstLineToken} reads back, both sides in the browser's own canonical colour form. */
+interface BorderTopProbe {
+  /** The computed `border-top-color` of the first element matching the selector. */
+  borderTopColor: string;
+  /** `--color-line`'s own resolved value, in whichever palette this run is in. */
+  lineTokenColor: string;
+}
+
+/**
+ * Reads an element's computed `border-top-color` alongside the resolved
+ * value of `--color-line`, so a spec can assert the two are the same colour.
+ *
+ * **The expectation is resolved in the browser rather than spelled as an
+ * `rgb(...)` literal**, which is the opposite of what `CLAUDE.md`'s hazard
+ * on computed expectations usually asks for, and deliberately so here:
+ * `--color-line` has a different value in each of `tokens.css`'s two
+ * palettes and nothing in this suite pins which one a given run resolves to,
+ * so a literal would be a literal for one palette and wrong in the other.
+ * The probe is a throwaway element carrying the same `var(--color-line)`, so
+ * what comes back is the token as this run resolved it -- not anything read
+ * off the rule under test, which is what would make the assertion circular.
+ *
+ * Shared by the two settings specs below rather than written twice: they
+ * pin the same property of two different lists, and a second copy is a
+ * second thing to keep in step.
+ */
+async function borderTopAgainstLineToken(page: Page, selector: string): Promise<BorderTopProbe> {
+  return page.evaluate((sel) => {
+    const element = document.querySelector(sel);
+    if (element === null) throw new Error(`no element matched ${sel} to read a border colour from`);
+    const probe = document.createElement('div');
+    probe.style.color = 'var(--color-line)';
+    document.body.appendChild(probe);
+    const lineTokenColor = getComputedStyle(probe).color;
+    probe.remove();
+    return { borderTopColor: getComputedStyle(element).borderTopColor, lineTokenColor };
+  }, selector);
 }
 
 test('the app loads from the host, including a deep link that is not /', async ({ page, harness }) => {
@@ -359,22 +400,119 @@ test('an operator can add a feed and see it listed', async ({ page, harness }) =
   // block this task also added, so pinning it closes that gap.
   //
   // Compared against the token's own resolved colour rather than a literal
-  // `rgb(...)`, because `--color-line` differs between the light and dark
-  // palettes (`tokens.css`) and this suite does not pin which one a given
-  // run resolves to. A throwaway element styled with the same
-  // `var(--color-line)` and read back gives the browser's own canonical
-  // form of that token, in whichever palette is active, to compare against.
+  // `rgb(...)` -- see `borderTopAgainstLineToken`'s own doc for why that is
+  // the right way round here.
   const item = list.locator('li').first();
   await expect(item).toBeVisible();
-  const [borderTopColor, lineTokenColor] = await page.evaluate(() => {
-    const li = document.querySelector("ul[aria-label='feeds'] li");
-    if (li === null) throw new Error('feeds list has no li to read a border colour from');
-    const probe = document.createElement('div');
-    probe.style.color = 'var(--color-line)';
-    document.body.appendChild(probe);
-    const resolved = getComputedStyle(probe).color;
-    probe.remove();
-    return [getComputedStyle(li).borderTopColor, resolved];
-  });
-  expect(borderTopColor).toBe(lineTokenColor);
+  const feedBorder = await borderTopAgainstLineToken(page, "ul[aria-label='feeds'] li");
+  expect(feedBorder.borderTopColor).toBe(feedBorder.lineTokenColor);
+});
+
+/*
+ * The download clients slice's own browser proof (task 4's brief), and the
+ * only place any of that slice's screen has run in a real browser.
+ *
+ * **What this spec measures.** `POST /api/download-clients` answers and a
+ * `download_client` row lands; that row reaches this tab's replica through
+ * `download_client`'s own `AFTER INSERT` trigger into `sync_log`
+ * (`sync/log.ts`'s `installSyncTriggers`, committed synchronously with the
+ * insert) and this tab's `/api/sync` tail; the list re-renders from the
+ * replica rather than from the POST's own `{ id }` body, which carries no
+ * name and no implementation; and `settings.css`'s rules for the new
+ * section actually resolve through a real cascade.
+ *
+ * **What this spec does not measure, stated exactly rather than as "the
+ * whole slice".** The reconcile `Host.addDownloadClient` schedules on
+ * create (design spec §7, acceptance item 5) does **not** dispatch here,
+ * and nothing below is evidence about it. `harness-2.ts` builds a real
+ * `Host` and never calls `host.start()`, so `started` stays `false`, the
+ * `if (started) dispatcher.rearm()` guard on the enqueue path
+ * (`host.ts`'s `ctxFor`, which `scheduleReconcile` goes through) arms
+ * nothing, and `dispatcher.start()` has never run to pick the row up
+ * anyway: the `reconcile` job exists in `jobs` and is never executed. The
+ * replica path above does not need it to -- the trigger fires on the
+ * insert's own commit, and nothing here talks to the client's address --
+ * so "the client is listed" is evidence about the write, the trigger and
+ * the sync tail, and about nothing else. Acceptance item 5 is pinned at
+ * the unit level, as are the four refusals (`unknown-implementation`,
+ * `bad-auth-shape`, `duplicate-name`, `bad-url`) and every credential
+ * invariant: this spec types an api key into the form and then has nothing
+ * further to do with it.
+ */
+
+/**
+ * Obviously synthetic, the same way `PASSWORD` above is, and never
+ * asserted on, never read back, never put in a test name. It is typed into
+ * a `type="password"` field (`AddDownloadClient.tsx`) and from there it
+ * crosses the wire once into the harness's in-memory `Secrets`; nothing in
+ * this file, and nothing in the host's `log: dropLine`, ever renders it.
+ */
+const API_KEY = 'placeholder-not-a-real-download-client-api-key';
+
+test('an operator can add a download client and see it listed', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await page.goto(`${harness.origin}/settings`);
+
+  // Precise locators, not loosened assertions: `/settings` is two forms
+  // now and `getByLabel` matches a substring by default, so every field
+  // named here is named by the string that belongs to exactly one of them.
+  // "Client name" is this form's, where the feed form's is "Name" -- which
+  // is why the feed spec above needs `exact: true` and this one does not.
+  await page.getByLabel('Client name').fill('Seedbox');
+  // Neither select is touched: `AddDownloadClient.tsx` defaults
+  // `implementation` to qBittorrent and the sign-in method to the api key,
+  // so the form as rendered already asks for exactly the one credential
+  // filled in below. The other three implementation/strategy combinations
+  // are unit-level (`AddDownloadClient.test.tsx`); what this spec is here
+  // for is the write reaching the replica.
+  await page.getByLabel('Api key').fill(API_KEY);
+  await page.getByLabel('Address').fill(`${harness.origin}/qbittorrent`);
+  await page.getByRole('button', { name: 'Add download client' }).click();
+
+  // `DownloadClients.tsx` never learns this client's name or its
+  // implementation from the POST's response body -- that answers only
+  // `{ id }` (`AddDownloadClient.tsx`'s doc on `postDownloadClient`). Both
+  // appearing is the real round trip instead: the host's insert
+  // committing, `download_client`'s own sync trigger logging it, this
+  // tab's `/api/sync` tail noticing on its next poll, and
+  // `useDownloadClients`'s `subscribeInserts` re-reading the replica from
+  // there (Global Constraint: lists come from the replica only).
+  const list = page.getByRole('list', { name: 'download clients' });
+  const client = list.locator('li').filter({ hasText: 'Seedbox' });
+  await expect(client.getByRole('heading', { name: 'Seedbox' })).toBeVisible({ timeout: 15_000 });
+  // `implementationLabel`'s own spelling of the wire's `qbittorrent`,
+  // scoped to the row rather than the page: the form's own `<option>`
+  // carries the identical string.
+  await expect(client).toContainText('qBittorrent');
+
+  // `settings.css`'s pin for this section, and the one the task's
+  // two-sided check is run against. Not `list-style-type: none`: a UA
+  // reset satisfies that just as well as a real rule does, which is how
+  // the previous slice's gutted-stylesheet half came back green. A
+  // token-derived colour is produced by the rule or by nothing -- with
+  // `settings.css` gone or emptied, `border-top-style` is `none` and the
+  // computed `border-top-color` falls back to `currentcolor`, which is
+  // `--color-text`, not `--color-line`.
+  //
+  // The feeds spec above pins the same property of the other list, and
+  // that is not the same assertion: the rule naming both lists
+  // (`settings.css`) would still satisfy the feeds one if the download
+  // clients half of its selector were dropped. This is the half that
+  // notices.
+  await expect(client).toBeVisible();
+  const clientBorder = await borderTopAgainstLineToken(page, "ul[aria-label='download clients'] li");
+  expect(clientBorder.borderTopColor).toBe(clientBorder.lineTokenColor);
+
+  // The heading-hierarchy rule `settings.css` adds for this screen, which
+  // nothing else pins. A listed client's name is an `<h2>` exactly as the
+  // section's own name is, so `base.css` alone renders it at
+  // `--text-title` (1rem, 16px) -- the same size as the heading above it.
+  // 13px is `--text-body`, which only the settings stylesheet's rule
+  // produces. Spelled literally rather than resolved from the token: this
+  // one has a single answer in both palettes, so `CLAUDE.md`'s preference
+  // for a literal applies with nothing to trade against it.
+  await expect(client.getByRole('heading', { name: 'Seedbox' })).toHaveCSS('font-size', '13px');
 });
