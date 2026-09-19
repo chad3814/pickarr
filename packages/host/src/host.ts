@@ -12,6 +12,8 @@ import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import { addFeed as addFeedRule } from './feeds/add.ts';
 import type { AddFeedInput, AddFeedRefusal } from './feeds/add.ts';
+import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
+import type { AddDownloadClientInput, AddDownloadClientRefusal } from './clients/add.ts';
 import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
 import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -26,6 +28,7 @@ export { HOST_PLUGIN_ID };
 export { PluginNotRegisteredError };
 export { ownerPluginId };
 export type { AddFeedInput, AddFeedRefusal };
+export type { AddDownloadClientInput, AddDownloadClientRefusal };
 export { MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S } from './feeds/add.ts';
 
 /**
@@ -109,6 +112,27 @@ export interface Host {
    * this (a later task) needs to map each refusal to its own status code.
    */
   addFeed(input: AddFeedInput): Promise<{ id: number } | AddFeedRefusal>;
+  /**
+   * Validates and writes a new `download_client` row -- storing its
+   * credential in the `secret` table under a generated name, never in a
+   * column -- then schedules its first reconcile immediately, which is the
+   * same call `main.ts` already makes at boot for every client on file. So
+   * a freshly added client reaches the state a restart would have left it
+   * in, and the reconcile is also the first real confirmation the url and
+   * the credential were right (design spec §8.8: no synchronous probe
+   * inside the POST, because that puts a third-party service's latency
+   * inside a user-facing request).
+   *
+   * The invariants themselves live in `clients/add.ts`, this method's own
+   * delegate, not here -- `host.ts` is already long and that rule set is
+   * self-contained, the same split `addFeed` uses.
+   *
+   * Returns a refusal *value* on failure, never throws, for the reason
+   * `addFeed` gives above. **No refusal, and nothing this method returns or
+   * logs, carries the submitted credential**: the value reaches
+   * `Secrets.saveSecret` and stops there.
+   */
+  addDownloadClient(input: AddDownloadClientInput): Promise<{ id: number } | AddDownloadClientRefusal>;
   /**
    * Delivers `file` to the plugin `pluginId` names, calling its
    * `onDownloadedFile`. The shape `deliverCompleted`
@@ -609,6 +633,28 @@ export function createHost(deps: {
       // restart would have polled it, rather than by a second, parallel path
       // that could drift from that one.
       host.schedulePoll(result.id);
+      return result;
+    },
+
+    async addDownloadClient(input) {
+      const result = addDownloadClientRule(
+        {
+          raw: deps.raw,
+          now: deps.now,
+          // The one method of `Secrets` the rule may have: handing it the
+          // whole instance would give it `get` as well, and a writer that
+          // cannot resolve a credential is a writer that cannot leak one.
+          saveSecret: (name, value) => { deps.secrets.saveSecret(name, value); },
+        },
+        input,
+      );
+      if ('refusal' in result) return result;
+      // Through the public method, not `scheduleReconcileJob` directly, for
+      // the reason `addFeed` gives about `schedulePoll`: this is the exact
+      // call `main.ts` makes at boot for every client already on file, so a
+      // freshly added client is reconciled the same way a restart would
+      // have reconciled it rather than by a second, parallel path.
+      await host.scheduleReconcile(result.id);
       return result;
     },
 

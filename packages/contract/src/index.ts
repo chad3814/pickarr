@@ -17,6 +17,8 @@ export type {
 } from './media.ts';
 export type { AddFeedRefusalCode } from './feeds.ts';
 export { ADD_FEED_REFUSALS } from './feeds.ts';
+export type { AddDownloadClientRefusalCode } from './download-clients.ts';
+export { ADD_DOWNLOAD_CLIENT_REFUSALS } from './download-clients.ts';
 export type { HostFetch } from './fetch.ts';
 export type { Migration } from './migrations.ts';
 export type { DownloadClients, DownloadSubmission } from './downloads.ts';
