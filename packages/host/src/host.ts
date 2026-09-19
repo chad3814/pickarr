@@ -107,9 +107,20 @@ export interface Host {
    * this method's own delegate, not here: `host.ts` is already long, and
    * that rule set is self-contained.
    *
-   * Returns a refusal *value* on failure, never throws: a thrown error is
-   * indistinguishable from a bug at the call site, and the route in front of
-   * this (a later task) needs to map each refusal to its own status code.
+   * **Returns every refusal as a value and throws none of them**: a thrown
+   * error is indistinguishable from a bug at the call site, and the route in
+   * front of this (a later task) needs to map each refusal to its own status
+   * code.
+   *
+   * That is the guarantee, and it is narrower than "never throws", which is
+   * what this line used to say. This method can still reject -- a SQLite
+   * error that is not the unique-constraint one is rethrown by `feeds/add.ts`,
+   * and the `schedulePoll` after a successful insert is outside any `try`.
+   * Both are infrastructure faults or bugs rather than answers about the
+   * input, both reach `api/server.ts`'s outermost handler, and both become a
+   * 500, which is the right status for them. Callers must not read "never
+   * throws" as licence to skip an error boundary; what they may rely on is
+   * that a *refusal* arrives in the return value or not at all.
    */
   addFeed(input: AddFeedInput): Promise<{ id: number } | AddFeedRefusal>;
   /**
@@ -127,10 +138,23 @@ export interface Host {
    * delegate, not here -- `host.ts` is already long and that rule set is
    * self-contained, the same split `addFeed` uses.
    *
-   * Returns a refusal *value* on failure, never throws, for the reason
-   * `addFeed` gives above. **No refusal, and nothing this method returns or
-   * logs, carries the submitted credential**: the value reaches
-   * `Secrets.saveSecret` and stops there.
+   * Returns every refusal as a value and throws none of them, for the
+   * reason `addFeed` gives above -- and, as there, that is not the same as
+   * never throwing. The two rejection paths here are `clients/add.ts`'s
+   * rethrow of any SQLite error that is not the `download_client_name`
+   * unique-constraint violation, and the awaited `scheduleReconcile` after
+   * a successful insert, which sits outside every `try`. `saveSecret` is a
+   * third: it runs before the insert (design spec §8.6) and a failure there
+   * rejects with no row written. All three become a 500 at the route.
+   *
+   * **No refusal, and nothing this method returns or logs, carries the
+   * submitted credential**: the value reaches `Secrets.saveSecret` and stops
+   * there. That holds on the throwing paths too, and structurally rather
+   * than by inspecting SQLite's wording: the only error `add.ts` rethrows
+   * comes from the `INSERT INTO download_client` statement, and neither
+   * credential is among that statement's bound values -- the row takes the
+   * generated *secret names*, never the secrets. There is no value for an
+   * error message to quote even if SQLite quoted its bindings.
    */
   addDownloadClient(input: AddDownloadClientInput): Promise<{ id: number } | AddDownloadClientRefusal>;
   /**

@@ -526,13 +526,26 @@ test('an operator can add a download client and see it listed', async ({ page, h
   await expect(client).toContainText('qBittorrent');
 
   // `settings.css`'s pin for this section, and the one the task's
-  // two-sided check is run against. Not `list-style-type: none`: a UA
-  // reset satisfies that just as well as a real rule does, which is how
-  // the previous slice's gutted-stylesheet half came back green. A
-  // token-derived colour is produced by the rule or by nothing -- with
-  // `settings.css` gone or emptied, `border-top-style` is `none` and the
-  // computed `border-top-color` falls back to `currentcolor`, which is
-  // `--color-text`, not `--color-line`.
+  // two-sided check is run against. A token-derived colour is produced by
+  // the rule or by nothing -- with `settings.css` gone or emptied,
+  // `border-top-style` is `none` and the computed `border-top-color` falls
+  // back to `currentcolor`, which is `--color-text`, not `--color-line`.
+  //
+  // Not `list-style-type: none`, and **not for the reason this comment
+  // first gave.** It said "a UA reset satisfies that just as well as a
+  // real rule does", which is false: no UA resets a `ul` to `none`, and
+  // `base.css`'s only `list-style` reset is scoped to `nav ul`
+  // (`grep -rn list-style packages/web/src/styles/` -> `base.css` `nav ul`,
+  // `library.css` x2, `settings.css` x1). Delete `settings.css` outright
+  // and the feeds spec's assertion reds with `disc`, which is exactly what
+  // the import-removed half of the two-sided check measured.
+  //
+  // What actually makes that assertion weak is narrower, and is a property
+  // of the *gutted* half alone: `list-style: none` is one declaration near
+  // the top of the file, so a stylesheet emptied of everything else still
+  // satisfies it. It pins that the file exists, not that its meaningful
+  // rules do. The border pin has no such second life -- there is nothing
+  // left to satisfy it once the rule block is gone.
   //
   // The feeds spec above pins the same property of the other list, and
   // that is not the same assertion: the rule naming both lists

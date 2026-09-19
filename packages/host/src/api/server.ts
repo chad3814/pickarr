@@ -276,9 +276,12 @@ export interface ReadServerDeps {
    * `ReadServerDeps.host` above already means the bind interface string, so
    * the object cannot also mean the `Host` instance; a function is also all
    * `POST /api/feeds` (`ROUTES` below) ever calls. Resolves a refusal
-   * *value* on failure, never throws -- see that method's own doc for why --
-   * so the route maps each refusal to its own status rather than treating
-   * one as a bug.
+   * *value* on failure and throws no refusal -- see that method's own doc,
+   * which also records what it can still reject with -- so the route maps
+   * each refusal to its own status rather than treating one as a bug. A
+   * rejection is not a refusal and is not mapped: it falls through to the
+   * outermost handler's 500, which is where an infrastructure fault
+   * belongs.
    */
   addFeed: (input: AddFeedInput) => Promise<{ id: number } | AddFeedRefusal>;
   /**
@@ -286,8 +289,11 @@ export interface ReadServerDeps {
    * handed in as the one operation this route needs rather than the whole
    * `Host`, for the reason `addFeed` above gives: `ReadServerDeps.host`
    * already means the bind interface string, so the object cannot also mean
-   * the `Host` instance. Resolves a refusal *value* on failure, never
-   * throws.
+   * the `Host` instance. Resolves a refusal *value* on failure and throws
+   * no refusal, with the same scope `addFeed` above states: it can still
+   * reject on a SQLite error that is not the name collision, on
+   * `saveSecret`, or on the reconcile it schedules after the insert, and
+   * each of those becomes a 500 here rather than a mapped status.
    *
    * **The one dependency in this interface that is handed a credential.**
    * The submitted api key or password arrives in the POST body, is passed

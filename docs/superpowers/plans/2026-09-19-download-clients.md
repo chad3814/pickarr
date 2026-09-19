@@ -362,9 +362,19 @@ Both, and report both:
    assertion must still red.
 
 The second is the one that matters. In the previous slice the first
-passed while the second did not, because `list-style-type: none` is
-satisfied by a UA reset. Assert a computed value only a real rule
+passed while the second did not. Assert a computed value only a real rule
 produces — a token-derived colour or border.
+
+> **Correction (final fix wave).** The reason originally given here —
+> "because `list-style-type: none` is satisfied by a UA reset" — is
+> false, and is left visible rather than deleted. No UA resets a `ul` to
+> `none`; `base.css`'s only `list-style` reset is scoped to `nav ul`.
+> Removing the import *does* red that assertion, with `disc` — Task 4's
+> own half 1 measured exactly that. The weakness is real but narrower:
+> `list-style: none` is a single declaration near the top of
+> `settings.css`, so the **gutted** half satisfies it while every
+> meaningful rule is gone. It pins the file's existence, not its rules.
+> The guidance is unchanged; only its justification was wrong.
 
 - [ ] **Step 4: Gate and commit**
 

@@ -137,10 +137,13 @@ export interface AddDownloadClientRefusal {
 /**
  * What `submit` resolves to.
  *
- * `offline` is this client's own outcome for a rejected `fetch` -- never a
- * server answer -- which is what keeps "no answer" distinguishable from
- * "refused": an offline submit reading as "already on file" would send the
- * operator hunting for a client that is not there.
+ * `offline` is this client's own outcome for a submit that never reached
+ * the host -- a rejected `fetch`, or a reply Pickarr's route layer could
+ * not have produced (see {@link postDownloadClient} on why an unparseable
+ * body is one of those). Never a server answer, which is what keeps "no
+ * answer" distinguishable from "refused": an offline submit reading as
+ * "already on file" would send the operator hunting for a client that is
+ * not there.
  *
  * **`unrecognised` is a normal outcome, not a should-not-happen one.**
  * `POST /api/download-clients` answers `{ id }`, or `{ refusal }` with one
@@ -194,9 +197,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * console.
  *
  * **Never throws.** A rejected `fetch` and a body that fails to parse both
- * answer `{ refusal: 'offline' }` -- neither is a server answer, so neither
- * may be reported as a refusal. A body that parses but matches neither an
- * accepted id nor a known refusal answers `{ refusal: 'unrecognised' }`.
+ * answer `{ refusal: 'offline' }`; a body that parses but matches neither
+ * an accepted id nor a known refusal answers `{ refusal: 'unrecognised' }`.
+ *
+ * **Why an unparseable body is `offline` and not `unrecognised`**, since
+ * the two are one `await` apart inside the same `try` and the reason this
+ * line used to give -- "neither is a server answer" -- is not true of the
+ * second as written. An unparseable body plainly *is* an answer; something
+ * sent those bytes. The question is whether *Pickarr* sent them, and it
+ * cannot have: `api/static-route.ts` refuses every `/api` path before it
+ * touches the filesystem precisely so a mistyped endpoint cannot answer
+ * HTML ("a client that parses markup as JSON and reports a nonsense
+ * error"), and `server.ts`'s catch-all is `json(404, { error: 'unknown
+ * route' })`. Every answer this route layer can produce is JSON. So
+ * unparseable bytes came from something in front of Pickarr -- a gateway's
+ * HTML 502, a captive portal, a transfer cut mid-stream -- and in each of
+ * those the submit did not reach the host. "Could not reach Pickarr" is
+ * the accurate sentence and "the host may be a different version" is not:
+ * version skew produces a *parseable* body here, which is exactly what
+ * `unrecognised` is for. A renamed endpoint answers that JSON 404 and
+ * lands there, not here.
+ *
+ * The ordering is what makes this hold, and it is the thing to re-check if
+ * the route layer ever gains a non-JSON answer under `/api`: at that point
+ * an unparseable body stops implying "not Pickarr" and this branch needs
+ * splitting.
  * The feeds slice shipped a version that threw, and because `handleSubmit`
  * is invoked as `void handleSubmit(event)` the rejection was swallowed, so
  * five of six real host answers wedged the form with the button stuck
@@ -245,7 +270,7 @@ export const REFUSAL_MESSAGES: Record<AddDownloadClientRefusalCode | 'offline' |
   'bad-auth-shape': 'Fill in exactly one set of credentials: an api key, or a username and password.',
   'duplicate-name': 'A download client with that name is already on file.',
   'bad-url': 'That address is not an http or https url.',
-  /** Distinct from every named refusal above, which are answers -- this one means the request never got one. */
+  /** Distinct from every named refusal above, which are answers from the host -- this one means the submit never reached it. The first clause is the load-bearing half: "could not reach Pickarr" is true of a rejected `fetch` and of a gateway answering in Pickarr's place alike, where "check your connection" is advice that happens to fit the first case better than the second. */
   offline: 'Could not reach Pickarr. Check your connection and try again.',
   /** `postDownloadClient`'s own catch-all. Names no code and no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
   unrecognised:

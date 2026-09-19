@@ -289,6 +289,34 @@ test('postDownloadClient reports offline for a rejected fetch, never a server an
   assert.deepEqual(await postDownloadClient(SAMPLE_INPUT), { refusal: 'offline' });
 });
 
+test('an unparseable body reads as offline, not as an unrecognised answer', async () => {
+  // A gateway's HTML 502 -- the realistic producer, and the case that
+  // decides which of the two catch-all outcomes an unparseable body gets.
+  // `offline` is right *because* Pickarr cannot have sent this:
+  // `static-route.ts` refuses every `/api` path before the filesystem so a
+  // mistyped endpoint cannot answer HTML, and `server.ts`'s catch-all is
+  // `json(404, { error: 'unknown route' })`. Every answer the route layer
+  // can produce parses. So these bytes came from in front of the host, the
+  // submit never reached it, and "could not reach Pickarr" is the true
+  // sentence -- where `unrecognised`'s "the host may be a different
+  // version" would be a diagnosis of the one cause ruled out, since
+  // version skew answers parseable JSON and lands on the other branch.
+  //
+  // Asserted here rather than left to the docblock because the two
+  // outcomes are one `await` apart inside the same `try`, so moving
+  // `response.json()` out of it is a one-line edit that silently switches
+  // this to `unrecognised`.
+  globalThis.fetch = fetchStub(() =>
+    Promise.resolve(new Response('<html><body>502 Bad Gateway</body></html>', {
+      status: 502,
+      headers: { 'content-type': 'text/html' },
+    })),
+  );
+  assert.deepEqual(await postDownloadClient(SAMPLE_INPUT), { refusal: 'offline' });
+  assert.ok(/could not reach/i.test(REFUSAL_MESSAGES.offline),
+    'and that outcome is the sentence about reachability, not the one about versions');
+});
+
 test('postDownloadClient sends the session cookie, never a token it read itself', async () => {
   let seenUrl: string | undefined;
   let seenInit: RequestInit | undefined;
@@ -329,8 +357,70 @@ test('postDownloadClient reports "unrecognised" for a body carrying no refusal, 
   }
 });
 
+/**
+ * The two envelope codes, named here by the same strings
+ * `server.test.ts`'s `both download client 400s carry a code` names on the
+ * host side.
+ *
+ * They used to be an invented `credential-rejected`. The behaviour pinned
+ * was right and both sides were green, but neither test named a string the
+ * other did: the route could have been renamed to answer
+ * `unparseable-body` and the host's test would have moved with it while
+ * this one went on passing about a code no route has ever sent. Two halves
+ * of one seam have to meet on a literal somewhere, and this is the half
+ * that was floating.
+ *
+ * Literals rather than an import, deliberately. These are *not* in
+ * `@pickarr/contract` and must not be -- `contract/src/download-clients.ts`
+ * and `feeds.ts` both record why the envelope codes stay in the route --
+ * and the production client is required not to enumerate them, which is
+ * what makes them arrive here as "unknown". Importing them would make the
+ * browser know them and delete the thing under test. The assertion below
+ * closes the gap a literal leaves.
+ */
+const ENVELOPE_REFUSAL_CODES = ['invalid-shape', 'malformed-body'] as const;
+
+/**
+ * The contract's codes as a set of plain strings, so the check below can
+ * ask about a string the tuple's own member type does not include.
+ *
+ * An *annotation*, never `ADD_DOWNLOAD_CLIENT_REFUSALS as readonly
+ * string[]`. The tuple is `as const`, so `.includes` accepts only its own
+ * four members and passing an envelope code is a type error -- and the
+ * reflex fix is a widening assertion, which this slice's diff does not
+ * contain and which would be a cast written to silence a checker that is
+ * right. Assigning the tuple to a widened type is an ordinary assignment
+ * the compiler verifies. `AddDownloadClient.tsx` reaches the same place
+ * twice, with its own `REFUSAL_CODES: ReadonlySet<string>` and with
+ * `Object.hasOwn` in place of `IMPLEMENTATIONS.includes`.
+ */
+const CONTRACT_REFUSAL_CODES: ReadonlySet<string> = new Set(ADD_DOWNLOAD_CLIENT_REFUSALS);
+
 test('postDownloadClient reports "unrecognised" for a refusal code this build does not know', async () => {
-  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'credential-rejected' }, 422)));
+  // Derived from the shared constant, not restated: these two are unknown
+  // to this build *because* the contract does not list them, and if a
+  // later slice moved either into `ADD_DOWNLOAD_CLIENT_REFUSALS` the loop
+  // below would silently stop testing the unknown-code path -- it would be
+  // asserting that a code the client fully understands renders as
+  // `unrecognised`, which is the opposite of the contract. This reds
+  // instead.
+  for (const code of ENVELOPE_REFUSAL_CODES) {
+    assert.ok(
+      !CONTRACT_REFUSAL_CODES.has(code),
+      `${code} is an envelope refusal and must stay out of the contract's list for this test to mean anything`,
+    );
+  }
+
+  for (const code of ENVELOPE_REFUSAL_CODES) {
+    globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: code }, 400)));
+    // eslint-disable-next-line no-await-in-loop -- each iteration installs its own `fetch` stub; running them concurrently would race over the one global.
+    assert.deepEqual(await postDownloadClient(SAMPLE_INPUT), { refusal: 'unrecognised' }, code);
+  }
+
+  // And a code that is neither a contract refusal nor an envelope one --
+  // the genuinely-newer-host case, which is why `unrecognised` exists at
+  // all. The two above are today's unknown codes; this is tomorrow's.
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'a-code-no-build-has-shipped' }, 422)));
   assert.deepEqual(await postDownloadClient(SAMPLE_INPUT), { refusal: 'unrecognised' });
 });
 
