@@ -25,6 +25,8 @@ import {
 import { envNameFor } from '../src/secrets/names.ts';
 import type { HostSettings } from '../src/main.ts';
 import {
+  LOOKUP_CONCURRENCY,
+  LOOKUP_TIMEOUT_MS,
   createPluginIdForType,
   createShutdown,
   defaultWebRoot,
@@ -41,6 +43,7 @@ import {
   shippedPlugins,
 } from '../src/main.ts';
 import { DEFAULT_CONFIG_PATH } from '../src/config/schemas.ts';
+import { JOB_TIMEOUT_MS } from '../src/jobs/run-job.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
 
 /** The plugin id every feed row below names, so `main` can register an owner for it. */
@@ -1612,4 +1615,32 @@ test('shippedPlugins builds one plugin per media type, each with its own prefix'
   for (const plugin of plugins) {
     assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2]);
   }
+});
+
+test('the job ceiling stays above the lookup timeout, so the lookup timeout can actually fire', () => {
+  // This relationship is the whole reason `JOB_TIMEOUT_MS` is six minutes
+  // rather than five, and nothing else would notice if it were lost.
+  //
+  // Both were 300_000 once. The job signal is armed when the job starts and
+  // the fetch timeout only when the request is issued, so the job ceiling
+  // always won the race and `LOOKUP_TIMEOUT_MS` was unreachable code -- a
+  // slow lookup surfaced as a job killed for running long, never as a
+  // timeout naming the url. The two numbers looked deliberate and one of
+  // them did nothing.
+  //
+  // Asserted as an inequality, not as two literals: the point is the gap,
+  // and either number may move as long as the gap survives.
+  assert.ok(
+    JOB_TIMEOUT_MS > LOOKUP_TIMEOUT_MS,
+    `the job ceiling (${JOB_TIMEOUT_MS}ms) must exceed the lookup timeout (${LOOKUP_TIMEOUT_MS}ms), `
+    + 'or the lookup timeout can never fire',
+  );
+});
+
+test('the lookup service gets more than one request in flight, so chunks do not run strictly in series', () => {
+  // A lookup of more than MAX_BATCH names is chunked, and at the default of
+  // one they serialise: three chunks of twenty-seven seconds measured
+  // eighty-one seconds of wall clock. A value of 1 here would silently
+  // restore that.
+  assert.ok(LOOKUP_CONCURRENCY > 1, 'chunked lookups must be able to overlap');
 });

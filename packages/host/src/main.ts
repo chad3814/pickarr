@@ -448,6 +448,31 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
   };
 }
 
+/**
+ * The lookup service answers a batch in tens of seconds and is allowed five
+ * minutes by the platform it runs on, so it gets that whole window rather
+ * than the 30s every other host gets -- a lookup cut off at 30s is a failed
+ * job and a retry that will take just as long. `fetch/queue.ts`'s
+ * `FetchTimeouts` doc has the reasoning for why this is per-hostname.
+ *
+ * `run-job.ts`'s `JOB_TIMEOUT_MS` is deliberately above this; see its doc.
+ */
+export const LOOKUP_TIMEOUT_MS = 300_000;
+
+/**
+ * A lookup of more than `MAX_BATCH` names is split into chunks, and at the
+ * default concurrency of one they run strictly in series -- three chunks of
+ * twenty-seven seconds is eighty-one seconds of wall clock for work the
+ * service would have done concurrently. Four is chosen to cut that without
+ * becoming a burst: the service is a shared deployment, and its own rate
+ * limiting, not this number, is what should decide when it has had enough.
+ */
+export const LOOKUP_CONCURRENCY = 4;
+
+/** Every other hostname keeps one in flight and `queue.ts`'s own default ceiling. */
+const DEFAULT_HOST_CONCURRENCY = 1;
+const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+
 /** The lookup service's origin when nothing says otherwise. */
 const DEFAULT_OPENMETADATA_URL = 'https://openmetadata.nexus';
 
@@ -785,8 +810,18 @@ export async function main(
       );
     }
   }
+  // Keyed off the resolved url, not a literal: `PICKARR_OPENMETADATA_URL`
+  // points a test deployment or a proxy somewhere else, and an entry keyed
+  // by the default hostname would then silently apply to nothing -- the
+  // failure being that the lookup quietly reverts to the 30s default, which
+  // is exactly the timeout this configuration exists to raise.
+  const lookupHostname = new URL(settings.openmetadataUrl).hostname;
   const artworkDir = resolveArtworkDir(settings.databasePath);
-  const fetch = createHostFetch({ fetch: globalThis.fetch });
+  const fetch = createHostFetch({
+    fetch: globalThis.fetch,
+    limits: { default: DEFAULT_HOST_CONCURRENCY, perHost: { [lookupHostname]: LOOKUP_CONCURRENCY } },
+    timeouts: { default: DEFAULT_FETCH_TIMEOUT_MS, perHost: { [lookupHostname]: LOOKUP_TIMEOUT_MS } },
+  });
   // A factory, not a built object: `createHost` supplies the `Secrets` it
   // will also give the reconcile handler, so the two cannot be different
   // instances. See `createHost`'s own `downloads` doc for why that matters.

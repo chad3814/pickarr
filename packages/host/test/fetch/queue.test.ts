@@ -119,7 +119,7 @@ test('a request that never settles times out, rejects, and releases its hostname
     if (calls === 1) return new Promise<Response>(() => {});
     return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 20 });
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 20 } });
 
   await assert.rejects(
     hostFetch.text('http://a.example/hangs'),
@@ -139,25 +139,23 @@ test('a request spends its budget while waiting for its hostname slot, not only 
   // The half of the wedge that lives in the queue rather than in the request.
   // Both requests are asked for in the same tick; the first ignores its
   // signal and never settles, so it holds the sole slot for the whole
-  // forty-millisecond budget. The second is woken the instant the first's own
-  // race gives the slot up -- which is exactly when the second's budget is
-  // spent too, since both were armed together.
+  // forty-millisecond budget. The second is woken the instant the first's
+  // own race gives the slot up.
   //
-  // The second's fetch would answer in twenty milliseconds, comfortably
-  // inside a fresh budget and comfortably outside none at all. That is the
-  // discriminator: with the timeout armed inside the queued task -- where it
-  // was until this was measured -- the second request started a *new*
-  // forty-millisecond window on being woken and resolved happily at sixty
-  // milliseconds, having waited untimed. A waiter's wall clock was therefore
-  // `queue depth x timeoutMs` with nothing bounding the depth, which is how a
-  // request outlives `run-job.ts`'s five-minute job ceiling and settles
-  // against a row its own timeout has already failed and a later attempt has
-  // re-claimed.
+  // The second's fetch answers in twenty milliseconds. That is the
+  // discriminator, and this test asserts the OPPOSITE of what it asserted
+  // before the timeout moved inside the queued task: the second request now
+  // starts its own forty-millisecond window on being woken and resolves at
+  // roughly sixty milliseconds, having waited untimed.
   //
-  // `calls` is asserted too, and it is 2 rather than 1 on purpose: the woken
-  // task does get its one attempt, because a fetch that can answer inside the
-  // same microtask drain should be allowed to. What it does not get is a
-  // second window to answer in.
+  // That is the intended meaning. A per-hostname ceiling is a statement
+  // about how long that service takes to answer, and the far end has no
+  // idea how long this process left the request in a queue. What the change
+  // gives up is this function bounding total wall clock: that is now the
+  // caller's signal's job, and `run-job.ts`'s `JOB_TIMEOUT_MS` is the
+  // ceiling that actually does it, deliberately set above the largest
+  // per-hostname timeout. The next test pins the half of that which lives
+  // here.
   let calls = 0;
   const fetchFn: typeof globalThis.fetch = async (input) => {
     calls += 1;
@@ -165,18 +163,86 @@ test('a request spends its budget while waiting for its hostname slot, not only 
     await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
     return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 40 });
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 40 } });
 
   const first = hostFetch.json<Echo>('http://a.example/hangs');
   const second = hostFetch.json<Echo>('http://a.example/queued-behind-it');
 
   await assert.rejects(first, /timed out after 40ms/);
-  await assert.rejects(
-    second,
-    /timed out after 40ms/,
-    'a request that spent its budget waiting must not be handed a fresh one',
+  const answered = await second;
+  assert.equal(
+    answered.url,
+    'http://a.example/queued-behind-it',
+    'a request gets its full budget from the moment its slot is granted, not from when it was asked for',
   );
-  assert.equal(calls, 2, 'the woken request got its one attempt, and no window to complete it in');
+  assert.equal(calls, 2, 'the woken request reached fetch');
+});
+
+test('a caller that aborted while queued is not spent on a real request', async () => {
+  // The replacement for the `timeout.aborted` short-circuit that the move
+  // made dead code. A request whose job already gave up must not, on
+  // finally reaching the front of the queue, issue a fetch nobody will read
+  // -- and must not make everything behind it wait while it does.
+  //
+  // `calls` is the assertion that matters: 1, not 2. The mutation this
+  // catches is deleting the short-circuit, which leaves the second request
+  // issuing a real fetch against an aborted job.
+  let calls = 0;
+  const fetchFn: typeof globalThis.fetch = async (input) => {
+    calls += 1;
+    if (calls === 1) return new Promise<Response>(() => {});
+    return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
+  };
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 40 } });
+
+  const controller = new AbortController();
+  const first = hostFetch.json<Echo>('http://a.example/hangs');
+  const second = hostFetch.json<Echo>('http://a.example/gives-up', { signal: controller.signal });
+  await tick();
+  controller.abort();
+
+  await assert.rejects(first, /timed out after 40ms/);
+  await assert.rejects(second, /abandoned: the caller aborted while it waited for a slot/);
+  assert.equal(calls, 1, 'the abandoned request never reached fetch');
+});
+
+test('a perHost timeout applies to its own hostname and leaves every other one on the default', async () => {
+  // The whole point of the per-hostname shape: the lookup service is
+  // allowed minutes, and a tracker is still cut off in milliseconds. One
+  // global number cannot express both.
+  const fetchFn: typeof globalThis.fetch = async (input) => {
+    if (String(input).includes('slow.example')) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, 40); });
+      return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
+    }
+    return new Promise<Response>(() => {});
+  };
+  const hostFetch = createHostFetch({
+    fetch: fetchFn,
+    timeouts: { default: 20, perHost: { 'slow.example': 5_000 } },
+  });
+
+  const generous = await hostFetch.json<Echo>('http://slow.example/takes-40ms');
+  assert.equal(generous.url, 'http://slow.example/takes-40ms', 'its own entry gave it room the default would not have');
+
+  await assert.rejects(
+    hostFetch.json<Echo>('http://other.example/hangs'),
+    /timed out after 20ms/,
+    'a hostname with no entry of its own is still on the default',
+  );
+});
+
+test('an invalid perHost timeout throws at construction, naming the hostname', () => {
+  // `assertValidTimeouts` walks every entry for the reason `assertValidLimits`
+  // does: a bad one is otherwise invisible until that hostname's first
+  // request, and then fails without saying which key was wrong.
+  assert.throws(
+    () => createHostFetch({ fetch: unusedFetch, timeouts: { default: 30_000, perHost: { 'bad.example': 0 } } }),
+    /"bad\.example".*\b0\b/,
+  );
+  assert.doesNotThrow(
+    () => createHostFetch({ fetch: unusedFetch, timeouts: { default: 30_000, perHost: { 'ok.example': 300_000 } } }),
+  );
 });
 
 test('a response whose body never completes times out too, and releases its hostname slot', async () => {
@@ -195,7 +261,7 @@ test('a response whose body never completes times out too, and releases its host
     if (calls === 1) return new Response(new ReadableStream({ start() {} }));
     return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 20 });
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 20 } });
 
   await assert.rejects(
     hostFetch.text('http://a.example/stalls'),
@@ -221,7 +287,7 @@ test('a caller\'s own abort signal is composed with the timeout, not replaced by
       init?.signal?.addEventListener('abort', () => { reject(new Error('aborted by the caller')); }, { once: true });
     });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeoutMs: 30_000 });
+  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 30_000 } });
 
   const controller = new AbortController();
   const pending = hostFetch.text('http://a.example/slow', { signal: controller.signal });
@@ -429,15 +495,15 @@ test('a negative limit throws at construction', () => {
   );
 });
 
-test('an invalid timeoutMs throws at construction, naming the parameter and the value', () => {
+test('an invalid timeout throws at construction, naming the key and the value', () => {
   // The same guard `assertValidLimit` gives a limit, for the same reason:
   // each of these constructs silently otherwise, and then fails every
   // request -- `0` timing out instantly, the rest with a `RangeError` about
-  // "delay" that names neither `timeoutMs` nor `createHostFetch`.
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: 0 }), /timeoutMs.*\b0\b/);
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: -1 }), /timeoutMs.*-1/);
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: 1.5 }), /timeoutMs.*1\.5/);
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeoutMs: Number.NaN }), /timeoutMs.*NaN/);
+  // "delay" that names neither the timeout nor `createHostFetch`.
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: 0 } }), /"default".*\b0\b/);
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: -1 } }), /"default".*-1/);
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: 1.5 } }), /"default".*1\.5/);
+  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: Number.NaN } }), /"default".*NaN/);
   // And the shipped default is not caught by its own guard.
   assert.doesNotThrow(() => createHostFetch({ fetch: unusedFetch }));
 });

@@ -145,7 +145,7 @@ test('a handler that resolves completes its row', async () => {
   const { id, job } = seedJob(raw, now, 'greet', 5);
 
   // The abort signal fires while the handler is still running, standing in
-  // for its real five-minute-later firing against a handler that happens to
+  // for its real six-minute-later firing against a handler that happens to
   // finish around the same time -- the actual race, not just "long after".
   const controller = new AbortController();
   const abortSignal = (_ms: number): AbortSignal => controller.signal;
@@ -375,11 +375,16 @@ test('the timeout signal is created with JOB_TIMEOUT_MS, and the grace wait is A
   // the literal, not the imported `JOB_TIMEOUT_MS` -- comparing a captured
   // value to the very constant `runJob` itself read would still pass if
   // that constant were mutated, since both sides would read the same
-  // (wrong) number. `assert.equal(JOB_TIMEOUT_MS, 300_000)` alongside pins
+  // (wrong) number. `assert.equal(JOB_TIMEOUT_MS, 360_000)` alongside pins
   // the exported constant to the same literal, so a mutation to either one
   // is still caught.
-  assert.equal(seenTimeoutMs, 300_000, 'the signal must be created with a five-minute timeout');
-  assert.equal(JOB_TIMEOUT_MS, 300_000, 'the exported constant itself must still be five minutes');
+  //
+  // Six minutes, not five: it has to stay above the largest per-hostname
+  // fetch timeout so a slow lookup fails as a timeout naming its url rather
+  // than as a job killed for running long. `main.test.ts` pins that
+  // relationship; this pins the number itself.
+  assert.equal(seenTimeoutMs, 360_000, 'the signal must be created with a six-minute timeout');
+  assert.equal(JOB_TIMEOUT_MS, 360_000, 'the exported constant itself must still be six minutes');
 
   controller.abort();
   await tick();
