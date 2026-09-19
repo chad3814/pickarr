@@ -34,9 +34,13 @@
  * Selectors are keyed the same way `library.css`'s are: a type, an ARIA
  * attribute already load-bearing for accessibility (`aria-labelledby` on
  * the screen, on each section and on each form; `aria-label` on each list),
- * or a parent/child relationship -- never a class. `grep -rn className
- * packages/web/src` still returns nothing, so there is no class to key on
- * and this file does not become the first component to add one.
+ * or a parent/child relationship -- never a class. No component sets one:
+ * `grep -rn className --include='*.ts' --include='*.tsx' packages/web/src`
+ * returns nothing, so there is no class to key on and this file does not
+ * become the first component to add one. The `--include` pair is not
+ * decoration -- an unrestricted `grep -rn className packages/web/src`
+ * matches this very sentence and reports one hit, so the command as
+ * written would contradict the claim it is offered as evidence for.
  */
 
 /*
