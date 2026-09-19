@@ -507,12 +507,25 @@ test('an operator can add a download client and see it listed', async ({ page, h
   expect(clientBorder.borderTopColor).toBe(clientBorder.lineTokenColor);
 
   // The heading-hierarchy rule `settings.css` adds for this screen, which
-  // nothing else pins. A listed client's name is an `<h2>` exactly as the
-  // section's own name is, so `base.css` alone renders it at
-  // `--text-title` (1rem, 16px) -- the same size as the heading above it.
-  // 13px is `--text-body`, which only the settings stylesheet's rule
-  // produces. Spelled literally rather than resolved from the token: this
-  // one has a single answer in both palettes, so `CLAUDE.md`'s preference
-  // for a literal applies with nothing to trade against it.
+  // nothing else pins. A listed client's name is an `<h3>` and nothing in
+  // `styles/` sets a bare `h3`, so without that block the UA's own
+  // `h3 { font-size: 1.17em }` applies against the 16px these headings
+  // inherit (`base.css` sets no `font-size` on `body`). 13px is
+  // `--text-body`, which only the settings stylesheet's rule produces.
+  // Measured under that mutant rather than reasoned: deleting the rule
+  // block reds this line with `18.72px` against `13px`, restored by
+  // checksum-verified copy.
+  //
+  // This sentence used to say the heading was an `<h2>` taking
+  // `--text-title` (16px) from `base.css`. That was true of the markup
+  // this spec was written against and stopped being true when the
+  // accessibility-tree repair made the four inner headings `<h3>`; the
+  // assertion's value did not move, because the settings rule produces
+  // 13px either way, which is exactly how a comment like this goes stale
+  // without anything failing.
+  //
+  // Spelled literally rather than resolved from the token: this one has a
+  // single answer in both palettes, so `CLAUDE.md`'s preference for a
+  // literal applies with nothing to trade against it.
   await expect(client.getByRole('heading', { name: 'Seedbox' })).toHaveCSS('font-size', '13px');
 });

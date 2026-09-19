@@ -2,7 +2,10 @@
  * The add-download-client form: `AddFeed.tsx`'s sibling, and built to the
  * same rules (design spec §6). Read that file's docblock first -- the three
  * decisions it records are inherited here rather than re-argued, and two of
- * them each cost the feeds slice a fix round.
+ * them each cost the feeds slice a fix round. The heading level this form
+ * is named by is inherited from there too: an `<h3>` under the download
+ * clients section's `<h2>`, with the error banner's heading left a peer
+ * `<h3>` for the reason that file spells out.
  *
  * **`submit` is a required prop, not defaulted to the real one.** A default
  * that performs network I/O would be invisible at the call site -- a future
@@ -335,7 +338,7 @@ export function AddDownloadClient({ submit }: AddDownloadClientProps): ReactElem
         void handleSubmit(event);
       }}
     >
-      <h2 id="add-download-client-heading">Add a download client</h2>
+      <h3 id="add-download-client-heading">Add a download client</h3>
       {error !== null && (
         <div role="alert">
           {/*

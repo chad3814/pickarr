@@ -2,6 +2,18 @@
  * The add-feed form: the host's first write surface (design spec
  * `2026-09-18-feed-settings-design.md`, whole doc).
  *
+ * **This form is named by an `<h3>`, one level under the feeds section's
+ * own `<h2>`.** It was an `<h2>`, which announced the form as a sibling of
+ * the section containing it while `settings.css`'s heading-hierarchy rule
+ * rendered it a tier smaller -- so the announced structure contradicted the
+ * visible one. The `id` is unchanged, so the `aria-labelledby` naming this
+ * `<form>` still resolves to the same element. The error banner's own
+ * heading below stays an `<h3>`, deliberately: `settings.css` gives it the
+ * same size and weight as this heading and distinguishes it by colour
+ * alone, so a peer level is what matches the rendering. Demoting it to
+ * `<h4>` would assert a fourth tier no stylesheet draws, which is this
+ * same defect pointing the other way.
+ *
  * **`submit` is a required prop, not defaulted to the real one.** A default
  * that performs network I/O would be invisible at the call site -- a future
  * test that forgets the prop would silently get a real `fetch` under
@@ -256,7 +268,7 @@ export function AddFeed({ submit }: AddFeedProps): ReactElement {
         void handleSubmit(event);
       }}
     >
-      <h2 id="add-feed-heading">Add a feed</h2>
+      <h3 id="add-feed-heading">Add a feed</h3>
       {error !== null && (
         <div role="alert">
           <h3>{error}</h3>

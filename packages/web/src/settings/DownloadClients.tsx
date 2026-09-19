@@ -8,6 +8,12 @@
  * root, which is this screen's root now that `/settings` holds two
  * sections; see that file's docblock.
  *
+ * **Each listed client's name is an `<h3>`**, one level under this
+ * section's own `<h2>`, for the reason `Feeds.tsx` records at length: the
+ * stylesheet already rendered it as the third tier and the accessibility
+ * tree still announced it as the second. Same shape as the feeds side, so
+ * the two sections stay alike here too.
+ *
  * **Every value is rendered as the replica holds it.** The host already
  * reduced `url` to origin and path (design spec §5), which drops userinfo,
  * query and fragment structurally -- so there is nothing here to parse,
@@ -60,7 +66,7 @@ export function DownloadClients({ source, submit }: DownloadClientsProps): React
           <ul aria-label="download clients">
             {clients.map((client) => (
               <li key={client.id}>
-                <h2>{client.name}</h2>
+                <h3>{client.name}</h3>
                 <p>{implementationLabel(client.implementation)}</p>
                 <p>{client.url === '' ? 'No address recorded.' : client.url}</p>
                 <p>{client.category === '' ? 'No category' : `Category: ${client.category}`}</p>

@@ -115,6 +115,54 @@ test('both sections list from the replica, each through its own hook', async () 
   });
 });
 
+/**
+ * Every heading `root` contains, in document order, as `"<level> <text>"`.
+ *
+ * Read off `tagName` rather than `getByRole('heading', { level })`: the
+ * assertion below wants the *whole* set in order, and a per-level query
+ * answers one level at a time with no way to see a heading that landed at
+ * a level nobody asked about. Returns strings, never elements -- handing a
+ * live node to `node:assert` is `CLAUDE.md`'s first testing hazard.
+ */
+function headingOutline(root: HTMLElement): readonly string[] {
+  return Array.from(root.querySelectorAll('h1, h2, h3, h4, h5, h6')).map(
+    (heading) => `${heading.tagName.slice(1)} ${heading.textContent ?? ''}`,
+  );
+}
+
+test('the /settings heading hierarchy is three tiers deep in the markup, not only in the stylesheet', async () => {
+  // `settings.css`'s heading-hierarchy rule renders three tiers; for one
+  // slice the markup announced two, because all four inner headings were
+  // still `<h2>`. Visible and announced disagreeing is worse than the
+  // uniform flatness it replaced, and nothing failed when it happened --
+  // no test in this package asserted a heading *level*, so the whole page
+  // could flatten back to `<h2>` and every `getByRole('heading', { name })`
+  // in `Feeds.test.tsx`, `DownloadClients.test.tsx` and this file would
+  // stay green. This is the assertion that reds instead.
+  //
+  // Spelled as a literal list rather than counted or derived: a count
+  // ("six level-3 headings") is satisfied by six headings at the wrong
+  // places, and anything computed from the components under test cannot
+  // observe those components changing (`CLAUDE.md`).
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD' }), clientOp({ id: 1, name: 'Seedbox' })]);
+  renderSettings(sourceFor(db));
+
+  await waitFor(() => {
+    assert.equal(screen.getAllByRole('heading', { name: 'Seedbox' }).length, 1, 'the client rendered, so the list tier is present to be checked');
+  });
+
+  assert.deepEqual(headingOutline(screen.getByTestId('settings')), [
+    '1 Settings',
+    '2 Feeds',
+    '3 Add a feed',
+    '3 Movies HD',
+    '2 Download clients',
+    '3 Add a download client',
+    '3 Seedbox',
+  ], 'one page heading, a section heading each, and everything inside a section one level further down');
+});
+
 test('a download client list that never resolves leaves the feeds list rendered', async () => {
   // The two hooks are independent, and this is the assertion that says so
   // rather than the arrangement merely implying it. The source below

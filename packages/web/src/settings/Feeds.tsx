@@ -12,6 +12,15 @@
  * page's `<h1>`. What is left here is a `<section>` named by its own `<h2>`
  * -- the same shape `DownloadClients.tsx` has, so the two read alike.
  *
+ * **Each listed feed's name is an `<h3>`, one level under this section's
+ * own `<h2>`.** It was an `<h2>` until the accessibility-tree repair, which
+ * made a feed a sibling of the section listing it; `settings.css`'s
+ * heading-hierarchy rule had already given it the third tier's *size*, so
+ * the announced structure and the rendered one disagreed. `Settings.tsx`
+ * owns the `<h1>` and the levels below it are fixed by that: `<h2>` for a
+ * section, `<h3>` for anything inside one. `Settings.test.tsx` pins the
+ * whole screen's levels so this cannot flatten again silently.
+ *
  * **The feed's `url` is rendered exactly as the replica holds it.** It
  * arrives redacted by the host, not raw (`RssFeedSyncRead`'s own doc), and
  * this screen never parses, reconstructs or otherwise "fixes" it -- doing
@@ -45,7 +54,7 @@ export function Feeds({ source, submit }: FeedsProps): ReactElement {
           <ul aria-label="feeds">
             {feeds.map((feed) => (
               <li key={feed.id}>
-                <h2>{feed.name}</h2>
+                <h3>{feed.name}</h3>
                 <p>{feed.url}</p>
               </li>
             ))}
