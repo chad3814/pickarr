@@ -4,11 +4,13 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { HOST_SYNCED_TABLES, readHostRows } from '../../src/sync/tables.ts';
 import { syncedTriggerNames } from '../../src/sync/log.ts';
+import { createSyncRegistry } from '../../src/sync/registry.ts';
 import type {
   MediaItemSyncRead,
   NzbDownloadSyncRead,
   PersonSyncRead,
   RoleSyncRead,
+  RssFeedSyncRead,
   RssItemSyncRead,
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
@@ -183,6 +185,66 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
   assert.ok(!('lastError' in nzb), 'nzb_download.last_error must never be projected');
 });
 
+/** Inserts one `rss_feed` row (id 1) with sensible defaults, so a test names only the column it is testing. */
+function seedFeed(raw: ReturnType<typeof openTestDatabase>['raw'], overrides: { url?: string }): void {
+  raw.prepare(`
+    INSERT INTO rss_feed (id, plugin_id, name, url, created_at, updated_at)
+    VALUES (1, 'tv', 'a feed', ?, 10, 20)
+  `).run(overrides.url ?? 'https://tracker.example/rss');
+}
+
+/**
+ * Reads `url` off a projected row, narrowed with `typeof`/`in` -- the way
+ * `useCounts.ts`'s `categoryOf` narrows -- rather than a cast: `readHostRows`
+ * hands back `unknown`, and this is a test asserting on its shape, not
+ * assuming it.
+ */
+function rowUrl(row: unknown): string {
+  if (typeof row !== 'object' || row === null || !('url' in row) || typeof row.url !== 'string') {
+    throw new Error('rss_feed projection has no string url');
+  }
+  return row.url;
+}
+
+test('a feed reaches a client with its apikey redacted', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedFeed(raw, { url: 'https://tracker.example/rss?apikey=SECRET' });
+  const rows = registry.readRows(raw, 'rss_feed', [1]);
+  assert.equal(rowUrl(rows[1]), 'https://tracker.example/rss?apikey=***');
+});
+
+test('a passkey-bearing url is NOT redacted today, and this pins that', () => {
+  // Deliberate, and the most important test in this task. `redactUrl` knows
+  // one parameter name. Issue #78 broadens it, and when it does this test
+  // fails -- which is the point: the gap closing must be observable rather
+  // than silent. Do not "fix" this by changing the expectation; change it
+  // when #78 changes the behaviour, and say so there.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedFeed(raw, { url: 'https://tracker.example/rss?passkey=SECRET' });
+  const rows = registry.readRows(raw, 'rss_feed', [1]);
+  assert.equal(
+    rowUrl(rows[1]),
+    'https://tracker.example/rss?passkey=SECRET',
+    'redactUrl does not know `passkey`; issue #78 tracks it',
+  );
+});
+
+test('the projection carries no column the client has no business holding', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedFeed(raw, {});
+  const row = registry.readRows(raw, 'rss_feed', [1])[1];
+  assert.deepEqual(
+    Object.keys(row as Record<string, unknown>).toSorted(),
+    ['createdAt', 'downloadClientId', 'downloadType', 'id', 'name', 'pluginId', 'pollIntervalS', 'updatedAt', 'url'],
+  );
+});
+
 /**
  * One row in every host synced table, with every nullable column filled, so a
  * projection's key set can be read off a real row rather than declared.
@@ -191,10 +253,13 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
  * column too, so `Object.keys` would be the same either way -- but the
  * read-shape comparison below is about names, and a fixture whose nulls were
  * accidental would make a *type* mismatch on a nullable field invisible if
- * that comparison is ever widened past names. The FK parents (`download_client`,
- * `rss_feed`) are seeded because `rss_item.feed_id` and the two downloads'
- * `download_client_id` are `NOT NULL` references; neither parent table is
- * synced, which is the point `feedId`/`downloadClientId` carry in the contract.
+ * that comparison is ever widened past names. `download_client` is seeded as
+ * an FK parent because the two downloads' `download_client_id` is a
+ * `NOT NULL` reference to it and it is not itself synced, which is the point
+ * `downloadClientId` carries in the contract. `rss_feed` is seeded for the
+ * same FK reason -- `rss_item.feed_id` -- but is no longer an unsynced
+ * parent itself: it is one of `HOST_SYNCED_TABLES` below and gets its own
+ * row read back like every other table in the loop.
  */
 function seedOneRowPerSyncedTable(raw: ReturnType<typeof openTestDatabase>['raw']): void {
   raw.prepare(`
@@ -348,16 +413,21 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
     id: true, mediaItemId: true, personId: true, role: true, name: true,
     billingOrder: true, createdAt: true,
   } satisfies Record<keyof RoleSyncRead, true>,
+  rss_feed: {
+    id: true, pluginId: true, name: true, downloadType: true, pollIntervalS: true,
+    downloadClientId: true, createdAt: true, updatedAt: true, url: true,
+  } satisfies Record<keyof RssFeedSyncRead, true>,
 };
 
 test('every host synced table has a read shape in the contract', () => {
-  // The set, before the fields: a seventh synced table added with no shape
+  // The set, before the fields: an eighth synced table added with no shape
   // would leave a client back on `unknown` for it, which is the state this
-  // whole comparison exists to end.
+  // whole comparison exists to end -- `rss_feed` was the seventh, and this
+  // guard is what it had to pass.
   assert.deepEqual(
     Object.keys(HOST_READ_SHAPE_FIELDS).toSorted(),
     [...HOST_SYNCED_TABLES].toSorted(),
-    'HOST_SYNCED_TABLES and the contract`s host read shapes must name the same six tables',
+    'HOST_SYNCED_TABLES and the contract`s host read shapes must name the same tables',
   );
 });
 

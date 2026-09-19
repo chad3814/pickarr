@@ -110,8 +110,13 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       //
       // **This index is self-filtering, and that is load-bearing rather than
       // incidental.** IndexedDB omits any record missing a component of the
-      // key path, so only rows projecting `pluginId` enter it: today exactly
-      // `media_item`, since `rss_item` carries `feedId` and no `pluginId`.
+      // key path, so only rows projecting `pluginId` enter it: `media_item`
+      // and, since it joined the synced set, `rss_feed` -- `rss_item`
+      // carries `feedId` and no `pluginId`, so it stays out on its own.
+      // `store/rows.ts`'s `TABLES_WITH_PLUGIN_ID` is a separate, narrower
+      // gate on top of this -- what the two per-category readers will
+      // *query* for, not what this index holds -- and does not admit
+      // `rss_feed` yet even though the index already does.
       // A tombstone nests its row under `value` and so has no
       // `value.pluginId` either, which is why a deleted row leaves the
       // counts without anything having to remember to remove it -- the same

@@ -13,11 +13,15 @@
  * **No artwork rows.** Artwork is not replicated (design spec §1.2, #79); the
  * three urls below are the whole of what this gatherer can say about it.
  *
- * **`feedId` and `downloadClientId` are carried through untouched.** Neither
- * resolves to a name from the replica alone -- `rss_feed` and
- * `download_client` are not synced, the latter deliberately (design spec
- * §2.4) -- so surfacing the bare id is this gatherer's entire obligation
- * toward either.
+ * **`feedId` and `downloadClientId` are carried through untouched, and this
+ * gatherer's obligation toward each is no longer the same.** `download_client`
+ * is not synced, deliberately (design spec §2.4), so `downloadClientId` can
+ * never resolve to a name from the replica and surfacing the bare id is the
+ * whole of what this gatherer owes it. `rss_feed` *is* synced now
+ * (`sync/tables.ts`), so `feedId` does resolve -- through `rss_feed`, a
+ * table this six-table gatherer does not name and, by the paragraph above,
+ * never will. Resolving it is therefore a caller's join against
+ * `store/rows.ts` directly, not this module's job.
  */
 import type {
   MediaItemSyncRead,
