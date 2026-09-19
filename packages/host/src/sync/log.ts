@@ -30,11 +30,12 @@ import { readHostState, writeHostState } from '../db/host-state.ts';
  * `installSyncTriggers(raw, HOST_SYNCED_TABLES)` on
  * every boot immediately after `migrateHost`, and `host.ts`'s `register`
  * call it on every boot for each plugin's declared tables. Both really do
- * run per boot; the other two call sites do not. `db/migrate.ts`'s
- * `migration15` and `migration16` each install one slice of the host's own
- * tables' triggers -- the original six and `rss_feed` respectively -- once
- * each, and `migrateHostWith` skips a migration once its version is
- * recorded, so on an existing database neither runs again.
+ * run per boot; the other three call sites do not. `db/migrate.ts`'s
+ * `migration15`, `migration16` and `migration17` each install one slice of
+ * the host's own tables' triggers -- the original six, `rss_feed` and
+ * `download_client` respectively -- once each, and `migrateHostWith` skips a
+ * migration once its version is recorded, so on an existing database none of
+ * them runs again.
  *
  * **"For the same table name" is the whole of the qualification, and
  * `ALTER TABLE ... RENAME TO` is what walks through it.** The rename rewrites
@@ -86,13 +87,13 @@ import { readHostState, writeHostState } from '../db/host-state.ts';
  * arbitrary string -- safety here comes from the caller, not from anything
  * below this line.
  *
- * `installSyncTriggers` has four real callers, and only one of them
+ * `installSyncTriggers` has five real callers, and only one of them
  * reaches this function with a name that needs validating. `main.ts`'s boot
  * call passes the hardcoded `HOST_SYNCED_TABLES` literal, and `migrate.ts`'s
- * `migration15` and `migration16` each pass their own hardcoded literal in
- * turn -- `MIGRATION_15_TABLES` and `['rss_feed']` -- so none of these three
- * needs runtime validation: each is a fixed list the host's own schema
- * defines. `host.ts`'s `register` passes a plugin's own declared table
+ * `migration15`, `migration16` and `migration17` each pass their own
+ * hardcoded literal in turn -- `MIGRATION_15_TABLES`, `['rss_feed']` and
+ * `['download_client']` -- so none of these four needs runtime validation:
+ * each is a fixed list the host's own schema defines. `host.ts`'s `register` passes a plugin's own declared table
  * names, and *does* reach this function with a name nothing here has
  * validated: `register` calls
  * `sync/registry.ts`'s `assertSyncable` -- name shape
@@ -177,8 +178,9 @@ export function installSyncTriggers(raw: DatabaseSync, tables: readonly string[]
  * `table` reaches the `FROM` clause as text, for the reason `syncTriggerSql`
  * above gives: a table's rows cannot be enumerated without naming it, and
  * SQLite binds no identifiers. Safety comes from the caller: `db/migrate.ts`'s
- * `migration15` and `migration16` each pass their own hardcoded literal
- * (`MIGRATION_15_TABLES`, `['rss_feed']`), and `seedSyncLogOnce` below passes
+ * `migration15`, `migration16` and `migration17` each pass their own
+ * hardcoded literal (`MIGRATION_15_TABLES`, `['rss_feed']`,
+ * `['download_client']`), and `seedSyncLogOnce` below passes
  * a plugin's declared table names -- a name `assertSyncable`
  * (`sync/registry.ts`), run by `host.ts`'s `register`, has already checked
  * before `seedSyncLogOnce` is ever called with it. `table_name` *is* bound,
@@ -260,7 +262,8 @@ function seededKey(table: string): string {
  * row; the key is what keeps a library-sized anti-join out of every restart.
  * None of the host's own tables need this guard, because each is seeded
  * inside a migration the runner skips once its version is recorded --
- * `migration15` for the original six, `migration16` for `rss_feed`; a
+ * `migration15` for the original six, `migration16` for `rss_feed`,
+ * `migration17` for `download_client`; a
  * plugin's declared table list has no version space of its own, which is
  * what this key stands in for.
  *

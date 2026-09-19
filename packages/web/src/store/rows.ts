@@ -78,9 +78,19 @@ export interface ListByTableOptions {
  * `person` does too, and so does `rss_feed`. `role` projects only
  * `createdAt`, and none of the six plugin read shapes (`tv_release`,
  * `tv_season`, `tv_series`, `movie_detail`, `xxx_scene`, `xxx_site`) carries
- * either. Asking `listByTable` for one of those seven is a programming
+ * either. Asking `listByTable` for one of those eight is a programming
  * error and throws (see below) rather than returning an empty page, which
  * would read as "this table is empty" -- a lie a caller has no way to catch.
+ *
+ * **`download_client` is the eighth, and it is excluded by omission rather
+ * than by shape -- which is a different thing from the seven above and is
+ * why it is named here.** It joined `HOST_SYNCED_TABLES` in the download
+ * clients slice and `DownloadClientSyncRead` does carry `updatedAt`, so its
+ * rows are already in `by_table_updated`; this set is simply the last thing
+ * standing between them and a caller. The screen that lists download
+ * clients is what makes that an error to fix rather than a table nobody
+ * asks for: admitting it is adding one line below, the same one-line change
+ * `rss_feed` needed when `settings/useFeeds.ts` landed.
  */
 const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'media_item',
@@ -224,7 +234,7 @@ function drain(cursorRequest: IDBRequest<IDBCursorWithValue | null>, limit: numb
 
 /**
  * `table` in modification order, walking `by_table_updated`. Throws for any
- * of the seven tables {@link TABLES_WITH_UPDATED_AT} excludes -- see that
+ * of the eight tables {@link TABLES_WITH_UPDATED_AT} excludes -- see that
  * constant's doc for the measurement and the reasoning against returning an
  * empty page instead.
  */
