@@ -1,5 +1,4 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { Transport } from '@pickarr/contract';
 
 /** A feed's poll interval must be at least this many seconds. */
 export const MIN_POLL_INTERVAL_S = 60;
@@ -12,12 +11,23 @@ export const MIN_POLL_INTERVAL_S = 60;
  */
 export const MAX_POLL_INTERVAL_S = 86_400;
 
-/** What `Host.addFeed` needs to create a feed. */
+/**
+ * What `Host.addFeed` needs to create a feed.
+ *
+ * `downloadType` is `string`, not `@pickarr/contract`'s `Transport`
+ * (`'torrent' | 'nzb'`), on purpose: this value arrives unchecked -- the
+ * route in front of this (a later task) hands it straight out of a JSON
+ * request body -- and this function is the validator that narrows it, not a
+ * caller that has already done so. Typing it `Transport` would tell the
+ * compiler a check `addFeed` itself performs at runtime (see
+ * `TRANSPORTS.has` below) is already guaranteed, which is false the moment
+ * a caller is anything other than trusted code.
+ */
 export interface AddFeedInput {
   pluginId: string;
   name: string;
   url: string;
-  downloadType: Transport;
+  downloadType: string;
   pollIntervalS: number;
 }
 
@@ -29,8 +39,8 @@ export interface AddFeedRefusal {
   refusal: 'unknown-plugin' | 'duplicate-url' | 'bad-download-type' | 'bad-poll-interval';
 }
 
-/** `Transport`'s whole vocabulary, checked at runtime: a caller's `downloadType` arrives as unchecked input, not a value this module already knows is one of the two literals. */
-const TRANSPORTS: ReadonlySet<string> = new Set<Transport>(['torrent', 'nzb']);
+/** `@pickarr/contract`'s `Transport` union (`'torrent' | 'nzb'`), spelled here as plain strings and checked at runtime -- `downloadType` is typed `string` above precisely because nothing has confirmed it is one of these two yet. */
+const TRANSPORTS: ReadonlySet<string> = new Set(['torrent', 'nzb']);
 
 /**
  * SQLite's own code for a UNIQUE constraint failure -- verified against
@@ -50,12 +60,16 @@ const SQLITE_CONSTRAINT_UNIQUE = 2067;
  * logic error surfaces with the same `code` but a different `errcode`, and
  * treating that as a lost race would misreport a real bug as a duplicate
  * url.
+ *
+ * `'code' in err` / `'errcode' in err`, not a cast: narrowing `unknown` this
+ * way tells the compiler no more than the check itself proves, the same
+ * pattern `useCounts.ts`'s own `isStoreClosed` uses to check a `DOMException`
+ * `name` without asserting a shape first.
  */
 function isUniqueConstraintViolation(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const code = (err as { code?: unknown }).code;
-  const errcode = (err as { errcode?: unknown }).errcode;
-  return code === 'ERR_SQLITE_ERROR' && errcode === SQLITE_CONSTRAINT_UNIQUE;
+  return typeof err === 'object' && err !== null
+    && 'code' in err && err.code === 'ERR_SQLITE_ERROR'
+    && 'errcode' in err && err.errcode === SQLITE_CONSTRAINT_UNIQUE;
 }
 
 /**
