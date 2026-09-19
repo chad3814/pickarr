@@ -10,6 +10,8 @@ import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
+import { addFeed as addFeedRule } from './feeds/add.ts';
+import type { AddFeedInput, AddFeedRefusal } from './feeds/add.ts';
 import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
 import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -23,6 +25,8 @@ import { ownerPluginId } from './db/owner.ts';
 export { HOST_PLUGIN_ID };
 export { PluginNotRegisteredError };
 export { ownerPluginId };
+export type { AddFeedInput, AddFeedRefusal };
+export { MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S } from './feeds/add.ts';
 
 /**
  * Real `Timers`, wiring `Host.start()`'s dispatcher to Node's own timer
@@ -91,6 +95,20 @@ export interface Host {
   /** Dispatches to the plugin owning the feed those items came from. */
   notifyNewRssItems(ids: readonly number[]): Promise<NotifyOutcome>;
   requestDownload(rssItemId: number): Promise<void>;
+  /**
+   * Validates and writes a new `rss_feed` row, then schedules its first poll
+   * immediately -- the same call `main.ts` already makes at boot for every
+   * feed on file, so a freshly added feed reaches the same state a restart
+   * would have left it in, and items arriving is the first real confirmation
+   * the url was right. The invariants themselves live in `feeds/add.ts`,
+   * this method's own delegate, not here: `host.ts` is already long, and
+   * that rule set is self-contained.
+   *
+   * Returns a refusal *value* on failure, never throws: a thrown error is
+   * indistinguishable from a bug at the call site, and the route in front of
+   * this (a later task) needs to map each refusal to its own status code.
+   */
+  addFeed(input: AddFeedInput): Promise<{ id: number } | AddFeedRefusal>;
   /**
    * Delivers `file` to the plugin `pluginId` names, calling its
    * `onDownloadedFile`. The shape `deliverCompleted`
@@ -490,7 +508,16 @@ export function createHost(deps: {
     return id;
   }
 
-  return {
+  // A named `const`, not a bare `return { ... }`, for exactly one reason:
+  // `addFeed` below needs to call this same object's own `schedulePoll` --
+  // the identical call `main.ts` makes at boot for a feed already on file --
+  // and a method can only reach the object it is a property of by naming a
+  // variable bound to it. Every method here still closes over `deps` and the
+  // functions above the same way it would inside a bare object literal;
+  // `host` is referenced nowhere until after this literal has finished
+  // evaluating, since nothing calls a `Host` method during its own
+  // construction.
+  const host: Host = {
     register(plugin) {
       // Otherwise a plugin silently captures the host's own handlers: both
       // would sit under the same `plugin_id` in `handlers`, and whichever
@@ -570,6 +597,21 @@ export function createHost(deps: {
 
     deliverToPlugin,
 
+    async addFeed(input) {
+      const result = addFeedRule(
+        { raw: deps.raw, now: deps.now, isRegistered: (pluginId) => plugins.has(pluginId) },
+        input,
+      );
+      if ('refusal' in result) return result;
+      // Through the public method, not `enqueuePollUnlessPending` directly:
+      // this is the exact call `main.ts` makes at boot for every feed
+      // already on file, so a freshly added feed is polled the same way a
+      // restart would have polled it, rather than by a second, parallel path
+      // that could drift from that one.
+      host.schedulePoll(result.id);
+      return result;
+    },
+
     start() {
       started = true;
       return dispatcher.start(
@@ -587,4 +629,6 @@ export function createHost(deps: {
       return dispatcher.idle();
     },
   };
+
+  return host;
 }

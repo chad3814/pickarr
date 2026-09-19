@@ -58,11 +58,14 @@ import type { SyncRegistry } from './registry.ts';
  *    `rss_item` before the `media_item` it is later relinked to, so the
  *    release is emitted first and its `media_item_id` points forward. The row
  *    arrives elsewhere in the same walk. A client already has to tolerate a
- *    reference it cannot resolve at all: `rss_item.feed_id` and
- *    `torrent_download`/`nzb_download`'s `download_client_id` name tables
- *    that are never synced (`sync/tables.ts`), by design and permanently.
- *    What is lost is the *ordering* guarantee inside the synced set, not
- *    eventual resolution of anything.
+ *    reference it cannot resolve at all:
+ *    `torrent_download`/`nzb_download`'s `download_client_id` names a table
+ *    that is never synced (`sync/tables.ts`), by design and permanently.
+ *    `rss_item.feed_id` used to be named alongside it here; it no longer is,
+ *    because `rss_feed` joined the synced set and a `feedId` now resolves,
+ *    eventually, the same way a forward `media_item_id` reference does. What
+ *    is lost is the *ordering* guarantee inside the synced set, not eventual
+ *    resolution of anything.
  * 2. **A page is `limit` rows, not `limit` hydrated groups.** Strictly better
  *    for bounding a response -- the old walk emitted every dependent row of
  *    each of `limit` media items, so a response weighed whatever those groups

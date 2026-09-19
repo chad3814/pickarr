@@ -1,7 +1,7 @@
 /**
- * The read API on a socket: `node:http`, ten routes -- eight behind a
- * session and two open (`/api/health` and the static bundle) -- bound by
- * default to every interface.
+ * The read-and-write API on a socket: `node:http`, eleven routes -- nine
+ * behind a session and two open (`/api/health` and the static bundle) --
+ * bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
  * routes behind a session", which the paragraph on the guard below -- and
@@ -9,10 +9,11 @@
  * A one-line summary disagreeing with its own file is the whole class of
  * defect the comments here are written against. (The count grew to eight
  * when the client-sync slice added `/api/sync` and `/api/sync/backfill`, to
- * nine when it added `/api/sync/bootstrap`, and to ten when the shell slice
- * added the static route -- guarded like the other eight except `/api/health`
- * and that one; the shape of the sentence is what matters and has not
- * changed.)
+ * nine when it added `/api/sync/bootstrap`, to ten when the shell slice
+ * added the static route -- guarded like the other eight except
+ * `/api/health` and that one -- and to eleven when this slice added
+ * `POST /api/feeds`, the first route this file answers a write on; the
+ * shape of the sentence is what matters and has not changed.)
  *
  * Everything this file does is routing. Parse a request, call one function
  * from `./reads.ts`, `./artwork-route.ts` or `./static-route.ts`, write what
@@ -37,6 +38,17 @@
  * response at all. The one caller-supplied value any body repeats is a media
  * type, which the brief requires an unknown type to name -- and `MEDIA_TYPE`
  * below is what keeps that from becoming a way to get a path echoed back.
+ *
+ * **One sanctioned exception, and only one: `/api/sync`'s and
+ * `/api/sync/backfill`'s bodies carry an `rss_feed` op whose `value.url` is a
+ * url.** It is not this sentence's rule quietly slipping -- `sync/tables.ts`'s
+ * top docblock is where that rule was deliberately amended, and the value
+ * here is `redactUrl`'s output, not the raw column, composed by
+ * `sync-route.ts` and `readHostRows` rather than by anything in this file.
+ * The redaction is narrower than a raw url deserves -- it catches `?apikey=`
+ * and nothing else, so a `?passkey=` or path-segment passkey reaches this
+ * body unchanged today (issue #78) -- which is why this is recorded as an
+ * exception rather than folded silently into the sentence above.
  *
  * **The auth dispatch's bodies are not this file's, and two of them do carry
  * urls.** That sentence was once unqualified, and `handle` now forwards
@@ -108,6 +120,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
+import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
 import { readArtwork } from './artwork-route.ts';
@@ -123,6 +136,58 @@ import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
  * machine without either having to be told a port.
  */
 export const DEFAULT_PORT = 8787;
+
+/** Enough for a feed; small enough that an unbounded client cannot make the host buy memory. */
+export const MAX_BODY_BYTES = 16 * 1024;
+
+/**
+ * How long one request has to arrive in full -- request line, headers and
+ * body -- before node answers `408` and drops the socket.
+ *
+ * **`MAX_BODY_BYTES` bounds how much a client may send; this bounds how long
+ * it may take.** Without both, a client that announces `Content-Length: 1000`,
+ * sends one byte and stops holds a socket with no response and no refusal:
+ * measured on the commit before this one at 15s and still waiting, since the
+ * only bound in play was node's own 300s `requestTimeout` default. Nothing in
+ * this module timed the read out on its own.
+ *
+ * **Five seconds, and which bound that is.** `requestTimeout` is the one that
+ * applies, because it covers headers *and* body and it is the body that was
+ * unbounded here; node's `headersTimeout` alone would not have caught this
+ * request, whose headers were complete. The value is sized against
+ * `MAX_BODY_BYTES`: 16 KiB in 5s is 3.2 KiB/s, slower than any link a client
+ * of this host is reachable over, so no honest request can hit it. It is per
+ * request and cleared once the request is fully received, so it bounds
+ * neither a slow *response* nor an idle keep-alive connection -- the latter
+ * is `keepAliveTimeout`'s (node's 5s default), left alone.
+ *
+ * `headersTimeout` is left at node's default, which node itself clamps to
+ * `requestTimeout` when that is the smaller of the two -- asserted in
+ * `server.test.ts` rather than trusted, since a clamp that stopped happening
+ * would leave headers bounded at 60s with nothing saying so.
+ */
+export const REQUEST_TIMEOUT_MS = 5_000;
+
+/**
+ * How often node sweeps open connections looking for one that has blown
+ * `REQUEST_TIMEOUT_MS`.
+ *
+ * **Setting `requestTimeout` alone does not bound anything to
+ * `requestTimeout`.** Node does not arm a timer per request; it walks the
+ * connection list on an interval and answers `408` to whatever it finds
+ * expired, so the real bound is the timeout rounded up to the next sweep.
+ * With node's 30s default that is what the same slow-body request measured:
+ * `requestTimeout` at 5s, `408` arriving at **29,904ms**. Dropping the sweep
+ * to one second is what makes the five seconds mean five: the same request
+ * measured **5,912ms**. So the bound to quote an operator is
+ * `REQUEST_TIMEOUT_MS + CONNECTIONS_CHECK_MS` in the worst case, not
+ * `REQUEST_TIMEOUT_MS` alone.
+ *
+ * One second, not less: the sweep is a walk of the open connections on a
+ * timer, so its cost scales with how often it runs, and a tenth of a second
+ * would buy nothing a client could notice against a five-second bound.
+ */
+export const CONNECTIONS_CHECK_MS = 1_000;
 
 /**
  * The read API's own contract version, as `/api/health` reports it -- not the
@@ -204,6 +269,17 @@ export interface ReadServerDeps {
    * the module doc.
    */
   pluginIdForType: (type: string) => string | undefined;
+  /**
+   * Validates and writes a new `rss_feed` row -- `Host.addFeed`, handed in
+   * as the one operation this route needs rather than the whole `Host`.
+   * `ReadServerDeps.host` above already means the bind interface string, so
+   * the object cannot also mean the `Host` instance; a function is also all
+   * `POST /api/feeds` (`ROUTES` below) ever calls. Resolves a refusal
+   * *value* on failure, never throws -- see that method's own doc for why --
+   * so the route maps each refusal to its own status rather than treating
+   * one as a bug.
+   */
+  addFeed: (input: AddFeedInput) => Promise<{ id: number } | AddFeedRefusal>;
   /**
    * Host tables plus every plugin's declared tables, as one lookup --
    * `sync/registry.ts`'s `createSyncRegistry(raw, plugins)`. What `/api/sync`
@@ -549,6 +625,14 @@ interface RouteRequest {
   pathname: string;
   /** The query string, which is where every route but artwork takes its arguments. */
   params: URLSearchParams;
+  /**
+   * The request body, already read, capped and json-parsed by `handle` --
+   * `undefined` for a `GET`, which never has one read. `unknown` because
+   * nothing here has checked its shape yet: that is each route's own job,
+   * the same way `addFeed` (`../feeds/add.ts`) is the validator for the
+   * fields inside it rather than a caller that has already done so.
+   */
+  body: unknown;
 }
 
 /**
@@ -571,11 +655,66 @@ interface Route {
    */
   readonly path: string;
   /**
+   * The HTTP methods this route answers. **Required, not defaulted**: a
+   * route added without thinking about its methods is exactly the route
+   * that should not silently accept a write. Until this slice the guard was
+   * one line rejecting every non-GET before dispatch, which is what kept
+   * `/api` read-only; making each route declare its own is what lets one
+   * route accept a POST without opening the rest.
+   */
+  readonly methods: readonly string[];
+  /**
    * Whether a caller with no session may reach it. `true` on exactly two
    * routes, and the tests assert that count rather than trusting it.
    */
   readonly open: boolean;
   readonly answer: (route: RouteRequest) => Answer | Promise<Answer>;
+}
+
+/**
+ * Whether `value` has the shape `POST /api/feeds` needs: every field
+ * present, and a primitive of the right type. Nothing here checks a field's
+ * *value* -- a registered plugin, a real transport, a poll interval in range
+ * -- because that is `addFeed`'s job (`../feeds/add.ts`'s module doc), and
+ * checking it twice is how the two checks drift apart.
+ *
+ * `'pluginId' in value` rather than a cast to `Record<string, unknown>`:
+ * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly as
+ * far as each check proves, the same pattern `feeds/add.ts`'s own
+ * `isUniqueConstraintViolation` uses.
+ */
+function isFeedBody(value: unknown): value is AddFeedInput {
+  return typeof value === 'object' && value !== null
+    && 'pluginId' in value && typeof value.pluginId === 'string'
+    && 'name' in value && typeof value.name === 'string'
+    && 'url' in value && typeof value.url === 'string'
+    && 'downloadType' in value && typeof value.downloadType === 'string'
+    && 'pollIntervalS' in value && typeof value.pollIntervalS === 'number';
+}
+
+/**
+ * The status `POST /api/feeds` answers for each way `addFeed` can refuse.
+ *
+ * A conflict is the one refusal that already has a row to point at --
+ * `duplicate-url` names a url already on file, so `409` is the one that
+ * fits. The other three are all "this otherwise well-formed field's value is
+ * not one this host will accept" -- an unregistered plugin, a transport
+ * that is not `torrent` or `nzb`, a poll interval outside the allowed range
+ * -- so all three answer `422`: the request parsed fine and named a field
+ * that exists, but the value it carries cannot be acted on. Whatever the
+ * status, the body always carries `refusal` itself (never a message a human
+ * would read), which is what a client actually branches on -- see this
+ * module's doc on why no body may carry prose in place of a stable code.
+ */
+function statusForFeedRefusal(refusal: AddFeedRefusal['refusal']): number {
+  switch (refusal) {
+    case 'duplicate-url':
+      return 409;
+    case 'unknown-plugin':
+    case 'bad-download-type':
+    case 'bad-poll-interval':
+      return 422;
+  }
 }
 
 /**
@@ -590,7 +729,21 @@ interface Route {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The ten routes.
+ * The eleven routes -- nine guarded, two `open: true`, the same split this
+ * module's own doc states.
+ *
+ * **It said "ten" until the final review counted them.** `POST /api/feeds`
+ * made eleven, and the slice that added it updated the module doc twenty
+ * lines above -- the one whose whole opening paragraph exists because its
+ * predecessor said "six routes" and was wrong -- while missing this line.
+ * That is not an argument for deleting the number: a reader wants to know
+ * whether the table below is the whole set. It is an argument for checking
+ * it, because no test pins the total and none can usefully. The one count
+ * assertion in `api/server.test.ts` is
+ * `assert.equal(guarded.length, ROUTES.length - 2)`, which derives its
+ * expectation from the code under test and so pins the *open* count
+ * without being able to see the total move. `grep -c "^    path: "` on this
+ * file is what actually answers it.
  *
  * Exported because the tests derive their request set from it; nothing else
  * reads it, and nothing may mutate it.
@@ -604,11 +757,13 @@ export const ROUTES: readonly Route[] = [
     // and it is an install fingerprint, so serving it without a session would
     // let a scanner tell two hosts apart and notice a rebuild. See
     // `sync-route.ts`'s `GenerationDeps`.
+    methods: ['GET'],
     open: true,
     answer: () => json(200, { ok: true, version: API_VERSION }),
   },
   {
     path: '/api/media',
+    methods: ['GET'],
     open: false,
     answer: ({ deps, params }) => {
       const resolved = pluginFor(params, deps.pluginIdForType);
@@ -618,6 +773,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/rss-items',
+    methods: ['GET'],
     open: false,
     // Not type-scoped, deliberately: a feed's `plugin_id` says who polls it,
     // not who may read what it found. See `rssItemsSince`.
@@ -625,6 +781,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/downloads',
+    methods: ['GET'],
     open: false,
     // The union pair, not the plain one: `id` is a per-table rowid, so a
     // two-part cursor cannot say which table's row was already served. See
@@ -637,6 +794,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/deletions',
+    methods: ['GET'],
     open: false,
     answer: ({ deps, params }) => {
       // Type-scoped, unlike the spec's own route sketch, and it has to be: a
@@ -655,6 +813,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/artwork/:kind/:mediaItemId',
+    methods: ['GET'],
     open: false,
     // No `type`, and no ownership check on the media item id: an accepted
     // consequence rather than an omission, and slice E's §5 records it.
@@ -676,6 +835,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/sync',
+    methods: ['GET'],
     open: false,
     // A replica of the whole library is exactly what the session guard
     // exists to protect (design spec §5) -- this route and the next are as
@@ -690,6 +850,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/sync/bootstrap',
+    methods: ['GET'],
     open: false,
     // Where an empty client starts both cursors. Guarded like the two it
     // feeds: the answer is two log positions and the sync generation, but a
@@ -702,6 +863,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/sync/backfill',
+    methods: ['GET'],
     open: false,
     // Two segments under `/api/sync`, one literal and one -- see
     // `matchesPath` -- which is what keeps this from shadowing or being
@@ -716,6 +878,32 @@ export const ROUTES: readonly Route[] = [
         params,
       );
       return json(answer.status, answer.body);
+    },
+  },
+  {
+    path: '/api/feeds',
+    methods: ['POST'],
+    open: false,
+    // Writes a new `rss_feed` row through `deps.addFeed` -- the first write
+    // this API has ever answered, and guarded like every read: a caller with
+    // no session has no more business creating a feed than reading one.
+    //
+    // Only the body's *shape* is checked here (the fields exist and have the
+    // right primitive types, via `isFeedBody`); the invariants on their
+    // values -- a registered plugin, a real transport, a poll interval in
+    // range -- live in `feeds/add.ts`'s `addFeed`, per the module doc's rule
+    // that no SQL and no business rule belongs in this file. Duplicating
+    // them here is how the two copies drift.
+    answer: async ({ deps, body }) => {
+      // `{ refusal }` and no prose, for the reason `MALFORMED_BODY`'s doc
+      // gives: these two are the only answers here that share a status, so
+      // an english string was the whole of what told them apart.
+      if (!isFeedBody(body)) return json(400, { refusal: 'invalid-shape' });
+      const result = await deps.addFeed(body);
+      if ('refusal' in result) {
+        return json(statusForFeedRefusal(result.refusal), { refusal: result.refusal });
+      }
+      return json(201, { id: result.id });
     },
   },
   {
@@ -734,6 +922,7 @@ export const ROUTES: readonly Route[] = [
     // this route existed. `staticAnswer` refuses `/api` again on its own,
     // defensively, in case it is ever called from somewhere that skipped
     // that exclusion.
+    methods: ['GET'],
     open: true,
     answer: ({ deps, request, pathname }) => staticRouteAnswer(
       deps.webRoot,
@@ -796,14 +985,40 @@ function routeFor(pathname: string): Route | undefined {
  * closes is the next mount, which now inherits the guard by construction
  * rather than by whoever adds it remembering to.
  *
- * Read-only, so anything but a GET is refused by its method rather than
- * routed as though it were one -- a router that looked only at the path
- * would answer a POST with a page of data, which is not a thing this API
- * should ever appear to accept. That check stays ahead of the guard, and
- * costs nothing: every non-GET path answers the same 405 whether or not the
- * caller has a session, so the ordering tells an anonymous caller nothing it
- * could not have worked out from "the API is read-only". Better Auth's own
- * POSTs never reach here -- `handle` dispatched them already.
+ * **Each route declares its own `methods` now, not one line rejecting every
+ * non-`GET` before dispatch.** That one line is what kept this API read-only
+ * from slice E until this one; a route answering a method it does not
+ * declare is refused by that route's own table entry instead, which is what
+ * lets `POST /api/feeds` accept a write without loosening the check for
+ * anything else. A router that looked only at the path would answer a POST
+ * with a page of data, which is not a thing any route here should ever
+ * appear to accept.
+ *
+ * **The order matters, and it is session-first.** For anything but an open
+ * route the session check runs *before* the method check, so a caller with
+ * no session gets `401` and learns nothing else -- whatever method they
+ * sent, and whether or not the path they sent it to names a route.
+ *
+ * That ordering was the other way round for one commit, and it leaked.
+ * Measured on that commit: anonymous `POST /api/media?type=movie` answered
+ * `405` while anonymous `POST /api/no-such-path` answered `401`, so a POST
+ * was a path-existence oracle -- ask twice and the pair of statuses names
+ * which `/api` paths exist. GETs were uniform `401` and hid it, which is
+ * why the leak needs a *cross-path* comparison to see, not a
+ * with-session/without-session one. The blanket non-`GET` refusal this
+ * slice replaced had answered both POSTs `405`, so it was a regression and
+ * not a property the API always had.
+ *
+ * Nothing the old order bought is lost. Measured on the order below: a
+ * signed-in caller still gets `405` for a method a route does not declare
+ * (`POST /api/media`, `GET /api/feeds`) and still gets `404`, not `405`,
+ * for a path no route claims -- the method check is skipped for
+ * `route === undefined`, so an unknown path is never told it failed a check
+ * only a real route could fail, and `answerFor` turns it into the 404. The
+ * two open routes still answer `405` to an anonymous wrong-method request,
+ * since `open` skips the session check: that tells a caller nothing, as
+ * both are open by definition and the path alone already says so. Better
+ * Auth's own POSTs never reach here -- `handle` dispatched them already.
  *
  * **The guard tests the value the session check resolves to.** Not its
  * status: an unauthenticated check answers `200` with a body of `null` (the
@@ -818,25 +1033,36 @@ function routeFor(pathname: string): Route | undefined {
  * question they have no standing to ask.
  */
 async function refusalFor(serving: Serving, target: URL | null, request: IncomingMessage): Promise<Answer | null> {
-  if (request.method !== 'GET') return json(405, { error: 'method not allowed' });
-  if (target !== null && routeFor(target.pathname)?.open === true) return null;
-  const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
-  return session === null ? UNAUTHORIZED : null;
+  const route = target === null ? undefined : routeFor(target.pathname);
+  if (route?.open !== true) {
+    const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+    if (session === null) return UNAUTHORIZED;
+  }
+  if (route !== undefined && !route.methods.includes(request.method ?? '')) {
+    return json(405, { error: 'method not allowed' });
+  }
+  return null;
 }
 
 /**
  * One request, routed. **Guarded already** -- `handle` has the refusal above
  * ahead of this call, so nothing here asks about a session and nothing added
- * here can forget to.
+ * here can forget to. `body` is `handle`'s: already read, capped and parsed
+ * for anything but a `GET`, `undefined` for one.
  */
-function answerFor(serving: Serving, target: URL | null, request: IncomingMessage): Answer | Promise<Answer> {
+function answerFor(
+  serving: Serving,
+  target: URL | null,
+  request: IncomingMessage,
+  body: unknown,
+): Answer | Promise<Answer> {
   if (target === null) return UNKNOWN_ROUTE;
   const { pathname, searchParams } = target;
 
   const route = routeFor(pathname);
   if (route === undefined) return UNKNOWN_ROUTE;
 
-  return route.answer({ deps: serving.deps, request, pathname, params: searchParams });
+  return route.answer({ deps: serving.deps, request, pathname, params: searchParams, body });
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
@@ -871,6 +1097,90 @@ function write(response: ServerResponse, answer: Answer): void {
 /** An error's message, whatever was thrown -- a non-`Error` stringifies rather than vanishing. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The fixed 413 an oversized body is refused with -- fixed for the same reason `UNKNOWN_ROUTE` is: nothing of the body it refused is ever worth repeating. */
+const PAYLOAD_TOO_LARGE = json(413, { error: 'payload too large' });
+
+/**
+ * The fixed 400 a body that is not valid json is refused with.
+ *
+ * **`refusal`, and no `error` beside it.** This and `invalid-shape` are the
+ * only two answers this API gives that share a status, so before this they
+ * were told apart by an english string and by nothing else -- which is the
+ * one thing the constraint on refusal codes forbids. They now carry the same
+ * single-field shape the `409` and `422` refusals already carried, so a
+ * client branches on `refusal` for every answer `POST /api/feeds` refuses a
+ * *body* with, rather than on `refusal` sometimes and prose the rest of the
+ * time. The prose is gone rather than kept alongside: a body carrying both
+ * is a body a client can still be tempted to read the wrong half of.
+ */
+const MALFORMED_BODY = json(400, { refusal: 'malformed-body' });
+
+/**
+ * Reads `request`'s body for anything but a `GET` -- `handle` never calls
+ * this for one -- capped at `MAX_BODY_BYTES` and refused with 413 the
+ * moment the running total exceeds it, **before** the bytes collected so far
+ * are parsed or handed anywhere. Refused with 400 if what was collected does
+ * not parse as json.
+ *
+ * Listened for with `'data'`/`'end'` rather than `for await`: `IncomingMessage`
+ * (`node:http`'s own typings) declares its async iterator `AsyncIterator<any>`,
+ * with no way to say the chunks are `Buffer`s short of asserting it -- and an
+ * assertion here would be exactly the cast the brief this module was written
+ * against refuses. The listener below types its own callback `(chunk:
+ * Buffer)`, which needs no assertion: it is a stricter parameter than the
+ * listener signature promises, which every `EventEmitter#on` overload in
+ * `@types/node` already allows.
+ *
+ * The over-cap branch does **not** call `request.destroy()`: destroying the
+ * request stream before the client has finished sending tears down the
+ * shared socket underneath the response this function's caller still has to
+ * write -- measured, as a `fetch` `SocketError` on the 413 this was meant to
+ * deliver. `settled` guarding the `'data'` handler is what stands in for it:
+ * bytes past the cap are still drained (so the stream still reaches `'end'`
+ * and the connection can be reused) but never pushed onto `chunks`, so
+ * nothing over the cap is held in memory either way.
+ */
+function readBody(request: IncomingMessage): Promise<{ body: unknown } | { refusal: Answer }> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    const finish = (result: { body: unknown } | { refusal: Answer }): void => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    request.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) {
+        finish({ refusal: PAYLOAD_TOO_LARGE });
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      if (settled) return;
+      const text = Buffer.concat(chunks).toString('utf8');
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        finish({ refusal: MALFORMED_BODY });
+        return;
+      }
+      finish({ body: parsed });
+    });
+    request.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+  });
 }
 
 /**
@@ -914,10 +1224,48 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
     }
     // Past the guard. Anything mounted from here down is guarded by having
     // been written below this line, rather than by being marked in `ROUTES`.
-    write(response, await answerFor(serving, target, request));
+    //
+    // The body is read here, not per route: every route but `/api/feeds`
+    // answers a `GET` and never has one, and `readBody` is a no-op cost none
+    // of them should each have to remember to skip.
+    let body: unknown;
+    if (request.method !== 'GET') {
+      const read = await readBody(request);
+      if ('refusal' in read) {
+        write(response, read.refusal);
+        return;
+      }
+      body = read.body;
+    }
+    write(response, await answerFor(serving, target, request, body));
   } catch (error) {
     const route = targetOf(request.url)?.pathname ?? '(unparseable)';
-    deps.log('read failed', { route, error: redactUrl(messageOf(error)) });
+    // A client that goes away mid-body is not a fault of this host's, and it
+    // used to be written down as one: `readBody`'s `'error'` listener rejects
+    // with node's own `'aborted'`, which arrives here and was logged as
+    // `read failed` -- the same line a real 500 writes. A browser navigating
+    // away from a submit is an entirely ordinary thing to do, so that line
+    // was going to appear in normal use and make a genuine write-path fault
+    // unfindable among copies of itself.
+    //
+    // **A distinct message, not silence.** A proxy-induced `ECONNRESET`
+    // reaches this same branch and is worth seeing; dropping the line would
+    // hide it. `request.destroyed && !response.headersSent` is what tells the
+    // two apart: the request stream is gone, and nothing had been written
+    // back yet, so there was no response for the client to have been reading
+    // when it left.
+    //
+    // Only the message changes. The response below is written either way --
+    // on a socket the client destroyed `writeJson` is a silent no-op
+    // (measured: the listener goes on serving normally afterwards), so
+    // returning early here would buy nothing and would give a genuine fault
+    // that happens to have a destroyed request no answer at all.
+    //
+    // `route` is `target.pathname`, never the query string, and the message
+    // goes through `redactUrl` -- the same two rules the 500 path follows, so
+    // no url reaches this line either.
+    const aborted = request.destroyed && !response.headersSent;
+    deps.log(aborted ? 'request aborted' : 'read failed', { route, error: redactUrl(messageOf(error)) });
     if (response.headersSent) {
       // Nothing safe left to say -- the status line is already gone. Dropping
       // the connection is what tells a client the response is incomplete;
@@ -986,7 +1334,14 @@ function originOf(address: AddressInfo): string {
  * without yielding.
  */
 export async function createReadServer(deps: ReadServerDeps): Promise<ReadServer> {
-  const server = createServer();
+  // `REQUEST_TIMEOUT_MS`'s own doc says why this bound and not another, and
+  // `CONNECTIONS_CHECK_MS`'s says why the second option is not optional.
+  // Both passed to `createServer` rather than assigned afterwards, so there
+  // is no window in which a listener is up without them.
+  const server = createServer({
+    requestTimeout: REQUEST_TIMEOUT_MS,
+    connectionsCheckingInterval: CONNECTIONS_CHECK_MS,
+  });
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);

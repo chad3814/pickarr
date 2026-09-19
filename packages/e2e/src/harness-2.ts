@@ -14,13 +14,35 @@
  * `ReadServerDeps` `main` does, by hand, and gets back a `close()` it can
  * actually call.
  *
- * **No plugin is registered, and none is needed.** `media_item` -- the one
- * table the shell's three counts read (`useCounts.ts`'s `CATEGORIES`) -- is a
- * *host* synced table (`HOST_SYNCED_TABLES`), synced with no plugin involved
- * at all. `seedMediaItem` below inserts into it directly, the same seam
- * `packages/host/test/api/sync-route.test.ts`'s own `seedMediaItem` uses, so
- * a spec can grow the replica's source of truth with no feed, no lookup
- * service and no job to produce one.
+ * **No plugin is registered in the sync registry, and none is needed there.**
+ * `media_item` -- the one table the shell's three counts read (`useCounts.ts`'s
+ * `CATEGORIES`) -- is a *host* synced table (`HOST_SYNCED_TABLES`), synced with
+ * no plugin involved at all. `seedMediaItem` below inserts into it directly,
+ * the same seam `packages/host/test/api/sync-route.test.ts`'s own
+ * `seedMediaItem` uses, so a spec can grow the replica's source of truth with
+ * no feed, no lookup service and no job to produce one. (`stubPlugin`, below,
+ * *is* registered -- on the `Host` this file builds for `addFeed`, a
+ * different map from the sync registry's -- see that paragraph for why this
+ * one no longer means "no plugin exists anywhere in this harness".)
+ *
+ * **The `Host` this file builds for `addFeed` is deliberately never
+ * started.** `createHost` gets real `fetch`/`downloads`/`secrets` wiring and
+ * three registered `stubPlugin`s, so `Host.addFeed`'s own `isRegistered`
+ * check accepts the same three categories `AddFeed.tsx`'s form offers --
+ * but `host.start()` is never called anywhere in this file. `Host.addFeed`
+ * still calls `schedulePoll`, which still enqueues a `poll` job row, but
+ * `schedulePoll`'s own `if (started) dispatcher.rearm()` guard (`host.ts`)
+ * means an unstarted host's enqueue arms no timer, so that job never runs.
+ * The write path this harness exists to test does not need it to:
+ * `rss_feed` reaching a client's replica goes through that table's own
+ * `AFTER INSERT` trigger into `sync_log` (`sync/log.ts`'s
+ * `installSyncTriggers`), committed synchronously with the insert itself,
+ * and `/api/sync`'s tail is what a client polls from there -- neither step
+ * depends on anything having polled the feed's own url. **A spec that needs
+ * that poll to actually dispatch -- fetching a feed, inserting `rss_item`
+ * rows, notifying a plugin -- will hang to Playwright's own timeout here,
+ * not fail with a message naming the gap:** nothing in this harness ever
+ * runs that job, and nothing at the call site says so.
  *
  * **The claim token is read from the database, not from a boot log.** The
  * task brief for this harness said to capture it off `main`'s stdout; that
@@ -47,6 +69,9 @@ import type { DatabaseSync } from 'node:sqlite';
 import { test as base } from '@playwright/test';
 import {
   createAuth,
+  createDownloadClients,
+  createHost,
+  createHostFetch,
   createReadServer,
   createSyncRegistry,
   ensureClaimToken,
@@ -69,8 +94,38 @@ const AUTH_SECRET = 'placeholder-not-a-real-signing-secret-for-e2e-tests';
 /** A `log` that drops every line. Nothing in this suite asserts on the host's own log. */
 const dropLine = (): void => {};
 
+/** `Host`'s and `createDownloadClients`'s own clock. Module scope, like `dropLine` above: it captures nothing from `boot()`, so nothing here needs rebuilding per test. */
+const now = (): number => Date.now();
+
 /** The three categories the shell has tabs for (`shell/useCounts.ts`'s `CATEGORIES`). */
 export type Category = 'tv' | 'movie' | 'xxx';
+
+/**
+ * A `MediaPlugin` that does the least possible: no migrations, no synced
+ * tables, no job handlers, and a no-op for every callback `Host` ever
+ * invokes. Registered once per category (below) so `feeds/add.ts`'s own
+ * `isRegistered` check -- reached through `Host.addFeed`, the real
+ * validator this harness now wires to `POST /api/feeds` -- accepts the
+ * same three plugin ids `AddFeed.tsx`'s form offers (`CATEGORIES`,
+ * `shell/useCounts.ts`), the same way a real `createTvPlugin` et al. would.
+ * A stub is enough: no spec in this file ever polls a feed to completion or
+ * reads a plugin-owned table, so nothing here needs `onNewRssItems` to do
+ * anything but resolve. This is the same "no plugin is needed beyond what
+ * `isRegistered` checks" the module doc's `media_item` paragraph already
+ * argues, applied to `addFeed`'s own gate instead.
+ */
+function stubPlugin(id: Category) {
+  return {
+    id,
+    mediaType: id,
+    migrations: [],
+    jobs: {},
+    synced: [],
+    async onNewRssItems() {},
+    async onDownloadedFile() {},
+    async onDownloadRequest() {},
+  };
+}
 
 export interface Harness {
   /** The origin the in-process host bound. Every navigation in a spec starts here. */
@@ -108,12 +163,50 @@ async function boot(): Promise<Booted> {
   migrateHost(raw);
 
   // Empty plugin list: see this module's doc for why `media_item` needs none.
+  // `Host`'s own `plugins` map (below) is separate from this registry and is
+  // what `addFeed`'s `isRegistered` check reads -- registering a plugin
+  // there does not have to mean registering it here too, since none of the
+  // three stub plugins below declares a `synced` table of its own.
   const registry = createSyncRegistry(raw, []);
   const generation = ensureSyncGeneration(raw, Date.now());
+
+  const hostFetch = createHostFetch({ fetch: globalThis.fetch });
+
+  // Never asked to resolve a real credential: no spec in this file submits
+  // a feed against a download client, only against the three plugin
+  // categories `Host.addFeed` itself validates.
+  const secrets = {
+    async get(name: string): Promise<string> {
+      throw new Error(`no secret configured for ${name}`);
+    },
+    saveSecret(): void {},
+  };
+
+  const host = createHost({
+    raw,
+    db,
+    fetch: hostFetch,
+    // A factory, not a built object -- `createHost`'s own doc on why:
+    // supplying `secrets` (below) is what keeps this the one `Secrets`
+    // instance the whole host resolves credentials through.
+    downloads: (deps) => createDownloadClients({ raw, fetch: hostFetch, secrets: deps, now, log: dropLine }),
+    secrets,
+    now,
+    artworkDir: join(dir, 'artwork'),
+  });
+  // `stubPlugin`'s own doc: enough for `Host.addFeed`'s `isRegistered`
+  // check to accept the same three ids `AddFeed.tsx`'s form offers.
+  for (const category of ['tv', 'movie', 'xxx'] as const) host.register(stubPlugin(category));
 
   const server = await createReadServer({
     raw,
     pluginIdForType: () => undefined,
+    // `Host.addFeed` -- the same method `main.ts` wires to this exact
+    // route. See this module's own doc ("The `Host` this file builds for
+    // `addFeed` is deliberately never started") for why the poll it
+    // schedules never runs, and why that is fine for what this harness
+    // tests.
+    addFeed: (input) => host.addFeed(input),
     registry,
     generation,
     host: '127.0.0.1',

@@ -55,11 +55,28 @@ export interface ListByTableOptions {
 }
 
 /**
- * The five tables `by_table_updated` covers, and no others -- measured
- * rather than intended (design spec §3.2). `media_item`, `rss_item`,
- * `torrent_download` and `nzb_download` project `updatedAt` because the sync
- * protocol's read shapes for them do; `person` does too. `role` projects
- * only `createdAt`, and none of the six plugin read shapes (`tv_release`,
+ * The six tables `by_table_updated` covers, and no others. The original five
+ * were measured rather than intended (design spec §3.2) -- this file's own
+ * tests page `media_item` and `rss_item` through the index directly.
+ *
+ * **`rss_feed`'s membership is measured too, and this paragraph used to say
+ * it was not.** It said "nothing in this repo pages an `rss_feed` row
+ * through `by_table_updated` today, so it rests on declared shape alone",
+ * which was true when it was written and stopped being true later in the
+ * same branch, when `settings/useFeeds.ts` landed and read the whole table
+ * through `listByTable`. Measured, by deleting `'rss_feed'` from the set
+ * below: **12 web tests red** -- five in `test/settings/useFeeds.test.tsx`,
+ * six in `test/settings/Feeds.test.tsx`, one in `test/shell/Shell.test.tsx`
+ * -- each of them seeding real rows through `applyBatch` into a real
+ * `fake-indexeddb` store and reading them back through this function. The
+ * declared shape holds as well (`RssFeedSyncRead` carries `updatedAt`, same
+ * as the other five, and the index's key path in `store/db.ts` admits any
+ * row with one), but it is no longer the only thing holding this entry up.
+ *
+ * `media_item`, `rss_item`, `torrent_download` and `nzb_download`
+ * project `updatedAt` because the sync protocol's read shapes for them do;
+ * `person` does too, and so does `rss_feed`. `role` projects only
+ * `createdAt`, and none of the six plugin read shapes (`tv_release`,
  * `tv_season`, `tv_series`, `movie_detail`, `xxx_scene`, `xxx_site`) carries
  * either. Asking `listByTable` for one of those seven is a programming
  * error and throws (see below) rather than returning an empty page, which
@@ -71,27 +88,37 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'torrent_download',
   'nzb_download',
   'person',
+  'rss_feed',
 ]);
 
 /**
- * The tables `by_table_plugin_updated` covers, and no others -- measured
- * rather than intended, the same way {@link TABLES_WITH_UPDATED_AT} is
- * (`store/db.test.ts`'s "the per-category index exists, and holds only rows
- * that project a pluginId" inserts a `media_item`, an `rss_item` and a
- * tombstone and reads the index back). Exactly one member today:
- * `media_item` is the only synced read shape carrying `pluginId`, and
- * `rss_item` carries `feedId` instead, which is why that index is
- * self-filtering at all (`store/db.ts`'s own note).
+ * The tables the two per-category readers below (`listByTablePlugin`,
+ * `countByPlugin`) will query `by_table_plugin_updated` for -- a guard on
+ * the *readers*, not a description of what the index holds. Exactly one
+ * member today: `media_item` is the table those two readers exist for.
+ *
+ * **This is no longer "the tables carrying `pluginId`", now that `rss_feed`
+ * does too.** `by_table_plugin_updated` is a generic IndexedDB index keyed
+ * `['table', 'value.pluginId', 'value.updatedAt', 'id']`
+ * (`store/db.ts`), so it indexes *any* row with both components, `rss_feed`
+ * rows included since `RssFeedSyncRead` carries `pluginId` -- with nothing
+ * in this file asking for that. `rss_item` still carries `feedId` instead of
+ * `pluginId`, which is why *its* rows stay out of the index on their own;
+ * `rss_feed` is the opposite case, present in the index and excluded here
+ * only because this set says so. No caller needs a feed listed by plugin
+ * yet, so it stays out; admitting it is a one-line change here whenever one
+ * does, not a schema change.
  *
  * **Separate from `TABLES_WITH_UPDATED_AT`, because they disagree.** That
- * set admits five tables and only the first of them projects a `pluginId`;
- * the two readers below originally reused it, so for `rss_item`,
- * `torrent_download`, `nzb_download` and `person` the guard passed and the
- * index answered nothing -- measured as `listByTablePlugin('rss_item','tv')
- * -> []` and `countByPlugin('rss_item','tv') -> 0` against a store holding
- * two real `rss_item` rows. That is precisely the lie the other set's own
- * doc exists to refuse: an empty answer reading as "this table is empty",
- * which a caller has no way to catch.
+ * set admits six tables and only two of them, `media_item` and `rss_feed`,
+ * project a `pluginId`; the two readers below originally reused it, so for
+ * `rss_item`, `torrent_download`, `nzb_download` and `person` the guard
+ * passed and the index answered nothing -- measured as
+ * `listByTablePlugin('rss_item','tv') -> []` and
+ * `countByPlugin('rss_item','tv') -> 0` against a store holding two real
+ * `rss_item` rows. That is precisely the lie the other set's own doc exists
+ * to refuse: an empty answer reading as "this table is empty", which a
+ * caller has no way to catch.
  */
 const TABLES_WITH_PLUGIN_ID: ReadonlySet<string> = new Set(['media_item']);
 

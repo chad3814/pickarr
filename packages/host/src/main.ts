@@ -712,7 +712,7 @@ export async function main(
 
   // **After the migrations, on every boot, and not only inside migration
   // 15.** `installSyncTriggers` drops each trigger before creating it, so
-  // this is idempotent and costs six `DROP`/`CREATE` triples on a schema
+  // this is idempotent and costs seven `DROP`/`CREATE` triples on a schema
   // that already has them.
   //
   // This is **defensive, not corrective**: triggers persist across
@@ -840,6 +840,10 @@ export async function main(
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
+    // The one operation `POST /api/feeds` needs, not the whole `Host`: see
+    // `ReadServerDeps.addFeed`'s own doc for why the interface asks for a
+    // function rather than this object.
+    addFeed: (input) => host.addFeed(input),
     registry,
     // Resolved once, here, rather than per request: this value cannot change
     // while the process holds `raw` open, so a route reading it would be a

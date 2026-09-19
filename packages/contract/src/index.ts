@@ -15,6 +15,8 @@ export type {
   RssItemRead,
   Transport,
 } from './media.ts';
+export type { AddFeedRefusalCode } from './feeds.ts';
+export { ADD_FEED_REFUSALS } from './feeds.ts';
 export type { HostFetch } from './fetch.ts';
 export type { Migration } from './migrations.ts';
 export type { DownloadClients, DownloadSubmission } from './downloads.ts';
@@ -24,6 +26,7 @@ export type {
   NzbDownloadSyncRead,
   PersonSyncRead,
   RoleSyncRead,
+  RssFeedSyncRead,
   RssItemSyncRead,
   SyncedTable,
   TorrentDownloadSyncRead,
