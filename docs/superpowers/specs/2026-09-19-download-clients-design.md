@@ -140,8 +140,19 @@ category.
 **The credential field is write-only.** It is never read back from the
 replica, because it is not there; editing is out of scope for this
 slice, and a field showing a placeholder for "something is stored" is
-the smallest honest thing. The list says whether a client has a
-credential configured, not what it is.
+the smallest honest thing.
+
+*Amended during Task 3, which found this section contradicting §5.* An
+earlier draft said the list "says whether a client has a credential
+configured". §5 projects neither secret name, so the browser cannot
+know that, and the sentence described a screen this design cannot
+build. The choice was to project a derived `hasCredential` boolean or
+to drop the claim; dropping it wins. Every client this UI creates must
+carry a credential — the auth shape is required — so the flag would
+read `true` for all of them and earn its keep only for rows some other
+writer inserted. That is not worth widening a projection whose whole
+argument is that it carries the minimum. The list shows `username`
+where there is one, and claims nothing about the credential.
 
 ## 7. Acceptance
 
