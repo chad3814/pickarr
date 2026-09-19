@@ -1,7 +1,7 @@
 /**
- * The read API on a socket: `node:http`, ten routes -- eight behind a
- * session and two open (`/api/health` and the static bundle) -- bound by
- * default to every interface.
+ * The read-and-write API on a socket: `node:http`, eleven routes -- nine
+ * behind a session and two open (`/api/health` and the static bundle) --
+ * bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
  * routes behind a session", which the paragraph on the guard below -- and
@@ -9,10 +9,11 @@
  * A one-line summary disagreeing with its own file is the whole class of
  * defect the comments here are written against. (The count grew to eight
  * when the client-sync slice added `/api/sync` and `/api/sync/backfill`, to
- * nine when it added `/api/sync/bootstrap`, and to ten when the shell slice
- * added the static route -- guarded like the other eight except `/api/health`
- * and that one; the shape of the sentence is what matters and has not
- * changed.)
+ * nine when it added `/api/sync/bootstrap`, to ten when the shell slice
+ * added the static route -- guarded like the other eight except
+ * `/api/health` and that one -- and to eleven when this slice added
+ * `POST /api/feeds`, the first route this file answers a write on; the
+ * shape of the sentence is what matters and has not changed.)
  *
  * Everything this file does is routing. Parse a request, call one function
  * from `./reads.ts`, `./artwork-route.ts` or `./static-route.ts`, write what
@@ -119,6 +120,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
+import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
 import { readArtwork } from './artwork-route.ts';
@@ -134,6 +136,9 @@ import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
  * machine without either having to be told a port.
  */
 export const DEFAULT_PORT = 8787;
+
+/** Enough for a feed; small enough that an unbounded client cannot make the host buy memory. */
+export const MAX_BODY_BYTES = 16 * 1024;
 
 /**
  * The read API's own contract version, as `/api/health` reports it -- not the
@@ -215,6 +220,17 @@ export interface ReadServerDeps {
    * the module doc.
    */
   pluginIdForType: (type: string) => string | undefined;
+  /**
+   * Validates and writes a new `rss_feed` row -- `Host.addFeed`, handed in
+   * as the one operation this route needs rather than the whole `Host`.
+   * `ReadServerDeps.host` above already means the bind interface string, so
+   * the object cannot also mean the `Host` instance; a function is also all
+   * `POST /api/feeds` (`ROUTES` below) ever calls. Resolves a refusal
+   * *value* on failure, never throws -- see that method's own doc for why --
+   * so the route maps each refusal to its own status rather than treating
+   * one as a bug.
+   */
+  addFeed: (input: AddFeedInput) => Promise<{ id: number } | AddFeedRefusal>;
   /**
    * Host tables plus every plugin's declared tables, as one lookup --
    * `sync/registry.ts`'s `createSyncRegistry(raw, plugins)`. What `/api/sync`
@@ -560,6 +576,14 @@ interface RouteRequest {
   pathname: string;
   /** The query string, which is where every route but artwork takes its arguments. */
   params: URLSearchParams;
+  /**
+   * The request body, already read, capped and json-parsed by `handle` --
+   * `undefined` for a `GET`, which never has one read. `unknown` because
+   * nothing here has checked its shape yet: that is each route's own job,
+   * the same way `addFeed` (`../feeds/add.ts`) is the validator for the
+   * fields inside it rather than a caller that has already done so.
+   */
+  body: unknown;
 }
 
 /**
@@ -582,11 +606,66 @@ interface Route {
    */
   readonly path: string;
   /**
+   * The HTTP methods this route answers. **Required, not defaulted**: a
+   * route added without thinking about its methods is exactly the route
+   * that should not silently accept a write. Until this slice the guard was
+   * one line rejecting every non-GET before dispatch, which is what kept
+   * `/api` read-only; making each route declare its own is what lets one
+   * route accept a POST without opening the rest.
+   */
+  readonly methods: readonly string[];
+  /**
    * Whether a caller with no session may reach it. `true` on exactly two
    * routes, and the tests assert that count rather than trusting it.
    */
   readonly open: boolean;
   readonly answer: (route: RouteRequest) => Answer | Promise<Answer>;
+}
+
+/**
+ * Whether `value` has the shape `POST /api/feeds` needs: every field
+ * present, and a primitive of the right type. Nothing here checks a field's
+ * *value* -- a registered plugin, a real transport, a poll interval in range
+ * -- because that is `addFeed`'s job (`../feeds/add.ts`'s module doc), and
+ * checking it twice is how the two checks drift apart.
+ *
+ * `'pluginId' in value` rather than a cast to `Record<string, unknown>`:
+ * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly as
+ * far as each check proves, the same pattern `feeds/add.ts`'s own
+ * `isUniqueConstraintViolation` uses.
+ */
+function isFeedBody(value: unknown): value is AddFeedInput {
+  return typeof value === 'object' && value !== null
+    && 'pluginId' in value && typeof value.pluginId === 'string'
+    && 'name' in value && typeof value.name === 'string'
+    && 'url' in value && typeof value.url === 'string'
+    && 'downloadType' in value && typeof value.downloadType === 'string'
+    && 'pollIntervalS' in value && typeof value.pollIntervalS === 'number';
+}
+
+/**
+ * The status `POST /api/feeds` answers for each way `addFeed` can refuse.
+ *
+ * A conflict is the one refusal that already has a row to point at --
+ * `duplicate-url` names a url already on file, so `409` is the one that
+ * fits. The other three are all "this otherwise well-formed field's value is
+ * not one this host will accept" -- an unregistered plugin, a transport
+ * that is not `torrent` or `nzb`, a poll interval outside the allowed range
+ * -- so all three answer `422`: the request parsed fine and named a field
+ * that exists, but the value it carries cannot be acted on. Whatever the
+ * status, the body always carries `refusal` itself (never a message a human
+ * would read), which is what a client actually branches on -- see this
+ * module's doc on why no body may carry prose in place of a stable code.
+ */
+function statusForFeedRefusal(refusal: AddFeedRefusal['refusal']): number {
+  switch (refusal) {
+    case 'duplicate-url':
+      return 409;
+    case 'unknown-plugin':
+    case 'bad-download-type':
+    case 'bad-poll-interval':
+      return 422;
+  }
 }
 
 /**
@@ -615,11 +694,13 @@ export const ROUTES: readonly Route[] = [
     // and it is an install fingerprint, so serving it without a session would
     // let a scanner tell two hosts apart and notice a rebuild. See
     // `sync-route.ts`'s `GenerationDeps`.
+    methods: ['GET'],
     open: true,
     answer: () => json(200, { ok: true, version: API_VERSION }),
   },
   {
     path: '/api/media',
+    methods: ['GET'],
     open: false,
     answer: ({ deps, params }) => {
       const resolved = pluginFor(params, deps.pluginIdForType);
@@ -629,6 +710,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/rss-items',
+    methods: ['GET'],
     open: false,
     // Not type-scoped, deliberately: a feed's `plugin_id` says who polls it,
     // not who may read what it found. See `rssItemsSince`.
@@ -636,6 +718,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/downloads',
+    methods: ['GET'],
     open: false,
     // The union pair, not the plain one: `id` is a per-table rowid, so a
     // two-part cursor cannot say which table's row was already served. See
@@ -648,6 +731,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/deletions',
+    methods: ['GET'],
     open: false,
     answer: ({ deps, params }) => {
       // Type-scoped, unlike the spec's own route sketch, and it has to be: a
@@ -666,6 +750,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/artwork/:kind/:mediaItemId',
+    methods: ['GET'],
     open: false,
     // No `type`, and no ownership check on the media item id: an accepted
     // consequence rather than an omission, and slice E's §5 records it.
@@ -687,6 +772,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/sync',
+    methods: ['GET'],
     open: false,
     // A replica of the whole library is exactly what the session guard
     // exists to protect (design spec §5) -- this route and the next are as
@@ -701,6 +787,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/sync/bootstrap',
+    methods: ['GET'],
     open: false,
     // Where an empty client starts both cursors. Guarded like the two it
     // feeds: the answer is two log positions and the sync generation, but a
@@ -713,6 +800,7 @@ export const ROUTES: readonly Route[] = [
   },
   {
     path: '/api/sync/backfill',
+    methods: ['GET'],
     open: false,
     // Two segments under `/api/sync`, one literal and one -- see
     // `matchesPath` -- which is what keeps this from shadowing or being
@@ -727,6 +815,29 @@ export const ROUTES: readonly Route[] = [
         params,
       );
       return json(answer.status, answer.body);
+    },
+  },
+  {
+    path: '/api/feeds',
+    methods: ['POST'],
+    open: false,
+    // Writes a new `rss_feed` row through `deps.addFeed` -- the first write
+    // this API has ever answered, and guarded like every read: a caller with
+    // no session has no more business creating a feed than reading one.
+    //
+    // Only the body's *shape* is checked here (the fields exist and have the
+    // right primitive types, via `isFeedBody`); the invariants on their
+    // values -- a registered plugin, a real transport, a poll interval in
+    // range -- live in `feeds/add.ts`'s `addFeed`, per the module doc's rule
+    // that no SQL and no business rule belongs in this file. Duplicating
+    // them here is how the two copies drift.
+    answer: async ({ deps, body }) => {
+      if (!isFeedBody(body)) return json(400, { error: 'invalid feed' });
+      const result = await deps.addFeed(body);
+      if ('refusal' in result) {
+        return json(statusForFeedRefusal(result.refusal), { refusal: result.refusal });
+      }
+      return json(201, { id: result.id });
     },
   },
   {
@@ -745,6 +856,7 @@ export const ROUTES: readonly Route[] = [
     // this route existed. `staticAnswer` refuses `/api` again on its own,
     // defensively, in case it is ever called from somewhere that skipped
     // that exclusion.
+    methods: ['GET'],
     open: true,
     answer: ({ deps, request, pathname }) => staticRouteAnswer(
       deps.webRoot,
@@ -807,14 +919,26 @@ function routeFor(pathname: string): Route | undefined {
  * closes is the next mount, which now inherits the guard by construction
  * rather than by whoever adds it remembering to.
  *
- * Read-only, so anything but a GET is refused by its method rather than
- * routed as though it were one -- a router that looked only at the path
- * would answer a POST with a page of data, which is not a thing this API
- * should ever appear to accept. That check stays ahead of the guard, and
- * costs nothing: every non-GET path answers the same 405 whether or not the
- * caller has a session, so the ordering tells an anonymous caller nothing it
- * could not have worked out from "the API is read-only". Better Auth's own
- * POSTs never reach here -- `handle` dispatched them already.
+ * **Each route declares its own `methods` now, not one line rejecting every
+ * non-`GET` before dispatch.** That one line is what kept this API read-only
+ * from slice E until this one; a route answering a method it does not
+ * declare is refused by that route's own table entry instead, which is what
+ * lets `POST /api/feeds` accept a write without loosening the check for
+ * anything else. A router that looked only at the path would answer a POST
+ * with a page of data, which is not a thing any route here should ever
+ * appear to accept.
+ *
+ * **The order matters.** The method check runs only for a route that
+ * exists (`route !== undefined`) -- an unknown path is never told it failed
+ * a method check, since that would be a way to learn the path is shaped
+ * like something real. A path no route claims stays a question for the
+ * session check below, exactly as it always was, and `answerFor` is what
+ * turns it into the 404 once a session has cleared that check. That check
+ * stays ahead of the guard, and costs nothing: every route's wrong-method
+ * answer is the same 405 whether or not the caller has a session, so the
+ * ordering tells an anonymous caller nothing it could not have worked out
+ * from the route's own path. Better Auth's own POSTs never reach here --
+ * `handle` dispatched them already.
  *
  * **The guard tests the value the session check resolves to.** Not its
  * status: an unauthenticated check answers `200` with a body of `null` (the
@@ -829,8 +953,11 @@ function routeFor(pathname: string): Route | undefined {
  * question they have no standing to ask.
  */
 async function refusalFor(serving: Serving, target: URL | null, request: IncomingMessage): Promise<Answer | null> {
-  if (request.method !== 'GET') return json(405, { error: 'method not allowed' });
-  if (target !== null && routeFor(target.pathname)?.open === true) return null;
+  const route = target === null ? undefined : routeFor(target.pathname);
+  if (route !== undefined && !route.methods.includes(request.method ?? '')) {
+    return json(405, { error: 'method not allowed' });
+  }
+  if (route?.open === true) return null;
   const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
   return session === null ? UNAUTHORIZED : null;
 }
@@ -838,16 +965,22 @@ async function refusalFor(serving: Serving, target: URL | null, request: Incomin
 /**
  * One request, routed. **Guarded already** -- `handle` has the refusal above
  * ahead of this call, so nothing here asks about a session and nothing added
- * here can forget to.
+ * here can forget to. `body` is `handle`'s: already read, capped and parsed
+ * for anything but a `GET`, `undefined` for one.
  */
-function answerFor(serving: Serving, target: URL | null, request: IncomingMessage): Answer | Promise<Answer> {
+function answerFor(
+  serving: Serving,
+  target: URL | null,
+  request: IncomingMessage,
+  body: unknown,
+): Answer | Promise<Answer> {
   if (target === null) return UNKNOWN_ROUTE;
   const { pathname, searchParams } = target;
 
   const route = routeFor(pathname);
   if (route === undefined) return UNKNOWN_ROUTE;
 
-  return route.answer({ deps: serving.deps, request, pathname, params: searchParams });
+  return route.answer({ deps: serving.deps, request, pathname, params: searchParams, body });
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
@@ -882,6 +1015,78 @@ function write(response: ServerResponse, answer: Answer): void {
 /** An error's message, whatever was thrown -- a non-`Error` stringifies rather than vanishing. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The fixed 413 an oversized body is refused with -- fixed for the same reason `UNKNOWN_ROUTE` is: nothing of the body it refused is ever worth repeating. */
+const PAYLOAD_TOO_LARGE = json(413, { error: 'payload too large' });
+
+/** The fixed 400 a body that is not valid json is refused with. */
+const MALFORMED_BODY = json(400, { error: 'malformed json body' });
+
+/**
+ * Reads `request`'s body for anything but a `GET` -- `handle` never calls
+ * this for one -- capped at `MAX_BODY_BYTES` and refused with 413 the
+ * moment the running total exceeds it, **before** the bytes collected so far
+ * are parsed or handed anywhere. Refused with 400 if what was collected does
+ * not parse as json.
+ *
+ * Listened for with `'data'`/`'end'` rather than `for await`: `IncomingMessage`
+ * (`node:http`'s own typings) declares its async iterator `AsyncIterator<any>`,
+ * with no way to say the chunks are `Buffer`s short of asserting it -- and an
+ * assertion here would be exactly the cast the brief this module was written
+ * against refuses. The listener below types its own callback `(chunk:
+ * Buffer)`, which needs no assertion: it is a stricter parameter than the
+ * listener signature promises, which every `EventEmitter#on` overload in
+ * `@types/node` already allows.
+ *
+ * The over-cap branch does **not** call `request.destroy()`: destroying the
+ * request stream before the client has finished sending tears down the
+ * shared socket underneath the response this function's caller still has to
+ * write -- measured, as a `fetch` `SocketError` on the 413 this was meant to
+ * deliver. `settled` guarding the `'data'` handler is what stands in for it:
+ * bytes past the cap are still drained (so the stream still reaches `'end'`
+ * and the connection can be reused) but never pushed onto `chunks`, so
+ * nothing over the cap is held in memory either way.
+ */
+function readBody(request: IncomingMessage): Promise<{ body: unknown } | { refusal: Answer }> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    const finish = (result: { body: unknown } | { refusal: Answer }): void => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    request.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) {
+        finish({ refusal: PAYLOAD_TOO_LARGE });
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      if (settled) return;
+      const text = Buffer.concat(chunks).toString('utf8');
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        finish({ refusal: MALFORMED_BODY });
+        return;
+      }
+      finish({ body: parsed });
+    });
+    request.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+  });
 }
 
 /**
@@ -925,7 +1130,20 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
     }
     // Past the guard. Anything mounted from here down is guarded by having
     // been written below this line, rather than by being marked in `ROUTES`.
-    write(response, await answerFor(serving, target, request));
+    //
+    // The body is read here, not per route: every route but `/api/feeds`
+    // answers a `GET` and never has one, and `readBody` is a no-op cost none
+    // of them should each have to remember to skip.
+    let body: unknown;
+    if (request.method !== 'GET') {
+      const read = await readBody(request);
+      if ('refusal' in read) {
+        write(response, read.refusal);
+        return;
+      }
+      body = read.body;
+    }
+    write(response, await answerFor(serving, target, request, body));
   } catch (error) {
     const route = targetOf(request.url)?.pathname ?? '(unparseable)';
     deps.log('read failed', { route, error: redactUrl(messageOf(error)) });

@@ -840,6 +840,10 @@ export async function main(
   const server = await (deps.createReadServer ?? createReadServer)({
     raw,
     pluginIdForType,
+    // The one operation `POST /api/feeds` needs, not the whole `Host`: see
+    // `ReadServerDeps.addFeed`'s own doc for why the interface asks for a
+    // function rather than this object.
+    addFeed: (input) => host.addFeed(input),
     registry,
     // Resolved once, here, rather than per request: this value cannot change
     // while the process holds `raw` open, so a route reading it would be a

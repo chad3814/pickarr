@@ -114,6 +114,13 @@ async function boot(): Promise<Booted> {
   const server = await createReadServer({
     raw,
     pluginIdForType: () => undefined,
+    // No e2e spec here posts to `/api/feeds` yet -- a UI task for it follows
+    // this one. A stub that throws is the same choice `server.test.ts` makes
+    // for the same reason: a spec that reaches it without meaning to gets a
+    // failure naming the gap, not a silent success.
+    addFeed: () => {
+      throw new Error('addFeed not stubbed in this harness');
+    },
     registry,
     generation,
     host: '127.0.0.1',
