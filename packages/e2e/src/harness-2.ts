@@ -14,13 +14,35 @@
  * `ReadServerDeps` `main` does, by hand, and gets back a `close()` it can
  * actually call.
  *
- * **No plugin is registered, and none is needed.** `media_item` -- the one
- * table the shell's three counts read (`useCounts.ts`'s `CATEGORIES`) -- is a
- * *host* synced table (`HOST_SYNCED_TABLES`), synced with no plugin involved
- * at all. `seedMediaItem` below inserts into it directly, the same seam
- * `packages/host/test/api/sync-route.test.ts`'s own `seedMediaItem` uses, so
- * a spec can grow the replica's source of truth with no feed, no lookup
- * service and no job to produce one.
+ * **No plugin is registered in the sync registry, and none is needed there.**
+ * `media_item` -- the one table the shell's three counts read (`useCounts.ts`'s
+ * `CATEGORIES`) -- is a *host* synced table (`HOST_SYNCED_TABLES`), synced with
+ * no plugin involved at all. `seedMediaItem` below inserts into it directly,
+ * the same seam `packages/host/test/api/sync-route.test.ts`'s own
+ * `seedMediaItem` uses, so a spec can grow the replica's source of truth with
+ * no feed, no lookup service and no job to produce one. (`stubPlugin`, below,
+ * *is* registered -- on the `Host` this file builds for `addFeed`, a
+ * different map from the sync registry's -- see that paragraph for why this
+ * one no longer means "no plugin exists anywhere in this harness".)
+ *
+ * **The `Host` this file builds for `addFeed` is deliberately never
+ * started.** `createHost` gets real `fetch`/`downloads`/`secrets` wiring and
+ * three registered `stubPlugin`s, so `Host.addFeed`'s own `isRegistered`
+ * check accepts the same three categories `AddFeed.tsx`'s form offers --
+ * but `host.start()` is never called anywhere in this file. `Host.addFeed`
+ * still calls `schedulePoll`, which still enqueues a `poll` job row, but
+ * `schedulePoll`'s own `if (started) dispatcher.rearm()` guard (`host.ts`)
+ * means an unstarted host's enqueue arms no timer, so that job never runs.
+ * The write path this harness exists to test does not need it to:
+ * `rss_feed` reaching a client's replica goes through that table's own
+ * `AFTER INSERT` trigger into `sync_log` (`sync/log.ts`'s
+ * `installSyncTriggers`), committed synchronously with the insert itself,
+ * and `/api/sync`'s tail is what a client polls from there -- neither step
+ * depends on anything having polled the feed's own url. **A spec that needs
+ * that poll to actually dispatch -- fetching a feed, inserting `rss_item`
+ * rows, notifying a plugin -- will hang to Playwright's own timeout here,
+ * not fail with a message naming the gap:** nothing in this harness ever
+ * runs that job, and nothing at the call site says so.
  *
  * **The claim token is read from the database, not from a boot log.** The
  * task brief for this harness said to capture it off `main`'s stdout; that
@@ -179,16 +201,11 @@ async function boot(): Promise<Booted> {
   const server = await createReadServer({
     raw,
     pluginIdForType: () => undefined,
-    // `Host.addFeed` -- the same method `main.ts` wires to this exact route
-    // -- validates the body, inserts the `rss_feed` row and schedules its
-    // first poll. This harness never calls `host.start()`, so that schedule
-    // never actually dispatches (`host.ts`'s own `started` flag doc: an
-    // enqueue before `start()` is inert, not harmful) -- nothing here ever
-    // fetches a feed's url. What a spec needs from a successful `addFeed`
-    // is only the row it leaves in `rss_feed`; the database's own sync
-    // trigger logs that the moment the insert commits, independent of
-    // whether anything ever polls it, and `/api/sync` is what carries it to
-    // a client from there.
+    // `Host.addFeed` -- the same method `main.ts` wires to this exact
+    // route. See this module's own doc ("The `Host` this file builds for
+    // `addFeed` is deliberately never started") for why the poll it
+    // schedules never runs, and why that is fine for what this harness
+    // tests.
     addFeed: (input) => host.addFeed(input),
     registry,
     generation,

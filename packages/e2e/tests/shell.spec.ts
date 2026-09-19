@@ -294,13 +294,24 @@ test('the empty state reads as an aside, not as content waiting to be filled in'
 });
 
 /*
- * The feed-settings slice's own browser proof (task 6's brief): the write
- * route, the host's invariants, the sync round trip, and the list updating
- * from the replica -- the whole slice in one spec, plus `settings.css`'s
- * own computed-style pin, proved against deletion the same way the browse
- * pins above were (task 6's own acceptance step: delete the import, confirm
- * this fails, restore by checksum-verified copy -- run and reported
- * separately from this diff).
+ * The feed-settings slice's own browser proof (task 6's brief). What this
+ * spec actually measures, stated precisely rather than as "the whole
+ * slice", which overclaims: the write route answers and the row lands in
+ * `rss_feed`; the sync round trip carries it to this tab's replica through
+ * `rss_feed`'s own `AFTER INSERT` trigger into `sync_log` and this tab's
+ * `/api/sync` tail, with no dependency on anything actually polling the
+ * feed; and the list re-renders from that replica, not from the POST's own
+ * `{ id }` body. Plus `settings.css`'s own computed-style pin, proved
+ * against deletion the same way the browse pins above were (task 6's own
+ * acceptance step: delete the import, confirm this fails, restore by
+ * checksum-verified copy -- run and reported separately from this diff).
+ *
+ * **What this spec does not cover.** `feeds/add.ts`'s four refusal
+ * invariants (`unknown-plugin`, `duplicate-url`, `bad-download-type`,
+ * `bad-poll-interval`) are exercised at the unit level, not here. Nor does
+ * anything here exercise `Host.addFeed`'s own `schedulePoll` actually
+ * dispatching -- `harness-2.ts`'s own module doc explains why this
+ * harness's `Host` never reaches that path at all.
  */
 
 test('an operator can add a feed and see it listed', async ({ page, harness }) => {
@@ -332,4 +343,32 @@ test('an operator can add a feed and see it listed', async ({ page, harness }) =
   // for `library.css`, drawn here for the stylesheet this task adds.
   const list = page.getByRole('list', { name: 'feeds' });
   await expect(list).toHaveCSS('list-style-type', 'none');
+
+  // A second, independent rule -- not the one just checked. `list-style:
+  // none` alone pins only `ul[aria-label='feeds']`'s own reset; deleting
+  // every other rule in `settings.css` (the border, the spacing, the form
+  // rules) leaves that one assertion green, which proves the stylesheet
+  // exists but not that its meaningful rules survive. `ul[aria-label='feeds']
+  // li`'s `border-top: 1px solid var(--color-line)` is a separate rule
+  // block this task also added, so pinning it closes that gap.
+  //
+  // Compared against the token's own resolved colour rather than a literal
+  // `rgb(...)`, because `--color-line` differs between the light and dark
+  // palettes (`tokens.css`) and this suite does not pin which one a given
+  // run resolves to. A throwaway element styled with the same
+  // `var(--color-line)` and read back gives the browser's own canonical
+  // form of that token, in whichever palette is active, to compare against.
+  const item = list.locator('li').first();
+  await expect(item).toBeVisible();
+  const [borderTopColor, lineTokenColor] = await page.evaluate(() => {
+    const li = document.querySelector("ul[aria-label='feeds'] li");
+    if (li === null) throw new Error('feeds list has no li to read a border colour from');
+    const probe = document.createElement('div');
+    probe.style.color = 'var(--color-line)';
+    document.body.appendChild(probe);
+    const resolved = getComputedStyle(probe).color;
+    probe.remove();
+    return [getComputedStyle(li).borderTopColor, resolved];
+  });
+  expect(borderTopColor).toBe(lineTokenColor);
 });
