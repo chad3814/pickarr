@@ -141,6 +141,55 @@ export const DEFAULT_PORT = 8787;
 export const MAX_BODY_BYTES = 16 * 1024;
 
 /**
+ * How long one request has to arrive in full -- request line, headers and
+ * body -- before node answers `408` and drops the socket.
+ *
+ * **`MAX_BODY_BYTES` bounds how much a client may send; this bounds how long
+ * it may take.** Without both, a client that announces `Content-Length: 1000`,
+ * sends one byte and stops holds a socket with no response and no refusal:
+ * measured on the commit before this one at 15s and still waiting, since the
+ * only bound in play was node's own 300s `requestTimeout` default. Nothing in
+ * this module timed the read out on its own.
+ *
+ * **Five seconds, and which bound that is.** `requestTimeout` is the one that
+ * applies, because it covers headers *and* body and it is the body that was
+ * unbounded here; node's `headersTimeout` alone would not have caught this
+ * request, whose headers were complete. The value is sized against
+ * `MAX_BODY_BYTES`: 16 KiB in 5s is 3.2 KiB/s, slower than any link a client
+ * of this host is reachable over, so no honest request can hit it. It is per
+ * request and cleared once the request is fully received, so it bounds
+ * neither a slow *response* nor an idle keep-alive connection -- the latter
+ * is `keepAliveTimeout`'s (node's 5s default), left alone.
+ *
+ * `headersTimeout` is left at node's default, which node itself clamps to
+ * `requestTimeout` when that is the smaller of the two -- asserted in
+ * `server.test.ts` rather than trusted, since a clamp that stopped happening
+ * would leave headers bounded at 60s with nothing saying so.
+ */
+export const REQUEST_TIMEOUT_MS = 5_000;
+
+/**
+ * How often node sweeps open connections looking for one that has blown
+ * `REQUEST_TIMEOUT_MS`.
+ *
+ * **Setting `requestTimeout` alone does not bound anything to
+ * `requestTimeout`.** Node does not arm a timer per request; it walks the
+ * connection list on an interval and answers `408` to whatever it finds
+ * expired, so the real bound is the timeout rounded up to the next sweep.
+ * With node's 30s default that is what the same slow-body request measured:
+ * `requestTimeout` at 5s, `408` arriving at **29,904ms**. Dropping the sweep
+ * to one second is what makes the five seconds mean five: the same request
+ * measured **5,912ms**. So the bound to quote an operator is
+ * `REQUEST_TIMEOUT_MS + CONNECTIONS_CHECK_MS` in the worst case, not
+ * `REQUEST_TIMEOUT_MS` alone.
+ *
+ * One second, not less: the sweep is a walk of the open connections on a
+ * timer, so its cost scales with how often it runs, and a tenth of a second
+ * would buy nothing a client could notice against a five-second bound.
+ */
+export const CONNECTIONS_CHECK_MS = 1_000;
+
+/**
  * The read API's own contract version, as `/api/health` reports it -- not the
  * package version.
  *
@@ -832,7 +881,10 @@ export const ROUTES: readonly Route[] = [
     // that no SQL and no business rule belongs in this file. Duplicating
     // them here is how the two copies drift.
     answer: async ({ deps, body }) => {
-      if (!isFeedBody(body)) return json(400, { error: 'invalid feed' });
+      // `{ refusal }` and no prose, for the reason `MALFORMED_BODY`'s doc
+      // gives: these two are the only answers here that share a status, so
+      // an english string was the whole of what told them apart.
+      if (!isFeedBody(body)) return json(400, { refusal: 'invalid-shape' });
       const result = await deps.addFeed(body);
       if ('refusal' in result) {
         return json(statusForFeedRefusal(result.refusal), { refusal: result.refusal });
@@ -928,17 +980,31 @@ function routeFor(pathname: string): Route | undefined {
  * with a page of data, which is not a thing any route here should ever
  * appear to accept.
  *
- * **The order matters.** The method check runs only for a route that
- * exists (`route !== undefined`) -- an unknown path is never told it failed
- * a method check, since that would be a way to learn the path is shaped
- * like something real. A path no route claims stays a question for the
- * session check below, exactly as it always was, and `answerFor` is what
- * turns it into the 404 once a session has cleared that check. That check
- * stays ahead of the guard, and costs nothing: every route's wrong-method
- * answer is the same 405 whether or not the caller has a session, so the
- * ordering tells an anonymous caller nothing it could not have worked out
- * from the route's own path. Better Auth's own POSTs never reach here --
- * `handle` dispatched them already.
+ * **The order matters, and it is session-first.** For anything but an open
+ * route the session check runs *before* the method check, so a caller with
+ * no session gets `401` and learns nothing else -- whatever method they
+ * sent, and whether or not the path they sent it to names a route.
+ *
+ * That ordering was the other way round for one commit, and it leaked.
+ * Measured on that commit: anonymous `POST /api/media?type=movie` answered
+ * `405` while anonymous `POST /api/no-such-path` answered `401`, so a POST
+ * was a path-existence oracle -- ask twice and the pair of statuses names
+ * which `/api` paths exist. GETs were uniform `401` and hid it, which is
+ * why the leak needs a *cross-path* comparison to see, not a
+ * with-session/without-session one. The blanket non-`GET` refusal this
+ * slice replaced had answered both POSTs `405`, so it was a regression and
+ * not a property the API always had.
+ *
+ * Nothing the old order bought is lost. Measured on the order below: a
+ * signed-in caller still gets `405` for a method a route does not declare
+ * (`POST /api/media`, `GET /api/feeds`) and still gets `404`, not `405`,
+ * for a path no route claims -- the method check is skipped for
+ * `route === undefined`, so an unknown path is never told it failed a check
+ * only a real route could fail, and `answerFor` turns it into the 404. The
+ * two open routes still answer `405` to an anonymous wrong-method request,
+ * since `open` skips the session check: that tells a caller nothing, as
+ * both are open by definition and the path alone already says so. Better
+ * Auth's own POSTs never reach here -- `handle` dispatched them already.
  *
  * **The guard tests the value the session check resolves to.** Not its
  * status: an unauthenticated check answers `200` with a body of `null` (the
@@ -954,12 +1020,14 @@ function routeFor(pathname: string): Route | undefined {
  */
 async function refusalFor(serving: Serving, target: URL | null, request: IncomingMessage): Promise<Answer | null> {
   const route = target === null ? undefined : routeFor(target.pathname);
+  if (route?.open !== true) {
+    const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+    if (session === null) return UNAUTHORIZED;
+  }
   if (route !== undefined && !route.methods.includes(request.method ?? '')) {
     return json(405, { error: 'method not allowed' });
   }
-  if (route?.open === true) return null;
-  const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
-  return session === null ? UNAUTHORIZED : null;
+  return null;
 }
 
 /**
@@ -1020,8 +1088,20 @@ function messageOf(error: unknown): string {
 /** The fixed 413 an oversized body is refused with -- fixed for the same reason `UNKNOWN_ROUTE` is: nothing of the body it refused is ever worth repeating. */
 const PAYLOAD_TOO_LARGE = json(413, { error: 'payload too large' });
 
-/** The fixed 400 a body that is not valid json is refused with. */
-const MALFORMED_BODY = json(400, { error: 'malformed json body' });
+/**
+ * The fixed 400 a body that is not valid json is refused with.
+ *
+ * **`refusal`, and no `error` beside it.** This and `invalid-shape` are the
+ * only two answers this API gives that share a status, so before this they
+ * were told apart by an english string and by nothing else -- which is the
+ * one thing the constraint on refusal codes forbids. They now carry the same
+ * single-field shape the `409` and `422` refusals already carried, so a
+ * client branches on `refusal` for every answer `POST /api/feeds` refuses a
+ * *body* with, rather than on `refusal` sometimes and prose the rest of the
+ * time. The prose is gone rather than kept alongside: a body carrying both
+ * is a body a client can still be tempted to read the wrong half of.
+ */
+const MALFORMED_BODY = json(400, { refusal: 'malformed-body' });
 
 /**
  * Reads `request`'s body for anything but a `GET` -- `handle` never calls
@@ -1215,7 +1295,14 @@ function originOf(address: AddressInfo): string {
  * without yielding.
  */
 export async function createReadServer(deps: ReadServerDeps): Promise<ReadServer> {
-  const server = createServer();
+  // `REQUEST_TIMEOUT_MS`'s own doc says why this bound and not another, and
+  // `CONNECTIONS_CHECK_MS`'s says why the second option is not optional.
+  // Both passed to `createServer` rather than assigned afterwards, so there
+  // is no window in which a listener is up without them.
+  const server = createServer({
+    requestTimeout: REQUEST_TIMEOUT_MS,
+    connectionsCheckingInterval: CONNECTIONS_CHECK_MS,
+  });
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
