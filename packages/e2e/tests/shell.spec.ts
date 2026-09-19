@@ -278,10 +278,12 @@ test('the empty state reads as an aside, not as content waiting to be filled in'
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
 
-  // `/unmatched` has no nav link of its own (`Shell.tsx`'s nav only maps
-  // over the three categories), so this is a direct navigation rather than a
-  // click -- the same deep-link path the first spec in this file exercises,
-  // now while already signed in.
+  // A direct navigation rather than a click, deliberately: this is the
+  // deep-link path the first spec in this file exercises, now while already
+  // signed in. `/unmatched` does have a nav link as of the feed-settings
+  // slice (spec 4's sentence presumed one, and task 5's review found it
+  // missing), so a click would reach the same screen -- it would just stop
+  // covering deep-linking, which is the only thing this spec is here for.
   await page.goto(`${harness.origin}/unmatched`);
 
   // `library.css`'s `section > p` rule sets `font-style: italic`, which the
