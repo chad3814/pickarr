@@ -448,7 +448,10 @@ test('a url that parses but names no host projects as the empty string, not the 
   // `URL.parse('qbit.example:8080')` succeeds with scheme `qbit.example:`,
   // `hostname: ''` and `origin: 'null'`. A projection guarded only on
   // `parsed !== null` would build `origin + pathname` out of those and put
-  // the six characters `null8080` in front of an operator as an address.
+  // the eight characters `null8080` in front of an operator as an address --
+  // eight, as `clientAddress`'s own docblock says; "six" here was a
+  // miscount, and the test comment contradicting the code it tests is
+  // exactly the drift this file exists to stop.
   // This is the whole reason the guard here is on the scheme rather than on
   // parsing, and it is constructed rather than argued.
   const { raw } = openTestDatabase();

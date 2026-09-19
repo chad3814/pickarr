@@ -61,7 +61,7 @@ export function assertSyncedTableName(pluginId: string, table: string): void {
  * (`create`/`upsert`/`delete`) and the two rules a client applies them by
  * are stated.
  *
- * **The host's seven do carry an `id`, and that does not contradict the
+ * **The host's eight do carry an `id`, and that does not contradict the
  * paragraph above.** `sync/tables.ts` projects `id` because its `SELECT`s
  * are the row and nothing maps them, and `readHostRows` keys its result by
  * that column -- so the field is there whether or not a client reads it. It

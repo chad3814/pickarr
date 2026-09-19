@@ -1268,6 +1268,27 @@ test('migration 17 installs the download client triggers and seeds a client alre
     'a client that predates this migration must be indexed, or no replica ever learns it exists');
 });
 
+/**
+ * The `op` of one `sync_log` row, narrowed with `in` rather than cast.
+ *
+ * The same guard shape the migration 17 seed test above uses inline, and the
+ * reason it is a function here is that the test below reads `op` three
+ * times. `(row as { … })` is the older spelling and 53 lines of this file
+ * still use it, so replacing them is not this task -- but the two spellings
+ * had ended up in *adjacent tests written in the same commit*, one of them
+ * already using the guard, and that is the one place the inconsistency is
+ * nobody's inheritance.
+ */
+function opsLogged(raw: ReturnType<typeof openTestDatabase>['raw'], table: string): string[] {
+  return raw.prepare('SELECT op FROM sync_log WHERE table_name = ?').all(table)
+    .map((row) => {
+      if (typeof row !== 'object' || row === null || !('op' in row)) {
+        throw new Error('sync_log row has no op');
+      }
+      return String(row.op);
+    });
+}
+
 test('migration 17\'s triggers, not only its seed, log a download client written afterwards', () => {
   // The seed and the triggers are two separate calls, and this drives the
   // triggers rather than inspecting `sqlite_master` for them: a trigger that
@@ -1290,19 +1311,14 @@ test('migration 17\'s triggers, not only its seed, log a download client written
     INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
     VALUES (1, 'qbit', 'torrent', 'http://qbit.local:8080', 'tv', 'copy', 1, 1)
   `).run();
-  const afterInsert = raw.prepare("SELECT op FROM sync_log WHERE table_name = 'download_client'").all()
-    .map((row) => String((row as { op: unknown }).op));
-  assert.deepEqual(afterInsert, ['upsert'], 'the insert trigger logs');
+  assert.deepEqual(opsLogged(raw, 'download_client'), ['upsert'], 'the insert trigger logs');
 
   raw.prepare("UPDATE download_client SET category = 'movies' WHERE id = 1").run();
-  const afterUpdate = raw.prepare("SELECT op FROM sync_log WHERE table_name = 'download_client'").all()
-    .map((row) => String((row as { op: unknown }).op));
-  assert.deepEqual(afterUpdate, ['upsert'], 'the update trigger re-logs the row, collapsed onto one entry');
+  assert.deepEqual(opsLogged(raw, 'download_client'), ['upsert'],
+    'the update trigger re-logs the row, collapsed onto one entry');
 
   raw.prepare('DELETE FROM download_client WHERE id = 1').run();
-  const afterDelete = raw.prepare("SELECT op FROM sync_log WHERE table_name = 'download_client'").all()
-    .map((row) => String((row as { op: unknown }).op));
-  assert.deepEqual(afterDelete, ['delete'], 'the delete trigger tombstones it');
+  assert.deepEqual(opsLogged(raw, 'download_client'), ['delete'], 'the delete trigger tombstones it');
 });
 
 test('the seed stamps `at` in real milliseconds, like the triggers', () => {
