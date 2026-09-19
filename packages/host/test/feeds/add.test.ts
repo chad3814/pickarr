@@ -139,7 +139,7 @@ test('a poll interval below the floor is refused', async () => {
 
 test('a bad download type is refused', async () => {
   const { host } = setupHost({ registered: ['movie'] });
-  const result = await host.addFeed({ ...input(), downloadType: 'magnet' as AddFeedInput['downloadType'] });
+  const result = await host.addFeed({ ...input(), downloadType: 'magnet' });
   assert.deepEqual(result, { refusal: 'bad-download-type' });
 });
 
