@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +16,16 @@ import type { AddFeedInput } from '../../src/feeds/add.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
-import { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, MAX_BODY_BYTES, ROUTES, createReadServer } from '../../src/api/server.ts';
+import {
+  API_VERSION,
+  CONNECTIONS_CHECK_MS,
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+  MAX_BODY_BYTES,
+  REQUEST_TIMEOUT_MS,
+  ROUTES,
+  createReadServer,
+} from '../../src/api/server.ts';
 
 /**
  * One database behind both handles: `raw` for the fixtures and the read
@@ -1311,6 +1321,99 @@ test('a route answers 405 for a method it does not declare, per route', async ()
     assert.equal(postOnly.status, 405, 'GET to a POST-only route is refused');
   } finally {
     await server.close();
+  }
+});
+
+test('a body that never arrives is timed out rather than held open', async () => {
+  // `MAX_BODY_BYTES` bounds how much a client may send and nothing bounded
+  // how long it could take: a signed-in request announcing
+  // `Content-Length: 1000` that sends one byte and stops held a socket with
+  // no response at all -- measured on the commit before this one at 15s and
+  // still waiting, since the only bound was node's 300s `requestTimeout`
+  // default.
+  //
+  // **Both options, because `requestTimeout` alone is not a bound of
+  // `requestTimeout`.** Node sweeps connections on an interval rather than
+  // arming a timer per request, so with the sweep at its 30s default a 5s
+  // `requestTimeout` produced a 408 at 29,904ms. This test would pass on
+  // that, given a long enough wait, which is why the bound below is derived
+  // from the two constants together and not from `REQUEST_TIMEOUT_MS`: drop
+  // `connectionsCheckingInterval` from `createReadServer` and the wait
+  // exceeds it.
+  //
+  // Over a raw socket because no `fetch` expresses "announce a length and
+  // then do not send it", and a session because `refusalFor` answers an
+  // anonymous caller before `readBody` is ever reached.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addFeed: async () => ({ id: 1 }),
+  });
+  const socket = connect({ port: server.port, host: server.host });
+  try {
+    await once(socket, 'connect');
+    socket.on('error', () => {});
+
+    let received = '';
+    const answered = new Promise<void>((resolve) => {
+      socket.on('data', (chunk: Buffer) => {
+        received += chunk.toString('utf8');
+        if (received.includes('\r\n')) resolve();
+      });
+    });
+
+    socket.write(
+      `POST /api/feeds HTTP/1.1\r\nHost: localhost\r\nCookie: ${cookie}\r\n`
+      + 'Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{',
+    );
+
+    // One sweep of slack past the worst case the two constants allow, plus a
+    // second of scheduling room. A failure here is an assertion naming the
+    // wait rather than a file that hangs for the 300s the default would
+    // have taken.
+    const bound = REQUEST_TIMEOUT_MS + (CONNECTIONS_CHECK_MS * 2) + 1_000;
+    await Promise.race([
+      answered,
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(
+            `no answer within ${String(bound)}ms to a body that never arrived; `
+            + `received so far: ${JSON.stringify(received.slice(0, 120))}`,
+          ));
+        }, bound);
+        timer.unref();
+      }),
+    ]);
+
+    assert.ok(
+      received.startsWith('HTTP/1.1 408'),
+      `the half-sent request is timed out, not held: ${JSON.stringify(received.slice(0, 60))}`,
+    );
+  } finally {
+    socket.destroy();
+    await server.close();
+  }
+});
+
+test('the request timeout node is given bounds the headers too', () => {
+  // The claim `REQUEST_TIMEOUT_MS`'s doc makes about `headersTimeout`, which
+  // is node's behaviour and not this module's: given a `requestTimeout`
+  // smaller than the 60s `headersTimeout` default, node clamps the latter to
+  // the former. Asserted because a node upgrade that stopped clamping would
+  // silently leave a half-sent *header* block bounded at 60s while every
+  // comment here said five seconds, and nothing else would notice.
+  //
+  // Built here rather than read off `createReadServer`, which exposes no
+  // timeouts: what this pins is the assumption, and the test above pins that
+  // `createReadServer` passes the options that trigger it.
+  const probe = createServer({
+    requestTimeout: REQUEST_TIMEOUT_MS,
+    connectionsCheckingInterval: CONNECTIONS_CHECK_MS,
+  });
+  try {
+    assert.equal(probe.requestTimeout, REQUEST_TIMEOUT_MS, 'the option is taken as given');
+    assert.equal(probe.headersTimeout, REQUEST_TIMEOUT_MS, 'and headers are clamped to it, not left at 60s');
+  } finally {
+    probe.close();
   }
 });
 

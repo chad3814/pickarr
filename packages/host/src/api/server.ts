@@ -141,6 +141,55 @@ export const DEFAULT_PORT = 8787;
 export const MAX_BODY_BYTES = 16 * 1024;
 
 /**
+ * How long one request has to arrive in full -- request line, headers and
+ * body -- before node answers `408` and drops the socket.
+ *
+ * **`MAX_BODY_BYTES` bounds how much a client may send; this bounds how long
+ * it may take.** Without both, a client that announces `Content-Length: 1000`,
+ * sends one byte and stops holds a socket with no response and no refusal:
+ * measured on the commit before this one at 15s and still waiting, since the
+ * only bound in play was node's own 300s `requestTimeout` default. Nothing in
+ * this module timed the read out on its own.
+ *
+ * **Five seconds, and which bound that is.** `requestTimeout` is the one that
+ * applies, because it covers headers *and* body and it is the body that was
+ * unbounded here; node's `headersTimeout` alone would not have caught this
+ * request, whose headers were complete. The value is sized against
+ * `MAX_BODY_BYTES`: 16 KiB in 5s is 3.2 KiB/s, slower than any link a client
+ * of this host is reachable over, so no honest request can hit it. It is per
+ * request and cleared once the request is fully received, so it bounds
+ * neither a slow *response* nor an idle keep-alive connection -- the latter
+ * is `keepAliveTimeout`'s (node's 5s default), left alone.
+ *
+ * `headersTimeout` is left at node's default, which node itself clamps to
+ * `requestTimeout` when that is the smaller of the two -- asserted in
+ * `server.test.ts` rather than trusted, since a clamp that stopped happening
+ * would leave headers bounded at 60s with nothing saying so.
+ */
+export const REQUEST_TIMEOUT_MS = 5_000;
+
+/**
+ * How often node sweeps open connections looking for one that has blown
+ * `REQUEST_TIMEOUT_MS`.
+ *
+ * **Setting `requestTimeout` alone does not bound anything to
+ * `requestTimeout`.** Node does not arm a timer per request; it walks the
+ * connection list on an interval and answers `408` to whatever it finds
+ * expired, so the real bound is the timeout rounded up to the next sweep.
+ * With node's 30s default that is what the same slow-body request measured:
+ * `requestTimeout` at 5s, `408` arriving at **29,904ms**. Dropping the sweep
+ * to one second is what makes the five seconds mean five: the same request
+ * measured **5,912ms**. So the bound to quote an operator is
+ * `REQUEST_TIMEOUT_MS + CONNECTIONS_CHECK_MS` in the worst case, not
+ * `REQUEST_TIMEOUT_MS` alone.
+ *
+ * One second, not less: the sweep is a walk of the open connections on a
+ * timer, so its cost scales with how often it runs, and a tenth of a second
+ * would buy nothing a client could notice against a five-second bound.
+ */
+export const CONNECTIONS_CHECK_MS = 1_000;
+
+/**
  * The read API's own contract version, as `/api/health` reports it -- not the
  * package version.
  *
@@ -1231,7 +1280,14 @@ function originOf(address: AddressInfo): string {
  * without yielding.
  */
 export async function createReadServer(deps: ReadServerDeps): Promise<ReadServer> {
-  const server = createServer();
+  // `REQUEST_TIMEOUT_MS`'s own doc says why this bound and not another, and
+  // `CONNECTIONS_CHECK_MS`'s says why the second option is not optional.
+  // Both passed to `createServer` rather than assigned afterwards, so there
+  // is no window in which a listener is up without them.
+  const server = createServer({
+    requestTimeout: REQUEST_TIMEOUT_MS,
+    connectionsCheckingInterval: CONNECTIONS_CHECK_MS,
+  });
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
