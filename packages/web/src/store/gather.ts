@@ -13,15 +13,19 @@
  * **No artwork rows.** Artwork is not replicated (design spec §1.2, #79); the
  * three urls below are the whole of what this gatherer can say about it.
  *
- * **`feedId` and `downloadClientId` are carried through untouched, and this
- * gatherer's obligation toward each is no longer the same.** `download_client`
- * is not synced, deliberately (design spec §2.4), so `downloadClientId` can
- * never resolve to a name from the replica and surfacing the bare id is the
- * whole of what this gatherer owes it. `rss_feed` *is* synced now
- * (`sync/tables.ts`), so `feedId` does resolve -- through `rss_feed`, a
- * table this six-table gatherer does not name and, by the paragraph above,
- * never will. Resolving it is therefore a caller's join against
- * `store/rows.ts` directly, not this module's job.
+ * **`feedId` and `downloadClientId` are carried through untouched, and both
+ * are now resolvable by someone -- just not here.** This paragraph used to
+ * record an asymmetry: `rss_feed` was synced and `download_client` was not
+ * (the storage design spec's §2.4), so surfacing a bare `downloadClientId`
+ * was the whole of what this gatherer owed it. The download clients slice
+ * ended that -- `download_client` joined `HOST_SYNCED_TABLES` and
+ * `DownloadClientSyncRead` is its projection -- so both ids now name a row
+ * the replica actually holds. Neither is resolved here all the same, for
+ * the reason the paragraph above gives rather than for want of a row: this
+ * gatherer names six tables and neither of those two is among them.
+ * Resolving either is a caller's join against `store/rows.ts` directly --
+ * `settings/useDownloadClients.ts` reads `download_client` exactly that
+ * way -- not this module's job.
  */
 import type {
   MediaItemSyncRead,
@@ -42,9 +46,9 @@ import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
  * this module and to a plugin's `compose.ts`, never to the store itself).
  * This gatherer does know, for exactly the six tables it names, because
  * `@pickarr/contract`'s `*SyncRead` interface for each of those six -- one
- * of seven now that `rss_feed` has joined the synced set, the seventh named
- * nowhere in this module -- is pinned to the projection the host actually
- * emits for it (`packages/host/test/sync/tables.test.ts` is what keeps the
+ * of eight now that `rss_feed` and `download_client` have joined the synced
+ * set, neither of the other two named anywhere in this module -- is pinned
+ * to the projection the host actually emits for it (`packages/host/test/sync/tables.test.ts` is what keeps the
  * two from drifting).
  *
  * **Knowing the shape is not the same as having checked it, so these check.**

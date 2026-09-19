@@ -124,11 +124,14 @@ test('feedId and downloadClientId are surfaced as ids, because the replica canno
   const gathered = await gatherMediaItem(db, 7);
 
   assert.ok(gathered !== undefined);
-  // Pinned deliberately (design spec §2.4): neither id resolves to a name
-  // from the replica alone -- `rss_feed` and `download_client` are not
-  // synced -- so the gatherer's whole obligation here is to pass the bare
-  // id through unchanged, and a later change to that is meant to be visible
-  // in this test rather than silent.
+  // Pinned deliberately: both tables are synced now (`rss_feed` in the feed
+  // settings slice, `download_client` in the download clients one), so both
+  // ids *could* be resolved -- but not by this gatherer, which names six
+  // tables and neither of those two. Its whole obligation here is to pass
+  // the bare id through unchanged, and a later change to that is meant to
+  // be visible in this test rather than silent. (This comment used to say
+  // neither table was synced, which was true when it was written and is
+  // not now.)
   assert.equal(gathered.releases[0]?.row.feedId, 42);
   assert.equal(gathered.releases[0]?.downloads[0]?.row.downloadClientId, 77);
   db.close();
