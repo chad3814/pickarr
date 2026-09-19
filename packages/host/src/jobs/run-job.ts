@@ -8,8 +8,23 @@ import { redactUrl } from '../clients/redact.ts';
  * How long a handler may run before the dispatcher gives up on it and fails
  * its row. Enforced here, never requested of the handler: nothing can kill a
  * JavaScript function mid-execution, so this bounds the row, not the work.
+ *
+ * **Deliberately above the largest per-hostname fetch timeout**
+ * (`fetch/queue.ts`'s `FetchTimeouts`, whose slowest entry is the lookup
+ * service's five minutes -- the hard ceiling of the platform it runs on).
+ * When the two were both five minutes this one always won, because it is
+ * armed when the job starts and the fetch timeout only when the request is
+ * issued: the fetch ceiling could never fire, and a slow lookup surfaced as
+ * a job killed for running long rather than as a timeout naming the url.
+ * The gap is what keeps those two distinguishable in a log, and what lets a
+ * request actually use the whole window the far end allows.
+ *
+ * Raising this raises how long one dead-lettered row can hold a dispatcher
+ * slot, which is the cost. Lowering the fetch ceiling instead was the
+ * alternative, and it buys the same separation by giving every lookup less
+ * time than its service is willing to spend.
  */
-export const JOB_TIMEOUT_MS = 300_000;
+export const JOB_TIMEOUT_MS = 360_000;
 
 /**
  * How long a handler gets to unwind cooperatively once its signal aborts,
@@ -23,7 +38,7 @@ function readClaimedRow(row: Record<string, unknown>): { attempts: number; maxAt
 }
 
 /**
- * One job's lifecycle: claim the row, race the handler against a five-minute
+ * One job's lifecycle: claim the row, race the handler against a six-minute
  * abort, and write the outcome back so a handler that settles after its own
  * timeout cannot undo what the timeout already decided -- nor decide anything
  * about a later attempt that has since re-claimed the same row. See the
