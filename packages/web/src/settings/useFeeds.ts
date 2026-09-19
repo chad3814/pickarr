@@ -47,13 +47,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The two fields this hook dereferences -- `name` for the heading and `url`
- * (already redacted by the host; see `RssFeedSyncRead`'s own doc) alongside
- * it -- and no more, matching `store/gather.ts`'s own predicates' rule of
- * checking exactly what a module reads off a row.
+ * The three fields this module dereferences -- `id` (the React key in
+ * `Feeds.tsx`, and this file's own test harness), `name` for the heading,
+ * and `url` (already redacted by the host; see `RssFeedSyncRead`'s own doc)
+ * -- and no more, matching `store/gather.ts`'s own predicates' rule of
+ * checking exactly what a module reads off a row (fix round 1,
+ * review-found: `id` was missing even though `Feeds.tsx` reads it).
  */
 function isRssFeed(value: unknown): value is RssFeedSyncRead {
-  return isRecord(value) && typeof value.name === 'string' && typeof value.url === 'string';
+  return (
+    isRecord(value) &&
+    typeof value.id === 'number' &&
+    typeof value.name === 'string' &&
+    typeof value.url === 'string'
+  );
 }
 
 function toFeeds(rows: readonly StoredRow[]): readonly RssFeedSyncRead[] {

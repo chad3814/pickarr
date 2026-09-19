@@ -26,9 +26,11 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
  * One `upsert` `SyncOp` for `rss_feed` -- an `upsert`, not a `create`: the
  * live tail (`packages/host/src/sync/tail.ts`) never emits `create`, only
  * `upsert` for a row's current state, so a test seeded with `create` would
- * prove less than it appears to (task 5's ruling; contrast
- * `Category.test.tsx`'s `mediaItem` helper, which legitimately builds a
- * `create` for a different reason stated there).
+ * prove less than it appears to (task 5's ruling). `Category.test.tsx`'s own
+ * `mediaItem` helper builds a `create` instead -- its docblock states no
+ * reason beyond "matching `useMediaItems.test.tsx`'s own helper" (fix round
+ * 1, review-found: an earlier version of this comment claimed one that is
+ * not there), so that choice is not a precedent this helper follows.
  */
 function feedOp({ id, name, url = 'https://tracker.example/rss?apikey=***' }: { id: number; name: string; url?: string }): SyncOp {
   return {
@@ -82,7 +84,11 @@ function fillFeedForm({ name, url }: { name: string; url: string }): void {
 test('the settings screen carries the route-mapping marker on its root element', async () => {
   const db = await freshDb();
   render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
-  assert.ok(screen.getByTestId('settings'), 'the marker names this screen');
+  // `getByTestId` alone can never fail the assertion below (it throws first
+  // on absence), which proves nothing beyond what the throw already would --
+  // asserting the marked element's own tag pins something real: the marker
+  // sits on the screen's root `<section>`, not on some inner wrapper.
+  assert.equal(screen.getByTestId('settings').tagName, 'SECTION', 'the marker sits on the root element');
 });
 
 test('the list shows a feed by name and host, from the replica', async () => {
@@ -90,21 +96,52 @@ test('the list shows a feed by name and host, from the replica', async () => {
   await seed(db, [feedOp({ id: 1, name: 'Movies HD', url: 'https://tracker.example/rss?apikey=***' })]);
   render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
   await waitFor(() => {
-    assert.ok(screen.getByRole('heading', { name: 'Movies HD' }), 'the feed is named');
+    // A length check, not `assert.ok(getByRole(...))`: the latter can only
+    // ever pass once the query stops throwing, which proves nothing beyond
+    // "found at least one" -- this also catches a duplicate render, the
+    // class of defect `useMediaItems.ts`'s own `windowGenerationRef` doc
+    // names a real instance of.
+    assert.equal(screen.getAllByRole('heading', { name: 'Movies HD' }).length, 1, 'the feed is named, exactly once');
   });
-  assert.ok(screen.getByText('https://tracker.example/rss?apikey=***'), 'the redacted url is shown as-is');
+  const urlText = screen.getByText('https://tracker.example/rss?apikey=***');
+  assert.equal(urlText.tagName, 'P', 'the redacted url is shown as-is, as its own line of text');
 });
 
-test('adding a feed puts it in the list without a refetch', async () => {
+test('clicking Add feed calls submit, and the row appears through the replica\'s own subscription, not a refetch', async () => {
   // The payoff of syncing the table: the POST answers only "accepted", and
-  // the row arrives through the replica's own subscription.
+  // the row arrives through the replica's own subscription -- not because
+  // `submit` itself wrote anything (it does not touch `db` at all).
+  //
+  // A `submit` that resolves and never checking it was *called* would pass
+  // even if the click did nothing at all: the row would still show up,
+  // because it comes from the `seed` call below regardless (fix round 1,
+  // review-found -- M5). `submitCalls` is what proves the click is the
+  // thing that fired the request.
   const db = await freshDb();
-  render(<Feeds source={sourceFor(db)} submit={() => Promise.resolve({ id: 1 })} />);
+  let submitCalls = 0;
+  render(
+    <Feeds
+      source={sourceFor(db)}
+      submit={() => {
+        submitCalls += 1;
+        return Promise.resolve({ id: 1 });
+      }}
+    />,
+  );
   fillFeedForm({ name: 'Movies HD', url: 'https://tracker.example/rss' });
   fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
+
+  await waitFor(() => {
+    assert.equal(submitCalls, 1, 'the click actually invoked submit');
+  });
+
   await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
   await waitFor(() => {
-    assert.ok(screen.getByRole('heading', { name: 'Movies HD' }));
+    assert.equal(
+      screen.getAllByRole('heading', { name: 'Movies HD' }).length,
+      1,
+      'the seeded row rendered, exactly once, not anything submit itself produced',
+    );
   });
 });
 
@@ -133,11 +170,22 @@ test('the error is a visible heading, not only an announced one', async () => {
   // CLAUDE.md's longest hazard: a component once passed ten tests with
   // `role`, an `aria-label`, no visible heading and no stylesheet rule, and
   // the first human to see it read it as an error.
+  //
+  // **`findByRole('heading', { name: /already/i })` alone does not guard
+  // this** (fix round 1, review-found): `getByRole`'s own `name` option
+  // reads the *accessibility tree*, which an `aria-label` satisfies with no
+  // visible text at all -- so a mutant that swaps `<h3>{error}</h3>` for
+  // `<h3 aria-label={error} />` still matches that query and this test
+  // still passed against an empty, invisible heading. Asserting the
+  // heading's own `textContent` against the literal sentence closes that:
+  // an `aria-label` never populates `textContent`, so the mutant now reads
+  // an empty string here and reds.
   const db = await freshDb();
   render(<Feeds source={sourceFor(db)} submit={submitFor('duplicate-url')} />);
   fillFeedForm({ name: 'X', url: 'https://tracker.example/rss' });
   fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
   const heading = await screen.findByRole('heading', { name: /already/i });
+  assert.equal(heading.textContent, 'That url is already on file.', 'the heading carries real visible text, not just an accessible name');
   assert.ok(screen.getByRole('alert').contains(heading), 'the visible heading is inside the announced region');
 });
 
@@ -145,7 +193,7 @@ test('an empty replica reads as "no feeds yet", not as still loading forever', a
   const db = await freshDb();
   render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
   await waitFor(() => {
-    assert.ok(screen.getByText(/no feeds yet/i));
+    assert.equal(screen.getByText(/no feeds yet/i).tagName, 'P', 'rendered as its own line of text, not merely present in the tree');
   });
 });
 
@@ -161,7 +209,7 @@ test('the list never falls back to the network when the replica is empty', async
   try {
     render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
     await waitFor(() => {
-      assert.ok(screen.getByText(/no feeds yet/i));
+      assert.equal(screen.getByText(/no feeds yet/i).tagName, 'P');
     });
     assert.equal(fetchCalls, 0, 'Feeds never called fetch: the list comes from the replica only');
   } finally {

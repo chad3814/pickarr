@@ -154,3 +154,56 @@ test('postFeed never reads a server-authored message off the body', async () => 
   const outcome = await postFeed(SAMPLE_INPUT);
   assert.deepEqual(outcome, { refusal: 'duplicate-url' }, 'only the refusal code crosses, never any other field');
 });
+
+/**
+ * Fix round 1 (review C1/I4): a 401 (an expired session -- the most
+ * ordinary failure a real submit meets), this tree's 400
+ * `{ error: 'invalid feed' }`, and a 500 all carry no `refusal` key at all.
+ * None of them may throw; each resolves to `{ refusal: 'unrecognised' }'`.
+ */
+test('postFeed reports "unrecognised" for a 401, never a throw', async () => {
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
+  assert.deepEqual(await postFeed(SAMPLE_INPUT), { refusal: 'unrecognised' });
+});
+
+test('postFeed reports "unrecognised" for a bare { error } body, never a throw', async () => {
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'invalid feed' }, 400)));
+  assert.deepEqual(await postFeed(SAMPLE_INPUT), { refusal: 'unrecognised' });
+});
+
+test('postFeed reports "unrecognised" for a 500, never a throw', async () => {
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'internal' }, 500)));
+  assert.deepEqual(await postFeed(SAMPLE_INPUT), { refusal: 'unrecognised' });
+});
+
+/**
+ * The form-level half of I4: once `submit` resolves to any non-`id`,
+ * non-throwing outcome, the button must come back usable and the form must
+ * show its own words -- not the wedge C1 found (five of six real host
+ * answers left the button permanently disabled with nothing rendered).
+ */
+test('an unrecognised answer shows its own sentence, and the button is usable again', async () => {
+  render(<AddFeed submit={() => Promise.resolve({ refusal: 'unrecognised' })} />);
+  fillNameAndUrl('Movies HD', 'https://tracker.example/rss');
+  submitForm();
+
+  const alert = await screen.findByRole('alert');
+  assert.ok(!/already|plugin|could not reach/i.test(alert.textContent ?? ''), 'its own words, distinct from every other outcome');
+
+  const submitButton = screen.getByRole<HTMLButtonElement>('button', { name: 'Add feed' });
+  assert.equal(submitButton.disabled, false, 'the form is usable again, not stuck pending');
+});
+
+test('a submit that rejects outright is caught, and the button is usable again', async () => {
+  // `submit` is an injected async function; C1's fix does not depend on
+  // what `postFeed` itself does, since a caller may inject one that throws.
+  render(<AddFeed submit={() => Promise.reject(new Error('boom'))} />);
+  fillNameAndUrl('Movies HD', 'https://tracker.example/rss');
+  submitForm();
+
+  const alert = await screen.findByRole('alert');
+  assert.ok(/could not reach/i.test(alert.textContent ?? ''), 'a rejected submit reads the same as offline');
+
+  const submitButton = screen.getByRole<HTMLButtonElement>('button', { name: 'Add feed' });
+  assert.equal(submitButton.disabled, false, 'the form is usable again, not stuck pending');
+});

@@ -348,6 +348,32 @@ test('the nav links to each category, and marks the current one', async () => {
 });
 
 /**
+ * Task 5's fix round (review Finding B): `/settings` and `/unmatched` were
+ * both reachable only by typing the url, with no `<NavLink>` at all --
+ * design spec §4 says the fifth route comes "with a nav link beside the
+ * three categories and `/unmatched`", which is unmet twice over if
+ * `/unmatched` itself has none.
+ */
+test('the nav also links to /unmatched and /settings', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/tv']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  const unmatched = screen.getByRole<HTMLAnchorElement>('link', { name: 'Unmatched' });
+  assert.equal(unmatched.getAttribute('href'), '/unmatched');
+
+  const settings = screen.getByRole<HTMLAnchorElement>('link', { name: 'Settings' });
+  assert.equal(settings.getAttribute('href'), '/settings');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
+/**
  * Pins the `<Route>` table's path-to-element mapping itself. The nav's own
  * hrefs and `aria-current` (asserted above) are derived from `CATEGORIES`
  * independently of the `<Route>` tree, so they cannot see this: swapping

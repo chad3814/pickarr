@@ -62,13 +62,27 @@ export interface AddFeedRefusal {
 }
 
 /**
- * What `submit` resolves to. `offline` is this client's own outcome for a
- * rejected `fetch` -- never a server answer -- which is what keeps "no
- * answer" distinguishable from "refused" (design spec §4): an offline
- * submit that read as "already on file" would send the operator hunting
- * for a feed that is not there.
+ * What `submit` resolves to.
+ *
+ * `offline` is this client's own outcome for a rejected `fetch` -- never a
+ * server answer -- which is what keeps "no answer" distinguishable from
+ * "refused" (design spec §4): an offline submit that read as "already on
+ * file" would send the operator hunting for a feed that is not there.
+ *
+ * **`unrecognised` is a normal outcome, not a should-not-happen one**
+ * (fix round 1, review-found). `POST /api/feeds` has two permanent response
+ * shapes: `{ refusal }` for a duplicate url, an unregistered plugin, a bad
+ * download type, a bad poll interval, and now the two shape-check refusals
+ * (`invalid-shape`, `malformed-body`); and a bare `{ error }` with no
+ * `refusal` key at all for a 401 (an expired session -- the single most
+ * ordinary failure a real submit meets), a 405, a 413, or a 500. A client
+ * this old will routinely outlive a host that has added a refusal code this
+ * build does not know, or answer with a body this build cannot parse at
+ * all -- neither is a defect in either side, so neither may crash this
+ * form. `unrecognised` covers both: any answer that is not a recognised
+ * accepted id and not one of `AddFeedRefusal`'s four known codes.
  */
-export type AddFeedOutcome = { id: number } | AddFeedRefusal | { refusal: 'offline' };
+export type AddFeedOutcome = { id: number } | AddFeedRefusal | { refusal: 'offline' | 'unrecognised' };
 
 const REFUSAL_CODES: ReadonlySet<string> = new Set([
   'unknown-plugin',
@@ -104,15 +118,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * server answer, so neither may be reported as a refusal, which would read
  * as "your feed was rejected" when nothing rejected it.
  *
- * A body that parses but matches neither an accepted id nor a known
- * refusal is not a shape this route's own contract admits -- `isFeedBody`
- * (`api/server.ts`) always accepts the shape this function sends, so a 400
- * `{ error: 'invalid feed' }` can only mean this function and the host have
- * drifted apart. That is thrown rather than folded into `AddFeedOutcome`'s
- * three cases (the same choice `library/Unmatched.tsx`'s `updatedAtOf`
- * makes for its own should-not-happen case), and never by inspecting
- * `error` itself -- a server-authored message never reaches a human here
- * (Global Constraint).
+ * **Never throws** (fix round 1, review-found: it did, and the five of six
+ * real host answers that are not `{ id }` and not one of `AddFeedRefusal`'s
+ * four codes -- a 401, this tree's 400, either landing 400, a 500 --
+ * wedged the form with the submit button stuck disabled and nothing on
+ * screen, because the throw escaped `handleSubmit`'s un-caught `await` and
+ * `setPending(false)` never ran). A body that parses but matches neither an
+ * accepted id nor a known refusal resolves to `{ refusal: 'unrecognised' }`
+ * instead -- see `AddFeedOutcome`'s own doc on why this is a normal
+ * outcome, not a should-not-happen one. Never reads `error` or any other
+ * field a body might carry beyond `id`/`refusal` -- a server-authored
+ * message never reaches a human here (Global Constraint).
  */
 export async function postFeed(input: AddFeedInput): Promise<AddFeedOutcome> {
   let body: unknown;
@@ -127,21 +143,27 @@ export async function postFeed(input: AddFeedInput): Promise<AddFeedOutcome> {
   } catch {
     return { refusal: 'offline' };
   }
-  if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
   if (isRecord(body) && typeof body.id === 'number') return { id: body.id };
-  throw new Error('unexpected answer from the feed endpoint');
+  if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
+  return { refusal: 'unrecognised' };
 }
 
-/** A fixed sentence per refusal -- never the server's own words (Global Constraint). */
-const REFUSAL_MESSAGES: Record<AddFeedRefusal['refusal'], string> = {
+/**
+ * A fixed sentence per non-accepted outcome -- never the server's own words
+ * (Global Constraint). One map covers all five, `offline` and
+ * `unrecognised` included, so `handleSubmit` below has no special case to
+ * get wrong between them.
+ */
+const REFUSAL_MESSAGES: Record<AddFeedRefusal['refusal'] | 'offline' | 'unrecognised', string> = {
   'duplicate-url': 'That url is already on file.',
   'unknown-plugin': 'That plugin is not registered on this host.',
   'bad-download-type': 'That download type is not supported.',
   'bad-poll-interval': 'That poll interval is out of range.',
+  /** Distinct from every named refusal above, which are answers -- this one means the request never got one. */
+  offline: 'Could not reach Pickarr. Check your connection and try again.',
+  /** `postFeed`'s own catch-all -- see `AddFeedOutcome`'s doc on why this is a normal outcome. Names no code, no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
+  unrecognised: 'Pickarr refused this feed, but did not say why. The host may be a different version than this page expects -- reload and try again.',
 };
-
-/** Distinct from every refusal above, which are answers -- this one means the request never got one. */
-const OFFLINE_MESSAGE = 'Could not reach Pickarr. Check your connection and try again.';
 
 export interface AddFeedProps {
   /** Posts the form. Required, not defaulted -- see this file's docblock. */
@@ -157,18 +179,37 @@ export function AddFeed({ submit }: AddFeedProps): ReactElement {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * `try`/`catch`/`finally { setPending(false) }`, matching `SignIn.tsx`'s
+   * own hardened `handleSubmit` (design spec §4: "errors follow `SignIn`'s
+   * hardened pattern") -- non-negotiable regardless of what `submit` does,
+   * since it is an injected async function and any implementation of it may
+   * reject (fix round 1, review-found: the previous version had none of the
+   * three, and `postFeed`'s own throw -- since removed -- escaped straight
+   * through the un-caught `await`, permanently disabling the button with
+   * nothing rendered). The `catch` here is `submit` rejecting outright,
+   * which `postFeed` itself no longer does; kept for the same reason
+   * `SignIn.handleSubmit` keeps one even though today's `signIn`/`signUp`
+   * only resolve -- a caller of this component may inject a `submit` this
+   * file cannot see the inside of.
+   */
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setPending(true);
     setError(null);
-    const outcome = await submit({ pluginId, name, url, downloadType, pollIntervalS });
-    setPending(false);
-    if ('id' in outcome) {
-      setName('');
-      setUrl('');
-      return;
+    try {
+      const outcome = await submit({ pluginId, name, url, downloadType, pollIntervalS });
+      if ('id' in outcome) {
+        setName('');
+        setUrl('');
+        return;
+      }
+      setError(REFUSAL_MESSAGES[outcome.refusal]);
+    } catch {
+      setError(REFUSAL_MESSAGES.offline);
+    } finally {
+      setPending(false);
     }
-    setError(outcome.refusal === 'offline' ? OFFLINE_MESSAGE : REFUSAL_MESSAGES[outcome.refusal]);
   }
 
   return (

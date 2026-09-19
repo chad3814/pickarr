@@ -255,7 +255,15 @@ function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): Reac
           Sign out
         </button>
       </header>
-      <nav aria-label="Categories">
+      {/*
+        `aria-label="Primary"`, not `"Categories"` (fix round 1,
+        review-found): the three category links used to be everything this
+        nav held, but `/unmatched` and `/settings` below are not categories,
+        and a label naming only a third of what it announces is exactly the
+        kind of drift `CLAUDE.md`'s stale-doc lesson warns against in prose
+        -- an `aria-label` is read aloud the same way.
+      */}
+      <nav aria-label="Primary">
         <ul>
           {CATEGORIES.map((category) => (
             <li key={category}>
@@ -264,6 +272,19 @@ function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): Reac
               </NavLink>
             </li>
           ))}
+          {/*
+            Design spec §4: "a nav link beside the three categories and
+            `/unmatched`" -- which presumes `/unmatched` already has one.
+            It did not (a pre-existing gap from the browse slice); task 5's
+            fix round closes it here rather than treating the gap as licence
+            to add `/settings` without one too (task 5's review, Finding B).
+          */}
+          <li>
+            <NavLink to="/unmatched">Unmatched</NavLink>
+          </li>
+          <li>
+            <NavLink to="/settings">Settings</NavLink>
+          </li>
         </ul>
       </nav>
       {storeFailed ? <StoreFailed /> : <Outlet />}
