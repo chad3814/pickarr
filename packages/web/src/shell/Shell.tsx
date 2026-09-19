@@ -23,8 +23,9 @@
  * 401 anywhere in the sync loops reaches `onUnauthenticated`, without this
  * component or `sync.ts` ever inspecting a response body.
  *
- * **Routing (task 4).** `Shell` is also where the app's four routes live --
- * `/tv`, `/movie`, `/xxx`, `/unmatched`, with `/` redirecting to `/tv` -- via
+ * **Routing (task 4, task 5 adds `/settings`).** `Shell` is also where the
+ * app's five routes live -- `/tv`, `/movie`, `/xxx`, `/unmatched`,
+ * `/settings`, with `/` redirecting to `/tv` -- via
  * a pathless layout `Route` (`ShellChrome`, below) that renders the header
  * and nav once and an `<Outlet />` for whichever category matched. A
  * trailing `path="*"` route keeps that chrome on screen for any path this
@@ -49,6 +50,8 @@ import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { Unmatched } from '../library/Unmatched.tsx';
 import { useCounts, CATEGORIES, type Category, type Counts } from './useCounts.ts';
 import { Category as CategoryScreen } from '../library/Category.tsx';
+import { Feeds } from '../settings/Feeds.tsx';
+import { postFeed } from '../settings/AddFeed.tsx';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
@@ -182,6 +185,13 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           content through `Unmatched`'s own `data-testid`.
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
+        {/*
+          `postFeed` is the real `submit` (`../settings/AddFeed.tsx`'s own
+          doc on why it is injected rather than defaulted): wired here,
+          explicitly, rather than given a default inside `Feeds` that would
+          perform network I/O invisibly at every call site.
+        */}
+        <Route path="settings" element={store === undefined ? null : <Feeds source={store} submit={postFeed} />} />
         {/* Keeps the chrome on screen for any other path -- see this file's doc. */}
         <Route path="*" element={null} />
       </Route>

@@ -456,6 +456,32 @@ test('the /unmatched route renders Unmatched, not a category', async () => {
   });
 });
 
+/**
+ * Task 5's own mapping test, alongside the four above -- `data-testid="settings"`
+ * carries the same route-mapping contract `Feeds.tsx`'s own docblock
+ * describes forward from `Category.tsx`'s and `Unmatched.tsx`'s markers.
+ */
+test('the /settings route renders Feeds, not a category', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/settings']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => {
+    assert.ok(screen.getByTestId('settings'), '/settings renders Feeds');
+  });
+  assert.ok(!screen.queryByTestId('category-tv'), 'not the tv category');
+  assert.ok(!screen.queryByTestId('category-movie'), 'not the movie category');
+  assert.ok(!screen.queryByTestId('category-xxx'), 'not the xxx category');
+  assert.ok(!screen.queryByTestId('unmatched'), 'not unmatched');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
 test('/ redirects to /tv rather than rendering an empty shell', async () => {
   const { deps, sched } = testDeps();
   render(
