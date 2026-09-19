@@ -239,8 +239,13 @@ test('the projection carries no column the client has no business holding', () =
   const registry = createSyncRegistry(raw, []);
   seedFeed(raw, {});
   const row = registry.readRows(raw, 'rss_feed', [1])[1];
+  // Narrowed to `object` with `typeof`/`null` -- enough for `Object.keys`,
+  // and no cast needed for it the way `Record<string, unknown>` would be.
+  if (typeof row !== 'object' || row === null) {
+    throw new Error('rss_feed projection is not an object');
+  }
   assert.deepEqual(
-    Object.keys(row as Record<string, unknown>).toSorted(),
+    Object.keys(row).toSorted(),
     ['createdAt', 'downloadClientId', 'downloadType', 'id', 'name', 'pluginId', 'pollIntervalS', 'updatedAt', 'url'],
   );
 });

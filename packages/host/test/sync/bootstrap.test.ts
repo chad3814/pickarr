@@ -287,10 +287,11 @@ test('an empty library answers a pivot above the whole log, so the walk can stil
   addRelease(raw, 21, null);
   const cursors = bootstrapCursors(raw, 4);
   const registry = createSyncRegistry(raw, []);
-  const releases = backfillBefore(raw, registry, cursors.before, 10).ops
-    .filter((op) => op.table === 'rss_item')
-    .map((op) => op.id);
-  assert.deepEqual(releases, [21], 'the walk must reach a row no media item names');
+  assert.deepEqual(
+    backfillBefore(raw, registry, cursors.before, 10).ops.map((op) => `${op.table}/${op.id}`).toSorted(),
+    ['rss_feed/1', 'rss_item/21'],
+    'the walk must reach a row no media item names, and own everything else there is too',
+  );
 });
 
 test('the shipped target is a number, and the per-category queries seek rather than scan', () => {

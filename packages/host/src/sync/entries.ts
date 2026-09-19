@@ -44,8 +44,8 @@ export interface CurrentState {
  * one per row.**
  *
  * That is the whole reason this is a step of its own rather than a lookup
- * inside each cursor's emission loop. A page of 200 entries over six tables
- * is six `readRows` calls; resolving each entry as it is emitted would be 200.
+ * inside each cursor's emission loop. A page of 200 entries over seven tables
+ * is seven `readRows` calls; resolving each entry as it is emitted would be 200.
  *
  * It is also what makes a torn read impossible. There is one query for the
  * entries and one per table for the rows, so a row deleted between the two

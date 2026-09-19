@@ -84,8 +84,11 @@ that write one row per changed row into `sync_log`. That log is how every client
 anything changed. **A table with no triggers replicates nothing, and nothing fails.**
 
 The synced tables are `HOST_SYNCED_TABLES` in `sync/tables.ts` — `media_item`,
-`rss_item`, `torrent_download`, `nzb_download`, `person`, `role` — plus every table a
-plugin declares in its `synced` array.
+`rss_item`, `torrent_download`, `nzb_download`, `person`, `role` and `rss_feed` — plus
+every table a plugin declares in its `synced` array. That list already went stale once
+here, missing `rss_feed` for a time after it joined the export: treat
+`sync/tables.ts`'s `HOST_SYNCED_TABLES` as the authoritative list and this sentence as
+illustrative only, current as of the commit that last touched it.
 
 ### What migration operations do to a trigger
 

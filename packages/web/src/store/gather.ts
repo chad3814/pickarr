@@ -41,9 +41,11 @@ import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
  * not know what shape any table holds, by design (that knowledge belongs to
  * this module and to a plugin's `compose.ts`, never to the store itself).
  * This gatherer does know, for exactly the six tables it names, because
- * `@pickarr/contract`'s six `*SyncRead` interfaces are pinned to the
- * projections the host actually emits (`packages/host/test/sync/tables.test.ts`
- * is what keeps the two from drifting).
+ * `@pickarr/contract`'s `*SyncRead` interface for each of those six -- one
+ * of seven now that `rss_feed` has joined the synced set, the seventh named
+ * nowhere in this module -- is pinned to the projection the host actually
+ * emits for it (`packages/host/test/sync/tables.test.ts` is what keeps the
+ * two from drifting).
  *
  * **Knowing the shape is not the same as having checked it, so these check.**
  * An earlier version of this module asserted instead -- one `trusted<T>`
