@@ -292,3 +292,44 @@ test('the empty state reads as an aside, not as content waiting to be filled in'
   await expect(empty).toBeVisible();
   await expect(empty).toHaveCSS('font-style', 'italic');
 });
+
+/*
+ * The feed-settings slice's own browser proof (task 6's brief): the write
+ * route, the host's invariants, the sync round trip, and the list updating
+ * from the replica -- the whole slice in one spec, plus `settings.css`'s
+ * own computed-style pin, proved against deletion the same way the browse
+ * pins above were (task 6's own acceptance step: delete the import, confirm
+ * this fails, restore by checksum-verified copy -- run and reported
+ * separately from this diff).
+ */
+
+test('an operator can add a feed and see it listed', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await page.goto(`${harness.origin}/settings`);
+  await page.getByLabel('Name').fill('Movies HD');
+  await page.getByLabel('Feed url').fill(`${harness.origin}/fixtures/movies.xml`);
+  await page.getByRole('button', { name: 'Add feed' }).click();
+
+  // `Feeds.tsx` never learns this feed's name from the POST's own response
+  // body -- that answers only `{ id }` (`AddFeed.tsx`'s own doc on
+  // `postFeed`). This heading appearing is the real path instead: the
+  // host's insert committing, `rss_feed`'s own sync trigger logging it,
+  // this tab's `/api/sync` tail noticing on its next poll, and
+  // `useFeeds`'s `subscribeInserts` re-reading the replica from there --
+  // the round trip `harness-2.ts`'s own doc on `addFeed` names as the
+  // reason this can be slow to appear, not a bug to route around with a
+  // refetch (Global Constraint: lists come from the replica only).
+  const feed = page.getByRole('heading', { name: 'Movies HD' });
+  await expect(feed).toBeVisible({ timeout: 15_000 });
+
+  // `settings.css`'s own pin: `toBeVisible()` above would pass against an
+  // unstyled bulleted list exactly as well as against one styled with
+  // `list-style: none` (`CLAUDE.md`'s own testing hazard on this gap) --
+  // the same distinction the browse screens' own computed-style specs draw
+  // for `library.css`, drawn here for the stylesheet this task adds.
+  const list = page.getByRole('list', { name: 'feeds' });
+  await expect(list).toHaveCSS('list-style-type', 'none');
+});

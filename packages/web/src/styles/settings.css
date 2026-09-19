@@ -1,0 +1,98 @@
+/*
+ * `components`'s second member (`library.css`'s own doc explains why the
+ * first one, `library.css`, reaches browse's markup by structure alone
+ * rather than a class -- the same reasoning applies here and is not
+ * repeated). `/settings` is its own file rather than a further section of
+ * `library.css`: that file's own docblock is a closed accounting of browse's
+ * markup -- "`<article>`, `<img>` and `ul[aria-label='releases']` each
+ * appear exactly once ... outside `styles/` and `test/`" -- and `Feeds.tsx`
+ * and `AddFeed.tsx` are a different screen with their own `<form>`, their
+ * own `<ul aria-label='feeds'>` and their own error alert, none of which
+ * that accounting was ever about. Appending them there would mean either
+ * rewriting an accounting that is still true of the markup it describes, or
+ * leaving it to quietly go stale the way `CLAUDE.md`'s testing hazard warns
+ * against for prose -- a second file keeps each accounting scoped to the
+ * screen it was written against.
+ *
+ * Selectors below are keyed the same way `library.css`'s are: a type, an
+ * ARIA attribute already load-bearing for accessibility (`aria-labelledby`
+ * on the form, `aria-label='feeds'` on the list), or a parent/child
+ * relationship -- never a class, since `Feeds.tsx` and `AddFeed.tsx` set
+ * none.
+ */
+
+/*
+ * Every configured feed (`Feeds.tsx`'s own `<ul aria-label='feeds'>`).
+ * Unstyled, this rendered as a bulleted list with the UA's own indent --
+ * the same gap `library.css`'s two lists closed for browse's own markup,
+ * closed here identically.
+ */
+ul[aria-label='feeds'] {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+
+ul[aria-label='feeds'] li {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-line);
+}
+
+/* The feed's name, sized like every other `h2` in the app but with no
+   bottom margin: `base.css`'s bare `h2` rule assumes a subsection heading
+   with body text following it at a page's own pace, and `--space-4` of air
+   above one line of url reads as a gap in the list rather than a heading
+   paired with its own detail line. `article h2` in `library.css` makes the
+   identical call for a card's title, for the identical reason. */
+ul[aria-label='feeds'] li h2 { margin: 0; }
+
+/* The feed's url, exactly as the replica holds it (`Feeds.tsx`'s own doc:
+   redacted by the host, never reconstructed here). Secondary detail under
+   the name it belongs to -- the same dimmed, smaller treatment
+   `library.css`'s release list gives a resolution or a status line under
+   its own filename. */
+ul[aria-label='feeds'] li p {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The add-feed form (`AddFeed.tsx`'s own doc: the host's first write
+ * surface). Keyed on the heading id the `<form>` already carries via
+ * `aria-labelledby` -- load-bearing for accessibility, reused rather than a
+ * hook added for styling alone, `library.css`'s own justification for every
+ * attribute selector in that file.
+ *
+ * `:not([role='alert'])` on the field rule below excludes the one other
+ * direct-child `<div>` this form has -- the error banner -- which gets its
+ * own rule instead of the field layout it does not want.
+ */
+form[aria-labelledby='add-feed-heading'] > div:not([role='alert']) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+form[aria-labelledby='add-feed-heading'] label {
+  color: var(--color-text-dim);
+  font-size: var(--text-label);
+}
+
+/* The error banner (`AddFeed.tsx`'s own `role='alert'` div around an `<h3>`
+   naming a fixed, server-blind message -- see that file's doc on why the
+   text itself is never the server's own words). `--color-error`, the same
+   token `base.css`'s `.error` utility applies elsewhere, reached here by
+   the attribute rather than a class this component does not set. */
+form[aria-labelledby='add-feed-heading'] [role='alert'] {
+  margin-bottom: var(--space-3);
+}
+
+form[aria-labelledby='add-feed-heading'] [role='alert'] h3 {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--color-error);
+}

@@ -4,9 +4,10 @@
  * in `styles/` references it rather than restating it.
  *
  * Rules outside this file may still declare *structural and idiomatic* values,
- * which name no design decision and have nothing here to reference: the six
- * `1px` hairline borders across `base.css` and `library.css` (a `--hairline`
- * token would be a token for the number 1) and the three more `1px` values in
+ * which name no design decision and have nothing here to reference: the
+ * seven `1px` hairline borders across `base.css`, `library.css` and, since
+ * the feed-settings slice, `settings.css` (a `--hairline` token would be a
+ * token for the number 1) and the three more `1px` values in
  * the visually-hidden clip idiom, `100%` and `1 0 100%` fills, `100vh`,
  * `60rem`, the poster's `2 / 3` aspect ratio, `font-weight: 600`, `h1`'s
  * `-0.015em` tracking, `clip-path: inset(50%)`, and the two-pixel focus

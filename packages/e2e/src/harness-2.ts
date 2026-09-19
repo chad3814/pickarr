@@ -47,6 +47,9 @@ import type { DatabaseSync } from 'node:sqlite';
 import { test as base } from '@playwright/test';
 import {
   createAuth,
+  createDownloadClients,
+  createHost,
+  createHostFetch,
   createReadServer,
   createSyncRegistry,
   ensureClaimToken,
@@ -69,8 +72,38 @@ const AUTH_SECRET = 'placeholder-not-a-real-signing-secret-for-e2e-tests';
 /** A `log` that drops every line. Nothing in this suite asserts on the host's own log. */
 const dropLine = (): void => {};
 
+/** `Host`'s and `createDownloadClients`'s own clock. Module scope, like `dropLine` above: it captures nothing from `boot()`, so nothing here needs rebuilding per test. */
+const now = (): number => Date.now();
+
 /** The three categories the shell has tabs for (`shell/useCounts.ts`'s `CATEGORIES`). */
 export type Category = 'tv' | 'movie' | 'xxx';
+
+/**
+ * A `MediaPlugin` that does the least possible: no migrations, no synced
+ * tables, no job handlers, and a no-op for every callback `Host` ever
+ * invokes. Registered once per category (below) so `feeds/add.ts`'s own
+ * `isRegistered` check -- reached through `Host.addFeed`, the real
+ * validator this harness now wires to `POST /api/feeds` -- accepts the
+ * same three plugin ids `AddFeed.tsx`'s form offers (`CATEGORIES`,
+ * `shell/useCounts.ts`), the same way a real `createTvPlugin` et al. would.
+ * A stub is enough: no spec in this file ever polls a feed to completion or
+ * reads a plugin-owned table, so nothing here needs `onNewRssItems` to do
+ * anything but resolve. This is the same "no plugin is needed beyond what
+ * `isRegistered` checks" the module doc's `media_item` paragraph already
+ * argues, applied to `addFeed`'s own gate instead.
+ */
+function stubPlugin(id: Category) {
+  return {
+    id,
+    mediaType: id,
+    migrations: [],
+    jobs: {},
+    synced: [],
+    async onNewRssItems() {},
+    async onDownloadedFile() {},
+    async onDownloadRequest() {},
+  };
+}
 
 export interface Harness {
   /** The origin the in-process host bound. Every navigation in a spec starts here. */
@@ -108,19 +141,55 @@ async function boot(): Promise<Booted> {
   migrateHost(raw);
 
   // Empty plugin list: see this module's doc for why `media_item` needs none.
+  // `Host`'s own `plugins` map (below) is separate from this registry and is
+  // what `addFeed`'s `isRegistered` check reads -- registering a plugin
+  // there does not have to mean registering it here too, since none of the
+  // three stub plugins below declares a `synced` table of its own.
   const registry = createSyncRegistry(raw, []);
   const generation = ensureSyncGeneration(raw, Date.now());
+
+  const hostFetch = createHostFetch({ fetch: globalThis.fetch });
+
+  // Never asked to resolve a real credential: no spec in this file submits
+  // a feed against a download client, only against the three plugin
+  // categories `Host.addFeed` itself validates.
+  const secrets = {
+    async get(name: string): Promise<string> {
+      throw new Error(`no secret configured for ${name}`);
+    },
+    saveSecret(): void {},
+  };
+
+  const host = createHost({
+    raw,
+    db,
+    fetch: hostFetch,
+    // A factory, not a built object -- `createHost`'s own doc on why:
+    // supplying `secrets` (below) is what keeps this the one `Secrets`
+    // instance the whole host resolves credentials through.
+    downloads: (deps) => createDownloadClients({ raw, fetch: hostFetch, secrets: deps, now, log: dropLine }),
+    secrets,
+    now,
+    artworkDir: join(dir, 'artwork'),
+  });
+  // `stubPlugin`'s own doc: enough for `Host.addFeed`'s `isRegistered`
+  // check to accept the same three ids `AddFeed.tsx`'s form offers.
+  for (const category of ['tv', 'movie', 'xxx'] as const) host.register(stubPlugin(category));
 
   const server = await createReadServer({
     raw,
     pluginIdForType: () => undefined,
-    // No e2e spec here posts to `/api/feeds` yet -- a UI task for it follows
-    // this one. A stub that throws is the same choice `server.test.ts` makes
-    // for the same reason: a spec that reaches it without meaning to gets a
-    // failure naming the gap, not a silent success.
-    addFeed: () => {
-      throw new Error('addFeed not stubbed in this harness');
-    },
+    // `Host.addFeed` -- the same method `main.ts` wires to this exact route
+    // -- validates the body, inserts the `rss_feed` row and schedules its
+    // first poll. This harness never calls `host.start()`, so that schedule
+    // never actually dispatches (`host.ts`'s own `started` flag doc: an
+    // enqueue before `start()` is inert, not harmful) -- nothing here ever
+    // fetches a feed's url. What a spec needs from a successful `addFeed`
+    // is only the row it leaves in `rss_feed`; the database's own sync
+    // trigger logs that the moment the insert commits, independent of
+    // whether anything ever polls it, and `/api/sync` is what carries it to
+    // a client from there.
+    addFeed: (input) => host.addFeed(input),
     registry,
     generation,
     host: '127.0.0.1',

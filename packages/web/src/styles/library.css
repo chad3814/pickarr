@@ -7,9 +7,11 @@
  * sets a class, and this file does not become the first exception. Verified
  * against the actual 2.0 markup, not assumed: `<article>`, `<img>` and
  * `ul[aria-label='releases']` each appear exactly once in `packages/web/src`
- * outside `styles/` and `test/`, and `<p>` appears exactly three times --
- * `Category`'s and `Unmatched`'s empty-list states, and `Shell`'s
- * store-failure explanation. 1.x's six deleted component stylesheets (`git show
+ * outside `styles/` and `test/`. `<p>` appeared exactly three times when
+ * this paragraph was written -- `Category`'s and `Unmatched`'s empty-list
+ * states, and `Shell`'s store-failure explanation -- and the feed-settings
+ * slice added two more in `Feeds.tsx`: see `section > p`'s own comment
+ * below for which of the five that rule actually reaches now. 1.x's six deleted component stylesheets (`git show
  * bbce069:packages/web/src/styles/card.css` and its five siblings) were
  * tuned against these same tokens and are worth reading before touching this
  * file again, even though their class-based selectors do not carry over.
@@ -144,18 +146,26 @@ ul[aria-label='unmatched releases'] li {
 
 /*
  * A short line of prose standing where a list would be: `Category`'s
- * "Nothing here yet.", `Unmatched`'s "Everything has been matched.", and
- * `Shell`'s explanation of a replica that would not open. Those are the
- * three, and only three, `<p>` elements in this app, and each is a direct
- * child of its screen's own `<section>`. Same italic-and-dimmed treatment as
- * `base.css`'s own `.loading`, so a list that has genuinely finished loading
- * with nothing in it reads as a different state from one still in flight,
- * not as an ordinary line of text about to be followed by more.
+ * "Nothing here yet.", `Unmatched`'s "Everything has been matched.",
+ * `Shell`'s explanation of a replica that would not open, and -- since the
+ * feed-settings slice -- `Feeds`'s own "No feeds yet.". Each of those four
+ * is a direct child of its screen's own `<section>`, which is what this
+ * selector actually reaches; that was every `<p>` in the app when this
+ * paragraph was first written; it no longer is. `Feeds.tsx`'s *other* `<p>`
+ * -- a listed feed's own url -- is a grandchild of the section (`<section>
+ * ul li p`), not a direct child, so this rule does not reach it, and
+ * `settings.css` gives that one its own treatment instead. Same
+ * italic-and-dimmed treatment as `base.css`'s own `.loading`, so a list
+ * that has genuinely finished loading with nothing in it reads as a
+ * different state from one still in flight, not as an ordinary line of
+ * text about to be followed by more.
  *
  * The store-failure paragraph takes the same treatment deliberately: the
  * heading above it is what carries the weight (`Shell.tsx`'s `StoreFailed`,
  * and `CLAUDE.md`'s hazard on asserting a `role` instead of a visible
- * heading), and this line is the remedy rather than the alarm.
+ * heading), and this line is the remedy rather than the alarm. `Feeds`'s
+ * empty state is the ordinary case the rule was written for in the first
+ * place, the same as `Category`'s and `Unmatched`'s.
  */
 section > p {
   color: var(--color-text-dim);

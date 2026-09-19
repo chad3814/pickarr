@@ -1175,9 +1175,15 @@ test('migration 16 seeds the log for a feed already on file, so an existing repl
 
   const logged = raw.prepare("SELECT row_id, op FROM sync_log WHERE table_name = 'rss_feed'").all()
     .map((row) => {
-      // Narrowed with `typeof`/`in` -- the way `useCounts.ts`'s
-      // `isStoreClosed` narrows -- rather than a cast on `node:sqlite`'s
-      // `unknown` row.
+      // Not narrowing `unknown` -- `node:sqlite`'s own `.all()` already
+      // types `row` as `Record<string, SQLOutputValue>`, so `row.row_id`
+      // and `row.op` below would typecheck with no guard here at all
+      // (measured: removing this `if` does not fail typecheck). What it
+      // buys instead is a fast, legible failure if this query's own
+      // `SELECT row_id, op` ever loses or renames a column -- without it,
+      // a missing property reads as `undefined`, and `Number`/`String`
+      // below would turn that into `NaN`/`'undefined'` rather than an
+      // error naming the actual problem.
       if (typeof row !== 'object' || row === null || !('row_id' in row) || !('op' in row)) {
         throw new Error('sync_log row has no row_id/op');
       }
