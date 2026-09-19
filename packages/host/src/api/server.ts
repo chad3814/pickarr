@@ -729,7 +729,21 @@ function statusForFeedRefusal(refusal: AddFeedRefusal['refusal']): number {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The ten routes.
+ * The eleven routes -- nine guarded, two `open: true`, the same split this
+ * module's own doc states.
+ *
+ * **It said "ten" until the final review counted them.** `POST /api/feeds`
+ * made eleven, and the slice that added it updated the module doc twenty
+ * lines above -- the one whose whole opening paragraph exists because its
+ * predecessor said "six routes" and was wrong -- while missing this line.
+ * That is not an argument for deleting the number: a reader wants to know
+ * whether the table below is the whole set. It is an argument for checking
+ * it, because no test pins the total and none can usefully. The one count
+ * assertion in `api/server.test.ts` is
+ * `assert.equal(guarded.length, ROUTES.length - 2)`, which derives its
+ * expectation from the code under test and so pins the *open* count
+ * without being able to see the total move. `grep -c "^    path: "` on this
+ * file is what actually answers it.
  *
  * Exported because the tests derive their request set from it; nothing else
  * reads it, and nothing may mutate it.
@@ -1226,7 +1240,32 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
     write(response, await answerFor(serving, target, request, body));
   } catch (error) {
     const route = targetOf(request.url)?.pathname ?? '(unparseable)';
-    deps.log('read failed', { route, error: redactUrl(messageOf(error)) });
+    // A client that goes away mid-body is not a fault of this host's, and it
+    // used to be written down as one: `readBody`'s `'error'` listener rejects
+    // with node's own `'aborted'`, which arrives here and was logged as
+    // `read failed` -- the same line a real 500 writes. A browser navigating
+    // away from a submit is an entirely ordinary thing to do, so that line
+    // was going to appear in normal use and make a genuine write-path fault
+    // unfindable among copies of itself.
+    //
+    // **A distinct message, not silence.** A proxy-induced `ECONNRESET`
+    // reaches this same branch and is worth seeing; dropping the line would
+    // hide it. `request.destroyed && !response.headersSent` is what tells the
+    // two apart: the request stream is gone, and nothing had been written
+    // back yet, so there was no response for the client to have been reading
+    // when it left.
+    //
+    // Only the message changes. The response below is written either way --
+    // on a socket the client destroyed `writeJson` is a silent no-op
+    // (measured: the listener goes on serving normally afterwards), so
+    // returning early here would buy nothing and would give a genuine fault
+    // that happens to have a destroyed request no answer at all.
+    //
+    // `route` is `target.pathname`, never the query string, and the message
+    // goes through `redactUrl` -- the same two rules the 500 path follows, so
+    // no url reaches this line either.
+    const aborted = request.destroyed && !response.headersSent;
+    deps.log(aborted ? 'request aborted' : 'read failed', { route, error: redactUrl(messageOf(error)) });
     if (response.headersSent) {
       // Nothing safe left to say -- the status line is already gone. Dropping
       // the connection is what tells a client the response is incomplete;

@@ -1437,6 +1437,110 @@ test('a body that never arrives is timed out rather than held open', async () =>
   }
 });
 
+/**
+ * Resolves with the first line `logs` receives, or rejects once `bound`
+ * elapses with none.
+ *
+ * Bounded for the reason the timeout test above gives: a wait with no bound
+ * turns "the line stopped being written" into a file that hangs with no test
+ * name attached, which `CLAUDE.md` records as costing an hour to trace. The
+ * passing path settles on the first poll after the server writes, waiting on
+ * nothing; `unref` so the bound cannot outlive the test.
+ */
+function firstLogLine(logs: readonly LogLine[], bound: number): Promise<LogLine> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + bound;
+    const poll = (): void => {
+      const line = logs[0];
+      if (line !== undefined) {
+        resolve(line);
+        return;
+      }
+      if (Date.now() > deadline) {
+        reject(new Error(`nothing was logged within ${String(bound)}ms of the client going away`));
+        return;
+      }
+      setTimeout(poll, 10).unref();
+    };
+    poll();
+  });
+}
+
+test('a client that goes away mid-body is written down as an abort, not as a server fault', async () => {
+  // Deferred finding #2 of the write-path review, measured there as
+  // `{"msg":"read failed","fields":{"route":"/api/feeds","error":"aborted"}}`
+  // -- the same line a genuine 500 on this route writes, from a browser
+  // navigating away from a submit. Two causes sharing one message means a
+  // real write-path fault is unfindable among copies of an ordinary event.
+  //
+  // Silence would be the wrong fix: a proxy-induced `ECONNRESET` reaches the
+  // same branch and is worth seeing. So this asserts a *distinct* message
+  // rather than an empty log.
+  //
+  // Over a raw socket for the reason the timeout test above gives -- no
+  // `fetch` expresses "announce a length, send one byte, vanish" -- and
+  // signed in, because `refusalFor` answers an anonymous caller before
+  // `readBody` is reached at all.
+  const { raw, db } = setup();
+  const { server, logs, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    // Reaching this would mean a body arrived, which is the opposite of what
+    // this test does. A throw here would be logged as `read failed` and the
+    // assertion below would name it.
+    addFeed: () => {
+      throw new Error('addFeed must not be reached: this request never finishes its body');
+    },
+  });
+  const socket = connect({ port: server.port, host: server.host });
+  try {
+    await once(socket, 'connect');
+    socket.on('error', () => {});
+
+    // Flushed before the socket goes, so the abort lands inside `readBody`
+    // rather than before the request is dispatched at all. The write
+    // callback is what says the bytes left this process; `'drain'` is not --
+    // a write this small never fills the buffer, so that event never fires
+    // and waiting on it hangs the file (measured, at 137s and counting).
+    await new Promise<void>((resolve) => {
+      socket.write(
+        `POST /api/feeds HTTP/1.1\r\nHost: localhost\r\nCookie: ${cookie}\r\n`
+        + 'Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{',
+        () => {
+          resolve();
+        },
+      );
+    });
+    // And a beat for the listener to parse those bytes and dispatch. Flushed
+    // is not received: destroying the socket before the header block is
+    // parsed leaves node with no request to emit, so nothing would reach the
+    // branch under test. Over loopback the parse is microseconds; this is
+    // three orders of magnitude of slack, and if it were ever not enough
+    // `firstLogLine` below fails by name rather than hanging.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 100).unref();
+    });
+    socket.destroy();
+
+    const line = await firstLogLine(logs, 5_000);
+    assert.equal(line.message, 'request aborted',
+      'a client going away is its own message, greppable apart from a real fault');
+    assert.deepEqual(line.detail, { route: '/api/feeds', error: 'aborted' },
+      'the path with no query string, and node\'s own word for what happened');
+
+    // The constraint, checked on the line rather than assumed from it: a
+    // feed url can carry a passkey, and nothing about an abort is worth a
+    // url in a log.
+    const written = JSON.stringify(line);
+    for (const forbidden of ['http', '?', 'apikey', 'Cookie', 'localhost']) {
+      assert.equal(written.includes(forbidden), false, `the line must not carry ${forbidden}`);
+    }
+
+    assert.equal(logs.length, 1, 'one line for one abort, and no 500 written beside it');
+  } finally {
+    socket.destroy();
+    await server.close();
+  }
+});
+
 test('the request timeout node is given bounds the headers too', () => {
   // The claim `REQUEST_TIMEOUT_MS`'s doc makes about `headersTimeout`, which
   // is node's behaviour and not this module's: given a `requestTimeout`
