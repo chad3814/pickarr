@@ -1175,8 +1175,13 @@ test('migration 16 seeds the log for a feed already on file, so an existing repl
 
   const logged = raw.prepare("SELECT row_id, op FROM sync_log WHERE table_name = 'rss_feed'").all()
     .map((row) => {
-      const entry = row as { row_id: unknown; op: unknown };
-      return [Number(entry.row_id), String(entry.op)];
+      // Narrowed with `typeof`/`in` -- the way `useCounts.ts`'s
+      // `isStoreClosed` narrows -- rather than a cast on `node:sqlite`'s
+      // `unknown` row.
+      if (typeof row !== 'object' || row === null || !('row_id' in row) || !('op' in row)) {
+        throw new Error('sync_log row has no row_id/op');
+      }
+      return [Number(row.row_id), String(row.op)];
     });
   assert.deepEqual(logged, [[1, 'upsert']],
     'a feed that predates this migration must be indexed, so a client backfills it rather than never learning it exists');

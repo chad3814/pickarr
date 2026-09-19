@@ -933,7 +933,8 @@ const MIGRATION_15_DDL = `
  * where `rss_feed` actually joins the synced set; this one keeps naming the
  * six tables it always did.
  */
-const MIGRATION_15_TABLES = ['media_item', 'rss_item', 'torrent_download', 'nzb_download', 'person', 'role'];
+const MIGRATION_15_TABLES: readonly string[] =
+  ['media_item', 'rss_item', 'torrent_download', 'nzb_download', 'person', 'role'];
 
 function migration15(db: DatabaseSync): void {
   db.exec(MIGRATION_15_DDL);

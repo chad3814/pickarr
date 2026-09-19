@@ -55,17 +55,21 @@ export interface ListByTableOptions {
 }
 
 /**
- * The six tables `by_table_updated` covers, and no others -- measured
- * rather than intended (design spec §3.2). `media_item`, `rss_item`,
- * `torrent_download` and `nzb_download` project `updatedAt` because the sync
- * protocol's read shapes for them do; `person` does too, and so does
- * `rss_feed` now that it is synced at all (`RssFeedSyncRead`, added the same
- * slice that added this entry). `role` projects only `createdAt`, and none
- * of the six plugin read shapes (`tv_release`, `tv_season`, `tv_series`,
- * `movie_detail`, `xxx_scene`, `xxx_site`) carries either. Asking
- * `listByTable` for one of those seven is a programming error and throws
- * (see below) rather than returning an empty page, which would read as
- * "this table is empty" -- a lie a caller has no way to catch.
+ * The six tables `by_table_updated` covers, and no others. The original five
+ * were measured rather than intended (design spec §3.2) -- this file's own
+ * tests page `media_item` and `rss_item` through the index directly.
+ * `rss_feed`'s membership is not yet measured the same way: nothing in this
+ * repo pages an `rss_feed` row through `by_table_updated` today, so it rests
+ * on declared shape alone -- `RssFeedSyncRead` carries `updatedAt`, same as
+ * the other five, and the index's key path (`store/db.ts`) admits any row
+ * with one. `media_item`, `rss_item`, `torrent_download` and `nzb_download`
+ * project `updatedAt` because the sync protocol's read shapes for them do;
+ * `person` does too, and so does `rss_feed`. `role` projects only
+ * `createdAt`, and none of the six plugin read shapes (`tv_release`,
+ * `tv_season`, `tv_series`, `movie_detail`, `xxx_scene`, `xxx_site`) carries
+ * either. Asking `listByTable` for one of those seven is a programming
+ * error and throws (see below) rather than returning an empty page, which
+ * would read as "this table is empty" -- a lie a caller has no way to catch.
  */
 const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'media_item',
