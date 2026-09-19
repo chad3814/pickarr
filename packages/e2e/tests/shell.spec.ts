@@ -17,6 +17,37 @@
  * lives entirely in the browser's jar, exactly as production leaves it
  * (Global Constraint). None of the three is ever asserted on, echoed into
  * a test name, or read back out of the page.
+ *
+ * **Anything typed into a form here is recorded in cleartext in the
+ * Playwright trace, and that trace leaves the runner.** This is the third
+ * channel, and it is the one the product's own credential accounting
+ * cannot see: `clients/add.ts` and the design spec both enumerate where a
+ * credential goes *inside Pickarr* -- a column, a log line, a message, a
+ * response body -- and a test artifact is none of those. Measured on this
+ * suite's own api key by unzipping `trace.zip` from a real run, ten
+ * occurrences across four files:
+ *
+ * - `0-trace.trace` x6 -- the `fill` action's `params.value`; the action
+ *   log line `fill("...")`; and **two DOM snapshots, each serialising the
+ *   masked input twice**, as `value` and as `__playwright_value_`.
+ *   Playwright does not redact `type="password"` in snapshots.
+ * - `test.trace` x2 -- the step title and the step's own `params.value`.
+ * - `resources/<sha>.json` x1 -- the `POST /api/download-clients` request
+ *   body. This one is the product's own single crossing, captured.
+ * - `resources/src@<sha>.txt` x1 -- this file, which is in git anyway.
+ *
+ * `playwright.config.ts` keeps the trace on failure and `ci.yml:96-103`
+ * uploads `test-results/` for 7 days, so a red build publishes all ten.
+ * That config's `trace` comment carries the decision and why it was not
+ * changed.
+ *
+ * **The standing constraint that makes this safe is on the values, not on
+ * the tooling: every credential this suite types must be a literal
+ * committed to this repo.** All three are, today. A spec that reads one
+ * from `process.env`, or points at a staging instance, publishes a real
+ * credential to a 7-day artifact with nothing here to stop it -- this
+ * paragraph is the only thing standing in the way, which is worth knowing
+ * about it.
  */
 import { expect, type Page } from '@playwright/test';
 import { test } from '../src/harness-2.ts';
@@ -446,6 +477,12 @@ test('an operator can add a feed and see it listed', async ({ page, harness }) =
  * a `type="password"` field (`AddDownloadClient.tsx`) and from there it
  * crosses the wire once into the harness's in-memory `Secrets`; nothing in
  * this file, and nothing in the host's `log: dropLine`, ever renders it.
+ *
+ * Those are two channels and there is a third: the Playwright trace
+ * records this value ten times, including two DOM snapshots of the masked
+ * input. See this file's own module docblock, which measures it and states
+ * the constraint that keeps it harmless -- this constant being a literal
+ * in git is that constraint, not an incidental convenience.
  */
 const API_KEY = 'placeholder-not-a-real-download-client-api-key';
 

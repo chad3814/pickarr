@@ -63,6 +63,27 @@ which is harmless — an unreferenced name resolves for nobody — and is
 preferable to the alternative ordering, where a row could reference a
 secret that was never stored.
 
+**A third channel, outside the product: the Playwright trace.** "Never
+logged, never echoed, never returned" is a statement about Pickarr, and
+the browser test that proves it is not part of Pickarr. Playwright
+records every value typed into a form in cleartext — the `fill` action's
+parameters, the action log line, the step title, the POST body, and the
+DOM snapshot, which serialises a `type="password"` input's `value`
+unredacted. Measured: ten occurrences of the e2e suite's own api key
+across four files in one `trace.zip`. `packages/e2e/playwright.config.ts`
+keeps the trace on failure and `.github/workflows/ci.yml:96-103` uploads
+`test-results/` as a build artifact with **7-day retention**, so a red
+build publishes all ten.
+
+Nothing real is exposed today: that api key is a synthetic constant
+committed to this repo. It is recorded because the channel is invisible
+from inside the product — no column, log line, message or response body
+is involved — and because the next spec to want a credential inherits it
+silently otherwise. The decision to keep tracing on, what it costs, and
+the constraint that replaces it (every credential the e2e suite types
+must be a literal committed to this repo) are in that config's `trace`
+comment.
+
 ### Refusals
 
 `unknown-implementation`, `bad-auth-shape`, `duplicate-name`,
@@ -159,7 +180,9 @@ where there is one, and claims nothing about the credential.
 1. `POST /api/download-clients` creates a row and a secret, and answers
    `201 { id }`.
 2. The credential appears in no log line, no error message and no
-   response body — pinned by a test that greps the captured logs.
+   response body — pinned by a test that greps the captured logs. Scope:
+   this is about the product. The e2e suite's own Playwright trace does
+   record it, by design of the tooling; see §2.
 3. The row reaches the replica with no secret name and with a url
    carrying no userinfo, query or fragment — pinned by a test that
    sends `http://user:pw@host:8080/x?y=z` and asserts what lands.

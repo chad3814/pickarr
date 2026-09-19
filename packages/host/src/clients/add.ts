@@ -32,6 +32,25 @@ import type { ClientType, Implementation } from './config.ts';
  * The two credential fields cross the wire here and nowhere else. Neither is
  * ever written to a column, a log line, an error message or a response body.
  *
+ * **Those four are the channels inside the product, and they are not the
+ * whole list.** A credential typed into the browser form by an end-to-end
+ * test is recorded in cleartext by Playwright's trace -- in the `fill`
+ * action's parameters, in the action log, in the step title, in the POST
+ * body resource, and in the DOM snapshot, which serialises a
+ * `type="password"` input's `value` unredacted. `packages/e2e`'s
+ * `playwright.config.ts` keeps that trace on failure and `ci.yml:96-103`
+ * uploads it as a build artifact with 7-day retention, so a red build
+ * publishes it.
+ *
+ * Nothing in this file can prevent that and no change here would: the
+ * channel is the test harness, not the code under test, and it exists for
+ * any form field a browser test fills. It is enumerated here because this
+ * docblock is where someone goes to find out where a credential can end up,
+ * and a list that stops at the product boundary reads as exhaustive when it
+ * is not. The constraint that keeps it harmless -- every credential the
+ * e2e suite types is a literal committed to this repo -- lives with the
+ * credentials, in `packages/e2e/tests/shell.spec.ts`'s module docblock.
+ *
  * **`category` may be `''`, and that is a configuration rather than a
  * missing value** -- which is why there is no refusal code for it and why
  * none is wanted. An empty category means "file downloads under no
