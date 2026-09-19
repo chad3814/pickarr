@@ -881,7 +881,10 @@ export const ROUTES: readonly Route[] = [
     // that no SQL and no business rule belongs in this file. Duplicating
     // them here is how the two copies drift.
     answer: async ({ deps, body }) => {
-      if (!isFeedBody(body)) return json(400, { error: 'invalid feed' });
+      // `{ refusal }` and no prose, for the reason `MALFORMED_BODY`'s doc
+      // gives: these two are the only answers here that share a status, so
+      // an english string was the whole of what told them apart.
+      if (!isFeedBody(body)) return json(400, { refusal: 'invalid-shape' });
       const result = await deps.addFeed(body);
       if ('refusal' in result) {
         return json(statusForFeedRefusal(result.refusal), { refusal: result.refusal });
@@ -1085,8 +1088,20 @@ function messageOf(error: unknown): string {
 /** The fixed 413 an oversized body is refused with -- fixed for the same reason `UNKNOWN_ROUTE` is: nothing of the body it refused is ever worth repeating. */
 const PAYLOAD_TOO_LARGE = json(413, { error: 'payload too large' });
 
-/** The fixed 400 a body that is not valid json is refused with. */
-const MALFORMED_BODY = json(400, { error: 'malformed json body' });
+/**
+ * The fixed 400 a body that is not valid json is refused with.
+ *
+ * **`refusal`, and no `error` beside it.** This and `invalid-shape` are the
+ * only two answers this API gives that share a status, so before this they
+ * were told apart by an english string and by nothing else -- which is the
+ * one thing the constraint on refusal codes forbids. They now carry the same
+ * single-field shape the `409` and `422` refusals already carried, so a
+ * client branches on `refusal` for every answer `POST /api/feeds` refuses a
+ * *body* with, rather than on `refusal` sometimes and prose the rest of the
+ * time. The prose is gone rather than kept alongside: a body carrying both
+ * is a body a client can still be tempted to read the wrong half of.
+ */
+const MALFORMED_BODY = json(400, { refusal: 'malformed-body' });
 
 /**
  * Reads `request`'s body for anything but a `GET` -- `handle` never calls

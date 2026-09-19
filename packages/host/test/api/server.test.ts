@@ -138,11 +138,16 @@ async function start(
   db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
   host?: string,
-  webRoot: string = MISSING_WEB_ROOT,
   // A partial `ReadServerDeps`, applied over the defaults below -- what lets
-  // `startSignedIn` hand a test its own `addFeed` without assembling a whole
-  // server. Defaulted to `{}` so every existing call site, none of which
-  // passes a sixth argument, is unaffected.
+  // a test hand this its own `addFeed`, or its own `webRoot`, without
+  // assembling a whole server.
+  //
+  // **`webRoot` is not a parameter of its own.** It was both: a fifth
+  // positional argument *and* a field of this object, spread after it, so
+  // the spread silently won whenever a caller passed both -- which
+  // `startSignedIn` did, on every call, writing `overrides.webRoot ??
+  // MISSING_WEB_ROOT` into a slot the next line overwrote. One route now,
+  // defaulted below like every other dep.
   overrides: Partial<ReadServerDeps> = {},
 ): Promise<Running> {
   const logs: LogLine[] = [];
@@ -168,7 +173,7 @@ async function start(
     generation: 'placeholder-generation',
     host,
     port: 0,
-    webRoot,
+    webRoot: MISSING_WEB_ROOT,
     authFor: (baseURL) => createAuth({
       raw,
       db,
@@ -261,11 +266,12 @@ async function signUpOwner(server: ReadServer, raw: DatabaseSync): Promise<strin
  * out of a failing test: the `try` in each test only runs once this has
  * returned.
  *
- * `overrides` is a partial `ReadServerDeps`, not a `webRoot` string -- what
- * this task extends it with, so a test can supply its own `addFeed` (`{
- * addFeed: async (i) => ({ id: 7 }) }`, say) without assembling a whole
- * server. `webRoot` is still reachable through it (`{ webRoot }`), since it
- * is itself one of `ReadServerDeps`'s own fields.
+ * `overrides` is a partial `ReadServerDeps`, not a `webRoot` string -- so a
+ * test can supply its own `addFeed` (`{ addFeed: async (i) => ({ id: 7 }) }`,
+ * say) without assembling a whole server. `webRoot` is reachable through it
+ * (`{ webRoot }`) and only through it, since it is itself one of
+ * `ReadServerDeps`'s own fields -- see `start`, which this passes straight
+ * through rather than picking `webRoot` out of it first.
  */
 async function startSignedIn(
   raw: DatabaseSync,
@@ -273,7 +279,7 @@ async function startSignedIn(
   pluginIdForType: (type: string) => string | undefined,
   overrides: Partial<ReadServerDeps> = {},
 ): Promise<SignedIn> {
-  const running = await start(raw, db, pluginIdForType, undefined, overrides.webRoot ?? MISSING_WEB_ROOT, overrides);
+  const running = await start(raw, db, pluginIdForType, undefined, overrides);
   try {
     return { ...running, cookie: await signUpOwner(running.server, raw) };
   } catch (error) {
@@ -373,25 +379,62 @@ function probeFor(route: { readonly path: string }): string {
   return route.path.split('/').map((segment) => (segment.startsWith(':') ? '1' : segment)).join('/');
 }
 
+/** One `guardProbe` answer: which route, which of its methods, and what came back. */
+interface Probe {
+  path: string;
+  method: string;
+  status: number;
+  text: string;
+}
+
 /**
- * One route probed with a method it actually declares, rather than always
+ * One route probed with **every** method it declares, rather than always
  * `GET` -- `/api/feeds` is `POST`-only, so a blanket `getAll` across every
  * route in `ROUTES` would hit its own method guard before ever reaching the
  * session check the tests using this mean to exercise. Every route but that
  * one still declares `GET`, so this is `get()` in every other case.
+ *
+ * **Every method, not `methods[0]`.** Probing the first was correct only
+ * because no route declares two, and it would have stayed silently correct
+ * past the day one did: the first route to declare `['GET', 'POST']` would
+ * have had its GET auth-probed and its POST not, by a helper whose callers
+ * believe they enumerate the table. There is nothing to notice that with, so
+ * the fan-out is here rather than in a comment asking the next person to
+ * remember.
+ *
+ * Resolves one entry per method, flattened by the callers, each labelled
+ * with the method so a failure names which one of a route's methods was let
+ * through.
  */
 async function guardProbe(
   server: ReadServer,
   route: { readonly path: string; readonly methods: readonly string[] },
   cookie: string | null,
-): Promise<{ path: string; status: number; text: string }> {
-  const method = route.methods[0];
-  if (method === undefined) throw new Error(`${route.path} declares no methods to probe`);
-  const response = await fetch(`${originOf(server)}${probeFor(route)}`, {
-    method,
-    headers: cookie === null ? {} : { cookie },
-  });
-  return { path: route.path, status: response.status, text: await response.text() };
+): Promise<Probe[]> {
+  if (route.methods.length === 0) throw new Error(`${route.path} declares no methods to probe`);
+  return Promise.all(route.methods.map(async (method) => {
+    const session = cookie === null ? {} : { cookie };
+    // Two whole inits rather than one with a conditional `body`. A non-GET
+    // needs a body that parses or `readBody` refuses it 400 ahead of the
+    // router (see the write-method test), and a GET may carry none at all --
+    // which `no-invalid-fetch-options` and `exactOptionalPropertyTypes` both
+    // object to expressing as `body: undefined`, correctly.
+    const init: RequestInit = method === 'GET'
+      ? { method, headers: session }
+      : { method, headers: { ...session, 'content-type': 'application/json' }, body: '{}' };
+    const response = await fetch(`${originOf(server)}${probeFor(route)}`, init);
+    return { path: route.path, method, status: response.status, text: await response.text() };
+  }));
+}
+
+/** Every route in `routes` probed with every method it declares, flattened into one list. */
+async function guardProbeAll(
+  server: ReadServer,
+  routes: readonly { readonly path: string; readonly methods: readonly string[] }[],
+  cookie: string | null,
+): Promise<Probe[]> {
+  const perRoute = await Promise.all(routes.map((route) => guardProbe(server, route, cookie)));
+  return perRoute.flat();
 }
 
 /**
@@ -1462,26 +1505,90 @@ test('each refusal answers a distinct code the client can branch on', async () =
   // maps a code to its own words; the server authors no sentence a human
   // reads, and no url or path appears in any body.
   //
-  // A fresh `setup()` per case, not one shared across both, run concurrently
+  // A fresh `setup()` per case, not one shared across them, run concurrently
   // rather than as a loop with an `await` in it -- the same reasoning
   // `getAll` gives: an install gets exactly one account (`signUpOwner`'s own
   // doc), so a second sign-up against the same database would be refused for
   // a reason that has nothing to do with the property this test checks, and
   // nothing here shares state across cases anyway.
-  await Promise.all(([['duplicate-url', 409], ['unknown-plugin', 422]] as const).map(async ([refusal, status]) => {
+  //
+  // **All four of `AddFeedRefusal`'s codes, not the two that used to be
+  // here.** `bad-download-type` and `bad-poll-interval` were pinned by
+  // nothing, so `statusForFeedRefusal` could have moved either out of the
+  // 422 group -- or dropped its `case` and fallen through -- with every test
+  // still green. The grouping is the thing under test, and a table missing
+  // half the group cannot see it drift.
+  const cases = [
+    ['duplicate-url', 409],
+    ['unknown-plugin', 422],
+    ['bad-download-type', 422],
+    ['bad-poll-interval', 422],
+  ] as const;
+  // Both halves of the table, so a code added to `AddFeedRefusal` without a
+  // row here fails rather than quietly going unprobed. Written as a set so
+  // a duplicated row cannot make the count right by accident.
+  assert.equal(new Set(cases.map(([refusal]) => refusal)).size, 4, 'every refusal the host can return has a row');
+
+  await Promise.all(cases.map(async ([refusal, status]) => {
     const { raw, db } = setup();
-    const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
       addFeed: async () => ({ refusal }),
     });
     try {
       const answer = await post(server, '/api/feeds', cookie, validBody());
       assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
-      assert.equal(JSON.parse(answer.text).refusal, refusal, 'and names itself in a stable code');
+      assert.deepEqual(JSON.parse(answer.text), { refusal }, 'and the whole body is that one stable code');
       assert.ok(!answer.text.includes('tracker.example'), 'the url is never echoed');
+      // The other half of the same constraint: no url in any *log* either,
+      // which the response-body assertion above says nothing about. `logs`
+      // is every `log` call this server made, asserted by substring rather
+      // than by shape so a url reaching any field of any line is caught.
+      assert.ok(
+        !JSON.stringify(logs).includes('tracker.example'),
+        'and the submitted url is not written down either',
+      );
     } finally {
       await server.close();
     }
   }));
+});
+
+test('both 400s carry a code, so the one status they share is not told apart by prose', async () => {
+  // The two refusals that collide on a status -- a body that does not parse
+  // and one that parses into the wrong shape. Every other refusal this
+  // endpoint gives has a status of its own; these two did not, and differed
+  // only in an english string, which is exactly what the constraint on
+  // refusal codes rules out. Asserted as whole bodies: adding `refusal`
+  // beside the old `error` would satisfy a `.refusal` check and still leave
+  // a client two shapes to read.
+  const { raw, db } = setup();
+  let called = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addFeed: async () => {
+      called += 1;
+      return { id: 1 };
+    },
+  });
+  try {
+    const unparseable = await postRaw(server, '/api/feeds', cookie, '{not json');
+    assert.equal(unparseable.status, 400);
+    assert.deepEqual(JSON.parse(unparseable.text), { refusal: 'malformed-body' });
+
+    // Parses, and is not a feed: `pollIntervalS` is a string where the shape
+    // wants a number, so `isFeedBody` refuses it.
+    const wrongShape = await post(server, '/api/feeds', cookie, { ...validBody(), pollIntervalS: 'soon' });
+    assert.equal(wrongShape.status, 400);
+    assert.deepEqual(JSON.parse(wrongShape.text), { refusal: 'invalid-shape' });
+
+    assert.notDeepEqual(
+      JSON.parse(unparseable.text),
+      JSON.parse(wrongShape.text),
+      'and the two are distinguishable without reading a sentence',
+    );
+    assert.equal(called, 0, 'neither reached the host');
+  } finally {
+    await server.close();
+  }
 });
 
 test('the route is guarded by a session like every read', async () => {
@@ -1495,23 +1602,6 @@ test('the route is guarded by a session like every read', async () => {
   }
 });
 
-test('a malformed body is refused without reaching the host', async () => {
-  const { raw, db } = setup();
-  let called = 0;
-  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
-    addFeed: async () => {
-      called += 1;
-      return { id: 1 };
-    },
-  });
-  try {
-    const answer = await postRaw(server, '/api/feeds', cookie, '{not json');
-    assert.equal(answer.status, 400);
-    assert.equal(called, 0, 'the host is not asked to validate transport-level junk');
-  } finally {
-    await server.close();
-  }
-});
 
 test('every route except health refuses without a session', async () => {
   // Enumerated from the route table, not hand-listed: `probeFor` turns each
@@ -1519,10 +1609,11 @@ test('every route except health refuses without a session', async () => {
   // guarded or fails here. A written-out list of six paths would pass
   // untouched beside a seventh route nobody guarded.
   //
-  // Each probed with its own declared method (`guardProbe`), not a blanket
-  // `GET`: `/api/feeds` answers only `POST`, and a `GET` against it would hit
-  // the method guard before ever reaching the session check this test means
-  // to exercise -- see that helper's own doc.
+  // Each probed with *every* method it declares (`guardProbeAll`), not a
+  // blanket `GET`: `/api/feeds` answers only `POST`, and a `GET` against it
+  // would hit the method guard before ever reaching the session check this
+  // test means to exercise -- see `guardProbe`'s own doc, which also says
+  // why it is every method and not the first.
   const { raw, db } = setup();
   const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
@@ -1533,17 +1624,26 @@ test('every route except health refuses without a session', async () => {
     assert.equal(guarded.length, ROUTES.length - 2, 'exactly two routes in the table are open');
     assert.ok(guarded.length >= 5, 'and the table is the real one, not a list this test passed over');
 
-    const refused = await Promise.all(guarded.map((route) => guardProbe(server, route, ANONYMOUS)));
-    for (const { path, status, text } of refused) {
-      assert.equal(status, 401, `${path} must refuse a caller with no session`);
-      assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, `${path} refuses with the fixed body`);
+    const refused = await guardProbeAll(server, guarded, ANONYMOUS);
+    // Exactly one answer per declared method, not per route. This is what
+    // fails the day `guardProbe` goes back to probing `methods[0]` and a
+    // route declares two -- which is otherwise silent, since a method that
+    // is never probed cannot fail the loop below.
+    assert.equal(
+      refused.length,
+      guarded.reduce((total, route) => total + route.methods.length, 0),
+      'every method every guarded route declares is probed, not just the first',
+    );
+    for (const { path, method, status, text } of refused) {
+      assert.equal(status, 401, `${method} ${path} must refuse a caller with no session`);
+      assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, `${method} ${path} refuses with the fixed body`);
     }
 
     // And the same enumeration with a session: nothing here is 401, so the
     // loop above is not passing merely because the guard refuses everyone.
-    const allowed = await Promise.all(guarded.map((route) => guardProbe(server, route, cookie)));
-    for (const { path, status } of allowed) {
-      assert.notEqual(status, 401, `${path} must be reachable by a session holder`);
+    const allowed = await guardProbeAll(server, guarded, cookie);
+    for (const { path, method, status } of allowed) {
+      assert.notEqual(status, 401, `${method} ${path} must be reachable by a session holder`);
     }
   } finally {
     await server.close();
@@ -1568,14 +1668,15 @@ test('health and the static bundle answer without a session, and nothing else do
       'two open routes: the health check and the bundle',
     );
 
-    // Each probed with its own declared method -- see `guardProbe`'s doc for
-    // why a blanket `GET` cannot probe `POST /api/feeds`.
-    const answers = await Promise.all(ROUTES.map((route) => guardProbe(server, route, ANONYMOUS)));
-    for (const { path, status } of answers) {
+    // Each probed with every method it declares -- see `guardProbe`'s doc
+    // for why a blanket `GET` cannot probe `POST /api/feeds`, and why one
+    // method per route is not enough.
+    const answers = await guardProbeAll(server, ROUTES, ANONYMOUS);
+    for (const { path, method, status } of answers) {
       if (openPaths.includes(path)) {
-        assert.notEqual(status, 401, `${path} must answer without a session`);
+        assert.notEqual(status, 401, `${method} ${path} must answer without a session`);
       } else {
-        assert.equal(status, 401, `${path} must refuse a caller with no session`);
+        assert.equal(status, 401, `${method} ${path} must refuse a caller with no session`);
       }
     }
 
@@ -1878,7 +1979,7 @@ async function bundleRoot(): Promise<string> {
 test('a protocol-relative target is refused, never answered with the bundle', async () => {
   const { raw, db } = setup();
   const webRoot = await bundleRoot();
-  const { server } = await start(raw, db, moviesOnly, undefined, webRoot);
+  const { server } = await start(raw, db, moviesOnly, undefined, { webRoot });
   try {
     // `fetch` sends these verbatim -- measured, it does not collapse the
     // doubled slash -- so the server really does see `//api/health`. Resolved
