@@ -484,10 +484,13 @@ test('the /unmatched route renders Unmatched, not a category', async () => {
 
 /**
  * Task 5's own mapping test, alongside the four above -- `data-testid="settings"`
- * carries the same route-mapping contract `Feeds.tsx`'s own docblock
- * describes forward from `Category.tsx`'s and `Unmatched.tsx`'s markers.
+ * carries the same route-mapping contract `Settings.tsx`'s own docblock
+ * describes forward from `Category.tsx`'s and `Unmatched.tsx`'s markers. The
+ * marker moved from `Feeds.tsx` to `Settings.tsx` when `/settings` grew its
+ * download clients section: the feeds section stopped being the screen's
+ * root element, and this test is about which screen the route reaches.
  */
-test('the /settings route renders Feeds, not a category', async () => {
+test('the /settings route renders the settings screen, not a category', async () => {
   const { deps, sched } = testDeps();
   render(
     <MemoryRouter initialEntries={['/settings']}>
@@ -496,7 +499,7 @@ test('the /settings route renders Feeds, not a category', async () => {
   );
 
   await waitFor(() => {
-    assert.ok(screen.getByTestId('settings'), '/settings renders Feeds');
+    assert.ok(screen.getByTestId('settings'), '/settings renders the settings screen');
   });
   assert.ok(!screen.queryByTestId('category-tv'), 'not the tv category');
   assert.ok(!screen.queryByTestId('category-movie'), 'not the movie category');

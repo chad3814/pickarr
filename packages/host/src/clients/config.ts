@@ -52,7 +52,16 @@ export type ClientConfig = SabnzbdConfig | QbittorrentBearerConfig | Qbittorrent
 
 const IMPLEMENTATIONS: readonly Implementation[] = ['qbittorrent', 'sabnzbd'];
 
-function isImplementation(value: string): value is Implementation {
+/**
+ * Whether `value` names one of the products this host can drive.
+ *
+ * Exported for `clients/add.ts`, the writer: the reader and the writer
+ * agreeing on what an implementation is has to be one list, not two. A
+ * second copy over there would let a third implementation be *accepted* by
+ * one and rejected by the other, which reads as "the client saved and then
+ * vanished".
+ */
+export function isImplementation(value: string): value is Implementation {
   return (IMPLEMENTATIONS as readonly string[]).includes(value);
 }
 

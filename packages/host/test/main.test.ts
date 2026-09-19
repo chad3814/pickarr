@@ -85,6 +85,7 @@ function fakeHost(overrides: Partial<Host>): Host {
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
     scheduleReconcile: async () => { throw new Error('scheduleReconcile: not used by this test'); },
     addFeed: async () => { throw new Error('addFeed: not used by this test'); },
+    addDownloadClient: async () => { throw new Error('addDownloadClient: not used by this test'); },
     // Throwing, not a no-op: a no-op default here would let a test pass
     // while `main`'s real `start()`/`stop()` calls go unexercised -- see
     // `createShutdown`'s own tests below, which override exactly the two

@@ -5,53 +5,162 @@
  * repeated). `/settings` is its own file rather than a further section of
  * `library.css`: that file's own docblock is a closed accounting of browse's
  * markup -- "`<article>`, `<img>` and `ul[aria-label='releases']` each
- * appear exactly once ... outside `styles/` and `test/`" -- and `Feeds.tsx`
- * and `AddFeed.tsx` are a different screen with their own `<form>`, their
- * own `<ul aria-label='feeds'>` and their own error alert, none of which
- * that accounting was ever about. Appending them there would mean either
+ * appear exactly once ... outside `styles/` and `test/`" -- and the settings
+ * screen's `<form>`s, lists and error alerts are none of what that
+ * accounting was written about. Appending them there would mean either
  * rewriting an accounting that is still true of the markup it describes, or
  * leaving it to quietly go stale the way `CLAUDE.md`'s testing hazard warns
  * against for prose -- a second file keeps each accounting scoped to the
  * screen it was written against.
  *
- * Selectors below are keyed the same way `library.css`'s are: a type, an
- * ARIA attribute already load-bearing for accessibility (`aria-labelledby`
- * on the form, `aria-label='feeds'` on the list), or a parent/child
- * relationship -- never a class, since `Feeds.tsx` and `AddFeed.tsx` set
- * none.
+ * **Both of `/settings`'s sections are styled here, in this one file, and
+ * the download clients slice did not get a stylesheet of its own.** That is
+ * the opposite call from the settings-versus-browse one above, made for the
+ * opposite reason: browse and settings are two screens, while feeds and
+ * download clients are two `<section>`s inside one `<section>`
+ * (`Settings.tsx`) reached by one url. The heading-hierarchy rule below is
+ * a statement about that whole screen rather than about either section, and
+ * it has nowhere to live if the screen's rules are split in two.
+ *
+ * **Most selectors below name both sections.** The two are built to the
+ * same shape on purpose (`DownloadClients.tsx`'s own doc: "`Feeds.tsx`'s
+ * sibling, and deliberately the same shape"), and a grouped selector is
+ * what keeps them that way -- with one rule block per section, the next
+ * person to change a list's spacing changes one of them and the two drift
+ * apart with nothing failing. Where the markup genuinely differs the
+ * selectors part company; today nothing does, beyond each section's own
+ * attribute values.
+ *
+ * Selectors are keyed the same way `library.css`'s are: a type, an ARIA
+ * attribute already load-bearing for accessibility (`aria-labelledby` on
+ * the screen, on each section and on each form; `aria-label` on each list),
+ * or a parent/child relationship -- never a class. No component sets one:
+ * `grep -rn className --include='*.ts' --include='*.tsx' packages/web/src`
+ * returns nothing, so there is no class to key on and this file does not
+ * become the first component to add one. The `--include` pair is not
+ * decoration -- an unrestricted `grep -rn className packages/web/src`
+ * matches this very sentence and reports one hit, so the command as
+ * written would contradict the claim it is offered as evidence for.
  */
 
 /*
- * Every configured feed (`Feeds.tsx`'s own `<ul aria-label='feeds'>`).
- * Unstyled, this rendered as a bulleted list with the UA's own indent --
- * the same gap `library.css`'s two lists closed for browse's own markup,
- * closed here identically.
+ * Air between the two sections. `Settings.tsx` renders them as bare
+ * siblings and nothing else supplies a gap: the feeds `<ul>` has no bottom
+ * margin (below), the next section's `<h2>` has no top margin
+ * (`base.css`), so all that separates the last feed from the words
+ * "Download clients" is that last `<li>`'s own `--space-2` of bottom
+ * padding -- less than the `--space-4` a section heading puts between
+ * itself and its own content, which makes the second section read as a
+ * continuation of the first.
+ *
+ * `> section + section` rather than a margin on each section: only the gap
+ * *between* them is wanted, and the second section is the only one that has
+ * a predecessor to be separated from. A third section added later picks
+ * this up with no edit here.
  */
-ul[aria-label='feeds'] {
+section[aria-labelledby='settings-heading'] > section + section {
+  margin-top: var(--space-6);
+}
+
+/*
+ * The screen's third heading tier, visually. The markup now agrees with it:
+ * `Settings.tsx`'s `<h1>`, each section's `<h2>`, and an `<h3>` for every
+ * heading inside a section -- the two form names ("Add a feed", "Add a
+ * download client") and every listed feed's and every listed client's own
+ * name.
+ *
+ * **This rule and those four `<h3>`s were shipped a slice apart, and the
+ * gap between them was the defect.** When this rule first landed, all four
+ * headings were still `<h2>`, so the page *looked* three tiers deep and
+ * *announced* two: a screen reader said "heading level 2" for "Add a
+ * download client" and for "Download clients" alike, and a listed client
+ * read as a sibling of the section listing it. That is worse than the
+ * uniform flatness it replaced, because the visible and announced
+ * interfaces had at least agreed before. `AddFeed.tsx`,
+ * `AddDownloadClient.tsx`, `Feeds.tsx` and `DownloadClients.tsx` carry the
+ * `<h3>`s now, and `Settings.test.tsx`'s `the /settings heading hierarchy
+ * is three tiers deep, in the markup and not only in the stylesheet` reds
+ * if any of them flattens back.
+ *
+ * **This block supplies the whole treatment, not just the size, because
+ * `base.css` has no `h3` rule at all** (`grep -n '^h[1-6]'
+ * packages/web/src/styles/base.css` -> `h1` and `h2` only, and nothing
+ * anywhere in `styles/` sets a bare `h3`). Deleting this block and
+ * measuring in Chromium gives **18.72px at weight 700**: `body` sets no
+ * `font-size`, so these headings inherit the UA's 16px and the UA's own
+ * `h3 { font-size: 1.17em }` scales *up* from it. An unstyled `<h3>` is
+ * therefore *bigger and heavier* than the 16px/600 `<h2>` it sits under --
+ * the hierarchy inverted, not merely unstyled. So `font-size`,
+ * `font-weight` and `margin` are all named here, reproducing exactly what
+ * `base.css`'s `h2` rule used to give these four headings apart from the
+ * size; the seven headings on the rendered screen measure identically
+ * before and after the `<h2>`-to-`<h3>` change.
+ *
+ * (That figure is measured rather than derived. The first draft of this
+ * comment reasoned its way to "about 15px", from an inherited 13px that
+ * `base.css` never sets -- `--text-body` appears there on `nav a`, not on
+ * `body`. The mutant is what corrected it.)
+ *
+ * Adding an `h3` rule to `base.css` instead was the alternative; it would
+ * have reached the two error-banner headings below, which already override
+ * all three properties, so it would have been three declarations that no
+ * element on any screen consumes.
+ *
+ * `--text-body` rather than `--text-meta`: the detail lines under each list
+ * item are already `--text-meta` and dimmed (below), and a name has to
+ * out-rank the lines that describe it.
+ */
+form[aria-labelledby='add-feed-heading'] > h3,
+form[aria-labelledby='add-download-client-heading'] > h3,
+ul[aria-label='feeds'] li h3,
+ul[aria-label='download clients'] li h3 {
+  font-size: var(--text-body);
+  font-weight: 600;
+  margin: 0 0 var(--space-4);
+}
+
+/*
+ * Every configured feed and every configured download client (`Feeds.tsx`'s
+ * `<ul aria-label='feeds'>` and `DownloadClients.tsx`'s
+ * `<ul aria-label='download clients'>`). Unstyled, both render as bulleted
+ * lists with the UA's own indent -- the same gap `library.css`'s two lists
+ * closed for browse's own markup, closed here identically.
+ */
+ul[aria-label='feeds'],
+ul[aria-label='download clients'] {
   list-style: none;
   margin: var(--space-2) 0 0;
   padding: 0;
 }
 
-ul[aria-label='feeds'] li {
+ul[aria-label='feeds'] li,
+ul[aria-label='download clients'] li {
   padding: var(--space-2) 0;
   border-top: 1px solid var(--color-line);
 }
 
-/* The feed's name, sized like every other `h2` in the app but with no
-   bottom margin: `base.css`'s bare `h2` rule assumes a subsection heading
-   with body text following it at a page's own pace, and `--space-4` of air
-   above one line of url reads as a gap in the list rather than a heading
-   paired with its own detail line. `article h2` in `library.css` makes the
-   identical call for a card's title, for the identical reason. */
-ul[aria-label='feeds'] li h2 { margin: 0; }
+/* The feed's or client's name. No bottom margin: the hierarchy rule above
+   gives every `<h3>` on this screen `--space-4` beneath it, which suits a
+   form heading followed by fields but reads as a gap in the list rather
+   than a name paired with its own detail. `article h2` in `library.css`
+   makes the identical call for a card's title, for the identical reason.
+   This overrides the block above by source order -- the two selectors have
+   the same specificity, so moving either one would silently undo this. */
+ul[aria-label='feeds'] li h3,
+ul[aria-label='download clients'] li h3 { margin: 0; }
 
-/* The feed's url, exactly as the replica holds it (`Feeds.tsx`'s own doc:
-   redacted by the host, never reconstructed here). Secondary detail under
-   the name it belongs to -- the same dimmed, smaller treatment
-   `library.css`'s release list gives a resolution or a status line under
-   its own filename. */
-ul[aria-label='feeds'] li p {
+/* The detail lines under each name: a feed's url (`Feeds.tsx`), and a
+   client's implementation, address, category and username
+   (`DownloadClients.tsx`). Every one of them is rendered exactly as the
+   replica holds it or as a fixed sentence standing in for a blank -- both
+   components' docs -- so this rule only has to make them read as secondary
+   detail, which is the same dimmed, smaller treatment `library.css`'s
+   release list gives a resolution or a status line under its own filename.
+   `overflow-wrap: anywhere` so a value with nothing to break at -- a url, or
+   a category named as one long token -- wraps rather than widening the
+   column past the rest of the page. */
+ul[aria-label='feeds'] li p,
+ul[aria-label='download clients'] li p {
   margin: var(--space-1) 0 0;
   color: var(--color-text-dim);
   font-size: var(--text-meta);
@@ -59,38 +168,44 @@ ul[aria-label='feeds'] li p {
 }
 
 /*
- * The add-feed form (`AddFeed.tsx`'s own doc: the host's first write
- * surface). Keyed on the heading id the `<form>` already carries via
- * `aria-labelledby` -- load-bearing for accessibility, reused rather than a
- * hook added for styling alone, `library.css`'s own justification for every
- * attribute selector in that file.
+ * The two add forms (`AddFeed.tsx`, `AddDownloadClient.tsx`). Keyed on the
+ * heading id each `<form>` already carries via `aria-labelledby` --
+ * load-bearing for accessibility, reused rather than a hook added for
+ * styling alone, `library.css`'s own justification for every attribute
+ * selector in that file.
  *
- * `:not([role='alert'])` on the field rule below excludes the one other
- * direct-child `<div>` this form has -- the error banner -- which gets its
- * own rule instead of the field layout it does not want.
+ * `:not([role='alert'])` excludes the one other direct-child `<div>` either
+ * form has -- the error banner -- which gets its own rule below instead of
+ * the field layout it does not want. `AddDownloadClient.tsx`'s credential
+ * fields are wrapped in a fragment rather than an element, so its username
+ * and password `<div>`s are direct children here exactly as its others are.
  */
-form[aria-labelledby='add-feed-heading'] > div:not([role='alert']) {
+form[aria-labelledby='add-feed-heading'] > div:not([role='alert']),
+form[aria-labelledby='add-download-client-heading'] > div:not([role='alert']) {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   margin-bottom: var(--space-3);
 }
 
-form[aria-labelledby='add-feed-heading'] label {
+form[aria-labelledby='add-feed-heading'] label,
+form[aria-labelledby='add-download-client-heading'] label {
   color: var(--color-text-dim);
   font-size: var(--text-label);
 }
 
-/* The error banner (`AddFeed.tsx`'s own `role='alert'` div around an `<h3>`
-   naming a fixed, server-blind message -- see that file's doc on why the
-   text itself is never the server's own words). `--color-error`, the same
+/* The error banner (each form's own `role='alert'` div around an `<h3>`
+   naming a fixed, server-blind message -- see either component's doc on why
+   the text is never the server's own words). `--color-error`, the same
    token `base.css`'s `.error` utility applies elsewhere, reached here by
-   the attribute rather than a class this component does not set. */
-form[aria-labelledby='add-feed-heading'] [role='alert'] {
+   the attribute rather than a class neither component sets. */
+form[aria-labelledby='add-feed-heading'] [role='alert'],
+form[aria-labelledby='add-download-client-heading'] [role='alert'] {
   margin-bottom: var(--space-3);
 }
 
-form[aria-labelledby='add-feed-heading'] [role='alert'] h3 {
+form[aria-labelledby='add-feed-heading'] [role='alert'] h3,
+form[aria-labelledby='add-download-client-heading'] [role='alert'] h3 {
   margin: 0;
   font-size: var(--text-body);
   font-weight: 600;

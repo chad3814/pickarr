@@ -335,6 +335,7 @@ function fakeHost(overrides: Partial<Host>): Host {
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
     scheduleReconcile: async () => { throw new Error('scheduleReconcile: not used by this test'); },
     addFeed: async () => { throw new Error('addFeed: not used by this test'); },
+    addDownloadClient: async () => { throw new Error('addDownloadClient: not used by this test'); },
     start: () => { throw new Error('start: not used by this test'); },
     stop: () => { throw new Error('stop: not used by this test'); },
     idle: async () => { throw new Error('idle: not used by this test'); },

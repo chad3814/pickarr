@@ -55,7 +55,7 @@ export interface ListByTableOptions {
 }
 
 /**
- * The six tables `by_table_updated` covers, and no others. The original five
+ * The seven tables `by_table_updated` covers, and no others. The original five
  * were measured rather than intended (design spec §3.2) -- this file's own
  * tests page `media_item` and `rss_item` through the index directly.
  *
@@ -75,12 +75,28 @@ export interface ListByTableOptions {
  *
  * `media_item`, `rss_item`, `torrent_download` and `nzb_download`
  * project `updatedAt` because the sync protocol's read shapes for them do;
- * `person` does too, and so does `rss_feed`. `role` projects only
- * `createdAt`, and none of the six plugin read shapes (`tv_release`,
- * `tv_season`, `tv_series`, `movie_detail`, `xxx_scene`, `xxx_site`) carries
- * either. Asking `listByTable` for one of those seven is a programming
- * error and throws (see below) rather than returning an empty page, which
- * would read as "this table is empty" -- a lie a caller has no way to catch.
+ * `person` does too, and so do `rss_feed` and `download_client`. `role`
+ * projects only `createdAt`, and none of the six plugin read shapes
+ * (`tv_release`, `tv_season`, `tv_series`, `movie_detail`, `xxx_scene`,
+ * `xxx_site`) carries either. Asking `listByTable` for one of those seven
+ * is a programming error and throws (see below) rather than returning an
+ * empty page, which would read as "this table is empty" -- a lie a caller
+ * has no way to catch.
+ *
+ * **`download_client` was the eighth exclusion and is now a member, and it
+ * is measured exactly the way `rss_feed` above is.** It joined
+ * `HOST_SYNCED_TABLES` in the download clients slice and
+ * `DownloadClientSyncRead` carries `updatedAt`, so its rows were already in
+ * `by_table_updated` while this set was the last thing standing between
+ * them and a caller; the entry below is the one line that admits them, and
+ * `settings/useDownloadClients.ts` is the caller that made it an error to
+ * fix rather than a table nobody asks for. Measured by deleting
+ * `'download_client'` from the set: **19 web tests red** -- eleven in
+ * `test/settings/DownloadClients.test.tsx`, six in
+ * `test/settings/useDownloadClients.test.tsx`, one in
+ * `test/settings/Settings.test.tsx` and one in `test/shell/Shell.test.tsx`
+ * -- each of them seeding real rows through `applyBatch` into a real
+ * `fake-indexeddb` store and reading them back through this function.
  */
 const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'media_item',
@@ -89,6 +105,7 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'nzb_download',
   'person',
   'rss_feed',
+  'download_client',
 ]);
 
 /**
@@ -110,7 +127,7 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
  * does, not a schema change.
  *
  * **Separate from `TABLES_WITH_UPDATED_AT`, because they disagree.** That
- * set admits six tables and only two of them, `media_item` and `rss_feed`,
+ * set admits seven tables and only two of them, `media_item` and `rss_feed`,
  * project a `pluginId`; the two readers below originally reused it, so for
  * `rss_item`, `torrent_download`, `nzb_download` and `person` the guard
  * passed and the index answered nothing -- measured as

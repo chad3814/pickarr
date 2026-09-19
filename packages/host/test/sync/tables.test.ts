@@ -5,7 +5,9 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { HOST_SYNCED_TABLES, readHostRows } from '../../src/sync/tables.ts';
 import { syncedTriggerNames } from '../../src/sync/log.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
+import { redactUrl } from '../../src/clients/redact.ts';
 import type {
+  DownloadClientSyncRead,
   MediaItemSyncRead,
   NzbDownloadSyncRead,
   PersonSyncRead,
@@ -30,9 +32,40 @@ test('every host synced table has all three triggers after migration', () => {
 });
 
 test('no credential-bearing table is synced', () => {
-  for (const forbidden of ['auth_user', 'auth_session', 'auth_account', 'auth_verification', 'host_state', 'secret', 'download_client']) {
+  // `download_client` was the seventh name on this list and is not on it any
+  // more -- it joined the synced set in this slice. It is off the list
+  // because it stopped belonging on it, not to make room: since migration 14
+  // the row holds no credential *value* at all, only the `secret` names that
+  // resolve to one, and `selectSql` projects neither of those names. The six
+  // below each still hold a value. The two guarantees that replaced
+  // `download_client`'s entry here are pinned by their own tests further
+  // down -- the projection's key set, and the url normalisation -- because a
+  // table being synced is now the premise rather than the violation.
+  for (const forbidden of ['auth_user', 'auth_session', 'auth_account', 'auth_verification', 'host_state', 'secret']) {
     assert.ok(!HOST_SYNCED_TABLES.includes(forbidden), `${forbidden} must never be synced`);
   }
+});
+
+test('download_client is one of the eight host synced tables', () => {
+  // The bootstrap assertion for this slice, and the first comment here was
+  // wrong about why -- recorded because the wrong version is the plausible
+  // one. It claimed the projection tests would stay green without this
+  // entry, since `readHostRows` dispatches on `selectSql` having a `case`
+  // rather than on this export. They do not: they read through
+  // `createSyncRegistry`, which routes on `HOST_SYNCED_TABLES.includes` and
+  // answers `{}` for a table it does not know, so they red on a missing row.
+  //
+  // Measured, dropping `'download_client'` from the list and running this
+  // file: **8 red, 16 green**. This one, the six `download_client`
+  // projection tests, and the read-shape set comparison. The test that does
+  // *not* notice is "every host synced table has all three triggers" -- it
+  // iterates this very list, so deleting an entry deletes its check. That is
+  // the blind spot this assertion covers, and it is a different one from the
+  // one first written down here.
+  assert.ok(HOST_SYNCED_TABLES.includes('download_client'),
+    'download_client must be synced -- a settings list reads it from the replica');
+  assert.equal(HOST_SYNCED_TABLES.length, 8,
+    'the host syncs eight of its own tables; a ninth needs a read shape, a migration and a decision');
 });
 
 test('every synced table has an integer primary key named id', () => {
@@ -251,6 +284,215 @@ test('the projection carries no column the client has no business holding', () =
 });
 
 /**
+ * Inserts one `download_client` row (id 1) with every column named, so a test
+ * varies only the url it is about.
+ *
+ * The two secret-name columns are filled with a recognisable literal prefix
+ * (`b2f1c0de`) rather than left null. A null column still produces a *key* in
+ * a `SELECT`'s result, so a key-set assertion catches a projection that names
+ * the column either way -- but only a non-null value catches the other half,
+ * a projection that names it and happens to be read on a row where it is
+ * null. `username` is filled for the opposite reason: it is projected on
+ * purpose, and a null there would make "it is on the wire" unobservable.
+ */
+function seedDownloadClient(
+  raw: ReturnType<typeof openTestDatabase>['raw'],
+  overrides: { url?: string },
+): void {
+  raw.prepare(`
+    INSERT INTO download_client (
+      id, name, type, implementation, url, api_key_secret_name, username,
+      password_secret_name, category, import_mode, created_at, updated_at
+    ) VALUES (
+      1, 'qbit', 'torrent', 'qbittorrent', ?,
+      'b2f1c0de-0000-4000-8000-000000000001', 'admin',
+      'b2f1c0de-0000-4000-8000-000000000002', 'tv', 'copy', 10, 20
+    )
+  `).run(overrides.url ?? 'http://qbit.local:8080');
+}
+
+/**
+ * Reads `url` off a projected `download_client` row, narrowed rather than
+ * cast, the way `rowUrl` above does for a feed. Separate from `rowUrl` only
+ * because this one must accept `''`, which is a legitimate projection here
+ * (see `readHostRows`) and is never one for a feed.
+ */
+function clientUrl(row: unknown): string {
+  if (typeof row !== 'object' || row === null || !('url' in row) || typeof row.url !== 'string') {
+    throw new Error('download_client projection has no string url');
+  }
+  return row.url;
+}
+
+test('a download client reaches a client with its address and neither of its secret names', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedDownloadClient(raw, {});
+
+  const row = registry.readRows(raw, 'download_client', [1])[1];
+  if (typeof row !== 'object' || row === null) {
+    throw new Error('download_client projection is not an object');
+  }
+  assert.deepEqual(
+    Object.keys(row).toSorted(),
+    ['category', 'createdAt', 'id', 'implementation', 'name', 'type', 'updatedAt', 'url', 'username'],
+    'design spec §5 names exactly these nine',
+  );
+
+  // Both spellings, and then the contents. The key-set assertion above
+  // already fails on an extra key, but it fails with a nine-name diff that
+  // does not say *which* door opened; these two do. And they are checked
+  // under both the aliased and the raw column name because the alias is this
+  // module's own choice -- a `SELECT api_key_secret_name` with no `AS` would
+  // satisfy an `apiKeySecretName` check and still put the name on the wire.
+  for (const forbidden of [
+    'apiKeySecretName', 'api_key_secret_name', 'passwordSecretName', 'password_secret_name',
+  ]) {
+    assert.ok(!(forbidden in row), `download_client.${forbidden} must never be projected`);
+  }
+  // The content check the two above cannot make: a secret name reaching the
+  // wire under some third spelling. The fixture's prefix is what is looked
+  // for, and the failure message deliberately does not quote what was found.
+  assert.ok(!JSON.stringify(row).includes('b2f1c0de'),
+    'a secret name reached the wire under a name this test does not enumerate');
+
+  // Values, not only names, and as one object rather than field by field:
+  // reading `row.username` off an `unknown` would need a cast, and the whole
+  // object is a stronger assertion anyway. `username` is here on purpose --
+  // it is plaintext because a username is not a credential (`db/schema.ts`)
+  // -- and `url` is the seed's default put through the normalisation, which
+  // gives the root path the parser supplies.
+  assert.deepEqual(row, {
+    id: 1,
+    name: 'qbit',
+    type: 'torrent',
+    implementation: 'qbittorrent',
+    url: 'http://qbit.local:8080/',
+    username: 'admin',
+    category: 'tv',
+    createdAt: 10,
+    updatedAt: 20,
+  });
+});
+
+test('a download client url reaches the replica as origin and path, with userinfo, query and fragment gone', () => {
+  // The guarantee design spec §5 is built on, and the one place this slice is
+  // safer than the feeds slice it copies. Three absence assertions before the
+  // equality, each naming the part of the url it guards: a lone `assert.equal`
+  // reds for any of the three and reports only that two strings differ, which
+  // is the least useful thing it could say about a partial normalisation.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedDownloadClient(raw, { url: 'http://user:hunter2@qbit.local:8080/base?token=abc#frag' });
+
+  const url = clientUrl(registry.readRows(raw, 'download_client', [1])[1]);
+
+  assert.ok(!url.includes('hunter2'), 'userinfo must be dropped -- this is the case redactUrl would pass through intact');
+  assert.ok(!url.includes('token'), 'the query string must be dropped, parameter name and all');
+  assert.ok(!url.includes('frag'), 'the fragment must be dropped');
+  assert.equal(url, 'http://qbit.local:8080/base',
+    'origin and path, nothing else -- host and port are the address and must survive');
+});
+
+test('redactUrl would not have caught the userinfo this projection drops', () => {
+  // Not a test of this module: a test of the premise the module doc argues
+  // from. The doc says `origin + pathname` is stronger than the feeds
+  // precedent *because* `redactUrl` returns `http://user:hunter2@qbit:8080`
+  // unchanged, and an argued reason is exactly what this codebase has found
+  // to be wrong most often. So construct it rather than assert it in prose.
+  // If issue #78 ever widens `redactUrl` to cover userinfo, this reds and the
+  // docblock's contrast needs rewording -- which is the point.
+  assert.equal(
+    redactUrl('http://user:hunter2@qbit.local:8080/base?token=abc#frag'),
+    'http://user:hunter2@qbit.local:8080/base?token=abc#frag',
+    'redactUrl knows one query parameter name and nothing structural',
+  );
+});
+
+test('a url that does not parse projects as the empty string, and the row still travels', () => {
+  // The deliberate decision, stated in `sync/tables.ts`'s docblock: the row
+  // reaches the replica with no address rather than the sync throwing, and
+  // rather than the row being dropped. Both alternatives were available and
+  // both are worse -- a throw takes down a whole page of unrelated rows, and
+  // a dropped row leaves `torrent_download.downloadClientId` pointing at
+  // something the client will never learn exists.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedDownloadClient(raw, { url: 'not a url at all' });
+
+  const rows = registry.readRows(raw, 'download_client', [1]);
+  assert.deepEqual(Object.keys(rows), ['1'], 'the row is still in the page, not dropped from it');
+  assert.equal(clientUrl(rows[1]), '', 'no address, rather than a throw or a missing row');
+  // The whole row, so "the rest of it is unaffected" is asserted rather than
+  // sampled: an implementation that blanked more than the url would pass a
+  // check on `name` alone.
+  assert.deepEqual(rows[1], {
+    id: 1,
+    name: 'qbit',
+    type: 'torrent',
+    implementation: 'qbittorrent',
+    url: '',
+    username: 'admin',
+    category: 'tv',
+    createdAt: 10,
+    updatedAt: 20,
+  });
+});
+
+test('a url that parses but names no host projects as the empty string, not the literal `null8080`', () => {
+  // The case `URL.parse` returning non-null does *not* rule out, measured by
+  // task 1 and recorded in `clients/add.ts`'s `isClientAddress`:
+  // `URL.parse('qbit.example:8080')` succeeds with scheme `qbit.example:`,
+  // `hostname: ''` and `origin: 'null'`. A projection guarded only on
+  // `parsed !== null` would build `origin + pathname` out of those and put
+  // the eight characters `null8080` in front of an operator as an address --
+  // eight, as `clientAddress`'s own docblock says; "six" here was a
+  // miscount, and the test comment contradicting the code it tests is
+  // exactly the drift this file exists to stop.
+  // This is the whole reason the guard here is on the scheme rather than on
+  // parsing, and it is constructed rather than argued.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedDownloadClient(raw, { url: 'qbit.example:8080' });
+
+  const url = clientUrl(registry.readRows(raw, 'download_client', [1])[1]);
+  assert.ok(!url.includes('null'), 'an opaque origin must not be serialised into the address');
+  assert.equal(url, '');
+});
+
+test('a download client url keeps a base path and a trailing slash exactly as the origin and path give them', () => {
+  // The other half of the normalisation, and the one a too-eager
+  // implementation breaks: a reverse-proxied client lives at a base path, and
+  // dropping it would give the replica an address that names the wrong
+  // service. `URL`'s own parse is what decides this, so the assertion is on
+  // the two shapes that differ.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedDownloadClient(raw, { url: 'https://box.example/qbittorrent/' });
+
+  assert.equal(clientUrl(registry.readRows(raw, 'download_client', [1])[1]), 'https://box.example/qbittorrent/');
+});
+
+test('a download client url with no path at all projects the root path the parser gives it', () => {
+  // `new URL('http://qbit.local:8080').pathname` is `'/'`, not `''`, so the
+  // projection of the most ordinary address this field ever holds is
+  // `http://qbit.local:8080/`. Pinned because it is the default every other
+  // test in this file seeds, and because "the url comes back unchanged" is
+  // the wrong expectation to carry into a review of this module.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedDownloadClient(raw, { url: 'http://qbit.local:8080' });
+
+  assert.equal(clientUrl(registry.readRows(raw, 'download_client', [1])[1]), 'http://qbit.local:8080/');
+});
+
+/**
  * One row in every host synced table, with every nullable column filled, so a
  * projection's key set can be read off a real row rather than declared.
  *
@@ -258,19 +500,21 @@ test('the projection carries no column the client has no business holding', () =
  * column too, so `Object.keys` would be the same either way -- but the
  * read-shape comparison below is about names, and a fixture whose nulls were
  * accidental would make a *type* mismatch on a nullable field invisible if
- * that comparison is ever widened past names. `download_client` is seeded as
- * an FK parent because the two downloads' `download_client_id` is a
- * `NOT NULL` reference to it and it is not itself synced, which is the point
- * `downloadClientId` carries in the contract. `rss_feed` is seeded for the
- * same FK reason -- `rss_item.feed_id` -- but is no longer an unsynced
- * parent itself: it is one of `HOST_SYNCED_TABLES` below and gets its own
- * row read back like every other table in the loop.
+ * that comparison is ever widened past names. `download_client` and
+ * `rss_feed` are both seeded as FK parents -- the two downloads'
+ * `download_client_id` and `rss_item.feed_id` -- but neither is *only* that
+ * any more: both are in `HOST_SYNCED_TABLES` and each gets its own row read
+ * back like every other table in the loop. `download_client` was the last
+ * unsynced parent, which is what made `downloadClientId` unresolvable in the
+ * contract until this slice.
+ *
+ * `seedDownloadClient` writes that row, so the two secret-name columns and
+ * `username` are filled here for the same "every nullable column filled"
+ * reason -- and so the projection tests above and this one cannot disagree
+ * about what a row looks like.
  */
 function seedOneRowPerSyncedTable(raw: ReturnType<typeof openTestDatabase>['raw']): void {
-  raw.prepare(`
-    INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
-    VALUES (1, 'sab', 'sabnzbd', 'http://localhost:8080', 'movies', 'move', 10, 10)
-  `).run();
+  seedDownloadClient(raw, {});
   raw.prepare(`
     INSERT INTO rss_feed (id, plugin_id, name, url, download_client_id, created_at, updated_at, download_type)
     VALUES (1, 'tv', 'a feed', 'https://example.test/feed', 1, 10, 10, 'torrent')
@@ -367,8 +611,8 @@ test('the media item a row belongs to has one name across every table that names
  * One witness object per host read shape: `Record<keyof T, true>`, which the
  * compiler makes exhaustive in both directions for an object literal -- a
  * missing key is an error, and an extra one is an excess property. So the
- * *names* in these six objects are `@pickarr/contract`'s six host shapes,
- * mechanically, and the test below compares them against what the six
+ * *names* in these eight objects are `@pickarr/contract`'s eight host shapes,
+ * mechanically, and the test below compares them against what the eight
  * `SELECT`s actually project.
  *
  * This is `test/db/schema.test.ts`'s pattern applied to the other pair that
@@ -422,13 +666,17 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
     id: true, pluginId: true, name: true, downloadType: true, pollIntervalS: true,
     downloadClientId: true, createdAt: true, updatedAt: true, url: true,
   } satisfies Record<keyof RssFeedSyncRead, true>,
+  download_client: {
+    id: true, name: true, type: true, implementation: true, url: true,
+    username: true, category: true, createdAt: true, updatedAt: true,
+  } satisfies Record<keyof DownloadClientSyncRead, true>,
 };
 
 test('every host synced table has a read shape in the contract', () => {
-  // The set, before the fields: an eighth synced table added with no shape
+  // The set, before the fields: a ninth synced table added with no shape
   // would leave a client back on `unknown` for it, which is the state this
-  // whole comparison exists to end -- `rss_feed` was the seventh, and this
-  // guard is what it had to pass.
+  // whole comparison exists to end -- `rss_feed` was the seventh and
+  // `download_client` the eighth, and this guard is what each had to pass.
   assert.deepEqual(
     Object.keys(HOST_READ_SHAPE_FIELDS).toSorted(),
     [...HOST_SYNCED_TABLES].toSorted(),

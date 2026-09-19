@@ -12,6 +12,8 @@ import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import { addFeed as addFeedRule } from './feeds/add.ts';
 import type { AddFeedInput, AddFeedRefusal } from './feeds/add.ts';
+import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
+import type { AddDownloadClientInput, AddDownloadClientRefusal } from './clients/add.ts';
 import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
 import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -26,6 +28,7 @@ export { HOST_PLUGIN_ID };
 export { PluginNotRegisteredError };
 export { ownerPluginId };
 export type { AddFeedInput, AddFeedRefusal };
+export type { AddDownloadClientInput, AddDownloadClientRefusal };
 export { MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S } from './feeds/add.ts';
 
 /**
@@ -104,11 +107,56 @@ export interface Host {
    * this method's own delegate, not here: `host.ts` is already long, and
    * that rule set is self-contained.
    *
-   * Returns a refusal *value* on failure, never throws: a thrown error is
-   * indistinguishable from a bug at the call site, and the route in front of
-   * this (a later task) needs to map each refusal to its own status code.
+   * **Returns every refusal as a value and throws none of them**: a thrown
+   * error is indistinguishable from a bug at the call site, and the route in
+   * front of this (a later task) needs to map each refusal to its own status
+   * code.
+   *
+   * That is the guarantee, and it is narrower than "never throws", which is
+   * what this line used to say. This method can still reject -- a SQLite
+   * error that is not the unique-constraint one is rethrown by `feeds/add.ts`,
+   * and the `schedulePoll` after a successful insert is outside any `try`.
+   * Both are infrastructure faults or bugs rather than answers about the
+   * input, both reach `api/server.ts`'s outermost handler, and both become a
+   * 500, which is the right status for them. Callers must not read "never
+   * throws" as licence to skip an error boundary; what they may rely on is
+   * that a *refusal* arrives in the return value or not at all.
    */
   addFeed(input: AddFeedInput): Promise<{ id: number } | AddFeedRefusal>;
+  /**
+   * Validates and writes a new `download_client` row -- storing its
+   * credential in the `secret` table under a generated name, never in a
+   * column -- then schedules its first reconcile immediately, which is the
+   * same call `main.ts` already makes at boot for every client on file. So
+   * a freshly added client reaches the state a restart would have left it
+   * in, and the reconcile is also the first real confirmation the url and
+   * the credential were right (design spec §8.8: no synchronous probe
+   * inside the POST, because that puts a third-party service's latency
+   * inside a user-facing request).
+   *
+   * The invariants themselves live in `clients/add.ts`, this method's own
+   * delegate, not here -- `host.ts` is already long and that rule set is
+   * self-contained, the same split `addFeed` uses.
+   *
+   * Returns every refusal as a value and throws none of them, for the
+   * reason `addFeed` gives above -- and, as there, that is not the same as
+   * never throwing. The two rejection paths here are `clients/add.ts`'s
+   * rethrow of any SQLite error that is not the `download_client_name`
+   * unique-constraint violation, and the awaited `scheduleReconcile` after
+   * a successful insert, which sits outside every `try`. `saveSecret` is a
+   * third: it runs before the insert (design spec §8.6) and a failure there
+   * rejects with no row written. All three become a 500 at the route.
+   *
+   * **No refusal, and nothing this method returns or logs, carries the
+   * submitted credential**: the value reaches `Secrets.saveSecret` and stops
+   * there. That holds on the throwing paths too, and structurally rather
+   * than by inspecting SQLite's wording: the only error `add.ts` rethrows
+   * comes from the `INSERT INTO download_client` statement, and neither
+   * credential is among that statement's bound values -- the row takes the
+   * generated *secret names*, never the secrets. There is no value for an
+   * error message to quote even if SQLite quoted its bindings.
+   */
+  addDownloadClient(input: AddDownloadClientInput): Promise<{ id: number } | AddDownloadClientRefusal>;
   /**
    * Delivers `file` to the plugin `pluginId` names, calling its
    * `onDownloadedFile`. The shape `deliverCompleted`
@@ -609,6 +657,28 @@ export function createHost(deps: {
       // restart would have polled it, rather than by a second, parallel path
       // that could drift from that one.
       host.schedulePoll(result.id);
+      return result;
+    },
+
+    async addDownloadClient(input) {
+      const result = addDownloadClientRule(
+        {
+          raw: deps.raw,
+          now: deps.now,
+          // The one method of `Secrets` the rule may have: handing it the
+          // whole instance would give it `get` as well, and a writer that
+          // cannot resolve a credential is a writer that cannot leak one.
+          saveSecret: (name, value) => { deps.secrets.saveSecret(name, value); },
+        },
+        input,
+      );
+      if ('refusal' in result) return result;
+      // Through the public method, not `scheduleReconcileJob` directly, for
+      // the reason `addFeed` gives about `schedulePoll`: this is the exact
+      // call `main.ts` makes at boot for every client already on file, so a
+      // freshly added client is reconciled the same way a restart would
+      // have reconciled it rather than by a second, parallel path.
+      await host.scheduleReconcile(result.id);
       return result;
     },
 

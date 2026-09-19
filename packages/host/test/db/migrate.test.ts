@@ -1168,9 +1168,11 @@ test('migration 16 seeds the log for a feed already on file, so an existing repl
 
   // Version 15 installs a **frozen** six-table literal
   // (`MIGRATION_15_TABLES`), deliberately decoupled from the live
-  // `HOST_SYNCED_TABLES` export so that a seventh table joining that export
+  // `HOST_SYNCED_TABLES` export so that a table joining that export later
   // cannot retroactively change what an already-applied migration did --
-  // `docs/database-migrations.md`'s first rule.
+  // `docs/database-migrations.md`'s first rule. Two have joined since:
+  // `rss_feed` in migration 16 and `download_client` in migration 17, each
+  // with its own migration rather than an edit to this one.
   //
   // Nothing failed when that decoupling was undone: re-coupling
   // `migration15` to `[...MIGRATION_15_TABLES, 'rss_feed']` left all 2374
@@ -1214,6 +1216,109 @@ test('migration 16 seeds the log for a feed already on file, so an existing repl
     });
   assert.deepEqual(logged, [[1, 'upsert']],
     'a feed that predates this migration must be indexed, so a client backfills it rather than never learning it exists');
+});
+
+test('migration 17 installs the download client triggers and seeds a client already on file', () => {
+  // `migration16`'s test above, aimed at the table this slice brings in.
+  // Migrated to 16 and seeded by hand, same reasoning as there: the row has
+  // to exist with no `download_client` trigger installed, which is the state
+  // a database applying version 17 for the first time is actually in.
+  // Inserting it after `migrateHost` would log it through the trigger and
+  // prove only that triggers work.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 16));
+
+  const triggerNames = `
+    SELECT name FROM sqlite_master
+    WHERE type = 'trigger'
+      AND name IN ('download_client_sync_ins', 'download_client_sync_upd', 'download_client_sync_del')
+    ORDER BY name
+  `;
+  // Named literally rather than matched by prefix, for the reason the
+  // migration 16 test gives: a prefix match is satisfied by a rename.
+  assert.deepEqual(
+    raw.prepare(triggerNames).all().map((row) => String(row.name)),
+    [],
+    'version 16 installs rss_feed\'s triggers and no others -- download_client is migration 17\'s',
+  );
+
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
+    VALUES (1, 'qbit', 'torrent', 'http://qbit.local:8080', 'tv', 'copy', 1, 1)
+  `).run();
+
+  migrateHostWith(raw, HOST_MIGRATIONS);
+
+  assert.deepEqual(
+    raw.prepare(triggerNames).all().map((row) => String(row.name)),
+    ['download_client_sync_del', 'download_client_sync_ins', 'download_client_sync_upd'],
+    'all three, so a later insert, update and delete each log',
+  );
+
+  const logged = raw.prepare("SELECT row_id, op FROM sync_log WHERE table_name = 'download_client'").all()
+    .map((row) => {
+      // Not narrowing `unknown` -- see the identical guard in the migration
+      // 16 test above for what it does and does not buy.
+      if (typeof row !== 'object' || row === null || !('row_id' in row) || !('op' in row)) {
+        throw new Error('sync_log row has no row_id/op');
+      }
+      return [Number(row.row_id), String(row.op)];
+    });
+  assert.deepEqual(logged, [[1, 'upsert']],
+    'a client that predates this migration must be indexed, or no replica ever learns it exists');
+});
+
+/**
+ * The `op` of one `sync_log` row, narrowed with `in` rather than cast.
+ *
+ * The same guard shape the migration 17 seed test above uses inline, and the
+ * reason it is a function here is that the test below reads `op` three
+ * times. `(row as { … })` is the older spelling and 53 lines of this file
+ * still use it, so replacing them is not this task -- but the two spellings
+ * had ended up in *adjacent tests written in the same commit*, one of them
+ * already using the guard, and that is the one place the inconsistency is
+ * nobody's inheritance.
+ */
+function opsLogged(raw: ReturnType<typeof openTestDatabase>['raw'], table: string): string[] {
+  return raw.prepare('SELECT op FROM sync_log WHERE table_name = ?').all(table)
+    .map((row) => {
+      if (typeof row !== 'object' || row === null || !('op' in row)) {
+        throw new Error('sync_log row has no op');
+      }
+      return String(row.op);
+    });
+}
+
+test('migration 17\'s triggers, not only its seed, log a download client written afterwards', () => {
+  // The seed and the triggers are two separate calls, and this drives the
+  // triggers rather than inspecting `sqlite_master` for them: a trigger that
+  // exists and a trigger that logs are not the same claim.
+  //
+  // What this adds over the test above, measured rather than assumed -- the
+  // first version of this comment guessed and guessed wrong, claiming the
+  // test above would stay green without `installSyncTriggers`. It does not;
+  // it asserts the three trigger names exist. Both tests red on that mutant,
+  // this one on `the insert trigger logs`. The separation that is real is
+  // the other way round: dropping `seedSyncLog` from `migration17` reds the
+  // test above (`a client that predates this migration must be indexed`) and
+  // leaves this one green, since a row written after the migration needs no
+  // seed. So the two cover the two calls one each, and neither subsumes the
+  // other -- it is just not the direction first written here.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
+    VALUES (1, 'qbit', 'torrent', 'http://qbit.local:8080', 'tv', 'copy', 1, 1)
+  `).run();
+  assert.deepEqual(opsLogged(raw, 'download_client'), ['upsert'], 'the insert trigger logs');
+
+  raw.prepare("UPDATE download_client SET category = 'movies' WHERE id = 1").run();
+  assert.deepEqual(opsLogged(raw, 'download_client'), ['upsert'],
+    'the update trigger re-logs the row, collapsed onto one entry');
+
+  raw.prepare('DELETE FROM download_client WHERE id = 1').run();
+  assert.deepEqual(opsLogged(raw, 'download_client'), ['delete'], 'the delete trigger tombstones it');
 });
 
 test('the seed stamps `at` in real milliseconds, like the triggers', () => {

@@ -46,7 +46,7 @@ export function assertSyncedTableName(pluginId: string, table: string): void {
 }
 
 /**
- * The six read shapes, one per synced **plugin** table. The host's own seven
+ * The six read shapes, one per synced **plugin** table. The host's own eight
  * are below, under `MediaItemSyncRead`.
  *
  * **Every one of these six omits the row's own id, and that is not an
@@ -61,7 +61,7 @@ export function assertSyncedTableName(pluginId: string, table: string): void {
  * (`create`/`upsert`/`delete`) and the two rules a client applies them by
  * are stated.
  *
- * **The host's seven do carry an `id`, and that does not contradict the
+ * **The host's eight do carry an `id`, and that does not contradict the
  * paragraph above.** `sync/tables.ts` projects `id` because its `SELECT`s
  * are the row and nothing maps them, and `readHostRows` keys its result by
  * that column -- so the field is there whether or not a client reads it. It
@@ -145,7 +145,7 @@ export interface XxxSiteRead {
 }
 
 /**
- * The seven read shapes for the **host's** own synced tables --
+ * The eight read shapes for the **host's** own synced tables --
  * `sync/tables.ts`'s `selectSql` projections, field for field.
  *
  * **Why `SyncRead` and not `Read`.** `MediaItemRead` and `RssItemRead` are
@@ -156,7 +156,7 @@ export interface XxxSiteRead {
  * carries, since for a private tracker that url carries the passkey and a
  * replica is permanent -- and no `createdAt`, `updatedAt` or `rankingScore`.
  * Reusing
- * either would either leak a field or silently drop one. All seven carry the
+ * either would either leak a field or silently drop one. All eight carry the
  * suffix rather than only the two that had to, so the family reads as one;
  * the plugin shapes above keep their bare `Read` because renaming them means
  * touching three plugin packages for no requirement.
@@ -174,13 +174,15 @@ export interface XxxSiteRead {
  * That check is over *names*; a field's declared type is not mechanisable
  * from a TypeScript type at run time and is not covered.
  *
- * **One field names a row a client will never receive**, and it is called
- * out on the field itself rather than here, because a client that reads only
- * the field list is the one that needs to know: `TorrentDownloadSyncRead`'s
- * and `NzbDownloadSyncRead`'s `downloadClientId`. `RssItemSyncRead.feedId`
- * used to be the other one; it stopped being one when `rss_feed` joined this
- * family below, in the same slice that added `RssFeedSyncRead` -- a client
- * can now resolve a `feedId` to the feed row it names.
+ * **This family used to carry two fields naming a row a client would never
+ * receive, and it now carries none.** `RssItemSyncRead.feedId` was the first
+ * to stop being one, when `rss_feed` joined this family below in the same
+ * slice that added `RssFeedSyncRead`. `TorrentDownloadSyncRead`'s and
+ * `NzbDownloadSyncRead`'s `downloadClientId` was the second and the harder
+ * of the two -- it was documented as unresolvable *in principle*, not merely
+ * today -- and `DownloadClientSyncRead` below is what retired that. Each
+ * field says so on itself rather than here, because a client that reads only
+ * the field list is the one that needs to know.
  */
 
 /**
@@ -253,11 +255,15 @@ export interface TorrentDownloadSyncRead {
   id: number;
   rssItemId: number;
   /**
-   * The `download_client` this was submitted to -- **an id a client can never
-   * resolve to a name**, for a harder reason than `RssItemSyncRead.feedId`'s.
-   * A `download_client` row holds a service's address and the names of its
-   * secrets, so that table is not merely unsynced today, it will not be
-   * synced. A client can group downloads by client; it cannot say which.
+   * The `download_client` this was submitted to. **This used to say the id
+   * could never be resolved to a name, and that is no longer true.** The
+   * reason it gave was that a `download_client` row holds a service's
+   * address and the names of its secrets -- so the table was said to be not
+   * merely unsynced today but unsyncable. What changed is that the
+   * projection stopped carrying either: `DownloadClientSyncRead` names no
+   * secret name at all, and its `url` is rebuilt from origin and path. So a
+   * client can now say *which* client a download went to, not only group by
+   * it.
    */
   downloadClientId: number;
   /** Null until the client confirms the submission. */
@@ -288,7 +294,7 @@ export interface TorrentDownloadSyncRead {
 export interface NzbDownloadSyncRead {
   id: number;
   rssItemId: number;
-  /** See `TorrentDownloadSyncRead.downloadClientId`: never resolvable from the replica. */
+  /** See `TorrentDownloadSyncRead.downloadClientId`: resolvable since `download_client` joined this family. */
   downloadClientId: number;
   clientRef: string | null;
   status: string;
@@ -360,10 +366,56 @@ export interface RssFeedSyncRead {
    */
   downloadType: string;
   pollIntervalS: number;
-  /** The `download_client` this feed submits to -- never resolvable; see `TorrentDownloadSyncRead.downloadClientId`. */
+  /** The `download_client` this feed submits to -- resolvable; see `TorrentDownloadSyncRead.downloadClientId`. */
   downloadClientId: number | null;
   createdAt: number;
   updatedAt: number;
   /** Redacted -- see the note above this interface for what that does and does not cover. */
   url: string;
+}
+
+/**
+ * A configured download client, as the replica holds it.
+ *
+ * **Two columns of `download_client` are deliberately absent and no future
+ * slice should add them**: `api_key_secret_name` and `password_secret_name`.
+ * Neither is a credential -- the value lives in the `secret` table and a
+ * name is safe to log by this codebase's own rule -- but a name is the
+ * layout of the secret store, and a browser has no use for it. The list
+ * screen says whether a client has a credential configured; it says so from
+ * the *shape* of the auth it was given, never from a name it was handed.
+ *
+ * `url` is the reason this shape needed a decision rather than a
+ * transcription. It does **not** reach this wire the way
+ * `RssFeedSyncRead.url` does. A feed's url is `redactUrl`'d, which knows one
+ * query parameter (`apikey`) and is why issue #78 is open; this one is
+ * rebuilt from its origin and its path, which drops userinfo, query and
+ * fragment structurally rather than by recognising them. A client may treat
+ * this field as an address and nothing more.
+ *
+ * **It can be the empty string**, and a client must render that rather than
+ * assume it away: `sync/tables.ts`'s `readHostRows` projects `''` for a row
+ * whose url is not an http(s) address at all, which the production writer
+ * (`clients/add.ts`) refuses but a migration or an operator's own SQL can
+ * still produce.
+ */
+export interface DownloadClientSyncRead {
+  id: number;
+  name: string;
+  /**
+   * The transport, `'torrent'` or `'nzb'`. Typed `string` for the reason
+   * `RssItemSyncRead.downloadType` gives: the column is unconstrained TEXT
+   * and nothing narrows it between the `SELECT` and the wire.
+   */
+  type: string;
+  /** The product, `'qbittorrent'` or `'sabnzbd'` -- `string` for the same reason `type` is. */
+  implementation: string;
+  /** Origin and path only, and possibly `''`. See the note above this interface. */
+  url: string;
+  /** Plaintext on purpose: a username is not a credential (`db/schema.ts`). Null when the client authenticates with an api key. */
+  username: string | null;
+  /** `''` means "no category", which is a configuration rather than a missing value (`clients/sabnzbd.ts`). */
+  category: string;
+  createdAt: number;
+  updatedAt: number;
 }

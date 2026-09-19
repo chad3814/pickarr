@@ -90,10 +90,14 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     raw,
     pluginIdForType: noType,
     // Never called: this file's routes are the three sync ones, and none of
-    // them reaches `/api/feeds` -- `server.test.ts`'s own stub gives the
-    // same "not stubbed" failure the shape rather than silently succeeding.
+    // them reaches `/api/feeds` or `/api/download-clients` -- both stubs
+    // give the same "not stubbed" failure the shape rather than silently
+    // succeeding, as `server.test.ts`'s own do.
     addFeed: () => {
       throw new Error('addFeed not stubbed in this test');
+    },
+    addDownloadClient: () => {
+      throw new Error('addDownloadClient not stubbed in this test');
     },
     registry,
     generation,
