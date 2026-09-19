@@ -928,17 +928,31 @@ function routeFor(pathname: string): Route | undefined {
  * with a page of data, which is not a thing any route here should ever
  * appear to accept.
  *
- * **The order matters.** The method check runs only for a route that
- * exists (`route !== undefined`) -- an unknown path is never told it failed
- * a method check, since that would be a way to learn the path is shaped
- * like something real. A path no route claims stays a question for the
- * session check below, exactly as it always was, and `answerFor` is what
- * turns it into the 404 once a session has cleared that check. That check
- * stays ahead of the guard, and costs nothing: every route's wrong-method
- * answer is the same 405 whether or not the caller has a session, so the
- * ordering tells an anonymous caller nothing it could not have worked out
- * from the route's own path. Better Auth's own POSTs never reach here --
- * `handle` dispatched them already.
+ * **The order matters, and it is session-first.** For anything but an open
+ * route the session check runs *before* the method check, so a caller with
+ * no session gets `401` and learns nothing else -- whatever method they
+ * sent, and whether or not the path they sent it to names a route.
+ *
+ * That ordering was the other way round for one commit, and it leaked.
+ * Measured on that commit: anonymous `POST /api/media?type=movie` answered
+ * `405` while anonymous `POST /api/no-such-path` answered `401`, so a POST
+ * was a path-existence oracle -- ask twice and the pair of statuses names
+ * which `/api` paths exist. GETs were uniform `401` and hid it, which is
+ * why the leak needs a *cross-path* comparison to see, not a
+ * with-session/without-session one. The blanket non-`GET` refusal this
+ * slice replaced had answered both POSTs `405`, so it was a regression and
+ * not a property the API always had.
+ *
+ * Nothing the old order bought is lost. Measured on the order below: a
+ * signed-in caller still gets `405` for a method a route does not declare
+ * (`POST /api/media`, `GET /api/feeds`) and still gets `404`, not `405`,
+ * for a path no route claims -- the method check is skipped for
+ * `route === undefined`, so an unknown path is never told it failed a check
+ * only a real route could fail, and `answerFor` turns it into the 404. The
+ * two open routes still answer `405` to an anonymous wrong-method request,
+ * since `open` skips the session check: that tells a caller nothing, as
+ * both are open by definition and the path alone already says so. Better
+ * Auth's own POSTs never reach here -- `handle` dispatched them already.
  *
  * **The guard tests the value the session check resolves to.** Not its
  * status: an unauthenticated check answers `200` with a body of `null` (the
@@ -954,12 +968,14 @@ function routeFor(pathname: string): Route | undefined {
  */
 async function refusalFor(serving: Serving, target: URL | null, request: IncomingMessage): Promise<Answer | null> {
   const route = target === null ? undefined : routeFor(target.pathname);
+  if (route?.open !== true) {
+    const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+    if (session === null) return UNAUTHORIZED;
+  }
   if (route !== undefined && !route.methods.includes(request.method ?? '')) {
     return json(405, { error: 'method not allowed' });
   }
-  if (route?.open === true) return null;
-  const session = await serving.auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
-  return session === null ? UNAUTHORIZED : null;
+  return null;
 }
 
 /**

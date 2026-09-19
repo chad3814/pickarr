@@ -1185,48 +1185,115 @@ test('a malformed cursor answers the first page rather than an error', async () 
   }
 });
 
-test('anything but a read is refused, whether or not the caller has a session', async () => {
-  // The whole API is read-only, so a write method is refused by the method
-  // rather than routed as though it were a GET -- which is what a router that
-  // only looked at the path would do, answering a POST with a page of data.
+test('a write method is refused by every route that does not declare it', async () => {
+  // **`/api` is no longer read-only** -- `POST /api/feeds` is a real write,
+  // and this test's job is that *no other* route acquired one with it. A
+  // route answers only the methods it declares, so a write against a
+  // GET-only path is refused by the method rather than routed as though it
+  // were a GET, which is what a router that only looked at the path would
+  // do, answering a POST with a page of data.
   //
-  // **The method check sits ahead of the guard, and it is the *guarded* path
-  // with no session that pins that.** It costs nothing to put it there: every
-  // non-GET answers the same 405 on every path with or without a session, so
-  // the ordering tells an anonymous caller nothing beyond "the API is
-  // read-only". The four combinations are all needed, and the one that does
-  // the work is a guarded path anonymously: an open path answers 405 whatever
-  // the order, so a version probing only `/api/health` could not tell the two
-  // orderings apart -- measured, by moving the guard in front and watching
-  // 23/23 pass.
+  // **What a caller learns depends on whether it has a session, and that is
+  // the point.** With a session: 405 on a route that exists, 404 on a path
+  // no route claims. With none: 405 only on an *open* route, and a uniform
+  // 401 everywhere else -- including the unclaimed path, so the pair cannot
+  // be compared to discover which paths exist. The session check runs first
+  // for exactly that reason (see `refusalFor`'s doc), and the ordering was
+  // the other way round for one commit, where anonymous POST answered 405
+  // on `/api/media` and 401 on an invented path.
+  //
+  // `UNMOUNTED_PROBE` (declared below, with its own doc and the assertion
+  // that it names nothing in `ROUTES`) is the third path, and it is the one
+  // that carries the finding: with only the two paths this test used to
+  // probe, both of which exist, the leak was invisible.
   const { raw, db } = setup();
   const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
+    const paths = [
+      { path: '/api/health', open: true, claimed: true },
+      { path: '/api/media?type=movie', open: false, claimed: true },
+      { path: UNMOUNTED_PROBE, open: false, claimed: false },
+    ];
     const probes = ['POST', 'PUT', 'DELETE', 'PATCH'].flatMap((method) => (
-      ['/api/health', '/api/media?type=movie'].flatMap((path) => [
-        { method, path, cookie, session: 'a session' },
-        { method, path, cookie: ANONYMOUS, session: 'no session' },
+      paths.flatMap((target) => [
+        { method, target, cookie, session: 'a session' },
+        { method, target, cookie: ANONYMOUS, session: 'no session' },
       ])
     ));
     const answers = await Promise.all(probes.map(async (probe) => {
-      const response = await fetch(`${originOf(server)}${probe.path}`, {
+      const response = await fetch(`${originOf(server)}${probe.target.path}`, {
         method: probe.method,
-        headers: probe.cookie === null ? {} : { cookie: probe.cookie },
+        headers: {
+          'content-type': 'application/json',
+          ...(probe.cookie === null ? {} : { cookie: probe.cookie }),
+        },
+        // An empty body would be refused 400 by `readBody` before the router
+        // ever ran -- `handle` reads the body for every non-GET, ahead of
+        // `answerFor` -- and the unclaimed path's 404 is the router's answer.
+        // `{}` is the smallest body that parses; no route below reads it.
+        body: '{}',
       });
       // Named out rather than spread: `no-map-spread` is a warning in this
-      // repo and the three fields are the three this loop asserts over.
+      // repo and these are the fields this loop asserts over.
       return {
         method: probe.method,
-        path: probe.path,
+        path: probe.target.path,
+        open: probe.target.open,
+        claimed: probe.target.claimed,
+        anonymous: probe.cookie === null,
         session: probe.session,
         status: response.status,
         text: await response.text(),
       };
     }));
-    for (const { method, path, session, status, text } of answers) {
-      assert.equal(status, 405, `${method} ${path} with ${session} is not a read`);
+    for (const { method, path, open, claimed, anonymous, session, status, text } of answers) {
+      const where = `${method} ${path} with ${session}`;
+      if (anonymous && !open) {
+        assert.equal(status, 401, `${where} is refused by the guard, before the method is looked at`);
+        assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, `${where} refuses with the fixed body`);
+        continue;
+      }
+      if (!claimed) {
+        assert.equal(status, 404, `${where} names no route, so the router answers`);
+        continue;
+      }
+      assert.equal(status, 405, `${where} is a method the route does not declare`);
       assert.deepEqual(JSON.parse(text), { error: 'method not allowed' });
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test('an anonymous POST tells a caller nothing about which paths exist', async () => {
+  // The regression this pins, in one comparison. The method check used to
+  // run ahead of the session check, so an anonymous POST answered 405 for a
+  // path a route claims and 401 for one none does -- a path-existence
+  // oracle needing no credential at all. GET never leaked it, which is why
+  // the two GETs are here too: they are what made the POST asymmetry easy
+  // to miss.
+  const { raw, db } = setup();
+  const { server } = await start(raw, db, moviesOnly);
+  try {
+    assert.ok(
+      !ROUTES.some((route) => route.path === '/api/no-such-route'),
+      '/api/no-such-route must name nothing in the table for this comparison to mean anything',
+    );
+
+    const known = await post(server, '/api/media?type=movie', ANONYMOUS, {});
+    const unknown = await post(server, '/api/no-such-route', ANONYMOUS, {});
+    assert.equal(
+      known.status,
+      unknown.status,
+      'an anonymous POST must not distinguish a real path from an invented one',
+    );
+    assert.equal(known.status, 401, 'and what both answer is the guard, not the router');
+    assert.deepEqual(JSON.parse(known.text), JSON.parse(unknown.text), 'bodies match too, not only statuses');
+
+    const knownGet = await get(server, '/api/media?type=movie', ANONYMOUS);
+    const unknownGet = await get(server, '/api/no-such-route', ANONYMOUS);
+    assert.equal(knownGet.status, 401, 'a GET to a real path is the same 401 it always was');
+    assert.equal(unknownGet.status, 401, 'and so is a GET to an invented one');
   } finally {
     await server.close();
   }
