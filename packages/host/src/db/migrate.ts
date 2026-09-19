@@ -964,6 +964,36 @@ function migration16(db: DatabaseSync): void {
 }
 
 /**
+ * Brings `download_client` into the synced set (`sync/tables.ts`'s top
+ * docblock has why, and design spec §5). `migration16` above, one table
+ * later: no DDL, because the table has existed since `INITIAL_SCHEMA` and
+ * migration 14 already reshaped its credential columns -- only the two calls
+ * replication needs.
+ *
+ * **A separate migration rather than an edit to 16, and rather than
+ * `HOST_SYNCED_TABLES`.** Version 16 is applied on this branch already, and
+ * `docs/database-migrations.md`'s first rule is that an applied migration is
+ * frozen; `MIGRATION_15_TABLES`'s own docblock above has the longer form of
+ * the same argument, including the measurement showing that re-coupling a
+ * migration to the live export leaves every test green while changing what a
+ * database at that version looks like.
+ *
+ * `installSyncTriggers` makes a future insert, update or delete log;
+ * `seedSyncLog` is what a client configured *before* this migration ran
+ * needs instead, since a trigger cannot log a write that already happened.
+ * The seed is not optional: a client's backfill walks `sync_log` backwards
+ * and reads it as an index of which rows exist, so an unseeded
+ * pre-existing `download_client` row would stay invisible to every replica
+ * forever with nothing failing to say so -- and unlike a feed, this row is
+ * already *named* by rows a client does hold, through
+ * `torrent_download.download_client_id`.
+ */
+function migration17(db: DatabaseSync): void {
+  installSyncTriggers(db, ['download_client']);
+  seedSyncLog(db, ['download_client']);
+}
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -985,6 +1015,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 14, up: (db) => migration14(db) },
   { version: 15, up: (db) => migration15(db) },
   { version: 16, up: (db) => migration16(db) },
+  { version: 17, up: (db) => migration17(db) },
 ];
 
 /**

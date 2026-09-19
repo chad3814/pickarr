@@ -23,6 +23,7 @@ export type { HostFetch } from './fetch.ts';
 export type { Migration } from './migrations.ts';
 export type { DownloadClients, DownloadSubmission } from './downloads.ts';
 export type {
+  DownloadClientSyncRead,
   MediaItemSyncRead,
   MovieRead,
   NzbDownloadSyncRead,

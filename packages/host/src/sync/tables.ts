@@ -7,15 +7,15 @@ import { redactUrl } from '../clients/redact.ts';
  *
  * **In:** the group (`media_item`), the releases under it (`rss_item`), what
  * was submitted for them (`torrent_download`, `nzb_download`), who is in them
- * (`person`, `role`), and the feeds that produce the releases (`rss_feed`).
- * `rss_feed` is not a `SELECT` like the other six -- see the paragraph below
- * that explains why it joined this list, and `readHostRows`'s own doc for
- * the extra step its row takes.
+ * (`person`, `role`), the feeds that produce the releases (`rss_feed`), and
+ * the clients those releases are submitted to (`download_client`). Those
+ * last two are the only ones whose projection is not purely a `SELECT` --
+ * see the paragraphs below on why each joined this list, and
+ * `readHostRows`'s own doc for the extra step each of their rows takes.
  *
  * **Out, and why:** `auth_user`, `auth_session`, `auth_account`,
  * `auth_verification`, `host_state` and `secret` hold credentials, and no
- * credential leaves this process. `download_client` holds a service's address
- * and the names of its secrets. `jobs` is machinery a client has no use for,
+ * credential leaves this process. `jobs` is machinery a client has no use for,
  * and so are `host_migrations` (schema bookkeeping), `sync_log` (this
  * mechanism's own log) and `sqlite_sequence` (SQLite's, and present only
  * because `sync_log` is `AUTOINCREMENT`). `poster`, `background` and `logo`
@@ -53,17 +53,101 @@ import { redactUrl } from '../clients/redact.ts';
  * with a `?passkey=` url asserted, deliberately, to survive unredacted --
  * so #78 closing it is a test failure there, not a silent change.
  *
- * **One consequence of that list, stated because a page does not hide
- * it.** `torrent_download`/`nzb_download`'s `download_client_id` *is*
- * projected below and names a table that is out and will stay out: a
- * `download_client` row holds a service's address and the names of its
- * secrets, so a client receives an id it can never resolve, by design.
- * `rss_item.feed_id` used to be the other half of this paragraph; it no
- * longer is, because the table it names joined the synced set above and a
- * client can now resolve it. Dropping `download_client_id` instead of
- * projecting it would be the alternative; it is kept because a client
- * grouping downloads by client can do so by id without ever needing the row,
- * and an id is not a url.
+ * **`download_client` was out on the credential rule until this slice, and
+ * that clause is amended rather than struck.** The "out" list above used to
+ * read, immediately after the six credential tables, "`download_client`
+ * holds a service's address and the names of its secrets." Both halves of
+ * that are still true *of the row*. What changed is that neither half has to
+ * reach a client for the settings screen to list one (design spec §5), so
+ * the projection carries neither:
+ *
+ * - **The secret names are not projected at all.** `api_key_secret_name`
+ *   and `password_secret_name` are simply absent from the `case` below.
+ *   Neither is a credential -- the value lives in `secret`, and a secret
+ *   name is safe to log by this codebase's own rule -- but a name is the
+ *   layout of the secret store, and a browser has no use for it.
+ * - **The url is rebuilt rather than filtered.** `readHostRows` projects
+ *   `origin + pathname`. Userinfo, query and fragment are gone
+ *   *structurally*: nothing recognises and removes them, they are simply
+ *   not among the two parts the projected value is assembled from.
+ *
+ * **That second guarantee is stronger than `rss_feed`'s, and the difference
+ * is the whole reason this table could join the list when that clause said
+ * it never would.** `redactUrl`, two paragraphs up, knows one credential
+ * shape. It does not touch userinfo at all: `http://user:hunter2@qbit:8080`
+ * -- a download client behind basic auth, which is an ordinary way to run
+ * one -- passes through `redactUrl` **unchanged**, credential included.
+ * `test/sync/tables.test.ts` constructs that call rather than trusting this
+ * sentence. The same url reaches the replica from here as
+ * `http://qbit:8080/`. A closed door, not a pattern match. #78 stays open
+ * for feeds because a tracker's passkey is genuinely part of the path or
+ * query it is sent in, so dropping those would leave a url that no longer
+ * reaches the feed; a download client's address is host, port and base path,
+ * and nothing else is part of its identity, so nothing is lost by keeping
+ * only those.
+ *
+ * **A url that is not an http(s) address projects as `''`, and the row
+ * reaches the replica anyway.** A deliberate choice between three
+ * behaviours, not an oversight, so the two rejected ones are named.
+ *
+ * *Throwing* would fail the whole page `readHostRows` was called for.
+ * Nothing between here and the route recovers part of it -- `sync/entries.ts`
+ * calls `readRows` bare, once per table -- so the throw travels to
+ * `api/server.ts`'s outermost handler, which answers `500 { error: 'read
+ * failed' }` for the whole request. One malformed row would therefore take
+ * every unrelated table's rows in that page with it, on that request and on
+ * every retry, since the row does not change: a client stuck at its cursor
+ * with no way to pass the row and nothing telling it which row. And that
+ * handler logs `redactUrl(messageOf(error))` -- so a thrown message quoting
+ * the url would put a userinfo credential in a log line, since `redactUrl`
+ * is exactly the function that does not catch that shape. Throwing here
+ * would reopen, in the log, the hole this projection closes on the wire.
+ *
+ * *Omitting the row* would make it vanish from the replica with nothing
+ * saying so, and a vanished client is worse than an addressless one:
+ * `torrent_download.downloadClientId` names it, so a client would be back to
+ * holding downloads that point at a row it will never receive -- the exact
+ * state this slice ends.
+ *
+ * `''` keeps the row, keeps every other field, and says "no address" in the
+ * one field that has none. The production writer refuses such a url anyway
+ * (`clients/add.ts`'s `isClientAddress`), so this is defence against a row
+ * that arrived another way: a migration, or an operator's own SQL.
+ *
+ * `''` rather than a marker like `(unusable address)` because **the client
+ * owns every sentence a human reads** (design spec §3): a marker would put
+ * host-authored English into a field the contract types as a url, and every
+ * client would then have to know to special-case that one string.
+ *
+ * **Nothing is logged when it fires.** That is a real cost and it is
+ * accepted rather than overlooked: the only diagnostic worth writing is the
+ * url, and no log line in this process may carry one (`api/server.ts`'s
+ * module doc). The blank address in the settings list is the signal.
+ *
+ * **"It parses" is not the test, and that was measured.**
+ * `URL.parse('qbit.example:8080')` -- what omitting `http://` produces,
+ * which is the likeliest way to get this field wrong -- does *not* answer
+ * null. It parses as scheme `qbit.example:` with the opaque path `8080`,
+ * giving `hostname: ''` and `origin` serialised as the literal string
+ * `'null'`, so `origin + pathname` over it is the eight-character
+ * address `null8080`. The guard below is therefore on the protocol, which is what
+ * makes a host mandatory. `clients/add.ts` refuses the same input at the
+ * writer, on the same measurement.
+ *
+ * **This paragraph used to name the ids a client receives and can never
+ * resolve, and there are none left.** `rss_item.feed_id` was the first to
+ * stop being one, when `rss_feed` joined the list above.
+ * `torrent_download`/`nzb_download`/`rss_feed`'s `download_client_id` was
+ * the second, and the harder one to retire: it was argued here not merely as
+ * unresolved but as unresolvable, on the reasoning that the row it names
+ * "holds a service's address and the names of its secrets" and so would
+ * never be synced. The paragraphs above are where that reasoning was
+ * answered rather than waived. Both ids are now ordinary references into
+ * tables the client holds. The alternative, considered twice and rejected
+ * twice, was to drop the column from the projection; it was kept both times
+ * because a client grouping downloads by client can do so by id without the
+ * row, and an id is not a url -- which is now the lesser of its two reasons
+ * rather than the whole of them.
  *
  * **This used to say `sync/backfill.ts` "claims page self-consistency only
  * for rows *within* the synced set", and that claim is retired.**
@@ -89,6 +173,7 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
   'person',
   'role',
   'rss_feed',
+  'download_client',
 ];
 
 /**
@@ -108,14 +193,14 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * builds its `ON ${table}` (safe there because it never reads a column),
  * makes this check fail closed and demand `CREDENTIAL_ALLOW_LIST` grow a
  * third entry, which the project's global constraints fix at exactly two.
- * Seven short, literal, unremarkable `SELECT`s cost less than that entry
+ * Eight short, literal, unremarkable `SELECT`s cost less than that entry
  * would.
  *
  * **The aliases are the wire's naming convention, and they exist for one
  * concrete reason.** A column name reaches a client verbatim: `readHostRows`
  * spreads the row `node:sqlite` hands back, and the result is serialised as
  * an op's `value` with no mapping step anywhere between. Unaliased, these
- * seven tables spoke snake_case while all six plugin read shapes
+ * eight tables spoke snake_case while all six plugin read shapes
  * (`packages/contract/src/sync.ts`) speak camelCase, so the same logical
  * field was `media_item_id` on three host tables and `mediaItemId` on three
  * plugin ones. The client's storage provider is designed (and not yet
@@ -179,14 +264,24 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  *   copied into permanent client storage, which is why this projection
  *   parts ways with that precedent the same way it does for `link`.
  *
- * **`rss_feed.url` is named below, not omitted, and it is the odd one out
- * of this list rather than a fifth entry on it.** Every column above fails
- * the "no url in permanent storage" bar and stays out entirely; this one
- * fails the same bar and is let through anyway, because it is transformed
- * first -- `readHostRows` redacts it after this `SELECT` runs. See this
- * file's top docblock for why that call was judged to clear the bar, and
- * for the gap between what it actually redacts and what a passkey can look
- * like.
+ * **`rss_feed.url` and `download_client.url` are named below, not omitted,
+ * and they are the odd ones out of this list rather than a fifth and sixth
+ * entry on it.** Every column above fails the "no url in permanent storage"
+ * bar and stays out entirely; these two fail the same bar and are let
+ * through anyway, because each is transformed after this `SELECT` runs --
+ * the feed's redacted, the client's rebuilt from its origin and path. See
+ * this file's top docblock for why each was judged to clear the bar, for the
+ * gap between what `redactUrl` actually redacts and what a passkey can look
+ * like, and for why the two are not the same guarantee.
+ *
+ * **`download_client`'s two secret-name columns are a fifth and sixth
+ * omission, and they are omitted for a different reason from the four
+ * above.** `api_key_secret_name` and `password_secret_name` do not fail the
+ * url-or-credential bar at all -- a secret name is neither, and this
+ * codebase logs one freely. They are left out because a browser has no use
+ * for the secret store's layout, which is a smaller reason and a sufficient
+ * one. Naming them here is what keeps someone adding them back on the
+ * correct observation that they are not credentials.
  */
 function selectSql(table: string, placeholders: string): string | undefined {
   switch (table) {
@@ -231,9 +326,51 @@ function selectSql(table: string, placeholders: string): string | undefined {
                       poll_interval_s AS pollIntervalS, download_client_id AS downloadClientId,
                       created_at AS createdAt, updated_at AS updatedAt, url
                  FROM rss_feed WHERE id IN (${placeholders})`;
+    case 'download_client':
+      // `url` travels raw out of this `SELECT` and is rebuilt by
+      // `readHostRows`, the same division of labour `rss_feed` above uses
+      // for its redaction. The two secret-name columns are absent on
+      // purpose; see this function's doc and the file's top docblock.
+      return `SELECT id, name, type, implementation, url, username, category,
+                      created_at AS createdAt, updated_at AS updatedAt
+                 FROM download_client WHERE id IN (${placeholders})`;
     default:
       return undefined;
   }
+}
+
+/**
+ * The schemes a download client's address can use, and so the schemes
+ * `clientAddress` below will build an address out of.
+ *
+ * The same set, for the same measured reason, as `clients/add.ts`'s
+ * `CLIENT_URL_PROTOCOLS`. Not imported from there: that constant is the
+ * *writer's* rule about what it will accept, and this one is the
+ * *projection's* rule about what it can render. Sharing them would make a
+ * future loosening of the writer silently loosen the wire, which is the
+ * direction that matters. Both files record the distinction:
+ * `isClientAddress`'s doc names this projection as "a different job with a
+ * different reason", and this is that job.
+ */
+const PROJECTABLE_URL_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
+
+/**
+ * A download client's address as a replica may hold it: `origin + pathname`,
+ * or `''` when the column holds something that is not an http(s) address.
+ *
+ * See this file's top docblock for the whole of the reasoning -- why the
+ * rebuild is structural rather than a redaction, why the empty string rather
+ * than a throw, a dropped row or a human-readable marker, and why the guard
+ * is on the protocol rather than on `URL.parse` answering non-null.
+ *
+ * `URL.parse` rather than `new URL` in a `try`, for `clients/add.ts`'s
+ * reason: it answers `null` instead of throwing, so there is no caught error
+ * here whose message -- which would quote the url -- could escape into a log.
+ */
+function clientAddress(url: string): string {
+  const parsed = URL.parse(url);
+  if (parsed === null || !PROJECTABLE_URL_PROTOCOLS.has(parsed.protocol)) return '';
+  return `${parsed.origin}${parsed.pathname}`;
 }
 
 /**
@@ -253,18 +390,21 @@ function selectSql(table: string, placeholders: string): string | undefined {
  * is a normal outcome of that walk rather than a case worth a round trip --
  * so this returns `{}` before ever touching `raw`.
  *
- * `table` decides *which* of `selectSql`'s seven literal statements runs; it
+ * `table` decides *which* of `selectSql`'s eight literal statements runs; it
  * never reaches SQL text itself. A name outside `HOST_SYNCED_TABLES` throws
  * rather than reading `undefined` columns or silently returning nothing.
  *
- * **`rss_feed` gets one extra step after the row comes back, and every other
- * table gets none.** Its `url` column is redacted here, by
- * `clients/redact.ts`'s `redactUrl`, on the spread copy this function
- * already makes -- not in `selectSql`, which cannot run JavaScript, and not
- * in storage, which would make the raw url unrecoverable for a future slice
- * that redacts better. This is the one place the wire's content is not
- * simply what the `SELECT` returned; see this file's top docblock for why
- * that is judged acceptable and what `redactUrl` does not yet catch.
+ * **Two tables get one extra step after the row comes back, and the other
+ * six get none.** `rss_feed`'s `url` is redacted by `clients/redact.ts`'s
+ * `redactUrl`; `download_client`'s is rebuilt from its origin and path by
+ * `clientAddress`. Both happen on the spread copy this function already
+ * makes -- not in `selectSql`, which cannot run JavaScript, and not in
+ * storage, which would make the raw url unrecoverable, for a future slice
+ * that redacts better in the feed's case and for the adapter that has to
+ * dial the thing in the client's. These are the only two places the wire's
+ * content is not simply what the `SELECT` returned; see this file's top
+ * docblock for why each was judged acceptable, what `redactUrl` does not yet
+ * catch, and why the two are deliberately not the same transformation.
  */
 export function readHostRows(
   raw: DatabaseSync,
@@ -288,11 +428,18 @@ export function readHostRows(
     // null-prototype object, and this is the boundary where that stops being
     // an implementation detail a caller has to know about.
     const projected: Record<string, unknown> = { ...row };
-    // The one non-SQL step in this function -- see the docblock above. Only
-    // `rss_feed` has a `url` column projected at all, and `typeof` (rather
-    // than a cast) is what lets this stay safe if that ever stops being true.
+    // The two non-SQL steps in this function -- see the docblock above. Each
+    // is keyed on its own table and narrowed with `typeof` rather than a
+    // cast, which is what lets both stay safe if a projection ever stops
+    // naming `url`. The two branches are deliberately not merged behind a
+    // shared "has a url" condition: they apply different transformations for
+    // different reasons, and a merged branch would invite a later change to
+    // one of them to quietly apply to both.
     if (table === 'rss_feed' && typeof projected.url === 'string') {
       projected.url = redactUrl(projected.url);
+    }
+    if (table === 'download_client' && typeof projected.url === 'string') {
+      projected.url = clientAddress(projected.url);
     }
     result[id] = projected;
   }
