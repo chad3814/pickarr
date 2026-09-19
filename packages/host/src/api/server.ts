@@ -120,6 +120,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
+import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
 import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
@@ -280,6 +281,22 @@ export interface ReadServerDeps {
    * one as a bug.
    */
   addFeed: (input: AddFeedInput) => Promise<{ id: number } | AddFeedRefusal>;
+  /**
+   * Validates and writes a new `download_client` row -- `Host.addDownloadClient`,
+   * handed in as the one operation this route needs rather than the whole
+   * `Host`, for the reason `addFeed` above gives: `ReadServerDeps.host`
+   * already means the bind interface string, so the object cannot also mean
+   * the `Host` instance. Resolves a refusal *value* on failure, never
+   * throws.
+   *
+   * **The one dependency in this interface that is handed a credential.**
+   * The submitted api key or password arrives in the POST body, is passed
+   * straight through here, and is stored under a generated name by
+   * `clients/add.ts`. Nothing in this module reads it, logs it or puts it in
+   * a response -- `POST /api/download-clients` answers `{ id }` or
+   * `{ refusal }`, both of which carry nothing from the request.
+   */
+  addDownloadClient: (input: AddDownloadClientInput) => Promise<{ id: number } | AddDownloadClientRefusal>;
   /**
    * Host tables plus every plugin's declared tables, as one lookup --
    * `sync/registry.ts`'s `createSyncRegistry(raw, plugins)`. What `/api/sync`
@@ -718,6 +735,72 @@ function statusForFeedRefusal(refusal: AddFeedRefusal['refusal']): number {
 }
 
 /**
+ * Whether `value` has the shape `POST /api/download-clients` needs: every
+ * field present, and a string. Nothing here checks a field's *value* -- a
+ * real implementation, a usable auth shape, a url that is an address --
+ * because that is `addDownloadClient`'s job (`../clients/add.ts`'s module
+ * doc), and checking it twice is how the two checks drift apart.
+ *
+ * **Every credential field is required, not optional**, and an unsupplied
+ * one is `''`. The distinction is load-bearing rather than tidy: the host
+ * reads `''` as "this strategy sends no such credential" and decides the
+ * auth shape from which of the three are blank, so a body that *omits*
+ * `apiKey` rather than sending it empty would arrive as `undefined` and be
+ * read as a shape the operator never chose. Requiring the field makes the
+ * client state its intent.
+ *
+ * **`type` is not a field and is not read even if sent.** The host derives
+ * it from `implementation` (design spec §4 and §8.3), because
+ * `readClientConfig` treats a `type`/`implementation` mismatch as fatal --
+ * so accepting one from a browser would be accepting the ability to
+ * construct a row that can never work. An extra property on the body is
+ * simply ignored, the same way it is for `POST /api/feeds`.
+ *
+ * `'name' in value` rather than a cast to `Record<string, unknown>`:
+ * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
+ * as far as each check proves -- the same pattern `isFeedBody` above uses.
+ */
+function isDownloadClientBody(value: unknown): value is AddDownloadClientInput {
+  return typeof value === 'object' && value !== null
+    && 'name' in value && typeof value.name === 'string'
+    && 'implementation' in value && typeof value.implementation === 'string'
+    && 'url' in value && typeof value.url === 'string'
+    && 'category' in value && typeof value.category === 'string'
+    && 'apiKey' in value && typeof value.apiKey === 'string'
+    && 'username' in value && typeof value.username === 'string'
+    && 'password' in value && typeof value.password === 'string';
+}
+
+/**
+ * The status `POST /api/download-clients` answers for each way
+ * `addDownloadClient` can refuse, on `statusForFeedRefusal`'s reasoning
+ * above.
+ *
+ * `duplicate-name` is the one refusal that already has a row to point at --
+ * a client answering to a name already on file -- so `409` is the one that
+ * fits. The other three are all "this otherwise well-formed field's value
+ * is not one this host will accept": an implementation this host cannot
+ * drive, a set of credential fields no auth strategy uses, a url that is
+ * not an http address. All three answer `422`: the request parsed fine and
+ * named fields that exist, but the values they carry cannot be acted on.
+ *
+ * Whatever the status, the body carries `refusal` itself and nothing else
+ * -- never a message a human would read, and in particular never the
+ * submitted credential or url, neither of which any answer from this route
+ * repeats.
+ */
+function statusForDownloadClientRefusal(refusal: AddDownloadClientRefusal['refusal']): number {
+  switch (refusal) {
+    case 'duplicate-name':
+      return 409;
+    case 'unknown-implementation':
+    case 'bad-auth-shape':
+    case 'bad-url':
+      return 422;
+  }
+}
+
+/**
  * The static route's own `path`, in `ROUTES` -- a sentinel `matchesPath`
  * recognises and handles before its ordinary segment comparison ever runs,
  * not a template built from `:name` segments the way every other route's is
@@ -902,6 +985,42 @@ export const ROUTES: readonly Route[] = [
       const result = await deps.addFeed(body);
       if ('refusal' in result) {
         return json(statusForFeedRefusal(result.refusal), { refusal: result.refusal });
+      }
+      return json(201, { id: result.id });
+    },
+  },
+  {
+    path: '/api/download-clients',
+    methods: ['POST'],
+    open: false,
+    // Writes a new `download_client` row through `deps.addDownloadClient`,
+    // shaped exactly like `POST /api/feeds` above and guarded the same way:
+    // a caller with no session has no more business configuring a download
+    // client than reading one.
+    //
+    // **This is the one route that receives a credential**, and the whole
+    // of what it does with it is hand it on. The api key or password
+    // arrives in the body, `isDownloadClientBody` confirms it is a string
+    // and reads nothing of its content, and `clients/add.ts` stores it
+    // under a generated name in the `secret` table. Neither answer below
+    // carries anything from the request: `{ id }` on success, `{ refusal }`
+    // on every failure. There is deliberately no branch here that could
+    // quote the body -- see this module's doc on why no response may carry
+    // prose in place of a stable code, which is also what keeps a helpful
+    // error message from becoming a credential in a log.
+    //
+    // Only the body's *shape* is checked here; the invariants on the values
+    // -- a known implementation, an auth shape some strategy can use, a url
+    // that is an address, a name not already taken -- live in
+    // `clients/add.ts`, per the module doc's rule that no SQL and no
+    // business rule belongs in this file.
+    answer: async ({ deps, body }) => {
+      // `{ refusal }` and no prose, for the reason `MALFORMED_BODY`'s doc
+      // gives: these two are the only answers here that share a status.
+      if (!isDownloadClientBody(body)) return json(400, { refusal: 'invalid-shape' });
+      const result = await deps.addDownloadClient(body);
+      if ('refusal' in result) {
+        return json(statusForDownloadClientRefusal(result.refusal), { refusal: result.refusal });
       }
       return json(201, { id: result.id });
     },

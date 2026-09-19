@@ -844,6 +844,12 @@ export async function main(
     // `ReadServerDeps.addFeed`'s own doc for why the interface asks for a
     // function rather than this object.
     addFeed: (input) => host.addFeed(input),
+    // The one operation `POST /api/download-clients` needs, wired the same
+    // way and for the same reason -- see `ReadServerDeps.addDownloadClient`.
+    // The credential in that route's body travels no further than this
+    // call: `Host.addDownloadClient` hands it to `Secrets.saveSecret` and
+    // writes only the generated name to the row.
+    addDownloadClient: (input) => host.addDownloadClient(input),
     registry,
     // Resolved once, here, rather than per request: this value cannot change
     // while the process holds `raw` open, so a route reading it would be a

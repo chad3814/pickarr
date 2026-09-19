@@ -13,6 +13,8 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import type { AddFeedInput } from '../../src/feeds/add.ts';
+import type { AddDownloadClientInput } from '../../src/clients/add.ts';
+import { ADD_DOWNLOAD_CLIENT_REFUSALS } from '@pickarr/contract';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
@@ -160,6 +162,15 @@ async function start(
     // silent success.
     addFeed: () => {
       throw new Error('addFeed not stubbed in this test');
+    },
+    // Same reasoning as `addFeed` above: no test here posts to
+    // `/api/download-clients` without overriding this, and one that reaches
+    // it without meaning to gets a failure naming the gap rather than a
+    // silent success. It must never be a stub that *succeeds*: the
+    // credential body below would then be accepted by a test that had no
+    // opinion about credentials at all.
+    addDownloadClient: () => {
+      throw new Error('addDownloadClient not stubbed in this test');
     },
     // No plugin in this file declares a synced table -- what `/api/sync` and
     // `/api/sync/backfill` do with a real one is `sync-route.test.ts`'s.
@@ -1701,6 +1712,198 @@ test('the route is guarded by a session like every read', async () => {
   try {
     const answer = await post(server, '/api/feeds', ANONYMOUS, validBody());
     assert.equal(answer.status, 401, 'no session, no write');
+  } finally {
+    await server.close();
+  }
+});
+
+
+/**
+ * The credential in every `POST /api/download-clients` test below.
+ *
+ * It exists to be looked for and not found: an obviously synthetic string,
+ * distinct from every other literal in this file, so an assertion that it is
+ * absent from a body or a log cannot be satisfied by some other value's
+ * absence. Nothing here is a real key.
+ */
+const SUBMITTED_API_KEY = 'apikey-must-never-be-echoed-9f8e7d';
+
+/**
+ * A well-formed `/api/download-clients` payload.
+ *
+ * The url names `qbit.example` and the api key is {@link SUBMITTED_API_KEY},
+ * both deliberately: the tests below assert neither is ever echoed into a
+ * response body or a log line, which needs values in the body worth
+ * searching for in the first place. Mirrors `validBody`'s own reasoning for
+ * `tracker.example`.
+ *
+ * `type` is absent because the wire shape has no such field -- the host
+ * derives it from `implementation` (design spec §4), so a client cannot
+ * send a `type`/`implementation` pair that disagrees.
+ */
+function validClientBody(): AddDownloadClientInput {
+  return {
+    name: 'A Client',
+    implementation: 'qbittorrent',
+    url: 'http://qbit.example:8080',
+    category: 'pickarr',
+    apiKey: SUBMITTED_API_KEY,
+    username: '',
+    password: '',
+  };
+}
+
+test('a valid download client is accepted and its id returned', async () => {
+  const { raw, db } = setup();
+  const accepted: AddDownloadClientInput[] = [];
+  const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+    addDownloadClient: async (i) => {
+      accepted.push(i);
+      return { id: 11 };
+    },
+  });
+  try {
+    const answer = await post(server, '/api/download-clients', cookie, validClientBody());
+    assert.equal(answer.status, 201);
+    assert.deepEqual(JSON.parse(answer.text), { id: 11 });
+    assert.equal(accepted.length, 1, 'the host was asked exactly once');
+    assert.equal(accepted[0]?.apiKey, SUBMITTED_API_KEY, 'and the credential reached it intact');
+
+    // The success path, not just the refusals: an accepted create is the
+    // one answer that has a real row to describe, and describing it is
+    // exactly how a credential ends up echoed back. The body is the id and
+    // nothing else.
+    assert.ok(!answer.text.includes(SUBMITTED_API_KEY), 'the credential is never echoed');
+    assert.ok(!answer.text.includes('qbit.example'), 'and neither is the address');
+    assert.ok(
+      !JSON.stringify(logs).includes(SUBMITTED_API_KEY),
+      'and the credential is not written down either',
+    );
+    assert.ok(
+      !JSON.stringify(logs).includes('qbit.example'),
+      'and no log line carries the url',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('each download client refusal answers a distinct code the client can branch on', async () => {
+  // Global Constraint: distinguishable without parsing prose. The client
+  // maps a code to its own words; the server authors no sentence a human
+  // reads, and no url and no credential appears in any body.
+  //
+  // **All four of `ADD_DOWNLOAD_CLIENT_REFUSALS`, not a sample.** The feeds
+  // slice shipped two of its four unpinned, so `statusForFeedRefusal` could
+  // have moved either out of the 422 group -- or dropped its `case` and
+  // fallen through -- with every test still green. The grouping is the
+  // thing under test, and a table missing half of it cannot see it drift.
+  //
+  // A fresh `setup()` per case, run concurrently rather than in a loop with
+  // an `await` in it: an install gets exactly one account, so a second
+  // sign-up against one database would be refused for a reason that has
+  // nothing to do with this property.
+  const cases = [
+    ['duplicate-name', 409],
+    ['unknown-implementation', 422],
+    ['bad-auth-shape', 422],
+    ['bad-url', 422],
+  ] as const;
+  // Both halves of the table, read off the contract rather than counted by
+  // hand, so a fifth code added to `ADD_DOWNLOAD_CLIENT_REFUSALS` fails here
+  // instead of quietly going unprobed.
+  assert.equal(
+    new Set(cases.map(([refusal]) => refusal)).size,
+    ADD_DOWNLOAD_CLIENT_REFUSALS.length,
+    'every refusal the host can return has a row',
+  );
+  for (const code of ADD_DOWNLOAD_CLIENT_REFUSALS) {
+    assert.ok(cases.some(([refusal]) => refusal === code), `${code} is probed`);
+  }
+
+  await Promise.all(cases.map(async ([refusal, status]) => {
+    const { raw, db } = setup();
+    const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+      addDownloadClient: async () => ({ refusal }),
+    });
+    try {
+      const answer = await post(server, '/api/download-clients', cookie, validClientBody());
+      assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
+      assert.deepEqual(JSON.parse(answer.text), { refusal }, 'and the whole body is that one stable code');
+      assert.ok(!answer.text.includes(SUBMITTED_API_KEY), 'the credential is never echoed');
+      assert.ok(!answer.text.includes('qbit.example'), 'and neither is the url');
+      // The other half of the same constraint: an error path is where a
+      // value gets written into a message by someone being helpful.
+      // Asserted by substring over every field of every line, so a
+      // credential reaching any of them is caught.
+      assert.ok(
+        !JSON.stringify(logs).includes(SUBMITTED_API_KEY),
+        'and the submitted credential is not written down either',
+      );
+      assert.ok(
+        !JSON.stringify(logs).includes('qbit.example'),
+        'and neither is the submitted url',
+      );
+    } finally {
+      await server.close();
+    }
+  }));
+});
+
+test('both download client 400s carry a code, so the one status they share is not told apart by prose', async () => {
+  // The two envelope refusals, which collide on a status and so used to
+  // differ only by an english string. The same pair `POST /api/feeds`
+  // answers, asserted again here rather than assumed shared: the two routes
+  // reach `MALFORMED_BODY` through the same `readBody`, but each owns its
+  // own `invalid-shape` answer and its own shape guard.
+  const { raw, db } = setup();
+  let called = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addDownloadClient: async () => {
+      called += 1;
+      return { id: 1 };
+    },
+  });
+  try {
+    const unparseable = await postRaw(server, '/api/download-clients', cookie, '{not json');
+    assert.equal(unparseable.status, 400);
+    assert.deepEqual(JSON.parse(unparseable.text), { refusal: 'malformed-body' });
+
+    // Parses, and is not a download client: `apiKey` is absent, which
+    // `isDownloadClientBody` refuses. An absent credential field is not the
+    // same fact as an empty one -- the host reads `''` as "this strategy
+    // sends none", so a body that omits the field entirely would otherwise
+    // reach the host as `undefined` and be read as a shape it never chose.
+    const { apiKey: _omitted, ...withoutApiKey } = validClientBody();
+    const wrongShape = await post(server, '/api/download-clients', cookie, withoutApiKey);
+    assert.equal(wrongShape.status, 400);
+    assert.deepEqual(JSON.parse(wrongShape.text), { refusal: 'invalid-shape' });
+
+    // And a `type` a caller tried to smuggle in is simply not read: the
+    // shape guard ignores unknown fields, and the host derives `type`
+    // itself, so this is accepted as an ordinary create rather than
+    // becoming a row whose type and implementation disagree.
+    const withType = await post(server, '/api/download-clients', cookie, { ...validClientBody(), type: 'nzb' });
+    assert.equal(withType.status, 201, 'an extra field is not a shape failure');
+
+    assert.notDeepEqual(
+      JSON.parse(unparseable.text),
+      JSON.parse(wrongShape.text),
+      'and the two 400s are distinguishable without reading a sentence',
+    );
+    assert.equal(called, 1, 'only the well-shaped body reached the host');
+  } finally {
+    await server.close();
+  }
+});
+
+test('the download client route is guarded by a session like every read', async () => {
+  const { raw, db } = setup();
+  const { server } = await start(raw, db, moviesOnly);
+  try {
+    const answer = await post(server, '/api/download-clients', ANONYMOUS, validClientBody());
+    assert.equal(answer.status, 401, 'no session, no write');
+    assert.ok(!answer.text.includes(SUBMITTED_API_KEY), 'and the refusal repeats nothing of the body');
   } finally {
     await server.close();
   }

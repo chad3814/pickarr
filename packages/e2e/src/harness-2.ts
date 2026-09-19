@@ -172,14 +172,30 @@ async function boot(): Promise<Booted> {
 
   const hostFetch = createHostFetch({ fetch: globalThis.fetch });
 
-  // Never asked to resolve a real credential: no spec in this file submits
-  // a feed against a download client, only against the three plugin
-  // categories `Host.addFeed` itself validates.
+  // An in-memory `Secrets`, not the host's own `createSecrets`: that one is
+  // not exported from `@pickarr/host`, and the chain it builds (environment,
+  // then the secrets directory, then the `secret` table) has nothing to
+  // contribute here -- no spec sets a `PICKARR_SECRET_*` variable or mounts
+  // a secrets directory.
+  //
+  // **`saveSecret` stores rather than discarding, and that is not
+  // decoration.** `addDownloadClient` (wired below) hands it the credential
+  // out of a POST body and writes only the generated name to the row, so a
+  // `saveSecret` that dropped the value would leave every client this
+  // harness creates naming a secret nothing can resolve -- a row that reads
+  // as configured and fails on first use, which is precisely the failure
+  // the name indirection exists to make impossible. Resolving it here keeps
+  // the harness's host behaving like `main`'s.
+  const storedSecrets = new Map<string, string>();
   const secrets = {
     async get(name: string): Promise<string> {
-      throw new Error(`no secret configured for ${name}`);
+      const value = storedSecrets.get(name);
+      if (value === undefined) throw new Error(`no secret configured for ${name}`);
+      return value;
     },
-    saveSecret(): void {},
+    saveSecret(name: string, value: string): void {
+      storedSecrets.set(name, value);
+    },
   };
 
   const host = createHost({
@@ -207,6 +223,13 @@ async function boot(): Promise<Booted> {
     // schedules never runs, and why that is fine for what this harness
     // tests.
     addFeed: (input) => host.addFeed(input),
+    // `Host.addDownloadClient`, wired exactly as `main.ts` wires it. The
+    // host this file builds is deliberately never started, so the reconcile
+    // this schedules is a row in `jobs` that no dispatcher ever picks up --
+    // the same arrangement `addFeed`'s poll is already in, and fine for the
+    // same reason: what a spec observes is the row that was created, not
+    // the job.
+    addDownloadClient: (input) => host.addDownloadClient(input),
     registry,
     generation,
     host: '127.0.0.1',
