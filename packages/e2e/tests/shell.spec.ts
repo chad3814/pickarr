@@ -320,7 +320,13 @@ test('an operator can add a feed and see it listed', async ({ page, harness }) =
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
 
   await page.goto(`${harness.origin}/settings`);
-  await page.getByLabel('Name').fill('Movies HD');
+  // `exact: true`: Playwright's `getByLabel` matches a substring by
+  // default, and `/settings` grew a second form with a "Client name" field
+  // when the download clients section landed -- which this locator then
+  // resolved to alongside the feed's own "Name", failing in strict mode.
+  // The label text this spec means has not changed; only the page around it
+  // has.
+  await page.getByLabel('Name', { exact: true }).fill('Movies HD');
   await page.getByLabel('Feed url').fill(`${harness.origin}/fixtures/movies.xml`);
   await page.getByRole('button', { name: 'Add feed' }).click();
 

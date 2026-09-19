@@ -1,14 +1,16 @@
 /**
- * `/settings`: every configured feed, read from the replica, plus the form
- * that adds one (design spec `2026-09-18-feed-settings-design.md`, whole
- * doc). The host's first write surface.
+ * The `/settings` screen's feeds section: every configured feed, read from
+ * the replica, plus the form that adds one (design spec
+ * `2026-09-18-feed-settings-design.md`, whole doc). The host's first write
+ * surface.
  *
- * **`data-testid="settings"` on the root element carries task 4's route-
- * mapping contract forward**, the same way `library/Category.tsx`'s
- * `category-${pluginId}` and `library/Unmatched.tsx`'s `unmatched` do:
- * `shell/Shell.test.tsx`'s mapping tests find whichever screen renders at
- * each route by this marker alone, not by rendered prose, so this
- * component's own text and layout stay free to change.
+ * **This was the whole of `/settings` and is now one of two sections on
+ * it** (the download clients slice, design spec §6). Two things moved out
+ * with that change and both moved to `Settings.tsx`, which is the route's
+ * element now: the `data-testid="settings"` route-mapping marker, which
+ * belongs on the screen's root element and this is no longer that, and the
+ * page's `<h1>`. What is left here is a `<section>` named by its own `<h2>`
+ * -- the same shape `DownloadClients.tsx` has, so the two read alike.
  *
  * **The feed's `url` is rendered exactly as the replica holds it.** It
  * arrives redacted by the host, not raw (`RssFeedSyncRead`'s own doc), and
@@ -20,7 +22,7 @@ import type { ReactElement } from 'react';
 import { useFeeds, type FeedsSource } from './useFeeds.ts';
 import { AddFeed, type AddFeedInput, type AddFeedOutcome } from './AddFeed.tsx';
 
-/** Re-exported so a caller of this screen (`Shell.tsx`, this file's own tests) needs one import, not two -- `useFeeds.ts` is where it is declared, since that hook is what actually needs it narrowed. */
+/** Re-exported so a caller of this section (`Settings.tsx`, this file's own tests) needs one import, not two -- `useFeeds.ts` is where it is declared, since that hook is what actually needs it narrowed. */
 export type { FeedsSource };
 
 export interface FeedsProps {
@@ -33,8 +35,8 @@ export function Feeds({ source, submit }: FeedsProps): ReactElement {
   const feeds = useFeeds(source);
 
   return (
-    <section aria-labelledby="settings-heading" data-testid="settings">
-      <h1 id="settings-heading">Feed settings</h1>
+    <section aria-labelledby="feeds-heading">
+      <h2 id="feeds-heading">Feeds</h2>
       <AddFeed submit={submit} />
       {feeds !== undefined &&
         (feeds.length === 0 ? (

@@ -50,8 +50,9 @@ import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { Unmatched } from '../library/Unmatched.tsx';
 import { useCounts, CATEGORIES, type Category, type Counts } from './useCounts.ts';
 import { Category as CategoryScreen } from '../library/Category.tsx';
-import { Feeds } from '../settings/Feeds.tsx';
+import { Settings } from '../settings/Settings.tsx';
 import { postFeed } from '../settings/AddFeed.tsx';
+import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
@@ -186,12 +187,22 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/*
-          `postFeed` is the real `submit` (`../settings/AddFeed.tsx`'s own
-          doc on why it is injected rather than defaulted): wired here,
-          explicitly, rather than given a default inside `Feeds` that would
-          perform network I/O invisibly at every call site.
+          `postFeed` and `postDownloadClient` are the two real `submit`s
+          (`../settings/AddFeed.tsx`'s own doc on why each is injected
+          rather than defaulted): wired here, explicitly, rather than given
+          a default inside either form that would perform network I/O
+          invisibly at every call site. `Settings` is the whole screen --
+          both sections -- and its own docblock says why it is a parent
+          component rather than a second section inside `Feeds`.
         */}
-        <Route path="settings" element={store === undefined ? null : <Feeds source={store} submit={postFeed} />} />
+        <Route
+          path="settings"
+          element={
+            store === undefined ? null : (
+              <Settings source={store} submitFeed={postFeed} submitDownloadClient={postDownloadClient} />
+            )
+          }
+        />
         {/* Keeps the chrome on screen for any other path -- see this file's doc. */}
         <Route path="*" element={null} />
       </Route>

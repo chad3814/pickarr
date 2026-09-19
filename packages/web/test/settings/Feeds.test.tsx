@@ -81,16 +81,6 @@ function fillFeedForm({ name, url }: { name: string; url: string }): void {
   fireEvent.change(screen.getByLabelText('Feed url'), { target: { value: url } });
 }
 
-test('the settings screen carries the route-mapping marker on its root element', async () => {
-  const db = await freshDb();
-  render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
-  // `getByTestId` alone can never fail the assertion below (it throws first
-  // on absence), which proves nothing beyond what the throw already would --
-  // asserting the marked element's own tag pins something real: the marker
-  // sits on the screen's root `<section>`, not on some inner wrapper.
-  assert.equal(screen.getByTestId('settings').tagName, 'SECTION', 'the marker sits on the root element');
-});
-
 test('the list shows a feed by name and host, from the replica', async () => {
   const db = await freshDb();
   await seed(db, [feedOp({ id: 1, name: 'Movies HD', url: 'https://tracker.example/rss?apikey=***' })]);
