@@ -81,7 +81,10 @@ test('a client starting from the pivot receives every live row exactly once', ()
   const delivered = [...walked, ...tailed].map(keyOf);
   assert.equal(new Set(delivered).size, delivered.length, 'no row may be delivered twice');
 
-  const live = raw.prepare("SELECT 'media_item' t, id FROM media_item UNION ALL SELECT 'rss_item' t, id FROM rss_item")
+  const live = raw.prepare(
+    "SELECT 'media_item' t, id FROM media_item UNION ALL SELECT 'rss_item' t, id FROM rss_item " +
+    "UNION ALL SELECT 'rss_feed' t, id FROM rss_feed",
+  )
     .all().map((row) => {
       const entry = row as { t: unknown; id: unknown };
       return `${String(entry.t)}/${String(Number(entry.id))}`;
@@ -164,7 +167,8 @@ test('one small old category does not drag the pivot to the bottom of the log', 
   const tailed = tailSince(raw, registry, cursors.since, 100).ops;
   const walked = backfillBefore(raw, registry, cursors.before, 100).ops;
   assert.equal(tailed.length, 3, 'the first tail page is bounded by the target, not by the whole library');
-  assert.equal(walked.length, 9, 'and everything below it is the walk\'s, including both `movie` items');
+  assert.equal(walked.length, 10,
+    'and everything below it is the walk\'s, including both `movie` items and `open`\'s own `rss_feed` row');
   assert.ok(walked.some((op) => op.table === 'media_item' && op.id === 1),
     'the oldest `movie` item is on the walk\'s side');
 });
@@ -181,11 +185,13 @@ test('no category reaching the target answers above the log, so the walk owns ev
 
   const cursors = bootstrapCursors(raw, 40);
   const registry = createSyncRegistry(raw, []);
-  assert.deepEqual(cursors, { since: 2, before: 3 }, 'one above every entry the log holds');
+  // `open()`'s own `rss_feed` row is the log's first entry, so "every entry
+  // the log holds" is now three, not two.
+  assert.deepEqual(cursors, { since: 3, before: 4 }, 'one above every entry the log holds');
   assert.deepEqual(tailSince(raw, registry, cursors.since, 100).ops, [], 'the tail starts empty');
   assert.deepEqual(
-    backfillBefore(raw, registry, cursors.before, 100).ops.map((op) => op.id).toSorted(),
-    [1, 2],
+    backfillBefore(raw, registry, cursors.before, 100).ops.map((op) => `${op.table}/${op.id}`).toSorted(),
+    ['media_item/1', 'media_item/2', 'rss_feed/1'],
     'and the walk owns every row there is',
   );
 });
@@ -217,11 +223,13 @@ test('the pivot is the lower of the group row and its latest release, with the m
   // candidate an offset of 1 lands on. A one-item category answers nothing
   // now and the pivot would go above the log instead.
   addItem(raw, 2, 'tv', 500);
-  assert.deepEqual(logOf(raw), ['1:media_item/1', '2:rss_item/21', '3:rss_item/22', '4:media_item/2'],
+  // `1:rss_feed/1` is `open()`'s own fixture row, logged ahead of everything
+  // this test writes.
+  assert.deepEqual(logOf(raw), ['1:rss_feed/1', '2:media_item/1', '3:rss_item/21', '4:rss_item/22', '5:media_item/2'],
     'fixture: media_item first');
 
   const cursors = bootstrapCursors(raw, 1);
-  assert.equal(cursors.before, 1, "the media_item's own entry is the lower of the two");
+  assert.equal(cursors.before, 2, "the media_item's own entry is the lower of the two");
 });
 
 test('the pivot is the lower of the two with a later media_item update inverting them', () => {
@@ -239,11 +247,13 @@ test('the pivot is the lower of the two with a later media_item update inverting
   // A second, newer item so `tv` reaches the target; item 1 is still what an
   // offset of 1 lands on.
   addItem(raw, 2, 'tv', 500);
-  assert.deepEqual(logOf(raw), ['4:rss_item/21', '5:rss_item/22', '6:media_item/1', '7:media_item/2'],
+  // `1:rss_feed/1` is `open()`'s own fixture row, logged ahead of everything
+  // this test writes.
+  assert.deepEqual(logOf(raw), ['1:rss_feed/1', '5:rss_item/21', '6:rss_item/22', '7:media_item/1', '8:media_item/2'],
     'fixture: the group row now sits above both of its releases');
 
   const cursors = bootstrapCursors(raw, 1);
-  assert.equal(cursors.before, 5, "the latest release's entry is the lower of the two, so it is the pivot");
+  assert.equal(cursors.before, 6, "the latest release's entry is the lower of the two, so it is the pivot");
 
   // The property that arithmetic buys: the card's newest release reaches the
   // client through the tail, beside the card itself, rather than waiting for
@@ -265,18 +275,22 @@ test('a media item with no releases uses its own entry', () => {
 
 test('an empty library answers a pivot above the whole log, so the walk can still find everything', () => {
   const raw = open();
-  // `rss_feed` is not synced, so this library has a log with nothing in it.
-  assert.deepEqual(logOf(raw), []);
-  assert.deepEqual(bootstrapCursors(raw, 4), { since: 0, before: 1 },
-    'a tail from 0 and a walk below 1 over an empty log are both empty, and neither is wrong');
+  // `rss_feed` is synced now, so `open()`'s own fixture row is the log's
+  // whole content here -- this library has no `media_item` at all, which is
+  // the "empty" this test means.
+  assert.deepEqual(logOf(raw), ['1:rss_feed/1']);
+  assert.deepEqual(bootstrapCursors(raw, 4), { since: 1, before: 2 },
+    'a tail from 1 and a walk below 2 leave only the feed row below the pivot, and neither cursor is wrong');
 
   // An unattached release with no media item at all: there is no category to
   // ask, so the pivot goes above the log and the walk owns everything. N11.
   addRelease(raw, 21, null);
   const cursors = bootstrapCursors(raw, 4);
   const registry = createSyncRegistry(raw, []);
-  assert.deepEqual(backfillBefore(raw, registry, cursors.before, 10).ops.map((op) => op.id), [21],
-    'the walk must reach a row no media item names');
+  const releases = backfillBefore(raw, registry, cursors.before, 10).ops
+    .filter((op) => op.table === 'rss_item')
+    .map((op) => op.id);
+  assert.deepEqual(releases, [21], 'the walk must reach a row no media item names');
 });
 
 test('the shipped target is a number, and the per-category queries seek rather than scan', () => {

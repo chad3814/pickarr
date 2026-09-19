@@ -3,7 +3,6 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { writeSecretValue } from '../secrets/store.ts';
 import { installSyncTriggers, seedSyncLog } from '../sync/log.ts';
-import { HOST_SYNCED_TABLES } from '../sync/tables.ts';
 
 /**
  * The shared tables, in dependency order so every `REFERENCES` names a table
@@ -922,11 +921,45 @@ const MIGRATION_15_DDL = `
  * Deleting the database and re-migrating works too, and is what 2.0 expects
  * of a development database anyway -- it starts empty and rebuilds from
  * feeds.
+ *
+ * **This installs and seeds a literal six-table list, not `HOST_SYNCED_TABLES`
+ * itself, and that stopped being the same thing the moment `rss_feed` joined
+ * that constant.** A migration that has been applied anywhere is frozen --
+ * `docs/database-migrations.md` says so in its first rule -- and reading a
+ * live, growing export from this function would quietly break that on a
+ * database that has not yet applied version 15: such a database would run
+ * this migration with whatever `HOST_SYNCED_TABLES` names *today*, which is
+ * not what version 15 named when it was written. `MIGRATION_16` below is
+ * where `rss_feed` actually joins the synced set; this one keeps naming the
+ * six tables it always did.
  */
+const MIGRATION_15_TABLES = ['media_item', 'rss_item', 'torrent_download', 'nzb_download', 'person', 'role'];
+
 function migration15(db: DatabaseSync): void {
   db.exec(MIGRATION_15_DDL);
-  installSyncTriggers(db, HOST_SYNCED_TABLES);
-  seedSyncLog(db, HOST_SYNCED_TABLES);
+  installSyncTriggers(db, MIGRATION_15_TABLES);
+  seedSyncLog(db, MIGRATION_15_TABLES);
+}
+
+/**
+ * Brings `rss_feed` into the synced set (`sync/tables.ts`'s top docblock has
+ * why, and design spec §3.1-§3.2). No DDL: the table has existed, unchanged,
+ * since `INITIAL_SCHEMA` -- this migration adds only what replication needs,
+ * the same two calls `migration15` made for its own six tables, scoped to
+ * this one.
+ *
+ * `installSyncTriggers` makes a future insert, update or delete log;
+ * `seedSyncLog` is what a feed created *before* this migration ran needs
+ * instead, since a trigger cannot log a write that already happened.
+ * `docs/database-migrations.md`'s "the mechanism, not just a repair" section
+ * is why the seed is not optional here: a client's backfill walks `sync_log`
+ * backwards and reads it as an index of which rows exist, so an unseeded
+ * pre-existing `rss_feed` row would stay invisible to every client forever,
+ * with nothing failing to say so.
+ */
+function migration16(db: DatabaseSync): void {
+  installSyncTriggers(db, ['rss_feed']);
+  seedSyncLog(db, ['rss_feed']);
 }
 
 /**
@@ -950,6 +983,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 13, up: (db) => db.exec(MIGRATION_13) },
   { version: 14, up: (db) => migration14(db) },
   { version: 15, up: (db) => migration15(db) },
+  { version: 16, up: (db) => migration16(db) },
 ];
 
 /**

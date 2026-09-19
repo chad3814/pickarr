@@ -1150,14 +1150,36 @@ test('migration 15 seeds the log, so rows written before it existed are reachabl
     ['media_item', 2, 'upsert'],
     ['person', 3, 'upsert'],
     ['role', 4, 'upsert'],
+    ['rss_feed', 1, 'upsert'],
     ['rss_item', 7, 'upsert'],
   ], 'one entry per live row of every synced table, and none for a table that is not synced');
+});
 
-  // `rss_feed` is not synced (`sync/tables.ts`: a feed's url can carry a
-  // passkey), so its row must not be in the log -- the seed is driven off
-  // `HOST_SYNCED_TABLES`, not off every table that happens to hold rows.
-  const feeds = raw.prepare("SELECT count(*) c FROM sync_log WHERE table_name = 'rss_feed'").get();
-  assert.equal(Number((feeds as { c: unknown }).c), 0, 'an unsynced table gets no log entry');
+test('migration 16 seeds the log for a feed already on file, so an existing replica backfills it', () => {
+  // `rss_feed` joined the synced set in this slice (`sync/tables.ts`'s top
+  // docblock has why); this is `migration15`'s own test above, aimed at the
+  // migration that actually brings this table in rather than the one that
+  // brought the other six in. Migrated to 15 and seeded by hand, same
+  // reasoning as above: these rows exist with no `rss_feed` trigger installed
+  // yet, which is the state a database applying this migration for the first
+  // time is actually in.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 15));
+
+  raw.prepare(`
+    INSERT INTO rss_feed (id, plugin_id, name, url, created_at, updated_at)
+    VALUES (1, 'tv', 'a feed', 'https://example.test/feed', 1, 1)
+  `).run();
+
+  migrateHostWith(raw, HOST_MIGRATIONS);
+
+  const logged = raw.prepare("SELECT row_id, op FROM sync_log WHERE table_name = 'rss_feed'").all()
+    .map((row) => {
+      const entry = row as { row_id: unknown; op: unknown };
+      return [Number(entry.row_id), String(entry.op)];
+    });
+  assert.deepEqual(logged, [[1, 'upsert']],
+    'a feed that predates this migration must be indexed, so a client backfills it rather than never learning it exists');
 });
 
 test('the seed stamps `at` in real milliseconds, like the triggers', () => {

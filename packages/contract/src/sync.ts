@@ -145,7 +145,7 @@ export interface XxxSiteRead {
 }
 
 /**
- * The six read shapes for the **host's** own synced tables --
+ * The seven read shapes for the **host's** own synced tables --
  * `sync/tables.ts`'s `selectSql` projections, field for field.
  *
  * **Why `SyncRead` and not `Read`.** `MediaItemRead` and `RssItemRead` are
@@ -156,7 +156,7 @@ export interface XxxSiteRead {
  * carries, since for a private tracker that url carries the passkey and a
  * replica is permanent -- and no `createdAt`, `updatedAt` or `rankingScore`.
  * Reusing
- * either would either leak a field or silently drop one. All six carry the
+ * either would either leak a field or silently drop one. All seven carry the
  * suffix rather than only the two that had to, so the family reads as one;
  * the plugin shapes above keep their bare `Read` because renaming them means
  * touching three plugin packages for no requirement.
@@ -174,9 +174,13 @@ export interface XxxSiteRead {
  * That check is over *names*; a field's declared type is not mechanisable
  * from a TypeScript type at run time and is not covered.
  *
- * **Two fields name rows a client will never receive**, and they are called
- * out on the fields themselves rather than here, because a client that reads
- * only the field list is the one that needs to know.
+ * **One field names a row a client will never receive**, and it is called
+ * out on the field itself rather than here, because a client that reads only
+ * the field list is the one that needs to know: `TorrentDownloadSyncRead`'s
+ * and `NzbDownloadSyncRead`'s `downloadClientId`. `RssItemSyncRead.feedId`
+ * used to be the other one; it stopped being one when `rss_feed` joined this
+ * family below, in the same slice that added `RssFeedSyncRead` -- a client
+ * can now resolve a `feedId` to the feed row it names.
  */
 
 /**
@@ -203,13 +207,12 @@ export interface MediaItemSyncRead {
 export interface RssItemSyncRead {
   id: number;
   /**
-   * The `rss_feed` this release came from -- **an id a client can never
-   * resolve to a name.** `rss_feed` is not synced and will not be: a feed row
-   * holds the feed's url, which for a private tracker or indexer carries the
-   * passkey, and no url may be copied into permanent client storage. So a
-   * client may group releases by feed, and count them, and tell two feeds
-   * apart; it cannot label either. Kept rather than dropped because an id is
-   * not a url and grouping by it needs nothing else.
+   * The `rss_feed` this release came from. **This used to be an id a client
+   * could never resolve to a name, and that changed when `rss_feed` joined
+   * the synced set** (`sync/tables.ts`'s top docblock has why, and the
+   * redaction its url now travels under). A client can therefore join this
+   * to `RssFeedSyncRead.id` and label the feed, not merely group and count
+   * by it as before.
    */
   feedId: number;
   filename: string;
@@ -328,4 +331,39 @@ export interface RoleSyncRead {
   name: string | null;
   billingOrder: number | null;
   createdAt: number;
+}
+
+/**
+ * A feed configured on the host, as the replica holds it -- the seventh host
+ * synced table, and the first added since the other six shipped
+ * (`sync/tables.ts`'s top docblock has the whole story).
+ *
+ * `url` is the reason this shape exists at all: the operator needs to tell
+ * two feeds apart in a settings screen, and a name alone cannot always do
+ * that. It reaches this wire **redacted**, not raw -- `readHostRows` strips
+ * a `?apikey=` query parameter's value before this row is ever built, which
+ * is the one shape `clients/redact.ts`'s `redactUrl` knows. `?passkey=`,
+ * `?token=` and a passkey embedded as a path segment all pass through this
+ * field unchanged today; issue #78 tracks widening what `redactUrl` catches.
+ * A client must not treat this field as safe to log or display without
+ * remembering that gap.
+ */
+export interface RssFeedSyncRead {
+  id: number;
+  /** Which plugin owns this feed, and so which category it belongs to. */
+  pluginId: string;
+  name: string;
+  /**
+   * `'torrent'` or `'nzb'`, typed `string` for the reason
+   * `RssItemSyncRead.downloadType` gives: the column is unconstrained TEXT
+   * and nothing narrows it between the `SELECT` and the wire.
+   */
+  downloadType: string;
+  pollIntervalS: number;
+  /** The `download_client` this feed submits to -- never resolvable; see `TorrentDownloadSyncRead.downloadClientId`. */
+  downloadClientId: number | null;
+  createdAt: number;
+  updatedAt: number;
+  /** Redacted -- see the note above this interface for what that does and does not cover. */
+  url: string;
 }

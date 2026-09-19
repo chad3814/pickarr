@@ -196,7 +196,10 @@ test('the walk and the tail partition the log at the pivot, with no row in both'
   // And together they cover everything, so the partition loses nothing. A
   // walk that overlapped the tail would pass the assertion above only by
   // losing rows, which this rules out.
-  const live = raw.prepare("SELECT 'media_item' t, id FROM media_item UNION ALL SELECT 'rss_item' t, id FROM rss_item")
+  const live = raw.prepare(
+    "SELECT 'media_item' t, id FROM media_item UNION ALL SELECT 'rss_item' t, id FROM rss_item " +
+    "UNION ALL SELECT 'rss_feed' t, id FROM rss_feed",
+  )
     .all().map((row) => {
       const entry = row as { t: unknown; id: unknown };
       return `${String(entry.t)}/${String(Number(entry.id))}`;
@@ -297,9 +300,12 @@ test('the walk emits in log order, so an op may name a synced row that arrives l
   // client has not received yet.
   //
   // It arrives elsewhere in the same walk, and the client already tolerates a
-  // reference it cannot resolve: `rss_item.feed_id` and
-  // `torrent_download.download_client_id` name tables that are never synced
-  // at all (`sync/tables.ts`).
+  // reference it cannot resolve at all:
+  // `torrent_download.download_client_id` names a table that is never synced
+  // (`sync/tables.ts`). `rss_item.feed_id` used to be the same story; it no
+  // longer is, since `rss_feed` joined the synced set -- `addFeed` below is
+  // itself a synced write now, which is why its own entry shows up in the
+  // walk alongside the two this test is actually about.
   const { raw, registry } = open();
   addFeed(raw);
   addRelease(raw, 10, null as unknown as number, 100);
@@ -309,8 +315,9 @@ test('the walk emits in log order, so an op may name a synced row that arrives l
 
   const page = backfillBefore(raw, registry, pivot, 10);
   const order = page.ops.map((op) => op.table);
-  assert.deepEqual(order, ['rss_item', 'media_item'],
-    'the release was written last, so it is emitted first -- ahead of the item it names');
+  assert.deepEqual(order, ['rss_item', 'media_item', 'rss_feed'],
+    'the release was written last, so it is emitted first -- ahead of the item it names, ' +
+    'and ahead of the feed the fixture created first');
   assert.equal((page.ops[0]?.value as { mediaItemId: number } | undefined)?.mediaItemId, 1,
     'and it does carry the forward reference');
   assert.ok(idsFor(page.ops, 'media_item').includes(1), 'which the same walk resolves, further down');

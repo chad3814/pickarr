@@ -1,38 +1,69 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { redactUrl } from '../clients/redact.ts';
 
 /**
  * The host's own tables that a client replicates, and the reason each of the
  * others is absent.
  *
  * **In:** the group (`media_item`), the releases under it (`rss_item`), what
- * was submitted for them (`torrent_download`, `nzb_download`), and who is in
- * them (`person`, `role`).
+ * was submitted for them (`torrent_download`, `nzb_download`), who is in them
+ * (`person`, `role`), and the feeds that produce the releases (`rss_feed`).
+ * `rss_feed` is not a `SELECT` like the other six -- see the paragraph below
+ * that explains why it joined this list, and `readHostRows`'s own doc for
+ * the extra step its row takes.
  *
  * **Out, and why:** `auth_user`, `auth_session`, `auth_account`,
  * `auth_verification`, `host_state` and `secret` hold credentials, and no
  * credential leaves this process. `download_client` holds a service's address
- * and the names of its secrets. `rss_feed` holds a feed's url, which for a
- * private tracker carries the passkey -- the same reason `selectSql` below
- * drops `rss_item.link`, and a url may not be copied into permanent client
- * storage at all. `jobs` is machinery a client has no use for, and so are
- * `host_migrations` (schema bookkeeping), `sync_log` (this mechanism's own
- * log) and `sqlite_sequence` (SQLite's, and present only because `sync_log`
- * is `AUTOINCREMENT`). `poster`, `background` and `logo` describe
- * files already reachable at `/api/artwork/:kind/:mediaItemId`, so a client
- * asks for the image and handles a 404 rather than replicating rows about
- * files it cannot read. `alias`, `external_reference` and `filepath_mapping`
- * have no consumer. `deleted_media_item` is slice E's tombstone table: the
- * log's delete ops supersede it, and it stays because `/api/deletions` still
- * serves it.
+ * and the names of its secrets. `jobs` is machinery a client has no use for,
+ * and so are `host_migrations` (schema bookkeeping), `sync_log` (this
+ * mechanism's own log) and `sqlite_sequence` (SQLite's, and present only
+ * because `sync_log` is `AUTOINCREMENT`). `poster`, `background` and `logo`
+ * describe files already reachable at `/api/artwork/:kind/:mediaItemId`, so a
+ * client asks for the image and handles a 404 rather than replicating rows
+ * about files it cannot read. `alias`, `external_reference` and
+ * `filepath_mapping` have no consumer. `deleted_media_item` is slice E's
+ * tombstone table: the log's delete ops supersede it, and it stays because
+ * `/api/deletions` still serves it.
+ *
+ * **`rss_feed` used to be out on a rule with no exception, and that rule is
+ * amended here, deliberately.** This docblock used to say a feed's url "may
+ * not be copied into permanent client storage at all" -- the same reason
+ * `selectSql` below still drops `rss_item.link`, because for a private
+ * tracker or indexer the url can carry the passkey. That is still true of
+ * the raw url. What changed is that the operator needs to tell two feeds
+ * apart in a settings screen that a name alone cannot always do, so the url
+ * now travels **redacted**: `readHostRows` calls `clients/redact.ts`'s
+ * `redactUrl` on it, after the `SELECT` runs and before the row is handed
+ * back. That makes `rss_feed` the first synced table whose projection is not
+ * purely SQL -- every other `case` below is the whole of that table's
+ * transformation, and this one is not.
+ *
+ * **The redaction is narrower than the rule it replaces, and the gap is
+ * recorded rather than hidden.** `redactUrl` knows exactly one credential
+ * shape, a `?apikey=` query parameter -- the only one anything in this
+ * codebase has ever had to send. `?passkey=`, `?token=` and a passkey
+ * embedded as a path segment (`/announce/SECRET/`) all pass through
+ * **unchanged**, and the path-segment case is undetectable in principle:
+ * nothing about a string distinguishes a secret segment from a category
+ * slug. So a private tracker's passkey can reach the replica today, and a
+ * replica is permanent storage on every device that ever syncs, unlike a
+ * response body reachable only for the life of a request. Issue #78 tracks
+ * broadening `redactUrl`; `test/sync/tables.test.ts` pins the gap itself
+ * with a `?passkey=` url asserted, deliberately, to survive unredacted --
+ * so #78 closing it is a test failure there, not a silent change.
  *
  * **One consequence of that list, stated because a page does not hide
- * it.** `rss_item.feed_id` and `torrent_download`/`nzb_download`'s
- * `download_client_id` *are* projected below, and both name tables that are
- * out and will stay out. A client therefore receives ids it can never
- * resolve, by design. Dropping the two columns instead would be the
- * alternative; they are kept because a client grouping releases by feed or
- * downloads by client can do so by id without ever needing the row, and an
- * id is not a url.
+ * it.** `torrent_download`/`nzb_download`'s `download_client_id` *is*
+ * projected below and names a table that is out and will stay out: a
+ * `download_client` row holds a service's address and the names of its
+ * secrets, so a client receives an id it can never resolve, by design.
+ * `rss_item.feed_id` used to be the other half of this paragraph; it no
+ * longer is, because the table it names joined the synced set above and a
+ * client can now resolve it. Dropping `download_client_id` instead of
+ * projecting it would be the alternative; it is kept because a client
+ * grouping downloads by client can do so by id without ever needing the row,
+ * and an id is not a url.
  *
  * **This used to say `sync/backfill.ts` "claims page self-consistency only
  * for rows *within* the synced set", and that claim is retired.**
@@ -40,10 +71,10 @@ import type { DatabaseSync } from 'node:sqlite';
  * reference a synced row the client has not received yet" -- because the walk
  * emits in log order rather than group order. Design spec §5.2 names the
  * earlier wording as false, and §7.8 pins the loss as a test. A client
- * already had to tolerate the two ids
- * above, which resolve to nothing *ever*; what the log walk additionally
- * costs is the ordering guarantee *inside* the synced set, where the
- * reference does resolve, just not yet.
+ * already had to tolerate the `download_client_id` above, which resolves to
+ * nothing *ever*; what the log walk additionally costs is the ordering
+ * guarantee *inside* the synced set, where a reference does resolve, just
+ * not yet.
  *
  * **A table being in this list is not a promise that every one of its
  * columns is projected.** `selectSql` below names the subset of each
@@ -57,6 +88,7 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
   'nzb_download',
   'person',
   'role',
+  'rss_feed',
 ];
 
 /**
@@ -76,13 +108,14 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * builds its `ON ${table}` (safe there because it never reads a column),
  * makes this check fail closed and demand `CREDENTIAL_ALLOW_LIST` grow a
  * third entry, which the project's global constraints fix at exactly two.
- * Six short, literal, unremarkable `SELECT`s cost less than that entry would.
+ * Seven short, literal, unremarkable `SELECT`s cost less than that entry
+ * would.
  *
  * **The aliases are the wire's naming convention, and they exist for one
  * concrete reason.** A column name reaches a client verbatim: `readHostRows`
  * spreads the row `node:sqlite` hands back, and the result is serialised as
- * an op's `value` with no mapping step anywhere between. Unaliased, these six
- * tables spoke snake_case while all six plugin read shapes
+ * an op's `value` with no mapping step anywhere between. Unaliased, these
+ * seven tables spoke snake_case while all six plugin read shapes
  * (`packages/contract/src/sync.ts`) speak camelCase, so the same logical
  * field was `media_item_id` on three host tables and `mediaItemId` on three
  * plugin ones. The client's storage provider is designed (and not yet
@@ -145,6 +178,15 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  *   guarded, per-request response; it is not a defensible call for a value
  *   copied into permanent client storage, which is why this projection
  *   parts ways with that precedent the same way it does for `link`.
+ *
+ * **`rss_feed.url` is named below, not omitted, and it is the odd one out
+ * of this list rather than a fifth entry on it.** Every column above fails
+ * the "no url in permanent storage" bar and stays out entirely; this one
+ * fails the same bar and is let through anyway, because it is transformed
+ * first -- `readHostRows` redacts it after this `SELECT` runs. See this
+ * file's top docblock for why that call was judged to clear the bar, and
+ * for the gap between what it actually redacts and what a passkey can look
+ * like.
  */
 function selectSql(table: string, placeholders: string): string | undefined {
   switch (table) {
@@ -181,6 +223,14 @@ function selectSql(table: string, placeholders: string): string | undefined {
       return `SELECT id, media_item_id AS mediaItemId, person_id AS personId, role, name,
                       billing_order AS billingOrder, created_at AS createdAt
                  FROM role WHERE id IN (${placeholders})`;
+    case 'rss_feed':
+      // `url` travels unaliased and unredacted out of this `SELECT` -- the
+      // redaction is `readHostRows`'s job, after this statement runs. See
+      // this file's top docblock and the "odd one out" note above.
+      return `SELECT id, plugin_id AS pluginId, name, download_type AS downloadType,
+                      poll_interval_s AS pollIntervalS, download_client_id AS downloadClientId,
+                      created_at AS createdAt, updated_at AS updatedAt, url
+                 FROM rss_feed WHERE id IN (${placeholders})`;
     default:
       return undefined;
   }
@@ -203,9 +253,18 @@ function selectSql(table: string, placeholders: string): string | undefined {
  * is a normal outcome of that walk rather than a case worth a round trip --
  * so this returns `{}` before ever touching `raw`.
  *
- * `table` decides *which* of `selectSql`'s six literal statements runs; it
+ * `table` decides *which* of `selectSql`'s seven literal statements runs; it
  * never reaches SQL text itself. A name outside `HOST_SYNCED_TABLES` throws
  * rather than reading `undefined` columns or silently returning nothing.
+ *
+ * **`rss_feed` gets one extra step after the row comes back, and every other
+ * table gets none.** Its `url` column is redacted here, by
+ * `clients/redact.ts`'s `redactUrl`, on the spread copy this function
+ * already makes -- not in `selectSql`, which cannot run JavaScript, and not
+ * in storage, which would make the raw url unrecoverable for a future slice
+ * that redacts better. This is the one place the wire's content is not
+ * simply what the `SELECT` returned; see this file's top docblock for why
+ * that is judged acceptable and what `redactUrl` does not yet catch.
  */
 export function readHostRows(
   raw: DatabaseSync,
@@ -228,7 +287,14 @@ export function readHostRows(
     // Spread rather than pass the row through: `node:sqlite` hands back a
     // null-prototype object, and this is the boundary where that stops being
     // an implementation detail a caller has to know about.
-    result[id] = { ...row };
+    const projected: Record<string, unknown> = { ...row };
+    // The one non-SQL step in this function -- see the docblock above. Only
+    // `rss_feed` has a `url` column projected at all, and `typeof` (rather
+    // than a cast) is what lets this stay safe if that ever stops being true.
+    if (table === 'rss_feed' && typeof projected.url === 'string') {
+      projected.url = redactUrl(projected.url);
+    }
+    result[id] = projected;
   }
   return result;
 }

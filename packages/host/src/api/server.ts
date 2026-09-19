@@ -38,6 +38,17 @@
  * type, which the brief requires an unknown type to name -- and `MEDIA_TYPE`
  * below is what keeps that from becoming a way to get a path echoed back.
  *
+ * **One sanctioned exception, and only one: `/api/sync`'s and
+ * `/api/sync/backfill`'s bodies carry an `rss_feed` op whose `value.url` is a
+ * url.** It is not this sentence's rule quietly slipping -- `sync/tables.ts`'s
+ * top docblock is where that rule was deliberately amended, and the value
+ * here is `redactUrl`'s output, not the raw column, composed by
+ * `sync-route.ts` and `readHostRows` rather than by anything in this file.
+ * The redaction is narrower than a raw url deserves -- it catches `?apikey=`
+ * and nothing else, so a `?passkey=` or path-segment passkey reaches this
+ * body unchanged today (issue #78) -- which is why this is recorded as an
+ * exception rather than folded silently into the sentence above.
+ *
  * **The auth dispatch's bodies are not this file's, and two of them do carry
  * urls.** That sentence was once unqualified, and `handle` now forwards
  * `/api/auth/*` to `toNodeHandler` ahead of everything, so it has to be

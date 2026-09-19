@@ -24,6 +24,7 @@ export type {
   NzbDownloadSyncRead,
   PersonSyncRead,
   RoleSyncRead,
+  RssFeedSyncRead,
   RssItemSyncRead,
   SyncedTable,
   TorrentDownloadSyncRead,
