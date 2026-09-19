@@ -89,6 +89,12 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
   const server = await createReadServer({
     raw,
     pluginIdForType: noType,
+    // Never called: this file's routes are the three sync ones, and none of
+    // them reaches `/api/feeds` -- `server.test.ts`'s own stub gives the
+    // same "not stubbed" failure the shape rather than silently succeeding.
+    addFeed: () => {
+      throw new Error('addFeed not stubbed in this test');
+    },
     registry,
     generation,
     host: undefined,

@@ -11,10 +11,11 @@ import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
+import type { AddFeedInput } from '../../src/feeds/add.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
-import type { ReadServer } from '../../src/api/server.ts';
-import { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, ROUTES, createReadServer } from '../../src/api/server.ts';
+import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
+import { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, MAX_BODY_BYTES, ROUTES, createReadServer } from '../../src/api/server.ts';
 
 /**
  * One database behind both handles: `raw` for the fixtures and the read
@@ -128,11 +129,23 @@ async function start(
   pluginIdForType: (type: string) => string | undefined,
   host?: string,
   webRoot: string = MISSING_WEB_ROOT,
+  // A partial `ReadServerDeps`, applied over the defaults below -- what lets
+  // `startSignedIn` hand a test its own `addFeed` without assembling a whole
+  // server. Defaulted to `{}` so every existing call site, none of which
+  // passes a sixth argument, is unaffected.
+  overrides: Partial<ReadServerDeps> = {},
 ): Promise<Running> {
   const logs: LogLine[] = [];
   const server = await createReadServer({
     raw,
     pluginIdForType,
+    // Never called by anything in this file: no test here posts to
+    // `/api/feeds` without overriding this, and a test that reaches it
+    // without meaning to gets a failure naming the gap rather than a
+    // silent success.
+    addFeed: () => {
+      throw new Error('addFeed not stubbed in this test');
+    },
     // No plugin in this file declares a synced table -- what `/api/sync` and
     // `/api/sync/backfill` do with a real one is `sync-route.test.ts`'s.
     // This file only needs the guard on both routes, which an empty registry
@@ -157,6 +170,7 @@ async function start(
     log: (message, detail) => {
       logs.push({ message, detail });
     },
+    ...overrides,
   });
   return { server, logs };
 }
@@ -236,14 +250,20 @@ async function signUpOwner(server: ReadServer, raw: DatabaseSync): Promise<strin
  * Closes the listener if the sign-up fails, rather than leaking a bound port
  * out of a failing test: the `try` in each test only runs once this has
  * returned.
+ *
+ * `overrides` is a partial `ReadServerDeps`, not a `webRoot` string -- what
+ * this task extends it with, so a test can supply its own `addFeed` (`{
+ * addFeed: async (i) => ({ id: 7 }) }`, say) without assembling a whole
+ * server. `webRoot` is still reachable through it (`{ webRoot }`), since it
+ * is itself one of `ReadServerDeps`'s own fields.
  */
 async function startSignedIn(
   raw: DatabaseSync,
   db: HostDb,
   pluginIdForType: (type: string) => string | undefined,
-  webRoot?: string,
+  overrides: Partial<ReadServerDeps> = {},
 ): Promise<SignedIn> {
-  const running = await start(raw, db, pluginIdForType, undefined, webRoot);
+  const running = await start(raw, db, pluginIdForType, undefined, overrides.webRoot ?? MISSING_WEB_ROOT, overrides);
   try {
     return { ...running, cookie: await signUpOwner(running.server, raw) };
   } catch (error) {
@@ -293,6 +313,44 @@ async function getAll(
 }
 
 /**
+ * A `POST` carrying a raw string body -- what the oversized-body and
+ * malformed-json tests need, since neither is expressible as a value
+ * `JSON.stringify` would produce. `post` below is this with the
+ * serialisation done for a caller that has an ordinary value to send.
+ *
+ * Resolves the same shape `getAll`'s entries do (`status` and an already-read
+ * `text`), rather than the raw `Response` `get` hands back: every caller of
+ * this asserts on both, and reading the body here once is what lets each
+ * test do that without an `await response.text()` of its own.
+ */
+async function postRaw(
+  server: ReadServer,
+  path: string,
+  cookie: string | null,
+  body: string,
+): Promise<{ status: number; text: string }> {
+  const response = await fetch(`${originOf(server)}${path}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(cookie === null ? {} : { cookie }),
+    },
+    body,
+  });
+  return { status: response.status, text: await response.text() };
+}
+
+/** `postRaw`, serialising `body` as json first -- what every test with a well-formed payload wants. */
+async function post(
+  server: ReadServer,
+  path: string,
+  cookie: string | null,
+  body: unknown,
+): Promise<{ status: number; text: string }> {
+  return postRaw(server, path, cookie, JSON.stringify(body));
+}
+
+/**
  * A request target for a route the table describes, with every `:name`
  * segment filled in.
  *
@@ -303,6 +361,27 @@ async function getAll(
  */
 function probeFor(route: { readonly path: string }): string {
   return route.path.split('/').map((segment) => (segment.startsWith(':') ? '1' : segment)).join('/');
+}
+
+/**
+ * One route probed with a method it actually declares, rather than always
+ * `GET` -- `/api/feeds` is `POST`-only, so a blanket `getAll` across every
+ * route in `ROUTES` would hit its own method guard before ever reaching the
+ * session check the tests using this mean to exercise. Every route but that
+ * one still declares `GET`, so this is `get()` in every other case.
+ */
+async function guardProbe(
+  server: ReadServer,
+  route: { readonly path: string; readonly methods: readonly string[] },
+  cookie: string | null,
+): Promise<{ path: string; status: number; text: string }> {
+  const method = route.methods[0];
+  if (method === undefined) throw new Error(`${route.path} declares no methods to probe`);
+  const response = await fetch(`${originOf(server)}${probeFor(route)}`, {
+    method,
+    headers: cookie === null ? {} : { cookie },
+  });
+  return { path: route.path, status: response.status, text: await response.text() };
 }
 
 /**
@@ -411,6 +490,23 @@ function continues(
 /** The one mapping most tests need: `movie` is `alpha`'s, and no other type exists. */
 function moviesOnly(type: string): string | undefined {
   return type === 'movie' ? 'alpha' : undefined;
+}
+
+/**
+ * A well-formed `/api/feeds` payload -- every `POST /api/feeds` test that
+ * does not care what the feed says starts here. The url names
+ * `tracker.example` deliberately: the refusal and malformed-body tests
+ * assert it is never echoed back, which needs a url in the body worth
+ * checking for in the first place.
+ */
+function validBody(): AddFeedInput {
+  return {
+    pluginId: 'alpha',
+    name: 'A Feed',
+    url: 'https://tracker.example/feed.xml?passkey=secret',
+    downloadType: 'torrent',
+    pollIntervalS: 300,
+  };
 }
 
 function seedMediaItem(raw: DatabaseSync, pluginId: string, updatedAt: number, title: string): number {
@@ -1136,11 +1232,127 @@ test('anything but a read is refused, whether or not the caller has a session', 
   }
 });
 
+test('a route answers 405 for a method it does not declare, per route', async () => {
+  // Per route, not once: a guard that refused every method on every route
+  // would pass a single-route test and break every write this slice adds.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    const getOnly = await post(server, '/api/media?type=movie', cookie, {});
+    assert.equal(getOnly.status, 405, 'POST to a GET-only route is refused');
+    const postOnly = await get(server, '/api/feeds', cookie);
+    assert.equal(postOnly.status, 405, 'GET to a POST-only route is refused');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a body larger than the cap is refused before it is parsed', async () => {
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    const huge = JSON.stringify({ name: 'x'.repeat(MAX_BODY_BYTES + 1_000) });
+    const answer = await postRaw(server, '/api/feeds', cookie, huge);
+    assert.equal(answer.status, 413, 'an oversized body is refused');
+    assert.ok(!answer.text.includes('x'.repeat(50)), 'and is not echoed back');
+  } finally {
+    await server.close();
+  }
+});
+
+test('every route declares its methods', () => {
+  // The count assertion that already guards `open` applies here too: a route
+  // added without `methods` must not silently inherit GET.
+  for (const route of ROUTES) {
+    assert.ok(route.methods.length > 0, `${route.path} declares at least one method`);
+  }
+});
+
+test('a valid feed is accepted and its id returned', async () => {
+  const { raw, db } = setup();
+  const accepted: AddFeedInput[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addFeed: async (i) => {
+      accepted.push(i);
+      return { id: 7 };
+    },
+  });
+  try {
+    const answer = await post(server, '/api/feeds', cookie, validBody());
+    assert.equal(answer.status, 201);
+    assert.deepEqual(JSON.parse(answer.text), { id: 7 });
+    assert.equal(accepted.length, 1, 'the host was asked exactly once');
+  } finally {
+    await server.close();
+  }
+});
+
+test('each refusal answers a distinct code the client can branch on', async () => {
+  // Global Constraint: distinguishable without parsing prose. The client
+  // maps a code to its own words; the server authors no sentence a human
+  // reads, and no url or path appears in any body.
+  //
+  // A fresh `setup()` per case, not one shared across both, run concurrently
+  // rather than as a loop with an `await` in it -- the same reasoning
+  // `getAll` gives: an install gets exactly one account (`signUpOwner`'s own
+  // doc), so a second sign-up against the same database would be refused for
+  // a reason that has nothing to do with the property this test checks, and
+  // nothing here shares state across cases anyway.
+  await Promise.all(([['duplicate-url', 409], ['unknown-plugin', 422]] as const).map(async ([refusal, status]) => {
+    const { raw, db } = setup();
+    const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+      addFeed: async () => ({ refusal }),
+    });
+    try {
+      const answer = await post(server, '/api/feeds', cookie, validBody());
+      assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
+      assert.equal(JSON.parse(answer.text).refusal, refusal, 'and names itself in a stable code');
+      assert.ok(!answer.text.includes('tracker.example'), 'the url is never echoed');
+    } finally {
+      await server.close();
+    }
+  }));
+});
+
+test('the route is guarded by a session like every read', async () => {
+  const { raw, db } = setup();
+  const { server } = await start(raw, db, moviesOnly);
+  try {
+    const answer = await post(server, '/api/feeds', ANONYMOUS, validBody());
+    assert.equal(answer.status, 401, 'no session, no write');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a malformed body is refused without reaching the host', async () => {
+  const { raw, db } = setup();
+  let called = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addFeed: async () => {
+      called += 1;
+      return { id: 1 };
+    },
+  });
+  try {
+    const answer = await postRaw(server, '/api/feeds', cookie, '{not json');
+    assert.equal(answer.status, 400);
+    assert.equal(called, 0, 'the host is not asked to validate transport-level junk');
+  } finally {
+    await server.close();
+  }
+});
+
 test('every route except health refuses without a session', async () => {
   // Enumerated from the route table, not hand-listed: `probeFor` turns each
   // route's own path into a request, so a route a later slice adds is either
   // guarded or fails here. A written-out list of six paths would pass
   // untouched beside a seventh route nobody guarded.
+  //
+  // Each probed with its own declared method (`guardProbe`), not a blanket
+  // `GET`: `/api/feeds` answers only `POST`, and a `GET` against it would hit
+  // the method guard before ever reaching the session check this test means
+  // to exercise -- see that helper's own doc.
   const { raw, db } = setup();
   const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
   try {
@@ -1151,7 +1363,7 @@ test('every route except health refuses without a session', async () => {
     assert.equal(guarded.length, ROUTES.length - 2, 'exactly two routes in the table are open');
     assert.ok(guarded.length >= 5, 'and the table is the real one, not a list this test passed over');
 
-    const refused = await getAll(server, guarded.map(probeFor), ANONYMOUS);
+    const refused = await Promise.all(guarded.map((route) => guardProbe(server, route, ANONYMOUS)));
     for (const { path, status, text } of refused) {
       assert.equal(status, 401, `${path} must refuse a caller with no session`);
       assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, `${path} refuses with the fixed body`);
@@ -1159,7 +1371,7 @@ test('every route except health refuses without a session', async () => {
 
     // And the same enumeration with a session: nothing here is 401, so the
     // loop above is not passing merely because the guard refuses everyone.
-    const allowed = await getAll(server, guarded.map(probeFor), cookie);
+    const allowed = await Promise.all(guarded.map((route) => guardProbe(server, route, cookie)));
     for (const { path, status } of allowed) {
       assert.notEqual(status, 401, `${path} must be reachable by a session holder`);
     }
@@ -1186,7 +1398,9 @@ test('health and the static bundle answer without a session, and nothing else do
       'two open routes: the health check and the bundle',
     );
 
-    const answers = await getAll(server, ROUTES.map(probeFor), ANONYMOUS);
+    // Each probed with its own declared method -- see `guardProbe`'s doc for
+    // why a blanket `GET` cannot probe `POST /api/feeds`.
+    const answers = await Promise.all(ROUTES.map((route) => guardProbe(server, route, ANONYMOUS)));
     for (const { path, status } of answers) {
       if (openPaths.includes(path)) {
         assert.notEqual(status, 401, `${path} must answer without a session`);
@@ -1520,7 +1734,7 @@ test('a protocol-relative target is refused, never answered with the bundle', as
 test('a signed-in protocol-relative target is an unknown route, not the bundle', async () => {
   const { raw, db } = setup();
   const webRoot = await bundleRoot();
-  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, webRoot);
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, { webRoot });
   try {
     // With the session supplied, the refusal above is out of the way and what
     // is left is the route lookup: a null target has no pathname to match, so
