@@ -31,6 +31,26 @@ import type { ClientType, Implementation } from './config.ts';
  *
  * The two credential fields cross the wire here and nowhere else. Neither is
  * ever written to a column, a log line, an error message or a response body.
+ *
+ * **`category` may be `''`, and that is a configuration rather than a
+ * missing value** -- which is why there is no refusal code for it and why
+ * none is wanted. An empty category means "file downloads under no
+ * category", and every consumer already understands it:
+ * `reconcile-job.ts:287` folds `config.category` through
+ * `normalizeClientCategory`, which maps `''` (and the literal `'None'`) to
+ * `null`, so a reconcile for a blank category asks for everything rather
+ * than for a category named "". qBittorrent's adapter folds it again on the
+ * send side (`qbittorrent.ts`'s `normalizeCategory`), omitting the
+ * `?category=` parameter entirely. SABnzbd's adapter deliberately does
+ * **not** normalise on the way out -- it sends `cat=` verbatim, and
+ * `sabnzbd.ts`'s own comment explains at length why normalising there would
+ * file a download under a category no operator configured; it folds on the
+ * way back instead.
+ *
+ * So `''` is written to the column as-is. Note this is the one field where
+ * `''` is *not* run through `nullIfBlank`: the column is `NOT NULL`, and
+ * unlike the credential fields a blank category is a real answer rather
+ * than an absent one.
  */
 export interface AddDownloadClientInput {
   name: string;
@@ -271,7 +291,13 @@ interface CredentialNames {
  * every credential it moved out of `download_client` and what
  * `scripts/seed-client.ts` generates -- one shape of generated name across
  * every writer there is. A uuid also satisfies `assertSecretName`, which
- * `saveSecret` applies before building any path from the name.
+ * `saveSecret` applies before building any path from the name, and it
+ * collides with no environment variable a container already has --
+ * `secrets/names.ts`'s `SECRET_ENV_PREFIX` measured that case, where
+ * `envNameFor('path')` was `PATH` and a stored credential was silently
+ * shadowed by the container's own. Both the prefix and the uuid shape keep
+ * that shut; a generated name could not have collided even before the
+ * prefix existed.
  *
  * **This is where the credential values stop being needed.** Everything
  * downstream works from {@link CredentialNames}, which holds no value --

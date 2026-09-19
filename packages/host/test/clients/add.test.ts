@@ -7,6 +7,7 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { createHost } from '../../src/host.ts';
 import type { Host, AddDownloadClientInput } from '../../src/host.ts';
 import { readClientConfig } from '../../src/clients/config.ts';
+import { normalizeClientCategory } from '../../src/clients/snapshot.ts';
 import { createSecrets } from '../../src/secrets/instance.ts';
 import type { Secrets } from '../../src/secrets/instance.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
@@ -395,6 +396,94 @@ test('a name already on file is refused, not thrown', async () => {
   assert.equal(Number((count as { n: unknown }).n), 1, 'and the second create left no row behind');
 });
 
+/** Every `secret` name on file, and every secret name a `download_client` row points at. */
+function secretNames(raw: DatabaseSync): { stored: string[]; referenced: string[] } {
+  // `name` only -- never `value`. `secrets/store.ts` is the one module
+  // allowed to name `secret.value` in SQL (`check-test-hygiene.ts`'s
+  // `CREDENTIAL_ALLOW_LIST`), and this test has no business reading one.
+  const stored = raw.prepare('SELECT name FROM secret ORDER BY name').all()
+    .map((row) => String((row as { name: unknown }).name));
+  const referenced = raw.prepare(
+    'SELECT api_key_secret_name AS n FROM download_client WHERE api_key_secret_name IS NOT NULL '
+    + 'UNION SELECT password_secret_name AS n FROM download_client WHERE password_secret_name IS NOT NULL',
+  ).all().map((row) => String((row as { n: unknown }).n));
+  return { stored, referenced };
+}
+
+test('the credential is stored before the row, so a refused duplicate leaves an orphan and never a dangling name', async () => {
+  // **This is the test for design spec §8.6's ordering decision**, which was
+  // argued in `clients/add.ts`'s docblock and enforced by nothing: swapping
+  // to insert-then-save left the whole file green, because on every path
+  // that *succeeds* the two orderings are indistinguishable.
+  //
+  // The refused duplicate is what tells them apart, and it is observable as
+  // a count. `saveSecret` first: the second create stores its credential,
+  // then loses the race on `download_client_name`, and the secret it wrote
+  // is left referenced by nobody -- two secrets, one row. Insert first: the
+  // insert raises before `saveSecret` is ever reached, so there is one
+  // secret and no orphan.
+  //
+  // An orphan is the outcome this module deliberately prefers, so this
+  // asserts its presence rather than treating it as a leak. `clients/add.ts`
+  // has why it is harmless: nothing enumerates `secret`, it is read by name
+  // alone, and `sync/tables.ts` keeps it out of the replica.
+  const { host, raw } = setupHost();
+
+  const first = await host.addDownloadClient(input({ name: 'Shared', apiKey: API_KEY }));
+  assert.ok('id' in first, 'the first create succeeds');
+
+  const second = await host.addDownloadClient(input({ name: 'Shared', apiKey: PASSWORD }));
+  assert.deepEqual(second, { refusal: 'duplicate-name' }, 'and the second loses the name race');
+
+  const { stored, referenced } = secretNames(raw);
+  assert.equal(stored.length, 2, 'both creates reached the secret store, the refused one included');
+  assert.equal(referenced.length, 1, 'but only the accepted create left a row behind');
+
+  const orphans = stored.filter((name) => !referenced.includes(name));
+  assert.equal(orphans.length, 1, 'so exactly one stored secret is referenced by no row');
+  // The other direction, which is the failure this ordering exists to make
+  // impossible: no row may name a secret that was never stored.
+  const dangling = referenced.filter((name) => !stored.includes(name));
+  assert.deepEqual(dangling, [], 'and no row names a secret the store does not have');
+});
+
+test('a constraint violation that is not the duplicate name is raised, not reported as a duplicate', async () => {
+  // The `errcode` half of `isUniqueConstraintViolation` was pinned by
+  // nothing: dropping it left the file green, so **any** `ERR_SQLITE_ERROR`
+  // out of the insert -- a genuine bug -- would have been answered
+  // `duplicate-name` and looked to a client like an ordinary name clash.
+  //
+  // Injected with a `BEFORE INSERT` trigger raising `ABORT`, which fails the
+  // statement and leaves the error to the caller exactly as a real
+  // constraint failure does. Measured on node 24: `code`
+  // `'ERR_SQLITE_ERROR'` -- the same code a unique violation carries, which
+  // is the whole point -- and `errcode` 1811, not 2067. `ABORT` rather than
+  // `ROLLBACK`: CLAUDE.md records that `RAISE(ROLLBACK)` unwinds first and
+  // ends up testing SQLite instead of this code.
+  const { host, raw } = setupHost();
+  raw.exec(
+    "CREATE TRIGGER block_client_insert BEFORE INSERT ON download_client "
+    + "BEGIN SELECT RAISE(ABORT, 'injected non-unique constraint failure'); END;",
+  );
+
+  await assert.rejects(
+    () => host.addDownloadClient(input()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error, 'a real error propagated');
+      assert.ok(
+        'code' in error && error.code === 'ERR_SQLITE_ERROR',
+        'and it is the same error code a unique violation carries',
+      );
+      assert.ok(
+        'errcode' in error && error.errcode !== 2067,
+        'but not the unique-constraint errcode, which is what tells the two apart',
+      );
+      return true;
+    },
+    'a constraint failure this module does not understand must reach the caller, not become a refusal',
+  );
+});
+
 test('a url that is not an http address is refused', async () => {
   const { host, saved } = setupHost();
   const badUrl = { refusal: 'bad-url' };
@@ -420,6 +509,30 @@ test('https is an address as much as http is', async () => {
   const { host, raw } = setupHost();
   const id = acceptedId(await host.addDownloadClient(input({ url: 'https://qbit.example/' })));
   assert.equal(clientRow(raw, id)['url'], 'https://qbit.example/');
+});
+
+test('an empty category is accepted and stored, because it means "no category"', async () => {
+  // Not a missing value and not a refusal: `reconcile-job.ts:287` folds
+  // `config.category` through `normalizeClientCategory`, which maps `''`
+  // and the literal `'None'` to `null`, so a blank category reconciles
+  // everything rather than asking for a category named "". qBittorrent's
+  // send side folds it again; SABnzbd's deliberately does not.
+  //
+  // Pinned because it is currently one tidy-up away from someone adding a
+  // spurious `bad-category` refusal for a value the rest of the system
+  // already understands. `''`, not `null`: the column is `NOT NULL`, and
+  // this is the one input field `nullIfBlank` does not touch.
+  const { host, raw } = setupHost();
+
+  const id = acceptedId(await host.addDownloadClient(input({ category: '' })));
+  assert.equal(clientRow(raw, id)['category'], '', 'stored as the empty string the operator chose');
+
+  // And the fold the reconcile path performs on it, asserted through the
+  // real function rather than restated: a test that spelled `null` without
+  // going through `normalizeClientCategory` would not notice that fold
+  // being removed.
+  assert.equal(normalizeClientCategory(String(clientRow(raw, id)['category'])), null,
+    'which every consumer reads as "no category"');
 });
 
 test('import_mode is written as a constant, spelled here so changing it is a visible decision', async () => {
