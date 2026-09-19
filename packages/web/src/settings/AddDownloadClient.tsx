@@ -71,8 +71,17 @@ export function implementationLabel(implementation: string): string {
   return isImplementationId(implementation) ? IMPLEMENTATION_LABELS[implementation] : implementation;
 }
 
+/**
+ * `Object.hasOwn` against the label map rather than `IMPLEMENTATIONS.includes`:
+ * that array is a `const` tuple, so its `includes` only accepts an
+ * `ImplementationId` and calling it with a `string` needs a widening
+ * assertion -- and this slice's diff is cast-free. Asking the map whether
+ * it has a label is also the question {@link implementationLabel} actually
+ * needs answered, so nothing here can drift from what that function does
+ * next.
+ */
 function isImplementationId(value: string): value is ImplementationId {
-  return (IMPLEMENTATIONS as readonly string[]).includes(value);
+  return Object.hasOwn(IMPLEMENTATION_LABELS, value);
 }
 
 /**
