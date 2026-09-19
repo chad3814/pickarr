@@ -78,6 +78,34 @@ test('feeds come from the replica', async () => {
   });
 });
 
+test('feeds are listed newest first', async () => {
+  // The hook's docblock says "newest first" and nothing pinned it: flipping
+  // its `direction: 'prev'` to `'next'` reversed the list and left all 100
+  // web tests green. A claim a reader would trust, with no test behind it,
+  // is the defect class this branch keeps producing.
+  //
+  // `feedOp` stamps `updatedAt: id`, so id 3 is the newest row -- and
+  // `by_table_updated` orders on exactly that column, which is what makes
+  // the direction observable here at all. Seeded out of order so the
+  // expectation cannot be satisfied by insertion order.
+  //
+  // The expected array is spelled out, not derived from the seeded ops
+  // (`CLAUDE.md`: an expectation computed from the code under test cannot
+  // see that code change).
+  const db = await freshDb();
+  await seed(db, [
+    feedOp({ id: 2, name: 'middle' }),
+    feedOp({ id: 3, name: 'newest' }),
+    feedOp({ id: 1, name: 'oldest' }),
+  ]);
+
+  render(<FeedNames source={sourceFor(db)} />);
+
+  await waitFor(() => {
+    assert.deepEqual(namesShown(), ['newest', 'middle', 'oldest']);
+  });
+});
+
 test('a feed added later appears without a refetch', async () => {
   const db = await freshDb();
   render(<FeedNames source={sourceFor(db)} />);

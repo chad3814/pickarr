@@ -58,11 +58,22 @@ export interface ListByTableOptions {
  * The six tables `by_table_updated` covers, and no others. The original five
  * were measured rather than intended (design spec §3.2) -- this file's own
  * tests page `media_item` and `rss_item` through the index directly.
- * `rss_feed`'s membership is not yet measured the same way: nothing in this
- * repo pages an `rss_feed` row through `by_table_updated` today, so it rests
- * on declared shape alone -- `RssFeedSyncRead` carries `updatedAt`, same as
- * the other five, and the index's key path (`store/db.ts`) admits any row
- * with one. `media_item`, `rss_item`, `torrent_download` and `nzb_download`
+ *
+ * **`rss_feed`'s membership is measured too, and this paragraph used to say
+ * it was not.** It said "nothing in this repo pages an `rss_feed` row
+ * through `by_table_updated` today, so it rests on declared shape alone",
+ * which was true when it was written and stopped being true later in the
+ * same branch, when `settings/useFeeds.ts` landed and read the whole table
+ * through `listByTable`. Measured, by deleting `'rss_feed'` from the set
+ * below: **12 web tests red** -- five in `test/settings/useFeeds.test.tsx`,
+ * six in `test/settings/Feeds.test.tsx`, one in `test/shell/Shell.test.tsx`
+ * -- each of them seeding real rows through `applyBatch` into a real
+ * `fake-indexeddb` store and reading them back through this function. The
+ * declared shape holds as well (`RssFeedSyncRead` carries `updatedAt`, same
+ * as the other five, and the index's key path in `store/db.ts` admits any
+ * row with one), but it is no longer the only thing holding this entry up.
+ *
+ * `media_item`, `rss_item`, `torrent_download` and `nzb_download`
  * project `updatedAt` because the sync protocol's read shapes for them do;
  * `person` does too, and so does `rss_feed`. `role` projects only
  * `createdAt`, and none of the six plugin read shapes (`tv_release`,

@@ -1166,6 +1166,29 @@ test('migration 16 seeds the log for a feed already on file, so an existing repl
   const { raw } = openTestDatabase();
   migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 15));
 
+  // Version 15 installs a **frozen** six-table literal
+  // (`MIGRATION_15_TABLES`), deliberately decoupled from the live
+  // `HOST_SYNCED_TABLES` export so that a seventh table joining that export
+  // cannot retroactively change what an already-applied migration did --
+  // `docs/database-migrations.md`'s first rule.
+  //
+  // Nothing failed when that decoupling was undone: re-coupling
+  // `migration15` to `[...MIGRATION_15_TABLES, 'rss_feed']` left all 2374
+  // server tests green, because `migration16`'s `DROP TRIGGER IF EXISTS`
+  // and `seedSyncLog`'s anti-join are both idempotent and the end state is
+  // identical either way. The end state is not what the freeze is about;
+  // *this* state is -- what a database looks like at version 15, which is
+  // where a database that stopped there actually lives. The three triggers
+  // are named literally rather than matched by prefix, so the assertion
+  // cannot be satisfied by a rename.
+  const feedTriggersAt15 = raw.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'trigger' AND name IN ('rss_feed_sync_ins', 'rss_feed_sync_upd', 'rss_feed_sync_del')
+    ORDER BY name
+  `).all().map((row) => String(row.name));
+  assert.deepEqual(feedTriggersAt15, [],
+    'version 15 installs triggers for its own frozen six tables and no others -- rss_feed is migration 16\'s');
+
   raw.prepare(`
     INSERT INTO rss_feed (id, plugin_id, name, url, created_at, updated_at)
     VALUES (1, 'tv', 'a feed', 'https://example.test/feed', 1, 1)
