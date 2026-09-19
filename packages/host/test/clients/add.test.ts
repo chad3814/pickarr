@@ -422,6 +422,21 @@ test('https is an address as much as http is', async () => {
   assert.equal(clientRow(raw, id)['url'], 'https://qbit.example/');
 });
 
+test('import_mode is written as a constant, spelled here so changing it is a visible decision', async () => {
+  // Nothing in 2.0 reads this column -- `clients/add.ts`'s own
+  // `IMPORT_MODE` has the measurement -- so there is no behaviour to assert
+  // and this pins the literal instead. That is the point: the column is
+  // `NOT NULL` and the value is inert, which is exactly the combination
+  // that lets it drift unnoticed. `copy` is what `scripts/seed-client.ts`
+  // documents and the value 1.x refused for qBittorrent is `move`, so a
+  // change here is worth one red test.
+  const { host, raw } = setupHost();
+  const qbit = acceptedId(await host.addDownloadClient(input({ name: 'qBit' })));
+  const sab = acceptedId(await host.addDownloadClient(input({ name: 'Sab', implementation: 'sabnzbd' })));
+  assert.equal(clientRow(raw, qbit)['import_mode'], 'copy');
+  assert.equal(clientRow(raw, sab)['import_mode'], 'copy');
+});
+
 test('a url is stored exactly as submitted', async () => {
   // Nothing is normalised on the way in. Design spec §5 puts the
   // `origin + pathname` narrowing on the *projection* to the replica, not on

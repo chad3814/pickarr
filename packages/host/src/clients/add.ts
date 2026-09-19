@@ -67,22 +67,35 @@ export interface AddDownloadClientRefusal {
 /**
  * What goes in `download_client.import_mode`.
  *
- * **Nothing in 2.0 reads this column.** Measured on this tree: the only
- * references to `import_mode` anywhere are the initial schema in
- * `db/migrate.ts`, the Drizzle mirror of it in `db/schema.ts`, and
- * `scripts/seed-client.ts`, which takes it as a required flag. No reader
- * exists -- not in the adapters, not in `clients/config.ts`, not in
- * `clients/deliver.ts` -- so there is nothing to look for and no consumer to
- * find. This constant exists solely because the column is `NOT NULL`.
+ * **Nothing in 2.0 reads this column.** Measured on this tree by grepping
+ * `import_mode`/`importMode` across `packages` and `scripts`: inside
+ * `packages/host/src` the only occurrences are the initial schema in
+ * `db/migrate.ts`, the Drizzle mirror of it in `db/schema.ts`, and this
+ * module. Every other host-side hit is an `INSERT` column list in a test
+ * fixture, plus `scripts/seed-client.ts`, which takes it as a required
+ * flag. No *reader* exists -- not in the adapters, not in
+ * `clients/config.ts`, not in `clients/deliver.ts`; `readClientConfig` does
+ * not even `SELECT` it. (1.x's `packages/core` does read an `importMode`,
+ * but that is its own config object on a schema 2.0 shares nothing with.)
+ * This constant exists solely because the column is `NOT NULL`.
  *
  * It is therefore **not a form field** (design spec §8.4): a field whose
- * value nothing consumes is a question with no right answer. `'move'` is
- * chosen over `'copy'` because it is what `scripts/seed-client.ts`'s own
- * documentation uses in its examples, so the one existing writer and this
- * one agree; when a reader is finally written, both kinds of row will mean
- * the same thing.
+ * value nothing consumes is a question with no right answer.
+ *
+ * **`'copy'` rather than `'move'`, and the choice is not arbitrary even
+ * though nothing reads it.** Two pieces of evidence, both measured on this
+ * tree. `scripts/seed-client.ts` -- the only other writer of this column --
+ * uses `--import-mode=copy` in all three of its documented examples, the
+ * SABnzbd one included, so this writer and that one agree. And 1.x, which
+ * does have a reader, **refuses** a qBittorrent client configured `move`:
+ * `packages/core/src/config/load.ts` rejects it because moving the file out
+ * from under a torrent stops it seeding. 1.x is frozen and shares no schema
+ * with 2.0, so that rule does not bind this column -- but a constant every
+ * qBittorrent row would carry is a poor thing to set to the one value the
+ * previous implementation called an error. `copy` is wrong for nobody
+ * today and latently wrong for nobody later.
  */
-const IMPORT_MODE = 'move';
+const IMPORT_MODE = 'copy';
 
 /**
  * The transport each implementation moves picks over -- the whole of the
@@ -104,8 +117,10 @@ const TYPE_FOR_IMPLEMENTATION: Readonly<Record<Implementation, ClientType>> = {
  * `clients/downloads.ts` each declare, and kept here for the reason
  * `feeds/add.ts` records: none of the three exports it, and pulling one of
  * those modules in for a two-line SQLite check would be the wrong dependency
- * for this one to take on. Four copies is one more than is comfortable; see
- * this task's report for the extraction that would remove all four.
+ * for this one to take on. That reasoning held at three copies and is
+ * thinner at four: the honest fix is one exported `isUniqueConstraintViolation`
+ * the four share, which is a refactor of three existing modules rather than
+ * part of this slice.
  */
 const SQLITE_CONSTRAINT_UNIQUE = 2067;
 
@@ -129,11 +144,16 @@ function isUniqueConstraintViolation(err: unknown): boolean {
 }
 
 /**
- * The schemes a download client can be reached over. Nothing else is an
- * address this host could dial: the qBittorrent and SABnzbd adapters both
- * resolve their request paths against the stored url through the WHATWG
- * parser, and every other scheme either has no host to send a request to or
- * is not something `QueuedFetch` speaks.
+ * The schemes a download client can be reached over.
+ *
+ * Both adapters build a request target by **string concatenation** --
+ * `` `${config.baseUrl}${TORRENTS_ADD_PATH}` `` in `qbittorrent.ts`,
+ * `` `${config.baseUrl}/api?${query}` `` in `sabnzbd.ts`; neither resolves
+ * the path through the WHATWG parser, so neither repairs a base url that is
+ * not one. Whatever this column holds is therefore very nearly the literal
+ * prefix of every request, and `fetch` is the only thing left to object.
+ * Restricting the scheme here is what keeps that objection from being the
+ * first sign of a misconfiguration.
  */
 const CLIENT_URL_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
 
@@ -209,8 +229,9 @@ interface CredentialPlan {
  * purpose. A *writer* has no such obligation: a form that submitted both
  * was filled in by someone who does not know which one will be used, and
  * silently discarding their password is worse than saying the shape is
- * wrong. This is the one place this module is stricter than the reader, and
- * every shape it accepts is one the reader accepts.
+ * wrong. This and the sabnzbd rule above are the two places this module is
+ * stricter than the reader; in the other direction there are none -- every
+ * shape accepted here is one `readClientConfig` resolves.
  */
 function planCredential(
   implementation: Implementation,
@@ -249,13 +270,16 @@ interface CredentialNames {
  * The name is a `randomUUID()`, matching what migration 14 generated for
  * every credential it moved out of `download_client` and what
  * `scripts/seed-client.ts` generates -- one shape of generated name across
- * every writer there is. A uuid also satisfies `assertSecretName` and
- * collides with no environment variable a container already has (see
- * `secrets/names.ts`'s `SECRET_ENV_PREFIX`, which measured that case).
+ * every writer there is. A uuid also satisfies `assertSecretName`, which
+ * `saveSecret` applies before building any path from the name.
  *
- * **This is where the credential values stop.** Nothing below this function
- * has one in hand, which is what makes "no credential in a column" a
- * property of the call graph rather than of care taken at each site.
+ * **This is where the credential values stop being needed.** Everything
+ * downstream works from {@link CredentialNames}, which holds no value --
+ * so the `INSERT` below reaches for `names.*` and never for `input.apiKey`
+ * or `input.password`. That is a discipline rather than an impossibility:
+ * `input` is still in scope there, which is exactly why the test suite
+ * greps every column of the written row rather than trusting the shape of
+ * this call.
  */
 function storeCredential(
   saveSecret: (name: string, value: string) => void,
