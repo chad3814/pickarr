@@ -1,7 +1,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { ADD_FEED_REFUSALS } from '@pickarr/contract';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
-import { AddFeed, postFeed, type AddFeedInput } from '../../src/settings/AddFeed.tsx';
+import { AddFeed, postFeed, REFUSAL_MESSAGES, type AddFeedInput } from '../../src/settings/AddFeed.tsx';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
 
 /**
@@ -23,6 +24,54 @@ function fillNameAndUrl(name: string, url: string): void {
 function submitForm(): void {
   fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
 }
+
+/**
+ * The two **refusal codes** tests below are final-review finding I-1's pin.
+ *
+ * The codes used to be declared twice -- `packages/host/src/feeds/add.ts`'s
+ * `AddFeedRefusal` union, and a hand-copied `REFUSAL_CODES` set in
+ * `AddFeed.tsx` -- with nothing asserting the two agreed. Measured on that
+ * tree: renaming `duplicate-url` to `url-already-on-file` in the host
+ * reddened exactly two host tests and left all 100 web tests green, so the
+ * rename ships and this form silently swaps "That url is already on file."
+ * for its catch-all. `@pickarr/contract`'s `ADD_FEED_REFUSALS` is the one
+ * declaration now, and `REFUSAL_MESSAGES`'s key type is built from it, so
+ * the rename is a type error -- but `npm run test:web` runs under tsx and
+ * does not typecheck, so a type error alone leaves the web suite green.
+ * These two are the runtime half.
+ *
+ * **The expected list is spelled out rather than derived.** `CLAUDE.md`:
+ * an expectation computed by the code under test cannot detect that code
+ * changing. Deriving this from `ADD_FEED_REFUSALS` would make it true under
+ * every rename, which is the one thing it exists to see.
+ */
+test('the refusal codes this form has sentences for are exactly the codes the contract declares', () => {
+  const spoken = Object.keys(REFUSAL_MESSAGES)
+    .filter((key) => key !== 'offline' && key !== 'unrecognised')
+    .toSorted();
+
+  // The client's set against the contract's: this is the assertion the
+  // host-only rename would have reddened.
+  assert.deepEqual(spoken, [...ADD_FEED_REFUSALS].toSorted(),
+    'every code the host can send has a sentence here, and this form claims no code the host cannot send');
+
+  // And the contract's against four literals, so a rename applied to both
+  // sides at once is still a deliberate, visible edit rather than a silent
+  // one. `offline` and `unrecognised` are filtered out above because they
+  // are this client's own outcomes, never anything a server answered.
+  assert.deepEqual(spoken, ['bad-download-type', 'bad-poll-interval', 'duplicate-url', 'unknown-plugin']);
+});
+
+test('no refusal code borrows another one\'s sentence', () => {
+  // A code added to the contract and then given a copy-pasted sentence --
+  // or quietly pointed at the catch-all -- would satisfy the key-set test
+  // above while telling an operator the wrong thing. Six outcomes, six
+  // distinct sentences.
+  const sentences = Object.values(REFUSAL_MESSAGES);
+  assert.equal(new Set(sentences).size, sentences.length,
+    'each outcome gets words of its own, so a refusal is legible without reading a code');
+  assert.equal(sentences.length, 6, 'the contract\'s four, plus offline and unrecognised');
+});
 
 test('the plugin select offers CATEGORIES, and defaults to a value the host will accept', () => {
   render(<AddFeed submit={() => Promise.resolve({ id: 1 })} />);

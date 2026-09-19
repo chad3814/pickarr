@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import type { AddFeedRefusalCode } from '@pickarr/contract';
 
 /** A feed's poll interval must be at least this many seconds. */
 export const MIN_POLL_INTERVAL_S = 60;
@@ -34,9 +35,16 @@ export interface AddFeedInput {
 /**
  * Why `Host.addFeed` declined to create the row, returned as a value rather
  * than thrown -- see this module's top comment for why.
+ *
+ * The codes themselves are `@pickarr/contract`'s `ADD_FEED_REFUSALS`, not
+ * this file's, because the browser client has to agree with them exactly to
+ * pick the right sentence and the two spellings used to be hand-copied. That
+ * module's own doc has the measurement. What stays here is the *shape* --
+ * a one-field object, so a refusal is a value this function can return
+ * beside `{ id }` -- and the rules that decide which code applies, below.
  */
 export interface AddFeedRefusal {
-  refusal: 'unknown-plugin' | 'duplicate-url' | 'bad-download-type' | 'bad-poll-interval';
+  refusal: AddFeedRefusalCode;
 }
 
 /** `@pickarr/contract`'s `Transport` union (`'torrent' | 'nzb'`), spelled here as plain strings and checked at runtime -- `downloadType` is typed `string` above precisely because nothing has confirmed it is one of these two yet. */

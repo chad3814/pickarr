@@ -18,18 +18,35 @@
  * means adding it to `CATEGORIES` (`shell/useCounts.ts`); there is no
  * endpoint that would let this form discover one on its own.
  *
- * **The poll-interval bounds and the two download types guide the operator;
- * they are not a second copy of the host's validation.** `feeds/add.ts`
- * owns `MIN_POLL_INTERVAL_S`/`MAX_POLL_INTERVAL_S` and the `torrent`/`nzb`
- * pair, and `packages/web` cannot import that package -- it is the server
- * side of the wire (`store/wire.ts`'s own doc on why `SyncOp` is mirrored
- * rather than imported gives the identical reason). The constants below are
- * mirrored, not shared: they steer the `<input>`/`<select>` toward a value
- * the host will accept, but a value outside them still reaches `submit` and
- * comes back as `bad-poll-interval` or `bad-download-type` rather than
- * being blocked here -- the host's check is the one that counts.
+ * **Which package a thing may come from, and why the refusal codes come
+ * from one and the bounds do not.** This package is bundled and run in a
+ * browser, so it may not import `packages/host`: that package is the server
+ * -- `node:http`, `node:sqlite`, the filesystem -- and none of it can be
+ * bundled or would mean anything if it were (`store/wire.ts`'s own doc on
+ * why `SyncOp` is mirrored rather than imported gives that same reason, and
+ * gives it about `@pickarr/host` specifically). `@pickarr/contract` is the
+ * other case entirely: it is a declared dependency of this package, it is
+ * already imported here at runtime and at type level across
+ * `store/gather.ts`, `library/useMediaItems.ts` and
+ * `settings/useFeeds.ts`, and its whole compiled surface is data and pure
+ * functions -- the one `node:sqlite` reference it holds is `import type`,
+ * erased before anything reaches a bundle. So "the client cannot import
+ * it" is true of the host and false of the contract, and the two halves of
+ * the `rss_feed` wire are both in the contract now: `RssFeedSyncRead` for
+ * the read, {@link ADD_FEED_REFUSALS} for the write.
+ *
+ * The poll-interval bounds and the two download types stay mirrored, and
+ * that is a different call rather than an oversight. A refusal *code* is
+ * the wire's vocabulary: if the two sides disagree on one, this form shows
+ * a human the wrong sentence and nothing says so. A bound is host policy
+ * the widget merely hints at: if the host raised its floor to 120 and the
+ * `min` below still said 60, an operator could still type 90, and the host
+ * would still refuse it, and this form would still render exactly the
+ * right sentence -- `bad-poll-interval`. The first drift lies to someone;
+ * the second loosens a hint. Only the first is worth a shared declaration.
  */
 import { useState, type FormEvent, type ReactElement } from 'react';
+import { ADD_FEED_REFUSALS, type AddFeedRefusalCode } from '@pickarr/contract';
 import { CATEGORIES } from '../shell/useCounts.ts';
 
 /** Mirrors `packages/host/src/feeds/add.ts`'s own bounds -- see this file's docblock on why mirrored rather than imported. */
@@ -56,9 +73,15 @@ export interface AddFeedInput {
   pollIntervalS: number;
 }
 
-/** Mirrors `feeds/add.ts`'s own `AddFeedRefusal`. */
+/**
+ * A refusal the host actually sent, carrying one of the four codes
+ * `@pickarr/contract` declares -- the same declaration `feeds/add.ts`'s own
+ * `AddFeedRefusal` is built from, so the two cannot drift. Not mirrored;
+ * see this file's docblock on why the codes are shared and the bounds above
+ * are not.
+ */
 export interface AddFeedRefusal {
-  refusal: 'unknown-plugin' | 'duplicate-url' | 'bad-download-type' | 'bad-poll-interval';
+  refusal: AddFeedRefusalCode;
 }
 
 /**
@@ -84,14 +107,16 @@ export interface AddFeedRefusal {
  */
 export type AddFeedOutcome = { id: number } | AddFeedRefusal | { refusal: 'offline' | 'unrecognised' };
 
-const REFUSAL_CODES: ReadonlySet<string> = new Set([
-  'unknown-plugin',
-  'duplicate-url',
-  'bad-download-type',
-  'bad-poll-interval',
-]);
+/**
+ * The codes this client recognises, built from the contract's list rather
+ * than spelled again here -- a second spelling is exactly what let the host
+ * rename one and leave this form quietly answering with its catch-all.
+ * `Set` rather than `Array#includes` only so the lookup below reads as a
+ * membership test; four entries make the performance question moot.
+ */
+const REFUSAL_CODES: ReadonlySet<string> = new Set(ADD_FEED_REFUSALS);
 
-function isRefusalCode(value: unknown): value is AddFeedRefusal['refusal'] {
+function isRefusalCode(value: unknown): value is AddFeedRefusalCode {
   return typeof value === 'string' && REFUSAL_CODES.has(value);
 }
 
@@ -150,11 +175,23 @@ export async function postFeed(input: AddFeedInput): Promise<AddFeedOutcome> {
 
 /**
  * A fixed sentence per non-accepted outcome -- never the server's own words
- * (Global Constraint). One map covers all five, `offline` and
+ * (Global Constraint). One map covers all six, `offline` and
  * `unrecognised` included, so `handleSubmit` below has no special case to
  * get wrong between them.
+ *
+ * **The keyed `Record` is load-bearing, not decoration.** Its key type is
+ * the contract's four codes plus this client's own two, so a code added to
+ * `ADD_FEED_REFUSALS` fails to compile here until someone writes the
+ * sentence for it, and a code renamed there fails twice -- an unwritten key
+ * and an unreachable one. That is the compile half of what stops the drift
+ * this map used to be vulnerable to; `AddFeed.test.tsx`'s
+ * `refusal codes` pair is the runtime half, and it is there because
+ * `npm run test:web` does not typecheck.
+ *
+ * Exported for that pair of tests, which asserts this object's own key set
+ * against a list spelled literally -- not against anything derived from it.
  */
-const REFUSAL_MESSAGES: Record<AddFeedRefusal['refusal'] | 'offline' | 'unrecognised', string> = {
+export const REFUSAL_MESSAGES: Record<AddFeedRefusalCode | 'offline' | 'unrecognised', string> = {
   'duplicate-url': 'That url is already on file.',
   'unknown-plugin': 'That plugin is not registered on this host.',
   'bad-download-type': 'That download type is not supported.',
