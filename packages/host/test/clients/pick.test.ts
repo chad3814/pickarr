@@ -316,7 +316,7 @@ test('every refusal code the contract declares is produced by a condition above'
     'client-type-mismatch',
     'already-submitted',
   ];
-  assert.deepEqual([...REQUEST_PICK_REFUSALS].sort(), [...constructed].sort());
+  assert.deepEqual(REQUEST_PICK_REFUSALS.toSorted(), constructed.toSorted());
 });
 
 test('a refusal carries the code and nothing else', async () => {

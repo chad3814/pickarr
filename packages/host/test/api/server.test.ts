@@ -14,7 +14,7 @@ import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import type { AddFeedInput } from '../../src/feeds/add.ts';
 import type { AddDownloadClientInput } from '../../src/clients/add.ts';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS } from '@pickarr/contract';
+import { ADD_DOWNLOAD_CLIENT_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
@@ -171,6 +171,14 @@ async function start(
     // opinion about credentials at all.
     addDownloadClient: () => {
       throw new Error('addDownloadClient not stubbed in this test');
+    },
+    // Same reasoning again: no test here posts a well-shaped body to
+    // `/api/picks` without overriding this. The guard-probe tests do reach
+    // `/api/picks` with a session, but they send `{}`, which the shape
+    // guard refuses ahead of this -- so a stub that resolved would make
+    // those tests pass for the wrong reason.
+    requestPick: () => {
+      throw new Error('requestPick not stubbed in this test');
     },
     // No plugin in this file declares a synced table -- what `/api/sync` and
     // `/api/sync/backfill` do with a real one is `sync-route.test.ts`'s.
@@ -1909,6 +1917,170 @@ test('the download client route is guarded by a session like every read', async 
   }
 });
 
+
+/**
+ * A well-formed `/api/picks` payload. One field, and a number: the whole of
+ * what the wire shape is.
+ *
+ * The id is obviously synthetic and appears in no other literal in this
+ * file, so an assertion that a body or a log does *not* carry it cannot be
+ * satisfied by some other value's absence -- the same reasoning
+ * {@link SUBMITTED_API_KEY} is built on.
+ */
+function validPickBody(): { rssItemId: number } {
+  return { rssItemId: 860531 };
+}
+
+test('a pick is accepted with 202 and no resource, not 201', async () => {
+  const asked: number[] = [];
+  const { raw, db } = setup();
+  const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+    requestPick: async (rssItemId) => {
+      asked.push(rssItemId);
+      return { accepted: true };
+    },
+  });
+  try {
+    const answer = await post(server, '/api/picks', cookie, validPickBody());
+
+    // **202, and the reason is not "nothing was created".** Measured on
+    // this tree: with the production wiring a `torrent_download` row does
+    // exist by the time this answers -- `clients/downloads.ts` inserts it
+    // before it calls the client, and `submit` is awaited the whole way up
+    // through `onDownloadRequest`, `requestDownload` and `requestPick`, so
+    // `clients/pick.test.ts` reads a `submitted` row straight after an
+    // `accepted`. What is true is narrower and is what 202 means: the
+    // request has been accepted and the processing is not complete.
+    assert.equal(answer.status, 202);
+    assert.deepEqual(JSON.parse(answer.text), { accepted: true });
+    assert.deepEqual(asked, [860531], 'the host was asked once, for the id in the body');
+
+    // No id, no Location, nothing a `201` would be claiming to have made.
+    // A pick names no resource this API serves: there is no
+    // `/api/picks/:id`, and what a pick eventually produces is a download
+    // row the browser learns about through the sync replica.
+    assert.deepEqual(Object.keys(JSON.parse(answer.text)), ['accepted']);
+    assert.ok(!JSON.stringify(logs).includes('860531'), 'and the accepted id is not written down');
+  } finally {
+    await server.close();
+  }
+});
+
+test('each pick refusal answers a distinct code the client can branch on', async () => {
+  // Global Constraint: distinguishable without parsing prose. The client
+  // maps a code to its own words; the server authors no sentence a human
+  // reads.
+  //
+  // **All five of `REQUEST_PICK_REFUSALS`, not a sample** -- the feeds
+  // slice shipped two of its four unpinned, so its status mapper could have
+  // moved either out of the 422 group, or dropped its `case` and fallen
+  // through, with every test still green. The grouping is the thing under
+  // test and a table missing part of it cannot see it drift.
+  //
+  // A fresh `setup()` per case, run concurrently rather than in a loop with
+  // an `await` in it: an install gets exactly one account, so a second
+  // sign-up against one database would be refused for a reason that has
+  // nothing to do with this property.
+  const cases = [
+    ['already-submitted', 409],
+    ['unknown-release', 422],
+    ['plugin-not-registered', 422],
+    ['no-client-of-type', 422],
+    ['client-type-mismatch', 422],
+  ] as const;
+  // Both halves of the table, read off the contract rather than counted by
+  // hand, so a sixth code added to `REQUEST_PICK_REFUSALS` fails here
+  // instead of quietly going unprobed.
+  assert.equal(
+    new Set(cases.map(([refusal]) => refusal)).size,
+    REQUEST_PICK_REFUSALS.length,
+    'every refusal the host can return has a row',
+  );
+  for (const code of REQUEST_PICK_REFUSALS) {
+    assert.ok(cases.some(([refusal]) => refusal === code), `${code} is probed`);
+  }
+  // And the split is a real one rather than five rows of the same number:
+  // a mapper that answered 422 for everything would satisfy every
+  // per-case assertion below if the table said 422 five times.
+  assert.equal(new Set(cases.map(([, status]) => status)).size, 2, 'the table distinguishes two statuses');
+
+  await Promise.all(cases.map(async ([refusal, status]) => {
+    const { raw, db } = setup();
+    const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+      requestPick: async () => ({ refusal }),
+    });
+    try {
+      const answer = await post(server, '/api/picks', cookie, validPickBody());
+      assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
+      assert.deepEqual(JSON.parse(answer.text), { refusal }, 'and the whole body is that one stable code');
+      assert.ok(!answer.text.includes('860531'), 'no refusal repeats the id it was asked about');
+      assert.ok(
+        !JSON.stringify(logs).includes('860531'),
+        'and nothing about the refused pick is written down either',
+      );
+    } finally {
+      await server.close();
+    }
+  }));
+});
+
+test('both pick 400s carry a code, so the one status they share is not told apart by prose', async () => {
+  // The two envelope refusals, which collide on a status and so would
+  // otherwise differ only by an english string. The same pair the other two
+  // POST routes answer, asserted again here rather than assumed shared:
+  // all three reach `MALFORMED_BODY` through the same `readBody`, but each
+  // owns its own `invalid-shape` answer and its own shape guard.
+  const { raw, db } = setup();
+  let called = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    requestPick: async () => {
+      called += 1;
+      return { accepted: true };
+    },
+  });
+  try {
+    const unparseable = await postRaw(server, '/api/picks', cookie, '{not json');
+    assert.equal(unparseable.status, 400);
+    assert.deepEqual(JSON.parse(unparseable.text), { refusal: 'malformed-body' });
+
+    // Parses, and is not a pick: `rssItemId` as a string is exactly what a
+    // form field or a route parameter hands you, and it is the shape the
+    // guard exists to stop -- the host would otherwise be asked about an id
+    // no `WHERE id = ?` could match.
+    const asString = await post(server, '/api/picks', cookie, { rssItemId: '860531' });
+    assert.equal(asString.status, 400);
+    assert.deepEqual(JSON.parse(asString.text), { refusal: 'invalid-shape' });
+
+    const missing = await post(server, '/api/picks', cookie, {});
+    assert.equal(missing.status, 400, 'an absent id is a shape failure too');
+    assert.deepEqual(JSON.parse(missing.text), { refusal: 'invalid-shape' });
+
+    // An extra field is simply not read, the same way it is not for the
+    // other two POST routes: the guard ignores unknown properties.
+    const extra = await post(server, '/api/picks', cookie, { ...validPickBody(), downloadClientId: 3 });
+    assert.equal(extra.status, 202, 'an extra field is not a shape failure');
+
+    assert.notDeepEqual(
+      JSON.parse(unparseable.text),
+      JSON.parse(asString.text),
+      'and the two 400s are distinguishable without reading a sentence',
+    );
+    assert.equal(called, 1, 'only the well-shaped body reached the host');
+  } finally {
+    await server.close();
+  }
+});
+
+test('the pick route is guarded by a session like every read', async () => {
+  const { raw, db } = setup();
+  const { server } = await start(raw, db, moviesOnly);
+  try {
+    const answer = await post(server, '/api/picks', ANONYMOUS, validPickBody());
+    assert.equal(answer.status, 401, 'no session, no write');
+  } finally {
+    await server.close();
+  }
+});
 
 test('every route except health refuses without a session', async () => {
   // Enumerated from the route table, not hand-listed: `probeFor` turns each

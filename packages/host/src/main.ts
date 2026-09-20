@@ -886,6 +886,12 @@ export async function main(
     // call: `Host.addDownloadClient` hands it to `Secrets.saveSecret` and
     // writes only the generated name to the row.
     addDownloadClient: (input) => host.addDownloadClient(input),
+    // The one operation `POST /api/picks` needs, wired the same way again.
+    // `host.requestPick` and not `host.requestDownload`: the two do the
+    // same work and only this one answers a refusal as a value, so passing
+    // the other would turn every refusal into a 500 -- see
+    // `ReadServerDeps.requestPick`.
+    requestPick: (rssItemId) => host.requestPick(rssItemId),
     registry,
     // Resolved once, here, rather than per request: this value cannot change
     // while the process holds `raw` open, so a route reading it would be a

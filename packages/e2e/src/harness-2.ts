@@ -231,6 +231,15 @@ async function boot(): Promise<Booted> {
     // same reason: what a spec observes is the row that was created, not
     // the job.
     addDownloadClient: (input) => host.addDownloadClient(input),
+    // `Host.requestPick`, wired exactly as `main.ts` wires it. What a spec
+    // can observe through it is narrower than through the two above, and
+    // deliberately so: `stubPlugin`'s `onDownloadRequest` is empty, so a
+    // pick here reaches a registered plugin, resolves, and writes no
+    // download row -- which is the very case `POST /api/picks`'s own
+    // comment cites for why it answers `202` and not `201`. A spec that
+    // wants a row needs a plugin that submits, which is not what these
+    // stubs are for.
+    requestPick: (rssItemId) => host.requestPick(rssItemId),
     registry,
     generation,
     host: '127.0.0.1',
