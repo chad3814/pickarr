@@ -16,6 +16,12 @@ import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from './clients/add.ts';
 import { requestPick as requestPickRule } from './clients/pick.ts';
 import type { PickAccepted, PickRefusal } from './clients/pick.ts';
+import {
+  addMapping as addMappingRule,
+  editMapping as editMappingRule,
+  removeMapping as removeMappingRule,
+} from './clients/mappings.ts';
+import type { AddMappingInput, EditMappingInput, MappingRefusal } from './clients/mappings.ts';
 import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
 import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -32,6 +38,7 @@ export { ownerPluginId };
 export type { AddFeedInput, AddFeedRefusal };
 export type { AddDownloadClientInput, AddDownloadClientRefusal };
 export type { PickAccepted, PickRefusal };
+export type { AddMappingInput, EditMappingInput, MappingRefusal };
 export { MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S } from './feeds/add.ts';
 
 /**
@@ -202,6 +209,55 @@ export interface Host {
    * error message to quote even if SQLite quoted its bindings.
    */
   addDownloadClient(input: AddDownloadClientInput): Promise<{ id: number } | AddDownloadClientRefusal>;
+  /**
+   * Validates and writes a new `filepath_mapping` row -- one translation
+   * from a path download client `downloadClientId` reports into one this
+   * host can open. The rules live in `clients/mappings.ts`, this method's
+   * own delegate, not here: the same split `addFeed` and
+   * `addDownloadClient` use, and for the same reason.
+   *
+   * **Nothing is scheduled afterwards, where the two write paths above each
+   * schedule a job.** That is not an omission: `clients/deliver.ts` re-reads
+   * this table through `mapClientPath` on **every** delivery tick and
+   * deliberately never stores a mapped path, "because a stored mapped path
+   * goes stale the moment a `filepath_mapping` row changes" (its own
+   * docblock, and design spec §4). So a new mapping is in force at the next
+   * tick with nothing to invalidate and nothing to enqueue, and a delivery
+   * stuck against a missing mapping recovers by itself -- which
+   * `deliver.ts` already cites as its reason for not failing such rows.
+   *
+   * Returns every refusal as a value and throws none of them, for the
+   * reason `addFeed` gives above -- and, as there, that is not the same as
+   * never throwing: a SQLite error that is neither the foreign-key nor the
+   * unique-index violation is rethrown by `clients/mappings.ts` and becomes
+   * a 500 at the route.
+   */
+  addMapping(input: AddMappingInput): Promise<{ id: number } | MappingRefusal>;
+  /**
+   * Replaces mapping `id`'s `from_path` and `to_path`, answering `{ id }`
+   * or one of `@pickarr/contract`'s `MAPPING_REFUSALS`.
+   *
+   * **Edit rather than delete-plus-add, and the reason predates this
+   * slice** (design spec §4): the row keeps its identity and its
+   * `created_at`, and an in-flight delivery is unharmed because the mapping
+   * is applied on demand rather than stored. `updated_at` moves; nothing
+   * else about the row does, and the client it belongs to cannot be changed
+   * at all -- see `EditMappingInput`.
+   *
+   * Returns every refusal as a value and throws none of them, with the same
+   * scope `addMapping` above states.
+   */
+  editMapping(id: number, input: EditMappingInput): Promise<{ id: number } | MappingRefusal>;
+  /**
+   * Deletes mapping `id`, answering `{ id }` or `unknown-mapping`.
+   *
+   * An id naming no row is the refusal rather than a quiet success, so a
+   * browser working from a stale list is told so. The removal reaches the
+   * replica through the `AFTER DELETE` trigger `installSyncTriggers`
+   * already emits for every synced table, which needs nothing from this
+   * method (design spec §5).
+   */
+  removeMapping(id: number): Promise<{ id: number } | MappingRefusal>;
   /**
    * Delivers `file` to the plugin `pluginId` names, calling its
    * `onDownloadedFile`. The shape `deliverCompleted`
@@ -747,6 +803,26 @@ export function createHost(deps: {
       // have reconciled it rather than by a second, parallel path.
       await host.scheduleReconcile(result.id);
       return result;
+    },
+
+    // The three mapping writes, each a straight delegation with nothing
+    // scheduled afterwards -- see `Host.addMapping`'s own doc for why there
+    // is no `schedulePoll`/`scheduleReconcile` twin here.
+    //
+    // `async` with no `await` inside, like `addFeed` above: `node:sqlite` is
+    // synchronous, so the rules are, and the `Promise` is the interface's
+    // rather than the implementation's.
+    async addMapping(input) {
+      return addMappingRule({ raw: deps.raw, now: deps.now }, input);
+    },
+
+    async editMapping(id, input) {
+      return editMappingRule({ raw: deps.raw, now: deps.now }, id, input);
+    },
+
+    async removeMapping(id) {
+      // No `now`, because a delete writes no column. See `removeMapping`.
+      return removeMappingRule({ raw: deps.raw }, id);
     },
 
     start() {

@@ -21,6 +21,8 @@ export type { AddDownloadClientRefusalCode } from './download-clients.ts';
 export { ADD_DOWNLOAD_CLIENT_REFUSALS } from './download-clients.ts';
 export type { RequestPickRefusalCode } from './picks.ts';
 export { REQUEST_PICK_REFUSALS } from './picks.ts';
+export type { MappingRefusalCode } from './mappings.ts';
+export { MAPPING_REFUSALS } from './mappings.ts';
 export type { HostFetch } from './fetch.ts';
 export type { Migration } from './migrations.ts';
 export type { DownloadClients, DownloadSubmission } from './downloads.ts';
