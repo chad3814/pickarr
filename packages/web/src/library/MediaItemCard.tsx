@@ -19,13 +19,22 @@ import { useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
 import { useGatheredItem, type GatheredSource } from './useGatheredItem.ts';
 import { ReleaseList } from './ReleaseList.tsx';
+import type { PickSubmit } from './postPick.ts';
 
 export interface MediaItemCardProps {
   source: GatheredSource;
   item: MediaItemSyncRead;
+  /**
+   * Submits one pick, handed straight to `ReleaseList` and never called
+   * here. Required and threaded from `Shell.tsx` rather than defaulted to
+   * the real `postPick`, for the reason `ReleaseList.tsx`'s docblock gives:
+   * a default doing network I/O is invisible at the call site, and a test
+   * that forgets it gets a real `fetch` under jsdom.
+   */
+  submitPick: PickSubmit;
 }
 
-export function MediaItemCard({ source, item }: MediaItemCardProps): ReactElement {
+export function MediaItemCard({ source, item, submitPick }: MediaItemCardProps): ReactElement {
   const [expanded, setExpanded] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
   const gathered = useGatheredItem(source, item.id, expanded);
@@ -52,7 +61,7 @@ export function MediaItemCard({ source, item }: MediaItemCardProps): ReactElemen
           {item.title}
         </button>
       </h2>
-      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} />}
+      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submitPick} />}
     </article>
   );
 }

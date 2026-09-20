@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import type {
   MediaItemSyncRead,
   NzbDownloadSyncRead,
@@ -8,6 +8,7 @@ import type {
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
 import { MediaItemCard } from '../../src/library/MediaItemCard.tsx';
+import type { PickSubmit } from '../../src/library/postPick.ts';
 import type { GatheredSource } from '../../src/library/useGatheredItem.ts';
 import type { GatheredDownload, GatheredItem, GatheredRelease } from '../../src/store/gather.ts';
 
@@ -142,6 +143,14 @@ const quietInserts = {
   getRows: async (): Promise<Map<number, unknown>> => new Map(),
 };
 
+/**
+ * A `submit` that accepts, for the cards in this file that are not about
+ * picking. Spelled at every call site rather than defaulted inside the
+ * component: a default that performed network I/O would give a test that
+ * forgot the prop a real `fetch` under jsdom (`ReleaseList.tsx`'s doc).
+ */
+const acceptsPick: PickSubmit = () => Promise.resolve({ accepted: true });
+
 /** A `GatheredSource` returning one bare gathered item, for tests that do not care what expanding shows. */
 const stubSource: GatheredSource = {
   ...quietInserts,
@@ -152,7 +161,7 @@ const stubSource: GatheredSource = {
 test('a card shows its title as a real heading', () => {
   // CLAUDE.md's longest hazard: the accessible name must come from a visible
   // heading, not an aria-label, or a query passes against an unstyled block.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} />);
+  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
   const heading = screen.getByRole('heading', { name: 'The Thing' });
   assert.equal(heading.textContent, 'The Thing');
 });
@@ -167,7 +176,7 @@ test('expanding gathers the item once, and collapsing does not re-gather', async
     },
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
   assert.equal(gathers, 0, 'a collapsed card costs nothing');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
@@ -201,7 +210,7 @@ test('a release shows its resolution and its download status', async () => {
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.2160p.mkv/ });
@@ -224,7 +233,7 @@ test('a release with no download row shows no status rather than a blank one', a
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.1080p.mkv/ });
@@ -236,7 +245,7 @@ test('a card whose artwork 404s still renders', () => {
   // Artwork is not replicated: the client asks `/api/artwork/:kind/:id` and
   // handles a 404 (host `sync/tables.ts`). Most items will have no poster for
   // a while, so a missing one must not blank the card.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} />);
+  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
   const image = screen.getByRole('img', { name: /The Thing/ });
   fireEvent.error(image);
   assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the card survives its poster failing');
@@ -247,4 +256,42 @@ test('a card whose artwork 404s still renders', () => {
   // of the DOM rather than sitting there broken. A boolean comparison, never
   // `assert.equal(image, ...)` against the live node itself (`CLAUDE.md`).
   assert.ok(screen.queryByRole('img', { name: /The Thing/ }) === null, 'the failed poster is removed, not left broken');
+});
+
+test('the submit a card is handed is the one its Pick button calls', async () => {
+  // `Shell` wires `postPick` and `Category` forwards it; neither calls it,
+  // and nor does this component. A card that dropped the prop on the floor
+  // would still render, still expand and still show a button -- so the only
+  // thing that pins the wire is pressing the button and seeing which release
+  // the injected `submit` was asked for (`CLAUDE.md`: pinning a function
+  // does not pin that anyone calls it).
+  const asked: number[] = [];
+  const source: GatheredSource = {
+    ...quietInserts,
+    gatherMediaItem: async (id: number) =>
+      gathered({
+        id,
+        title: 'The Thing',
+        releases: [{ id: 31, row: rssItem({ id: 31, filename: 'the.thing.mkv', resolution: '1080p' }) }],
+      }),
+    subscribe: () => () => {},
+  };
+  render(
+    <MediaItemCard
+      source={source}
+      item={summary({ id: 7, title: 'The Thing' })}
+      submitPick={(rssItemId) => {
+        asked.push(rssItemId);
+        return Promise.resolve({ accepted: true });
+      }}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'The Thing' }));
+
+  const row = await screen.findByRole('listitem', { name: 'the.thing.mkv' });
+  fireEvent.click(within(row).getByRole('button'));
+
+  await waitFor(() => {
+    assert.deepEqual(asked, [31], 'the release the operator pressed, through the submit the card was given');
+  });
 });

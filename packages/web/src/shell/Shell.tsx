@@ -53,6 +53,7 @@ import { Category as CategoryScreen } from '../library/Category.tsx';
 import { Settings } from '../settings/Settings.tsx';
 import { postFeed } from '../settings/AddFeed.tsx';
 import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
+import { postPick } from '../library/postPick.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
@@ -172,9 +173,18 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
     <Routes>
       <Route element={<ShellChrome counts={counts} onSignOut={handleSignOut} storeFailed={storeFailed} />}>
         <Route index element={<Navigate to="/tv" replace />} />
-        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" />} />
-        <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" />} />
-        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" />} />
+        {/*
+          `postPick` is the third real `submit` this file wires, on the same
+          rule as the two below: a form or a button that performs network I/O
+          takes it as a required prop, because a default that posts is
+          invisible at the call site and a test that forgets the prop gets a
+          real `fetch`. It reaches `ReleaseList`'s per-release Pick button
+          through `Category` and `MediaItemCard`, neither of which calls it
+          (picks design §2).
+        */}
+        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" submitPick={postPick} />} />
+        <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" submitPick={postPick} />} />
+        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" submitPick={postPick} />} />
         {/*
           `store` is `undefined` until `createStore` resolves (this component's
           own effect, above); `Unmatched`'s `source` prop is not optional, so

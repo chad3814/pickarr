@@ -122,6 +122,44 @@ ul[aria-label='releases'] li > span:not([id$='-filename']) {
 }
 
 /*
+ * The per-release Pick button (`ReleaseList.tsx`, picks design §2), which
+ * only a release with no download of its own ever has. `base.css`'s
+ * `button` rule already gives it a border, a radius and a disabled
+ * treatment; this narrows it to the meta scale the rest of the row runs at,
+ * so a list of releases does not become a column of full-size form
+ * controls. Keyed by type inside the list, the same way everything else in
+ * this file is keyed by structure -- no component this stylesheet reaches
+ * sets a class. `article h2 button` above is a different element in a
+ * different place and is untouched by this.
+ */
+ul[aria-label='releases'] li > button {
+  flex: none;
+  font-size: var(--text-meta);
+  padding: 0 var(--space-2);
+}
+
+/*
+ * A refused pick's sentence (`ReleaseList.tsx`'s `role='alert'`, whose words
+ * are this client's own and never the host's). `flex-basis: 100%` gives it
+ * the line under the release it belongs to rather than a squeeze between the
+ * filename and the button -- the `li` rule above already wraps.
+ * `--color-error` is the token `settings.css` reaches each add form's banner
+ * with, here by the attribute rather than a class the component does not
+ * set.
+ *
+ * **This rule existing is load-bearing.** `CLAUDE.md`'s longest hazard is a
+ * component whose accessible name satisfied ten tests while no stylesheet
+ * rule reached it at all, so it rendered as an unstyled block nobody read as
+ * an error. A test asserting that the sentence is rendered text means
+ * something only if the rendered text is also styled as the alarm it is.
+ */
+ul[aria-label='releases'] li > [role='alert'] {
+  flex-basis: 100%;
+  color: var(--color-error);
+  font-size: var(--text-meta);
+}
+
+/*
  * `Unmatched`'s own list of filenames -- a release a feed delivered that no
  * lookup has attached to a media item yet (`Unmatched.tsx`'s own doc).
  * `aria-label='unmatched releases'` distinguishes it from `ReleaseList`'s
