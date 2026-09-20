@@ -1024,6 +1024,26 @@ test('an operator can add, edit and remove a path mapping on a download client',
   await expect(editorHostPath).toBeVisible();
   expect(await boxOf(clientPathSpan, 'the client path with the editor open')).toEqual(beforeEditing);
 
+  // **The editor's fields are laid out, which is the other half of the
+  // selector this task widened.** `settings.css` used to name
+  // `li > div > form > div`, which reaches the *add* form only -- a row's
+  // editor is two levels further down, at `li > div > ul > li > form` -- so
+  // each of its field `<div>`s computed `display: block` and put its label
+  // and its input on one line. Reverting that selector and re-running this
+  // suite left 15/15 green before this assertion existed; with it, the
+  // revert is red here. (Its sibling widening, `li [role='alert'] p`, was
+  // already pinned by the two refusal assertions below. One of the pair was
+  // covered and one was not.)
+  //
+  // Exactly one producer, so this survives a gutted stylesheet as well as a
+  // missing one: a `<div>` computes `display: block` from the UA sheet, and
+  // no component in `packages/web/src` sets a class for anything else to
+  // key on. The parent of the input rather than an nth-child, because that
+  // `<div>` is precisely what the rule selects.
+  const editorField = editorHostPath.locator('xpath=..');
+  await expect(editorField).toHaveCSS('display', 'flex');
+  await expect(editorField).toHaveCSS('flex-direction', 'column');
+
   // A refused `PATCH`, driven through the one path-content rule the host
   // has (design spec §7: `empty-path` refuses the empty string and nothing
   // else -- no leading `/` is required, no backslash rejected). The fields
