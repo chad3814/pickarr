@@ -108,7 +108,7 @@ export function selectClientForFeed(raw: DatabaseSync, feedId: number, chooseInd
       // below: `clients/pick.ts` turns this into the `client-type-mismatch`
       // refusal and that one into `no-client-of-type`, and prose is all
       // that told the two apart otherwise -- see `../errors.ts`.
-      throw new ClientTypeMismatchError(feed.id, feed.name, client.id, client.type, feed.downloadType);
+      throw new ClientTypeMismatchError(feed, client);
     }
     return client.id;
   }
@@ -116,7 +116,7 @@ export function selectClientForFeed(raw: DatabaseSync, feedId: number, chooseInd
   const candidates = readCandidateClientIds(raw, feed.downloadType);
 
   if (candidates.length === 0) {
-    throw new NoClientOfTypeError(feed.id, feed.name, feed.downloadType);
+    throw new NoClientOfTypeError(feed);
   }
 
   if (candidates.length > 1) {

@@ -177,19 +177,46 @@ function seedRssItem(raw: DatabaseSync, feedId: number, downloadType = 'torrent'
 }
 
 /**
- * Calls `host.requestPick` and fails if it *rejects*.
+ * Every refusal code a test in this file has actually watched come back out
+ * of `requestPick`, recorded by {@link pickWithoutThrowing} as each one
+ * runs. The last test in the file is the only reader.
  *
- * **This is the invariant the whole slice turns on, so it is asserted rather
- * than assumed by every test below.** `requestDownload` throws where the two
- * other write paths return refusals as values; `requestPick` exists to
- * convert that, and a test written as `await assert.rejects(...)` would be
- * asserting the very bug this function was added to remove. Wrapping the
- * call is what makes a regression read as "it threw" rather than as an
- * unhandled rejection somewhere in the runner's output.
+ * **This set is what makes that test's name true.** It used to compare
+ * `REQUEST_PICK_REFUSALS` against a literal list written three lines above
+ * the assertion, which checks only that the contract still holds five
+ * particular strings: deleting any one of the condition tests below left it
+ * green, because the literal was still sitting there. Reading what the
+ * tests *observed* is the difference between "these five strings are
+ * declared" and "these five conditions were constructed and each produced
+ * its code".
+ *
+ * **What it does not promise**, so the name is not read as stronger than it
+ * is: a code counts as covered wherever it was produced, so deleting the
+ * dedicated `no-client-of-type` test would still leave the set complete
+ * while the shape test below happens to construct that same condition. The
+ * guarantee is that every code is reached by some condition in this file,
+ * which is what the title claims and no more.
+ */
+const observedRefusals = new Set<string>();
+
+/**
+ * Calls `host.requestPick`, fails if it *rejects*, and records any refusal
+ * it saw in {@link observedRefusals}.
+ *
+ * **The reject check is the invariant the whole slice turns on, so it is
+ * asserted rather than assumed by every test below.** `requestDownload`
+ * throws where the two other write paths return refusals as values;
+ * `requestPick` exists to convert that, and a test written as
+ * `await assert.rejects(...)` would be asserting the very bug this function
+ * was added to remove. Wrapping the call is what makes a regression read as
+ * "it threw" rather than as an unhandled rejection somewhere in the
+ * runner's output.
  */
 async function pickWithoutThrowing(host: Host, rssItemId: number): Promise<unknown> {
   try {
-    return await host.requestPick(rssItemId);
+    const result = await host.requestPick(rssItemId);
+    if ('refusal' in result) observedRefusals.add(result.refusal);
+    return result;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     assert.fail(`requestPick rejected instead of returning a refusal: ${detail}`);
@@ -304,21 +331,6 @@ test('picking the same release twice is refused as already-submitted by the real
   assert.deepEqual(rows, ['submitted', 'failed'], 'the original row survives and the colliding attempt is marked failed');
 });
 
-test('every refusal code the contract declares is produced by a condition above', () => {
-  // Read off `REQUEST_PICK_REFUSALS` rather than hand-listed, so a sixth
-  // code added to the contract fails here instead of quietly going
-  // unexercised -- the gap the feeds slice shipped, where two of four codes
-  // had no test at all.
-  const constructed = [
-    'unknown-release',
-    'plugin-not-registered',
-    'no-client-of-type',
-    'client-type-mismatch',
-    'already-submitted',
-  ];
-  assert.deepEqual(REQUEST_PICK_REFUSALS.toSorted(), constructed.toSorted());
-});
-
 test('a refusal carries the code and nothing else', async () => {
   // Global Constraint: no credential, url or path in any message or body,
   // and a refusal distinguishable without parsing prose. Every condition
@@ -365,4 +377,23 @@ test('requestPick returns its refusal rather than rejecting with it', async () =
     42,
   );
   assert.deepEqual(result, { refusal: 'unknown-release' });
+});
+
+/**
+ * Declared last on purpose: node's runner executes a file's top-level tests
+ * in declaration order, and this one reads what every test above it
+ * observed. A condition test that fails before recording fails this one
+ * too, which is a cascade rather than a second, separate finding.
+ */
+test('every refusal code the contract declares is produced by a condition above', () => {
+  // Compared against what the tests actually saw, not against a literal
+  // list -- see `observedRefusals`. Both directions in one `deepEqual`: a
+  // sixth code added to `REQUEST_PICK_REFUSALS` with no condition behind it
+  // reds here, and so does a code this file produces that the contract does
+  // not declare.
+  assert.deepEqual(
+    [...observedRefusals].toSorted(),
+    REQUEST_PICK_REFUSALS.toSorted(),
+    'each code must have been seen coming back from requestPick, not merely declared',
+  );
 });
