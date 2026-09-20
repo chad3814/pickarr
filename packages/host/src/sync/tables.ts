@@ -7,11 +7,13 @@ import { redactUrl } from '../clients/redact.ts';
  *
  * **In:** the group (`media_item`), the releases under it (`rss_item`), what
  * was submitted for them (`torrent_download`, `nzb_download`), who is in them
- * (`person`, `role`), the feeds that produce the releases (`rss_feed`), and
- * the clients those releases are submitted to (`download_client`). Those
- * last two are the only ones whose projection is not purely a `SELECT` --
- * see the paragraphs below on why each joined this list, and
- * `readHostRows`'s own doc for the extra step each of their rows takes.
+ * (`person`, `role`), the feeds that produce the releases (`rss_feed`), the
+ * clients those releases are submitted to (`download_client`), and the path
+ * translations configured under each client (`filepath_mapping`).
+ * `rss_feed` and `download_client` are the only two whose projection is not
+ * purely a `SELECT` -- see the paragraphs below on why each joined this
+ * list, and `readHostRows`'s own doc for the extra step each of their rows
+ * takes.
  *
  * **Out, and why:** `auth_user`, `auth_session`, `auth_account`,
  * `auth_verification`, `host_state` and `secret` hold credentials, and no
@@ -21,10 +23,20 @@ import { redactUrl } from '../clients/redact.ts';
  * because `sync_log` is `AUTOINCREMENT`). `poster`, `background` and `logo`
  * describe files already reachable at `/api/artwork/:kind/:mediaItemId`, so a
  * client asks for the image and handles a 404 rather than replicating rows
- * about files it cannot read. `alias`, `external_reference` and
- * `filepath_mapping` have no consumer. `deleted_media_item` is slice E's
+ * about files it cannot read. `alias` and `external_reference` have no
+ * consumer. `deleted_media_item` is slice E's
  * tombstone table: the log's delete ops supersede it, and it stays because
  * `/api/deletions` still serves it.
+ *
+ * **This sentence used to name `filepath_mapping` as a third table with no
+ * consumer, and that had been false for two slices before this one struck
+ * it.** `clients/deliver.ts` has applied `clients/paths.ts`'s
+ * `mapClientPath` on every delivery tick since the reconcile slice landed,
+ * so the table had a consumer well before it had a writer; the line stayed
+ * because nothing in this file reads it and nothing fails when a reason
+ * goes stale. Recorded rather than quietly deleted, because the class of
+ * defect -- a justification that was true when written -- is the one this
+ * codebase keeps finding.
  *
  * **`rss_feed` used to be out on a rule with no exception, and that rule is
  * amended here, deliberately.** This docblock used to say a feed's url "may
@@ -160,6 +172,24 @@ import { redactUrl } from '../clients/redact.ts';
  * guarantee *inside* the synced set, where a reference does resolve, just
  * not yet.
  *
+ * **`filepath_mapping` is the ninth, and it carries two filesystem paths to
+ * the replica on a distinction, not on an exception.** `selectSql`'s doc
+ * below refuses `storage_path` and this file does not weaken that: the rule
+ * is that this host does not leak filesystem structure a client never asked
+ * about. A `storage_path` is **discovered** -- the download client reports
+ * where it happened to put a file, disclosing a layout nobody chose to
+ * disclose. A mapping is **dictated**: both `from_path` and `to_path` are
+ * strings the operator typed into the settings screen, and reading them
+ * back is showing someone their own input. A settings UI that cannot
+ * display the setting is not a settings UI. Design spec §5 states the
+ * distinction so it can be argued with; the `storagePath` rule in
+ * `packages/contract/src/sync.ts` stands exactly as written.
+ *
+ * The projection is six columns and the whole row: `filepath_mapping` has
+ * nothing else in it. There is no third thing this table knows that a
+ * client is being spared, which is worth saying because every other
+ * paragraph above is about a column held back.
+ *
  * **A table being in this list is not a promise that every one of its
  * columns is projected.** `selectSql` below names the subset of each
  * included table that is safe to hand to a client at all -- see its own doc
@@ -174,6 +204,7 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
   'role',
   'rss_feed',
   'download_client',
+  'filepath_mapping',
 ];
 
 /**
@@ -193,14 +224,14 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * builds its `ON ${table}` (safe there because it never reads a column),
  * makes this check fail closed and demand `CREDENTIAL_ALLOW_LIST` grow a
  * third entry, which the project's global constraints fix at exactly two.
- * Eight short, literal, unremarkable `SELECT`s cost less than that entry
+ * Nine short, literal, unremarkable `SELECT`s cost less than that entry
  * would.
  *
  * **The aliases are the wire's naming convention, and they exist for one
  * concrete reason.** A column name reaches a client verbatim: `readHostRows`
  * spreads the row `node:sqlite` hands back, and the result is serialised as
  * an op's `value` with no mapping step anywhere between. Unaliased, these
- * eight tables spoke snake_case while all six plugin read shapes
+ * nine tables would speak snake_case while all six plugin read shapes
  * (`packages/contract/src/sync.ts`) speak camelCase, so the same logical
  * field was `media_item_id` on three host tables and `mediaItemId` on three
  * plugin ones. The client's storage provider is designed (and not yet
@@ -233,7 +264,11 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  *   reports it"). `api/reads.ts`'s `DOWNLOAD_COLUMNS`, the equivalent
  *   projection behind `/api/downloads`, already excludes it -- this module
  *   is what would have been the one place that regressed the rule the file
- *   next door already follows.
+ *   next door already follows. **`filepath_mapping` projecting two paths
+ *   does not soften this entry**, and the two cases are worth reading
+ *   together: this path is one the client *discovered* and reported, and
+ *   those are two the operator *dictated* and is owed a sight of. The top
+ *   docblock has the distinction in full.
  * - **`rss_item.link`** -- for a private tracker or indexer this *is* a
  *   credential: `server.ts`'s module doc says plainly that it "carries the
  *   passkey". `/api/rss-items` serves `RssItemRead.link` unredacted today,
@@ -326,6 +361,14 @@ function selectSql(table: string, placeholders: string): string | undefined {
                       poll_interval_s AS pollIntervalS, download_client_id AS downloadClientId,
                       created_at AS createdAt, updated_at AS updatedAt, url
                  FROM rss_feed WHERE id IN (${placeholders})`;
+    case 'filepath_mapping':
+      // Two filesystem paths, projected on purpose -- the one place in this
+      // function that does what `selectSql`'s doc above otherwise refuses.
+      // Both are operator input rather than client-reported layout; see the
+      // file's top docblock, and design spec §5 for the argument.
+      return `SELECT id, download_client_id AS downloadClientId, from_path AS fromPath,
+                      to_path AS toPath, created_at AS createdAt, updated_at AS updatedAt
+                 FROM filepath_mapping WHERE id IN (${placeholders})`;
     case 'download_client':
       // `url` travels raw out of this `SELECT` and is rebuilt by
       // `readHostRows`, the same division of labour `rss_feed` above uses
@@ -390,12 +433,12 @@ function clientAddress(url: string): string {
  * is a normal outcome of that walk rather than a case worth a round trip --
  * so this returns `{}` before ever touching `raw`.
  *
- * `table` decides *which* of `selectSql`'s eight literal statements runs; it
+ * `table` decides *which* of `selectSql`'s nine literal statements runs; it
  * never reaches SQL text itself. A name outside `HOST_SYNCED_TABLES` throws
  * rather than reading `undefined` columns or silently returning nothing.
  *
  * **Two tables get one extra step after the row comes back, and the other
- * six get none.** `rss_feed`'s `url` is redacted by `clients/redact.ts`'s
+ * seven get none.** `rss_feed`'s `url` is redacted by `clients/redact.ts`'s
  * `redactUrl`; `download_client`'s is rebuilt from its origin and path by
  * `clientAddress`. Both happen on the spread copy this function already
  * makes -- not in `selectSql`, which cannot run JavaScript, and not in

@@ -26,6 +26,7 @@ export type { Migration } from './migrations.ts';
 export type { DownloadClients, DownloadSubmission } from './downloads.ts';
 export type {
   DownloadClientSyncRead,
+  FilepathMappingSyncRead,
   MediaItemSyncRead,
   MovieRead,
   NzbDownloadSyncRead,

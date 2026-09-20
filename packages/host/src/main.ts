@@ -738,7 +738,7 @@ export async function main(
 
   // **After the migrations, on every boot, and not only inside migration
   // 15.** `installSyncTriggers` drops each trigger before creating it, so
-  // this is idempotent and costs eight `DROP`/`CREATE` triples on a schema
+  // this is idempotent and costs nine `DROP`/`CREATE` triples on a schema
   // that already has them.
   //
   // This is **defensive, not corrective**: triggers persist across

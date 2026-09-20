@@ -8,6 +8,7 @@ import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { redactUrl } from '../../src/clients/redact.ts';
 import type {
   DownloadClientSyncRead,
+  FilepathMappingSyncRead,
   MediaItemSyncRead,
   NzbDownloadSyncRead,
   PersonSyncRead,
@@ -46,8 +47,9 @@ test('no credential-bearing table is synced', () => {
   }
 });
 
-test('download_client is one of the eight host synced tables', () => {
-  // The bootstrap assertion for this slice, and the first comment here was
+test('download_client is one of the nine host synced tables', () => {
+  // The bootstrap assertion for the download-clients slice, and the first
+  // comment here was
   // wrong about why -- recorded because the wrong version is the plausible
   // one. It claimed the projection tests would stay green without this
   // entry, since `readHostRows` dispatches on `selectSql` having a `case`
@@ -55,8 +57,9 @@ test('download_client is one of the eight host synced tables', () => {
   // `createSyncRegistry`, which routes on `HOST_SYNCED_TABLES.includes` and
   // answers `{}` for a table it does not know, so they red on a missing row.
   //
-  // Measured, dropping `'download_client'` from the list and running this
-  // file: **8 red, 16 green**. This one, the six `download_client`
+  // Measured in that slice, dropping `'download_client'` from the list and
+  // running this file: **8 red, 16 green**. This one, the six
+  // `download_client`
   // projection tests, and the read-shape set comparison. The test that does
   // *not* notice is "every host synced table has all three triggers" -- it
   // iterates this very list, so deleting an entry deletes its check. That is
@@ -64,8 +67,32 @@ test('download_client is one of the eight host synced tables', () => {
   // one first written down here.
   assert.ok(HOST_SYNCED_TABLES.includes('download_client'),
     'download_client must be synced -- a settings list reads it from the replica');
-  assert.equal(HOST_SYNCED_TABLES.length, 8,
-    'the host syncs eight of its own tables; a ninth needs a read shape, a migration and a decision');
+  assert.equal(HOST_SYNCED_TABLES.length, 9,
+    'the host syncs nine of its own tables; a tenth needs a read shape, a migration and a decision');
+});
+
+test('filepath_mapping is the ninth host synced table', () => {
+  // The bootstrap assertion for the path-mappings slice, the same shape the
+  // one above has for the download-clients slice -- and it covers the same
+  // blind spot, because "every host synced table has all three triggers"
+  // iterates this list and so cannot see an entry that is missing.
+  //
+  // Measured, dropping `'filepath_mapping'` from the list and running this
+  // file: **4 red, 22 green** -- this one, the length assertion above, `a
+  // filepath mapping reaches a client as both of its paths and nothing
+  // else` (which reads through `createSyncRegistry` and so gets `{}`), and
+  // `every host synced table has a read shape in the contract`.
+  //
+  // **Two tests that look like they should notice do not, and the reason is
+  // the blind spot rather than a gap in them.** `each host projection and
+  // its contract read shape name exactly the same fields` and `every column
+  // a host table projects reaches the wire in camelCase` both iterate this
+  // list through `projectionsOf`, so deleting an entry deletes its check --
+  // exactly as the triggers test does. A first draft of this comment
+  // predicted the opposite for the first of them and was wrong; the
+  // measurement is what replaced the guess.
+  assert.ok(HOST_SYNCED_TABLES.includes('filepath_mapping'),
+    'filepath_mapping must be synced -- the mappings under each client are read from the replica');
 });
 
 test('every synced table has an integer primary key named id', () => {
@@ -492,6 +519,34 @@ test('a download client url with no path at all projects the root path the parse
   assert.equal(clientUrl(registry.readRows(raw, 'download_client', [1])[1]), 'http://qbit.local:8080/');
 });
 
+test('a filepath mapping reaches a client as both of its paths and nothing else', () => {
+  // **The one projection in this module that carries a path on purpose**,
+  // which is why it gets a test of its own rather than only the key-set
+  // comparison at the bottom of this file. `selectSql`'s own doc refuses
+  // `storage_path` outright, and design spec §5 amends that rule rather than
+  // breaking it: a `storage_path` is *discovered* -- the client reports
+  // where it happened to put a file -- and a mapping is *dictated*, both
+  // halves typed by the operator into the screen that reads them back.
+  //
+  // Both values are asserted literally rather than read back through
+  // anything that built them, and neither is a prefix of the other, so a
+  // projection that swapped `from_path` and `to_path` fails here.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedDownloadClient(raw, {});
+  raw.prepare(`
+    INSERT INTO filepath_mapping (id, download_client_id, from_path, to_path, created_at, updated_at)
+    VALUES (1, 1, '/downloads/tv', '/srv/media', 10, 20)
+  `).run();
+
+  const registry = createSyncRegistry(raw, []);
+  const row = registry.readRows(raw, 'filepath_mapping', [1])[1];
+  assert.deepEqual(row, {
+    id: 1, downloadClientId: 1, fromPath: '/downloads/tv', toPath: '/srv/media',
+    createdAt: 10, updatedAt: 20,
+  });
+});
+
 /**
  * One row in every host synced table, with every nullable column filled, so a
  * projection's key set can be read off a real row rather than declared.
@@ -553,6 +608,10 @@ function seedOneRowPerSyncedTable(raw: ReturnType<typeof openTestDatabase>['raw'
     INSERT INTO role (id, media_item_id, person_id, role, name, billing_order, created_at)
     VALUES (1, 1, 1, 'actor', 'Flynn', 0, 10)
   `).run();
+  raw.prepare(`
+    INSERT INTO filepath_mapping (id, download_client_id, from_path, to_path, created_at, updated_at)
+    VALUES (1, 1, '/downloads', '/media', 10, 20)
+  `).run();
 }
 
 /** The projection of row 1 from each host synced table, keyed by table name. */
@@ -611,8 +670,8 @@ test('the media item a row belongs to has one name across every table that names
  * One witness object per host read shape: `Record<keyof T, true>`, which the
  * compiler makes exhaustive in both directions for an object literal -- a
  * missing key is an error, and an extra one is an excess property. So the
- * *names* in these eight objects are `@pickarr/contract`'s eight host shapes,
- * mechanically, and the test below compares them against what the eight
+ * *names* in these nine objects are `@pickarr/contract`'s nine host shapes,
+ * mechanically, and the test below compares them against what the nine
  * `SELECT`s actually project.
  *
  * This is `test/db/schema.test.ts`'s pattern applied to the other pair that
@@ -670,13 +729,18 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
     id: true, name: true, type: true, implementation: true, url: true,
     username: true, category: true, createdAt: true, updatedAt: true,
   } satisfies Record<keyof DownloadClientSyncRead, true>,
+  filepath_mapping: {
+    id: true, downloadClientId: true, fromPath: true, toPath: true,
+    createdAt: true, updatedAt: true,
+  } satisfies Record<keyof FilepathMappingSyncRead, true>,
 };
 
 test('every host synced table has a read shape in the contract', () => {
-  // The set, before the fields: a ninth synced table added with no shape
+  // The set, before the fields: a tenth synced table added with no shape
   // would leave a client back on `unknown` for it, which is the state this
-  // whole comparison exists to end -- `rss_feed` was the seventh and
-  // `download_client` the eighth, and this guard is what each had to pass.
+  // whole comparison exists to end -- `rss_feed` was the seventh,
+  // `download_client` the eighth and `filepath_mapping` the ninth, and this
+  // guard is what each had to pass.
   assert.deepEqual(
     Object.keys(HOST_READ_SHAPE_FIELDS).toSorted(),
     [...HOST_SYNCED_TABLES].toSorted(),
