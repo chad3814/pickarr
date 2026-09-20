@@ -262,10 +262,28 @@ export const mappingSubmit: MappingSubmit = {
  * typed is already on screen in the field they typed it into, and an error
  * that repeats it adds nothing; a path they did *not* type is not this
  * client's to disclose.
+ *
+ * **`duplicate-from-path` is the one sentence two different actions share,
+ * and it stays one sentence -- worded for both rather than for the add.**
+ * The code is reachable from `postMapping` (a new mapping repeating a
+ * `from_path`) and from `patchMapping` (an existing one edited onto
+ * another row's `from_path`); both are migration 19's unique index on
+ * `(download_client_id, from_path)` and there is only one thing wrong in
+ * either case, so splitting them would mean a second key this `Record`'s
+ * type cannot distinguish and two spellings of one rule. What was wrong
+ * was the wording: it used to end "Edit the existing mapping instead",
+ * which is an instruction to do the thing the operator is *already* doing
+ * when the refusal arrives from the edit route. The conflict is always
+ * with a *different* row on either route -- a row keeping its own
+ * `from_path` collides with nothing, which
+ * `packages/host/src/clients/mappings.ts`'s `editMapping` measures -- so
+ * naming the other mapping, rather than "the existing" one, is true and
+ * actionable from both forms.
  */
 export const MAPPING_REFUSAL_MESSAGES: Record<MappingRefusalCode | 'offline' | 'unrecognised', string> = {
   'unknown-client': 'Pickarr no longer has that download client on file. Reload the page and try again.',
-  'duplicate-from-path': 'This download client already maps that client path somewhere. Edit the existing mapping instead.',
+  'duplicate-from-path':
+    'This download client already maps that client path. Change the mapping that already has it, or use a different client path.',
   'unknown-mapping': 'That path mapping is no longer on file. Reload the page to see what is.',
   'empty-path': 'Fill in both paths. Neither the client path nor the host path may be left blank.',
   /** Distinct from every named refusal above, which are answers from the host -- this one means the request never reached it. Worded exactly as `AddDownloadClient.tsx`'s own `offline`, because it is the same event and a second wording for it would be two sentences for one condition. */
