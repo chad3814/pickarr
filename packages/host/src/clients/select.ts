@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { ClientTypeMismatchError, NoClientOfTypeError } from '../errors.ts';
 
 /**
  * The `rss_feed` columns `selectClientForFeed` needs, narrowed the way
@@ -102,10 +103,12 @@ export function selectClientForFeed(raw: DatabaseSync, feedId: number, chooseInd
       // read -- puts the failure next to its cause instead of at the far
       // end of a submit call, where a magnet handed to SABnzbd fails with
       // an opaque error that says nothing about the feed that caused it.
-      throw new Error(
-        `feed ${feed.id} (${feed.name}) names download client ${client.id} of type ` +
-        `${JSON.stringify(client.type)}, but its download_type is ${JSON.stringify(feed.downloadType)}`,
-      );
+      //
+      // A class rather than a bare `Error`, like the no-candidates branch
+      // below: `clients/pick.ts` turns this into the `client-type-mismatch`
+      // refusal and that one into `no-client-of-type`, and prose is all
+      // that told the two apart otherwise -- see `../errors.ts`.
+      throw new ClientTypeMismatchError(feed.id, feed.name, client.id, client.type, feed.downloadType);
     }
     return client.id;
   }
@@ -113,10 +116,7 @@ export function selectClientForFeed(raw: DatabaseSync, feedId: number, chooseInd
   const candidates = readCandidateClientIds(raw, feed.downloadType);
 
   if (candidates.length === 0) {
-    throw new Error(
-      `feed ${feed.id} (${feed.name}) has no download client of type ${JSON.stringify(feed.downloadType)}: ` +
-      `create one, or set the feed's download_client_id`,
-    );
+    throw new NoClientOfTypeError(feed.id, feed.name, feed.downloadType);
   }
 
   if (candidates.length > 1) {

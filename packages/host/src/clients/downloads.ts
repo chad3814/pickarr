@@ -18,6 +18,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, DownloadSubmission } from '@pickarr/contract';
 import type { QueuedFetch } from '../fetch/queue.ts';
+import { AlreadySubmittedError } from '../errors.ts';
 import { readClientConfig } from './config.ts';
 import type { Secrets } from '../secrets/instance.ts';
 import type { ClientConfig } from './config.ts';
@@ -288,13 +289,15 @@ export function createDownloadClients(deps: {
         // wording also reaches `jobs.last_error` once this rethrows into
         // `run-job.ts` -- the raw SQLite message would otherwise still get
         // there unchanged.
+        //
+        // `AlreadySubmittedError` (`../errors.ts`) rather than a bare
+        // `Error` carrying that wording, because `clients/pick.ts` maps
+        // this one collision to the `already-submitted` refusal and every
+        // other rejection from this call to a 500. Reading `errcode` off
+        // `cause` at that end would be a second copy of the check three
+        // lines up; the class is the same fact stated once.
         const failure = isUniqueConstraintViolation(err)
-          ? new Error(
-            `rss item ${submission.rssItemId} could not be recorded against download client ` +
-            `${downloadClientId}: this client already has a recorded download using ` +
-            'the same reference',
-            { cause: err },
-          )
+          ? new AlreadySubmittedError(submission.rssItemId, downloadClientId, { cause: err })
           : err;
         const message = failure instanceof Error ? failure.message : String(failure);
         plan.markFailed(raw, rowId, redactUrl(message), now());

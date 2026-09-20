@@ -14,6 +14,8 @@ import { addFeed as addFeedRule } from './feeds/add.ts';
 import type { AddFeedInput, AddFeedRefusal } from './feeds/add.ts';
 import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from './clients/add.ts';
+import { requestPick as requestPickRule } from './clients/pick.ts';
+import type { PickAccepted, PickRefusal } from './clients/pick.ts';
 import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
 import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -21,7 +23,7 @@ import { pendingJobId, readPayloadNumber } from './jobs/pending.ts';
 import { createReconcileHandler, scheduleReconcile as scheduleReconcileJob } from './clients/reconcile-job.ts';
 import type { Secrets } from './secrets/instance.ts';
 import { HOST_PLUGIN_ID } from './host-id.ts';
-import { PluginNotRegisteredError } from './errors.ts';
+import { PluginNotRegisteredError, UnknownRssItemError } from './errors.ts';
 import { ownerPluginId } from './db/owner.ts';
 
 export { HOST_PLUGIN_ID };
@@ -29,6 +31,7 @@ export { PluginNotRegisteredError };
 export { ownerPluginId };
 export type { AddFeedInput, AddFeedRefusal };
 export type { AddDownloadClientInput, AddDownloadClientRefusal };
+export type { PickAccepted, PickRefusal };
 export { MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S } from './feeds/add.ts';
 
 /**
@@ -97,7 +100,49 @@ export interface Host {
   register(plugin: MediaPlugin): void;
   /** Dispatches to the plugin owning the feed those items came from. */
   notifyNewRssItems(ids: readonly number[]): Promise<NotifyOutcome>;
+  /**
+   * Hands an rss item to the plugin owning its feed, which submits it to a
+   * download client.
+   *
+   * **Throws, where every other write path on this interface returns a
+   * refusal as a value.** That is not an oversight being preserved: this
+   * method predates any caller at all, and the errors it and everything
+   * under it raise are how a job's `last_error` and the host log describe a
+   * failed pick. `requestPick` below is the conversion, and
+   * `clients/pick.ts` is where each throw becomes a code. A caller that
+   * wants an answer rather than an exception should use that one.
+   *
+   * Rejects with `UnknownRssItemError` for an id naming no row and
+   * `PluginNotRegisteredError` for a row whose feed's plugin is absent; the
+   * plugin's own handler may reject with anything, and does reject with
+   * `NoClientOfTypeError`, `ClientTypeMismatchError` or
+   * `AlreadySubmittedError` when the submission cannot be placed.
+   */
   requestDownload(rssItemId: number): Promise<void>;
+  /**
+   * Submits a pick for one release, answering `{ accepted: true }` or one
+   * of `@pickarr/contract`'s `REQUEST_PICK_REFUSALS`.
+   *
+   * The value-returning face of `requestDownload` above, and the one
+   * `POST /api/picks` is built on. The conversion itself lives in
+   * `clients/pick.ts`, this method's own delegate -- the same split
+   * `addFeed` and `addDownloadClient` use, and for the same reason:
+   * `host.ts` is already long and that rule set is self-contained.
+   *
+   * **Returns every refusal as a value and throws none of them**, with
+   * exactly the scope `addFeed`'s own doc states and no more. It can still
+   * reject: anything `requestDownload` raises that is not one of the five
+   * refusal classes is rethrown untouched -- a corrupt row, a closed
+   * database, a plugin's own bug, a download client that could not be
+   * reached. Those are infrastructure faults rather than answers about the
+   * pick, they reach `api/server.ts`'s outermost handler, and they become a
+   * 500, which is the right status for them.
+   *
+   * **`{ accepted: true }` does not mean a download row exists**, and the
+   * route's own comment has the measurement. What it means is that the
+   * owning plugin's `onDownloadRequest` resolved.
+   */
+  requestPick(rssItemId: number): Promise<PickAccepted | PickRefusal>;
   /**
    * Validates and writes a new `rss_feed` row, then schedules its first poll
    * immediately -- the same call `main.ts` already makes at boot for every
@@ -636,11 +681,33 @@ export function createHost(deps: {
 
     async requestDownload(rssItemId) {
       const pluginId = ownerPluginId(deps.raw, rssItemId);
-      const plugin = pluginId !== undefined ? plugins.get(pluginId) : undefined;
-      if (pluginId === undefined || !plugin) {
-        throw new Error(`rss item id ${rssItemId} belongs to a feed whose plugin is not registered`);
+      if (pluginId === undefined) {
+        // Two conditions used to share one thrown sentence here ("belongs
+        // to a feed whose plugin is not registered"), because nothing
+        // downstream had to tell them apart. `requestPick` does: an id
+        // naming no row is `unknown-release` and a row whose plugin is
+        // absent is `plugin-not-registered`, and those are two different
+        // things to put in front of an operator. `ownerPluginId` joins
+        // `rss_item` to `rss_feed`, so `undefined` means one of the two
+        // rows is missing -- and `rss_item.feed_id` is a foreign key under
+        // `PRAGMA foreign_keys = ON` (`db/open.ts`), so the feed cannot be
+        // the missing one and this is the item.
+        throw new UnknownRssItemError(rssItemId);
+      }
+      const plugin = plugins.get(pluginId);
+      if (!plugin) {
+        throw new PluginNotRegisteredError(pluginId);
       }
       await plugin.onDownloadRequest(rssItemId, ctxFor(plugin.id));
+    },
+
+    async requestPick(rssItemId) {
+      // Through `host.requestDownload`, the public method, and not through
+      // the closure above it -- the same routing `addFeed` uses for
+      // `schedulePoll`, and for the same reason: a pick must take the exact
+      // path every other caller of `requestDownload` takes, rather than a
+      // second, parallel one that could drift from it.
+      return requestPickRule({ requestDownload: (id) => host.requestDownload(id) }, rssItemId);
     },
 
     deliverToPlugin,
