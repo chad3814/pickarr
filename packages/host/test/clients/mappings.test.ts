@@ -318,7 +318,7 @@ test('an empty path is refused on either field, and only the empty string is', a
   assert.equal(
     refusalOf(await host.addMapping({ downloadClientId: clientId, fromPath: '', toPath: '/media' })),
     'empty-path',
-    'an empty from_path matches every path the client reports',
+    'an empty from_path is a catch-all for every absolute POSIX path -- see the module docblock',
   );
   assert.equal(
     refusalOf(await host.addMapping({ downloadClientId: clientId, fromPath: '/downloads', toPath: '' })),
