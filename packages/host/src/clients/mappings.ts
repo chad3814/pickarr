@@ -137,9 +137,14 @@ const SQLITE_CONSTRAINT_UNIQUE = 2067;
  * tree, by inserting a `filepath_mapping` naming a `download_client` id that
  * does not exist and reading `errcode` off what was thrown.
  *
- * The first copy of this one in the repository; the four `2067` declarations
- * above have no `787` beside them, because no other write path in this
- * package has a foreign key it lets a caller choose the value of.
+ * **Not the first mention of 787 in the repository**, which is what this
+ * said until a review checked it: `db/migrate.ts`'s migration-12 docblock
+ * already records the same code, measured the same way, for the two
+ * `auth_user` foreign keys that declare no `ON DELETE`. It is the first
+ * *constant* -- that one is prose in a comment, since nothing there
+ * catches the error -- and the four `2067` declarations named above have
+ * no `787` beside them, because no other write path in this package has a
+ * foreign key it lets a caller choose the value of.
  */
 const SQLITE_CONSTRAINT_FOREIGNKEY = 787;
 

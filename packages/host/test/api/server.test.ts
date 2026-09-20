@@ -14,6 +14,7 @@ import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import type { AddFeedInput } from '../../src/feeds/add.ts';
 import type { AddDownloadClientInput } from '../../src/clients/add.ts';
+import type { MappingRefusal } from '../../src/clients/mappings.ts';
 import { ADD_DOWNLOAD_CLIENT_REFUSALS, MAPPING_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
@@ -180,20 +181,28 @@ async function start(
     requestPick: () => {
       throw new Error('requestPick not stubbed in this test');
     },
-    // Same reasoning again, for all three mapping writes. The guard-probe
-    // tests do reach both `/api/mappings` routes with a session -- they
-    // send `{}`, which the shape guards refuse ahead of these, and the
-    // `DELETE` half reaches `removeMapping`, so that one is overridden by
-    // every test that means to exercise it.
+    // Same reasoning again for the two that take a body: the guard-probe
+    // tests reach both `/api/mappings` routes with a session, sending
+    // `{}`, which each shape guard refuses ahead of these.
     addMapping: () => {
       throw new Error('addMapping not stubbed in this test');
     },
     editMapping: () => {
       throw new Error('editMapping not stubbed in this test');
     },
-    removeMapping: () => {
-      throw new Error('removeMapping not stubbed in this test');
-    },
+    // **The one default in this object that is not a throw, and the
+    // exception is forced by `guardProbe`.** `DELETE /api/mappings/:id`
+    // has no body to fail a shape guard, so the probe reaches this
+    // function -- with a throwing default that is a genuine 500 written
+    // into the log of a test whose subject is the session guard, and a
+    // reader later trying to work out what is broken.
+    //
+    // It is still not a stub that *succeeds*, which is the property the
+    // siblings above exist to protect: `unknown-mapping` is the truthful
+    // answer for id 1 against a database with no mappings in it, and any
+    // test that means to observe a removal overrides this and would fail
+    // loudly against it if it forgot.
+    removeMapping: async () => ({ refusal: 'unknown-mapping' }),
     // No plugin in this file declares a synced table -- what `/api/sync` and
     // `/api/sync/backfill` do with a real one is `sync-route.test.ts`'s.
     // This file only needs the guard on both routes, which an empty registry
@@ -2260,6 +2269,99 @@ test('a DELETE sends no body, and the request reader must not refuse it for that
       { refusal: 'invalid-shape' },
       'and it is a shape failure rather than a parse failure: there was nothing to parse',
     );
+
+    // **A DELETE that *does* send a body is still read, and still refused
+    // if it does not parse.** The change in `readBody` is about an empty
+    // body, not about the method: skipping the read for `DELETE` would
+    // leave a client's bytes unread on the socket, so the body is drained
+    // and discarded either way. A `DELETE` carrying `{not json` therefore
+    // gets the same `malformed-body` any other method would -- measured,
+    // and pinned here because the alternative implementation would have
+    // answered 204 and nothing would have said so.
+    const garbage = await sendRaw(server, 'DELETE', '/api/mappings/7', cookie, '{not json');
+    assert.equal(garbage.status, 400);
+    assert.deepEqual(JSON.parse(garbage.text), { refusal: 'malformed-body' });
+
+    // And a DELETE carrying a well-formed body is read, discarded and
+    // answered normally: the route takes its id from the path and looks at
+    // no body at all.
+    const withBody = await send(server, 'DELETE', '/api/mappings/7', cookie, { fromPath: '/ignored' });
+    assert.equal(withBody.status, 204);
+    assert.equal(withBody.text, '');
+  } finally {
+    await server.close();
+  }
+});
+
+test('an empty request body is not a malformed one, and whitespace still is', async () => {
+  // **The edit to `readBody` moved three routes that were already
+  // shipped**, and this is where that is pinned rather than left for the
+  // next reader to construct. `JSON.parse('')` throws, so before the
+  // change every completely empty non-`GET` body was `malformed-body`;
+  // it is now `{ body: undefined }`, which each route's own shape guard
+  // then refuses as `invalid-shape`.
+  //
+  // Both codes are 400 and both are stable codes, so the constraint the
+  // pair exists to satisfy is untouched -- and `invalid-shape` is the
+  // honest one, because there was nothing to parse.
+  //
+  // **Whitespace-only is still `malformed-body`**, and that is the line:
+  // the check is `text === ''`, not a trim, so `' '` reaches `JSON.parse`
+  // and throws exactly as it did before. A trim here would have quietly
+  // widened "no body" to "nothing but spaces", which is a different claim
+  // about what a client sent.
+  //
+  // Asserted on a **non-mapping** route as well as a mapping one, because
+  // the routes this change moved are the ones it was not written for.
+  const { raw, db } = setup();
+  let reached = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addFeed: async () => {
+      reached += 1;
+      return { id: 1 };
+    },
+    addMapping: async () => {
+      reached += 1;
+      return { id: 1 };
+    },
+  });
+  try {
+    const routes = ['/api/feeds', '/api/mappings'] as const;
+
+    const empties = await Promise.all(routes.map(async (path) => {
+      const { status, text } = await postRaw(server, path, cookie, '');
+      return { path, status, text };
+    }));
+    for (const { path, status, text } of empties) {
+      assert.equal(status, 400, `${path} refuses an empty body`);
+      assert.deepEqual(
+        JSON.parse(text),
+        { refusal: 'invalid-shape' },
+        `${path}: an absent body is a shape failure, not a parse failure`,
+      );
+    }
+
+    const blanks = await Promise.all(routes.map(async (path) => {
+      const { status, text } = await postRaw(server, path, cookie, '   ');
+      return { path, status, text };
+    }));
+    for (const { path, status, text } of blanks) {
+      assert.equal(status, 400, `${path} refuses a whitespace-only body`);
+      assert.deepEqual(
+        JSON.parse(text),
+        { refusal: 'malformed-body' },
+        `${path}: whitespace is a body, and it does not parse -- the check is \`=== ''\`, not a trim`,
+      );
+    }
+
+    // The two codes still tell the two conditions apart, which is the whole
+    // point of neither of them being prose.
+    assert.notDeepEqual(
+      JSON.parse(String(empties[0]?.text)),
+      JSON.parse(String(blanks[0]?.text)),
+      'an absent body and an unparseable one remain distinguishable without reading a sentence',
+    );
+    assert.equal(reached, 0, 'and neither body reached a host operation');
   } finally {
     await server.close();
   }
@@ -2388,28 +2490,53 @@ test('both mapping 400s carry a code, so the one status they share is not told a
   }
 });
 
+/**
+ * The one mapping id the stubs below know about, so a test can tell "the
+ * host was asked and said no" from "the route never asked".
+ */
+const KNOWN_MAPPING_ID = 7;
+
+/**
+ * `editMapping`/`removeMapping` stubs that behave the way the real host
+ * behaves, recording every id they are handed into `asked`.
+ *
+ * **Realistic rather than always-accepting, and that is what makes the
+ * `Number.isSafeInteger` test mean anything.** The first version of that
+ * test used stubs that answered `{ id }` for every id, so deleting the
+ * check turned a 404 into a 204 -- a loud failure produced entirely by the
+ * stub. The real host answers `changes === 0` as
+ * `{ refusal: 'unknown-mapping' }`, so what actually changes in production
+ * is the *body* of a 404, not the status. These stubs reproduce that, so
+ * the assertion that reds is the one about the body.
+ */
+function knownMappingOnly(asked: number[]): Pick<ReadServerDeps, 'editMapping' | 'removeMapping'> {
+  const answer = async (id: number): Promise<{ id: number } | MappingRefusal> => {
+    asked.push(id);
+    return id === KNOWN_MAPPING_ID ? { id } : { refusal: 'unknown-mapping' };
+  };
+  return { editMapping: (id) => answer(id), removeMapping: (id) => answer(id) };
+}
+
 test('a mapping id that is not a safe integer is an unknown route, and the host is never asked', async () => {
   // The `:id` is read back off the pathname by index and checked, never
   // bound and never `!`-asserted -- the shape `/api/artwork/:kind/
   // :mediaItemId` established.
   //
-  // **`Number.isSafeInteger` is the check that is not decoration.**
-  // `'9'.repeat(30)` is all digits, so `DIGITS` passes it, and `Number` of
-  // it is `1e+30` -- a float. Handing a float to a parameter bound against
-  // an `INTEGER PRIMARY KEY` is a 500 for a request that only ever meant
-  // "not found". The two calls below are what reds if the check goes.
+  // **What `Number.isSafeInteger` actually buys, re-measured.** The reason
+  // first written here -- "a float bound against an `INTEGER PRIMARY KEY`
+  // is a 500" -- was false. `node:sqlite` binds `1e+30`, `1.5`, `-1` and
+  // `2**53` to both the `DELETE` and the `UPDATE` without throwing, each
+  // reporting `changes: 0`, so the host would answer
+  // `404 { refusal: 'unknown-mapping' }`.
+  //
+  // The check still earns its place, and this test is written against the
+  // two things it really does: the answer is the *unknown-route* 404 rather
+  // than a claim that a well-formed id named no row, and no such id reaches
+  // a prepared statement at all. The row-aliasing case, which is the
+  // stronger reason, is the test below.
   const { raw, db } = setup();
   const asked: number[] = [];
-  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
-    editMapping: async (id) => {
-      asked.push(id);
-      return { id };
-    },
-    removeMapping: async (id) => {
-      asked.push(id);
-      return { id };
-    },
-  });
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, knownMappingOnly(asked));
   try {
     const tooLarge = '9'.repeat(30);
     const unreachable = [
@@ -2427,15 +2554,71 @@ test('a mapping id that is not a safe integer is an unknown route, and the host 
 
     for (const { method, path, status, text } of answers) {
       assert.equal(status, 404, `${method} ${path} is not a mapping that could exist`);
-      assert.deepEqual(JSON.parse(text), { error: 'unknown route' }, 'and it answers the same 404 a path naming no route gets');
+      // The body, not the status, is what moves if the check goes: the host
+      // would answer `unknown-mapping`, which asserts something about a row
+      // that it cannot honestly assert about `1e+30`.
+      assert.deepEqual(
+        JSON.parse(text),
+        { error: 'unknown route' },
+        `${method} ${path} answers the same 404 a path naming no route gets, not unknown-mapping`,
+      );
     }
     assert.deepEqual(asked, [], 'no unparseable id reached the host, whatever it would have done with it');
 
-    // The control: a real id does reach the host, so the assertion above is
-    // not passing because nothing ever gets through.
-    const real = await sendBodiless(server, 'DELETE', '/api/mappings/7', cookie);
-    assert.equal(real.status, 204);
-    assert.deepEqual(asked, [7]);
+    // Two controls, so the assertions above are not passing because nothing
+    // ever gets through: a real id the host knows, and a real id it does
+    // not -- the second being exactly the answer the unparseable ids must
+    // *not* receive.
+    const known = await sendBodiless(server, 'DELETE', `/api/mappings/${String(KNOWN_MAPPING_ID)}`, cookie);
+    assert.equal(known.status, 204);
+
+    const absent = await sendBodiless(server, 'DELETE', '/api/mappings/8', cookie);
+    assert.equal(absent.status, 404);
+    assert.deepEqual(
+      JSON.parse(absent.text),
+      { refusal: 'unknown-mapping' },
+      'a well-formed id naming no row reads differently from an id that could never name one',
+    );
+
+    assert.deepEqual(asked, [KNOWN_MAPPING_ID, 8], 'and only the two well-formed ids reached the host');
+  } finally {
+    await server.close();
+  }
+});
+
+test('an id above 2**53 cannot be used to address the row next to the one asked for', async () => {
+  // **The strongest reason the check exists, and the one that is a
+  // correctness bug rather than a cosmetic one.** Measured directly against
+  // a migrated database: a `filepath_mapping` row seeded at id
+  // `9007199254740992` (`2**53`) is deleted by
+  // `DELETE ... WHERE id = Number('9007199254740993')` -- a *different*
+  // id -- with `changes: 1`, because `Number('9007199254740993')` is
+  // `9007199254740992`. Every integer above `2**53` has neighbours that
+  // collapse onto it, and `INTEGER PRIMARY KEY` runs to `2**63 - 1`.
+  //
+  // `DIGITS` cannot catch this: sixteen digits are all digits. This is the
+  // one case where removing `Number.isSafeInteger` is not a cosmetic change
+  // to a 404 body but a silent write to the wrong row.
+  const alias = '9007199254740993';
+  assert.equal(Number(alias), 2 ** 53, 'the premise: this id parses to its neighbour');
+  assert.equal(Number.isSafeInteger(Number(alias)), false, 'and the check is what sees that');
+
+  const { raw, db } = setup();
+  const asked: number[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, knownMappingOnly(asked));
+  try {
+    const removed = await sendBodiless(server, 'DELETE', `/api/mappings/${alias}`, cookie);
+    assert.equal(removed.status, 404);
+    assert.deepEqual(JSON.parse(removed.text), { error: 'unknown route' });
+
+    const edited = await send(server, 'PATCH', `/api/mappings/${alias}`, cookie, validMappingEditBody());
+    assert.equal(edited.status, 404);
+
+    assert.deepEqual(
+      asked,
+      [],
+      `no request for ${alias} may reach the host, because what it would be handed is ${String(2 ** 53)}`,
+    );
   } finally {
     await server.close();
   }

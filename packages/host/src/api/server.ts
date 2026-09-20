@@ -1071,11 +1071,37 @@ function statusForMappingRefusal(refusal: MappingRefusal['refusal']): number {
  * Every segment is checked rather than `!`-asserted:
  * `noUncheckedIndexedAccess` types each one `string | undefined`, and a
  * path with the right number of slashes and an empty segment is a real
- * request a client can send. `Number.isSafeInteger` is the last check and
- * is not decoration -- `Number('9'.repeat(30))` is a float, and handing a
- * float to a parameter bound against an `INTEGER PRIMARY KEY` is a 500 for
- * a request that only ever meant "not found". `DIGITS` alone does not
- * catch it, since thirty digits are all digits.
+ * request a client can send.
+ *
+ * **`Number.isSafeInteger` is the last check, and the reason written here
+ * first was false.** It said a float bound against an `INTEGER PRIMARY
+ * KEY` is a 500. Measured on a migrated database: `node:sqlite` binds
+ * `1e+30`, `1.5`, `-1` and `2**53` to both the `DELETE` and the `UPDATE`
+ * **without throwing**, each reporting `changes: 0`. So without this check
+ * the host answers `404 { refusal: 'unknown-mapping' }`, not a 500. The
+ * sentence was copied from `artworkAnswer`'s docblock above, which makes
+ * the same claim about the same binding and is wrong in the same way; that
+ * one is left for whoever owns that route, but nothing here now rests on
+ * it.
+ *
+ * Two real reasons remain, and both are measured.
+ *
+ * **A float id can address a row that is not the one asked for.** A
+ * `filepath_mapping` row seeded at id `9007199254740992` (`2**53`) is
+ * deleted by a request for `/api/mappings/9007199254740993` -- a different
+ * id -- because `Number('9007199254740993')` *is* `9007199254740992`,
+ * `changes: 1`, row gone. Every integer above `2**53` has neighbours that
+ * collapse onto it, and `INTEGER PRIMARY KEY` goes to `2**63 - 1`, so the
+ * aliasing is a property of the id space rather than of any particular
+ * install. This check is the only thing between that and a silent
+ * wrong-row write. `DIGITS` cannot see it: sixteen digits are all digits.
+ *
+ * **And the body stays honest.** `unknown-mapping` claims "this is a
+ * well-formed id and no row has it", which is a statement the host cannot
+ * make about `1e+30`. Refused here, both callers answer `UNKNOWN_ROUTE` --
+ * the same 404 a path naming no route gets -- so an id that could never
+ * name a row reads as a bad request target rather than as a missing
+ * mapping, and no unparseable id reaches a prepared statement at all.
  *
  * `undefined` rather than an `Answer`, because the two callers want
  * different things from it and neither wants this function's opinion: both
@@ -1118,10 +1144,10 @@ const STATIC_ROUTE_PATH = '/*';
  * the download-clients slice then added a twelfth and updated neither.
  * (The picks slice made it thirteen and corrected both; this slice makes
  * it fifteen. Measured with the `grep` below on each occasion, not
- * incremented on sight.) That is not an argument for deleting the number: a reader wants to know
- * whether the table below is the whole set. It is an argument for checking
- * it, because no test pins the total and none can usefully. The one count
- * assertion in `api/server.test.ts` is
+ * incremented on sight.) That is not an argument for deleting the number:
+ * a reader wants to know whether the table below is the whole set. It is
+ * an argument for checking it, because no test pins the total and none
+ * can usefully. The one count assertion in `api/server.test.ts` is
  * `assert.equal(guarded.length, ROUTES.length - 2)`, which derives its
  * expectation from the code under test and so pins the *open* count
  * without being able to see the total move. `grep -c "^    path: "` on this
@@ -1759,6 +1785,20 @@ function readBody(request: IncomingMessage): Promise<{ body: unknown } | { refus
       // constraint the two exist to satisfy is untouched -- and
       // `invalid-shape` is the more honest of the two, since there was
       // nothing to parse and so nothing malformed.
+      // `test/api/server.test.ts` pins that on `POST /api/feeds` as well
+      // as on a mapping route, because the routes this moved are the ones
+      // it was not written for.
+      //
+      // **`=== ''` and not a trim**, deliberately. `'   '` is a body, it
+      // does not parse, and it still answers `malformed-body` -- pinned
+      // beside the empty case. Trimming would widen "the client sent no
+      // body" to "the client sent nothing but spaces", which is a
+      // different claim and one this function has no reason to make.
+      //
+      // **A `DELETE` that does send a body is still read and still
+      // checked**, since this is about what arrived rather than about the
+      // method: `DELETE` with `{not json` is `malformed-body`, pinned in
+      // the same test.
       if (text === '') {
         finish({ body: undefined });
         return;
