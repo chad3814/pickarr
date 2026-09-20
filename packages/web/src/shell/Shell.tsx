@@ -53,6 +53,7 @@ import { Category as CategoryScreen } from '../library/Category.tsx';
 import { Settings } from '../settings/Settings.tsx';
 import { postFeed } from '../settings/AddFeed.tsx';
 import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
+import { mappingSubmit } from '../settings/postMapping.ts';
 import { postPick } from '../library/postPick.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
@@ -211,19 +212,29 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/*
-          `postFeed` and `postDownloadClient` are the two real `submit`s
+          `postFeed`, `postDownloadClient` and `mappingSubmit` are the
+          real `submit`s this screen needs
           (`../settings/AddFeed.tsx`'s own doc on why each is injected
           rather than defaulted): wired here, explicitly, rather than given
           a default inside either form that would perform network I/O
-          invisibly at every call site. `Settings` is the whole screen --
-          both sections -- and its own docblock says why it is a parent
-          component rather than a second section inside `Feeds`.
+          invisibly at every call site. The third is one value carrying
+          three verbs -- the add, the edit and the remove a path mapping
+          needs -- because all three are the same seam and threading them
+          separately would put five submit props on this one element.
+          `Settings` is the whole screen -- both sections -- and its own
+          docblock says why it is a parent component rather than a second
+          section inside `Feeds`.
         */}
         <Route
           path="settings"
           element={
             store === undefined ? null : (
-              <Settings source={store} submitFeed={postFeed} submitDownloadClient={postDownloadClient} />
+              <Settings
+                source={store}
+                submitFeed={postFeed}
+                submitDownloadClient={postDownloadClient}
+                submitMapping={mappingSubmit}
+              />
             )
           }
         />

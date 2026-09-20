@@ -6,9 +6,9 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
-import { subscribeInserts } from '../../src/store/notify.ts';
-import { DownloadClients } from '../../src/settings/DownloadClients.tsx';
-import type { DownloadClientsSource } from '../../src/settings/useDownloadClients.ts';
+import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
+import { DownloadClients, type DownloadClientsListSource } from '../../src/settings/DownloadClients.tsx';
+import type { MappingSubmit } from '../../src/settings/postMapping.ts';
 import {
   REFUSAL_MESSAGES,
   type AddDownloadClientInput,
@@ -59,13 +59,21 @@ function clientOp({
   };
 }
 
-/** Everything `DownloadClients` needs, bound straight to a raw database -- no `Store`, nothing this suite has to stop afterwards. */
-function sourceFor(db: IDBDatabase): DownloadClientsSource {
+/** Everything `DownloadClients` needs, bound straight to a raw database -- no `Store`, nothing this suite has to stop afterwards. `subscribe` is here for the nested mappings list, which is the first settings list to need it. */
+function sourceFor(db: IDBDatabase): DownloadClientsListSource {
   return {
     listByTable: (table, opts) => listByTable(db, table, opts),
+    subscribe,
     subscribeInserts,
   };
 }
+
+/** No test in this file expands a client's mappings, so none of these three may be reached. `ClientMappings.test.tsx` is where they are driven. */
+const neverSubmitMapping: MappingSubmit = {
+  add: () => assert.fail('this file must not add a path mapping'),
+  edit: () => assert.fail('this file must not edit a path mapping'),
+  remove: () => assert.fail('this file must not remove a path mapping'),
+};
 
 /** A `submit` that fails the test if it is ever called -- a listing test must not be silently exercising the add path (`Feeds.test.tsx`'s own `neverSubmit`). */
 function neverSubmit(): Promise<AddDownloadClientOutcome> {
@@ -89,7 +97,7 @@ function submitForm(): void {
 test('the list shows a client by name, implementation and address, from the replica', async () => {
   const db = await freshDb();
   await seed(db, [clientOp({ id: 1, name: 'Seedbox', implementation: 'qbittorrent', url: 'http://qbit.example:8080' })]);
-  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} />);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
 
   await waitFor(() => {
     // A length check, not `assert.ok(getByRole(...))`: the latter can only
@@ -113,7 +121,7 @@ test('an implementation this build has no word for is still shown, as the host s
   // not make this list render a blank line where a name belongs.
   const db = await freshDb();
   await seed(db, [clientOp({ id: 1, name: 'Seedbox', implementation: 'transmission' })]);
-  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} />);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText('transmission'), 'the unrecognised implementation is shown verbatim');
@@ -130,7 +138,7 @@ test('a client with a username says so, and one with none says nothing about a c
     clientOp({ id: 1, name: 'Logs in', username: 'admin' }),
     clientOp({ id: 2, name: 'Bearer', username: null }),
   ]);
-  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} />);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText('Signs in as admin'));
@@ -147,7 +155,7 @@ test('a blank category and a blank address each read as the configuration they a
   // http address at all (`DownloadClientSyncRead`'s own doc).
   const db = await freshDb();
   await seed(db, [clientOp({ id: 1, name: 'Seedbox', url: '', category: '' })]);
-  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} />);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText('No address recorded.'));
@@ -158,7 +166,7 @@ test('a blank category and a blank address each read as the configuration they a
 test('a category is named where there is one', async () => {
   const db = await freshDb();
   await seed(db, [clientOp({ id: 1, name: 'Seedbox', category: 'movies' })]);
-  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} />);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText('Category: movies'));
@@ -179,6 +187,7 @@ test('clicking Add download client calls submit, and the row appears through the
         submitCalls += 1;
         return Promise.resolve({ id: 1 });
       }}
+      submitMapping={neverSubmitMapping}
     />,
   );
   fillClientForm();
@@ -212,7 +221,7 @@ test('each refusal reads as its own sentence, and offline and unrecognised read 
   ] as const) {
     // eslint-disable-next-line no-await-in-loop -- each iteration renders, asserts and cleans up before the next; the six outcomes cannot run concurrently against the one shared `screen` (`Feeds.test.tsx`'s own refusal walk takes the identical exception for the identical reason).
     const db = await freshDb();
-    render(<DownloadClients source={sourceFor(db)} submit={submitFor(outcome)} />);
+    render(<DownloadClients source={sourceFor(db)} submit={submitFor(outcome)} submitMapping={neverSubmitMapping} />);
     fillClientForm();
     submitForm();
     // eslint-disable-next-line no-await-in-loop -- see above
@@ -237,7 +246,7 @@ test('the error is legible: the sentence is rendered text, not only an accessibl
   // That is the whole point of this test and the reason it does not use
   // `getByRole`'s `name` option anywhere.
   const db = await freshDb();
-  render(<DownloadClients source={sourceFor(db)} submit={submitFor({ refusal: 'duplicate-name' })} />);
+  render(<DownloadClients source={sourceFor(db)} submit={submitFor({ refusal: 'duplicate-name' })} submitMapping={neverSubmitMapping} />);
   fillClientForm();
   submitForm();
 
@@ -249,7 +258,7 @@ test('the error is legible: the sentence is rendered text, not only an accessibl
 
 test('an empty replica reads as "no download clients yet", not as still loading forever', async () => {
   const db = await freshDb();
-  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} />);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
   await waitFor(() => {
     assert.equal(screen.getByText(/no download clients yet/i).tagName, 'P',
       'rendered as its own line of text, not merely present in the tree');
@@ -266,7 +275,7 @@ test('the list never falls back to the network when the replica is empty', async
     return Promise.resolve(new Response('{}', { status: 200 }));
   };
   try {
-    render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} />);
+    render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
     await waitFor(() => {
       assert.equal(screen.getByText(/no download clients yet/i).tagName, 'P');
     });
@@ -288,7 +297,7 @@ test('a successful add does not refetch the list either', async () => {
     return Promise.resolve(new Response('{}', { status: 200 }));
   };
   try {
-    render(<DownloadClients source={sourceFor(db)} submit={submitFor({ id: 1 })} />);
+    render(<DownloadClients source={sourceFor(db)} submit={submitFor({ id: 1 })} submitMapping={neverSubmitMapping} />);
     fillClientForm();
     submitForm();
     await waitFor(() => {
@@ -298,4 +307,37 @@ test('a successful add does not refetch the list either', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('each listed client offers its own path mappings, named from its own heading', async () => {
+  // The wiring `ClientMappings.test.tsx` cannot see: that this section
+  // mounts one per client, hands each the right id, and names each from
+  // the heading beside it -- so two clients present two distinguishable
+  // expanders rather than two buttons both reading `Path mappings`.
+  const db = await freshDb();
+  await seed(db, [clientOp({ id: 1, name: 'Seedbox' }), clientOp({ id: 2, name: 'Attic NAS' })]);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
+
+  await waitFor(() => {
+    assert.equal(screen.getAllByRole('button', { name: /^Path mappings/ }).length, 2, 'one per client');
+  });
+  const seedbox = screen.getByRole('button', { name: 'Path mappings Seedbox' });
+  assert.equal(seedbox.getAttribute('aria-expanded'), 'false', 'collapsed until asked');
+  assert.ok(screen.getByRole('button', { name: 'Path mappings Attic NAS' }),
+    'and the other client\'s expander is a different control with a different name');
+
+  // Expanding one reaches the replica for that client alone. The mapping
+  // below belongs to client 2, so client 1's expansion must not show it.
+  await seed(db, [{
+    op: 'upsert',
+    table: 'filepath_mapping',
+    id: 1,
+    value: { id: 1, downloadClientId: 2, fromPath: '/nas/done', toPath: '/mnt/nas', createdAt: 1, updatedAt: 1 },
+  }]);
+  fireEvent.click(seedbox);
+
+  await waitFor(() => {
+    assert.ok(screen.getByText(/no path mappings/i), 'client 1 has none of its own');
+  });
+  assert.ok(!screen.queryByText('/nas/done'), 'and client 2\'s mapping stayed in client 2\'s row');
 });
