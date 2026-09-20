@@ -855,3 +855,277 @@ test('a pick with no download client set up says so, in words that are styled as
   // dead row (acceptance item 4: no outcome leaves the button pending).
   await expect(page.getByRole('button', { name: `Pick ${RELEASE_FILENAME}` })).toBeEnabled();
 });
+
+/*
+ * The path-mappings slice's own browser proof (task 4's brief), and the
+ * only place any of that slice's screen has run in a real browser.
+ *
+ * **What this spec measures.** All three of the slice's routes answer, in
+ * a browser, over a real socket, with a real session cookie: `POST
+ * /api/mappings` creates a row, `PATCH /api/mappings/:id` replaces both of
+ * its paths and separately answers an `empty-path` refusal, and `DELETE
+ * /api/mappings/:id` removes it. Each of those three rows, edits and
+ * tombstones reaches this tab's replica through `filepath_mapping`'s own
+ * `AFTER INSERT`/`AFTER UPDATE`/`AFTER DELETE` triggers into `sync_log`
+ * (`sync/log.ts`'s `installSyncTriggers`, committed synchronously with the
+ * statement) and this tab's `/api/sync` tail -- nothing below reads a
+ * response body for a path, because none of the three routes answers one:
+ * `POST` and `PATCH` answer `{ id }` and `DELETE` answers no body at all.
+ * The list on screen is the replica's, or it is nothing (Global
+ * Constraint). And `settings.css`'s rules for this section resolve through
+ * a real cascade, which is what the three computed-style assertions below
+ * are for.
+ *
+ * **`PATCH` and `DELETE` are new verbs for this API and this is the first
+ * time either has crossed a real network stack.** Everything before this
+ * slice was `GET` and `POST`. A unit test calls a route handler; here the
+ * browser's own `fetch` sets the method, Node's HTTP parser reads it, and
+ * `api/server.ts`'s per-route `methods` table dispatches on it.
+ *
+ * **What this spec does not measure, stated exactly rather than as "the
+ * whole slice".**
+ *
+ * - **Acceptance item 4 -- that an edit changes what the next delivery
+ *   tick resolves -- is not exercised here at all, and could not be.**
+ *   `mapClientPath` is read by `clients/deliver.ts`, which runs from the
+ *   job dispatcher, and `harness-2.ts` builds a real `Host` and never
+ *   calls `host.start()`. No tick ever runs in this suite. Unlike the
+ *   download clients spec above, though, that costs the *writes* nothing:
+ *   `Host.addMapping`, `editMapping` and `removeMapping` are each one
+ *   synchronous SQLite statement and schedule no job, so there is no
+ *   follow-up work left undispatched behind any of the three. The gap is
+ *   entirely on the reading side. Acceptance item 4 is pinned against
+ *   `mapClientPath` at the unit level, which is where the design spec puts
+ *   it ("pinned against `mapClientPath`, not asserted").
+ * - **Three of the four refusals.** Only `empty-path` is driven below.
+ *   `duplicate-from-path` (acceptance item 2, caught from the unique
+ *   index), `unknown-client` and `unknown-mapping` are host-level and
+ *   pinned in `packages/host/test/clients/mappings.test.ts`;
+ *   `postMapping.ts`'s own two -- `offline` and `unrecognised` -- are
+ *   pinned in `packages/web/test/settings/postMapping.test.tsx`. Nothing
+ *   below is evidence about any of the five.
+ * - **Acceptance item 7 -- that `PATCH` and `DELETE` are refused without a
+ *   session.** Every request this spec makes carries one. The guard and
+ *   its ordering are pinned in the host's own route tests.
+ * - **A `from_path` of `D:\Downloads` (acceptance item 3).** The paths
+ *   typed below are POSIX-shaped. The Windows case is pinned at the host
+ *   and at `postMapping.ts`; what this spec shows is that a path crosses
+ *   the wire and comes back off the replica unchanged, which is the same
+ *   property for one shape of value.
+ *
+ * **No credential is typed here that this file did not already type.** The
+ * two values this spec puts in a form that the ones above do not are
+ * filesystem paths, and they are obviously synthetic literals in git. They
+ * are not credentials -- but they are recorded in `trace.zip` exactly as a
+ * credential would be, per this file's module docblock, so it is worth
+ * saying that they stay paths: nothing below reads a path from
+ * `process.env`, from the database, or from anywhere but the two constants
+ * under this comment. The download client this spec has to create first
+ * reuses `API_KEY` above rather than introducing a second secret-shaped
+ * literal.
+ */
+
+/** The prefix the download client would report. A literal in git, and a path rather than anything credential-shaped -- see the comment above. */
+const CLIENT_PATH = '/downloads/complete';
+/** What that prefix becomes for the host, as first typed. */
+const HOST_PATH = '/media/downloads';
+/** And after the edit. Different from {@link HOST_PATH} at the first character, so a row still showing the old value cannot satisfy the assertion by prefix. */
+const HOST_PATH_CORRECTED = '/mnt/library/downloads';
+
+/**
+ * A locator's box, or a failure naming the locator rather than a `null`
+ * dereference. `boundingBox()` answers `null` for an element that is not
+ * rendered, and an assertion comparing two `null`s would pass.
+ */
+async function boxOf(locator: ReturnType<Page['locator']>, what: string): Promise<{ x: number; y: number; width: number; height: number }> {
+  const box = await locator.boundingBox();
+  if (box === null) throw new Error(`${what} has no bounding box, so it is not rendered`);
+  return box;
+}
+
+test('an operator can add, edit and remove a path mapping on a download client', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await page.goto(`${harness.origin}/settings`);
+
+  // A mapping belongs to a download client by foreign key (design spec
+  // §8), so there has to be one first. Created through the same form the
+  // spec above drives, for the same reason that one does: this suite has
+  // no harness writer for a client, and `addDownloadClient` is the only
+  // thing that knows the credential-name scheme.
+  await page.getByLabel('Client name').fill('Seedbox');
+  await page.getByLabel('Api key').fill(API_KEY);
+  await page.getByLabel('Address').fill(`${harness.origin}/qbittorrent`);
+  await page.getByRole('button', { name: 'Add download client' }).click();
+  await expect(page.getByRole('heading', { name: 'Seedbox' })).toBeVisible({ timeout: 15_000 });
+
+  // The expander's accessible name is composed from two spans of visible
+  // text -- its own label and the client's heading (`ClientMappings.tsx`)
+  // -- so naming it this way is also a check that the composition holds.
+  const expander = page.getByRole('button', { name: 'Path mappings Seedbox' });
+  await expect(expander).toHaveAttribute('aria-expanded', 'false');
+  await expander.click();
+  await expect(expander).toHaveAttribute('aria-expanded', 'true');
+
+  // Zero is an answer and renders as a sentence, not as an empty list
+  // (Global Constraint). The italic is `settings.css`'s empty-state rule
+  // and nothing else on this screen produces it: `base.css`'s only italic
+  // is on `.loading`, and no component in `packages/web/src` sets a class
+  // at all, so an unstyled or emptied stylesheet computes `normal` here.
+  const emptyState = page.getByText('No path mappings for this download client.');
+  await expect(emptyState).toBeVisible();
+  await expect(emptyState).toHaveCSS('font-style', 'italic');
+
+  const addForm = page.getByRole('form', { name: 'Add a path mapping' });
+  await addForm.getByLabel('Client path').fill(CLIENT_PATH);
+  await addForm.getByLabel('Host path').fill(HOST_PATH);
+  await addForm.getByRole('button', { name: 'Add path mapping' }).click();
+
+  // `POST /api/mappings` answers `{ id }` and nothing else -- no path
+  // comes back in that body (`postMapping.ts`). So a row carrying both
+  // paths is the round trip: the host's insert committing,
+  // `filepath_mapping`'s `AFTER INSERT` trigger logging it, this tab's
+  // `/api/sync` tail noticing on its next poll, and
+  // `useClientMappings`'s `subscribeInserts` re-reading the replica.
+  //
+  // The row's accessible name is its own client path, which is how it is
+  // addressed from here on (`MappingRow`: an unlabelled `<li>` reads with
+  // an empty name even when full of visible text).
+  const row = page.getByRole('listitem', { name: CLIENT_PATH });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await expect(row).toContainText(HOST_PATH);
+  await expect(emptyState).toHaveCount(0);
+
+  // `settings.css`'s row layout, and a rule this task added. A `<li>`
+  // computes `display: list-item` from the UA stylesheet, so `flex` here
+  // has exactly one producer: with the stylesheet removed or emptied of
+  // its rule bodies this reads `list-item`. Without it the two buttons sit
+  // flush against the host path and against each other -- measured, three
+  // edges at one x -- which that rule's own comment records.
+  await expect(row).toHaveCSS('display', 'flex');
+
+  // **The row does not move when the editor opens.** This is the pin
+  // `tokens.css`'s `--size-mapping-row` names: `MappingRow` removes Edit
+  // and Remove from the DOM while the row is being edited, so without a
+  // height of its own the first line shrinks to the text and the paths
+  // ride up under the pointer. Measured with only that one declaration
+  // removed, the client path's top edge went from 693.5px to 690px.
+  //
+  // The whole box rather than `y` alone: nothing about opening an editor
+  // should move the path horizontally or resize it either, and all four
+  // numbers were identical in the run this was written against.
+  const clientPathSpan = row.locator('span').first();
+  const beforeEditing = await boxOf(clientPathSpan, 'the client path before the editor opens');
+
+  await row.getByRole('button', { name: `Edit ${CLIENT_PATH}` }).click();
+  const editorHostPath = row.getByLabel('Host path');
+  await expect(editorHostPath).toBeVisible();
+  expect(await boxOf(clientPathSpan, 'the client path with the editor open')).toEqual(beforeEditing);
+
+  // **The editor's fields are laid out, which is the other half of the
+  // selector this task widened.** `settings.css` used to name
+  // `li > div > form > div`, which reaches the *add* form only -- a row's
+  // editor is two levels further down, at `li > div > ul > li > form` -- so
+  // each of its field `<div>`s computed `display: block` and put its label
+  // and its input on one line. Reverting that selector and re-running this
+  // suite left 15/15 green before this assertion existed; with it, the
+  // revert is red here. (Its sibling widening, `li [role='alert'] p`, was
+  // already pinned by the two refusal assertions below. One of the pair was
+  // covered and one was not.)
+  //
+  // Exactly one producer, so this survives a gutted stylesheet as well as a
+  // missing one: a `<div>` computes `display: block` from the UA sheet, and
+  // no component in `packages/web/src` sets a class for anything else to
+  // key on. The parent of the input rather than an nth-child, because that
+  // `<div>` is precisely what the rule selects.
+  const editorField = editorHostPath.locator('xpath=..');
+  await expect(editorField).toHaveCSS('display', 'flex');
+  await expect(editorField).toHaveCSS('flex-direction', 'column');
+
+  // A refused `PATCH`, driven through the one path-content rule the host
+  // has (design spec §7: `empty-path` refuses the empty string and nothing
+  // else -- no leading `/` is required, no backslash rejected). The fields
+  // are deliberately not `required` in the markup for exactly this reason,
+  // so the browser submits it and the host answers.
+  await row.getByLabel('Client path').fill('');
+  await row.getByRole('button', { name: `Save ${CLIENT_PATH}` }).click();
+
+  const refusal = row.getByRole('alert');
+  await expect(refusal).toHaveText(
+    'Fill in both paths. Neither the client path nor the host path may be left blank.',
+  );
+
+  // **The two-sided pin.** `settings.css`'s refusal rule is the reason
+  // that block exists at all: without it the detail-line rule above it
+  // reaches this sentence -- a refusal `<p>` is a `<p>` inside a client
+  // `<li>` -- and an error message renders dimmed at the meta scale,
+  // indistinguishable from the line naming the client's category. That is
+  // `CLAUDE.md`'s longest hazard with a stylesheet as the cause.
+  //
+  // A token-derived colour has exactly one producer here, which is what
+  // makes this red under a *gutted* stylesheet and not only a missing one.
+  // `base.css`'s `--color-error` is on the `.error` utility, and no
+  // component in `packages/web/src` sets a class; delete this file's rule
+  // bodies and the sentence computes `--color-text-dim` from the
+  // detail-line rule, or `--color-text` if that is gone too. Neither is
+  // `--color-error`. This is deliberately *not* `list-style-type: none`
+  // (#90): a value a reset also produces survives gutting.
+  //
+  // Resolved in the browser rather than spelled `rgb(...)`, for the reason
+  // `colorAgainstToken` above gives -- `--color-error` differs between the
+  // two palettes and nothing here pins which one a run resolves to.
+  const refused = await colorAgainstToken(
+    page,
+    "ul[aria-label='download clients'] li > div > ul > li > [role='alert'] p",
+    '--color-error',
+  );
+  expect(refused.color).toBe(refused.tokenColor);
+
+  // And the other half of the same rule, which is the half a reviewer of
+  // task 3 found unproven: the empty-state rule's `font-style: italic`
+  // reaches this sentence too, because a mapping row is an `<li>` whose
+  // refusal banner is a `<div>` with a `<p>` in it. Measured by deleting
+  // the one declaration: this sentence computed `italic`. An alert is not
+  // an aside, and `font-style: normal` is what keeps it from reading as
+  // one -- while the empty-state sentence above still reads as one.
+  await expect(refusal.locator('p')).toHaveCSS('font-style', 'normal');
+
+  // No outcome leaves a control pending (acceptance item 6): the refused
+  // save re-enabled its own button rather than wedging the row.
+  await expect(row.getByRole('button', { name: `Save ${CLIENT_PATH}` })).toBeEnabled();
+
+  // Now an accepted edit. Only the host path changes, so the row keeps its
+  // accessible name and `row` keeps resolving.
+  await row.getByLabel('Client path').fill(CLIENT_PATH);
+  await editorHostPath.fill(HOST_PATH_CORRECTED);
+  await row.getByRole('button', { name: `Save ${CLIENT_PATH}` }).click();
+
+  // `PATCH` answers `{ id }` -- no path in the body either -- so the new
+  // value on screen came from the replica, through `filepath_mapping`'s
+  // `AFTER UPDATE` trigger and the sync tail. `store/apply.ts` counts an
+  // upsert over an existing row as `touched` and never `inserted`, so the
+  // insert channel does not fire for this at all: it is
+  // `useClientMappings`'s per-row `subscribe` that notices, which is the
+  // subscription this slice added and which no other settings list has.
+  await expect(row).toContainText(HOST_PATH_CORRECTED, { timeout: 15_000 });
+  await expect(row).not.toContainText(HOST_PATH);
+
+  // **The removal, and it has to be checked by absence.** `DELETE`
+  // answers `204` with no body -- the first bodiless success this API has
+  // -- so `deleteMapping` reads the status rather than a field, and a
+  // `{ removed: true }` in hand is not evidence the row is gone.
+  //
+  // Both assertions below fail if it is not. The first is the row itself:
+  // `useClientMappings` re-reads the replica and the row leaves when the
+  // `AFTER DELETE` tombstone arrives, not when the request resolves. The
+  // second is stronger than a restatement of it -- the sentence renders
+  // only on `mappings.length === 0`, so a row that had merely stopped
+  // matching the `listitem` role would satisfy the first and not this.
+  // Had the host answered `unknown-mapping` instead, `MappingRow` would
+  // have rendered a refusal and kept the row.
+  await row.getByRole('button', { name: `Remove ${CLIENT_PATH}` }).click();
+  await expect(row).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.getByText('No path mappings for this download client.')).toBeVisible();
+});

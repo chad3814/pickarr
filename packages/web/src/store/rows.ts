@@ -55,9 +55,12 @@ export interface ListByTableOptions {
 }
 
 /**
- * The seven tables `by_table_updated` covers, and no others. The original five
- * were measured rather than intended (design spec §3.2) -- this file's own
- * tests page `media_item` and `rss_item` through the index directly.
+ * The eight tables `by_table_updated` is *read* for, and no others -- which
+ * is once again the same as the tables whose rows it holds, now that the
+ * `filepath_mapping` paragraph at the end has a caller in it. The original
+ * five were measured rather than intended (design spec §3.2) -- this
+ * file's own tests page `media_item` and `rss_item` through the index
+ * directly.
  *
  * **`rss_feed`'s membership is measured too, and this paragraph used to say
  * it was not.** It said "nothing in this repo pages an `rss_feed` row
@@ -75,7 +78,8 @@ export interface ListByTableOptions {
  *
  * `media_item`, `rss_item`, `torrent_download` and `nzb_download`
  * project `updatedAt` because the sync protocol's read shapes for them do;
- * `person` does too, and so do `rss_feed` and `download_client`. `role`
+ * `person` does too, and so do `rss_feed`, `download_client` and
+ * `filepath_mapping`. `role`
  * projects only `createdAt`, and none of the six plugin read shapes
  * (`tv_release`, `tv_season`, `tv_series`, `movie_detail`, `xxx_scene`,
  * `xxx_site`) carries either. Asking `listByTable` for one of those seven
@@ -97,6 +101,53 @@ export interface ListByTableOptions {
  * `test/settings/Settings.test.tsx` and one in `test/shell/Shell.test.tsx`
  * -- each of them seeding real rows through `applyBatch` into a real
  * `fake-indexeddb` store and reading them back through this function.
+ *
+ * **`filepath_mapping` was a ninth synced table and an eighth exclusion,
+ * and it is now a member.** It joined `HOST_SYNCED_TABLES` in the
+ * path-mappings slice with an `updatedAt` of its own (migration 19), so
+ * its rows were already in `by_table_updated` while this set was the last
+ * thing standing between them and a caller -- exactly where
+ * `download_client` stood one slice earlier. The task that made it synced
+ * deliberately left this entry to the task that needed it, and
+ * `settings/useClientMappings.ts` is that caller: the path mappings inside
+ * each download client's row on `/settings`.
+ *
+ * Measured the way the two entries above are, by deleting
+ * `'filepath_mapping'` from the set below: **34 web tests red** of 215 --
+ * fifteen in `test/settings/ClientMappings.test.tsx`, ten in
+ * `test/settings/useClientMappings.test.tsx`, seven in
+ * `test/settings/DownloadClients.test.tsx` and two in
+ * `test/settings/Settings.test.tsx` -- each of them seeding real rows
+ * through `applyBatch` into a real `fake-indexeddb` store and reading them
+ * back through this function.
+ *
+ * This figure said 33 of 214 for the length of one fix wave, and was
+ * wrong by the time it was written: the commit adding the order test to
+ * `useClientMappings.test.tsx` landed two commits *earlier in that same
+ * wave*, and that test fails under this mutation too. Nothing was
+ * mismeasured -- the count was correct when taken and stale when
+ * committed. A measured number is only true of the tree it was measured
+ * against, which is worth knowing before writing the next one.
+ *
+ * The last nine of those are worth naming, because they are collateral
+ * rather than aim: **eight of the nine mention no mapping at all.** The
+ * ninth does -- `DownloadClients.test.tsx`'s `each listed client offers
+ * its own path mappings, named from its own heading`, which this slice
+ * added -- and the sentence here used to say all nine, which a review
+ * re-ran the mutation and corrected. The eight are the other six in
+ * `DownloadClients.test.tsx` and both in `Settings.test.tsx`.
+ * `DownloadClients` mounts a `ClientMappings` per listed client, so a throw here becomes a
+ * rejection out of that hook's refresh on any settings render at all --
+ * which is the other half of why an empty page would be worse than a
+ * throw. A silent `[]` would have left all nine green and the mappings
+ * lists permanently, invisibly empty.
+ *
+ * So the throw's message is true of every table it can name again: the
+ * seven this set excludes are `role`, which projects only `createdAt`, and
+ * the six plugin read shapes, which carry neither. The paragraph this
+ * replaces recorded a deliberate, bounded inaccuracy in that sentence for
+ * the one table that carried the column and was excluded anyway; nothing
+ * here needs it now.
  */
 const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'media_item',
@@ -106,6 +157,7 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'person',
   'rss_feed',
   'download_client',
+  'filepath_mapping',
 ]);
 
 /**
@@ -127,7 +179,7 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
  * does, not a schema change.
  *
  * **Separate from `TABLES_WITH_UPDATED_AT`, because they disagree.** That
- * set admits seven tables and only two of them, `media_item` and `rss_feed`,
+ * set admits eight tables and only two of them, `media_item` and `rss_feed`,
  * project a `pluginId`; the two readers below originally reused it, so for
  * `rss_item`, `torrent_download`, `nzb_download` and `person` the guard
  * passed and the index answered nothing -- measured as
@@ -241,9 +293,10 @@ function drain(cursorRequest: IDBRequest<IDBCursorWithValue | null>, limit: numb
 
 /**
  * `table` in modification order, walking `by_table_updated`. Throws for any
- * of the seven tables {@link TABLES_WITH_UPDATED_AT} excludes -- see that
- * constant's doc for the measurement and the reasoning against returning an
- * empty page instead.
+ * of the seven tables {@link TABLES_WITH_UPDATED_AT} excludes, every one of
+ * which carries no `updatedAt` at all. See that constant's doc for the
+ * per-table measurements and for why an empty page would be worse than a
+ * throw.
  */
 export async function listByTable(
   db: IDBDatabase,

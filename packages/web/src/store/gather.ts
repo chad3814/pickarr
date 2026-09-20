@@ -46,8 +46,9 @@ import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
  * this module and to a plugin's `compose.ts`, never to the store itself).
  * This gatherer does know, for exactly the six tables it names, because
  * `@pickarr/contract`'s `*SyncRead` interface for each of those six -- one
- * of eight now that `rss_feed` and `download_client` have joined the synced
- * set, neither of the other two named anywhere in this module -- is pinned
+ * of nine now that `rss_feed`, `download_client` and `filepath_mapping`
+ * have joined the synced set, none of the other three named anywhere in
+ * this module -- is pinned
  * to the projection the host actually emits for it (`packages/host/test/sync/tables.test.ts` is what keeps the
  * two from drifting).
  *

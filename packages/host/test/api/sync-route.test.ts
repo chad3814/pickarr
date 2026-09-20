@@ -90,9 +90,10 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     raw,
     pluginIdForType: noType,
     // Never called: this file's routes are the three sync ones, and none of
-    // them reaches `/api/feeds`, `/api/download-clients` or `/api/picks` --
-    // all three stubs give the same "not stubbed" failure the shape rather
-    // than silently succeeding, as `server.test.ts`'s own do.
+    // them reaches `/api/feeds`, `/api/download-clients`, `/api/picks` or
+    // either `/api/mappings` route -- every stub gives the same "not
+    // stubbed" failure the shape rather than silently succeeding, as
+    // `server.test.ts`'s own do.
     addFeed: () => {
       throw new Error('addFeed not stubbed in this test');
     },
@@ -101,6 +102,15 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     },
     addDownloadClient: () => {
       throw new Error('addDownloadClient not stubbed in this test');
+    },
+    addMapping: () => {
+      throw new Error('addMapping not stubbed in this test');
+    },
+    editMapping: () => {
+      throw new Error('editMapping not stubbed in this test');
+    },
+    removeMapping: () => {
+      throw new Error('removeMapping not stubbed in this test');
     },
     registry,
     generation,

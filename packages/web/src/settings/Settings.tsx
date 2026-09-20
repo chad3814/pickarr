@@ -35,18 +35,27 @@ import type { ReactElement } from 'react';
 import { Feeds } from './Feeds.tsx';
 import { DownloadClients } from './DownloadClients.tsx';
 import type { FeedsSource } from './useFeeds.ts';
-import type { DownloadClientsSource } from './useDownloadClients.ts';
+import type { DownloadClientsListSource } from './DownloadClients.tsx';
 import type { AddFeedInput, AddFeedOutcome } from './AddFeed.tsx';
 import type { AddDownloadClientInput, AddDownloadClientOutcome } from './AddDownloadClient.tsx';
+import type { MappingSubmit } from './postMapping.ts';
 
 /**
  * Whatever both sections need. An intersection rather than either one
- * alone: the two hooks happen to want the same two `Store` members today,
- * and writing that down as "both" means a section that grows a third
+ * alone: writing that down as "both" means a section that grows a
  * requirement widens this type by itself instead of silently relying on
  * the other section's declaration.
+ *
+ * **They no longer want the same members, and this is the change that
+ * ended that.** The feeds side still needs `listByTable` and
+ * `subscribeInserts`; the download clients side now also needs
+ * `subscribe`, because each client row expands to a mappings list with an
+ * edit and a delete in it, and `store/apply.ts` reports neither as an
+ * insert. `DownloadClientsListSource` is where that is declared, so this
+ * line stays a statement about the two sections rather than a second
+ * inventory of their members.
  */
-export type SettingsSource = FeedsSource & DownloadClientsSource;
+export type SettingsSource = FeedsSource & DownloadClientsListSource;
 
 export interface SettingsProps {
   source: SettingsSource;
@@ -54,14 +63,21 @@ export interface SettingsProps {
   submitFeed: (input: AddFeedInput) => Promise<AddFeedOutcome>;
   /** Posts a new download client. Required for the same reason. */
   submitDownloadClient: (input: AddDownloadClientInput) => Promise<AddDownloadClientOutcome>;
+  /** Adds, edits and removes a path mapping inside a download client's row. Required for the same reason -- `postMapping.ts`'s `MappingSubmit` has it at length. */
+  submitMapping: MappingSubmit;
 }
 
-export function Settings({ source, submitFeed, submitDownloadClient }: SettingsProps): ReactElement {
+export function Settings({
+  source,
+  submitFeed,
+  submitDownloadClient,
+  submitMapping,
+}: SettingsProps): ReactElement {
   return (
     <section aria-labelledby="settings-heading" data-testid="settings">
       <h1 id="settings-heading">Settings</h1>
       <Feeds source={source} submit={submitFeed} />
-      <DownloadClients source={source} submit={submitDownloadClient} />
+      <DownloadClients source={source} submit={submitDownloadClient} submitMapping={submitMapping} />
     </section>
   );
 }

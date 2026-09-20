@@ -46,7 +46,7 @@ export function assertSyncedTableName(pluginId: string, table: string): void {
 }
 
 /**
- * The six read shapes, one per synced **plugin** table. The host's own eight
+ * The six read shapes, one per synced **plugin** table. The host's own nine
  * are below, under `MediaItemSyncRead`.
  *
  * **Every one of these six omits the row's own id, and that is not an
@@ -61,7 +61,7 @@ export function assertSyncedTableName(pluginId: string, table: string): void {
  * (`create`/`upsert`/`delete`) and the two rules a client applies them by
  * are stated.
  *
- * **The host's eight do carry an `id`, and that does not contradict the
+ * **The host's nine do carry an `id`, and that does not contradict the
  * paragraph above.** `sync/tables.ts` projects `id` because its `SELECT`s
  * are the row and nothing maps them, and `readHostRows` keys its result by
  * that column -- so the field is there whether or not a client reads it. It
@@ -145,7 +145,7 @@ export interface XxxSiteRead {
 }
 
 /**
- * The eight read shapes for the **host's** own synced tables --
+ * The nine read shapes for the **host's** own synced tables --
  * `sync/tables.ts`'s `selectSql` projections, field for field.
  *
  * **Why `SyncRead` and not `Read`.** `MediaItemRead` and `RssItemRead` are
@@ -156,7 +156,7 @@ export interface XxxSiteRead {
  * carries, since for a private tracker that url carries the passkey and a
  * replica is permanent -- and no `createdAt`, `updatedAt` or `rankingScore`.
  * Reusing
- * either would either leak a field or silently drop one. All eight carry the
+ * either would either leak a field or silently drop one. All nine carry the
  * suffix rather than only the two that had to, so the family reads as one;
  * the plugin shapes above keep their bare `Read` because renaming them means
  * touching three plugin packages for no requirement.
@@ -250,6 +250,17 @@ export interface RssItemSyncRead {
  * Neither `storagePath` nor `lastError` is here, and neither ever will be:
  * `sync/tables.ts`'s `selectSql` doc has why a path and a partly-redacted
  * error string are served through `/api/downloads` and refused here.
+ *
+ * **`FilepathMappingSyncRead` below carries two filesystem paths, and that
+ * is not this rule bending.** The two cases differ in where the string came
+ * from. A `storagePath` is **discovered** -- the download client reports
+ * where it happened to put a file, so replicating it discloses a layout
+ * nobody chose to disclose, and no operator ever asked to see it. A mapping
+ * is **dictated**: both of its paths are strings the operator typed into
+ * the settings screen, and reading them back shows someone their own input.
+ * The rule's purpose -- that this host does not leak filesystem structure
+ * to a client that never asked for it -- is untouched, and the sentence
+ * above still means exactly what it says. Design spec §5 argues it in full.
  */
 export interface TorrentDownloadSyncRead {
   id: number;
@@ -416,6 +427,52 @@ export interface DownloadClientSyncRead {
   username: string | null;
   /** `''` means "no category", which is a configuration rather than a missing value (`clients/sabnzbd.ts`). */
   category: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * One path translation for one download client, as the replica holds it --
+ * the ninth host synced table.
+ *
+ * **Its projection is the whole row, and it is the fifth of those rather
+ * than the first**, which an earlier version of this sentence claimed.
+ * Counted against `PRAGMA table_info` rather than by eye: `media_item`
+ * (9 of 9), `person` (5 of 5), `role` (7 of 7) and `rss_feed` (9 of 9) all
+ * precede it, and `rss_item` (11 of 13), the two download tables (13 of 15,
+ * 12 of 14) and `download_client` (9 of 12) are the ones that hold columns
+ * back. What is unusual here is narrower and still worth saying: this table
+ * has six columns and no seventh a client is being spared, so unlike every
+ * other entry in this family there is no omission to justify -- and
+ * `rss_feed`, the whole-row projection nearest to it, still transforms its
+ * `url` on the way out, where nothing here is transformed at all.
+ *
+ * **Both fields are filesystem paths, and both are here deliberately.** See
+ * `TorrentDownloadSyncRead` above for why that does not contradict the
+ * `storagePath` rule it states: these two are operator input, not client
+ * report. `sync/tables.ts`'s top docblock and design spec §5 have the
+ * argument.
+ *
+ * **Neither is validated, normalised or platform-shaped, so a client must
+ * not treat either as a path *this* machine could open.**
+ * `clients/paths.ts` refuses `node:path` outright -- these are foreign
+ * paths, possibly Windows-shaped, always from a machine that is not the
+ * one rendering them -- so `D:\Downloads` is a legitimate `fromPath` and
+ * the empty string is the only value the writer refuses (design spec §7).
+ * A client displays and edits these strings; it does not parse them.
+ *
+ * `downloadClientId` resolves against `DownloadClientSyncRead.id`, which a
+ * client holds: a mapping is meaningless away from the client it belongs
+ * to, and the screen nests it under that client's row.
+ */
+export interface FilepathMappingSyncRead {
+  id: number;
+  /** The `download_client` whose reported paths this translates. Resolvable; see above. */
+  downloadClientId: number;
+  /** The prefix a download client reports, matched at a path boundary by `mapClientPath`. */
+  fromPath: string;
+  /** What that prefix becomes for the host. */
+  toPath: string;
   createdAt: number;
   updatedAt: number;
 }

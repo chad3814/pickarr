@@ -38,8 +38,8 @@ function seedClient(raw: DatabaseSync, overrides: { name?: string } = {}): numbe
 /** Inserts one `filepath_mapping` row for `clientId`. Mirrors `paths.test.ts`'s own `seedMapping`. */
 function seedMapping(raw: DatabaseSync, clientId: number, fromPath: string, toPath: string): void {
   raw.prepare(`
-    INSERT INTO filepath_mapping (download_client_id, from_path, to_path, created_at)
-    VALUES (?, ?, ?, 1)
+    INSERT INTO filepath_mapping (download_client_id, from_path, to_path, created_at, updated_at)
+    VALUES (?, ?, ?, 1, 1)
   `).run(clientId, fromPath, toPath);
 }
 

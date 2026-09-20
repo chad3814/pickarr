@@ -53,7 +53,7 @@ import type { SyncRegistry } from './registry.ts';
  * on the op rather than inside the payload is what makes that independent of
  * each read shape:
  * `readHostRows` (`sync/tables.ts`) happens to project `id` into `value` for
- * all eight host tables, and no plugin read shape carries it at all
+ * all nine host tables, and no plugin read shape carries it at all
  * (`packages/contract/src/sync.ts`), so a protocol that read the key out of
  * `value` worked for the host and silently failed for every plugin table --
  * an op a client could not key, group or later delete. The `id` inside a host
