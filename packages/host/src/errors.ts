@@ -17,10 +17,38 @@
  * are what make the mapping a compile-time relationship instead.
  *
  * **Each message names ids and a feed name, and never a url, a path or a
- * credential.** That is load-bearing rather than incidental: these messages
- * reach `jobs.last_error` and the host log. No refusal *body* carries any
- * of it -- the route answers a bare code (`api/server.ts`) -- so what is
- * written here is for an operator reading a log, not for a browser.
+ * credential.** Where that care is needed is narrower than this paragraph
+ * first claimed, and is worth stating exactly: a wrong account of where a
+ * string ends up is how the wrong string ends up there. This line said the
+ * messages "reach `jobs.last_error` and the host log", and neither half is
+ * true. Traced through every caller on this tree:
+ *
+ * - **Four of the five are never written down at all.**
+ *   `UnknownRssItemError` and `PluginNotRegisteredError` are raised by
+ *   `requestDownload` before a submission starts, and `NoClientOfTypeError`
+ *   and `ClientTypeMismatchError` by `selectClientForFeed`, which
+ *   `clients/downloads.ts` calls *before* it inserts the download row -- so
+ *   `markFailed` never runs for them and there is no column to write to.
+ *   All four become bare codes in `clients/pick.ts` and are discarded.
+ * - **`AlreadySubmittedError` is the one that persists**, into
+ *   `torrent_download.last_error` / `nzb_download.last_error`, through
+ *   `redactUrl`. `sync/tables.ts` deliberately keeps that column out of the
+ *   replica, but `/api/downloads` does serve it to a session holder as
+ *   `DownloadRead.lastError` -- so it is the one message here a browser can
+ *   be shown, and that, not a log file, is why none of these may carry a
+ *   url or a credential.
+ * - **`jobs.last_error` receives none of them.** The only job kinds are
+ *   `poll`, `reconcile` and a plugin's own lookup; none reaches
+ *   `requestDownload` or `submit`.
+ * - **No log line carries one either.** `clients/downloads.ts` logs a fixed
+ *   sentence beside `{ rssItemId, downloadClientId, kind }` and never the
+ *   message, and no refusal reaches `api/server.ts`'s 500 handler, which is
+ *   the only place a thrown message is written to the host log.
+ *
+ * So four of these messages are read by a developer holding a stack trace
+ * and by nobody else. That is not an argument for being careless with them
+ * -- the fifth is served over HTTP, and which is which is a property of
+ * call sites above this file rather than of the classes.
  */
 
 /**
@@ -91,14 +119,21 @@ export class UnknownRssItemError extends Error {
  *
  * The message is the one that branch has carried since it was written,
  * including its remedy ("create one, or set the feed's
- * download_client_id"): an operator reading a log is who it is for, and the
- * class is for `clients/pick.ts`, which answers the browser a bare
- * `no-client-of-type`.
+ * download_client_id"). The class is for `clients/pick.ts`, which answers
+ * a bare `no-client-of-type` and discards the wording entirely.
+ *
+ * **One `feed` object rather than loose positional parameters.** `feedName`
+ * and `downloadType` are both `string`, so passing them the wrong way round
+ * would compile and produce a message that reads perfectly and names the
+ * wrong things -- the failure mode a reader is least likely to catch,
+ * because nothing about it looks broken. `clients/select.ts` already holds
+ * a `FeedRow` with exactly these three fields, so the call site is shorter
+ * as well as safer.
  */
 export class NoClientOfTypeError extends Error {
-  constructor(feedId: number, feedName: string, downloadType: string) {
+  constructor(feed: { id: number; name: string; downloadType: string }) {
     super(
-      `feed ${feedId} (${feedName}) has no download client of type ${JSON.stringify(downloadType)}: ` +
+      `feed ${feed.id} (${feed.name}) has no download client of type ${JSON.stringify(feed.downloadType)}: ` +
       `create one, or set the feed's download_client_id`,
     );
     this.name = 'NoClientOfTypeError';
@@ -115,12 +150,24 @@ export class NoClientOfTypeError extends Error {
  * missing client to create. `clients/select.ts`'s own tests already
  * asserted the two messages do not overlap; the classes are what make that
  * distinction survive a rewording.
+ *
+ * **Two objects rather than five positional parameters**, and this is the
+ * constructor that most needed it: `feedName`, `clientType` and
+ * `downloadType` were three `string`s in one list, and swapping the last
+ * two would compile and answer "names download client 3 of type
+ * \"torrent\", but its download_type is \"nzb\"" for a feed that is the
+ * other way round -- a wrong message that reads like a right one. Grouping
+ * them also matches what `clients/select.ts` has in hand: a `FeedRow` and
+ * a `ClientTypeRow`, passed whole.
  */
 export class ClientTypeMismatchError extends Error {
-  constructor(feedId: number, feedName: string, clientId: number, clientType: string, downloadType: string) {
+  constructor(
+    feed: { id: number; name: string; downloadType: string },
+    client: { id: number; type: string },
+  ) {
     super(
-      `feed ${feedId} (${feedName}) names download client ${clientId} of type ` +
-      `${JSON.stringify(clientType)}, but its download_type is ${JSON.stringify(downloadType)}`,
+      `feed ${feed.id} (${feed.name}) names download client ${client.id} of type ` +
+      `${JSON.stringify(client.type)}, but its download_type is ${JSON.stringify(feed.downloadType)}`,
     );
     this.name = 'ClientTypeMismatchError';
   }
@@ -145,12 +192,17 @@ export class ClientTypeMismatchError extends Error {
  * The message deliberately does not repeat SQLite's, which reads `UNIQUE
  * constraint failed: torrent_download.download_client_id,
  * torrent_download.client_ref` and names neither the item nor the client.
+ * It is also the one message in this module that is written down and
+ * served -- see this module's own doc for where it goes.
+ *
+ * One object rather than two adjacent `number` parameters, for the reason
+ * {@link NoClientOfTypeError} gives: transposing them would compile.
  */
 export class AlreadySubmittedError extends Error {
-  constructor(rssItemId: number, downloadClientId: number, options: { cause: unknown }) {
+  constructor(submission: { rssItemId: number; downloadClientId: number }, options: { cause: unknown }) {
     super(
-      `rss item ${rssItemId} could not be recorded against download client ` +
-      `${downloadClientId}: this client already has a recorded download using ` +
+      `rss item ${submission.rssItemId} could not be recorded against download client ` +
+      `${submission.downloadClientId}: this client already has a recorded download using ` +
       'the same reference',
       options,
     );

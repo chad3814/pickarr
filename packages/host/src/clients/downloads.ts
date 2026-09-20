@@ -275,11 +275,19 @@ export function createDownloadClients(deps: {
         // `UPDATE`, above. Left as SQLite's raw message, `last_error` would
         // read `UNIQUE constraint failed: torrent_download.download_
         // client_id, torrent_download.client_ref`, naming neither the item
-        // nor the client. Replaced with a new error (rather than just a
-        // different `message` written to this row) so the same clear
-        // wording also reaches `jobs.last_error` once this rethrows into
-        // `run-job.ts` -- the raw SQLite message would otherwise still get
-        // there unchanged.
+        // nor the client. Replaced with a new error rather than just a
+        // different `message` written to this row, so the same clear
+        // wording travels with the rethrow as well as landing in the
+        // column.
+        //
+        // **This comment used to say the wording "also reaches
+        // `jobs.last_error` once this rethrows into `run-job.ts`". It does
+        // not, and never has on this tree**: the only job kinds are
+        // `poll`, `reconcile` and a plugin's own lookup, and none of them
+        // reaches `submit`. Where the wording actually goes is this row's
+        // `last_error`, which `/api/downloads` serves as
+        // `DownloadRead.lastError`, and -- since this slice -- into
+        // `clients/pick.ts`, which discards it for a bare code.
         //
         // `AlreadySubmittedError` (`../errors.ts`) rather than a bare
         // `Error` carrying that wording, because `clients/pick.ts` maps
@@ -288,7 +296,10 @@ export function createDownloadClients(deps: {
         // `cause` at that end would be a second copy of the check three
         // lines up; the class is the same fact stated once.
         const failure = isUniqueConstraintViolation(err)
-          ? new AlreadySubmittedError(submission.rssItemId, downloadClientId, { cause: err })
+          ? new AlreadySubmittedError(
+            { rssItemId: submission.rssItemId, downloadClientId },
+            { cause: err },
+          )
           : err;
         const message = failure instanceof Error ? failure.message : String(failure);
         plan.markFailed(raw, rowId, redactUrl(message), now());
