@@ -61,9 +61,16 @@
  * - `unknown-mapping` -- the edit or the remove named a `filepath_mapping`
  *   row that does not exist. A removal that matched nothing is this, never
  *   a silent success.
- * - `empty-path` -- `fromPath` or `toPath` was `''`. An empty `from_path`
- *   matches every path the client reports; an empty `to_path` maps
- *   everything to a relative path.
+ * - `empty-path` -- `fromPath` or `toPath` was `''`. An empty `to_path`
+ *   maps everything under its prefix to a relative path. An empty
+ *   `from_path` is a catch-all for **absolute POSIX paths only**, not for
+ *   every path the client reports: `matchesBoundary` needs the remainder
+ *   after the prefix to be `''` or to start with `/`, so a Windows-shaped
+ *   `D:\Downloads\x` is measurably *not* matched -- the case the paragraph
+ *   above insists this contract must accept. It rewrites the paths a
+ *   single-filesystem install relies on passing through and misses the
+ *   foreign ones a mapping is for.
+ *   `packages/host/src/clients/mappings.ts` has the full measurement.
  */
 export const MAPPING_REFUSALS = [
   'unknown-client',

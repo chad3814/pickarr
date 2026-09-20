@@ -34,8 +34,29 @@
  * stricter than its consumer refuses configurations the consumer would have
  * handled, so there is no leading-slash check, no backslash rejection and
  * no normalisation. `empty-path` is the single exception and covers `''`
- * alone -- an empty `from_path` matches every path `matchesBoundary` is
- * asked about, and an empty `to_path` maps every file to a relative path.
+ * alone.
+ *
+ * **What an empty path actually does, since the reason given here was
+ * wrong and the paragraph above is what disproved it.** An empty `to_path`
+ * maps every file under its prefix to a relative path. An empty
+ * `from_path` was described as matching "every path `matchesBoundary` is
+ * asked about", which cannot be true of a module that exists to accept
+ * `D:\Downloads`: `matchesBoundary` requires the remainder after the
+ * prefix to be `''` or to start with `/`, and with an empty prefix the
+ * remainder is the whole path. So it is a catch-all for **absolute POSIX
+ * paths only**. Measured on this tree against `mapClientPath`, with an
+ * empty-`from_path` row to `/media` inserted by hand:
+ * `/downloads/complete/x` -> `/media/downloads/complete/x` and `''` ->
+ * `/media` are matched, while `D:\Downloads\x`, `C:/Downloads/x` and
+ * `relative/path` all come back unchanged. It is also the shortest
+ * possible prefix, so `mapClientPath`'s longest-match rule makes it lose
+ * to every other mapping that matches -- a fallback, not an override.
+ * The refusal is still right, and for a reason the false one obscured: an
+ * empty `from_path` silently rewrites the paths a host that shares a
+ * filesystem with its client relies on passing through untouched, while
+ * missing exactly the foreign, Windows-shaped ones this table exists to
+ * translate. It is a rule that fires where it is not wanted and not where
+ * it looks like it would.
  *
  * **No refusal carries anything from the input.** Not a path, not an id:
  * a refusal says which rule was broken and nothing about the value that
