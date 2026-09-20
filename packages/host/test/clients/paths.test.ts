@@ -100,3 +100,34 @@ test('a sibling directory with a longer name is not a match', () => {
 
   assert.equal(result, '/downloads-old/movie.mkv');
 });
+
+test('the tie this function does not resolve cannot be reached, because the index refuses it', () => {
+  // `mapClientPath`'s doc says equal-length matches resolve to whichever row
+  // the loop visits first and that nothing relies on that. Migration 19's
+  // unique index on `(download_client_id, from_path)` is what turns "nothing
+  // relies on it" into "nothing can reach it", and this drives that through
+  // the consumer rather than asserting the index exists -- the schema half
+  // is `test/db/migrate.test.ts`'s "two mappings for one client cannot share
+  // a from_path".
+  //
+  // **Equal length and both matching implies identical, which is the whole
+  // argument.** `matchesBoundary` requires `clientPath.startsWith(fromPath)`,
+  // so two `from_path` values that both match one path are both prefixes of
+  // it; two prefixes of one string with the same length are the same string.
+  // So a tie needs two identical `from_path` values for one client, and that
+  // is exactly the pair the index refuses. Two same-length *different*
+  // values (`/a/b` and `/c/d`) are admitted by the index and cannot tie,
+  // because at most one of them matches any given path.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/media');
+
+  assert.throws(
+    () => seedMapping(raw, clientId, '/downloads', '/elsewhere'),
+    /UNIQUE/,
+    'the second row of the only pair that could tie must never reach the table',
+  );
+
+  assert.equal(mapClientPath(raw, clientId, '/downloads/movie.mkv'), '/media/movie.mkv',
+    'so the surviving mapping is the only candidate and the answer is not a draw');
+});

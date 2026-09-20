@@ -48,8 +48,19 @@ export const filepathMapping = sqliteTable('filepath_mapping', {
   fromPath: text('from_path').notNull(),
   toPath: text('to_path').notNull(),
   createdAt: integer('created_at').notNull(),
+  // Migration 19, which is also where the table joined `HOST_SYNCED_TABLES`
+  // -- every synced table projects an `updatedAt`. `.default(0)` mirrors the
+  // `DEFAULT 0` that migration carries and is not a value any writer should
+  // inherit: SQLite refuses `ADD COLUMN ... NOT NULL` without a constant
+  // default on a populated table, and the migration backfills `created_at`
+  // over it immediately. That migration's own docblock has the measurement.
+  updatedAt: integer('updated_at').notNull().default(0),
 }, (t) => [
   index('filepath_mapping_client').on(t.downloadClientId),
+  // One mapping per prefix per client. Migration 19's docblock has why this
+  // is a correctness fix rather than duplicate detection: it is what makes
+  // `clients/paths.ts`'s unresolved equal-length tie unreachable.
+  uniqueIndex('filepath_mapping_from_path').on(t.downloadClientId, t.fromPath),
 ]);
 
 export const rssFeed = sqliteTable('rss_feed', {

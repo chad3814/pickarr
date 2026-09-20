@@ -1070,6 +1070,95 @@ CREATE UNIQUE INDEX nzb_download_live_item
 `;
 
 /**
+ * **`filepath_mapping` joins the synced set, and gains the two things it
+ * needs to be there**: an `updated_at`, and a unique key on
+ * `(download_client_id, from_path)`. `migration17` above, two tables later
+ * -- but the first of the three that is not "no DDL", because this table was
+ * written before anything replicated and has neither.
+ *
+ * **Why this table is allowed to carry paths to a replica at all**, given
+ * that `sync/tables.ts`'s `selectSql` refuses `storage_path` outright:
+ * design spec §5 amends that rule rather than breaking it. A
+ * `storage_path` is **discovered** -- the client reports where it happened
+ * to put a file, disclosing a filesystem layout nobody chose to disclose.
+ * A mapping is **dictated**: both halves are strings the operator typed
+ * into the settings screen, so reading them back shows someone their own
+ * input. The `storagePath` rule stands untouched.
+ *
+ * **`DEFAULT 0` exists only to make `ADD COLUMN ... NOT NULL` legal**, the
+ * same role it plays in `MIGRATION_2` and `MIGRATION_6` above, and the
+ * `UPDATE` on the next line is the real value: a row that predates this
+ * migration was last written when it was created, so `created_at` is the
+ * honest answer and `0` (1970) would be a visible lie in a settings list
+ * sorted by it.
+ *
+ * Measured on SQLite 3.53.4, because the constraint is narrower than it
+ * looks and an empty database does not show it: `ALTER TABLE t ADD COLUMN c
+ * INTEGER NOT NULL` with no default **succeeds** on an empty table and
+ * fails on a populated one with "Cannot add a NOT NULL column with default
+ * value NULL" -- so the no-default form would migrate every fresh install
+ * and fail boot on exactly the databases that have mappings to keep. A
+ * non-constant default is refused outright on a populated table
+ * ("Cannot add a column with non-constant default"), so
+ * `DEFAULT (created_at)` -- which would need no `UPDATE` -- is not
+ * available.
+ *
+ * **The unique index is a correctness fix and not only duplicate
+ * detection** (design spec §6). `clients/paths.ts`'s `mapClientPath` takes
+ * the longest matching `from_path` and says of a tie that it resolves to
+ * whichever row is visited first and nothing relies on that. A tie needs
+ * two matching `from_path` values of equal length; both match only if both
+ * are prefixes of the same path, and two equal-length prefixes of one
+ * string are the same string -- so a tie needs two *identical* `from_path`
+ * values for one client, which is exactly the pair this index refuses.
+ * Unreachable rather than unlikely. `test/clients/paths.test.ts` drives
+ * that through the consumer, and `test/db/migrate.test.ts` pins the index
+ * itself.
+ *
+ * `filepath_mapping_client`, the non-unique index on `download_client_id`
+ * alone, is left in place. It is now a prefix of this one and so has no
+ * query of its own, but removing it is a judgement about index maintenance
+ * cost that this slice was not asked to make; it is recorded in the task
+ * report rather than acted on.
+ *
+ * **If this `CREATE UNIQUE INDEX` ever fails, the database already holds
+ * the defect** -- `MIGRATION_18`'s own note, for the same reason and with a
+ * stronger version of it: `filepath_mapping` has no production writer at
+ * all until the next task of this slice, so every row in every database is
+ * one an operator inserted by hand. The abort inside the migration's
+ * savepoint fails boot loudly, which is the right outcome; no repair here
+ * could know which of two mappings for one prefix the operator meant.
+ */
+const MIGRATION_19 = `
+ALTER TABLE filepath_mapping ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE filepath_mapping SET updated_at = created_at;
+CREATE UNIQUE INDEX filepath_mapping_from_path
+  ON filepath_mapping (download_client_id, from_path);
+`;
+
+/**
+ * The DDL above, then the two calls replication needs -- `migration17`'s
+ * shape with a body in front of it.
+ *
+ * Order matters in one direction only: the `UPDATE` runs before
+ * `installSyncTriggers`, so it writes no `sync_log` entries, and
+ * `seedSyncLog` then writes exactly one `upsert` per existing row. Running
+ * the triggers first would reach the same end state by a longer route, with
+ * the backfill `UPDATE` logging every row and the seed then finding nothing
+ * to do.
+ *
+ * `seedSyncLog` is not optional, for `migration17`'s reason: a client's
+ * backfill walks `sync_log` backwards and reads it as an index of which rows
+ * exist, so an unseeded pre-existing mapping would stay invisible to every
+ * replica forever with nothing failing to say so.
+ */
+function migration19(db: DatabaseSync): void {
+  db.exec(MIGRATION_19);
+  installSyncTriggers(db, ['filepath_mapping']);
+  seedSyncLog(db, ['filepath_mapping']);
+}
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -1093,6 +1182,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 16, up: (db) => migration16(db) },
   { version: 17, up: (db) => migration17(db) },
   { version: 18, up: (db) => db.exec(MIGRATION_18) },
+  { version: 19, up: (db) => migration19(db) },
 ];
 
 /**

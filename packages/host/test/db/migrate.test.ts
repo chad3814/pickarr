@@ -1454,3 +1454,161 @@ test('the seed is a no-op on a fresh install, where every synced table is empty'
   const count = raw.prepare('SELECT count(*) c FROM sync_log').get();
   assert.equal(Number((count as { c: unknown }).c), 0, 'no rows, so nothing to log');
 });
+
+/**
+ * One `download_client` row and one `filepath_mapping` row under it, on
+ * whatever schema version the caller has migrated to.
+ *
+ * `updated_at` is deliberately not named in the mapping insert, because two
+ * of the three callers below seed onto **version 18**, where the column does
+ * not exist yet and naming it would fail with `no such column` rather than
+ * exercising anything. The two that run on a fully migrated database get the
+ * `DEFAULT 0` the `ALTER` carries, which neither of them reads.
+ */
+function seedClientAndMapping(
+  raw: ReturnType<typeof openTestDatabase>['raw'],
+  createdAt: number,
+): void {
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
+    VALUES (1, 'qbit', 'torrent', 'http://qbit.local:8080', 'tv', 'copy', 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO filepath_mapping (id, download_client_id, from_path, to_path, created_at)
+    VALUES (1, 1, '/downloads', '/media', ?)
+  `).run(createdAt);
+}
+
+test('migration 19 backfills updated_at from created_at on a mapping that predates it', () => {
+  // The column every synced table projects, on a table that had only
+  // `created_at` -- `packages/web/src/store/rows.ts`'s `listByTable` refuses
+  // a table whose rows carry no `updatedAt`, so a row left without one is a
+  // row the settings screen cannot page.
+  //
+  // Seeded at version 18 rather than after `migrateHost`, for the reason the
+  // migration 17 test above gives: a row written afterwards would take the
+  // column's `DEFAULT 0` through an ordinary insert and prove nothing about
+  // the backfill.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 18));
+  seedClientAndMapping(raw, 777);
+
+  migrateHostWith(raw, HOST_MIGRATIONS);
+
+  const row = raw.prepare('SELECT created_at, updated_at FROM filepath_mapping WHERE id = 1').get();
+  if (typeof row !== 'object' || row === null || !('created_at' in row) || !('updated_at' in row)) {
+    throw new Error('filepath_mapping row has no created_at/updated_at');
+  }
+  assert.equal(Number(row.created_at), 777, 'the migration must not rewrite created_at');
+  assert.equal(Number(row.updated_at), 777,
+    'a row that predates the column must carry its creation time, not the DEFAULT 0 that makes the ALTER legal');
+});
+
+test('two mappings for one client cannot share a from_path', () => {
+  // Design spec §6: the `duplicate-from-path` refusal is *caught* from this
+  // index rather than pre-checked, so two concurrent writes cannot both pass
+  // a check and collide. It is also a correctness fix on its own --
+  // `clients/paths.ts`'s `mapClientPath` resolves equal-length matches by
+  // iteration order and says nothing may rely on that, and two identical
+  // `from_path` values for one client are the only way to reach it. See
+  // `test/clients/paths.test.ts` for that half, driven through the consumer.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedClientAndMapping(raw, 1);
+
+  assert.throws(
+    () => raw.prepare(`
+      INSERT INTO filepath_mapping (download_client_id, from_path, to_path, created_at, updated_at)
+      VALUES (1, '/downloads', '/elsewhere', 2, 2)
+    `).run(),
+    /UNIQUE/,
+    'a second mapping with the same from_path for one client must be refused by the index',
+  );
+
+  // The two halves of the key, each pinned by a row the index must admit --
+  // an index on `from_path` alone would refuse the second of these, and one
+  // on `download_client_id` alone would refuse the first.
+  raw.prepare(`
+    INSERT INTO filepath_mapping (download_client_id, from_path, to_path, created_at, updated_at)
+    VALUES (1, '/downloads/tv', '/media/tv', 2, 2)
+  `).run();
+  raw.prepare(`
+    INSERT INTO download_client (id, name, type, url, category, import_mode, created_at, updated_at)
+    VALUES (2, 'sab', 'nzb', 'http://sab.local:8080', 'tv', 'copy', 1, 1)
+  `).run();
+  raw.prepare(`
+    INSERT INTO filepath_mapping (download_client_id, from_path, to_path, created_at, updated_at)
+    VALUES (2, '/downloads', '/other', 2, 2)
+  `).run();
+
+  const count = raw.prepare('SELECT count(*) c FROM filepath_mapping').get();
+  assert.equal(Number((count as { c: unknown }).c), 3,
+    'a second from_path for one client, and the same from_path for a different client, are both fine');
+});
+
+test('migration 19 installs the filepath_mapping triggers and seeds a mapping already on file', () => {
+  // `migration17`'s test above, aimed at the table this slice brings in.
+  // Migrated to 18 and seeded by hand, same reasoning as there: the row has
+  // to exist with no `filepath_mapping` trigger installed, which is the
+  // state a database applying version 19 for the first time is actually in.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 18));
+
+  const triggerNames = `
+    SELECT name FROM sqlite_master
+    WHERE type = 'trigger'
+      AND name IN ('filepath_mapping_sync_ins', 'filepath_mapping_sync_upd', 'filepath_mapping_sync_del')
+    ORDER BY name
+  `;
+  // Named literally rather than matched by prefix, for the reason the
+  // migration 16 and 17 tests give: a prefix match is satisfied by a rename.
+  assert.deepEqual(
+    raw.prepare(triggerNames).all().map((row) => String(row.name)),
+    [],
+    'version 18 adds two indexes and no triggers -- filepath_mapping is migration 19\'s',
+  );
+
+  seedClientAndMapping(raw, 1);
+
+  migrateHostWith(raw, HOST_MIGRATIONS);
+
+  assert.deepEqual(
+    raw.prepare(triggerNames).all().map((row) => String(row.name)),
+    ['filepath_mapping_sync_del', 'filepath_mapping_sync_ins', 'filepath_mapping_sync_upd'],
+    'all three, so a later insert, update and delete each log',
+  );
+
+  const logged = raw.prepare("SELECT row_id, op FROM sync_log WHERE table_name = 'filepath_mapping'").all()
+    .map((row) => {
+      // Not narrowing `unknown` -- see the identical guard in the migration
+      // 16 test above for what it does and does not buy.
+      if (typeof row !== 'object' || row === null || !('row_id' in row) || !('op' in row)) {
+        throw new Error('sync_log row has no row_id/op');
+      }
+      return [Number(row.row_id), String(row.op)];
+    });
+  assert.deepEqual(logged, [[1, 'upsert']],
+    'a mapping that predates this migration must be indexed, or no replica ever learns it exists');
+});
+
+test('migration 19\'s triggers log a mapping written, edited and removed afterwards', () => {
+  // `migration17`'s equivalent, and the delete leg is load-bearing for this
+  // slice rather than incidental: design spec §5 says a removal needs no new
+  // machinery because `installSyncTriggers` already emits
+  // `AFTER DELETE ... OLD.id, 'delete'`, and this is what pins that the
+  // claim holds for this table too. Drives the triggers rather than
+  // inspecting `sqlite_master`: a trigger that exists and a trigger that
+  // logs are not the same claim.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  seedClientAndMapping(raw, 1);
+  assert.deepEqual(opsLogged(raw, 'filepath_mapping'), ['upsert'], 'the insert trigger logs');
+
+  raw.prepare("UPDATE filepath_mapping SET to_path = '/media/tv' WHERE id = 1").run();
+  assert.deepEqual(opsLogged(raw, 'filepath_mapping'), ['upsert'],
+    'the update trigger re-logs the row, collapsed onto one entry');
+
+  raw.prepare('DELETE FROM filepath_mapping WHERE id = 1').run();
+  assert.deepEqual(opsLogged(raw, 'filepath_mapping'), ['delete'], 'the delete trigger tombstones it');
+});

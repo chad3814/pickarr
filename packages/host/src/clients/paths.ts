@@ -48,9 +48,25 @@ function matchesBoundary(clientPath: string, fromPath: string): boolean {
  * specific mapping (`/downloads/tv` -> `/media/tv`) beats a general one that
  * also matches (`/downloads` -> `/media`) regardless of which row was
  * inserted first -- row order is a storage detail, not a rule a caller
- * should have to depend on. Ties (two mappings of the same length, which
- * would require two identical `from_path` values for one client) resolve to
- * whichever `.reduce` visits first; nothing here relies on that.
+ * should have to depend on.
+ *
+ * **A tie is unreachable, where this used to say only that nothing relied
+ * on resolving one.** Two mappings can tie only if both match and both have
+ * the same length; the loop below matches on `startsWith`, so two matching
+ * `from_path` values are both prefixes of `clientPath`, and two prefixes of
+ * one string with the same length are the same string. A tie therefore
+ * needs two *identical* `from_path` values for one client -- which
+ * migration 19's `filepath_mapping_from_path` unique index on
+ * `(download_client_id, from_path)` refuses outright. Two same-length but
+ * different values (`/a/b` and `/c/d`) are perfectly legal and cannot tie,
+ * because at most one of them matches any given path.
+ *
+ * Were the index ever dropped, the tie would resolve to whichever row this
+ * loop visits first and nothing here would rely on that -- but that is the
+ * fallback, not the guarantee. `test/clients/paths.test.ts` drives the
+ * refusal through this function rather than asserting the index exists.
+ * (The sentence this replaced said `.reduce`; the loop below has not been
+ * one since it was written.)
  *
  * No match is not an error: the path is returned unchanged, which is the
  * correct behaviour for a host that shares a filesystem with its client --
