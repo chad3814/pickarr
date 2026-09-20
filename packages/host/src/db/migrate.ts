@@ -1072,7 +1072,7 @@ CREATE UNIQUE INDEX nzb_download_live_item
 /**
  * **`filepath_mapping` joins the synced set, and gains the two things it
  * needs to be there**: an `updated_at`, and a unique key on
- * `(download_client_id, from_path)`. `migration17` above, two tables later
+ * `(download_client_id, from_path)`. `migration17` above, one table later
  * -- but the first of the three that is not "no DDL", because this table was
  * written before anything replicated and has neither.
  *
@@ -1085,23 +1085,64 @@ CREATE UNIQUE INDEX nzb_download_live_item
  * into the settings screen, so reading them back shows someone their own
  * input. The `storagePath` rule stands untouched.
  *
- * **`DEFAULT 0` exists only to make `ADD COLUMN ... NOT NULL` legal**, the
- * same role it plays in `MIGRATION_2` and `MIGRATION_6` above, and the
- * `UPDATE` on the next line is the real value: a row that predates this
- * migration was last written when it was created, so `created_at` is the
- * honest answer and `0` (1970) would be a visible lie in a settings list
- * sorted by it.
+ * **This rebuilds the table rather than adding the column, and the reason
+ * is that `ADD COLUMN` cannot leave the schema in the state we want.**
+ * `updated_at` has to be `NOT NULL`, and `ALTER TABLE ... ADD COLUMN` will
+ * only add a `NOT NULL` column to a populated table if it carries a
+ * *constant* default. Both halves measured on SQLite 3.53.4 through
+ * `node:sqlite`, and quoted rather than paraphrased:
  *
- * Measured on SQLite 3.53.4, because the constraint is narrower than it
- * looks and an empty database does not show it: `ALTER TABLE t ADD COLUMN c
- * INTEGER NOT NULL` with no default **succeeds** on an empty table and
- * fails on a populated one with "Cannot add a NOT NULL column with default
- * value NULL" -- so the no-default form would migrate every fresh install
- * and fail boot on exactly the databases that have mappings to keep. A
- * non-constant default is refused outright on a populated table
- * ("Cannot add a column with non-constant default"), so
- * `DEFAULT (created_at)` -- which would need no `UPDATE` -- is not
- * available.
+ * | statement | empty table | one row |
+ * |---|---|---|
+ * | `ADD COLUMN c INTEGER NOT NULL` | succeeds | `Cannot add a NOT NULL column with default value NULL` |
+ * | `ADD COLUMN c INTEGER NOT NULL DEFAULT (unixepoch())` | succeeds | `Cannot add a column with non-constant default` |
+ * | `ADD COLUMN c INTEGER NOT NULL DEFAULT 0` | succeeds | succeeds |
+ *
+ * The empty-table column is why an `ALTER`-based version of this migration
+ * would have passed every test and failed on the databases that matter:
+ * a fresh install has no mappings, and only a populated one refuses.
+ *
+ * So `ADD COLUMN` offers exactly one legal shape here, `DEFAULT 0` -- and
+ * **a default needed to *add* a column is not a default worth *keeping*.**
+ * That step is the one this docblock got wrong in its first version: it
+ * established the necessity of the default at the moment of the `ALTER`
+ * and then carried it forward as a property of the column, which does not
+ * follow. SQLite has no `ALTER COLUMN` to drop it afterwards, so the
+ * choice is between a permanent trap and a rebuild.
+ *
+ * **The trap is worth the rebuild's twelve lines because it is silent and
+ * it is not one writer's to avoid.** A row written without the column
+ * stores `0`, which sorts to the front of `listByTable`'s modification
+ * order and renders as 1970; nothing fails. `clients/mappings.ts` binds
+ * the column and `test/clients/mappings.test.ts` pins that it does, but a
+ * test pins one writer, and every row this table held before this slice
+ * came from a hand-written `INSERT`. Without the default, such an `INSERT`
+ * raises `NOT NULL constraint failed: filepath_mapping.updated_at` at the
+ * moment it is written.
+ *
+ * **The rebuild's usual hazard is already priced in.** A
+ * create-copy-drop-rename drops the table's sync triggers with it
+ * (`docs/database-migrations.md`), and this migration installs them on the
+ * very next line regardless, because this is where the table joins the
+ * synced set.
+ *
+ * **`DEFAULT (created_at)` is not available on either route.** `ADD
+ * COLUMN` refuses a non-constant default (above), and the `CREATE TABLE`
+ * below would refuse it too, with a *different* message worth writing down
+ * because it is the one a reader trying this actually sees:
+ * `default value of column [updated_at] is not constant`. Copying
+ * `created_at` into `updated_at` in the `INSERT ... SELECT` is what stands
+ * in for it, and says the same thing -- a row never edited was last
+ * modified when it was created.
+ *
+ * **Row ids are preserved and content is unchanged, so no relog is owed.**
+ * The `INSERT ... SELECT` carries `id` across explicitly rather than
+ * letting the new table reissue one, which `docs/database-migrations.md`
+ * requires of any rebuild ("a row's `id` is immutable"). `seedSyncLog`
+ * below, not `relogSyncedTables`, is the right function: this table has
+ * never been synced, so `sync_log` holds no entry for it at all and there
+ * is nothing to announce as *changed* -- only rows to index for the first
+ * time.
  *
  * **The unique index is a correctness fix and not only duplicate
  * detection** (design spec §6). `clients/paths.ts`'s `mapClientPath` takes
@@ -1123,15 +1164,26 @@ CREATE UNIQUE INDEX nzb_download_live_item
  *
  * **If this `CREATE UNIQUE INDEX` ever fails, the database already holds
  * the defect** -- `MIGRATION_18`'s own note, for the same reason and with a
- * stronger version of it: `filepath_mapping` has no production writer at
- * all until the next task of this slice, so every row in every database is
- * one an operator inserted by hand. The abort inside the migration's
+ * stronger version of it: `filepath_mapping` had no production writer at
+ * all before this slice, so every row that predates it is one an operator
+ * inserted by hand. The abort inside the migration's
  * savepoint fails boot loudly, which is the right outcome; no repair here
  * could know which of two mappings for one prefix the operator meant.
  */
 const MIGRATION_19 = `
-ALTER TABLE filepath_mapping ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
-UPDATE filepath_mapping SET updated_at = created_at;
+CREATE TABLE filepath_mapping_new (
+  id                  INTEGER PRIMARY KEY,
+  download_client_id  INTEGER NOT NULL REFERENCES download_client (id),
+  from_path           TEXT    NOT NULL,
+  to_path             TEXT    NOT NULL,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL
+);
+INSERT INTO filepath_mapping_new (id, download_client_id, from_path, to_path, created_at, updated_at)
+  SELECT id, download_client_id, from_path, to_path, created_at, created_at FROM filepath_mapping;
+DROP TABLE filepath_mapping;
+ALTER TABLE filepath_mapping_new RENAME TO filepath_mapping;
+CREATE INDEX filepath_mapping_client ON filepath_mapping (download_client_id);
 CREATE UNIQUE INDEX filepath_mapping_from_path
   ON filepath_mapping (download_client_id, from_path);
 `;
@@ -1140,17 +1192,20 @@ CREATE UNIQUE INDEX filepath_mapping_from_path
  * The DDL above, then the two calls replication needs -- `migration17`'s
  * shape with a body in front of it.
  *
- * Order matters in one direction only: the `UPDATE` runs before
- * `installSyncTriggers`, so it writes no `sync_log` entries, and
- * `seedSyncLog` then writes exactly one `upsert` per existing row. Running
- * the triggers first would reach the same end state by a longer route, with
- * the backfill `UPDATE` logging every row and the seed then finding nothing
- * to do.
+ * **`installSyncTriggers` after the rebuild, never before**, and here that
+ * is not merely the documented order but the only one that works: the
+ * `DROP TABLE` above takes any trigger installed first away with it.
+ * `docs/database-migrations.md` states the rule for a rebuild, and warns
+ * against relying on `main.ts`'s per-boot reinstall -- which runs after
+ * every migration, and so would not cover a later migration acting on this
+ * table in the gap.
  *
  * `seedSyncLog` is not optional, for `migration17`'s reason: a client's
  * backfill walks `sync_log` backwards and reads it as an index of which rows
  * exist, so an unseeded pre-existing mapping would stay invisible to every
- * replica forever with nothing failing to say so.
+ * replica forever with nothing failing to say so. Neither the copy nor the
+ * drop above logs anything -- no trigger exists while they run -- so the
+ * seed is the only thing that indexes a row this migration carried over.
  */
 function migration19(db: DatabaseSync): void {
   db.exec(MIGRATION_19);

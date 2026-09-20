@@ -49,8 +49,11 @@ function fakeTimers(): Timers {
  * `updated_at` would leave the value the insert wrote -- which equals the
  * value the edit should have written -- and the assertion would pass
  * against a writer that forgot. `CREATED_AT` and `EDITED_AT` are distinct,
- * and both are distinct from `0`, which is the value migration 19's
- * `DEFAULT 0` silently supplies to any write that omits the column.
+ * and both are distinct from `0`, which is what a `DEFAULT 0` on the column
+ * would have supplied to any write that omitted it. Migration 19 rebuilds
+ * the table rather than leaving that default in place, so the omission now
+ * raises instead -- but `0` stays named here because the *edit* path has no
+ * such protection: an `UPDATE` may omit the column freely.
  */
 const CREATED_AT = 1_700_000_000_000;
 const EDITED_AT = 1_700_000_999_000;
@@ -153,19 +156,24 @@ test('an added mapping is on file, with both timestamps set from the clock', asy
   });
 });
 
-test('an insert that omitted updated_at would store epoch 0, so the insert is pinned against that value', async () => {
-  // **The trap migration 19 left behind.** SQLite will not add a `NOT NULL`
-  // column to a populated table without a constant default, so
-  // `filepath_mapping.updated_at` carries `DEFAULT 0` permanently -- and the
-  // default does not go away once the backfill has run. An `INSERT` that
-  // left the column out therefore succeeds and stores `0`, which sorts to
-  // the front of `listByTable`'s modification order and renders as 1970.
+test('the insert stamps updated_at rather than leaving it to the schema', async () => {
+  // **This used to be the only guard against a trap that no longer
+  // exists, and it is kept because it is still a good test.** The trap:
+  // SQLite will not add a `NOT NULL` column to a populated table without a
+  // constant default, so the first version of migration 19 carried
+  // `DEFAULT 0` -- and a default needed to *add* a column does not go away
+  // once the backfill has run. An `INSERT` omitting the column stored `0`,
+  // which sorts to the front of `listByTable`'s modification order and
+  // renders as 1970, with nothing failing.
   //
-  // Measured rather than assumed: on this tree, `INSERT INTO
-  // filepath_mapping (download_client_id, from_path, to_path, created_at)`
-  // produces a row with `updated_at: 0`. This test is the thing that reds
-  // if the writer ever drops the column from its list, which is why it
-  // asserts the value rather than merely that a row exists.
+  // Migration 19 now rebuilds the table so the column has no default at
+  // all, and the same `INSERT` raises `NOT NULL constraint failed:
+  // filepath_mapping.updated_at` -- pinned in `test/db/migrate.test.ts`.
+  // A schema that refuses the omission is a stronger guard than a test
+  // that pins one writer, but it does not make this test redundant: it
+  // asserts the *value* is the clock the write was stamped from, not
+  // merely that some value was supplied, so a writer binding a constant
+  // would still red here.
   const { host, raw } = setupHost();
   const clientId = seedClient(raw);
 
@@ -176,14 +184,15 @@ test('an insert that omitted updated_at would store epoch 0, so the insert is pi
   }));
 
   const stored = mappingRow(raw, id)['updated_at'];
-  assert.notEqual(stored, 0, 'the column default, which means the writer omitted the column');
+  assert.notEqual(stored, 0, 'the value a DEFAULT 0 would have supplied, back when omitting the column was possible');
   assert.equal(stored, CREATED_AT, 'and the value is the clock the write was stamped from');
 });
 
 test('an edit moves updated_at forward and leaves created_at alone', async () => {
-  // The second half of the `DEFAULT 0` trap: an `UPDATE` that omits the
-  // column does not reset it to `0`, it leaves the insert's value -- so a
-  // row edited hours later still claims it was last modified when it was
+  // **The half the schema cannot protect.** `NOT NULL` refuses an `INSERT`
+  // that omits the column; it does nothing about an `UPDATE` that omits it
+  // from its `SET` list, which simply leaves the insert's value -- so a row
+  // edited hours later still claims it was last modified when it was
   // created, and the replica orders it wrongly. A single fixed clock could
   // not see that, which is why this file's clock moves.
   const { host, raw, setNow } = setupHost();

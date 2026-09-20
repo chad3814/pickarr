@@ -187,15 +187,18 @@ function emptyPathRefusal(fromPath: string, toPath: string): MappingRefusal | un
 /**
  * Writes one `filepath_mapping` row, answering `{ id }` or a refusal.
  *
- * **`updated_at` is bound explicitly, and it is the one column here that
- * would go wrong quietly if it were not.** Migration 19 added it to a
- * populated table, which SQLite only allows for a `NOT NULL` column with a
- * constant default, so the column carries `DEFAULT 0` permanently -- an
- * `INSERT` that omitted it would succeed and store epoch 0, which sorts to
- * the front of `listByTable`'s modification order and renders as 1970 in a
- * client. Measured on this tree rather than reasoned about, and
- * `test/clients/mappings.test.ts` pins the value rather than trusting this
- * paragraph.
+ * **`updated_at` is bound explicitly, and the column is `NOT NULL` with no
+ * default, so omitting it now fails loudly rather than quietly.** That was
+ * not free: `ALTER TABLE ... ADD COLUMN` would only have added a `NOT NULL`
+ * column to a populated table with a constant default, and SQLite has no
+ * `ALTER COLUMN` to take one away again, so migration 19 rebuilds the
+ * table instead. Before that rebuild the column carried `DEFAULT 0` and an
+ * `INSERT` that left it out stored epoch 0 -- which sorts to the front of
+ * `listByTable`'s modification order and renders as 1970 in a client, with
+ * nothing failing. `test/clients/mappings.test.ts` still pins the stored
+ * value, and it is now the second guard rather than the only one: the
+ * schema refuses the omission and the test pins that this writer does not
+ * make it.
  *
  * `created_at` and `updated_at` take the same `now()` on an insert, the
  * shape `clients/add.ts` and `feeds/add.ts` both use: a row that has never
@@ -253,10 +256,14 @@ export function addMapping(
  * taken?") would refuse exactly this edit, which is the one someone makes
  * when fixing a typo in the `to_path` alone.
  *
- * `updated_at` is bound here too, and for the same reason
- * {@link addMapping}'s doc gives: the `DEFAULT 0` this column carries is a
- * value no writer may inherit, and an edit that left it alone would leave a
- * row whose last-modified time predates the edit.
+ * `updated_at` is bound here too, and the `NOT NULL` column that protects
+ * {@link addMapping} does **not** protect this statement: an `UPDATE` that
+ * omitted the column from its `SET` list violates nothing -- it simply
+ * leaves the insert's value, so a row edited hours later still claims it
+ * was last modified when it was created, and the replica orders it wrongly.
+ * Binding it here is the whole of the guard, and
+ * `test/clients/mappings.test.ts` moves its clock between the insert and
+ * the edit so that a writer which forgot could not pass.
  */
 export function editMapping(
   deps: { raw: DatabaseSync; now: () => number },

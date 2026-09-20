@@ -49,12 +49,13 @@ export const filepathMapping = sqliteTable('filepath_mapping', {
   toPath: text('to_path').notNull(),
   createdAt: integer('created_at').notNull(),
   // Migration 19, which is also where the table joined `HOST_SYNCED_TABLES`
-  // -- every synced table projects an `updatedAt`. `.default(0)` mirrors the
-  // `DEFAULT 0` that migration carries and is not a value any writer should
-  // inherit: SQLite refuses `ADD COLUMN ... NOT NULL` without a constant
-  // default on a populated table, and the migration backfills `created_at`
-  // over it immediately. That migration's own docblock has the measurement.
-  updatedAt: integer('updated_at').notNull().default(0),
+  // -- every synced table projects an `updatedAt`. **No default**, and that
+  // cost a table rebuild: `ADD COLUMN ... NOT NULL` would have needed a
+  // constant one, which SQLite then has no `ALTER COLUMN` to remove, and a
+  // row written without the column would have stored epoch 0 silently
+  // rather than failing. That migration's docblock has the measurement and
+  // the argument.
+  updatedAt: integer('updated_at').notNull(),
 }, (t) => [
   index('filepath_mapping_client').on(t.downloadClientId),
   // One mapping per prefix per client. Migration 19's docblock has why this
