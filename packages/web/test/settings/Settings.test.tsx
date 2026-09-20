@@ -6,12 +6,13 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
-import { subscribeInserts } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import type { StoredRow } from '../../src/store/db.ts';
 import type { ListByTableOptions } from '../../src/store/rows.ts';
 import { Settings, type SettingsSource } from '../../src/settings/Settings.tsx';
 import type { AddFeedOutcome } from '../../src/settings/AddFeed.tsx';
 import type { AddDownloadClientOutcome } from '../../src/settings/AddDownloadClient.tsx';
+import type { MappingSubmit } from '../../src/settings/postMapping.ts';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -65,6 +66,7 @@ function clientOp({ id, name }: { id: number; name: string }): SyncOp {
 function sourceFor(db: IDBDatabase): SettingsSource {
   return {
     listByTable: (table, opts) => listByTable(db, table, opts),
+    subscribe,
     subscribeInserts,
   };
 }
@@ -76,9 +78,22 @@ function neverSubmitFeed(): Promise<AddFeedOutcome> {
 function neverSubmitClient(): Promise<AddDownloadClientOutcome> {
   assert.fail('a listing test must not call the download client submit');
 }
+/** Nothing here expands a client's path mappings, so none of these three may be reached. */
+const neverSubmitMapping: MappingSubmit = {
+  add: () => assert.fail('a listing test must not add a path mapping'),
+  edit: () => assert.fail('a listing test must not edit a path mapping'),
+  remove: () => assert.fail('a listing test must not remove a path mapping'),
+};
 
 function renderSettings(source: SettingsSource): void {
-  render(<Settings source={source} submitFeed={neverSubmitFeed} submitDownloadClient={neverSubmitClient} />);
+  render(
+    <Settings
+      source={source}
+      submitFeed={neverSubmitFeed}
+      submitDownloadClient={neverSubmitClient}
+      submitMapping={neverSubmitMapping}
+    />,
+  );
 }
 
 test('the settings screen carries the route-mapping marker on its root element', async () => {
@@ -174,9 +189,17 @@ test('a download client list that never resolves leaves the feeds list rendered'
   const stalled: SettingsSource = {
     listByTable: (table: string, opts: ListByTableOptions): Promise<readonly StoredRow[]> =>
       table === 'download_client' ? new Promise<readonly StoredRow[]>(() => {}) : listByTable(db, table, opts),
+    subscribe,
     subscribeInserts,
   };
-  render(<Settings source={stalled} submitFeed={neverSubmitFeed} submitDownloadClient={neverSubmitClient} />);
+  render(
+    <Settings
+      source={stalled}
+      submitFeed={neverSubmitFeed}
+      submitDownloadClient={neverSubmitClient}
+      submitMapping={neverSubmitMapping}
+    />,
+  );
 
   await waitFor(() => {
     assert.equal(screen.getAllByRole('heading', { name: 'Movies HD' }).length, 1, 'the feed is listed anyway');

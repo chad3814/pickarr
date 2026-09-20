@@ -211,3 +211,119 @@ form[aria-labelledby='add-download-client-heading'] [role='alert'] h3 {
   font-weight: 600;
   color: var(--color-error);
 }
+
+/*
+ * The path mappings inside each download client's row
+ * (`ClientMappings.tsx`, design spec §8). Keyed by structure alone, which
+ * this file's docblock already allows ("a type, an ARIA attribute already
+ * load-bearing for accessibility, or a parent/child relationship") -- and
+ * here it is the only option: every `aria-labelledby` that component sets
+ * points at a *per-client* or *per-mapping* id, so there is no stable
+ * attribute value to select on and inventing one would be a hook added for
+ * styling alone.
+ *
+ * The structure being relied on, in full: `ClientMappings` renders one
+ * `<div>` as the last child of each client's `<li>`, holding the expander
+ * button, then -- once expanded -- the add form, then either the empty
+ * sentence or the `<ul>` of mapping rows. That `<div>` is the only
+ * element of its type a client `<li>` has, so `li > div` names it
+ * unambiguously.
+ */
+ul[aria-label='download clients'] li > div {
+  margin-top: var(--space-3);
+}
+
+/*
+ * The add-mapping form's fields, laid out exactly as the screen's two
+ * other add forms are (the rule near the top of this file). A separate
+ * block rather than a fourth selector there because that one is keyed on
+ * a fixed heading id and this one cannot be; the declarations are the same
+ * three on purpose, so the third form on this screen does not read as a
+ * different kind of thing from the first two.
+ */
+ul[aria-label='download clients'] li > div > form > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+ul[aria-label='download clients'] li > div form label {
+  color: var(--color-text-dim);
+  font-size: var(--text-label);
+}
+
+/*
+ * The add form's name, one tier under the client's own `<h3>` -- an `<h4>`,
+ * and no rule in `base.css` or above in this file reaches one
+ * (`grep -n 'h4' packages/web/src/styles/*.css` finds only this block), so
+ * without this it falls through to the UA's own `h4` rule and takes
+ * whatever margins that supplies. Same three declarations as the two
+ * `<h3>` form headings above, with less space beneath: this form sits
+ * inside a list row rather than at the top of a section.
+ */
+ul[aria-label='download clients'] li > div > form > h4 {
+  font-size: var(--text-body);
+  font-weight: 600;
+  margin: 0 0 var(--space-3);
+}
+
+/*
+ * The mapping rows. `ul[aria-label='download clients']`'s own list rule
+ * above is keyed on that attribute, which this nested list does not carry
+ * (its name is composed from the expander and the client heading instead),
+ * so without this it renders with the UA's bullets and indent while the
+ * list around it does not.
+ *
+ * The row `<li>`s themselves need nothing: the `li` selectors above are
+ * descendant selectors, so a mapping row already picks up the same padding
+ * and hairline a client row has. `overflow-wrap` is here because a path is
+ * exactly the kind of value with nothing to break at -- the same reason the
+ * detail-line rule above carries it.
+ */
+ul[aria-label='download clients'] li > div > ul {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * "No path mappings for this download client." `library.css`'s `section > p`
+ * gives every other empty state on the app its italic-and-dimmed treatment,
+ * and reaches none of these: this one is a `<p>` several levels inside a
+ * section rather than a direct child. The detail-line rule above already
+ * dims it and drops it to the meta scale, so the italic is all that is
+ * missing -- and it is the half that distinguishes "finished loading, there
+ * are none" from an ordinary line of detail about the client.
+ */
+ul[aria-label='download clients'] li > div > p {
+  font-style: italic;
+}
+
+/*
+ * A refused add, edit or remove. **This rule is the reason this block
+ * exists at all**: without it the detail-line rule above reaches these
+ * sentences, because they are `<p>`s inside a client `<li>` -- so a refusal
+ * would render dimmed, at the meta scale, indistinguishable from the line
+ * naming the client's category. `CLAUDE.md`'s longest hazard is a component
+ * that announced itself as an error and rendered as ordinary text, and a
+ * stylesheet that actively dims an alert is that defect with a stronger
+ * cause.
+ *
+ * `--color-error` and `--text-body`, matching the two add forms' banners
+ * above; `font-style: normal` because the empty-state rule's italic would
+ * otherwise reach the add form's banner through the same `> div >` path if
+ * that selector is ever loosened, and an alert is not an aside.
+ */
+ul[aria-label='download clients'] li [role='alert'] {
+  margin: var(--space-2) 0 0;
+}
+
+ul[aria-label='download clients'] li [role='alert'] p {
+  margin: 0;
+  font-size: var(--text-body);
+  font-style: normal;
+  font-weight: 600;
+  color: var(--color-error);
+}
