@@ -847,13 +847,22 @@ function statusForDownloadClientRefusal(refusal: AddDownloadClientRefusal['refus
  * from the host rather than from here.
  *
  * **`typeof … === 'number'` and no more**, deliberately: this does not
- * reject a non-integer, a negative or `NaN`. None of them can name a row,
- * so each already has a correct answer -- `unknown-release` -- and adding
- * the check here would be this module deciding what an id may look like,
- * which is a value-level rule about the `rss_item` table it can see none
- * of. What the guard is for is the string an id arrives as when a caller
- * forgets to parse it, which would otherwise reach a `WHERE id = ?` that
- * silently matches nothing for a second reason.
+ * reject a non-integer, a negative or `NaN`. Measured against a migrated
+ * database holding one `rss_item` at id 1, each of `1.5`, `-1` and `NaN`
+ * comes back from `ownerPluginId`'s join as `undefined` -- so each already
+ * has a correct answer, `unknown-release`, and adding the check here would
+ * be this module deciding what an id may look like, which is a value-level
+ * rule about a table it can see none of.
+ *
+ * **The `typeof` half is not decoration, and the obvious reason for it is
+ * wrong.** The same measurement: `'1'`, the string an id arrives as when a
+ * caller forgets to parse it, **matches the row** -- SQLite applies the
+ * column's INTEGER affinity to the bound text and compares it as a number.
+ * So a string id would not "silently match nothing"; it would silently
+ * *work*, and this route would be quietly accepting a wire shape it does
+ * not declare, which the browser client is then free to depend on. The
+ * guard is what keeps `{ rssItemId: number }` true of what the host is
+ * actually asked.
  *
  * `'rssItemId' in value` rather than a cast to `Record<string, unknown>`:
  * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly

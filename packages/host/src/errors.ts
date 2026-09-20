@@ -66,10 +66,17 @@ export class PluginNotRegisteredError extends Error {
  * `clients/pick.ts` maps them to two different refusal codes:
  * `unknown-release` is "that id names nothing", which a browser showing a
  * stale list produces, and `plugin-not-registered` is "it names something
- * this host cannot act on", which a misconfigured install produces. The
- * feed side of that join is foreign-keyed and so cannot be the missing
- * half; `requestDownload` re-reads the item's existence to decide which of
- * the two this is.
+ * this host cannot act on", which a misconfigured install produces.
+ *
+ * **`requestDownload` does not need a second query to tell them apart**,
+ * and does not make one. `rss_item.feed_id` is `NOT NULL REFERENCES
+ * rss_feed (id)` (`db/migrate.ts`) under `PRAGMA foreign_keys = ON`
+ * (`db/open.ts`), so the feed half of the join cannot be the missing one:
+ * `undefined` from `ownerPluginId` means the *item* is absent, full stop,
+ * and a plugin id that comes back and is not in the registry is the other
+ * case. Were the pragma ever off, an orphaned item would be reported as
+ * unknown rather than as unowned -- a wrong code on a database that is
+ * already corrupt, which is why this is a note and not a guard.
  */
 export class UnknownRssItemError extends Error {
   constructor(rssItemId: number) {
