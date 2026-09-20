@@ -58,7 +58,8 @@
   /* Fixed component dimensions, not margins or gaps, which is why they are
      their own family rather than further `--space-*` members: the scale
      above is for the distance *between* things, and each of these is the
-     width of one specific thing. Two members, since the picks slice.
+     width or the height of one specific thing. Three members, since this
+     slice; the first two are widths and the third is a height.
 
      `--size-poster` is the poster frame `library.css`'s `article img` crops
      to, at the fixed 2:3 aspect ratio 1.x's `card.css` measured, so every
@@ -92,9 +93,42 @@
      re-measure. The pin is conservative, not exact -- it also reddens for a
      shorter label that would have fitted -- because no jsdom test can
      measure a rendered string, and a false red that says "re-measure" costs
-     less than the silent reflow it replaces. */
+     less than the silent reflow it replaces.
+
+     `--size-mapping-row` is the third, the first that is a height, and the
+     same *kind* of thing as `--size-pick-button`: a floor that stops a row
+     reflowing when a control comes or goes. A mapping row's first line
+     holds the two paths and, when the row is idle, an Edit and a Remove
+     button -- and `ClientMappings.tsx` removes those two from the DOM
+     while the row is being edited, rather than hiding them. So the line's
+     height is the buttons' height in one state and the text's in the
+     other, and the paths ride up at the moment the operator opens the form
+     to correct one of them.
+
+     Measured in Chromium on a real mapping row, with only the
+     `line-height` declaration in `settings.css` removed and the rest of
+     that file as it stands: opening the editor moved the client path's top
+     edge from **693.5px to 690px**, a **3.5px** jump in the text being
+     read and in everything below it. A `<button>` on this screen computes
+     **27px** tall (`getComputedStyle(...).height`; `base.css`'s `button`
+     rule is `--text-body` text, `--space-1` of vertical padding and a 1px
+     border, over the `box-sizing: border-box` the UA stylesheet gives a
+     button), so 1.75rem clears it by 1px and the line measures 28px in
+     both states. It is applied as a length `line-height` rather than a
+     `min-height` because half-leading then centres the glyphs in the box
+     for free: with it, a path's text and a button's text share a centre
+     line at 704px, measured in the same run.
+
+     **Its weakness is `--size-pick-button`'s**: it is a measurement of
+     today's control, and a taller button reflows the row again with
+     nothing in the stylesheet able to notice. It is guarded from the other
+     end rather than left to rot -- `packages/e2e/tests/shell.spec.ts` reads
+     the client path's bounding box either side of opening the editor and
+     requires the two to be equal, in a real browser, so a control that
+     outgrows this value reddens there. */
   --size-poster: 6rem;
   --size-pick-button: 4.5rem;
+  --size-mapping-row: 1.75rem;
 
   /* One elevation, for dialogs. Cards are separated by surface and hairline, so a
      second shadow token would be speculative. */
