@@ -4,19 +4,23 @@ For review on the repo owner's return. Built with standing authority to
 decide forks, and — after the owner left mid-slice — to commit unsigned
 when the signing agent was unavailable.
 
-**Branch:** `path-mappings`, 23 commits, based on `pickarr-2` at
+**Branch:** `path-mappings`, **24 commits**, based on `pickarr-2` at
 `5dab78d`. **Not merged. Not pushed.**
 
-**Eight commits are unsigned** and need a rebase before this lands
-anywhere shared:
+**15 commits are unsigned** and need a rebase before this lands
+anywhere shared. Rather than list them here — see below — get them
+from the tree, which cannot go stale:
 
 ```
-4926804  88a8b9c  0ac7e7b  2db5604  68bd0bf  ccfc0c2  1098f12  ce70e23
+git log --format='%G? %h %s' 5dab78d..path-mappings | grep '^N '
 ```
 
-plus the six from the fix wave: `d470952`, `d35173d`, `ca52f8f`,
-`80aaf51`, `a94719d`, `4916195`. Verify with
-`git log --format='%G? %h %s' 5dab78d..path-mappings`.
+*This block first said 23 commits and listed 14 unsigned, and was
+wrong the moment it was committed, because committing it made a 24th.*
+The identical failure it describes two sections down, reproduced by the
+document describing it. Hence the command rather than a list: a
+measured number is true of the tree it was measured against, and a
+handover is written against a tree it is about to change.
 
 **Gate:** lint 110 warnings / 0 errors (0 in
 `contract`/`host`/`web`/`e2e`), typecheck / test-hygiene / build PASS,
