@@ -92,12 +92,15 @@ function setupHost(): Harness {
  * client a mapping can hang off looks like.
  */
 function seedClient(raw: DatabaseSync, name = 'Client'): number {
-  raw.prepare(`
+  // `lastInsertRowid` off the `run` result rather than a `SELECT id` read
+  // back through a cast -- `paths.test.ts`'s twin does the latter, and
+  // `(inserted as { id: unknown }).id` is a cast this file does not need to
+  // take on when the insert already answers the id.
+  const result = raw.prepare(`
     INSERT INTO download_client (name, type, implementation, url, category, import_mode, created_at, updated_at)
     VALUES (?, 'torrent', 'qbittorrent', 'https://example.invalid', 'movies', 'copy', 1, 1)
   `).run(name);
-  const inserted = raw.prepare('SELECT id FROM download_client WHERE name = ?').get(name);
-  return Number((inserted as { id: unknown }).id);
+  return Number(result.lastInsertRowid);
 }
 
 /**

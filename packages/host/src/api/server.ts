@@ -1,6 +1,6 @@
 /**
- * The read-and-write API on a socket: `node:http`, thirteen routes --
- * eleven behind a session and two open (`/api/health` and the static
+ * The read-and-write API on a socket: `node:http`, fifteen routes --
+ * thirteen behind a session and two open (`/api/health` and the static
  * bundle) -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
@@ -13,8 +13,11 @@
  * added the static route -- guarded like the other eight except
  * `/api/health` and that one -- to eleven with `POST /api/feeds`, the first
  * route this file answers a write on, to twelve with
- * `POST /api/download-clients`, and to thirteen with `POST /api/picks`; the
- * shape of the sentence is what matters and has not changed.)
+ * `POST /api/download-clients`, to thirteen with `POST /api/picks`, and to
+ * fifteen with `POST /api/mappings` and `/api/mappings/:id` -- the last of
+ * those being one route answering two methods, so the route count and the
+ * method count have stopped being the same number; the shape of the
+ * sentence is what matters and has not changed.)
  *
  * **It said "eleven" through two of those.** The download-clients slice
  * added its route and left both this line and `ROUTES`' own doc reading
@@ -128,6 +131,7 @@ import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
+import type { AddMappingInput, EditMappingInput, MappingRefusal } from '../clients/mappings.ts';
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
@@ -332,6 +336,32 @@ export interface ReadServerDeps {
    */
   requestPick: (rssItemId: number) => Promise<PickAccepted | PickRefusal>;
   /**
+   * Writes a new `filepath_mapping` row -- `Host.addMapping`, handed in as
+   * one function rather than the whole `Host`, for the reason `addFeed`
+   * above gives.
+   *
+   * Resolves a refusal *value* on failure and throws no refusal, with the
+   * same scope the three above state: a SQLite error that is neither the
+   * foreign-key nor the unique-index violation is rethrown by
+   * `clients/mappings.ts` and becomes a 500 here rather than a mapped
+   * status.
+   */
+  addMapping: (input: AddMappingInput) => Promise<{ id: number } | MappingRefusal>;
+  /**
+   * Replaces one mapping's two paths -- `Host.editMapping`, wired the same
+   * way as `addMapping` above and with the same guarantees. `id` is a
+   * separate argument rather than a field of the input because it comes
+   * from the request *path*, not from the body: see `mappingIdFrom`.
+   */
+  editMapping: (id: number, input: EditMappingInput) => Promise<{ id: number } | MappingRefusal>;
+  /**
+   * Deletes one mapping -- `Host.removeMapping`, wired the same way again.
+   * Resolves `{ id }` for a row that was there and `unknown-mapping` for
+   * one that was not; the route discards the id, since a `204` carries no
+   * body to put it in.
+   */
+  removeMapping: (id: number) => Promise<{ id: number } | MappingRefusal>;
+  /**
    * Host tables plus every plugin's declared tables, as one lookup --
    * `sync/registry.ts`'s `createSyncRegistry(raw, plugins)`. What `/api/sync`
    * and `/api/sync/backfill` read current state through; see `sync-route.ts`.
@@ -420,20 +450,37 @@ export interface ReadServerDeps {
 /**
  * What a route answers, before anything is written to a socket.
  *
- * Three shapes because artwork and the static bundle are the two routes that
- * do not answer JSON, and each already returns a status/headers/body triple
- * of its own (`ArtworkResponse`, `StaticResponse`) that this module has no
- * business reinterpreting. Keeping routing separate from writing is what
- * lets every route be a function of its request.
+ * Artwork and the static bundle are the two routes that do not answer JSON,
+ * and each already returns a status/headers/body triple of its own
+ * (`ArtworkResponse`, `StaticResponse`) that this module has no business
+ * reinterpreting. Keeping routing separate from writing is what lets every
+ * route be a function of its request.
+ *
+ * **`empty` is the fourth, and it is not `json` with an absent body.** A
+ * `204` must carry no body and no `Content-Length` at all, and `writeJson`
+ * below composes both from `JSON.stringify(body)` -- which for `undefined`
+ * answers `undefined`, so `Buffer.byteLength` would throw and a successful
+ * delete would become a 500. `DELETE /api/mappings/:id` is the only route
+ * that answers this kind today.
  */
 type Answer =
   | { kind: 'json'; status: number; body: unknown }
+  | { kind: 'empty'; status: number }
   | { kind: 'artwork'; artwork: ArtworkResponse }
   | { kind: 'static'; file: StaticResponse };
 
 function json(status: number, body: unknown): Answer {
   return { kind: 'json', status, body };
 }
+
+/**
+ * The fixed `204` a successful delete answers: a status, and nothing else.
+ *
+ * A module-level constant rather than a value built per request, because
+ * there is nothing in it that could vary -- and in particular nothing from
+ * the request, which is the rule every fixed answer in this file follows.
+ */
+const NO_CONTENT: Answer = { kind: 'empty', status: 204 };
 
 /** The fixed 404 every unrecognised path and every unparseable one answers. */
 const UNKNOWN_ROUTE = json(404, { error: 'unknown route' });
@@ -678,7 +725,9 @@ interface RouteRequest {
   params: URLSearchParams;
   /**
    * The request body, already read, capped and json-parsed by `handle` --
-   * `undefined` for a `GET`, which never has one read. `unknown` because
+   * `undefined` for a `GET`, which never has one read, and `undefined`
+   * too for a request that sent an empty one (a `DELETE`, ordinarily; see
+   * `readBody`). `unknown` because
    * nothing here has checked its shape yet: that is each route's own job,
    * the same way `addFeed` (`../feeds/add.ts`) is the validator for the
    * fields inside it rather than a caller that has already done so.
@@ -915,6 +964,135 @@ function statusForPickRefusal(refusal: PickRefusal['refusal']): number {
 }
 
 /**
+ * Whether `value` has the shape `POST /api/mappings` needs: three fields, a
+ * number and two strings.
+ *
+ * Nothing here checks a field's *value*. Not that the client id names a
+ * row -- that is `unknown-client`, caught from the foreign key in
+ * `../clients/mappings.ts`; not that the `from_path` is free -- that is
+ * `duplicate-from-path`, caught from the unique index; and above all
+ * **nothing here looks at the shape of a path**. Design spec §7: a
+ * `from_path` may be `D:\Downloads`, because these are foreign paths from a
+ * machine that is not this one, and `../clients/paths.ts` refuses
+ * `node:path` for exactly that reason. A route that demanded a leading `/`
+ * or rejected a backslash would be stricter than the consumer and would
+ * refuse mappings that work. The one path-content rule there is --
+ * `empty-path`, on `''` alone -- lives in the host with every other
+ * value-level invariant, per the module doc's rule that no business rule
+ * belongs in this file.
+ *
+ * `'fromPath' in value` rather than a cast to `Record<string, unknown>`:
+ * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
+ * as far as each check proves -- the same pattern `isFeedBody`,
+ * `isDownloadClientBody` and `isPickBody` above use.
+ */
+function isMappingBody(value: unknown): value is AddMappingInput {
+  return typeof value === 'object' && value !== null
+    && 'downloadClientId' in value && typeof value.downloadClientId === 'number'
+    && 'fromPath' in value && typeof value.fromPath === 'string'
+    && 'toPath' in value && typeof value.toPath === 'string';
+}
+
+/**
+ * Whether `value` has the shape `PATCH /api/mappings/:id` needs: the two
+ * paths, both present.
+ *
+ * **Both required, not optional**, and `downloadClientId` absent. The host
+ * replaces both columns, so an omitted field would arrive as `undefined`
+ * and there would be two spellings of "leave it alone" for this route to
+ * tell apart -- `EditMappingInput`'s own doc has the longer version. The
+ * client a mapping belongs to is not editable at all: a mapping is
+ * meaningless away from its client (design spec §8), and an extra
+ * `downloadClientId` on the body is simply ignored, the same way an extra
+ * property is on every other route here.
+ *
+ * The id is **not** in the body -- it is the path segment `mappingIdFrom`
+ * reads -- so there is no way for a body to name one row while the target
+ * names another.
+ */
+function isMappingEditBody(value: unknown): value is EditMappingInput {
+  return typeof value === 'object' && value !== null
+    && 'fromPath' in value && typeof value.fromPath === 'string'
+    && 'toPath' in value && typeof value.toPath === 'string';
+}
+
+/**
+ * The status the three mapping routes answer for each way the host can
+ * refuse, on `statusForFeedRefusal`'s reasoning above.
+ *
+ * `duplicate-from-path` is the one refusal that already has a row to point
+ * at -- a mapping on this client already holding that `from_path` -- so
+ * `409` is the one that fits, exactly as `duplicate-url`, `duplicate-name`
+ * and `already-submitted` get it on the other three write routes.
+ *
+ * **`unknown-client` and `unknown-mapping` answer `404`, where every
+ * "names no row" refusal on the routes above answers `422`.** The
+ * difference is what the id is *of*. `unknown-release` is a field inside a
+ * `POST /api/picks` body describing the pick; the request itself was
+ * addressed to a route that exists, so a `404` would say "no such
+ * endpoint". Here `unknown-mapping` is the **request target** --
+ * `/api/mappings/7` names a resource, and a resource that is not there is
+ * what `404` means. `unknown-client` rides along with it: `POST
+ * /api/mappings` addresses the collection rather than a client, but the
+ * two are the same answer to a browser holding a stale settings list
+ * (reload and the row it named is gone), and giving them different
+ * statuses would split one recovery into two.
+ *
+ * `empty-path` answers `422`: the request parsed fine and named fields
+ * that exist, but the value one of them carries cannot be acted on.
+ *
+ * Whatever the status, the body carries `refusal` itself and nothing else
+ * -- never a message a human would read, and never a path. Paths are in
+ * this table by design (design spec §5) and a client reads them back off
+ * the replica; that is not licence for an *error* body to quote the one it
+ * was just handed.
+ */
+function statusForMappingRefusal(refusal: MappingRefusal['refusal']): number {
+  switch (refusal) {
+    case 'duplicate-from-path':
+      return 409;
+    case 'unknown-client':
+    case 'unknown-mapping':
+      return 404;
+    case 'empty-path':
+      return 422;
+  }
+}
+
+/**
+ * The mapping id in `/api/mappings/:id`, or `undefined` for a segment that
+ * is not one.
+ *
+ * **Read back off the pathname by index, never bound**, which is the shape
+ * `artworkAnswer` above established and the reason `Route.path` carries a
+ * `:name` segment at all: the template exists so `matchesPath` can compare
+ * segment counts, and the value is this function's to recover.
+ *
+ * Every segment is checked rather than `!`-asserted:
+ * `noUncheckedIndexedAccess` types each one `string | undefined`, and a
+ * path with the right number of slashes and an empty segment is a real
+ * request a client can send. `Number.isSafeInteger` is the last check and
+ * is not decoration -- `Number('9'.repeat(30))` is a float, and handing a
+ * float to a parameter bound against an `INTEGER PRIMARY KEY` is a 500 for
+ * a request that only ever meant "not found". `DIGITS` alone does not
+ * catch it, since thirty digits are all digits.
+ *
+ * `undefined` rather than an `Answer`, because the two callers want
+ * different things from it and neither wants this function's opinion: both
+ * turn it into `UNKNOWN_ROUTE`, which is the same 404 a path naming no
+ * route gets, so an unparseable id tells a caller nothing a missing row
+ * would not have.
+ */
+function mappingIdFrom(pathname: string): number | undefined {
+  const segments = pathname.split('/');
+  if (segments.length !== 4) return undefined;
+  const raw = segments[3];
+  if (raw === undefined || !DIGITS.test(raw)) return undefined;
+  const id = Number(raw);
+  return Number.isSafeInteger(id) ? id : undefined;
+}
+
+/**
  * The static route's own `path`, in `ROUTES` -- a sentinel `matchesPath`
  * recognises and handles before its ordinary segment comparison ever runs,
  * not a template built from `:name` segments the way every other route's is
@@ -926,8 +1104,11 @@ function statusForPickRefusal(refusal: PickRefusal['refusal']): number {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The thirteen routes -- eleven guarded, two `open: true`, the same split
- * this module's own doc states.
+ * The fifteen routes -- thirteen guarded, two `open: true`, the same split
+ * this module's own doc states. Fifteen *routes*, sixteen route-and-method
+ * pairs: `/api/mappings/:id` is the first entry here to declare two
+ * methods, so the two counts have parted company and a reader counting
+ * "endpoints" will get a different number than `grep` does.
  *
  * **It said "ten" until the final review counted them, and then "eleven"
  * for two slices while the table held twelve.** `POST /api/feeds` made
@@ -935,7 +1116,9 @@ const STATIC_ROUTE_PATH = '/*';
  * above -- the one whose whole opening paragraph exists because its
  * predecessor said "six routes" and was wrong -- while missing this line;
  * the download-clients slice then added a twelfth and updated neither.
- * That is not an argument for deleting the number: a reader wants to know
+ * (The picks slice made it thirteen and corrected both; this slice makes
+ * it fifteen. Measured with the `grep` below on each occasion, not
+ * incremented on sight.) That is not an argument for deleting the number: a reader wants to know
  * whether the table below is the whole set. It is an argument for checking
  * it, because no test pins the total and none can usefully. The one count
  * assertion in `api/server.test.ts` is
@@ -1207,6 +1390,90 @@ export const ROUTES: readonly Route[] = [
     },
   },
   {
+    path: '/api/mappings',
+    methods: ['POST'],
+    open: false,
+    // Writes a new `filepath_mapping` row through `deps.addMapping`, shaped
+    // exactly like the three POST routes above and guarded the same way: a
+    // caller with no session has no more business configuring where this
+    // host looks for a file than reading which files it has.
+    //
+    // Only the body's *shape* is checked here; every value-level invariant
+    // -- a client that exists, a `from_path` this client has not already
+    // claimed, neither path empty -- lives in `../clients/mappings.ts`, per
+    // the module doc's rule that no SQL and no business rule belongs in
+    // this file.
+    answer: async ({ deps, body }) => {
+      // `{ refusal }` and no prose, for the reason `MALFORMED_BODY`'s doc
+      // gives: these two are the only answers here that share a status.
+      if (!isMappingBody(body)) return json(400, { refusal: 'invalid-shape' });
+      const result = await deps.addMapping(body);
+      if ('refusal' in result) {
+        return json(statusForMappingRefusal(result.refusal), { refusal: result.refusal });
+      }
+      return json(201, { id: result.id });
+    },
+  },
+  {
+    path: '/api/mappings/:id',
+    // **The first route in this table to declare two methods**, and the
+    // first `PATCH` or `DELETE` this API has ever answered -- until this
+    // slice it answered `GET` and `POST` only. That is a line in this
+    // array rather than a change to the guard, which is what the per-route
+    // `methods` table added in the feed-settings slice bought (design spec
+    // §6). `refusalFor`'s ordering is untouched: the session check still
+    // runs before the method check, so an anonymous `PATCH` and an
+    // anonymous `DELETE` are `401` exactly as an anonymous `POST` is, and
+    // neither can be used to tell a real path from an invented one.
+    //
+    // **One entry, not two.** `routeFor` is a `.find`, so a second entry
+    // with this same path would never be reached and its methods would
+    // silently 405. The branch below is on `request.method` instead, which
+    // is safe because the guard has already refused every method not named
+    // here.
+    methods: ['PATCH', 'DELETE'],
+    open: false,
+    // Four segments, so `matchesPath`'s segment-count comparison keeps this
+    // and `/api/mappings` above from shadowing one another -- the same
+    // arrangement `/api/sync` and `/api/sync/backfill` already have.
+    //
+    // The `:id` is read back off the pathname by `mappingIdFrom`, never
+    // bound by the router: `Route.path` declares the segment only so the
+    // count matches. `/api/artwork/:kind/:mediaItemId` is the precedent.
+    answer: async ({ deps, request, pathname, body }) => {
+      const id = mappingIdFrom(pathname);
+      // The same 404 a path naming no route gets. An id that is not digits,
+      // or is too large to be an integer, is not a mapping that could
+      // exist, and saying so in any other words would tell a caller which
+      // of their two mistakes it was.
+      if (id === undefined) return UNKNOWN_ROUTE;
+
+      if (request.method === 'DELETE') {
+        const removed = await deps.removeMapping(id);
+        if ('refusal' in removed) {
+          return json(statusForMappingRefusal(removed.refusal), { refusal: removed.refusal });
+        }
+        // 204 and no body. There is nothing left to describe: the id the
+        // caller would read back is the one they sent, in the url they sent
+        // it to.
+        return NO_CONTENT;
+      }
+
+      // `PATCH`, and nothing else can reach here: `methods` above names two
+      // and `refusalFor` answers 405 for every other, so this is not an
+      // unchecked assumption about the request line.
+      if (!isMappingEditBody(body)) return json(400, { refusal: 'invalid-shape' });
+      const result = await deps.editMapping(id, body);
+      if ('refusal' in result) {
+        return json(statusForMappingRefusal(result.refusal), { refusal: result.refusal });
+      }
+      // 200 rather than 201: nothing was created, and the id is the one the
+      // caller addressed. It is answered anyway, so an edit and an add have
+      // the same success shape for a client to read.
+      return json(200, { id: result.id });
+    },
+  },
+  {
     path: STATIC_ROUTE_PATH,
     // The other of two open routes (design spec §3, and the shell slice's
     // Task 1). It has to be: the bundle is the same bytes for every caller,
@@ -1379,6 +1646,13 @@ function write(response: ServerResponse, answer: Answer): void {
     writeJson(response, answer.status, answer.body);
     return;
   }
+  if (answer.kind === 'empty') {
+    // No `Content-Type` and no `Content-Length`: a 204 carries neither, and
+    // `end()` with no argument is what sends the status line alone.
+    response.writeHead(answer.status);
+    response.end();
+    return;
+  }
   if (answer.kind === 'artwork') {
     // Written exactly as `readArtwork` composed it, including a 404 or a 304
     // carrying no body at all: that function has already decided what the
@@ -1466,6 +1740,29 @@ function readBody(request: IncomingMessage): Promise<{ body: unknown } | { refus
     request.on('end', () => {
       if (settled) return;
       const text = Buffer.concat(chunks).toString('utf8');
+      // **No body at all is not a malformed one**, and telling the two
+      // apart is what makes `DELETE /api/mappings/:id` answerable.
+      // `JSON.parse('')` throws, so before this line every bodiless
+      // non-`GET` request was refused `400 malformed-body` *here*, ahead of
+      // the router -- and a `DELETE` carries no body, which is exactly what
+      // `fetch(url, { method: 'DELETE' })` sends. The per-route `methods`
+      // entry could not have reached that, because this runs first.
+      //
+      // The alternative was to skip this call for `DELETE` in `handle`,
+      // which was rejected: a request whose stream is never read leaves
+      // bytes on the socket if a client did send some, and the rule would
+      // then be about the method rather than about what arrived.
+      //
+      // **What this changes for the routes that already existed**: a `POST`
+      // with a completely empty body now answers `invalid-shape` rather
+      // than `malformed-body`. Both are 400 and both carry a code, so the
+      // constraint the two exist to satisfy is untouched -- and
+      // `invalid-shape` is the more honest of the two, since there was
+      // nothing to parse and so nothing malformed.
+      if (text === '') {
+        finish({ body: undefined });
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(text);
@@ -1525,9 +1822,16 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
     // Past the guard. Anything mounted from here down is guarded by having
     // been written below this line, rather than by being marked in `ROUTES`.
     //
-    // The body is read here, not per route: every route but `/api/feeds`
-    // answers a `GET` and never has one, and `readBody` is a no-op cost none
-    // of them should each have to remember to skip.
+    // The body is read here, not per route: most routes answer a `GET` and
+    // never have one, and `readBody` is a no-op cost none of them should
+    // each have to remember to skip. (That line named `/api/feeds` as the
+    // single exception, which it stopped being three write routes ago.)
+    //
+    // `DELETE` goes through it too, and must: a request whose stream is
+    // never read leaves bytes on the socket if a client did send some.
+    // `readBody` answers `{ body: undefined }` for an empty one rather than
+    // calling it malformed -- see its own note, which is where the bodiless
+    // `DELETE` this slice added is actually handled.
     let body: unknown;
     if (request.method !== 'GET') {
       const read = await readBody(request);

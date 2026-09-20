@@ -14,7 +14,7 @@ import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import type { AddFeedInput } from '../../src/feeds/add.ts';
 import type { AddDownloadClientInput } from '../../src/clients/add.ts';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
+import { ADD_DOWNLOAD_CLIENT_REFUSALS, MAPPING_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
@@ -179,6 +179,20 @@ async function start(
     // those tests pass for the wrong reason.
     requestPick: () => {
       throw new Error('requestPick not stubbed in this test');
+    },
+    // Same reasoning again, for all three mapping writes. The guard-probe
+    // tests do reach both `/api/mappings` routes with a session -- they
+    // send `{}`, which the shape guards refuse ahead of these, and the
+    // `DELETE` half reaches `removeMapping`, so that one is overridden by
+    // every test that means to exercise it.
+    addMapping: () => {
+      throw new Error('addMapping not stubbed in this test');
+    },
+    editMapping: () => {
+      throw new Error('editMapping not stubbed in this test');
+    },
+    removeMapping: () => {
+      throw new Error('removeMapping not stubbed in this test');
     },
     // No plugin in this file declares a synced table -- what `/api/sync` and
     // `/api/sync/backfill` do with a real one is `sync-route.test.ts`'s.
@@ -358,14 +372,15 @@ async function getAll(
  * this asserts on both, and reading the body here once is what lets each
  * test do that without an `await response.text()` of its own.
  */
-async function postRaw(
+async function sendRaw(
   server: ReadServer,
+  method: string,
   path: string,
   cookie: string | null,
   body: string,
 ): Promise<{ status: number; text: string }> {
   const response = await fetch(`${originOf(server)}${path}`, {
-    method: 'POST',
+    method,
     headers: {
       'content-type': 'application/json',
       ...(cookie === null ? {} : { cookie }),
@@ -373,6 +388,15 @@ async function postRaw(
     body,
   });
   return { status: response.status, text: await response.text() };
+}
+
+async function postRaw(
+  server: ReadServer,
+  path: string,
+  cookie: string | null,
+  body: string,
+): Promise<{ status: number; text: string }> {
+  return sendRaw(server, 'POST', path, cookie, body);
 }
 
 /** `postRaw`, serialising `body` as json first -- what every test with a well-formed payload wants. */
@@ -383,6 +407,39 @@ async function post(
   body: unknown,
 ): Promise<{ status: number; text: string }> {
   return postRaw(server, path, cookie, JSON.stringify(body));
+}
+
+/** `sendRaw` with the serialisation done, for the two methods the mapping routes added. */
+async function send(
+  server: ReadServer,
+  method: string,
+  path: string,
+  cookie: string | null,
+  body: unknown,
+): Promise<{ status: number; text: string }> {
+  return sendRaw(server, method, path, cookie, JSON.stringify(body));
+}
+
+/**
+ * A request carrying **no body at all** and no `content-type`, which is
+ * what a browser's `fetch(url, { method: 'DELETE' })` actually sends.
+ *
+ * Separate from `send` rather than `send(..., undefined)`, because the
+ * absence is the whole point: `JSON.stringify(undefined)` is `undefined`,
+ * which `fetch` would turn into no body anyway, but writing it that way
+ * would read as an oversight rather than as the case under test.
+ */
+async function sendBodiless(
+  server: ReadServer,
+  method: string,
+  path: string,
+  cookie: string | null,
+): Promise<{ status: number; text: string }> {
+  const response = await fetch(`${originOf(server)}${path}`, {
+    method,
+    headers: cookie === null ? {} : { cookie },
+  });
+  return { status: response.status, text: await response.text() };
 }
 
 /**
@@ -2081,6 +2138,396 @@ test('the pick route is guarded by a session like every read', async () => {
   try {
     const answer = await post(server, '/api/picks', ANONYMOUS, validPickBody());
     assert.equal(answer.status, 401, 'no session, no write');
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * A well-shaped `POST /api/mappings` body, so each test overrides only the
+ * field it means to change.
+ *
+ * `D:\Downloads` **is** the default rather than an exotic extra case
+ * (design spec §7 and acceptance 3): a route-level check on path shape
+ * would be caught by every test in this group rather than by one of them.
+ */
+function validMappingBody(overrides: Partial<{ downloadClientId: number; fromPath: string; toPath: string }> = {}): {
+  downloadClientId: number;
+  fromPath: string;
+  toPath: string;
+} {
+  return { downloadClientId: 4, fromPath: 'D:\\Downloads', toPath: '/mnt/seedbox', ...overrides };
+}
+
+/** A well-shaped `PATCH /api/mappings/:id` body -- the two paths, and no id. */
+function validMappingEditBody(): { fromPath: string; toPath: string } {
+  return { fromPath: 'D:\\Downloads', toPath: '/mnt/media' };
+}
+
+test('a well-shaped mapping body is written and answered 201 with the new id', async () => {
+  const { raw, db } = setup();
+  const seen: unknown[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addMapping: async (input) => {
+      seen.push(input);
+      return { id: 31 };
+    },
+  });
+  try {
+    const answer = await post(server, '/api/mappings', cookie, validMappingBody());
+
+    assert.equal(answer.status, 201);
+    assert.deepEqual(JSON.parse(answer.text), { id: 31 });
+    assert.deepEqual(
+      seen,
+      [{ downloadClientId: 4, fromPath: 'D:\\Downloads', toPath: '/mnt/seedbox' }],
+      'the host is handed the body verbatim -- in particular the route neither normalises nor rejects a windows-shaped path',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('an edit answers 200 with the id from the path, and the host is told which row', async () => {
+  const { raw, db } = setup();
+  const seen: { id: number; input: unknown }[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    editMapping: async (id, input) => {
+      seen.push({ id, input });
+      return { id };
+    },
+  });
+  try {
+    const answer = await send(server, 'PATCH', '/api/mappings/7', cookie, validMappingEditBody());
+
+    assert.equal(answer.status, 200, 'an edit created nothing, so it is not a 201');
+    assert.deepEqual(JSON.parse(answer.text), { id: 7 });
+    assert.deepEqual(
+      seen,
+      [{ id: 7, input: { fromPath: 'D:\\Downloads', toPath: '/mnt/media' } }],
+      'the id comes off the path and the paths come out of the body, with neither read from the other',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('a removal answers 204 with no body at all', async () => {
+  const { raw, db } = setup();
+  const seen: number[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    removeMapping: async (id) => {
+      seen.push(id);
+      return { id };
+    },
+  });
+  try {
+    const answer = await sendBodiless(server, 'DELETE', '/api/mappings/7', cookie);
+
+    assert.equal(answer.status, 204);
+    assert.equal(answer.text, '', 'a 204 carries no body, and composing one would be a protocol violation');
+    assert.deepEqual(seen, [7]);
+  } finally {
+    await server.close();
+  }
+});
+
+test('a DELETE sends no body, and the request reader must not refuse it for that', async () => {
+  // **The case the "one line per route" account of this slice misses.**
+  // `handle` reads a body for every method but `GET`, and `readBody`'s
+  // `JSON.parse('')` throws -- so before this slice a bodiless `DELETE`
+  // was answered `400 malformed-body` by the reader, ahead of the router,
+  // and the route's own `methods` entry could not have helped. A browser's
+  // `fetch(url, { method: 'DELETE' })` sends exactly that, so this is the
+  // ordinary case and not an edge one.
+  //
+  // Asserted against *both* new methods: a bodiless `PATCH` is a legal
+  // request too, and it must reach the shape guard and be told its body is
+  // the wrong shape, rather than be told it is malformed json.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    removeMapping: async (id) => ({ id }),
+    editMapping: async (id) => ({ id }),
+  });
+  try {
+    const removed = await sendBodiless(server, 'DELETE', '/api/mappings/7', cookie);
+    assert.equal(removed.status, 204, 'a bodiless DELETE is the normal shape, not a malformed request');
+
+    const edited = await sendBodiless(server, 'PATCH', '/api/mappings/7', cookie);
+    assert.equal(edited.status, 400, 'a bodiless PATCH has no paths to write');
+    assert.deepEqual(
+      JSON.parse(edited.text),
+      { refusal: 'invalid-shape' },
+      'and it is a shape failure rather than a parse failure: there was nothing to parse',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('every mapping refusal answers its own status, on the route that can produce it', async () => {
+  // **All four of `MAPPING_REFUSALS`, not a sample** -- the feeds slice
+  // shipped two of its four unpinned, so its status mapper could have
+  // dropped a `case` and fallen through with every test still green.
+  //
+  // Each code is driven through a route that can really answer it rather
+  // than through whichever is convenient: `unknown-client` only reaches
+  // the add, `unknown-mapping` only the edit and the remove. A stub can
+  // return any code from any route, which is exactly why the table below
+  // says which pairing it is asserting.
+  const cases = [
+    ['POST', '/api/mappings', 'unknown-client', 404],
+    ['POST', '/api/mappings', 'duplicate-from-path', 409],
+    ['POST', '/api/mappings', 'empty-path', 422],
+    ['PATCH', '/api/mappings/7', 'unknown-mapping', 404],
+    ['PATCH', '/api/mappings/7', 'duplicate-from-path', 409],
+    ['PATCH', '/api/mappings/7', 'empty-path', 422],
+    ['DELETE', '/api/mappings/7', 'unknown-mapping', 404],
+  ] as const;
+  // Both halves of the table, read off the contract rather than counted by
+  // hand, so a fifth code added to `MAPPING_REFUSALS` fails here instead of
+  // quietly going unprobed.
+  assert.equal(
+    new Set(cases.map(([, , refusal]) => refusal)).size,
+    MAPPING_REFUSALS.length,
+    'every refusal the host can return has a row',
+  );
+  for (const code of MAPPING_REFUSALS) {
+    assert.ok(cases.some(([, , refusal]) => refusal === code), `${code} is probed`);
+  }
+  // And the split is a real one rather than seven rows of the same number:
+  // a mapper answering 404 for everything would satisfy every per-case
+  // assertion below if the table said 404 seven times.
+  assert.equal(new Set(cases.map(([, , , status]) => status)).size, 3, 'the table distinguishes three statuses');
+
+  // A fresh `setup()` per case, run concurrently rather than in a loop with
+  // an `await` in it: an install gets exactly one account, so a second
+  // sign-up against one database would be refused for a reason that has
+  // nothing to do with this property.
+  await Promise.all(cases.map(async ([method, path, refusal, status]) => {
+    const { raw, db } = setup();
+    const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+      addMapping: async () => ({ refusal }),
+      editMapping: async () => ({ refusal }),
+      removeMapping: async () => ({ refusal }),
+    });
+    try {
+      const answer = await send(server, method, path, cookie, validMappingBody());
+      assert.equal(answer.status, status, `${method} ${path} answers ${String(status)} for ${refusal}`);
+      assert.deepEqual(JSON.parse(answer.text), { refusal }, 'and the whole body is that one stable code');
+      assert.ok(
+        !answer.text.includes('Downloads') && !answer.text.includes('seedbox'),
+        'no refusal repeats a path it was handed',
+      );
+      assert.ok(
+        !JSON.stringify(logs).includes('Downloads'),
+        'and nothing about the refused mapping is written down either',
+      );
+    } finally {
+      await server.close();
+    }
+  }));
+});
+
+test('both mapping 400s carry a code, so the one status they share is not told apart by prose', async () => {
+  const { raw, db } = setup();
+  let added = 0;
+  let edited = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    addMapping: async () => {
+      added += 1;
+      return { id: 1 };
+    },
+    editMapping: async (id) => {
+      edited += 1;
+      return { id };
+    },
+  });
+  try {
+    const unparseable = await postRaw(server, '/api/mappings', cookie, '{not json');
+    assert.equal(unparseable.status, 400);
+    assert.deepEqual(JSON.parse(unparseable.text), { refusal: 'malformed-body' });
+
+    // Parses, and is not a mapping: `downloadClientId` as a string is what
+    // a form field or a route parameter hands you.
+    const asString = await post(server, '/api/mappings', cookie, validMappingBody({ downloadClientId: 4 }));
+    assert.equal(asString.status, 201, 'the control: the well-shaped body is accepted');
+
+    const wrongType = await post(server, '/api/mappings', cookie, { ...validMappingBody(), downloadClientId: '4' });
+    assert.equal(wrongType.status, 400);
+    assert.deepEqual(JSON.parse(wrongType.text), { refusal: 'invalid-shape' });
+
+    const missingPath = await post(server, '/api/mappings', cookie, { downloadClientId: 4, fromPath: '/downloads' });
+    assert.equal(missingPath.status, 400, 'an absent to_path is a shape failure');
+    assert.deepEqual(JSON.parse(missingPath.text), { refusal: 'invalid-shape' });
+
+    // An extra field is simply not read, the same way it is not on the
+    // three POST routes above.
+    const extra = await post(server, '/api/mappings', cookie, { ...validMappingBody(), id: 99 });
+    assert.equal(extra.status, 201, 'an extra field is not a shape failure');
+
+    // And the same pair on the edit, which has its own guard rather than
+    // sharing the add's.
+    const editUnparseable = await sendRaw(server, 'PATCH', '/api/mappings/7', cookie, '{not json');
+    assert.equal(editUnparseable.status, 400);
+    assert.deepEqual(JSON.parse(editUnparseable.text), { refusal: 'malformed-body' });
+
+    const editWrongShape = await send(server, 'PATCH', '/api/mappings/7', cookie, { fromPath: '/downloads' });
+    assert.equal(editWrongShape.status, 400);
+    assert.deepEqual(JSON.parse(editWrongShape.text), { refusal: 'invalid-shape' });
+
+    assert.notDeepEqual(
+      JSON.parse(unparseable.text),
+      JSON.parse(wrongType.text),
+      'and the two 400s are distinguishable without reading a sentence',
+    );
+    assert.equal(added, 2, 'only the two well-shaped bodies -- the control and the one with an extra field -- reached the host');
+    assert.equal(edited, 0, 'and neither malformed edit did');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a mapping id that is not a safe integer is an unknown route, and the host is never asked', async () => {
+  // The `:id` is read back off the pathname by index and checked, never
+  // bound and never `!`-asserted -- the shape `/api/artwork/:kind/
+  // :mediaItemId` established.
+  //
+  // **`Number.isSafeInteger` is the check that is not decoration.**
+  // `'9'.repeat(30)` is all digits, so `DIGITS` passes it, and `Number` of
+  // it is `1e+30` -- a float. Handing a float to a parameter bound against
+  // an `INTEGER PRIMARY KEY` is a 500 for a request that only ever meant
+  // "not found". The two calls below are what reds if the check goes.
+  const { raw, db } = setup();
+  const asked: number[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    editMapping: async (id) => {
+      asked.push(id);
+      return { id };
+    },
+    removeMapping: async (id) => {
+      asked.push(id);
+      return { id };
+    },
+  });
+  try {
+    const tooLarge = '9'.repeat(30);
+    const unreachable = [
+      ['DELETE', `/api/mappings/${tooLarge}`],
+      ['PATCH', `/api/mappings/${tooLarge}`],
+      ['DELETE', '/api/mappings/7x'],
+      ['PATCH', '/api/mappings/-1'],
+      ['DELETE', '/api/mappings/1.5'],
+    ] as const;
+
+    const answers = await Promise.all(unreachable.map(async ([method, path]) => {
+      const { status, text } = await send(server, method, path, cookie, validMappingEditBody());
+      return { method, path, status, text };
+    }));
+
+    for (const { method, path, status, text } of answers) {
+      assert.equal(status, 404, `${method} ${path} is not a mapping that could exist`);
+      assert.deepEqual(JSON.parse(text), { error: 'unknown route' }, 'and it answers the same 404 a path naming no route gets');
+    }
+    assert.deepEqual(asked, [], 'no unparseable id reached the host, whatever it would have done with it');
+
+    // The control: a real id does reach the host, so the assertion above is
+    // not passing because nothing ever gets through.
+    const real = await sendBodiless(server, 'DELETE', '/api/mappings/7', cookie);
+    assert.equal(real.status, 204);
+    assert.deepEqual(asked, [7]);
+  } finally {
+    await server.close();
+  }
+});
+
+test('PATCH and DELETE are refused without a session exactly as POST is, and tell a caller nothing else', async () => {
+  // Acceptance 7, and the ordering `refusalFor` fixed a round of its own
+  // for. The session check runs *before* the method check, so an anonymous
+  // caller gets `401` whatever they sent and whether or not the path they
+  // sent it to names a route. Measured as a **cross-path** comparison,
+  // because that is the only way the leak was visible: when the order was
+  // reversed, an anonymous write to a real path answered `405` and one to
+  // an invented path answered `401`, so a pair of requests named which
+  // `/api` paths exist.
+  const { raw, db } = setup();
+  let reached = 0;
+  const count = async (): Promise<{ id: number }> => {
+    reached += 1;
+    return { id: 1 };
+  };
+  const { server } = await start(raw, db, moviesOnly, undefined, {
+    addMapping: count,
+    editMapping: count,
+    removeMapping: count,
+  });
+  try {
+    const probes = [
+      // The three methods the two routes declare.
+      ['POST', '/api/mappings'],
+      ['PATCH', '/api/mappings/1'],
+      ['DELETE', '/api/mappings/1'],
+      // A method neither route declares, on a path that exists. This is the
+      // one the ordering is about: `405` here would be an oracle.
+      ['GET', '/api/mappings/1'],
+      ['PUT', '/api/mappings/1'],
+      // The same requests to paths no route claims, which must be
+      // indistinguishable from the ones above.
+      ['POST', '/api/mappings-invented'],
+      ['PATCH', '/api/mappings-invented/1'],
+      ['DELETE', '/api/mappings-invented/1'],
+    ] as const;
+
+    // `sendBodiless` for the `GET`, because `fetch` refuses to build a
+    // `GET` with a body at all -- which is itself why the `GET` probe is
+    // worth having: it is the shape a browser can actually send.
+    const answers = await Promise.all(probes.map(async ([method, path]) => {
+      const { status, text } = await (method === 'GET'
+        ? sendBodiless(server, method, path, ANONYMOUS)
+        : send(server, method, path, ANONYMOUS, validMappingEditBody()));
+      return { method, path, status, text };
+    }));
+
+    for (const { method, path, status, text } of answers) {
+      assert.equal(status, 401, `anonymous ${method} ${path} must be refused`);
+      assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, `${method} ${path} refuses with the fixed body`);
+    }
+    assert.equal(
+      new Set(answers.map(({ status }) => status)).size,
+      1,
+      'one status across every pairing, so no comparison tells a real path from an invented one',
+    );
+    assert.equal(reached, 0, 'and no anonymous request reached the host');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a signed-in caller still gets 405 for a method the mapping routes do not declare', async () => {
+  // The other half of the ordering: nothing the session-first order buys
+  // costs the method check its job. A caller who has identified themselves
+  // is told their method is wrong, because at that point it is not a
+  // question they have no standing to ask.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    const wrong = await Promise.all(([
+      ['GET', '/api/mappings'],
+      ['DELETE', '/api/mappings'],
+      ['GET', '/api/mappings/1'],
+      ['POST', '/api/mappings/1'],
+    ] as const).map(async ([method, path]) => {
+      // `fetch` refuses to build a `GET` with a body, so the two `GET`
+      // probes are sent as a browser would send them.
+      const { status } = await (method === 'GET'
+        ? sendBodiless(server, method, path, cookie)
+        : send(server, method, path, cookie, {}));
+      return { method, path, status };
+    }));
+
+    for (const { method, path, status } of wrong) {
+      assert.equal(status, 405, `${method} ${path} is not a method either route declares`);
+    }
   } finally {
     await server.close();
   }

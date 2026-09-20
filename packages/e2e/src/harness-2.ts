@@ -436,6 +436,14 @@ async function boot(): Promise<Booted> {
     // `submitted` -- happens inside this call, so a spec that watches a
     // download row appear in the browser is watching all of it.
     requestPick: (rssItemId) => host.requestPick(rssItemId),
+    // The three mapping writes, wired exactly as `main.ts` wires them.
+    // Unlike `addFeed` and `addDownloadClient` these schedule nothing at
+    // all, so the "job no dispatcher here ever runs" caveat above does not
+    // apply to them: the whole of what a spec can observe -- the row, and
+    // what `mapClientPath` resolves next -- is done inside the request.
+    addMapping: (input) => host.addMapping(input),
+    editMapping: (id, input) => host.editMapping(id, input),
+    removeMapping: (id) => host.removeMapping(id),
     registry,
     generation,
     host: '127.0.0.1',

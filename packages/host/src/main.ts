@@ -892,6 +892,15 @@ export async function main(
     // the other would turn every refusal into a 500 -- see
     // `ReadServerDeps.requestPick`.
     requestPick: (rssItemId) => host.requestPick(rssItemId),
+    // The three `/api/mappings` operations, wired the same way again --
+    // one function each, never the `Host` itself. None of the three
+    // schedules anything: `clients/deliver.ts` re-reads `filepath_mapping`
+    // on every delivery tick and never stores a mapped path, so a change
+    // here is in force at the next tick with nothing to enqueue. See
+    // `Host.addMapping`.
+    addMapping: (input) => host.addMapping(input),
+    editMapping: (id, input) => host.editMapping(id, input),
+    removeMapping: (id) => host.removeMapping(id),
     registry,
     // Resolved once, here, rather than per request: this value cannot change
     // while the process holds `raw` open, so a route reading it would be a
