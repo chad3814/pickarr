@@ -14,10 +14,21 @@
  * flag; each {@link MappingRow} holds whether *it* is being edited, what
  * is in its form, whether *its* request is in flight and what *it* was
  * refused. State held up here and keyed by mapping id would work too; a
- * single flag shared by the list would not -- it disables every control
- * in the list on any action, and opens every row's form on any Edit.
- * `library/ReleaseList.tsx` records the same split and the measurement
- * behind it.
+ * single flag shared by the list would not.
+ *
+ * Measured, twice, against the 214 web tests. Hoisting `pending` into
+ * this component and passing it down reddens **one** test -- `acting on
+ * one mapping leaves the others alone`, on the assertion written for
+ * exactly this (`the other mapping is still removable while this one is
+ * in flight`: `true !== false`). Hoisting `editing` instead reddens the
+ * same one test, on the assertion two lines further down (`the other row
+ * did not open a form nobody asked it to`). Every other test in the file
+ * stays green under both, which is the point: with one mapping on screen
+ * a shared flag has nothing to spill onto, so only a test that puts two
+ * up and acts on one of them can see it. `library/ReleaseList.tsx`
+ * records the same split, and its own measurement is a different shape --
+ * two tests, because that file has a walk that clicks six buttons in a
+ * row.
  *
  * **Nothing here is refetched after a write** (Global Constraint). The
  * three controls call `submit` and stop; the row appears, changes or

@@ -251,9 +251,11 @@ export const mappingSubmit: MappingSubmit = {
  * the contract's four codes plus this client's own two, so a code added to
  * `MAPPING_REFUSALS` fails to compile here until someone writes the
  * sentence for it, and a code renamed there fails twice -- an unwritten
- * key and an unreachable one. `postMapping.test.tsx`'s two `refusal codes`
- * tests are the runtime half, and they exist because `npm run test:web`
- * does not typecheck.
+ * key and an unreachable one. The two tests at the top of
+ * `postMapping.test.tsx` -- one pinning this object's key set against
+ * `MAPPING_REFUSALS` *and* against a literal list, one pinning that no two
+ * of its sentences are the same -- are the runtime half, and they exist
+ * because `npm run test:web` does not typecheck.
  *
  * **No sentence quotes a path.** Each says which rule was broken and, where
  * there is one, the action that resolves it. A path the operator just
