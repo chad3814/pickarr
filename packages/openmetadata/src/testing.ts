@@ -355,11 +355,11 @@ export interface TestHarness {
  * `rss_feed` and `rss_item.feed_id` are included even though nothing joins
  * them. They were added for an `onDownloadRequest` that did -- it read
  * `rss_feed.download_client_id` through `rss_item` to name a client in its
- * submission -- and that join is gone: the plugin omits the client now and
- * the host resolves it from the feed. They stay because that absence is the
- * thing worth testing: `engine-jobs.test.ts` seeds a feed that *does* name a
- * client and asserts the submission still carries none, which needs a column
- * for the plugin to conspicuously not read.
+ * submission -- and that join is gone: `DownloadSubmission` has no client
+ * field at all now, so the host resolves one from the feed and the plugin
+ * never looks. They stay because that is exactly what `engine-jobs.test.ts`
+ * drops in order to prove it, and a plugin cannot be shown not to read a
+ * table that was never created.
  */
 export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number } = {}): TestHarness {
   const raw = new DatabaseSync(':memory:');

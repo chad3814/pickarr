@@ -569,15 +569,15 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     },
 
     async onDownloadRequest(rssItemId, ctx) {
-      // No `downloadClientId`, and no read of `rss_feed.download_client_id`
-      // to find one. That column is the host's, and its `NULL` means "the
-      // host's default client" -- which this used to have no way to say,
-      // because `DownloadSubmission.downloadClientId` was a required
-      // number, so it threw instead and failed every pick on a feed created
-      // through the settings UI. The field is optional now and absent means
-      // exactly that, so the whole question goes back to `submit`, which
-      // resolves it through the host's own `selectClientForFeed` -- the
-      // same policy every other path already used.
+      // An rss item and nothing else. This used to join `rss_item` to
+      // `rss_feed` to read `download_client_id`, and throw when it was
+      // `NULL` -- which is every feed created through the settings UI --
+      // because `DownloadSubmission` then required a client id and that
+      // column's `NULL` ("the host's default") had no way to be said.
+      // `DownloadSubmission` carries no client id at all now, so the
+      // question is `submit`'s alone and it answers it through the host's
+      // `selectClientForFeed`, the same policy every other path used all
+      // along. Nothing here reads a host column to get there.
       const reference = await ctx.downloads.submit({ rssItemId });
       ctx.log('submitted a download', { rssItemId, reference });
     },

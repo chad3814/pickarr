@@ -55,15 +55,28 @@ function refuseToChoose(): never {
 
 /**
  * A fixed-sequence stand-in for `Math.random`, so a test can drive the
- * *real* chooser without asserting a probability. A plain LCG: the constants
- * are glibc's, the modulus is 2^31, and nothing here needs the sequence to
- * be good -- only to be the same one on every run.
+ * *real* chooser without asserting a probability.
+ *
+ * A 32-bit xorshift, every step an exact operation on a 32-bit word. This
+ * was a textbook LCG, described here as glibc's; it was neither. At this
+ * width `state * 1103515245` exceeds `Number.MAX_SAFE_INTEGER` on the first
+ * step, so the product is rounded and the sequence is not the one those
+ * constants name. Determinism -- the only property actually required --
+ * survived that, but the attribution did not, and an unchecked provenance
+ * in a comment is the kind of claim this repo has been bitten by.
+ *
+ * Nothing here needs the sequence to be statistically good. What is
+ * required of it is that it be the same on every run, and that it reach all
+ * three candidates -- which is not assumed, it is what the assertion below
+ * measures.
  */
 function seededRandom(seed: number): () => number {
-  let state = seed;
+  let state = seed | 0;
   return () => {
-    state = (state * 1103515245 + 12345) % 2147483648;
-    return state / 2147483648;
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 4294967296;
   };
 }
 
@@ -166,12 +179,17 @@ test('a chooser answering outside the candidate range is an error, not a crash',
   seedClient(raw, { name: 'Second', type: 'torrent' });
   const feedId = seedFeed(raw, { name: 'Out Of Range Feed', downloadType: 'torrent', downloadClientId: null });
 
+  // Index 7, not index 2: `2` appears in this message anyway as the
+  // candidate count, and in the feed id often enough, so `includes('2')`
+  // would pass against an implementation that never reported the index at
+  // all. `answered 7` can only come from the chooser's own answer.
   assert.throws(
-    () => selectClientForFeed(raw, feedId, () => 2),
+    () => selectClientForFeed(raw, feedId, () => 7),
     (err: unknown) => err instanceof Error
       && err.message.includes(`feed ${feedId}`)
       && err.message.includes('Out Of Range Feed')
-      && err.message.includes('2')
+      && err.message.includes('answered 7')
+      && err.message.includes('2 candidates')
       && !err.message.includes('has no download client of type'),
   );
 });

@@ -551,7 +551,7 @@ test('a plugin submitting a download reaches the injected client and reads back 
   host.register(makePlugin({
     id: 'alpha',
     onDownloadRequest: async (rssItemId, ctx) => {
-      const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: 7 });
+      const reference = await ctx.downloads.submit({ rssItemId });
       if (reference === null) {
         throw new Error('test double: expected a reference, got null');
       }
@@ -564,7 +564,7 @@ test('a plugin submitting a download reaches the injected client and reads back 
 
   await host.requestDownload(itemId);
 
-  assert.deepEqual(submitted, [{ rssItemId: itemId, downloadClientId: 7 }]);
+  assert.deepEqual(submitted, [{ rssItemId: itemId }]);
   assert.deepEqual(references, [`SAB-${itemId}`]);
 });
 

@@ -722,10 +722,10 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     },
 
     async onDownloadRequest(rssItemId, ctx) {
-      // No `downloadClientId`, the same as the real plugin: which client an
-      // item goes to is resolved from its feed by the host, and a constant
-      // here used to stand in for a column this double would have had no
-      // business reading.
+      // An rss item and nothing else, because that is all a
+      // `DownloadSubmission` has room for. A constant `downloadClientId`
+      // used to sit here standing in for a column this double had no
+      // business reading; the field went, and with it the question.
       const reference = await ctx.downloads.submit({ rssItemId });
       ctx.log('submitted a download', { rssItemId, reference });
     },

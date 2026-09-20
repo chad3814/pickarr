@@ -271,11 +271,10 @@ function withRecordedDownloads(ctx: PluginContext): {
   };
 }
 
-test('a download request on a feed that names no client submits without naming one', async () => {
+test('a download request on a feed that names no client submits anyway', async () => {
   // The defect: this used to read `rss_feed.download_client_id` itself and
-  // throw on NULL, which is every feed created through the settings UI. The
-  // column is NULL here and the submission still goes out -- carrying no
-  // `downloadClientId` at all, which is how it says "the host decides".
+  // throw on NULL, which is every feed created through the settings UI.
+  // The column is NULL here and the submission goes out regardless.
   const { plugin, harness } = build();
   const feedId = harness.insertFeed(null);
   const rssItemId = harness.insertRssItem('e.mp4', feedId);
@@ -290,13 +289,15 @@ test('a download request on a feed that names no client submits without naming o
   );
 });
 
-test('a download request does not read the feed\'s download client column', async () => {
-  // The same submission for a feed that *does* name a client: the plugin no
-  // longer reads that column, so what it sends cannot depend on it. Written
-  // as its own case because the NULL test above would still pass if the
-  // column were read and merely tolerated when absent.
+test('a download request works with the rss_feed table dropped, so it reads no feed', async () => {
+  // What the test above cannot show any more. `DownloadSubmission` has one
+  // field, so the submission's shape is fixed by the type and nothing about
+  // it could reveal whether the feed was read. Dropping the table does
+  // reveal it: the join this used to make would fail with "no such table:
+  // rss_feed" and the call below would reject instead of submitting.
   const { plugin, harness } = build();
   const rssItemId = harness.insertRssItem('f.mp4', harness.insertFeed(7));
+  harness.raw.exec('DROP TABLE rss_feed');
   const recorded = withRecordedDownloads(harness.ctx);
 
   await plugin.onDownloadRequest(rssItemId, recorded.ctx);

@@ -169,7 +169,7 @@ test('a submitted torrent gets a row with its infohash and the returned ref', as
   const fetch = fakeFetch({ text: async () => 'Ok.' });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5000, chooseIndex: refuseToChoose, log: noLog });
 
-  const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
+  const ref = await clients.submit({ rssItemId: itemId });
 
   assert.equal(ref, MAGNET_HASH);
   const row = raw.prepare(
@@ -192,11 +192,11 @@ test('a resubmit that collides with an already-recorded ref gets a message namin
   const fetch = fakeFetch({ text: async () => 'Ok.' });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5500, chooseIndex: refuseToChoose, log: noLog });
 
-  const firstRef = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
+  const firstRef = await clients.submit({ rssItemId: itemId });
   assert.equal(firstRef, MAGNET_HASH);
 
   await assert.rejects(
-    clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
+    clients.submit({ rssItemId: itemId }),
     (err: unknown) => err instanceof Error
       && err.message.includes(`rss item ${itemId}`)
       && err.message.includes(`download client ${clientId}`)
@@ -241,7 +241,7 @@ test('the row exists before the client is called', async () => {
   });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 1000, chooseIndex: refuseToChoose, log: noLog });
 
-  await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
+  await clients.submit({ rssItemId: itemId });
 
   assert.equal(sawSubmittingRow, true, 'the row must exist and read submitting before the adapter is called');
 });
@@ -260,7 +260,7 @@ test('an unresolved torrent url leaves the row submitting with no error', async 
   });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 2000, chooseIndex: refuseToChoose, log: noLog });
 
-  const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
+  const ref = await clients.submit({ rssItemId: itemId });
 
   assert.equal(ref, null);
   const row = raw.prepare(
@@ -291,7 +291,7 @@ test('a client that throws leaves the row failed with a redacted error', async (
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 3000, chooseIndex: refuseToChoose, log: noLog });
 
   await assert.rejects(
-    clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
+    clients.submit({ rssItemId: itemId }),
     (err: unknown) => err instanceof Error && err.message.includes('network hiccup'),
   );
 
@@ -303,28 +303,30 @@ test('a client that throws leaves the row failed with a redacted error', async (
   assert.ok(!(row.last_error as string).includes(secret), 'the secret must not appear in last_error');
 });
 
-test('a submission naming a client the feed does not use is refused', async () => {
+test('a feed that names one of two clients of its type is submitted to that one', async () => {
+  // What is left of the test that used to stand here. That one submitted
+  // client B against a feed naming client A and asserted the refusal; the
+  // submission cannot name a client at all now, so there is no
+  // disagreement to have. What still needs pinning through the real
+  // `submit` -- rather than only through `selectClientForFeed` -- is that a
+  // named client wins when a second of its type is sitting right there, and
+  // that reaching it took no draw.
   const raw = setup();
-  const clientA = seedClient(raw, { name: 'ClientA', apiKey: 'key-5a', category: 'movies' });
-  const clientB = seedClient(raw, { name: 'ClientB', apiKey: 'key-5b', category: 'movies' });
-  const feedId = seedFeed(raw, { downloadType: 'torrent', downloadClientId: clientA });
-  const itemId = seedRssItem(raw, feedId, { link: 'https://example.test/x.torrent', filename: 'X' });
+  const named = seedClient(raw, { name: 'ClientA', apiKey: 'key-5a', category: 'movies' });
+  const other = seedClient(raw, { name: 'ClientB', apiKey: 'key-5b', category: 'movies' });
+  const feedId = seedFeed(raw, { downloadType: 'torrent', downloadClientId: named });
+  const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'X' });
 
-  // No handler wired for either transport: a refused submission must never
-  // reach the network at all.
-  const fetch = fakeFetch({});
+  const fetch = fakeFetch({ text: async () => 'Ok.' });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4000, chooseIndex: refuseToChoose, log: noLog });
 
-  await assert.rejects(
-    clients.submit({ rssItemId: itemId, downloadClientId: clientB }),
-    (err: unknown) => err instanceof Error
-      && err.message.includes(`client ${clientB}`)
-      && err.message.includes(`client ${clientA}`)
-      && err.message.includes(`feed ${feedId}`),
-  );
+  await clients.submit({ rssItemId: itemId });
 
-  const row = raw.prepare('SELECT COUNT(*) AS n FROM torrent_download WHERE rss_item_id = ?').get(itemId);
-  assert.equal(Number((row as { n: unknown }).n), 0, 'a refused submission must write no row');
+  const row = raw.prepare(
+    'SELECT download_client_id FROM torrent_download WHERE rss_item_id = ?',
+  ).get(itemId) as { download_client_id: unknown };
+  assert.equal(Number(row.download_client_id), named);
+  assert.notEqual(Number(row.download_client_id), other);
 });
 
 test('a download_client type/implementation mismatch is refused before any request is made', async () => {
@@ -351,7 +353,7 @@ test('a download_client type/implementation mismatch is refused before any reque
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4500, chooseIndex: refuseToChoose, log: noLog });
 
   await assert.rejects(
-    clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
+    clients.submit({ rssItemId: itemId }),
     (err: unknown) => err instanceof Error
       && err.message.includes(`client ${clientId}`)
       && err.message.includes('qbittorrent')
@@ -378,7 +380,7 @@ test('an nzb feed writes to nzb_download and never to torrent_download', async (
   const fetch = fakeFetch({ json: async () => ({ status: true, nzo_ids: ['SABnzbd_nzo_three'] }) });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 6000, chooseIndex: refuseToChoose, log: noLog });
 
-  const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
+  const ref = await clients.submit({ rssItemId: itemId });
 
   assert.equal(ref, 'SABnzbd_nzo_three');
   const nzbCount = raw.prepare('SELECT COUNT(*) AS n FROM nzb_download WHERE rss_item_id = ?').get(itemId);
@@ -410,7 +412,7 @@ test('a late update cannot overwrite a row that is no longer submitting', async 
   });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 7000, chooseIndex: refuseToChoose, log: noLog });
 
-  await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
+  await clients.submit({ rssItemId: itemId });
 
   const row = raw.prepare(
     'SELECT status, last_error, client_ref FROM nzb_download WHERE rss_item_id = ?',
@@ -418,10 +420,10 @@ test('a late update cannot overwrite a row that is no longer submitting', async 
   assert.deepEqual({ ...row }, { status: 'failed', last_error: 'preempted-by-newer-attempt', client_ref: null });
 });
 
-test('a submission that names no client goes to the feed\'s sole client of its type', async () => {
+test('a submission on a feed naming no client goes to the sole client of its type', async () => {
   // The case that failed for every feed created through the settings UI:
   // `AddFeedInput` has no download client field, so `download_client_id` is
-  // NULL, and until now a submission had no way to say "you decide". The
+  // NULL, and the plugin that used to read it had nothing to send. The
   // policy that answers here is the same one every other path already used.
   const raw = setup();
   const clientId = seedClient(raw, { name: 'SoleQBT', apiKey: 'key-9', category: 'movies' });
@@ -440,7 +442,7 @@ test('a submission that names no client goes to the feed\'s sole client of its t
   assert.deepEqual({ ...row }, { download_client_id: clientId, status: 'submitted' });
 });
 
-test('a submission that names no client, where two match, is recorded against the chooser\'s answer', async () => {
+test('a submission on a feed naming no client, where two match, takes the chooser\'s answer', async () => {
   // What proves `chooseIndex` is threaded from here through to
   // `selectClientForFeed` rather than stopping at this module's own deps.
   // Index 1 of two ids in ascending order is the second, spelled out
