@@ -122,8 +122,13 @@ export interface ListByTableOptions {
  * back through this function.
  *
  * The last nine of those are worth naming, because they are collateral
- * rather than aim: nothing in them mentions a mapping. `DownloadClients`
- * mounts a `ClientMappings` per listed client, so a throw here becomes a
+ * rather than aim: **eight of the nine mention no mapping at all.** The
+ * ninth does -- `DownloadClients.test.tsx`'s `each listed client offers
+ * its own path mappings, named from its own heading`, which this slice
+ * added -- and the sentence here used to say all nine, which a review
+ * re-ran the mutation and corrected. The eight are the other six in
+ * `DownloadClients.test.tsx` and both in `Settings.test.tsx`.
+ * `DownloadClients` mounts a `ClientMappings` per listed client, so a throw here becomes a
  * rejection out of that hook's refresh on any settings render at all --
  * which is the other half of why an empty page would be worse than a
  * throw. A silent `[]` would have left all nine green and the mappings

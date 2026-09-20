@@ -257,9 +257,10 @@ ul[aria-label='download clients'] li > div > button[aria-expanded='true'] {
  * Every mapping form's fields, laid out exactly as the screen's two other
  * add forms are (the rule near the top of this file). A separate block
  * rather than a fourth selector there because that one is keyed on a fixed
- * heading id and these cannot be; the declarations are the same three on
- * purpose, so a mapping form does not read as a different kind of thing
- * from the first two.
+ * heading id and these cannot be; the declarations are the same four on
+ * purpose -- `display`, `flex-direction`, `gap` and `margin-bottom` -- so
+ * a mapping form does not read as a different kind of thing from the
+ * first two. (Three, this said, until a review counted them.)
  *
  * **`li form > div`, not `li > div > form > div`, and that is a fix rather
  * than a tidy-up.** The tighter selector named the add form only -- `li`
