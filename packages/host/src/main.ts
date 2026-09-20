@@ -28,6 +28,7 @@ import { warnIfWebRootMissing } from './api/static-route.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
+import { randomIndex } from './clients/select.ts';
 import { createSecrets } from './secrets/instance.ts';
 import type { Secrets } from './secrets/instance.ts';
 import type { Config } from './config/instance.ts';
@@ -826,7 +827,7 @@ export async function main(
   // will also give the reconcile handler, so the two cannot be different
   // instances. See `createHost`'s own `downloads` doc for why that matters.
   const downloads = (hostSecrets: Secrets): DownloadClients =>
-    createDownloadClients({ raw, fetch, secrets: hostSecrets, now: () => Date.now(), log });
+    createDownloadClients({ raw, fetch, secrets: hostSecrets, now: () => Date.now(), chooseIndex: randomIndex, log });
 
   // Two shapes, not one object literal with `timers` always present:
   // `exactOptionalPropertyTypes` is on, so an explicit `timers: undefined`

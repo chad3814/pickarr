@@ -70,6 +70,7 @@ import { test as base } from '@playwright/test';
 import {
   createAuth,
   createDownloadClients,
+  randomIndex,
   createHost,
   createHostFetch,
   createReadServer,
@@ -205,7 +206,7 @@ async function boot(): Promise<Booted> {
     // A factory, not a built object -- `createHost`'s own doc on why:
     // supplying `secrets` (below) is what keeps this the one `Secrets`
     // instance the whole host resolves credentials through.
-    downloads: (deps) => createDownloadClients({ raw, fetch: hostFetch, secrets: deps, now, log: dropLine }),
+    downloads: (deps) => createDownloadClients({ raw, fetch: hostFetch, secrets: deps, now, chooseIndex: randomIndex, log: dropLine }),
     secrets,
     now,
     artworkDir: join(dir, 'artwork'),

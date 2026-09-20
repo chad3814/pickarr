@@ -58,8 +58,29 @@ function readCandidateClientIds(raw: DatabaseSync, downloadType: string): number
   return rows.map((row) => Number((row as { id: unknown }).id));
 }
 
-/** The client a feed's picks go to. Throws when the choice is ambiguous or absent. */
-export function selectClientForFeed(raw: DatabaseSync, feedId: number): number {
+/**
+ * How `selectClientForFeed` breaks a tie: given the number of candidates,
+ * answers which one, as an index into the candidate list. Injected rather
+ * than called directly for the reason `now` is -- a test that cannot fix
+ * the answer can only assert a probability.
+ */
+export type ChooseIndex = (count: number) => number;
+
+/**
+ * The chooser production passes. `random` is a parameter, defaulted to
+ * `Math.random`, purely so the mapping from a draw to an index can be
+ * pinned exactly; nothing outside a test ever supplies it.
+ */
+export function randomIndex(count: number, random: () => number = Math.random): number {
+  return Math.floor(random() * count);
+}
+
+/**
+ * The client a feed's picks go to. Throws when there is no client it could
+ * mean; where several could, `chooseIndex` settles it -- see that branch for
+ * why a draw replaced the refusal that used to stand there.
+ */
+export function selectClientForFeed(raw: DatabaseSync, feedId: number, chooseIndex: ChooseIndex): number {
   const feed = readFeedRow(raw, feedId);
 
   if (feed.downloadClientId !== null) {
@@ -99,21 +120,55 @@ export function selectClientForFeed(raw: DatabaseSync, feedId: number): number {
   }
 
   if (candidates.length > 1) {
-    // A SOLE match is safe to use because it is unambiguous by
-    // construction -- there is exactly one client that type could mean. A
-    // FIRST match would not be: it is exactly the 1.x bug wearing a better
-    // name. 1.x sent every pick to `downloadClients[0]` regardless of how
-    // anything was configured, so a second client of the same type could
-    // receive nothing at all, forever, with no error. When two candidates
-    // exist there is no correct silent answer, so this refuses loudly,
-    // naming the feed and the candidates, instead of guessing one.
-    throw new Error(
-      `feed ${feed.id} (${feed.name}) matches ${candidates.length} download clients of type ` +
-      `${JSON.stringify(feed.downloadType)} (ids ${candidates.join(', ')}): set the feed's ` +
-      `download_client_id to choose one`,
-    );
+    // This branch used to refuse. The reasoning it refused with is kept,
+    // because it is still true of what it was aimed at:
+    //
+    //   A SOLE match is safe to use because it is unambiguous by
+    //   construction -- there is exactly one client that type could mean. A
+    //   FIRST match would not be: it is exactly the 1.x bug wearing a better
+    //   name. 1.x sent every pick to `downloadClients[0]` regardless of how
+    //   anything was configured, so a second client of the same type could
+    //   receive nothing at all, forever, with no error.
+    //
+    // What changed is that several candidates are now settled by a draw
+    // rather than by a refusal, and that objection does not reach a draw.
+    // It is an objection to a *fixed* index: the 1.x failure was a
+    // configured client that never received anything, and a draw over the
+    // candidates gives every one of them work. The two are not the same
+    // answer written differently -- `select.test.ts` fails the fixed one
+    // and passes the drawn one, which is the whole point of that test.
+    //
+    // Refusing was the right answer while nothing could call
+    // `requestDownload`; a refusal nobody could trigger cost nothing and
+    // kept the question open. Now that a pick reaches here, refusing would
+    // fail a pick on an install whose two clients are both able to take it.
+    //
+    // Health is not consulted, because no health state exists to consult:
+    // `download_client` has no status column, no `last_seen` and no failure
+    // counter, and nothing records one per client. So a draw can land on a
+    // client that is down, and will keep doing so one time in N rather than
+    // routing around it. Filed as #93 rather than solved here; an install
+    // with one client of a type -- nearly all of them -- never reaches this
+    // branch at all.
+    const index = chooseIndex(candidates.length);
+    const chosen = candidates[index];
+    if (chosen === undefined) {
+      // Reachable, unlike the two guards around it: `chooseIndex` is
+      // injected, so an answer outside the range is a caller's bug and this
+      // is what makes it read as one instead of as an `undefined` client id
+      // surfacing somewhere further down the submit path.
+      throw new Error(
+        `feed ${feed.id} (${feed.name}): the download client chooser answered ${index}, which is ` +
+        `not one of the ${candidates.length} candidates of type ${JSON.stringify(feed.downloadType)}`,
+      );
+    }
+    return chosen;
   }
 
+  // A sole candidate is taken without consulting `chooseIndex` at all: it
+  // is unambiguous by construction, so there is nothing to draw, and the
+  // case that describes nearly every install stays independent of whatever
+  // chooser a caller supplied.
   const only = candidates[0];
   if (only === undefined) {
     // Unreachable: `candidates.length` is checked to be exactly 1 above, so

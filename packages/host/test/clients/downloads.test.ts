@@ -19,6 +19,16 @@ function setup(): DatabaseSync {
 function noLog(): void {}
 
 /**
+ * The `chooseIndex` every test below but one passes. Each of those seeds a
+ * feed that names its own client, so `selectClientForFeed` settles without
+ * a draw and reaching a chooser would mean the named client was ignored --
+ * which this turns into a failure rather than a coincidence.
+ */
+function refuseToChoose(): never {
+  throw new Error('the chooser was consulted for a feed that names its own client');
+}
+
+/**
  * The secrets subsystem these tests resolve credentials through. `baseDir`
  * does not exist, so the chain's file link finds nothing and every value
  * comes from the `secret` table `seedClient` wrote it to.
@@ -157,7 +167,7 @@ test('a submitted torrent gets a row with its infohash and the returned ref', as
   const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
 
   const fetch = fakeFetch({ text: async () => 'Ok.' });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5000, chooseIndex: refuseToChoose, log: noLog });
 
   const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -180,7 +190,7 @@ test('a resubmit that collides with an already-recorded ref gets a message namin
   const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
 
   const fetch = fakeFetch({ text: async () => 'Ok.' });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5500, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5500, chooseIndex: refuseToChoose, log: noLog });
 
   const firstRef = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
   assert.equal(firstRef, MAGNET_HASH);
@@ -229,7 +239,7 @@ test('the row exists before the client is called', async () => {
       return { status: true, nzo_ids: ['SABnzbd_nzo_xyz'] };
     },
   });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 1000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 1000, chooseIndex: refuseToChoose, log: noLog });
 
   await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -248,7 +258,7 @@ test('an unresolved torrent url leaves the row submitting with no error', async 
     // server, which is not a failure -- see `findRegisteredRef`.
     json: async () => [],
   });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 2000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 2000, chooseIndex: refuseToChoose, log: noLog });
 
   const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -278,7 +288,7 @@ test('a client that throws leaves the row failed with a redacted error', async (
       throw new Error(`network hiccup fetching https://sab.example.com/api?mode=addurl&apikey=${secret}&output=json`);
     },
   });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 3000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 3000, chooseIndex: refuseToChoose, log: noLog });
 
   await assert.rejects(
     clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
@@ -303,7 +313,7 @@ test('a submission naming a client the feed does not use is refused', async () =
   // No handler wired for either transport: a refused submission must never
   // reach the network at all.
   const fetch = fakeFetch({});
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4000, chooseIndex: refuseToChoose, log: noLog });
 
   await assert.rejects(
     clients.submit({ rssItemId: itemId, downloadClientId: clientB }),
@@ -338,7 +348,7 @@ test('a download_client type/implementation mismatch is refused before any reque
     json: async () => { requests += 1; throw new Error('must not be called'); },
     text: async () => { requests += 1; throw new Error('must not be called'); },
   });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4500, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 4500, chooseIndex: refuseToChoose, log: noLog });
 
   await assert.rejects(
     clients.submit({ rssItemId: itemId, downloadClientId: clientId }),
@@ -366,7 +376,7 @@ test('an nzb feed writes to nzb_download and never to torrent_download', async (
   });
 
   const fetch = fakeFetch({ json: async () => ({ status: true, nzo_ids: ['SABnzbd_nzo_three'] }) });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 6000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 6000, chooseIndex: refuseToChoose, log: noLog });
 
   const ref = await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -398,7 +408,7 @@ test('a late update cannot overwrite a row that is no longer submitting', async 
       return { status: true, nzo_ids: ['SABnzbd_nzo_four'] };
     },
   });
-  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 7000, log: noLog });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 7000, chooseIndex: refuseToChoose, log: noLog });
 
   await clients.submit({ rssItemId: itemId, downloadClientId: clientId });
 
@@ -407,3 +417,4 @@ test('a late update cannot overwrite a row that is no longer submitting', async 
   ).get(itemId);
   assert.deepEqual({ ...row }, { status: 'failed', last_error: 'preempted-by-newer-attempt', client_ref: null });
 });
+

@@ -25,6 +25,7 @@ import { createQbittorrentClient, infohashFromMagnet } from './qbittorrent.ts';
 import { redactUrl } from './redact.ts';
 import { createSabnzbdClient } from './sabnzbd.ts';
 import { selectClientForFeed } from './select.ts';
+import type { ChooseIndex } from './select.ts';
 import type { SubmitResult } from './types.ts';
 
 /** SQLite's own code for a UNIQUE constraint failure -- verified against `node:sqlite`. */
@@ -211,41 +212,49 @@ export function createDownloadClients(deps: {
    */
   secrets: Secrets;
   now: () => number;
+  /**
+   * How a feed with several clients of its type settles on one. Required
+   * for the reason `now` above is: a default would let a test pick up real
+   * randomness without saying so, and a selection test that draws from
+   * `Math.random` asserts a probability rather than a behaviour. Production
+   * passes `randomIndex`.
+   */
+  chooseIndex: ChooseIndex;
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }): DownloadClients {
-  const { raw, fetch, secrets, now, log } = deps;
+  const { raw, fetch, secrets, now, chooseIndex, log } = deps;
 
   return {
     async submit(submission: DownloadSubmission): Promise<string | null> {
       const item = readDownloadItem(raw, submission.rssItemId);
-      const selectedClientId = selectClientForFeed(raw, item.feedId);
-      if (selectedClientId !== submission.downloadClientId) {
+      const downloadClientId = selectClientForFeed(raw, item.feedId, chooseIndex);
+      if (submission.downloadClientId !== downloadClientId) {
         throw new Error(
           `download submission names client ${submission.downloadClientId}, but feed ${item.feedId} ` +
-          `uses client ${selectedClientId} for its picks`,
+          `uses client ${downloadClientId} for its picks`,
         );
       }
 
-      const config = await readClientConfig(raw, submission.downloadClientId, secrets);
+      const config = await readClientConfig(raw, downloadClientId, secrets);
       const plan = buildPlan(config, fetch);
 
       const insertedAt = now();
       const rowId = plan.tableKind === 'torrent'
         ? insertTorrentRow(raw, {
           rssItemId: submission.rssItemId,
-          downloadClientId: submission.downloadClientId,
+          downloadClientId,
           infohash: infohashFromMagnet(item.link),
           at: insertedAt,
         })
         : insertNzbRow(raw, {
           rssItemId: submission.rssItemId,
-          downloadClientId: submission.downloadClientId,
+          downloadClientId,
           at: insertedAt,
         });
 
       const logDetail = {
         rssItemId: submission.rssItemId,
-        downloadClientId: submission.downloadClientId,
+        downloadClientId,
         kind: config.kind,
       };
       log('download submission recorded', logDetail);
@@ -274,7 +283,7 @@ export function createDownloadClients(deps: {
         const failure = isUniqueConstraintViolation(err)
           ? new Error(
             `rss item ${submission.rssItemId} could not be recorded against download client ` +
-            `${submission.downloadClientId}: this client already has a recorded download using ` +
+            `${downloadClientId}: this client already has a recorded download using ` +
             'the same reference',
             { cause: err },
           )

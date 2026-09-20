@@ -9,6 +9,13 @@ export { API_VERSION, DEFAULT_HOST, DEFAULT_PORT, createReadServer } from './api
 export { createAuth } from './auth/instance.ts';
 export { ensureClaimToken } from './auth/claim.ts';
 export { createDownloadClients } from './clients/downloads.ts';
+// `randomIndex` is `createDownloadClients`'s required `chooseIndex` in
+// production. Exported for the same external caller as `createAuth` above:
+// the e2e harness builds its own `DownloadClients` and would otherwise have
+// to invent a chooser, which is the one dependency it should not be
+// choosing differently from `main`.
+export type { ChooseIndex } from './clients/select.ts';
+export { randomIndex } from './clients/select.ts';
 export type { HostDb } from './db/open.ts';
 export { openDatabase, openTestDatabase } from './db/open.ts';
 export { migrateHost, migratePlugin } from './db/migrate.ts';
