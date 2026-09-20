@@ -120,12 +120,36 @@ this message:
    plugin's comment names this exactly — "a required number with no way
    to say that" — and refuses to invent host policy, correctly.
 
-So: `downloadClientId` becomes **optional**, the plugin omits it, and
-`submit` resolves through `selectClientForFeed`. The contract's own
+So: `downloadClientId` is **removed**, the plugin stops supplying one,
+and `submit` resolves through `selectClientForFeed`. The contract's own
 docblock already assigns this job to the host —
 
 > The host resolves a submission to the client that received it … that
 > resolution and the wiring behind it live in `@pickarr/host`.
+
+*Amended during Task 1's fix round. This section first said the field
+becomes **optional**, and that was wrong in a way only a measurement
+found.* Leaving it optional kept `submit`'s check that a supplied id
+agrees with the feed's client — a check written when selection was
+deterministic. Once selection draws at random there is no single such
+client, so that check compared a supplied id against a **fresh draw**
+and refused a perfectly valid candidate: measured at **2010/3000 =
+67.0%**, exactly `(n-1)/n`.
+
+The repair first proposed here was to validate "is the supplied id among
+the feed's candidates". That is worse. It says what to *validate* and
+never what to **use**, so the row is still written against the draw and
+a submission naming client 1 is silently recorded against client 3 — and
+a silent misroute is a worse failure than a loud refusal, because nobody
+reports it.
+
+Removing the field removes the trap instead of re-specifying it. Nothing
+supplied one: every real `onDownloadRequest` omitted it, and the two
+sites that passed one used doubles that never reach real `submit`. The
+compiler confirms the case is now unrepresentable — `TS2353` at all 13
+construction sites. A future caller that genuinely needs to force a
+client should reintroduce it with validate-**and-use** semantics, not
+validate-only.
 
 — so this is an existing responsibility being honoured, not a new one.
 
