@@ -160,13 +160,44 @@ ul[aria-label='releases'] li > span:not([id$='-filename']) {
  * here would beat `base.css`'s `button:disabled` whatever its specificity
  * and leave a disabled `Picking…` wearing the live treatment. That needs
  * `:not(:disabled)` on the selector or an explicit `:disabled` block beside
- * it, neither of which is free.
+ * it, neither of which is free -- and the rule below is now that explicit
+ * block, added for a different reason and subject to exactly this trap,
+ * which is why it is keyed on `:disabled` rather than on the bare element.
  */
 ul[aria-label='releases'] li > button {
   flex: none;
   min-width: var(--size-pick-button);
   font-size: var(--text-meta);
   padding: 0 var(--space-2);
+}
+
+/*
+ * `Picking…`, which is the only thing this button is ever disabled for.
+ *
+ * `base.css`'s `button:disabled` paints `--color-text-faint`, and that
+ * token is **3.50:1 against `--color-surface` in dark and 3.51:1 in
+ * light** -- below the 4.5:1 floor for essential text. `base.css` already
+ * draws this exact distinction twice: its `nav a` rule says "`dim`, not
+ * `faint`: an inactive tab is essential text and `--color-text-faint` is
+ * below the 4.5:1 floor", and its `::placeholder` rule calls itself "the
+ * one legitimate use ... with no restriction attached" because a
+ * placeholder is not content. `Picking…` is content: it is the whole of
+ * what the operator is told while a pick is in flight.
+ *
+ * **It became a real defect rather than a theoretical one when the pick
+ * lifecycle changed.** While an accepted pick cleared `pending` at the 202
+ * the state lasted 33ms and nobody could read it either way. It now lasts
+ * until the download row replicates -- 2934ms on the Playwright spec's own
+ * path -- so it is a string a person actually reads.
+ * `--color-text-dim` measures **6.23:1 dark / 5.85:1 light** on the same
+ * surface, and is the token the rest of this row's detail already uses.
+ *
+ * The border stays `base.css`'s dimmed `--color-line`. WCAG 1.4.11's 3:1
+ * boundary rule is about something the user operates, and a disabled
+ * control is the one thing it is not; the text is what had to change.
+ */
+ul[aria-label='releases'] li > button:disabled {
+  color: var(--color-text-dim);
 }
 
 /*

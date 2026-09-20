@@ -103,37 +103,44 @@ async function borderTopAgainstLineToken(page: Page, selector: string): Promise<
   }, selector);
 }
 
-/** What {@link colorAgainstErrorToken} reads back, both sides in the browser's own canonical colour form. */
+/** What {@link colorAgainstToken} reads back, both sides in the browser's own canonical colour form. */
 interface TextColorProbe {
   /** The computed `color` of the first element matching the selector. */
   color: string;
-  /** `--color-error`'s own resolved value, in whichever palette this run is in. */
-  errorTokenColor: string;
+  /** The named token's own resolved value, in whichever palette this run is in. */
+  tokenColor: string;
 }
 
 /**
- * {@link borderTopAgainstLineToken}'s sibling for text colour against
- * `--color-error`, and the same technique for the same reason: the token
- * has a different value in each palette, so the expectation is resolved in
- * the browser rather than spelled as a literal.
+ * {@link borderTopAgainstLineToken}'s sibling for text colour, and the same
+ * technique for the same reason: a colour token has a different value in
+ * each of `tokens.css`'s two palettes and nothing in this suite pins which
+ * one a given run resolves to, so a literal `rgb(...)` would be right in
+ * one palette and wrong in the other.
  *
- * A second function rather than one parameterised by property and token
- * name. The two share four lines of probe, and folding them together would
- * mean either two round trips into the page or a helper whose signature
- * carries two strings that have to agree with each other -- neither of
- * which is a better trade than the duplication, at two callers.
+ * **It takes the token name, where its first version hard-coded
+ * `--color-error`.** That version's own comment declined to parameterise,
+ * on the ground that folding the two probes together would mean "a helper
+ * whose signature carries two strings that have to agree with each other
+ * -- neither of which is a better trade than the duplication, at two
+ * callers". The count is what changed: the pick spec now also asserts
+ * `Picking…` against `--color-text-dim`, so the alternative is three
+ * near-identical functions. Only the *token* is parameterised, not the
+ * property -- the border probe stays separate, which is the half of that
+ * argument that still holds.
  */
-async function colorAgainstErrorToken(page: Page, selector: string): Promise<TextColorProbe> {
-  return page.evaluate((sel) => {
+async function colorAgainstToken(page: Page, selector: string, token: string): Promise<TextColorProbe> {
+  return page.evaluate(([sel, tokenName]) => {
+    if (sel === undefined || tokenName === undefined) throw new Error('a selector and a token name are required');
     const element = document.querySelector(sel);
     if (element === null) throw new Error(`no element matched ${sel} to read a text colour from`);
     const probe = document.createElement('div');
-    probe.style.color = 'var(--color-error)';
+    probe.style.color = `var(${tokenName})`;
     document.body.appendChild(probe);
-    const errorTokenColor = getComputedStyle(probe).color;
+    const tokenColor = getComputedStyle(probe).color;
     probe.remove();
-    return { color: getComputedStyle(element).color, errorTokenColor };
-  }, selector);
+    return { color: getComputedStyle(element).color, tokenColor };
+  }, [selector, token]);
 }
 
 test('the app loads from the host, including a deep link that is not /', async ({ page, harness }) => {
@@ -655,18 +662,27 @@ test('an operator can add a download client and see it listed', async ({ page, h
  * drives `no-client-of-type` because it is the only one reachable without a
  * second feed, a second client or a second pick.
  *
- * **Acceptance item 6 is not met, and this is where that is visible rather
- * than where it is fixed.** Picks design §3 and acceptance 6 say `Picking…`
- * lasts until the download row arrives. It does not: `ReleaseRow`'s
- * `finally { setPending(false) }` clears the flag when `POST /api/picks`
- * answers. Measured on this spec's own path, on a warm local run: the
- * button was enabled and reading `Pick` again **33ms** after the click, and
- * the status replaced it **2934ms** after the click -- a ~2.9 second window
- * in which the server already holds a `submitted` row for that release and
- * the browser still offers a button that would submit another. Nothing
- * below asserts either behaviour, so neither this spec nor a fix to
- * `ReleaseList.tsx` has to move the other; the task report has the full
- * account.
+ * **Acceptance item 6 was not met when this spec was written, and this is
+ * where that was found.** Picks design §3 and acceptance 6 say `Picking…`
+ * lasts until the download row arrives. It did not: `ReleaseRow`'s
+ * `finally { setPending(false) }` cleared the flag when `POST /api/picks`
+ * answered. Measured on this spec's own path, on a warm local run: the
+ * button was enabled and reading `Pick` again **33ms** after the click and
+ * the status replaced it **2934ms** after -- a ~2.9 second window in which
+ * the server already held a `submitted` row for that release and the
+ * browser still offered a button that would submit another, answering
+ * `already-submitted` and leaving a `failed` row behind.
+ *
+ * It is fixed, and this spec is now where it is *pinned* rather than only
+ * where it was visible. `ReleaseRow` clears `pending` for every outcome
+ * except a 202 and holds it for that one, and the first spec below asserts
+ * the held state between the click and the row. The assertion depends on
+ * that window being wide, which is the same 2934ms measured above -- before
+ * the fix it would have had 33ms and been a flake; after it, it has the
+ * whole of the round trip. There is deliberately no timeout behind the
+ * hold: a plugin that accepts and writes no row leaves that one button
+ * pending until the card is reopened, which `ReleaseRow`'s docblock records
+ * as an accepted consequence rather than guarding.
  *
  * **No credential is typed anywhere in either spec.** Unlike the download
  * clients spec above, the qBittorrent api key the adapter sends with these
@@ -740,13 +756,43 @@ test('an operator can pick a release and watch its status take the button’s pl
 
   await pick.click();
 
+  // Scoped to the row rather than reused from `pick` above, and that is not
+  // tidiness: the button's accessible name is composed from its own label
+  // and the filename, so pressing it changes that name from
+  // `Pick <filename>` to `Picking… <filename>` and the `pick` locator stops
+  // matching. The row holds exactly one button while it has no download.
+  const row = page.getByRole('listitem', { name: RELEASE_FILENAME });
+  const rowButton = row.getByRole('button');
+
+  // **Acceptance 6, in a browser.** The pick has been accepted by the host
+  // and the `torrent_download` row has not reached this tab yet, so the
+  // button must still be pending -- see the block above for the 33ms/2934ms
+  // measurement that says how wide this window is and why it used not to
+  // be.
+  await expect(rowButton).toHaveText('Picking…');
+  await expect(rowButton).toBeDisabled();
+
+  // And it has to be readable while it is up, which is the half that only
+  // matters now it lasts seconds instead of 33ms. `base.css`'s
+  // `button:disabled` paints `--color-text-faint` -- 3.50:1 in dark and
+  // 3.51:1 in light against `--color-surface`, under the 4.5:1 floor for
+  // essential text, the same objection `base.css`'s own `nav a` rule
+  // records against that token. `library.css`'s `:disabled` block overrides
+  // it with `--color-text-dim` (6.23:1 / 5.85:1). Resolved in the browser
+  // rather than spelled `rgb(...)`, for the reason the helper gives.
+  const pendingLabel = await colorAgainstToken(
+    page,
+    "ul[aria-label='releases'] li > button:disabled",
+    '--color-text-dim',
+  );
+  expect(pendingLabel.color).toBe(pendingLabel.tokenColor);
+
   // `submitted` is where the row settles: the fake client answers inside
   // the request, so `clients/downloads.ts` marks the row before
   // `POST /api/picks` returns, and no reconcile ever runs to move it on
   // (the block above). A tail poll landing between the insert and the
   // update could show `submitting` first, which is why this waits for the
   // settled value rather than asserting the first status to appear.
-  const row = page.getByRole('listitem', { name: RELEASE_FILENAME });
   await expect(row).toContainText('Status: submitted', { timeout: 15_000 });
 
   // The button is gone rather than merely disabled: `ReleaseList` renders
@@ -798,8 +844,8 @@ test('a pick with no download client set up says so, in words that are styled as
   // Resolved in the browser rather than spelled `rgb(...)`, for the reason
   // `borderTopAgainstLineToken` above gives: `--color-error` differs between
   // the two palettes and nothing here pins which one a run resolves to.
-  const alarm = await colorAgainstErrorToken(page, "ul[aria-label='releases'] li > [role='alert']");
-  expect(alarm.color).toBe(alarm.errorTokenColor);
+  const alarm = await colorAgainstToken(page, "ul[aria-label='releases'] li > [role='alert']", '--color-error');
+  expect(alarm.color).toBe(alarm.tokenColor);
 
   // And the button came back, so a refused pick is retryable rather than a
   // dead row (acceptance item 4: no outcome leaves the button pending).

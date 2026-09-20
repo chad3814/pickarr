@@ -1,8 +1,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from '@testing-library/react';
 import type { NzbDownloadSyncRead, RssItemSyncRead, TorrentDownloadSyncRead } from '@pickarr/contract';
-import { ReleaseList } from '../../src/library/ReleaseList.tsx';
+import { ReleaseList, PICK_LABELS } from '../../src/library/ReleaseList.tsx';
 import { PICK_REFUSAL_MESSAGES, type PickOutcome, type PickSubmit } from '../../src/library/postPick.ts';
 import type { GatheredDownload, GatheredRelease } from '../../src/store/gather.ts';
 
@@ -274,16 +274,25 @@ test('clicking Pick disables that button and it reads Picking…', () => {
   assert.ok(pickButton('release-1.mkv').disabled, 'and cannot be clicked again while it happens');
 });
 
-test('the download status replaces the pending button when the row arrives in releases', () => {
-  // Picks design §3: `Picking…` ends because a `torrent_download` row
-  // replicated in and `useGatheredItem` re-gathered, not because anything
-  // here waited on a timer. This drives that by handing the *same mounted
-  // component* the array a re-gather would produce, which is the only thing
-  // it ever sees -- and `submit` never settles, so the pending flag is still
-  // set when the row lands. The status has to win over it.
-  const view = render(<ReleaseList releases={releasesFor(1)} submit={neverSettles} />);
+test('an accepted pick stays Picking… through the 202, and the status replaces it when the row arrives', async () => {
+  // Acceptance 6, end to end through the only two things this component
+  // ever sees: an answer from `submit`, and a `releases` array.
+  //
+  // The `await act` is what makes the middle assertion mean anything. The
+  // 202 resolves in a microtask, so without flushing it this would pass
+  // against a version that re-enables on success -- which is exactly the
+  // version that shipped, and which the browser measured re-enabling the
+  // button 33ms after the click with the row 2934ms away.
+  const view = render(<ReleaseList releases={releasesFor(1)} submit={accepts} />);
   fireEvent.click(pickButton('release-1.mkv'));
-  assert.equal(pickButton('release-1.mkv').textContent, 'Picking…', 'in flight');
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  assert.equal(pickButton('release-1.mkv').textContent, PICK_LABELS.pending,
+    'the host accepted it; this browser still has no row for it');
+  assert.ok(pickButton('release-1.mkv').disabled, 'so there is nothing to click a second time');
+  assert.equal(screen.queryAllByRole('alert').length, 0, 'an acceptance is not something to report');
 
   const arrived: GatheredRelease[] = [
     {
@@ -292,11 +301,28 @@ test('the download status replaces the pending button when the row arrives in re
       downloads: [torrentDownload(torrent({ id: 1, status: 'submitted', percentage: null }))],
     },
   ];
-  view.rerender(<ReleaseList releases={arrived} submit={neverSettles} />);
+  view.rerender(<ReleaseList releases={arrived} submit={accepts} />);
 
   const row = screen.getByRole('listitem', { name: 'release-1.mkv' });
   assert.ok(row.textContent?.includes('Status: submitted'), 'the status the replica now holds');
-  assert.equal(within(row).queryAllByRole('button').length, 0, 'and no button left pending behind it');
+  assert.equal(within(row).queryAllByRole('button').length, 0, 'and the pending button is gone with it');
+});
+
+test('the Pick button renders exactly the two labels --size-pick-button was measured against', () => {
+  // `styles/tokens.css`'s floor is 72px because these two strings measure
+  // 40.64px and 66.58px in Chromium. Nothing recomputes that, so a third
+  // label or a longer one widens the button and moves everything to its
+  // left with no stylesheet able to notice.
+  assert.deepEqual(PICK_LABELS, { idle: 'Pick', pending: 'Picking…' },
+    'a changed, longer or third label needs `--size-pick-button` (styles/tokens.css) re-measured');
+
+  // And these are the strings the button actually renders, not a pair of
+  // constants nothing reads (`CLAUDE.md`: pinning a value does not pin that
+  // anyone uses it).
+  render(<ReleaseList releases={releasesFor(1)} submit={neverSettles} />);
+  assert.equal(pickButton('release-1.mkv').textContent, PICK_LABELS.idle);
+  fireEvent.click(pickButton('release-1.mkv'));
+  assert.equal(pickButton('release-1.mkv').textContent, PICK_LABELS.pending);
 });
 
 /** One of {@link PickOutcome}'s two refusal members -- everything that is not an acceptance. */
@@ -361,21 +387,17 @@ test('every refusal reaches the screen as its own sentence, in text a human can 
   }
 });
 
-test('an accepted pick says nothing, because the row itself is about to', async () => {
-  render(<ReleaseList releases={releasesFor(1)} submit={accepts} />);
-  fireEvent.click(pickButton('release-1.mkv'));
-  await waitFor(() => {
-    assert.ok(!pickButton('release-1.mkv').disabled, 'the button has come back');
-  });
-  assert.equal(screen.queryAllByRole('alert').length, 0, 'and there was nothing to report');
-});
-
-test('every outcome re-enables the button, including a submit that rejects outright', async () => {
-  // `finally { setPending(false) }` is the only thing that makes this true.
-  // The last release has no planned outcome, so `submitPlan` rejects for it
-  // -- the case the feeds slice shipped without a `finally` for, which left
-  // its form wedged with the button disabled and nothing on screen.
-  const outcomes: readonly PickOutcome[] = [{ accepted: true }, ...REFUSALS];
+test('every refusal and every error re-enables the button, including a submit that rejects outright', async () => {
+  // The `finally` is the only thing that makes this true, and this is the
+  // half of its job that did not change: the last release has no planned
+  // outcome, so `submitPlan` rejects for it -- the case the feeds slice
+  // shipped without a `finally` for, which left its form wedged with the
+  // button disabled and nothing on screen.
+  //
+  // **`{ accepted: true }` is deliberately not in this list.** A 202 is the
+  // one outcome that must *not* re-enable, and the test above is where that
+  // is pinned; putting it here would make the two contradict each other.
+  const outcomes: readonly PickOutcome[] = REFUSALS;
   const count = outcomes.length + 1;
   render(<ReleaseList releases={releasesFor(count)} submit={submitPlan(outcomes)} />);
   for (let index = 1; index <= count; index += 1) {
@@ -386,7 +408,7 @@ test('every outcome re-enables the button, including a submit that rejects outri
     const buttons = screen.getAllByRole<HTMLButtonElement>('button');
     assert.equal(buttons.length, count, 'every release still offers its button');
     assert.ok(buttons.every((button) => !button.disabled), 'and not one of them is left disabled');
-    assert.ok(buttons.every((button) => button.textContent === 'Pick'),
+    assert.ok(buttons.every((button) => button.textContent === PICK_LABELS.idle),
       'and none is still reading Picking…');
   });
 });

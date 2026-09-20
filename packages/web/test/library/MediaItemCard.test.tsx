@@ -161,7 +161,7 @@ const stubSource: GatheredSource = {
 test('a card shows its title as a real heading', () => {
   // CLAUDE.md's longest hazard: the accessible name must come from a visible
   // heading, not an aria-label, or a query passes against an unstyled block.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
+  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
   const heading = screen.getByRole('heading', { name: 'The Thing' });
   assert.equal(heading.textContent, 'The Thing');
 });
@@ -176,7 +176,7 @@ test('expanding gathers the item once, and collapsing does not re-gather', async
     },
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
   assert.equal(gathers, 0, 'a collapsed card costs nothing');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
@@ -210,7 +210,7 @@ test('a release shows its resolution and its download status', async () => {
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.2160p.mkv/ });
@@ -233,7 +233,7 @@ test('a release with no download row shows no status rather than a blank one', a
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.1080p.mkv/ });
@@ -245,7 +245,7 @@ test('a card whose artwork 404s still renders', () => {
   // Artwork is not replicated: the client asks `/api/artwork/:kind/:id` and
   // handles a 404 (host `sync/tables.ts`). Most items will have no poster for
   // a while, so a missing one must not blank the card.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submitPick={acceptsPick} />);
+  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
   const image = screen.getByRole('img', { name: /The Thing/ });
   fireEvent.error(image);
   assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the card survives its poster failing');
@@ -280,7 +280,7 @@ test('the submit a card is handed is the one its Pick button calls', async () =>
     <MediaItemCard
       source={source}
       item={summary({ id: 7, title: 'The Thing' })}
-      submitPick={(rssItemId) => {
+      submit={(rssItemId) => {
         asked.push(rssItemId);
         return Promise.resolve({ accepted: true });
       }}

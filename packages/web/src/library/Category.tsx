@@ -34,13 +34,13 @@ export interface CategoryProps {
   /** `media_item.pluginId` for this category -- `'tv' | 'movie' | 'xxx'` in practice, but this component does not need to know the closed set (`useCounts.ts`'s own doc on why a category is a plugin id, not a table). */
   pluginId: string;
   /** Submits one pick, forwarded to each card's `ReleaseList` and never called here. A prop rather than a member of `CategorySource`: a store is the replica, and posting to `/api/picks` is not something a replica does. */
-  submitPick: PickSubmit;
+  submit: PickSubmit;
 }
 
-export function Category({ store, pluginId, submitPick }: CategoryProps): ReactElement {
+export function Category({ store, pluginId, submit }: CategoryProps): ReactElement {
   return (
     <section data-testid={`category-${pluginId}`}>
-      {store === undefined ? null : <CategoryList store={store} pluginId={pluginId} submitPick={submitPick} />}
+      {store === undefined ? null : <CategoryList store={store} pluginId={pluginId} submit={submit} />}
     </section>
   );
 }
@@ -48,10 +48,10 @@ export function Category({ store, pluginId, submitPick }: CategoryProps): ReactE
 interface CategoryListProps {
   store: CategorySource;
   pluginId: string;
-  submitPick: PickSubmit;
+  submit: PickSubmit;
 }
 
-function CategoryList({ store, pluginId, submitPick }: CategoryListProps): ReactElement | null {
+function CategoryList({ store, pluginId, submit }: CategoryListProps): ReactElement | null {
   const { items, loadMore, done, empty } = useMediaItems(store, pluginId);
 
   // `items.length === 0 && !empty` is the one state `empty` cannot yet
@@ -66,7 +66,7 @@ function CategoryList({ store, pluginId, submitPick }: CategoryListProps): React
   return (
     <div>
       {items.map((item) => (
-        <MediaItemCard key={item.id} source={store} item={item} submitPick={submitPick} />
+        <MediaItemCard key={item.id} source={store} item={item} submit={submit} />
       ))}
       {!done && (
         <button type="button" onClick={loadMore}>

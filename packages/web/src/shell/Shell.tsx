@@ -182,9 +182,9 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           through `Category` and `MediaItemCard`, neither of which calls it
           (picks design §2).
         */}
-        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" submitPick={postPick} />} />
-        <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" submitPick={postPick} />} />
-        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" submitPick={postPick} />} />
+        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" submit={postPick} />} />
+        <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" submit={postPick} />} />
+        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" submit={postPick} />} />
         {/*
           `store` is `undefined` until `createStore` resolves (this component's
           own effect, above); `Unmatched`'s `source` prop is not optional, so

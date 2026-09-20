@@ -31,10 +31,10 @@ export interface MediaItemCardProps {
    * a default doing network I/O is invisible at the call site, and a test
    * that forgets it gets a real `fetch` under jsdom.
    */
-  submitPick: PickSubmit;
+  submit: PickSubmit;
 }
 
-export function MediaItemCard({ source, item, submitPick }: MediaItemCardProps): ReactElement {
+export function MediaItemCard({ source, item, submit }: MediaItemCardProps): ReactElement {
   const [expanded, setExpanded] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
   const gathered = useGatheredItem(source, item.id, expanded);
@@ -61,7 +61,7 @@ export function MediaItemCard({ source, item, submitPick }: MediaItemCardProps):
           {item.title}
         </button>
       </h2>
-      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submitPick} />}
+      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submit} />}
     </article>
   );
 }

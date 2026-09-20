@@ -77,7 +77,7 @@ test('the category screen carries the route-mapping marker on its root element',
   // alone, so it is a contract this component inherited rather than
   // decoration it is free to drop.
   const db = await freshDb();
-  render(<Category store={sourceFor(db)} pluginId="tv" submitPick={acceptsPick} />);
+  render(<Category store={sourceFor(db)} pluginId="tv" submit={acceptsPick} />);
   assert.ok(screen.getByTestId('category-tv'), 'the marker names this category');
 
   await waitFor(() => {
@@ -93,7 +93,7 @@ test('a category lists its items newest first, each as its own card', async () =
     mediaItem({ id: 1, pluginId: 'tv', title: 'Older Show', updatedAt: 10 }),
     mediaItem({ id: 2, pluginId: 'tv', title: 'Newer Show', updatedAt: 20 }),
   ]);
-  render(<Category store={sourceFor(db)} pluginId="tv" submitPick={acceptsPick} />);
+  render(<Category store={sourceFor(db)} pluginId="tv" submit={acceptsPick} />);
 
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Newer Show', 'Older Show'], 'newest first');
@@ -104,7 +104,7 @@ test('a category lists its items newest first, each as its own card', async () =
 
 test('an empty category says so rather than rendering nothing', async () => {
   const db = await freshDb();
-  render(<Category store={sourceFor(db)} pluginId="tv" submitPick={acceptsPick} />);
+  render(<Category store={sourceFor(db)} pluginId="tv" submit={acceptsPick} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText(/nothing here yet/i));
@@ -118,7 +118,7 @@ test('a category with no store yet renders only its marker, not "nothing here ye
   // `store` is `undefined` until `Shell`'s own store finishes opening
   // (`Shell.tsx`'s state, `Category.tsx`'s own doc). This must not be
   // mistaken for a confirmed-empty replica.
-  render(<Category store={undefined} pluginId="tv" submitPick={acceptsPick} />);
+  render(<Category store={undefined} pluginId="tv" submit={acceptsPick} />);
   assert.ok(screen.getByTestId('category-tv'), 'the marker renders even with no store yet');
   assert.ok(!screen.queryByText(/nothing here yet/i), 'not yet knowable whether the category is empty');
 });
@@ -126,7 +126,7 @@ test('a category with no store yet renders only its marker, not "nothing here ye
 test('expanding a card gathers through the same store the list read from', async () => {
   const db = await freshDb();
   await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: 'The Show', updatedAt: 10 })]);
-  render(<Category store={sourceFor(db)} pluginId="tv" submitPick={acceptsPick} />);
+  render(<Category store={sourceFor(db)} pluginId="tv" submit={acceptsPick} />);
 
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['The Show']);
@@ -152,7 +152,7 @@ test('no fetch is issued while a category renders', async () => {
   try {
     const db = await freshDb();
     await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: 'Local Show', updatedAt: 10 })]);
-    render(<Category store={sourceFor(db)} pluginId="tv" submitPick={acceptsPick} />);
+    render(<Category store={sourceFor(db)} pluginId="tv" submit={acceptsPick} />);
     await waitFor(() => {
       assert.deepEqual(titlesShown(), ['Local Show']);
     });

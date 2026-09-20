@@ -79,12 +79,20 @@
      measured), so the floor covers the padding and the border as well as the
      text, and 4.5rem clears the wider label by 5.42px.
 
-     **Its weakness is that it is a measurement of two specific strings.** A
-     third, longer label -- or a font that does not load -- reflows the row
-     again and nothing in the suite fails. Sizing to the content instead
-     would need `ch` units against a proportional face, which measures the
-     wrong thing, or rendering both labels and hiding one, which is markup
-     this stylesheet does not get to write. */
+     **Its weakness is that it is a measurement of two specific strings**, and
+     it is now pinned rather than merely written down. A third label, or a
+     longer one, reflows the row again and no stylesheet can notice. Sizing
+     to the content instead would need `ch` units against a proportional
+     face, which measures the wrong thing, or rendering both labels and
+     hiding one, which is markup this stylesheet does not get to write -- so
+     the assumption is guarded from the other end: `ReleaseList.tsx` exports
+     the two labels as `PICK_LABELS` and `ReleaseList.test.tsx` pins that
+     object literally, naming this token in its failure message. Changing a
+     label reddens that test and sends whoever changed it back here to
+     re-measure. The pin is conservative, not exact -- it also reddens for a
+     shorter label that would have fitted -- because no jsdom test can
+     measure a rendered string, and a false red that says "re-measure" costs
+     less than the silent reflow it replaces. */
   --size-poster: 6rem;
   --size-pick-button: 4.5rem;
 
