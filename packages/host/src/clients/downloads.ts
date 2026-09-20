@@ -189,9 +189,11 @@ function buildPlan(config: ClientConfig, fetch: QueuedFetch): Plan {
  * module doc describes, one step per line:
  *
  * 1. Read the rss item to find its feed.
- * 2. `selectClientForFeed` picks the client the feed actually uses, and the
- *    submission's own `downloadClientId` is checked against it -- naming a
- *    different client is refused before anything is written.
+ * 2. `selectClientForFeed` picks the client the feed actually uses. That
+ *    answer is what the row is written against, whether or not the
+ *    submission named one; a submission that *did* name one is checked
+ *    against it, and naming a different client is refused before anything
+ *    is written.
  * 3. `readClientConfig` decides the auth strategy, which decides the table
  *    and the adapter (`buildPlan`).
  * 4. The `submitting` row is inserted, with the infohash already known when
@@ -227,8 +229,14 @@ export function createDownloadClients(deps: {
   return {
     async submit(submission: DownloadSubmission): Promise<string | null> {
       const item = readDownloadItem(raw, submission.rssItemId);
+      // Resolved here whether or not the submission named a client, because
+      // the feed's client is the host's answer to give -- see
+      // `DownloadSubmission.downloadClientId`. A submission that named one
+      // is only *checked* against this, which is why the id used from here
+      // down is `downloadClientId` and never `submission.downloadClientId`:
+      // an absent one has nothing to read.
       const downloadClientId = selectClientForFeed(raw, item.feedId, chooseIndex);
-      if (submission.downloadClientId !== downloadClientId) {
+      if (submission.downloadClientId !== undefined && submission.downloadClientId !== downloadClientId) {
         throw new Error(
           `download submission names client ${submission.downloadClientId}, but feed ${item.feedId} ` +
           `uses client ${downloadClientId} for its picks`,

@@ -418,3 +418,54 @@ test('a late update cannot overwrite a row that is no longer submitting', async 
   assert.deepEqual({ ...row }, { status: 'failed', last_error: 'preempted-by-newer-attempt', client_ref: null });
 });
 
+test('a submission that names no client goes to the feed\'s sole client of its type', async () => {
+  // The case that failed for every feed created through the settings UI:
+  // `AddFeedInput` has no download client field, so `download_client_id` is
+  // NULL, and until now a submission had no way to say "you decide". The
+  // policy that answers here is the same one every other path already used.
+  const raw = setup();
+  const clientId = seedClient(raw, { name: 'SoleQBT', apiKey: 'key-9', category: 'movies' });
+  const feedId = seedFeed(raw, { downloadType: 'torrent', downloadClientId: null });
+  const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Sole Show' });
+
+  const fetch = fakeFetch({ text: async () => 'Ok.' });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 8000, chooseIndex: refuseToChoose, log: noLog });
+
+  const ref = await clients.submit({ rssItemId: itemId });
+
+  assert.equal(ref, MAGNET_HASH);
+  const row = raw.prepare(
+    'SELECT download_client_id, status FROM torrent_download WHERE rss_item_id = ?',
+  ).get(itemId);
+  assert.deepEqual({ ...row }, { download_client_id: clientId, status: 'submitted' });
+});
+
+test('a submission that names no client, where two match, is recorded against the chooser\'s answer', async () => {
+  // What proves `chooseIndex` is threaded from here through to
+  // `selectClientForFeed` rather than stopping at this module's own deps.
+  // Index 1 of two ids in ascending order is the second, spelled out
+  // literally: an implementation that dropped the chooser and kept the
+  // lowest id would write `first` and this would see it.
+  const raw = setup();
+  const first = seedClient(raw, {
+    name: 'FirstQBT', apiKey: 'key-10a', category: 'movies', baseUrl: 'https://first.example.test',
+  });
+  const second = seedClient(raw, {
+    name: 'SecondQBT', apiKey: 'key-10b', category: 'movies', baseUrl: 'https://second.example.test',
+  });
+  const feedId = seedFeed(raw, { downloadType: 'torrent', downloadClientId: null });
+  const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Chosen Show' });
+
+  const fetch = fakeFetch({ text: async () => 'Ok.' });
+  const clients = createDownloadClients({
+    raw, fetch, secrets: makeSecrets(raw), now: () => 8500, chooseIndex: () => 1, log: noLog,
+  });
+
+  await clients.submit({ rssItemId: itemId });
+
+  const row = raw.prepare(
+    'SELECT download_client_id FROM torrent_download WHERE rss_item_id = ?',
+  ).get(itemId) as { download_client_id: unknown };
+  assert.equal(Number(row.download_client_id), second);
+  assert.notEqual(Number(row.download_client_id), first);
+});

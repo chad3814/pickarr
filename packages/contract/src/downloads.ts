@@ -1,7 +1,23 @@
-/** Which item to hand to which configured client. */
+/** Which item to hand over, and -- optionally -- to which configured client. */
 export interface DownloadSubmission {
   rssItemId: number;
-  downloadClientId: number;
+  /**
+   * Optional, and absent means **the host decides**: it resolves the client
+   * from the item's feed, by the same policy every other path uses.
+   *
+   * It was a required `number`, which gave a plugin no way to say "you
+   * decide" -- so a plugin that did not want to invent host policy had to
+   * read `rss_feed.download_client_id` itself, and had nothing to send when
+   * that column was `NULL`, which is every feed created through the
+   * settings UI. Omitting it is now the normal case, and the one a plugin
+   * should prefer: the feed's client is not a plugin's column to read.
+   *
+   * Supplying it does not override that resolution -- the host still
+   * resolves, and refuses a submission that names a different client than
+   * the feed's own. It is an assertion about where the item should go, not
+   * an instruction.
+   */
+  downloadClientId?: number;
 }
 
 /**
