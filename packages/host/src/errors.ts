@@ -7,7 +7,7 @@
  * `clients/downloads.ts` throw three of the others and are imported *by*
  * `host.ts`, so the same argument applies to them in the other direction.
  *
- * **Why five classes and not five message prefixes.** `clients/pick.ts`
+ * **Why six classes and not six message prefixes.** `clients/pick.ts`
  * turns each of these into one of `@pickarr/contract`'s
  * `REQUEST_PICK_REFUSALS` codes, and the only alternative to a type is
  * matching the message text. Every message below interpolates an id, so a
@@ -23,13 +23,16 @@
  * messages "reach `jobs.last_error` and the host log", and neither half is
  * true. Traced through every caller on this tree:
  *
- * - **Four of the five are never written down at all.**
+ * - **Five of the six are never written down at all.**
  *   `UnknownRssItemError` and `PluginNotRegisteredError` are raised by
  *   `requestDownload` before a submission starts, and `NoClientOfTypeError`
  *   and `ClientTypeMismatchError` by `selectClientForFeed`, which
  *   `clients/downloads.ts` calls *before* it inserts the download row -- so
  *   `markFailed` never runs for them and there is no column to write to.
- *   All four become bare codes in `clients/pick.ts` and are discarded.
+ *   `ReleaseAlreadyPickedError` joins them for a different reason: it is
+ *   raised *by* that insert, so the row it would have been written to is
+ *   the one that did not come into existence. All five become bare codes
+ *   in `clients/pick.ts` and are discarded.
  * - **`AlreadySubmittedError` is the one that persists**, into
  *   `torrent_download.last_error` / `nzb_download.last_error`, through
  *   `redactUrl`. `sync/tables.ts` deliberately keeps that column out of the
@@ -45,9 +48,9 @@
  *   message, and no refusal reaches `api/server.ts`'s 500 handler, which is
  *   the only place a thrown message is written to the host log.
  *
- * So four of these messages are read by a developer holding a stack trace
+ * So five of these messages are read by a developer holding a stack trace
  * and by nobody else. That is not an argument for being careless with them
- * -- the fifth is served over HTTP, and which is which is a property of
+ * -- the sixth is served over HTTP, and which is which is a property of
  * call sites above this file rather than of the classes.
  */
 
@@ -178,12 +181,37 @@ export class ClientTypeMismatchError extends Error {
  * reference onto a download row collides with the partial unique index on
  * `(download_client_id, client_ref)`.
  *
- * **This is the one error here that stands for a *caught* constraint
- * violation rather than a condition some code checked.** `clients/
- * downloads.ts` writes its row first and asks the client second, so a
- * second pick at the same release reaches the same client, gets the same
- * reference back, and collides on the `UPDATE` -- there is no window in
- * which two concurrent picks could both pass a check and then both insert.
+ * **A *caught* constraint violation rather than a condition some code
+ * checked**, like {@link ReleaseAlreadyPickedError} below and unlike every
+ * other class in this module. `clients/downloads.ts` writes its row
+ * first and asks the client second, so a reference the client hands back
+ * that it has already handed back for some other row collides on the
+ * `UPDATE` rather than being pre-checked and then raced.
+ *
+ * **What this catches, now that the release-level index exists.** It is
+ * *not* the same release picked twice: since migration 18 a second live
+ * download for one `rss_item` is refused at the insert, before any client
+ * is called, and that is {@link ReleaseAlreadyPickedError}. What is left
+ * here is two *different* releases resolving to one reference on one
+ * client -- two `rss_item` rows carrying the same magnet, which a feed
+ * that re-publishes an item under a new guid produces. Both map to the
+ * `already-submitted` refusal, because from the caller's side both are
+ * "this download is already on file"; they are two classes because the
+ * conditions are different and prose is all that would otherwise tell them
+ * apart.
+ *
+ * **This docblock used to claim "a second pick at the same release reaches
+ * the same client … there is no window in which two concurrent picks could
+ * both pass a check and then both insert."** The second half was true and
+ * the first was false, and the whole-branch review measured the cost:
+ * `clients/select.ts` had already begun *drawing* at random among a feed's
+ * candidate clients (`a5c8e9f`, three commits before this sentence was
+ * written), so a second pick reached the same client only 1 time in N, and
+ * with two torrent clients configured the same release picked twice
+ * answered `accepted` twice. The mechanism described was right about the
+ * collision it described; the premise underneath it -- "the same client" --
+ * was a claim about another module that this one neither states nor checks.
+ *
  * `cause` is SQLite's own error, kept so the collision is still traceable;
  * nothing reads it, and in particular `clients/pick.ts` does not, because
  * re-deriving the detection from `errcode` at the far end would be a second
@@ -207,5 +235,52 @@ export class AlreadySubmittedError extends Error {
       options,
     );
     this.name = 'AlreadySubmittedError';
+  }
+}
+
+/**
+ * Thrown by `createDownloadClients`'s `submit` when inserting a download
+ * row collides with migration 18's partial unique index on `rss_item_id`
+ * -- that is, when the release already has a download in every status but
+ * `failed`.
+ *
+ * **The second caught constraint violation in this module, and the one
+ * that does not depend on which client was resolved.**
+ * {@link AlreadySubmittedError} is keyed on `(download_client_id,
+ * client_ref)` and therefore cannot see a second pick that landed on a
+ * different client; `clients/select.ts` draws at random among a feed's
+ * candidates, so that is the common case on any install with two clients
+ * of one type rather than a rare one. Migration 18's docblock has the
+ * measurement and the definition of "live" the index encodes.
+ *
+ * **Caught, not pre-checked, and the ordering is what makes that safe.**
+ * `clients/downloads.ts` inserts the row synchronously, before it awaits
+ * anything, so a second pick arriving while the first is still talking to
+ * its client meets a row that is already on file and already `submitting`.
+ * A `SELECT` asking "does this release have a live download?" would have
+ * to be followed by an insert, and two picks could both pass it -- which
+ * is the race design spec §6 chose a real constraint to avoid.
+ *
+ * **How this is told apart from {@link AlreadySubmittedError} without
+ * reading SQLite's message.** By *where* the violation was caught, not by
+ * what it said. The insert supplies `client_ref = NULL`, which the
+ * `..._client_ref` index excludes, so an insert can only have hit this
+ * one; the `UPDATE` that writes a reference changes neither `rss_item_id`
+ * nor the row's membership of `status <> 'failed'`, so it can only have
+ * hit the other. A substring match on `UNIQUE constraint failed: …` would
+ * be broken by a column rename that reddens nothing, which is the reason
+ * this module holds classes at all.
+ *
+ * One object rather than two adjacent `number` parameters, for the reason
+ * {@link NoClientOfTypeError} gives: transposing them would compile.
+ */
+export class ReleaseAlreadyPickedError extends Error {
+  constructor(submission: { rssItemId: number; downloadClientId: number }, options: { cause: unknown }) {
+    super(
+      `rss item ${submission.rssItemId} could not be recorded against download client ` +
+      `${submission.downloadClientId}: this release already has a download that has not failed`,
+      options,
+    );
+    this.name = 'ReleaseAlreadyPickedError';
   }
 }

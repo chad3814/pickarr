@@ -36,9 +36,16 @@
  * `Pick` again 33ms after the click, status arriving at 2934ms** -- ~2.9
  * seconds during which the host already held a `submitted` row and the
  * browser still offered a live button, and a second click there answers
- * `already-submitted` and leaves a `failed` row behind. What is written
- * above is now what the code does; see {@link ReleaseRow} for the shape,
- * and for the hang it deliberately accepts.
+ * `already-submitted`. What is written above is now what the code does;
+ * see {@link ReleaseRow} for the shape, and for the hang it deliberately
+ * accepts.
+ *
+ * **That sentence used to end "and leaves a `failed` row behind", which
+ * this list then rendered forever beside the `submitted` one.** It does
+ * not any more: the host's release-level index refuses the second pick at
+ * the insert, before a row exists, so a refused pick writes nothing at
+ * all. Nothing here changed for it -- the row this component would have
+ * had to hide is simply never written.
  *
  * **Each row is a component, so each row owns its own pending flag and its
  * own error.** State held up here and keyed by release id would work too; a
@@ -164,8 +171,8 @@ interface ReleaseRowProps {
  * row ever arrives, so that one button stays `Picking…` until the card is
  * collapsed and reopened. There is no timeout and no fallback here on
  * purpose -- a timer would re-enable a button whose pick may still be in
- * flight, which is the `already-submitted`-and-a-`failed`-row outcome
- * again, arrived at more slowly. It is scoped to one row of one card and
+ * flight, which is the `already-submitted` outcome again, arrived at more
+ * slowly -- a refusal shown for a pick that was in fact working. It is scoped to one row of one card and
  * survives no remount, and it is the price of never offering a second pick
  * on a release the host has already accepted one for.
  *

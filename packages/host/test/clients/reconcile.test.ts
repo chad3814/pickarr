@@ -264,11 +264,13 @@ test('an entry matching no row is counted untracked and never written', () => {
 
 test('a delivered row is left alone by every arm', () => {
   const raw = setup();
-  const itemId = seedRssItem(raw, 'a');
   const clientId = seedClient(raw);
-  const queueId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-queue', status: 'delivered' });
-  const completedId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-completed', status: 'delivered' });
-  const failedId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-failed', status: 'delivered' });
+  // One release per row: three `delivered` rows are three live downloads,
+  // which migration 18's index requires to belong to three releases. Which
+  // release each row names is not what this test is about.
+  const queueId = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'a'), downloadClientId: clientId, clientRef: 'ref-queue', status: 'delivered' });
+  const completedId = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: clientId, clientRef: 'ref-completed', status: 'delivered' });
+  const failedId = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: clientId, clientRef: 'ref-failed', status: 'delivered' });
 
   const result = walkSnapshot(deps(raw, clientId, {
     snapshot: {
@@ -365,15 +367,27 @@ test('a ref another row already holds is never attached, and the rest of the tic
   // `client_ref` unique-index violation, and the throw took the whole tick
   // with it -- so this asserts both that nothing was written to the claiming
   // row and that an unrelated row still advanced.
+  //
+  // **The holder and the claimant are two rss_items sharing a filename, not
+  // two rows on one item.** They were one item until migration 18's partial
+  // unique index on `rss_item_id` made that shape unrepresentable. Nothing
+  // this test is about changed with it: `recoverRefs` matches on
+  // `rss_item.filename` and never reads `rss_item_id`, so a duplicate
+  // filename is the whole of what makes one job the single candidate for
+  // both rows -- which is exactly the shape
+  // `one client job claimed by two same-named downloads recovers neither`
+  // below already used, for the same reason (`rss_feed.url` is unique, so
+  // two items can only share a filename across two feeds).
   const raw = setup();
   const itemId = seedRssItem(raw, 'movie');
+  const claimantItemId = seedRssItemOnNewFeed(raw, 'claimant-feed', 'movie.mkv');
   const otherItemId = seedRssItem(raw, 'other');
   const clientId = seedClient(raw);
   const holderId = insertTorrentRow(raw, {
     rssItemId: itemId, downloadClientId: clientId, clientRef: 'nzo-1', status: 'downloading',
   });
   const claimantId = insertTorrentRow(raw, {
-    rssItemId: itemId, downloadClientId: clientId, clientRef: null, status: 'submitting',
+    rssItemId: claimantItemId, downloadClientId: clientId, clientRef: null, status: 'submitting',
   });
   const bystanderId = insertTorrentRow(raw, {
     rssItemId: otherItemId, downloadClientId: clientId, clientRef: 'ref-other', status: 'submitted',
@@ -439,38 +453,6 @@ test('a ref held by a row in the other download table is not a candidate either'
   assert.equal(readColumn(raw, 'nzb_download', nzbHolderId, 'percentage'), 12);
 });
 
-test('the same rss_item requested twice recovers neither row, with no second feed involved', () => {
-  // The claim pass's own case, reached without `seedRssItemOnNewFeed`: two
-  // download rows on one `rss_item` read the identical filename, so one
-  // client job is the single unambiguous candidate for both. Nothing needs
-  // two feeds, or two releases, to produce this.
-  const raw = setup();
-  const itemId = seedRssItem(raw, 'movie');
-  const clientId = seedClient(raw);
-  const firstId = insertTorrentRow(raw, {
-    rssItemId: itemId, downloadClientId: clientId, clientRef: null, status: 'submitting',
-  });
-  const secondId = insertTorrentRow(raw, {
-    rssItemId: itemId, downloadClientId: clientId, clientRef: null, status: 'submitting',
-  });
-
-  const result = walkSnapshot(deps(raw, clientId, {
-    snapshot: { ...emptySnapshot, queue: [queueEntry({ ref: 'ref-shared', name: 'movie.mkv' })] },
-  }));
-
-  // `ref-shared` matches no row, so the walk counts it untracked -- recovery
-  // itself wrote nothing, and threw nothing.
-  assert.deepEqual(result, {
-    advanced: 0, completed: 0, failed: 0, untracked: 1, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0,
-  });
-  for (const id of [firstId, secondId]) {
-    assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), null);
-    assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitting');
-    assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 1);
-  }
-});
-
 test('one client job claimed by two same-named downloads recovers neither', () => {
   // Ambiguity from the job's side, which "exactly one candidate for this
   // row" does not catch: two rows whose rss_item.filename is the same each
@@ -478,6 +460,19 @@ test('one client job claimed by two same-named downloads recovers neither', () =
   // job to two rows is wrong on its face -- and it would not fail quietly,
   // because `client_ref`'s partial unique index rejects the second write and
   // that throw would escape walkSnapshot and abandon the rest of the tick.
+  //
+  // **This file used to carry a second test of the same property**, "the
+  // same rss_item requested twice recovers neither row, with no second feed
+  // involved", which reached it with two `submitting` rows on one
+  // `rss_item`. Migration 18's partial unique index on `rss_item_id` makes
+  // that shape unrepresentable, so it was deleted rather than repaired.
+  // Enumerated before accepting the loss: `recoverRefs` reads
+  // `rss_item.filename` and never `rss_item_id`, so the two tests differed
+  // only in how the duplicate filename was produced, not in anything the
+  // claim pass can distinguish -- and the claim pass itself is the thing
+  // both were aimed at. What the deleted one additionally showed was that
+  // the situation needed no second feed to arise; that is no longer true,
+  // and the index is why.
   const raw = setup();
   // Two rss_items sharing a filename but on different feeds -- `rss_feed.url`
   // is unique, so the shared helper cannot seed this shape. The duplicate
@@ -571,10 +566,10 @@ test('a complete snapshot stamps a row it does not account for', () => {
 test('an incomplete snapshot stamps nothing and reports absent zero', () => {
   // And still advances a row it does contain -- two assertions, one fake.
   const raw = setup();
-  const itemId = seedRssItem(raw, 'a');
   const clientId = seedClient(raw);
-  const missingId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-missing', status: 'downloading' });
-  const presentId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-present', status: 'submitted' });
+  // Two live rows, so two releases -- see the `delivered` test above.
+  const missingId = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'a'), downloadClientId: clientId, clientRef: 'ref-missing', status: 'downloading' });
+  const presentId = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: clientId, clientRef: 'ref-present', status: 'submitted' });
 
   const result = walkSnapshot(deps(raw, clientId, {
     now: 900,

@@ -166,7 +166,15 @@ test('a card shows its title as a real heading', () => {
   assert.equal(heading.textContent, 'The Thing');
 });
 
-test('expanding gathers the item once, and collapsing does not re-gather', async () => {
+test('expanding gathers the item once, and collapsing costs nothing while reopening refreshes', async () => {
+  // **`gathers` was pinned at 1 across the reopen**, which is the review's
+  // I2: both subscriptions are torn down while a card is collapsed, so a
+  // download row landing in that window is never noticed, and answering
+  // the reopen from the cache alone left a live `Pick` button on a release
+  // that already had one. `useGatheredItem`'s docblock has the decision;
+  // what this card-level test still pins is the half that did not change
+  // -- a collapsed card gathers nothing at all.
+  //
   let gathers = 0;
   const source: GatheredSource = {
     ...quietInserts,
@@ -186,11 +194,16 @@ test('expanding gathers the item once, and collapsing does not re-gather', async
   assert.equal(gathers, 1);
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
+  // Collapsed. Asserted before reopening, because after the reopen a count
+  // of 2 would be satisfied by a collapse that gathered and a reopen that
+  // did not, which is the opposite of what this claims.
+  assert.equal(gathers, 1, 'collapsing gathers nothing');
+
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   await waitFor(() => {
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
-  assert.equal(gathers, 1, 'reopening reuses what was already gathered');
+  assert.equal(gathers, 2, 'reopening refreshes what it shows from the cache');
 });
 
 test('a release shows its resolution and its download status', async () => {

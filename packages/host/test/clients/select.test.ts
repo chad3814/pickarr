@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
-import { randomIndex, selectClientForFeed } from '../../src/clients/select.ts';
+import { randomIndexWith, selectClientForFeed } from '../../src/clients/select.ts';
 
 function setup(): DatabaseSync {
   const { raw } = openTestDatabase();
@@ -138,10 +138,11 @@ test('three clients of the feed\'s type: the chooser picks among them, by id ord
 });
 
 test('repeated selection through the real chooser reaches every candidate', () => {
-  // This is the test the 1.x bug has to fail. `randomIndex` is the chooser
-  // production passes; only its source of randomness is replaced, by a
-  // generator whose sequence is fixed -- so the assertion is the same on
-  // every run instead of being a probability dressed up as a test.
+  // This is the test the 1.x bug has to fail. `randomIndexWith` is the
+  // factory `randomIndex` -- the chooser production passes -- is built
+  // from; only its source of randomness is replaced here, by a generator
+  // whose sequence is fixed, so the assertion is the same on every run
+  // instead of being a probability dressed up as a test.
   const raw = setup();
   const ids = [
     seedClient(raw, { name: 'First', type: 'torrent' }),
@@ -153,21 +154,21 @@ test('repeated selection through the real chooser reaches every candidate', () =
   const random = seededRandom(20260919);
   const reached = new Set<number>();
   for (let pick = 0; pick < 60; pick += 1) {
-    reached.add(selectClientForFeed(raw, feedId, (count) => randomIndex(count, random)));
+    reached.add(selectClientForFeed(raw, feedId, randomIndexWith(random)));
   }
 
   assert.deepEqual([...reached].toSorted((a, b) => a - b), ids);
 });
 
-test('randomIndex spans the whole range and never answers past its end', () => {
+test('a chooser built by randomIndexWith spans the whole range and never answers past its end', () => {
   // `Math.random` is [0, 1), so the top of the range must land on the last
   // index rather than one past it -- the out-of-range answer the next test
   // shows `selectClientForFeed` would refuse.
-  assert.equal(randomIndex(3, () => 0), 0);
-  assert.equal(randomIndex(3, () => 0.34), 1);
-  assert.equal(randomIndex(3, () => 0.67), 2);
-  assert.equal(randomIndex(3, () => 0.9999999), 2);
-  assert.equal(randomIndex(1, () => 0.9999999), 0);
+  assert.equal(randomIndexWith(() => 0)(3), 0);
+  assert.equal(randomIndexWith(() => 0.34)(3), 1);
+  assert.equal(randomIndexWith(() => 0.67)(3), 2);
+  assert.equal(randomIndexWith(() => 0.9999999)(3), 2);
+  assert.equal(randomIndexWith(() => 0.9999999)(1), 0);
 });
 
 test('a chooser answering outside the candidate range is an error, not a crash', () => {

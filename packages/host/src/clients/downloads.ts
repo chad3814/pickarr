@@ -2,8 +2,9 @@
  * The real `DownloadClients`: resolves a plugin's submission to the client
  * that owns its feed, hands it to that client's adapter, and records what
  * happened in `torrent_download` or `nzb_download` -- whichever table
- * matches the *client's* type, not necessarily the feed's (see
- * `tableKindFor` below).
+ * matches the *client's* type, not necessarily the feed's (see `buildPlan`
+ * below -- this line named a `tableKindFor` that has never existed on this
+ * tree).
  *
  * The row is written before the adapter is ever called. That ordering is
  * the entire reason `client_ref` is nullable on both tables: a submission
@@ -14,11 +15,22 @@
  * something else has already decided the row's fate cannot clobber it --
  * the same shape as the previous slice's blocking bug, guarded the same
  * way.
+ *
+ * **Two unique constraints refuse a submission here, and they ask
+ * different questions.** The insert can collide with migration 18's
+ * partial unique index on `rss_item_id` -- "does this release already have
+ * a download that has not failed" -- and the `UPDATE` that writes the
+ * client's reference can collide with the older partial index on
+ * `(download_client_id, client_ref)` -- "has this client already been
+ * handed this reference". Both become the `already-submitted` refusal and
+ * neither is pre-checked; `insertRow` and the `catch` around the adapter
+ * call have the reasoning, and `../errors.ts` has why they are two
+ * classes.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, DownloadSubmission } from '@pickarr/contract';
 import type { QueuedFetch } from '../fetch/queue.ts';
-import { AlreadySubmittedError } from '../errors.ts';
+import { AlreadySubmittedError, ReleaseAlreadyPickedError } from '../errors.ts';
 import { readClientConfig } from './config.ts';
 import type { Secrets } from '../secrets/instance.ts';
 import type { ClientConfig } from './config.ts';
@@ -94,10 +106,57 @@ function insertNzbRow(
   return Number(result.lastInsertRowid);
 }
 
+/**
+ * Inserts the `submitting` row, or throws `ReleaseAlreadyPickedError` when
+ * this release already has a download in any status but `failed`.
+ *
+ * **Caught here, never pre-checked, and this is the only place that can
+ * tell which constraint fired.** Migration 18's partial unique index on
+ * `rss_item_id` is what refuses; nothing above this line asks whether the
+ * release has been picked. A `SELECT` that did would have to be followed
+ * by this insert, and two picks could both pass it and then both write --
+ * design spec §6's whole reason for catching a real constraint instead.
+ * The insert is synchronous and happens before `submit` awaits anything,
+ * so a second pick arriving mid-flight meets a row that is already there.
+ *
+ * **A violation from this statement can only be the release index**, which
+ * is why no message is parsed to find out: the insert writes `client_ref`
+ * as NULL and `..._client_ref` is partial on `client_ref IS NOT NULL`, so
+ * that index has no entry to collide with. The converse holds at the
+ * `markSubmitted` call site, which can only hit the other one --
+ * `../errors.ts`'s two docblocks have the full argument.
+ *
+ * `tableKind` rather than two call sites, because both now need the same
+ * `try`/`catch` around them and duplicating it would be the second copy of
+ * a rule with one reason. `infohash` is a parameter rather than read here
+ * so this function stays the insert and nothing else; it is `null` on the
+ * nzb path, where the column does not exist and is not passed on.
+ */
+function insertRow(
+  tableKind: 'torrent' | 'nzb',
+  raw: DatabaseSync,
+  params: { rssItemId: number; downloadClientId: number; infohash: string | null; at: number },
+): number {
+  try {
+    return tableKind === 'torrent'
+      ? insertTorrentRow(raw, params)
+      : insertNzbRow(raw, params);
+  } catch (err) {
+    if (!isUniqueConstraintViolation(err)) throw err;
+    throw new ReleaseAlreadyPickedError(
+      { rssItemId: params.rssItemId, downloadClientId: params.downloadClientId },
+      { cause: err },
+    );
+  }
+}
+
 // Four tiny, table-specific functions rather than one parameterised by a
 // table-name string: every other query in this codebase names its table as
 // a literal, and building one from a variable here -- even a variable this
 // module fully controls -- would be the only query anywhere that does not.
+// `insertRow` above takes a `tableKind` and still obeys that rule: it
+// branches to one of two functions that each name their table as a
+// literal, rather than interpolating one into SQL.
 //
 // Every one of these guards `AND status = 'submitting'`: a settle that
 // arrives after something else already decided the row (a newer attempt,
@@ -239,18 +298,12 @@ export function createDownloadClients(deps: {
       const plan = buildPlan(config, fetch);
 
       const insertedAt = now();
-      const rowId = plan.tableKind === 'torrent'
-        ? insertTorrentRow(raw, {
-          rssItemId: submission.rssItemId,
-          downloadClientId,
-          infohash: infohashFromMagnet(item.link),
-          at: insertedAt,
-        })
-        : insertNzbRow(raw, {
-          rssItemId: submission.rssItemId,
-          downloadClientId,
-          at: insertedAt,
-        });
+      const rowId = insertRow(plan.tableKind, raw, {
+        rssItemId: submission.rssItemId,
+        downloadClientId,
+        infohash: plan.tableKind === 'torrent' ? infohashFromMagnet(item.link) : null,
+        at: insertedAt,
+      });
 
       const logDetail = {
         rssItemId: submission.rssItemId,
@@ -269,10 +322,20 @@ export function createDownloadClients(deps: {
         }
         return result.ref;
       } catch (err) {
-        // A second submission of an item whose first attempt already
-        // recorded a ref hits the partial unique index on
+        // A submission whose reference this client already holds against
+        // some *other* row hits the partial unique index on
         // (download_client_id, client_ref) -- `plan.markSubmitted`'s own
-        // `UPDATE`, above. Left as SQLite's raw message, `last_error` would
+        // `UPDATE`, above.
+        //
+        // **Not the same item twice**, which is what this used to say and
+        // which cannot reach here any more: `insertRow` refuses a second
+        // live download for one release two statements earlier. What
+        // remains is two *different* releases resolving to one reference
+        // on one client -- two `rss_item` rows carrying the same magnet,
+        // which a feed republishing an item under a new guid produces, and
+        // which `downloads.test.ts` builds.
+        //
+        // Left as SQLite's raw message, `last_error` would
         // read `UNIQUE constraint failed: torrent_download.download_
         // client_id, torrent_download.client_ref`, naming neither the item
         // nor the client. Replaced with a new error rather than just a

@@ -68,13 +68,34 @@ function readCandidateClientIds(raw: DatabaseSync, downloadType: string): number
 export type ChooseIndex = (count: number) => number;
 
 /**
- * The chooser production passes. `random` is a parameter, defaulted to
- * `Math.random`, purely so the mapping from a draw to an index can be
- * pinned exactly; nothing outside a test ever supplies it.
+ * Builds a chooser over `random`, so the mapping from a draw to an index
+ * can be pinned exactly. Exported for `select.test.ts`, which is the only
+ * caller that supplies anything but `Math.random`.
+ *
+ * **A factory rather than a second parameter on {@link randomIndex}, and
+ * the arity is the reason.** That function was
+ * `randomIndex(count, random = Math.random)` and was handed to
+ * `createDownloadClients` as a {@link ChooseIndex}, which declares one
+ * parameter -- so the second was invisible through the type and the
+ * compiler could not object to a caller that filled it. `chooseIndex`
+ * reaches one call site today and it passes one argument; a future
+ * `candidates.map(chooseIndex)` would have passed an index in as `random`
+ * and drawn `Math.floor(index * count)`, which is a real answer for
+ * index 0 and out of range for every other. Written this way the extra
+ * parameter is not on the chooser at all, so that cannot be expressed.
  */
-export function randomIndex(count: number, random: () => number = Math.random): number {
-  return Math.floor(random() * count);
+export function randomIndexWith(random: () => number): ChooseIndex {
+  return (count) => Math.floor(random() * count);
 }
+
+/**
+ * The chooser production passes: {@link randomIndexWith} over
+ * `Math.random`.
+ *
+ * Typed as `ChooseIndex` rather than inferred, so its arity is the
+ * interface's arity by construction.
+ */
+export const randomIndex: ChooseIndex = randomIndexWith(Math.random);
 
 /**
  * The client a feed's picks go to. Throws when there is no client it could

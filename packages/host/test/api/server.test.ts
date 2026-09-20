@@ -1106,8 +1106,12 @@ test('the downloads cursor pages forward across both tables when a client sends 
   assert.equal(PAGE_SIZE, 200, 'the counts below are written for a page size of 200');
   const { raw, db } = setup();
   const feedId = seedFeed(raw, 'https://feeds.test/downloads.xml');
-  const rssItemId = seedRssItem(raw, feedId, 100, 'Paged.Movie.1080p.mkv');
   const clientId = seedClient(raw, 'paging');
+  // One release per download row: migration 18's partial unique index on
+  // `rss_item_id` allows a release at most one download that has not
+  // failed. Which release each row names is nothing this cursor reads.
+  const itemFor = (label: string): number =>
+    seedRssItem(raw, feedId, 100, `Paged.Movie.${label}.1080p.mkv`);
 
   // Interleaved by `updated_at`, one transport either side of every step, so
   // the page boundary falls between two rows from *different* tables -- which
@@ -1115,11 +1119,11 @@ test('the downloads cursor pages forward across both tables when a client sends 
   // `updated_at` is distinct, so the expected order is fixed by time alone.
   const expected: string[] = [];
   for (let index = 1; index <= 100; index += 1) {
-    expected.push(`torrent#${seedTorrentDownload(raw, rssItemId, clientId, 1000 + 2 * index, `ref-t${index}`)}`);
-    expected.push(`nzb#${seedNzbDownload(raw, rssItemId, clientId, 1001 + 2 * index, `ref-n${index}`)}`);
+    expected.push(`torrent#${seedTorrentDownload(raw, itemFor(`t${index}`), clientId, 1000 + 2 * index, `ref-t${index}`)}`);
+    expected.push(`nzb#${seedNzbDownload(raw, itemFor(`n${index}`), clientId, 1001 + 2 * index, `ref-n${index}`)}`);
   }
   // The one row past the page boundary, newer than all 200 before it.
-  expected.push(`torrent#${seedTorrentDownload(raw, rssItemId, clientId, 1000 + 2 * 101, 'ref-t101')}`);
+  expected.push(`torrent#${seedTorrentDownload(raw, itemFor('t101'), clientId, 1000 + 2 * 101, 'ref-t101')}`);
   assert.equal(expected.length, OVER_ONE_PAGE, 'the fixture must be exactly one row past a page');
 
   const { server, cookie } = await startSignedIn(raw, db, moviesOnly);

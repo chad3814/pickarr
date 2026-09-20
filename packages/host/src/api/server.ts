@@ -878,10 +878,14 @@ function isPickBody(value: unknown): value is { rssItemId: number } {
  * The status `POST /api/picks` answers for each way `requestPick` can
  * refuse, on `statusForFeedRefusal`'s reasoning above.
  *
- * `already-submitted` is the one refusal that already has a row to point at
- * -- a download this client has on file under the reference this pick
- * resolved to -- so `409` is the one that fits, exactly as `duplicate-url`
- * and `duplicate-name` get it on the other two routes.
+ * `already-submitted` is the one refusal that already has a row to point
+ * at -- since migration 18 that is a download on the release this pick
+ * named, in any status but `failed`; before it, only a download this
+ * client held under the reference this pick resolved to. Either way there
+ * is an existing row that is the reason, so `409` is the one that fits,
+ * exactly as `duplicate-url` and `duplicate-name` get it on the other two
+ * routes. `clients/pick.ts` maps both conditions to this one code, and
+ * says why.
  *
  * The other four all answer `422`: the request parsed fine and named a
  * field that exists, but the value it carries cannot be acted on. That is
@@ -1165,13 +1169,23 @@ export const ROUTES: readonly Route[] = [
     // What is actually true is narrower, and is what 202 means: the request
     // has been accepted and its processing is not complete.
     //
-    //  - **The host cannot say a row exists, because the plugin decides.**
-    //    `MediaPlugin.onDownloadRequest` resolves `void` and the contract
-    //    requires it to submit nothing; `packages/e2e/src/harness-2.ts`'s
-    //    `stubPlugin` is a registered plugin whose handler is `async
-    //    onDownloadRequest() {}`, and a pick at one of its feeds answers
-    //    `accepted` with nothing written anywhere. A `201` from this route
-    //    would be the host asserting something only the plugin knows.
+    //  - **The host cannot say a row exists, because nothing tells it
+    //    one does.** `MediaPlugin.onDownloadRequest` returns
+    //    `Promise<void>`, and `host.ts`'s `requestDownload` awaits it and
+    //    reads nothing off it. `ctx.downloads.submit` does answer a
+    //    reference, but it answers it to the *plugin*, which the contract
+    //    does not oblige to call it at all -- so `accepted` here means
+    //    "the owning plugin's handler resolved" and cannot be strengthened
+    //    into "a row was written" by anything on this path. A `201` would
+    //    be the host asserting a fact no value it holds carries.
+    //
+    //    This bullet used to cite `packages/e2e/src/harness-2.ts`'s
+    //    `stubPlugin` as `async onDownloadRequest() {}`. `d983fde` changed
+    //    that handler to submit for real, so the example no longer exists
+    //    on this tree even though the conclusion did not depend on it: the
+    //    argument above is about the return type of the contract's own
+    //    method, which is checkable from `packages/contract` without
+    //    looking for a plugin that happens to write nothing.
     //  - **A row that does exist may not be a download yet.** `submit`
     //    answers `null` for a `.torrent` the client did not resolve, which
     //    leaves the row `submitting` with no `client_ref` for the reconcile

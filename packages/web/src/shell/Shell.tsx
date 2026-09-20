@@ -181,6 +181,20 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           real `fetch`. It reaches `ReleaseList`'s per-release Pick button
           through `Category` and `MediaItemCard`, neither of which calls it
           (picks design §2).
+
+          **Where these three lines are driven**, since no unit test in
+          `Shell.test.tsx` reaches them and the repo's hazard list warns
+          that pinning a pure function does not pin that anyone calls it:
+          `packages/e2e/tests/shell.spec.ts`'s "an operator can pick a
+          release and watch its status take the button's place" clicks the
+          real button in Chromium against a real host and watches
+          `Status: submitted` arrive through sync, which is a stronger pin than a jsdom render
+          could be -- it fails if any hop between this line and
+          `POST /api/picks` is wrong, including ones a stubbed `fetch`
+          would not exercise. Deliberately not duplicated here: a jsdom
+          copy would need a seeded replica and a stubbed global `fetch`,
+          and would be a second, weaker statement of the same fact to keep
+          in step.
         */}
         <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" submit={postPick} />} />
         <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" submit={postPick} />} />

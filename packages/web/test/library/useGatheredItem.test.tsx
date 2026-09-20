@@ -160,7 +160,15 @@ test('a disabled hook never gathers, and reads as undefined', () => {
   assert.equal(gathers, 0, 'a collapsed card costs nothing');
 });
 
-test('enabling gathers once, and disabling then re-enabling reuses the cached result', async () => {
+test('enabling gathers once, and re-enabling shows the cached result and gathers again behind it', async () => {
+  // **This test used to end `assert.equal(gathers, 1, 'reopening reused
+  // the cache instead of gathering again')`**, which pinned the stale
+  // read as desirable. Both subscriptions are torn down while collapsed,
+  // so a download row replicating in during that window is not noticed,
+  // and answering from the cache alone meant a re-expanded card rendered
+  // a live `Pick` button for a release that already had a download. The
+  // cache is kept and the pin is inverted: the cached title must still
+  // appear (that is what the cache is for), and a gather must follow it.
   let gathers = 0;
   const source: GatheredSource = {
     ...quietInserts,
@@ -181,12 +189,58 @@ test('enabling gathers once, and disabling then re-enabling reuses the cached re
 
   rerender(<Harness source={source} mediaItemId={7} enabled={false} />);
   assert.equal(resultText(), 'none', 'collapsing hides the cached result rather than clearing it');
+  assert.equal(gathers, 1, 'and collapsing itself gathers nothing');
 
   rerender(<Harness source={source} mediaItemId={7} enabled />);
+  // No `waitFor` around this one: the cached title is rendered by the
+  // effect that runs on re-enable, before any promise resolves, which is
+  // the whole difference between a placeholder and an empty flash. A
+  // `waitFor` here would also pass against a hook that only showed it
+  // once the fresh gather landed.
+  assert.equal(resultText(), 'Title', 'the cached result is shown at once');
+  await waitFor(() => {
+    assert.equal(gathers, 2, 'and a fresh gather runs behind it');
+  });
+});
+
+test('a download that lands while a card is collapsed is visible when it reopens', async () => {
+  // The case the pin above hid, written the way a browser meets it: a
+  // release with no download is gathered and rendered, the card is
+  // collapsed, the pick's row replicates in while nothing is listening,
+  // and the card reopens. Before the re-gather this rendered the release
+  // with no downloads indefinitely -- a live `Pick` button on a release
+  // the host would refuse, and on a multi-client install a second real
+  // download.
+  //
+  // `downloadsText` and not `resultText`: the title is identical either
+  // way, so an assertion on it could not tell a stale gather from a fresh
+  // one. The download list is the thing that changed.
+  let gathers = 0;
+  const source: GatheredSource = {
+    ...quietInserts,
+    gatherMediaItem: async (id: number) => {
+      gathers += 1;
+      return gathers === 1
+        ? stubItem(id, 'Title', [release(3, [])])
+        : stubItem(id, 'Title', [release(3, [{ table: 'torrent_download', id: 11, row: torrentRow(11, 3) }])]);
+    },
+    subscribe: () => () => {},
+  };
+  const { rerender } = render(<Harness source={source} mediaItemId={7} enabled />);
   await waitFor(() => {
     assert.equal(resultText(), 'Title');
   });
-  assert.equal(gathers, 1, 'reopening reused the cache instead of gathering again');
+  assert.equal(downloadsText(), '', 'nothing is picked yet');
+
+  // Collapsed: no subscription is listening, so the row that lands here
+  // wakes nothing. Nothing is simulated -- the hook simply is not told.
+  rerender(<Harness source={source} mediaItemId={7} enabled={false} />);
+
+  rerender(<Harness source={source} mediaItemId={7} enabled />);
+
+  await waitFor(() => {
+    assert.equal(downloadsText(), 'torrent_download:11');
+  });
 });
 
 test("a notification on the item's own row, while enabled, replaces the cached result with a fresh gather", async () => {
@@ -259,7 +313,13 @@ test('a gather still in flight when the card collapses does not surface, but its
   await waitFor(() => {
     assert.equal(resultText(), 'Title');
   });
-  assert.equal(gathers, 1, 'the late result was cached, so reopening did not gather again');
+  // The cached late result is what puts the title on screen -- the second
+  // gather this reopen also starts is still unresolved, since nothing has
+  // called `resolveGather` for it, so the title can only have come from
+  // the cache. That is the property this test is named for, and it is now
+  // pinned by the second gather *not* having answered rather than by it
+  // not having happened.
+  assert.equal(gathers, 2, 'reopening re-gathers, and the cache is what renders until it lands');
 });
 
 /**

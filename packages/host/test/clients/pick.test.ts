@@ -7,11 +7,20 @@
  * expects. A double-only suite would pin the mapping and nothing else: it
  * would stay green if `selectClientForFeed` stopped throwing
  * `NoClientOfTypeError`, if `requestDownload` stopped distinguishing a
- * missing row from an unregistered plugin, or if the unique index on
- * `(download_client_id, client_ref)` were dropped -- which is to say it
- * would pin the half of the behaviour that cannot break on its own. The
- * five conditions are therefore *constructed* here, in the database, and the
- * refusal is read off the far end.
+ * missing row from an unregistered plugin, or if either partial unique
+ * index on the download tables were dropped -- which is to say it would pin
+ * the half of the behaviour that cannot break on its own. Every condition
+ * is therefore *constructed* here, in the database, and the refusal is read
+ * off the far end.
+ *
+ * **Three of them construct `already-submitted`'s boundary rather than just
+ * its code**, because the whole-branch review found that the one test which
+ * existed could not see the defect it was aimed at: it seeded a feed that
+ * *named* its client, so no draw happened, and the case where a draw sends
+ * the second pick somewhere else -- the case where duplicate detection
+ * actually failed -- was the one it could not build. The three are the
+ * named-client case, the drawn case, and the `failed` case that must still
+ * be allowed through.
  *
  * The two tests that do use a double are the two that cannot be constructed:
  * "a rejection that is not a refusal is rethrown" needs an error no
@@ -30,6 +39,7 @@ import type { Host } from '../../src/host.ts';
 import { requestPick } from '../../src/clients/pick.ts';
 import { UnknownRssItemError } from '../../src/errors.ts';
 import { createDownloadClients } from '../../src/clients/downloads.ts';
+import type { ChooseIndex } from '../../src/clients/select.ts';
 import { createSecrets } from '../../src/secrets/instance.ts';
 import { writeSecretValue } from '../../src/secrets/store.ts';
 import type { QueuedFetch } from '../../src/fetch/queue.ts';
@@ -37,9 +47,13 @@ import type { QueuedFetch } from '../../src/fetch/queue.ts';
 /**
  * The magnet every torrent seeded below links to, and the infohash
  * `infohashFromMagnet` reads out of it -- which is also the `client_ref`
- * qBittorrent's adapter reports back, and therefore the value the partial
- * unique index on `(download_client_id, client_ref)` collides on when the
- * same release is picked twice. Mirrors `downloads.test.ts`'s pair.
+ * qBittorrent's adapter reports back, and therefore what a `submitted` row
+ * in this file carries. Mirrors `downloads.test.ts`'s pair.
+ *
+ * It is no longer what a second pick at the same release collides on: since
+ * migration 18 that is refused at the insert, by the index on
+ * `rss_item_id`, before a reference is asked for. `MAGNET_HASH` is still
+ * asserted here, as the evidence that a pick really reached the client.
  */
 const MAGNET = 'magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567&dn=Some.Show';
 const MAGNET_HASH = '0123456789abcdef0123456789abcdef01234567';
@@ -112,20 +126,32 @@ function pickingPlugin(id: string): MediaPlugin {
   };
 }
 
-/** A host wired to the real download subsystem over `raw`, with `alpha` registered. */
-function setup(): { raw: DatabaseSync; host: Host } {
+/**
+ * A host wired to the real download subsystem over `raw`, with `alpha`
+ * registered.
+ *
+ * Both dependencies a test may need to vary are parameters with the
+ * defaults every test but two takes: {@link OK_FETCH}, whose adapter always
+ * succeeds, and {@link refuseToChoose}, which fails rather than silently
+ * settling a draw. The two that override them are the ones that need a
+ * feed with several candidate clients (the draw), and the one that needs a
+ * first submission to fail (the fetch).
+ */
+function setup(options: { fetch?: QueuedFetch; chooseIndex?: ChooseIndex } = {}): { raw: DatabaseSync; host: Host } {
+  const fetch = options.fetch ?? OK_FETCH;
+  const chooseIndex = options.chooseIndex ?? refuseToChoose;
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const host = createHost({
     raw,
     db,
-    fetch: OK_FETCH,
+    fetch,
     downloads: (secrets) => createDownloadClients({
       raw,
-      fetch: OK_FETCH,
+      fetch,
       secrets,
       now: () => NOW,
-      chooseIndex: refuseToChoose,
+      chooseIndex,
       log: () => {},
     }),
     secrets: createSecrets({ raw, baseDir: NO_SECRETS_DIR }),
@@ -306,12 +332,19 @@ test('a feed naming a client of the wrong type is refused as client-type-mismatc
 });
 
 test('picking the same release twice is refused as already-submitted by the real unique index, not thrown', async () => {
-  // The refusal that is *caught*, never pre-checked. The first pick writes
-  // `client_ref = MAGNET_HASH` against the client; the second reaches the
-  // same client, is told the same reference, and its `UPDATE` collides with
-  // the partial unique index on (download_client_id, client_ref). No code
-  // asked "has this been submitted?", which is what makes two concurrent
-  // picks unable to both pass a check and then race the same constraint.
+  // The refusal that is *caught*, never pre-checked. The first pick leaves
+  // a live `torrent_download` row on this release; the second's INSERT
+  // collides with migration 18's partial unique index on `rss_item_id`
+  // before any client is called. No code asked "has this been submitted?",
+  // which is what makes two concurrent picks unable to both pass a check
+  // and then race the same constraint -- the insert is synchronous and
+  // happens before `submit` awaits anything.
+  //
+  // **This test used to describe the `(download_client_id, client_ref)`
+  // index**, which collided on the `UPDATE` that writes the reference back.
+  // That index still exists and still catches its own case; it is no longer
+  // the one this reaches, because the release index refuses two statements
+  // earlier. `downloads.test.ts` has the case that still reaches the other.
   const { raw, host } = setup();
   const clientId = seedClient(raw, { name: 'QBT' });
   const feedId = seedFeed(raw, { downloadClientId: clientId });
@@ -324,11 +357,111 @@ test('picking the same release twice is refused as already-submitted by the real
   assert.deepEqual(second, { refusal: 'already-submitted' });
 
   // The index really is what refused: had it been dropped, the second pick
-  // would have written a second `submitted` row and answered `accepted`.
+  // would have written a second row and answered `accepted`. And the row it
+  // does *not* write is the whole of the review's I3 -- the refused attempt
+  // used to leave a `failed` row that `ReleaseList` rendered forever beside
+  // the `submitted` one, with no surface to clear it.
   const rows = raw.prepare(
     'SELECT status FROM torrent_download WHERE rss_item_id = ? ORDER BY id',
   ).all(itemId).map((row) => String((row as { status: unknown }).status));
-  assert.deepEqual(rows, ['submitted', 'failed'], 'the original row survives and the colliding attempt is marked failed');
+  assert.deepEqual(rows, ['submitted'], 'the original row survives and the refused attempt writes nothing');
+});
+
+test('a second pick is refused even when the draw lands on a different client', async () => {
+  // **The case the test above cannot see, and the one the whole-branch
+  // review measured as accepted twice.** That test seeds a feed that
+  // *names* its client, so no draw happens and the second pick necessarily
+  // reaches the same client and collides on `(download_client_id,
+  // client_ref)`. Here the feed names none and two clients match its type,
+  // so `selectClientForFeed` draws -- and a draw that answers 1 the second
+  // time sends the second pick to a client that has never seen this
+  // reference. Before the `rss_item_id` index, that second pick answered
+  // `{ accepted: true }` and left two clients downloading the same file.
+  //
+  // `0` then `1` are both legal answers of a real draw over two
+  // candidates, which is what makes this a behaviour and not a contrived
+  // chooser: nothing here asks the chooser for anything `randomIndex`
+  // could not have answered.
+  const draws = [0, 1];
+  let draw = 0;
+  const chooseIndex: ChooseIndex = (count) => {
+    const answer = draws[draw];
+    draw += 1;
+    if (answer === undefined || answer >= count) {
+      throw new Error(`the chooser was consulted ${String(draw)} times over ${String(count)} candidates`);
+    }
+    return answer;
+  };
+  const { raw, host } = setup({ chooseIndex });
+  const first = seedClient(raw, { name: 'QBT-A' });
+  const second = seedClient(raw, { name: 'QBT-B' });
+  const feedId = seedFeed(raw, { downloadClientId: null });
+  const itemId = seedRssItem(raw, feedId);
+
+  assert.deepEqual(await pickWithoutThrowing(host, itemId), { accepted: true }, 'the first pick must succeed');
+
+  const result = await pickWithoutThrowing(host, itemId);
+
+  assert.deepEqual(result, { refusal: 'already-submitted' });
+  assert.equal(draw, 2, 'both picks drew, so the second really did resolve a client of its own');
+  // Read across both clients rather than filtered to either: the defect
+  // was one row per client, and a query naming one client would show
+  // exactly one row whether or not the second was written.
+  const rows = raw.prepare(
+    'SELECT download_client_id, status FROM torrent_download WHERE rss_item_id = ? ORDER BY id',
+  ).all(itemId).map((row) => ({
+    client: Number((row as { download_client_id: unknown }).download_client_id),
+    status: String((row as { status: unknown }).status),
+  }));
+  assert.deepEqual(
+    rows,
+    [{ client: first, status: 'submitted' }],
+    'one live download for the release, and no row at all for the client the second draw reached',
+  );
+  assert.notEqual(first, second, 'the two clients are distinct, so the draw had somewhere else to land');
+});
+
+test('a release whose only download failed can be picked again', async () => {
+  // The other half of the definition: `failed` is the one status that does
+  // *not* block, so a pick that produced no download is not permanent.
+  // Constructed rather than asserted -- the first submission fails at the
+  // client, which is the only way this schema produces a `failed` row.
+  let calls = 0;
+  const failThenSucceed: QueuedFetch = {
+    ...OK_FETCH,
+    text: async () => {
+      calls += 1;
+      // qBittorrent answers a refused add with HTTP 200 and this body, which
+      // `clients/qbittorrent.ts` turns into a throw -- so the row is marked
+      // `failed` by the real path rather than by a hand-written UPDATE.
+      return calls === 1 ? 'Fails.' : 'Ok.';
+    },
+  };
+  const { raw, host } = setup({ fetch: failThenSucceed });
+  const clientId = seedClient(raw, { name: 'QBT' });
+  const feedId = seedFeed(raw, { downloadClientId: clientId });
+  const itemId = seedRssItem(raw, feedId);
+
+  // Not a refusal: a client that refused the add is an infrastructure
+  // fault and reaches the route as a 500, which is `pick.ts`'s rule for
+  // everything that is not one of the five.
+  await assert.rejects(host.requestPick(itemId));
+  assert.deepEqual(
+    raw.prepare('SELECT status FROM torrent_download WHERE rss_item_id = ?')
+      .all(itemId).map((row) => String((row as { status: unknown }).status)),
+    ['failed'],
+    'the first attempt left a failed row and nothing else',
+  );
+
+  const result = await pickWithoutThrowing(host, itemId);
+
+  assert.deepEqual(result, { accepted: true }, 'a failed download does not block a re-pick');
+  assert.deepEqual(
+    raw.prepare('SELECT status FROM torrent_download WHERE rss_item_id = ? ORDER BY id')
+      .all(itemId).map((row) => String((row as { status: unknown }).status)),
+    ['failed', 'submitted'],
+    'the failed attempt is kept as history beside the download that worked',
+  );
 });
 
 test('a refusal carries the code and nothing else', async () => {

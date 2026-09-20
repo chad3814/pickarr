@@ -16,12 +16,24 @@
  * "does this rss item exist" query here, no client lookup and no "has this
  * already been submitted" SELECT. Every condition below is discovered by the
  * code that owns it -- `host.ts` reading the item's owner,
- * `clients/select.ts` resolving the feed's client, SQLite's own partial
- * unique index on `(download_client_id, client_ref)` -- and arrives here as
- * a class from `../errors.ts`. A pre-check would be a second copy of each
+ * `clients/select.ts` resolving the feed's client, and SQLite's own two
+ * partial unique indexes on the download tables -- and arrives here as a
+ * class from `../errors.ts`. A pre-check would be a second copy of each
  * rule, and for `already-submitted` it would also be wrong: two concurrent
- * picks can both pass a check and then collide, where two picks that both
- * reach the index cannot both win.
+ * picks can both pass a check and then collide, where a second insert
+ * against a live row cannot pass the constraint at all.
+ *
+ * **That last clause used to read "two picks that both reach the index
+ * cannot both win", and it was false when it was written.** The index it
+ * meant was the one on `(download_client_id, client_ref)`, and
+ * `clients/select.ts` had already begun drawing at random among a feed's
+ * candidate clients three commits earlier -- so two picks at one release
+ * reached *different* clients and both won, measured as two `submitted`
+ * rows and two `accepted` answers on a two-client install. The sentence
+ * described a real mechanism and rested on a premise about another module
+ * that this one neither states nor checks. What makes the claim true now
+ * is migration 18's index on `rss_item_id`, which is keyed on the release
+ * rather than on whatever client a draw happened to return.
  *
  * **The mapping is exhaustive over `REQUEST_PICK_REFUSALS` and closed
  * against everything else.** An error this module does not recognise is
@@ -36,6 +48,7 @@ import {
   ClientTypeMismatchError,
   NoClientOfTypeError,
   PluginNotRegisteredError,
+  ReleaseAlreadyPickedError,
   UnknownRssItemError,
 } from '../errors.ts';
 
@@ -81,12 +94,24 @@ export interface PickAccepted {
  * Ordered as design spec §6 lists the codes, which is also the order a pick
  * meets them; nothing depends on that, since no error is an instance of two
  * of these classes.
+ *
+ * **Six classes, five codes**, and the pair that share one is deliberate.
+ * `ReleaseAlreadyPickedError` is "this release already has a live
+ * download" and `AlreadySubmittedError` is "this client already holds this
+ * reference"; they are separate conditions caught at separate statements
+ * (`clients/downloads.ts`'s insert and its `markSubmitted` respectively),
+ * and separate classes for the reason this module's whole mapping exists.
+ * They answer the same code because a caller can do the same thing about
+ * either -- nothing -- and a sixth code would be a distinction
+ * `web/src/library/postPick.ts` would have to write a second sentence for
+ * that said the same thing.
  */
 function refusalFor(err: unknown): RequestPickRefusalCode | undefined {
   if (err instanceof UnknownRssItemError) return 'unknown-release';
   if (err instanceof PluginNotRegisteredError) return 'plugin-not-registered';
   if (err instanceof NoClientOfTypeError) return 'no-client-of-type';
   if (err instanceof ClientTypeMismatchError) return 'client-type-mismatch';
+  if (err instanceof ReleaseAlreadyPickedError) return 'already-submitted';
   if (err instanceof AlreadySubmittedError) return 'already-submitted';
   return undefined;
 }

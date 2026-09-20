@@ -178,16 +178,26 @@ test('a submitted torrent gets a row with its infohash and the returned ref', as
   assert.deepEqual({ ...row }, { infohash: MAGNET_HASH, client_ref: MAGNET_HASH, status: 'submitted' });
 });
 
-test('a resubmit that collides with an already-recorded ref gets a message naming the item and client', async () => {
+test('a second release resolving to a ref the client already holds gets a message naming the item and client', async () => {
   // The second submission's row hits the partial unique index on
   // (download_client_id, client_ref) once the same magnet's ref is written
   // against a client that already holds it. Left unhandled, `last_error`
   // would read SQLite's raw `UNIQUE constraint failed: ...` message,
   // naming neither the item nor the client.
+  //
+  // **Two rss_items carrying the same magnet, and this test used to use
+  // one.** Since migration 18 the same release picked twice never reaches
+  // the client at all -- the release-level index refuses the insert, which
+  // is `pick.test.ts`'s territory now. What still reaches this index is
+  // two *different* releases that resolve to one reference, which a feed
+  // republishing an item under a new guid produces. That shape is the only
+  // remaining route to `AlreadySubmittedError`, and it is the shape the
+  // class's docblock now claims, so it is the shape this test builds.
   const raw = setup();
   const clientId = seedClient(raw, { name: 'QBTResubmit', apiKey: 'key-1b', category: 'movies' });
   const feedId = seedFeed(raw, { downloadType: 'torrent', downloadClientId: clientId });
   const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
+  const twinId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
 
   const fetch = fakeFetch({ text: async () => 'Ok.' });
   const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5500, chooseIndex: refuseToChoose, log: noLog });
@@ -196,25 +206,58 @@ test('a resubmit that collides with an already-recorded ref gets a message namin
   assert.equal(firstRef, MAGNET_HASH);
 
   await assert.rejects(
-    clients.submit({ rssItemId: itemId }),
+    clients.submit({ rssItemId: twinId }),
     (err: unknown) => err instanceof Error
-      && err.message.includes(`rss item ${itemId}`)
+      && err.message.includes(`rss item ${twinId}`)
       && err.message.includes(`download client ${clientId}`)
       && !err.message.includes('UNIQUE constraint failed'),
   );
 
   const rows = raw.prepare(
-    'SELECT status, last_error FROM torrent_download WHERE rss_item_id = ? ORDER BY id',
-  ).all(itemId) as Array<{ status: unknown; last_error: unknown }>;
-  assert.equal(rows.length, 2, 'the resubmit must have inserted its own row');
+    'SELECT rss_item_id, status, last_error FROM torrent_download ORDER BY id',
+  ).all() as Array<{ rss_item_id: unknown; status: unknown; last_error: unknown }>;
+  assert.equal(rows.length, 2, 'the second release must have inserted its own row');
+  assert.equal(rows[1]?.rss_item_id, twinId);
   assert.equal(rows[1]?.status, 'failed');
-  assert.ok(typeof rows[1]?.last_error === 'string' && (rows[1].last_error as string).includes(`rss item ${itemId}`));
+  assert.ok(typeof rows[1]?.last_error === 'string' && (rows[1].last_error as string).includes(`rss item ${twinId}`));
   // The first row must be untouched. A collision is the *second* attempt's
   // failure, and the download the first attempt really did register is still
   // registered -- so a resubmit that rewrote or cleared row one would lose
   // the only record of the reference the client actually holds.
+  assert.equal(rows[0]?.rss_item_id, itemId);
   assert.equal(rows[0]?.status, 'submitted', 'the original row must survive a colliding resubmit');
   assert.equal(rows[0]?.last_error, null, 'the original row must not inherit the resubmit\'s error');
+});
+
+test('a release that already has a live download is refused before the client is called', async () => {
+  // The release-level index, at the layer that catches it -- `pick.test.ts`
+  // drives the same condition through a host and reads the refusal code off
+  // the far end. Both belong: this one is what proves no request was made
+  // and no second row exists, which a refusal code alone does not say.
+  const raw = setup();
+  const clientId = seedClient(raw, { name: 'QBTLive', apiKey: 'key-1c', category: 'movies' });
+  const feedId = seedFeed(raw, { downloadType: 'torrent', downloadClientId: clientId });
+  const itemId = seedRssItem(raw, feedId, { link: MAGNET, filename: 'Some Show' });
+
+  let calls = 0;
+  const fetch = fakeFetch({ text: async () => { calls += 1; return 'Ok.'; } });
+  const clients = createDownloadClients({ raw, fetch, secrets: makeSecrets(raw), now: () => 5500, chooseIndex: refuseToChoose, log: noLog });
+
+  await clients.submit({ rssItemId: itemId });
+  assert.equal(calls, 1, 'the first submission reached the client');
+
+  await assert.rejects(
+    clients.submit({ rssItemId: itemId }),
+    (err: unknown) => err instanceof Error
+      && err.name === 'ReleaseAlreadyPickedError'
+      && err.message.includes(`rss item ${itemId}`)
+      && !err.message.includes('UNIQUE constraint failed'),
+  );
+
+  assert.equal(calls, 1, 'and the second never did -- the insert refused it first');
+  const rows = raw.prepare('SELECT status FROM torrent_download WHERE rss_item_id = ?')
+    .all(itemId).map((row) => String((row as { status: unknown }).status));
+  assert.deepEqual(rows, ['submitted'], 'no second row was written, not even a failed one');
 });
 
 test('the row exists before the client is called', async () => {

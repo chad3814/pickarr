@@ -671,7 +671,11 @@ test('an operator can add a download client and see it listed', async ({ page, h
  * the status replaced it **2934ms** after -- a ~2.9 second window in which
  * the server already held a `submitted` row for that release and the
  * browser still offered a button that would submit another, answering
- * `already-submitted` and leaving a `failed` row behind.
+ * `already-submitted` -- and, on the tree that measurement was taken on,
+ * leaving a `failed` row behind. The row half is no longer true: the
+ * host's release-level unique index refuses the second pick before it
+ * writes anything. The window is what this spec is about, and it was
+ * real.
  *
  * It is fixed, and this spec is now where it is *pinned* rather than only
  * where it was visible. `ReleaseRow` clears `pending` for every outcome

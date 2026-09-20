@@ -1,6 +1,30 @@
 /**
- * A media item's gathered detail, fetched lazily and cached for the life of
- * the component that asked for it.
+ * A media item's gathered detail, fetched lazily, and cached only as what
+ * to render while the next gather runs.
+ *
+ * **The cache is a placeholder, not an answer, and it used to be both.**
+ * While `enabled` is `false` this hook tears down both subscriptions, so a
+ * download row that replicates in while a card is collapsed is not
+ * noticed. Serving the cached gather on re-expand and stopping there meant
+ * the card then rendered a live `Pick` button for a release that already
+ * had a download -- indefinitely, until something touched the `media_item`
+ * row or the component unmounted. The whole-branch review measured it: 0
+ * listeners while collapsed, 1 gather after re-expanding. A test pinned
+ * that as desirable ("reopening reused the cache instead of gathering
+ * again") and no review had questioned the pin, which is why nothing
+ * reddened.
+ *
+ * **The pin was wrong and the cache was right**, so only the pin changed
+ * shape. Dropping the cache entry on disable would also have closed the
+ * staleness, at the cost of a card that flashes empty every time it
+ * reopens; re-gathering *behind* the cached value costs the same one
+ * gather and shows the last known detail while it runs. A collapsed card
+ * still costs nothing -- no gather, no subscription -- which is the
+ * property the cache was added for. What it no longer does is answer for a
+ * window it was not watching.
+ *
+ * The 3+N race below is unchanged and is a different thing: that one
+ * resolves on the next wake, this one had no wake to resolve on.
  *
  * **`gatherMediaItem` is 3+N transactions, and cannot be made atomic** --
  * `store/rows.ts` does not accept a caller's transaction, and that is a
@@ -11,17 +35,19 @@
  * (`byRssItem`) that a concurrent write can land between. This hook does not
  * hide that; the wrong answer is temporary and corrects itself on the next
  * wake. **The justification here used to be "it is a read-only screen, so
- * the wrong answer is not actionable", and this slice is what ends that
- * premise.** It has not ended yet: as of this commit nothing on these
- * screens writes, so the old sentence is still true of the tree you are
- * reading. It stops being true one task later, when `ReleaseList` grows a
- * per-release Pick button (picks design §2) -- from then on, a release
- * whose download row has not been read yet renders exactly like one nobody
- * has picked, and is therefore pickable. What happens to a second
- * submission is the host's answer to give, not this hook's to claim; the
- * refusal named for it in picks design §6 is `already-submitted`, and it
- * does not exist in this tree either. Recorded here rather than left for
- * that task to notice, because this is the paragraph the premise lives in.
+ * the wrong answer is not actionable", and this slice is what ended that
+ * premise.** It has ended: `ReleaseList` has its per-release Pick button
+ * (picks design §2), so a release whose download row has not been read yet
+ * renders exactly like one nobody has picked, and is therefore pickable.
+ * The two sentences that followed -- "it has not ended yet", and that the
+ * refusal "does not exist in this tree either" -- were written a task
+ * before both did, and stayed here after the button and `POST /api/picks`
+ * landed. What happens to a second submission is still the host's answer
+ * to give and not this hook's to claim: the refusal is
+ * `already-submitted`, and the host now refuses it from a unique index on
+ * the release rather than on the client a draw returned, so the window
+ * this paragraph describes costs a refused click and never a duplicate
+ * download.
  *
  * **What "self-correcting" means here.** This hook subscribes to the
  * gathered media item's own row (`table: 'media_item'`) for as long as it is
@@ -154,11 +180,12 @@ function releaseOf(value: unknown): number | undefined {
 /**
  * Gathers media item `mediaItemId` through `source` only while `enabled` is
  * `true`, and caches the result for as long as this hook is mounted: a
- * second `enabled` transition back to `true` for the same id reuses the
- * cached value rather than gathering again. A collapsed card (`enabled ===
- * false`) costs nothing -- no gather, no subscription -- and `undefined` is
- * what it reads while collapsed, while still loading, or when the replica
- * holds no such item.
+ * second `enabled` transition back to `true` for the same id renders the
+ * cached value immediately *and* gathers again behind it, so nothing that
+ * landed while the card was collapsed stays unseen. A collapsed card
+ * (`enabled === false`) costs nothing -- no gather, no subscription -- and
+ * `undefined` is what it reads while collapsed, while still loading, or
+ * when the replica holds no such item.
  */
 export function useGatheredItem(
   source: GatheredSource,
@@ -189,11 +216,13 @@ export function useGatheredItem(
         });
     }
 
+    // The cached value is shown at once *and* a fresh gather is started.
+    // See this file's docblock: the cache is what this renders while the
+    // gather runs, not the answer it settles for.
     if (cache.current.has(mediaItemId)) {
       setItem(cache.current.get(mediaItemId));
-    } else {
-      safeGather();
     }
+    safeGather();
 
     /**
      * Re-gathers if any of `ids` is a download under one of this item's
