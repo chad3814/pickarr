@@ -50,6 +50,19 @@ function seedClient(raw: DatabaseSync, overrides: { name?: string; type?: string
  * the foreign keys both download tables require. Mirrors `migrate.test.ts`'s
  * own `seedDownloadTarget`, which is private to that file.
  */
+/**
+ * One feed and one rss item under it, both named `name`, and the item's id.
+ *
+ * **Several tests below call this once per download row rather than once
+ * per test**, which used to be one call and several rows keyed on the same
+ * item. Migration 18's partial unique index on `rss_item_id` forbids that
+ * shape -- a release may have at most one download in any status but
+ * `failed` -- and forbids it for a reason these tests are indifferent to:
+ * nothing here is about which release a row belongs to, only about the
+ * client, the status and the id order. Distinct items are also what the
+ * write path actually produces, so the fixtures are closer to real rows
+ * than they were.
+ */
 function seedRssItem(raw: DatabaseSync, name: string): number {
   raw.prepare(`
     INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at)
@@ -241,6 +254,7 @@ test('markDelivered applies only from the status the row was read with, and repo
   const raw = setup();
   const itemId = seedRssItem(raw, 'a');
   const clientId = seedClient(raw);
+  const freshItemId = seedRssItem(raw, 'b');
   const staleId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const staleRow: DownloadRow = {
     id: staleId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
@@ -253,9 +267,9 @@ test('markDelivered applies only from the status the row was read with, and repo
   assert.equal(readColumn(raw, 'torrent_download', staleId, 'status'), 'downloading');
   assert.equal(readColumn(raw, 'torrent_download', staleId, 'delivered_at'), null);
 
-  const freshId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
+  const freshId = insertTorrentRow(raw, { rssItemId: freshItemId, downloadClientId: clientId, status: 'completed' });
   const freshRow: DownloadRow = {
-    id: freshId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
+    id: freshId, table: 'torrent_download', rssItemId: freshItemId, downloadClientId: clientId,
     clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
   };
 
@@ -370,9 +384,9 @@ test('rowsForClientByStatus reads rows from both tables, tagged with which table
   const clientId = seedClient(raw);
   const otherClientId = seedClient(raw, { name: 'Other' });
   const torrentId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
-  const nzbId = insertNzbRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
+  const nzbId = insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: clientId, status: 'submitted' });
   // A row on a different client must not show up in this client's list.
-  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: otherClientId, status: 'downloading' });
+  insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: otherClientId, status: 'downloading' });
 
   const rows = rowsForClientByStatus(raw, clientId, ['submitted', 'downloading']);
 
@@ -392,9 +406,12 @@ test('rowsForClientByStatus returns only the statuses asked for', () => {
   const itemId = seedRssItem(raw, 'a');
   const clientId = seedClient(raw);
   const liveId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
-  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+  insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: clientId, status: 'delivered' });
+  // The `failed` row is the one that may still share a release with
+  // another, since migration 18's index excludes exactly that status --
+  // left on `itemId` deliberately rather than moved with the rest.
   insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'failed' });
-  insertNzbRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: clientId, status: 'delivered' });
 
   const rows = rowsForClientByStatus(raw, clientId, ['completed']);
 
@@ -410,9 +427,9 @@ test('rowsForClientByStatus returns rows in id order, which is the order deliver
   // Inserted so that reading through the status index -- which orders by
   // status value first -- would interleave them differently from id order.
   const first = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitting' });
-  const second = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
-  const third = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitting' });
-  const fourth = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
+  const second = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: clientId, status: 'downloading' });
+  const third = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: clientId, status: 'submitting' });
+  const fourth = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'd'), downloadClientId: clientId, status: 'completed' });
 
   const rows = rowsForClientByStatus(raw, clientId, ['submitting', 'submitted', 'downloading', 'completed']);
 
@@ -460,12 +477,12 @@ test('unreclaimedRowsForClient returns only delivered rows nothing has reclaimed
   const clientId = seedClient(raw);
   const otherClientId = seedClient(raw, { name: 'Other' });
   const pendingId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
-  const pendingNzbId = insertNzbRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
-  const reclaimedId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'delivered' });
+  const pendingNzbId = insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: clientId, status: 'delivered' });
+  const reclaimedId = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: clientId, status: 'delivered' });
   raw.prepare('UPDATE torrent_download SET reclaimed_at = ? WHERE id = ?').run(700, reclaimedId);
   // Neither a row on another client nor one that never reached `delivered`.
-  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: otherClientId, status: 'delivered' });
-  insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'completed' });
+  insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'd'), downloadClientId: otherClientId, status: 'delivered' });
+  insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'e'), downloadClientId: clientId, status: 'completed' });
 
   const rows = unreclaimedRowsForClient(raw, clientId);
 

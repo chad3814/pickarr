@@ -11,7 +11,7 @@ import {
 import { MAX_BATCH } from '../src/client.ts';
 import type { ApplyArgs } from '../src/engine.ts';
 import type { LookupEnvelope, Media } from '../src/types.ts';
-import type { HostFetch } from '@pickarr/contract';
+import type { DownloadSubmission, HostFetch, PluginContext } from '@pickarr/contract';
 
 const NOW = 1_700_000_000_000;
 
@@ -240,14 +240,69 @@ test('a name the payload names but the database does not throws rather than bein
   );
 });
 
-test('the two entry points this slice does not develop still do something real', async () => {
+test('the entry point this slice does not develop still does something real', async () => {
   const { plugin, harness } = build();
   await plugin.onDownloadedFile({ path: '/downloads/a.mp4', sizeBytes: 10, downloadClientId: 1 }, harness.ctx);
   assert.match(harness.logs[0]?.message ?? '', /download/);
-  await assert.rejects(
-    () => plugin.onDownloadRequest(harness.insertRssItem('e.mp4'), harness.ctx),
-    /download client/,
+});
+
+/**
+ * `harness.ctx` with a `downloads` that records instead of throwing, and the
+ * submissions it recorded. The harness's own `downloads.submit` refuses,
+ * which is right for every lookup test and is the one thing an
+ * `onDownloadRequest` test has to replace.
+ */
+function withRecordedDownloads(ctx: PluginContext): {
+  ctx: PluginContext;
+  submitted: DownloadSubmission[];
+} {
+  const submitted: DownloadSubmission[] = [];
+  return {
+    ctx: {
+      ...ctx,
+      downloads: {
+        async submit(submission: DownloadSubmission): Promise<string> {
+          submitted.push(submission);
+          return 'client-ref-1';
+        },
+      },
+    },
+    submitted,
+  };
+}
+
+test('a download request on a feed that names no client submits anyway', async () => {
+  // The defect: this used to read `rss_feed.download_client_id` itself and
+  // throw on NULL, which is every feed created through the settings UI.
+  // The column is NULL here and the submission goes out regardless.
+  const { plugin, harness } = build();
+  const feedId = harness.insertFeed(null);
+  const rssItemId = harness.insertRssItem('e.mp4', feedId);
+  const recorded = withRecordedDownloads(harness.ctx);
+
+  await plugin.onDownloadRequest(rssItemId, recorded.ctx);
+
+  assert.deepEqual(recorded.submitted, [{ rssItemId }]);
+  assert.ok(
+    harness.logs.some((line) => line.message === 'submitted a download'),
+    'the submission must be logged',
   );
+});
+
+test('a download request works with the rss_feed table dropped, so it reads no feed', async () => {
+  // What the test above cannot show any more. `DownloadSubmission` has one
+  // field, so the submission's shape is fixed by the type and nothing about
+  // it could reveal whether the feed was read. Dropping the table does
+  // reveal it: the join this used to make would fail with "no such table:
+  // rss_feed" and the call below would reject instead of submitting.
+  const { plugin, harness } = build();
+  const rssItemId = harness.insertRssItem('f.mp4', harness.insertFeed(7));
+  harness.raw.exec('DROP TABLE rss_feed');
+  const recorded = withRecordedDownloads(harness.ctx);
+
+  await plugin.onDownloadRequest(rssItemId, recorded.ctx);
+
+  assert.deepEqual(recorded.submitted, [{ rssItemId }]);
 });
 
 test('the dispatcher\'s signal reaches the request, which is the shape production always takes', async () => {

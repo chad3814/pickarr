@@ -28,6 +28,7 @@ import { warnIfWebRootMissing } from './api/static-route.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
 import { createDownloadClients } from './clients/downloads.ts';
+import { randomIndex } from './clients/select.ts';
 import { createSecrets } from './secrets/instance.ts';
 import type { Secrets } from './secrets/instance.ts';
 import type { Config } from './config/instance.ts';
@@ -826,7 +827,7 @@ export async function main(
   // will also give the reconcile handler, so the two cannot be different
   // instances. See `createHost`'s own `downloads` doc for why that matters.
   const downloads = (hostSecrets: Secrets): DownloadClients =>
-    createDownloadClients({ raw, fetch, secrets: hostSecrets, now: () => Date.now(), log });
+    createDownloadClients({ raw, fetch, secrets: hostSecrets, now: () => Date.now(), chooseIndex: randomIndex, log });
 
   // Two shapes, not one object literal with `timers` always present:
   // `exactOptionalPropertyTypes` is on, so an explicit `timers: undefined`
@@ -885,6 +886,12 @@ export async function main(
     // call: `Host.addDownloadClient` hands it to `Secrets.saveSecret` and
     // writes only the generated name to the row.
     addDownloadClient: (input) => host.addDownloadClient(input),
+    // The one operation `POST /api/picks` needs, wired the same way again.
+    // `host.requestPick` and not `host.requestDownload`: the two do the
+    // same work and only this one answers a refusal as a value, so passing
+    // the other would turn every refusal into a 500 -- see
+    // `ReadServerDeps.requestPick`.
+    requestPick: (rssItemId) => host.requestPick(rssItemId),
     registry,
     // Resolved once, here, rather than per request: this value cannot change
     // while the process holds `raw` open, so a route reading it would be a

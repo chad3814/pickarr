@@ -569,25 +569,16 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     },
 
     async onDownloadRequest(rssItemId, ctx) {
-      const { raw } = ownTables(ctx);
-      const row = raw.prepare(
-        `SELECT rss_feed.download_client_id AS download_client_id
-           FROM rss_item JOIN rss_feed ON rss_feed.id = rss_item.feed_id
-          WHERE rss_item.id = ?`,
-      ).get(rssItemId);
-      const clientId = row === undefined ? null : (row as { download_client_id: SQLOutputValue }).download_client_id;
-      if (typeof clientId !== 'number') {
-        // The column's meaning is "the host's default client", and
-        // `DownloadSubmission.downloadClientId` is a required number with no
-        // way to say that. Picking one here would be a plugin inventing host
-        // policy, so the gap is left visible as a failed job -- see the
-        // spec's §6.
-        throw new Error(
-          `openmetadata: rss item ${rssItemId} is in a feed that names no download client, `
-          + 'and a submission cannot say "the default"',
-        );
-      }
-      const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: clientId });
+      // An rss item and nothing else. This used to join `rss_item` to
+      // `rss_feed` to read `download_client_id`, and throw when it was
+      // `NULL` -- which is every feed created through the settings UI --
+      // because `DownloadSubmission` then required a client id and that
+      // column's `NULL` ("the host's default") had no way to be said.
+      // `DownloadSubmission` carries no client id at all now, so the
+      // question is `submit`'s alone and it answers it through the host's
+      // `selectClientForFeed`, the same policy every other path used all
+      // along. Nothing here reads a host column to get there.
+      const reference = await ctx.downloads.submit({ rssItemId });
       ctx.log('submitted a download', { rssItemId, reference });
     },
   };

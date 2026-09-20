@@ -6,7 +6,7 @@ import { defineConfig, devices } from '@playwright/test';
  * runtime without touching the thing under test.
  *
  * There is no `webServer` here, and that is not a leftover from an empty
- * suite: `packages/e2e/tests/shell.spec.ts`'s five specs are live and run on
+ * suite: every spec in `packages/e2e/tests/shell.spec.ts` is live and runs on
  * every `npm run e2e`. Each one boots its own in-process host on its own
  * ephemeral port (`../src/harness-2.ts`'s `harness` fixture), so there is no
  * one static server this config could start and hand a fixed port to — a

@@ -39,13 +39,6 @@ export const LOOKUP_PATH = '/api/v1/lookup';
 export const POLL_DELAY_MS = 5_000;
 
 /**
- * Where a download goes. A real plugin would take this from the `rss_feed`
- * row the item came from, which names a client by id; the double has no
- * reason to configure more than one.
- */
-const DEFAULT_DOWNLOAD_CLIENT_ID = 1;
-
-/**
  * The double's own row: what it knows about one rss item's identification.
  *
  * Keyed per rss item rather than per media item, because the dedup points two
@@ -729,10 +722,11 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     },
 
     async onDownloadRequest(rssItemId, ctx) {
-      const reference = await ctx.downloads.submit({
-        rssItemId,
-        downloadClientId: DEFAULT_DOWNLOAD_CLIENT_ID,
-      });
+      // An rss item and nothing else, because that is all a
+      // `DownloadSubmission` has room for. A constant `downloadClientId`
+      // used to sit here standing in for a column this double had no
+      // business reading; the field went, and with it the question.
+      const reference = await ctx.downloads.submit({ rssItemId });
       ctx.log('submitted a download', { rssItemId, reference });
     },
   };

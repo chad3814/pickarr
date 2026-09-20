@@ -10,8 +10,8 @@ const run = promisify(execFile);
  *
  * The 1.x E2E suite this ran for was deleted in task 3, and for a while
  * afterward this function had nothing to build for -- but that is no longer
- * true: `packages/e2e/tests/shell.spec.ts`'s five specs are the live 2.0
- * suite, and every one of them needs the real built SPA, since
+ * true: `packages/e2e/tests/shell.spec.ts` is the live 2.0 suite, and every
+ * spec in it needs the real built SPA, since
  * `../src/harness-2.ts`'s `harness` fixture serves `webDist` (below) as the
  * host's `webRoot`. Building once here, rather than per test, is what the
  * root `playwright.config.ts`'s own refusal-to-run-from-root guarantees a

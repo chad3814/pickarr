@@ -888,21 +888,25 @@ test('a full walk of the download union serves every row exactly once', () => {
 
   const raw = setup();
   const feedId = seedFeed(raw, 'https://example.com/feed');
-  const itemId = seedRssItem(raw, feedId, 10, 'a.mkv');
   const clientId = seedClient(raw, 'Client');
+  // One release per download row. Migration 18's partial unique index on
+  // `rss_item_id` allows a release at most one download that has not
+  // failed, so the 400 rows below need 400 releases; which release each
+  // names has no bearing on a cursor that orders by `(updated_at, id)`.
+  const itemFor = (label: string): number => seedRssItem(raw, feedId, 10, `${label}.mkv`);
 
   // 200 torrent rows, `updated_at` equal to the id. And 200 nzb rows, all but
   // the first likewise -- nzb row 1 is parked far in the future, so the run
   // of shared pairs starts at an *odd* offset and page 1 therefore ends in
   // the middle of one. Without that single unpaired row every boundary would
   // land between pairs, where the two-field cursor happens to be safe.
-  const parked = seedNzbDownload(raw, itemId, clientId, 1000, 'ref-n-parked');
+  const parked = seedNzbDownload(raw, itemFor('n-parked'), clientId, 1000, 'ref-n-parked');
   assert.equal(parked, 1, 'the parked nzb row must be rowid 1, so it shares a pair with torrent 1');
   for (const id of ascending(2, 199)) {
-    seedNzbDownload(raw, itemId, clientId, id, `ref-n${id}`);
+    seedNzbDownload(raw, itemFor(`n${id}`), clientId, id, `ref-n${id}`);
   }
   for (const id of ascending(1, 200)) {
-    seedTorrentDownload(raw, itemId, clientId, id, `ref-t${id}`, `hash${id}`);
+    seedTorrentDownload(raw, itemFor(`t${id}`), clientId, id, `ref-t${id}`, `hash${id}`);
   }
 
   const expected = [

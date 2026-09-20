@@ -1,7 +1,7 @@
 /**
- * The read-and-write API on a socket: `node:http`, eleven routes -- nine
- * behind a session and two open (`/api/health` and the static bundle) --
- * bound by default to every interface.
+ * The read-and-write API on a socket: `node:http`, thirteen routes --
+ * eleven behind a session and two open (`/api/health` and the static
+ * bundle) -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
  * routes behind a session", which the paragraph on the guard below -- and
@@ -11,9 +11,16 @@
  * when the client-sync slice added `/api/sync` and `/api/sync/backfill`, to
  * nine when it added `/api/sync/bootstrap`, to ten when the shell slice
  * added the static route -- guarded like the other eight except
- * `/api/health` and that one -- and to eleven when this slice added
- * `POST /api/feeds`, the first route this file answers a write on; the
+ * `/api/health` and that one -- to eleven with `POST /api/feeds`, the first
+ * route this file answers a write on, to twelve with
+ * `POST /api/download-clients`, and to thirteen with `POST /api/picks`; the
  * shape of the sentence is what matters and has not changed.)
+ *
+ * **It said "eleven" through two of those.** The download-clients slice
+ * added its route and left both this line and `ROUTES`' own doc reading
+ * eleven, so the number was one short before the picks slice made it two.
+ * Measured rather than counted by eye, which is the only way this gets
+ * caught: `grep -c "^    path: "` on this file.
  *
  * Everything this file does is routing. Parse a request, call one function
  * from `./reads.ts`, `./artwork-route.ts` or `./static-route.ts`, write what
@@ -121,6 +128,7 @@ import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
+import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
@@ -303,6 +311,26 @@ export interface ReadServerDeps {
    * `{ refusal }`, both of which carry nothing from the request.
    */
   addDownloadClient: (input: AddDownloadClientInput) => Promise<{ id: number } | AddDownloadClientRefusal>;
+  /**
+   * Submits a pick -- `Host.requestPick`, handed in as the one operation
+   * this route needs rather than the whole `Host`, for the reason `addFeed`
+   * above gives: `ReadServerDeps.host` already means the bind interface
+   * string, so the object cannot also mean the `Host` instance, and a
+   * function is all `POST /api/picks` ever calls.
+   *
+   * **A function is also what keeps `requestDownload` out of reach.** The
+   * `Host` carries both, and `requestDownload` is the throwing one: handing
+   * this module the object would put the method whose refusals arrive as
+   * exceptions one property access away from the route that must not use
+   * it.
+   *
+   * Resolves a refusal *value* on failure and throws no refusal, with the
+   * same scope the two above state: anything `Host.requestPick` does not
+   * recognise as a refusal is rethrown -- a plugin's own bug, a download
+   * client that could not be reached, a closed database -- and each of
+   * those becomes a 500 here rather than a mapped status.
+   */
+  requestPick: (rssItemId: number) => Promise<PickAccepted | PickRefusal>;
   /**
    * Host tables plus every plugin's declared tables, as one lookup --
    * `sync/registry.ts`'s `createSyncRegistry(raw, plugins)`. What `/api/sync`
@@ -807,6 +835,86 @@ function statusForDownloadClientRefusal(refusal: AddDownloadClientRefusal['refus
 }
 
 /**
+ * Whether `value` has the shape `POST /api/picks` needs: one field, and a
+ * number.
+ *
+ * Nothing here checks the *value* -- not that the id names a row, not that
+ * its feed has a registered plugin, not that a client of the right type
+ * exists, and not that this release has already been picked. Every one of
+ * those is `requestPick`'s (`../clients/pick.ts`'s module doc), and
+ * checking any of them twice is how the two checks drift apart. The
+ * `unknown-release` refusal is what an id naming nothing gets, and it comes
+ * from the host rather than from here.
+ *
+ * **`typeof … === 'number'` and no more**, deliberately: this does not
+ * reject a non-integer, a negative or `NaN`. Measured against a migrated
+ * database holding one `rss_item` at id 1, each of `1.5`, `-1` and `NaN`
+ * comes back from `ownerPluginId`'s join as `undefined` -- so each already
+ * has a correct answer, `unknown-release`, and adding the check here would
+ * be this module deciding what an id may look like, which is a value-level
+ * rule about a table it can see none of.
+ *
+ * **The `typeof` half is not decoration, and the obvious reason for it is
+ * wrong.** The same measurement: `'1'`, the string an id arrives as when a
+ * caller forgets to parse it, **matches the row** -- SQLite applies the
+ * column's INTEGER affinity to the bound text and compares it as a number.
+ * So a string id would not "silently match nothing"; it would silently
+ * *work*, and this route would be quietly accepting a wire shape it does
+ * not declare, which the browser client is then free to depend on. The
+ * guard is what keeps `{ rssItemId: number }` true of what the host is
+ * actually asked.
+ *
+ * `'rssItemId' in value` rather than a cast to `Record<string, unknown>`:
+ * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
+ * as far as the check proves -- the same pattern `isFeedBody` and
+ * `isDownloadClientBody` above use.
+ */
+function isPickBody(value: unknown): value is { rssItemId: number } {
+  return typeof value === 'object' && value !== null
+    && 'rssItemId' in value && typeof value.rssItemId === 'number';
+}
+
+/**
+ * The status `POST /api/picks` answers for each way `requestPick` can
+ * refuse, on `statusForFeedRefusal`'s reasoning above.
+ *
+ * `already-submitted` is the one refusal that already has a row to point
+ * at -- since migration 18 that is a download on the release this pick
+ * named, in any status but `failed`; before it, only a download this
+ * client held under the reference this pick resolved to. Either way there
+ * is an existing row that is the reason, so `409` is the one that fits,
+ * exactly as `duplicate-url` and `duplicate-name` get it on the other two
+ * routes. `clients/pick.ts` maps both conditions to this one code, and
+ * says why.
+ *
+ * The other four all answer `422`: the request parsed fine and named a
+ * field that exists, but the value it carries cannot be acted on. That is
+ * the honest grouping even though the four are not alike in *whose* fault
+ * they are -- `unknown-release` is a stale browser, `plugin-not-registered`
+ * and `no-client-of-type` are an install with a gap in it, and
+ * `client-type-mismatch` is a feed configured wrongly. A status is not what
+ * tells those apart; the code in the body is, which is the whole reason
+ * this route answers one. Splitting them across statuses would put the
+ * distinction in the place a client is least able to act on it and leave
+ * the codes doing the work anyway.
+ *
+ * Whatever the status, the body carries `refusal` itself and nothing else
+ * -- never a message a human would read, and never the rss item id it was
+ * asked about.
+ */
+function statusForPickRefusal(refusal: PickRefusal['refusal']): number {
+  switch (refusal) {
+    case 'already-submitted':
+      return 409;
+    case 'unknown-release':
+    case 'plugin-not-registered':
+    case 'no-client-of-type':
+    case 'client-type-mismatch':
+      return 422;
+  }
+}
+
+/**
  * The static route's own `path`, in `ROUTES` -- a sentinel `matchesPath`
  * recognises and handles before its ordinary segment comparison ever runs,
  * not a template built from `:name` segments the way every other route's is
@@ -818,13 +926,15 @@ function statusForDownloadClientRefusal(refusal: AddDownloadClientRefusal['refus
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The eleven routes -- nine guarded, two `open: true`, the same split this
- * module's own doc states.
+ * The thirteen routes -- eleven guarded, two `open: true`, the same split
+ * this module's own doc states.
  *
- * **It said "ten" until the final review counted them.** `POST /api/feeds`
- * made eleven, and the slice that added it updated the module doc twenty
- * lines above -- the one whose whole opening paragraph exists because its
- * predecessor said "six routes" and was wrong -- while missing this line.
+ * **It said "ten" until the final review counted them, and then "eleven"
+ * for two slices while the table held twelve.** `POST /api/feeds` made
+ * eleven and the slice that added it updated the module doc twenty lines
+ * above -- the one whose whole opening paragraph exists because its
+ * predecessor said "six routes" and was wrong -- while missing this line;
+ * the download-clients slice then added a twelfth and updated neither.
  * That is not an argument for deleting the number: a reader wants to know
  * whether the table below is the whole set. It is an argument for checking
  * it, because no test pins the total and none can usefully. The one count
@@ -1029,6 +1139,71 @@ export const ROUTES: readonly Route[] = [
         return json(statusForDownloadClientRefusal(result.refusal), { refusal: result.refusal });
       }
       return json(201, { id: result.id });
+    },
+  },
+  {
+    path: '/api/picks',
+    methods: ['POST'],
+    open: false,
+    // Submits one pick through `deps.requestPick`, shaped exactly like the
+    // two POST routes above and guarded the same way. It is the third write
+    // this API answers and the one the other two were leading to: the
+    // download path has existed for several slices with no caller.
+    //
+    // Only the body's *shape* is checked here -- one field, a number, via
+    // `isPickBody`. Every value-level invariant, including whether that id
+    // names a row at all, lives in `../clients/pick.ts` and what it wraps,
+    // per the module doc's rule that no SQL and no business rule belongs in
+    // this file.
+    //
+    // **202, and not 201.** The reason is *not* that nothing was created by
+    // the time this answers -- that is the obvious argument and it is
+    // false. Measured on this tree: `clients/downloads.ts` inserts the
+    // download row *before* it calls the client, and `submit` is awaited
+    // the whole way up through the plugin's `onDownloadRequest`,
+    // `requestDownload` and `requestPick`, so with the production wiring a
+    // `torrent_download` row is on file, usually already `submitted`,
+    // before this line runs. `clients/pick.test.ts` reads exactly that row
+    // straight after an `accepted`.
+    //
+    // What is actually true is narrower, and is what 202 means: the request
+    // has been accepted and its processing is not complete.
+    //
+    //  - **The host cannot say a row exists, because nothing tells it
+    //    one does.** `MediaPlugin.onDownloadRequest` returns
+    //    `Promise<void>`, and `host.ts`'s `requestDownload` awaits it and
+    //    reads nothing off it. `ctx.downloads.submit` does answer a
+    //    reference, but it answers it to the *plugin*, which the contract
+    //    does not oblige to call it at all -- so `accepted` here means
+    //    "the owning plugin's handler resolved" and cannot be strengthened
+    //    into "a row was written" by anything on this path. A `201` would
+    //    be the host asserting a fact no value it holds carries.
+    //
+    //    This bullet used to cite `packages/e2e/src/harness-2.ts`'s
+    //    `stubPlugin` as `async onDownloadRequest() {}`. `d983fde` changed
+    //    that handler to submit for real, so the example no longer exists
+    //    on this tree even though the conclusion did not depend on it: the
+    //    argument above is about the return type of the contract's own
+    //    method, which is checkable from `packages/contract` without
+    //    looking for a plugin that happens to write nothing.
+    //  - **A row that does exist may not be a download yet.** `submit`
+    //    answers `null` for a `.torrent` the client did not resolve, which
+    //    leaves the row `submitting` with no `client_ref` for the reconcile
+    //    job to settle later -- and that row can still end `failed`.
+    //  - **There is no resource to point at.** A `201` names what it made,
+    //    by id or by `Location`; this answers `{ accepted: true }` and
+    //    there is no `/api/picks/:id` to serve. What a pick eventually
+    //    produces is a download row the browser learns about through the
+    //    sync replica, not through this response.
+    answer: async ({ deps, body }) => {
+      // `{ refusal }` and no prose, for the reason `MALFORMED_BODY`'s doc
+      // gives: these two are the only answers here that share a status.
+      if (!isPickBody(body)) return json(400, { refusal: 'invalid-shape' });
+      const result = await deps.requestPick(body.rssItemId);
+      if ('refusal' in result) {
+        return json(statusForPickRefusal(result.refusal), { refusal: result.refusal });
+      }
+      return json(202, { accepted: true });
     },
   },
   {

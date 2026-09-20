@@ -7,6 +7,7 @@ import { HOST_MIGRATIONS, migrateHost, migrateHostWith, migratePlugin } from '..
 import { SYNC_QUERIES, deletionsSince } from '../../src/api/reads.ts';
 import { createSecrets } from '../../src/secrets/instance.ts';
 import { readClientConfig } from '../../src/clients/config.ts';
+import { DOWNLOAD_STATUSES } from '../../src/clients/rows.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -291,10 +292,18 @@ function seedDownloadTarget(raw: DatabaseSync): void {
     INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at)
     VALUES ('alpha', 'Feed', 'https://example.com/feed', 1, 1)
   `).run();
-  raw.prepare(`
+  // **Two items, not one**, so a test needing two live download rows has
+  // two releases to hang them on: since migration 18 a release may have at
+  // most one download in any status but `failed`. Seeded here rather than
+  // per test because the two tests that need it are the two about the
+  // download tables' unique indexes, and an unused second `rss_item` costs
+  // the other four nothing.
+  const insertItem = raw.prepare(`
     INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
-    VALUES (1, 'a.mkv', 'https://example.com/a', 1, 1, 'torrent', '1080p')
-  `).run();
+    VALUES (1, ?, ?, 1, 1, 'torrent', '1080p')
+  `);
+  insertItem.run('a.mkv', 'https://example.com/a');
+  insertItem.run('b.mkv', 'https://example.com/b');
 }
 
 test('a migration to version 6 adds implementation to a populated download_client row', () => {
@@ -332,20 +341,32 @@ test('two unconfirmed downloads for one client coexist', () => {
 
   // Both rows have a null client_ref -- the shape a submission has the moment
   // after the request is made but before the client confirms it. Two of them
-  // must be able to sit in the table at once, or a submission that died
-  // waiting for an answer would block its own retry.
+  // must be able to sit in the table at once, or a client that has two
+  // submissions in flight could not record the second.
   //
   // This holds because SQLite exempts NULL from a unique constraint, NOT
   // because the index is partial, so this test passes against a total index
   // too. That is not a weakness: the coexistence is the property the write
   // path depends on, and it is worth pinning on its own terms. The `WHERE`
   // clause gets its own test below.
+  //
+  // **Two releases, and this test used to use one.** The sentence above
+  // used to end "or a submission that died waiting for an answer would
+  // block its own retry", and since migration 18 that is exactly what a
+  // dead submission does: an unconfirmed row is `submitting`, `submitting`
+  // is not `failed`, and the release-level index therefore refuses a
+  // second pick at the same release until something settles the first. The
+  // trade is deliberate -- the insert is the only synchronous point at
+  // which two concurrent picks can be told apart, so a constraint that
+  // exempted `submitting` would not constrain anything the pick path can
+  // reach. Migration 18's docblock has the argument; what survives here is
+  // the narrower and still-load-bearing claim, that null refs are distinct.
   const insert = raw.prepare(`
     INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
-    VALUES (1, 1, 'pending', 1, 1)
+    VALUES (?, 1, 'pending', 1, 1)
   `);
-  insert.run();
-  insert.run();
+  insert.run(1);
+  insert.run(2);
 
   const count = raw.prepare('SELECT COUNT(*) AS n FROM torrent_download').get() as { n: unknown };
   assert.equal(Number(count.n), 2);
@@ -375,14 +396,19 @@ test('two downloads cannot claim the same client_ref', () => {
   migrateHost(raw);
   seedDownloadTarget(raw);
 
+  // **Two different releases**, which is what keeps this test about the
+  // index it names. Both rows on one `rss_item` would now also violate
+  // migration 18's `..._live_item` index, and SQLite reports both with the
+  // same errcode -- so the assertion below would pass while proving
+  // nothing about `(download_client_id, client_ref)` at all.
   const insert = raw.prepare(`
     INSERT INTO torrent_download (rss_item_id, download_client_id, client_ref, status, created_at, updated_at)
-    VALUES (1, 1, 'confirmed-1', 'pending', 1, 1)
+    VALUES (?, 1, 'confirmed-1', 'pending', 1, 1)
   `);
-  insert.run();
+  insert.run(1);
 
   assert.throws(
-    () => insert.run(),
+    () => insert.run(2),
     (err: unknown) => {
       const code = (err as { code?: unknown }).code;
       // 2067 is SQLite's own SQLITE_CONSTRAINT_UNIQUE -- proof that the
@@ -392,6 +418,86 @@ test('two downloads cannot claim the same client_ref', () => {
       return code === 'ERR_SQLITE_ERROR' && errcode === 2067;
     },
   );
+});
+
+test('a release may hold only one download that has not failed, on either table', () => {
+  // Migration 18's own index, driven rather than read back out of
+  // `sqlite_master`: the drift guard below covers the text, this covers
+  // what the text does. Both tables, because a release's table is decided
+  // by its feed's transport and either one is reachable.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedDownloadTarget(raw);
+
+  for (const table of ['torrent_download', 'nzb_download']) {
+    const insert = raw.prepare(`
+      INSERT INTO ${table} (rss_item_id, download_client_id, status, created_at, updated_at)
+      VALUES (1, 1, ?, 1, 1)
+    `);
+    insert.run('submitting');
+    assert.throws(
+      () => { insert.run('submitting'); },
+      // 2067 is SQLITE_CONSTRAINT_UNIQUE, so this is the index refusing and
+      // not some other error -- the same proof the client_ref test uses.
+      (err: unknown) => (err as { errcode?: unknown }).errcode === 2067,
+      `${table} must refuse a second live download for one release`,
+    );
+  }
+});
+
+test('every status but failed blocks a second download for one release', () => {
+  // The definition of "live", pinned value by value rather than by
+  // restating the `WHERE` clause. `DOWNLOAD_STATUSES` is read from
+  // `clients/rows.ts` so a seventh status added there reddens here rather
+  // than slipping past a literal list -- the index is frozen text and this
+  // is the test that notices when the vocabulary moves out from under it.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seedDownloadTarget(raw);
+
+  const blocked: string[] = [];
+  for (const status of DOWNLOAD_STATUSES) {
+    raw.prepare('DELETE FROM torrent_download').run();
+    raw.prepare(`
+      INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
+      VALUES (1, 1, ?, 1, 1)
+    `).run(status);
+    try {
+      raw.prepare(`
+        INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
+        VALUES (1, 1, 'submitting', 1, 1)
+      `).run();
+    } catch (err) {
+      if ((err as { errcode?: unknown }).errcode !== 2067) throw err;
+      blocked.push(status);
+    }
+  }
+
+  // Spelled out rather than derived as `DOWNLOAD_STATUSES.filter(s => s !==
+  // 'failed')`: an expectation computed from the same list the loop walks
+  // would survive the list changing, which is the whole thing this test is
+  // here to notice.
+  assert.deepEqual(blocked, ['submitting', 'submitted', 'downloading', 'completed', 'delivered']);
+  assert.ok(!blocked.includes('failed'), 'a failed download must leave its release pickable again');
+});
+
+test('the live-item index is partial on both download tables', () => {
+  // The drift guard for migration 18, the shape the `client_ref` one above
+  // has. Unlike that one the `WHERE` here is not decoration -- dropping it
+  // would make every release permanently unpickable after one failed
+  // attempt, and the test above would catch that. This pins the text so a
+  // *widening* of the clause, which no insert above would notice, still
+  // reds.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  for (const name of ['torrent_download_live_item', 'nzb_download_live_item']) {
+    const index = raw.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+    ).get(name) as { sql: unknown } | undefined;
+    assert.ok(index, `expected an index named ${name}`);
+    assert.match(String(index.sql), /WHERE status <> 'failed'/, `${name} should exempt failed rows`);
+  }
 });
 
 test('a migration to version 7 adds the reconcile columns to both download tables', () => {

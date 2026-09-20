@@ -44,6 +44,19 @@
  * not fail with a message naming the gap:** nothing in this harness ever
  * runs that job, and nothing at the call site says so.
  *
+ * **A pick is the one write path here that needs no job, so the unstarted
+ * dispatcher costs it nothing.** `addFeed` and `addDownloadClient` each
+ * schedule follow-up work (a poll, a reconcile) that never dispatches.
+ * `requestDownload` schedules none: it calls the owning plugin's
+ * `onDownloadRequest` inline, that calls `ctx.downloads.submit`, and
+ * `createDownloadClients` resolves the client, inserts the `submitting`
+ * row, calls the adapter and updates the row to `submitted` -- all before
+ * `POST /api/picks` answers. What the unstarted dispatcher *does* cost a
+ * pick is everything after the submission: the `reconcile` job that would
+ * later carry the row from `submitted` through `downloading` to
+ * `completed` never runs, so a download row created here stays at whatever
+ * status `submit` left it at, forever.
+ *
  * **The claim token is read from the database, not from a boot log.** The
  * task brief for this harness said to capture it off `main`'s stdout; that
  * premise does not hold here, on two independent grounds. First, this
@@ -63,13 +76,16 @@
  * -- `127.0.0.1` is unambiguous.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test as base } from '@playwright/test';
+import type { MediaPlugin, PluginContext } from '@pickarr/contract';
 import {
   createAuth,
   createDownloadClients,
+  randomIndex,
   createHost,
   createHostFetch,
   createReadServer,
@@ -78,6 +94,7 @@ import {
   ensureSyncGeneration,
   migrateHost,
   openDatabase,
+  type Host,
   type ReadServer,
 } from '@pickarr/host';
 import { webDist } from './paths.ts';
@@ -102,19 +119,37 @@ export type Category = 'tv' | 'movie' | 'xxx';
 
 /**
  * A `MediaPlugin` that does the least possible: no migrations, no synced
- * tables, no job handlers, and a no-op for every callback `Host` ever
- * invokes. Registered once per category (below) so `feeds/add.ts`'s own
- * `isRegistered` check -- reached through `Host.addFeed`, the real
- * validator this harness now wires to `POST /api/feeds` -- accepts the
- * same three plugin ids `AddFeed.tsx`'s form offers (`CATEGORIES`,
- * `shell/useCounts.ts`), the same way a real `createTvPlugin` et al. would.
- * A stub is enough: no spec in this file ever polls a feed to completion or
- * reads a plugin-owned table, so nothing here needs `onNewRssItems` to do
- * anything but resolve. This is the same "no plugin is needed beyond what
- * `isRegistered` checks" the module doc's `media_item` paragraph already
- * argues, applied to `addFeed`'s own gate instead.
+ * tables, no job handlers, and a no-op for two of the three callbacks
+ * `Host` ever invokes. Registered once per category (below) so
+ * `feeds/add.ts`'s own `isRegistered` check -- reached through
+ * `Host.addFeed`, the real validator this harness now wires to
+ * `POST /api/feeds` -- accepts the same three plugin ids `AddFeed.tsx`'s
+ * form offers (`CATEGORIES`, `shell/useCounts.ts`), the same way a real
+ * `createTvPlugin` et al. would. A stub is enough for those two: no spec in
+ * this file ever polls a feed to completion or reads a plugin-owned table,
+ * so nothing here needs `onNewRssItems` to do anything but resolve. This is
+ * the same "no plugin is needed beyond what `isRegistered` checks" the
+ * module doc's `media_item` paragraph already argues, applied to
+ * `addFeed`'s own gate instead.
+ *
+ * **`onDownloadRequest` is the exception, and it submits for real.** It was
+ * empty until the picks slice, which is why `createReadServer`'s
+ * `requestPick` wiring below used to carry a comment saying a pick here
+ * "writes no download row". It writes one now: `ctx.downloads.submit` is
+ * the host's real `createDownloadClients` (built in `boot`), so a pick
+ * runs the same resolution, the same insert and the same adapter call
+ * `main`'s plugins do. That is the whole reason the `see the status
+ * appear` spec can exist -- a plugin that resolved without submitting
+ * would leave the browser with nothing to replicate, and a spec written
+ * against it could only ever prove that `POST /api/picks` answered.
+ *
+ * The real plugins' `onDownloadRequest` is this same call and one `ctx.log`
+ * beside it (`packages/openmetadata/src/engine.ts`, the base all three of
+ * `plugin-tv`, `plugin-movie` and `plugin-xxx` are built from), so this
+ * stub is not a simplification of the submission path -- it is that path,
+ * minus a log line this harness drops anyway (`dropLine`).
  */
-function stubPlugin(id: Category) {
+function stubPlugin(id: Category): MediaPlugin {
   return {
     id,
     mediaType: id,
@@ -123,8 +158,117 @@ function stubPlugin(id: Category) {
     synced: [],
     async onNewRssItems() {},
     async onDownloadedFile() {},
-    async onDownloadRequest() {},
+    async onDownloadRequest(rssItemId: number, ctx: PluginContext) {
+      await ctx.downloads.submit({ rssItemId });
+    },
   };
+}
+
+/**
+ * Obviously synthetic, and not a real credential -- the same shape and the
+ * same reasoning as `AUTH_SECRET` above.
+ *
+ * **Unlike `tests/shell.spec.ts`'s own `API_KEY`, this one is never typed
+ * into a form**, so it never reaches a Playwright action log or a DOM
+ * snapshot: `seedPickableRelease` below hands it to `Host.addDownloadClient`
+ * in process. It crosses no wire the browser can see and is written to the
+ * harness's in-memory `Secrets` and nowhere else.
+ */
+const QBITTORRENT_API_KEY = 'placeholder-not-a-real-qbittorrent-api-key';
+
+/**
+ * A magnet whose infohash is 40 hex characters, which is what
+ * `qbittorrent.ts`'s `MAGNET_BTIH_PATTERN` requires before `submit` will
+ * answer a reference without a second `/torrents/info` round trip.
+ *
+ * A literal rather than a generated hash: the value ends up in
+ * `torrent_download.client_ref`, so a fixed one makes that column the same
+ * from run to run and greppable from here. Nothing needs it unique --
+ * every test gets its own database, and the unique index over
+ * `(download_client_id, client_ref)` therefore has one row to police.
+ */
+const MAGNET = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
+
+/** A listening fake, and the one call that stops it. */
+interface FakeClient {
+  origin: string;
+  close(): Promise<void>;
+}
+
+/**
+ * The least qBittorrent that `clients/qbittorrent.ts`'s `submit` will
+ * accept, on its own ephemeral loopback port.
+ *
+ * **One route, because a magnet submission makes exactly one request.**
+ * `submit` POSTs to `/api/v2/torrents/add`, treats every body that is not
+ * `Fails.` as success (`isAddRefusalBody`'s own doc on why it fails *open*),
+ * and then -- because `infohashFromMagnet` already answered -- returns that
+ * infohash without calling `/torrents/info` at all. `Ok.` is what a real
+ * server sends, so nothing here depends on the fail-open branch.
+ *
+ * It answers 404 to everything else on purpose rather than 200: a change
+ * that made this suite's submission take the `.torrent` path, or reach for
+ * a snapshot, would then fail loudly with a `FetchFailedError` instead of
+ * quietly succeeding against a fake that agrees with anything.
+ *
+ * **It checks no credential.** `readClientConfig` resolving the api key out
+ * of the harness's `Secrets`, and the adapter attaching it, are covered by
+ * `packages/host/test/clients/config.test.ts` and `qbittorrent.test.ts`;
+ * asserting the header here would only put the credential in a second
+ * place. What this fake exists for is to be reachable, so the row reaches
+ * `submitted` rather than `failed`.
+ */
+async function startFakeQbittorrent(): Promise<FakeClient> {
+  const server = createServer((request, response) => {
+    if (request.method === 'POST' && request.url === '/api/v2/torrents/add') {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('Ok.');
+      return;
+    }
+    response.writeHead(404, { 'content-type': 'text/plain' });
+    response.end('not a route this fake serves');
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+
+  const address = server.address();
+  // `Server.address()` is `string | AddressInfo | null` -- a pipe, a socket,
+  // or nothing bound. Narrowed rather than asserted: this one listened on a
+  // TCP port a line ago, so the other two are unreachable, and a check says
+  // that without claiming it.
+  if (address === null || typeof address === 'string') {
+    throw new Error('the fake download client bound no TCP port');
+  }
+  const { port } = address;
+
+  return {
+    origin: `http://127.0.0.1:${String(port)}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      // `Server.close()` stops new connections and then *waits* for the
+      // sockets it already has, and Node's own fetch keeps a connection
+      // alive after the response. This makes teardown depend on nothing but
+      // itself.
+      //
+      // **Not a fix for an observed hang, and it would be easy to write
+      // that here.** Measured by deleting this line and running the picking
+      // spec: it passed in 9.65s against 9.2s with the line in, so nothing
+      // in this suite is currently waiting on an idle socket. What the line
+      // buys is that a future spec which picks twice, or picks and then
+      // does something slower, cannot start paying for one.
+      server.closeAllConnections();
+      server.close((err) => { if (err) reject(err); else resolve(); });
+    }),
+  };
+}
+
+/** What one pick needs on the server before a browser can make it. */
+export interface PickableRelease {
+  /** The `media_item` the card renders, and whose title expands it. */
+  mediaItemId: number;
+  /** The `rss_item` the release row renders, and the id a pick names. */
+  rssItemId: number;
 }
 
 export interface Harness {
@@ -145,12 +289,56 @@ export interface Harness {
    * be counted by none of the three tabs.
    */
   seedMediaItem(pluginId: Category, title: string): number;
+  /**
+   * Everything a pick needs that a browser cannot create for itself: a
+   * torrent download client pointed at this test's fake qBittorrent, a
+   * torrent feed, a `media_item` to expand, and one `rss_item` under it
+   * with no download of its own -- which is what gives that release a
+   * `Pick` button (`ReleaseList.tsx`, picks design §2).
+   *
+   * **The client and the feed go through `Host`'s own writers, the rss item
+   * does not.** `addDownloadClient` is the only thing that knows the
+   * credential-name scheme `readClientConfig` reads back, so writing that
+   * row by hand would be a second copy of it that could drift; `addFeed`
+   * is already wired into this harness for `POST /api/feeds`. There is no
+   * equivalent writer for an `rss_item` -- they arrive from a feed poll,
+   * and this harness never dispatches one (see the module doc) -- so that
+   * one is a direct insert, the same seam `seedMediaItem` uses.
+   *
+   * **The feed names no download client**, which is deliberately the case
+   * picks design §5 says fails today: a UI-created feed always has
+   * `download_client_id` NULL, and the pick only succeeds because
+   * `selectClientForFeed` finds the one client of the feed's type. With
+   * exactly one client there is no draw to make, so nothing here depends
+   * on `randomIndex`.
+   */
+  seedPickableRelease(input: {
+    pluginId: Category;
+    title: string;
+    filename: string;
+    resolution: string;
+    /**
+     * Whether to create the torrent client the pick needs. Required rather
+     * than defaulted, for the reason every other required dependency in
+     * this file is: a spec that omitted it would get one behaviour or the
+     * other with nothing at the call site saying which.
+     *
+     * `false` leaves the install with no client of the feed's type at all,
+     * so `selectClientForFeed` raises `NoClientOfTypeError` and the pick
+     * comes back as the `no-client-of-type` refusal -- the one refusal a
+     * browser can be driven to without a second feed, a second client or a
+     * second pick.
+     */
+    withDownloadClient: boolean;
+  }): Promise<PickableRelease>;
 }
 
 interface Booted {
   raw: DatabaseSync;
   dir: string;
   server: ReadServer;
+  host: Host;
+  qbittorrent: FakeClient;
 }
 
 /**
@@ -161,6 +349,13 @@ async function boot(): Promise<Booted> {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-e2e-'));
   const { raw, db } = openDatabase(join(dir, 'pickarr.db'));
   migrateHost(raw);
+
+  // Started for every test, not only the one that picks: one listener on an
+  // ephemeral loopback port costs about nothing, and a fixture that boots a
+  // different host depending on which spec uses it is two arrangements to
+  // keep in step. Nothing reaches it unless a spec calls
+  // `seedPickableRelease` and then presses `Pick`.
+  const qbittorrent = await startFakeQbittorrent();
 
   // Empty plugin list: see this module's doc for why `media_item` needs none.
   // `Host`'s own `plugins` map (below) is separate from this registry and is
@@ -205,7 +400,7 @@ async function boot(): Promise<Booted> {
     // A factory, not a built object -- `createHost`'s own doc on why:
     // supplying `secrets` (below) is what keeps this the one `Secrets`
     // instance the whole host resolves credentials through.
-    downloads: (deps) => createDownloadClients({ raw, fetch: hostFetch, secrets: deps, now, log: dropLine }),
+    downloads: (deps) => createDownloadClients({ raw, fetch: hostFetch, secrets: deps, now, chooseIndex: randomIndex, log: dropLine }),
     secrets,
     now,
     artworkDir: join(dir, 'artwork'),
@@ -230,6 +425,17 @@ async function boot(): Promise<Booted> {
     // same reason: what a spec observes is the row that was created, not
     // the job.
     addDownloadClient: (input) => host.addDownloadClient(input),
+    // `Host.requestPick`, wired exactly as `main.ts` wires it. What a spec
+    // can observe through it is *wider* than through the two above, which
+    // is the opposite of what this comment said while `stubPlugin`'s
+    // `onDownloadRequest` was empty. `addFeed` and `addDownloadClient` each
+    // finish their visible work in the request and leave the rest to a job
+    // no dispatcher here ever runs; a pick has no job at all. The whole of
+    // it -- the plugin callback, `selectClientForFeed`, the `submitting`
+    // insert, the adapter's request to the fake client, and the update to
+    // `submitted` -- happens inside this call, so a spec that watches a
+    // download row appear in the browser is watching all of it.
+    requestPick: (rssItemId) => host.requestPick(rssItemId),
     registry,
     generation,
     host: '127.0.0.1',
@@ -249,7 +455,7 @@ async function boot(): Promise<Booted> {
     log: dropLine,
   });
 
-  return { raw, dir, server };
+  return { raw, dir, server, host, qbittorrent };
 }
 
 /**
@@ -294,18 +500,83 @@ async function boot(): Promise<Booted> {
  */
 export const test = base.extend<{ harness: Harness }>({
   harness: async ({ context }, use) => {
-    const { raw, dir, server } = await boot();
+    const { raw, dir, server, host, qbittorrent } = await boot();
     try {
       const claimToken = ensureClaimToken(raw, Date.now());
+      function seedMediaItem(pluginId: Category, title: string): number {
+        const at = Date.now();
+        const info = raw.prepare(
+          'INSERT INTO media_item (plugin_id, created_at, updated_at, title) VALUES (?, ?, ?, ?)',
+        ).run(pluginId, at, at, title);
+        return Number(info.lastInsertRowid);
+      }
+
       await use({
         origin: `http://${server.host}:${server.port}`,
         claimToken,
-        seedMediaItem(pluginId, title) {
+        seedMediaItem,
+        async seedPickableRelease({ pluginId, title, filename, resolution, withDownloadClient }) {
+          if (withDownloadClient) {
+            const client = await host.addDownloadClient({
+              name: `${pluginId} seedbox`,
+              implementation: 'qbittorrent',
+              url: qbittorrent.origin,
+              // Blank, so `clients/add.ts`'s `nullIfBlank` writes `NULL` and
+              // the adapter sends no `category` parameter at all -- the case
+              // `normalizeCategory` exists for. A category here would be a
+              // value this fake would have to agree with for no gain.
+              category: '',
+              apiKey: QBITTORRENT_API_KEY,
+              username: '',
+              password: '',
+            });
+            // Every refusal from either writer is a mistake in this harness,
+            // not an outcome a spec is meant to see, so both are turned into
+            // a throw naming the code. The alternative -- letting the spec
+            // fail later on a missing button -- points at the browser for a
+            // fault that happened in Node.
+            if ('refusal' in client) {
+              throw new Error(`the harness could not create a download client: ${client.refusal}`);
+            }
+          }
+
+          const feed = await host.addFeed({
+            pluginId,
+            name: `${pluginId} feed`,
+            // `.invalid` is the reserved TLD (RFC 2606), so nothing can
+            // resolve it even if some future change did arm the dispatcher
+            // -- and `rss_feed` is a synced table, so whatever goes here
+            // reaches the browser's replica. A feed url can carry a private
+            // tracker's passkey (`feeds/add.ts`'s own note on why the
+            // `duplicate-url` refusal names none), which is reason enough
+            // for this one to be obviously nobody's.
+            url: `http://feeds.invalid/${pluginId}.xml`,
+            downloadType: 'torrent',
+            // Any value inside `feeds/add.ts`'s `MIN_POLL_INTERVAL_S` ..
+            // `MAX_POLL_INTERVAL_S` window will do, since nothing here ever
+            // polls: the poll `addFeed` schedules is a `jobs` row an
+            // unstarted host never arms (see this module's doc). A value
+            // outside the window would be refused, and the throw above
+            // would name `bad-poll-interval` rather than leaving it to be
+            // debugged from a browser.
+            pollIntervalS: 3_600,
+          });
+          if ('refusal' in feed) {
+            throw new Error(`the harness could not create a feed: ${feed.refusal}`);
+          }
+
+          const mediaItemId = seedMediaItem(pluginId, title);
           const at = Date.now();
-          const info = raw.prepare(
-            'INSERT INTO media_item (plugin_id, created_at, updated_at, title) VALUES (?, ?, ?, ?)',
-          ).run(pluginId, at, at, title);
-          return Number(info.lastInsertRowid);
+          // `media_item_id` set and no download row: that pair is exactly
+          // what puts this release in `ReleaseList` with a `Pick` button
+          // rather than a status (`ReleaseList.tsx`, picks design §2).
+          const info = raw.prepare(`
+            INSERT INTO rss_item
+              (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution)
+            VALUES (?, ?, ?, ?, ?, 'torrent', ?, ?)
+          `).run(feed.id, filename, MAGNET, at, at, mediaItemId, resolution);
+
+          return { mediaItemId, rssItemId: Number(info.lastInsertRowid) };
         },
       });
     } finally {
@@ -314,6 +585,11 @@ export const test = base.extend<{ harness: Harness }>({
       // do, and why `context.close()` rather than `page.close()`.
       await context.close();
       await server.close();
+      // After the read server rather than before it: the only thing that
+      // ever dials this fake is an adapter call made while serving
+      // `POST /api/picks`, so once that server is closed there is nothing
+      // left that could reach it. Ordered, not raced.
+      await qbittorrent.close();
       raw.close();
       await rm(dir, { recursive: true, force: true });
     }

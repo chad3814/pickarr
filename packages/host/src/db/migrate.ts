@@ -994,6 +994,82 @@ function migration17(db: DatabaseSync): void {
 }
 
 /**
+ * **One live download per release**, on each download table.
+ *
+ * The constraint this adds is release-level dedup, and the two partial
+ * unique indexes that already existed are not: `torrent_download_client_ref`
+ * and `nzb_download_client_ref` are keyed on `(download_client_id,
+ * client_ref)`, which asks "has *this client* already been handed this
+ * reference". Both questions are worth asking and they are not the same
+ * one, so both indexes stay.
+ *
+ * **Why the client-keyed index alone was not enough**, measured by the
+ * whole-branch review and now pinned by `clients/pick.test.ts`'s "a second
+ * pick is refused even when the draw lands on a different client":
+ * `clients/select.ts` resolves a feed that names no client by *drawing* at
+ * random among the clients of its type, so two picks at one release
+ * resolve to the same client only 1 time in N. With two torrent clients
+ * configured, the same release picked twice answered `accepted` twice and
+ * left two clients downloading the same file, with nothing logged. A
+ * constraint keyed on the resolved client cannot see a resolution that is
+ * a draw -- which is design spec §5's amendment, in the one place the
+ * amendment did not look.
+ *
+ * **`WHERE status <> 'failed'`, and that is the definition of "live".**
+ * `clients/rows.ts`'s `DOWNLOAD_STATUSES` has six members and `failed` is
+ * the only one that means *no download exists and none is coming*: a
+ * `submitting` row is in flight, `submitted` and `downloading` are held by
+ * a client, `completed` is a file on disk, and `delivered` is a file in
+ * the library that reclaim has since removed from the client. Re-picking
+ * any of those five produces a second copy of something the operator
+ * already has, so all five block. `failed` must not block, or a pick that
+ * never became a download would be permanent -- `clients/pick.test.ts`'s
+ * "a release whose only download failed can be picked again" is that half,
+ * and the two tests together are what pin the boundary rather than just
+ * its blocking side.
+ *
+ * Written as `<> 'failed'` rather than as an `IN` list of the other five,
+ * deliberately: a seventh status added later then blocks by default, and
+ * the failure that shape produces is a refused pick an operator can see
+ * and report, where an `IN` list that forgot the new status produces a
+ * silent duplicate download. That is the direction to fail in, and it is
+ * the reverse of what `rows.ts` says about deriving "everything except X"
+ * from the list -- there the list is read at runtime and can grow with it,
+ * here the text is frozen the moment this migration is applied.
+ *
+ * **One index per table, and the cross-table case cannot arise.** A
+ * release's table is decided by `clients/downloads.ts`'s `buildPlan` from
+ * `ClientConfig['kind']`; `clients/config.ts` refuses a row whose
+ * `implementation` and `type` disagree, so kind ⇒ client type; and
+ * `clients/select.ts` only ever returns a client whose `type` equals the
+ * feed's `download_type` (it filters the candidates by it and refuses an
+ * explicit mismatch). So every submission for one `rss_item` lands in the
+ * table its feed's `download_type` names, and nothing in this tree ever
+ * updates that column -- `feeds/add.ts` inserts it, migration 5 renamed
+ * its `'usenet'` value once, and there is no feed-edit path. A release
+ * therefore cannot carry both a `torrent_download` and an `nzb_download`,
+ * which is what makes two per-table indexes sufficient. Were a feed-edit
+ * path ever added, that stops being true and these two indexes would not
+ * catch it: the constraint would have to move somewhere that can see both
+ * tables at once.
+ *
+ * **If this `CREATE` ever fails, the database already holds the defect.**
+ * A duplicate would abort the migration inside its savepoint and fail
+ * boot loudly, which is the right outcome and is not repaired here: no
+ * repair could know which of two live downloads for one release to keep,
+ * and the situation is unreachable on any install that has run this code
+ * -- `clients/downloads.ts` is the only writer of either table, it is
+ * reached only through `Host.requestDownload`, and nothing called that
+ * before `POST /api/picks` existed in this same slice.
+ */
+const MIGRATION_18 = `
+CREATE UNIQUE INDEX torrent_download_live_item
+  ON torrent_download (rss_item_id) WHERE status <> 'failed';
+CREATE UNIQUE INDEX nzb_download_live_item
+  ON nzb_download (rss_item_id) WHERE status <> 'failed';
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -1016,6 +1092,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 15, up: (db) => migration15(db) },
   { version: 16, up: (db) => migration16(db) },
   { version: 17, up: (db) => migration17(db) },
+  { version: 18, up: (db) => db.exec(MIGRATION_18) },
 ];
 
 /**

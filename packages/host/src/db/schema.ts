@@ -242,6 +242,17 @@ export const torrentDownload = sqliteTable('torrent_download', {
   uniqueIndex('torrent_download_client_ref')
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
+  // One *live* download per release, where live is every status but
+  // `failed`. The index above is client-side dedup and cannot stand in for
+  // this one: it is keyed on the resolved client, and `clients/select.ts`
+  // resolves a feed that names no client by drawing among the clients of
+  // its type -- so a second pick that draws differently collides with
+  // nothing. Migration 18's docblock has the measurement, the reason
+  // `failed` is excluded, and why two per-table indexes cover the whole
+  // rule.
+  uniqueIndex('torrent_download_live_item')
+    .on(t.rssItemId)
+    .where(sql`${t.status} <> 'failed'`),
   index('torrent_download_item').on(t.rssItemId),
   // The read API's sync cursor over this table's branch of the union.
   index('torrent_download_sync').on(t.updatedAt, t.id),
@@ -281,6 +292,12 @@ export const nzbDownload = sqliteTable('nzb_download', {
   uniqueIndex('nzb_download_client_ref')
     .on(t.downloadClientId, t.clientRef)
     .where(sql`${t.clientRef} is not null`),
+  // See `torrentDownload.torrent_download_live_item`: the same rule, and
+  // both tables need it because which one a release lands in is decided by
+  // its feed's `download_type`.
+  uniqueIndex('nzb_download_live_item')
+    .on(t.rssItemId)
+    .where(sql`${t.status} <> 'failed'`),
   index('nzb_download_item').on(t.rssItemId),
   // The read API's sync cursor over this table's branch of the union.
   index('nzb_download_sync').on(t.updatedAt, t.id),

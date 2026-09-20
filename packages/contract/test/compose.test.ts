@@ -55,7 +55,7 @@ const fixture: MediaPlugin = {
     // The client's own reference must be read, not `void` behind an ignored
     // await — the null check below only compiles if `submit` kept its
     // promised `string | null` return type.
-    const reference = await ctx.downloads.submit({ rssItemId, downloadClientId: 1 });
+    const reference = await ctx.downloads.submit({ rssItemId });
     ctx.log('submitted download', { reference: reference === null ? null : reference.toUpperCase() });
   },
 };

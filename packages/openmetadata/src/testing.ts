@@ -352,11 +352,14 @@ export interface TestHarness {
  * one that exists in this stub table, are not rejected by a constraint this
  * package's own tests have no way to satisfy.
  *
- * `rss_feed` and `rss_item.feed_id` are included even though this task's own
- * tests never join them, because the next task's `onDownloadRequest` does --
- * `rss_item` joined through to `rss_feed` for the download client to submit
- * against -- and a harness patched in afterward would leave that join
- * untested here.
+ * `rss_feed` and `rss_item.feed_id` are included even though nothing joins
+ * them. They were added for an `onDownloadRequest` that did -- it read
+ * `rss_feed.download_client_id` through `rss_item` to name a client in its
+ * submission -- and that join is gone: `DownloadSubmission` has no client
+ * field at all now, so the host resolves one from the feed and the plugin
+ * never looks. They stay because that is exactly what `engine-jobs.test.ts`
+ * drops in order to prove it, and a plugin cannot be shown not to read a
+ * table that was never created.
  */
 export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number } = {}): TestHarness {
   const raw = new DatabaseSync(':memory:');

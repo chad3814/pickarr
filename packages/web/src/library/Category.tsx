@@ -24,20 +24,23 @@ import type { ReactElement } from 'react';
 import { useMediaItems, type MediaItemsSource } from './useMediaItems.ts';
 import { MediaItemCard } from './MediaItemCard.tsx';
 import type { GatheredSource } from './useGatheredItem.ts';
+import type { PickSubmit } from './postPick.ts';
 
-/** Everything this screen needs from a store: `useMediaItems`'s two members, plus `MediaItemCard`'s own two (through `useGatheredItem`). A real `Store` satisfies this by structural assignment. */
+/** Everything this screen needs from a store: `useMediaItems`'s two members, plus `MediaItemCard`'s own four (through `useGatheredItem`), one of which -- `subscribeInserts` -- both halves already wanted. A real `Store` satisfies this by structural assignment. */
 export interface CategorySource extends MediaItemsSource, GatheredSource {}
 
 export interface CategoryProps {
   store: CategorySource | undefined;
   /** `media_item.pluginId` for this category -- `'tv' | 'movie' | 'xxx'` in practice, but this component does not need to know the closed set (`useCounts.ts`'s own doc on why a category is a plugin id, not a table). */
   pluginId: string;
+  /** Submits one pick, forwarded to each card's `ReleaseList` and never called here. A prop rather than a member of `CategorySource`: a store is the replica, and posting to `/api/picks` is not something a replica does. */
+  submit: PickSubmit;
 }
 
-export function Category({ store, pluginId }: CategoryProps): ReactElement {
+export function Category({ store, pluginId, submit }: CategoryProps): ReactElement {
   return (
     <section data-testid={`category-${pluginId}`}>
-      {store === undefined ? null : <CategoryList store={store} pluginId={pluginId} />}
+      {store === undefined ? null : <CategoryList store={store} pluginId={pluginId} submit={submit} />}
     </section>
   );
 }
@@ -45,9 +48,10 @@ export function Category({ store, pluginId }: CategoryProps): ReactElement {
 interface CategoryListProps {
   store: CategorySource;
   pluginId: string;
+  submit: PickSubmit;
 }
 
-function CategoryList({ store, pluginId }: CategoryListProps): ReactElement | null {
+function CategoryList({ store, pluginId, submit }: CategoryListProps): ReactElement | null {
   const { items, loadMore, done, empty } = useMediaItems(store, pluginId);
 
   // `items.length === 0 && !empty` is the one state `empty` cannot yet
@@ -62,7 +66,7 @@ function CategoryList({ store, pluginId }: CategoryListProps): ReactElement | nu
   return (
     <div>
       {items.map((item) => (
-        <MediaItemCard key={item.id} source={store} item={item} />
+        <MediaItemCard key={item.id} source={store} item={item} submit={submit} />
       ))}
       {!done && (
         <button type="button" onClick={loadMore}>
