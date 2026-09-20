@@ -131,9 +131,40 @@ ul[aria-label='releases'] li > span:not([id$='-filename']) {
  * this file is keyed by structure -- no component this stylesheet reaches
  * sets a class. `article h2 button` above is a different element in a
  * different place and is untouched by this.
+ *
+ * **`min-width` is what the styling task added to this rule, and it is a
+ * correctness fix rather than polish.** The button has three states and two
+ * of them are this rule's problem: `Pick`, `Picking…`, and gone entirely
+ * once the release has a download. Between the first two only the label
+ * changes, and the wider label made the button 25.94px wider
+ * (`tokens.css`'s own measurement on `--size-pick-button`). The button's
+ * right edge is the row's, so all of that came off the left: the
+ * resolution jumped 25.94px left -- as would the score, on a release that
+ * has one -- and the filename column gave up the same width, at the
+ * instant the operator clicked. The floor holds both labels at one width,
+ * and nothing in the row moves.
+ *
+ * **The third transition still reflows, and deliberately.** When the
+ * download row arrives this button is replaced by a status span -- different
+ * content of a different length -- and reserving a button's width on a row
+ * that no longer has one would leave a gap instead of keeping anything
+ * steady.
+ *
+ * **No colour or border of its own, on purpose.** `base.css`'s `button` rule
+ * is the secondary treatment and its own doc says the primary one is opted
+ * into from markup, which no component this stylesheet reaches does; and
+ * the button is already the only bordered thing in a row that is otherwise
+ * a filename and some dimmed 12px detail, so it needs no further marking to
+ * be found at all. Worth knowing before adding one:
+ * this rule is in the `components` layer, so a `color` or `border-color`
+ * here would beat `base.css`'s `button:disabled` whatever its specificity
+ * and leave a disabled `Picking…` wearing the live treatment. That needs
+ * `:not(:disabled)` on the selector or an explicit `:disabled` block beside
+ * it, neither of which is free.
  */
 ul[aria-label='releases'] li > button {
   flex: none;
+  min-width: var(--size-pick-button);
   font-size: var(--text-meta);
   padding: 0 var(--space-2);
 }

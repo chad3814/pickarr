@@ -55,14 +55,38 @@
   --radius-md: 6px;
   --radius-lg: 10px;
 
-  /* A fixed component dimension, not a margin or a gap, which is why it is
-     its own family rather than a seventh `--space-*`: the scale above is for
-     the distance *between* things, and this is the width of one specific
-     thing. One member for now -- the poster frame `library.css`'s `article
-     img` crops to, at the fixed 2:3 aspect ratio 1.x's `card.css` measured,
-     so every card's frame is the same shape regardless of the source
-     image's own aspect ratio. */
+  /* Fixed component dimensions, not margins or gaps, which is why they are
+     their own family rather than further `--space-*` members: the scale
+     above is for the distance *between* things, and each of these is the
+     width of one specific thing. Two members, since the picks slice.
+
+     `--size-poster` is the poster frame `library.css`'s `article img` crops
+     to, at the fixed 2:3 aspect ratio 1.x's `card.css` measured, so every
+     card's frame is the same shape regardless of the source image's own
+     aspect ratio.
+
+     `--size-pick-button` is a floor rather than a frame. The Pick button's
+     label is `Pick` until it is pressed and `Picking…` while the pick is in
+     flight (`ReleaseList.tsx`, picks design §3), and with no floor those two
+     render **40.64px and 66.58px** wide. Both numbers, and what they cost
+     the rest of the row, were measured in Chromium in a real release row
+     rather than reasoned about: swapping the label moved the resolution's
+     left edge from 1014.59px to 988.66px and shrank the filename column from
+     717.98px to 692.05px -- a **25.94px** jump in everything between the
+     filename and the button, at the moment the operator clicks. With this
+     floor both labels measure 72px and nothing beside them moves. A `<button>`
+     computes `box-sizing: border-box` from the UA stylesheet (also
+     measured), so the floor covers the padding and the border as well as the
+     text, and 4.5rem clears the wider label by 5.42px.
+
+     **Its weakness is that it is a measurement of two specific strings.** A
+     third, longer label -- or a font that does not load -- reflows the row
+     again and nothing in the suite fails. Sizing to the content instead
+     would need `ch` units against a proportional face, which measures the
+     wrong thing, or rendering both labels and hiding one, which is markup
+     this stylesheet does not get to write. */
   --size-poster: 6rem;
+  --size-pick-button: 4.5rem;
 
   /* One elevation, for dialogs. Cards are separated by surface and hairline, so a
      second shadow token would be speculative. */

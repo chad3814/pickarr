@@ -8,6 +8,7 @@
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@pickarr/contract": "*",
     "@pickarr/host": "*"
   },
   "devDependencies": {

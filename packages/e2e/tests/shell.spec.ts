@@ -11,12 +11,13 @@
  * This file is the first thing that actually opens two tabs.
  *
  * **No spec here reads a session cookie's value.** Every credential this
- * suite ever holds -- the claim token, a password, and since the download
- * clients slice a download client's api key -- is typed into a form or read
- * off the database directly (`harness-2.ts`'s own doc); the cookie itself
- * lives entirely in the browser's jar, exactly as production leaves it
- * (Global Constraint). None of the three is ever asserted on, echoed into
- * a test name, or read back out of the page.
+ * suite ever holds -- the claim token, a password, a download client's api
+ * key since the download clients slice, and the fake qBittorrent's own api
+ * key since the picks slice -- is typed into a form, read off the database
+ * directly, or never leaves Node at all (`harness-2.ts`'s own doc); the
+ * cookie itself lives entirely in the browser's jar, exactly as production
+ * leaves it (Global Constraint). None of the four is ever asserted on,
+ * echoed into a test name, or read back out of the page.
  *
  * **Anything typed into a form here is recorded in cleartext in the
  * Playwright trace, and that trace leaves the runner.** This is the third
@@ -99,6 +100,39 @@ async function borderTopAgainstLineToken(page: Page, selector: string): Promise<
     const lineTokenColor = getComputedStyle(probe).color;
     probe.remove();
     return { borderTopColor: getComputedStyle(element).borderTopColor, lineTokenColor };
+  }, selector);
+}
+
+/** What {@link colorAgainstErrorToken} reads back, both sides in the browser's own canonical colour form. */
+interface TextColorProbe {
+  /** The computed `color` of the first element matching the selector. */
+  color: string;
+  /** `--color-error`'s own resolved value, in whichever palette this run is in. */
+  errorTokenColor: string;
+}
+
+/**
+ * {@link borderTopAgainstLineToken}'s sibling for text colour against
+ * `--color-error`, and the same technique for the same reason: the token
+ * has a different value in each palette, so the expectation is resolved in
+ * the browser rather than spelled as a literal.
+ *
+ * A second function rather than one parameterised by property and token
+ * name. The two share four lines of probe, and folding them together would
+ * mean either two round trips into the page or a helper whose signature
+ * carries two strings that have to agree with each other -- neither of
+ * which is a better trade than the duplication, at two callers.
+ */
+async function colorAgainstErrorToken(page: Page, selector: string): Promise<TextColorProbe> {
+  return page.evaluate((sel) => {
+    const element = document.querySelector(sel);
+    if (element === null) throw new Error(`no element matched ${sel} to read a text colour from`);
+    const probe = document.createElement('div');
+    probe.style.color = 'var(--color-error)';
+    document.body.appendChild(probe);
+    const errorTokenColor = getComputedStyle(probe).color;
+    probe.remove();
+    return { color: getComputedStyle(element).color, errorTokenColor };
   }, selector);
 }
 
@@ -578,4 +612,196 @@ test('an operator can add a download client and see it listed', async ({ page, h
   // single answer in both palettes, so `CLAUDE.md`'s preference for a
   // literal applies with nothing to trade against it.
   await expect(client.getByRole('heading', { name: 'Seedbox' })).toHaveCSS('font-size', '13px');
+});
+
+/*
+ * The picks slice's own browser proof (task 5's brief), and the only place
+ * any part of that slice has run in a real browser.
+ *
+ * **What the first spec below measures, and it is more of the server than
+ * either spec above can claim.** A pick schedules no job. `addFeed` and
+ * `addDownloadClient` each finish their visible work in the request and
+ * leave a poll or a reconcile to a dispatcher this harness never starts, so
+ * each of those specs is evidence about a write, a trigger and a sync tail
+ * and about nothing further. `Host.requestDownload` has no such tail: the
+ * whole of it runs inside `POST /api/picks` -- the registered plugin's
+ * `onDownloadRequest`, `ctx.downloads.submit`, `selectClientForFeed`
+ * resolving a feed that names no client to the one torrent client on file
+ * (picks design §5's own failing case), the `submitting` insert, a real
+ * HTTP request from `clients/qbittorrent.ts`'s adapter to the fake client
+ * `harness-2.ts` listens with, and the update to `submitted`. Pressing the
+ * button in a browser therefore exercises every one of those, plus
+ * `torrent_download`'s own sync triggers and this tab's `/api/sync` tail.
+ *
+ * **And it is evidence for picks design §7's subscription specifically, by
+ * elimination.** `useGatheredItem` re-gathers when something it subscribes
+ * to changes. A pick touches no `media_item` row and no `rss_item` row --
+ * `clients/downloads.ts` inserts into `torrent_download` and updates that
+ * same row, and nothing else -- so the media item this card is built from
+ * is byte-for-byte what it was before the click. The status appearing
+ * without a reload therefore has exactly one available cause: the
+ * subscription to inserts on the two download tables that task 3 added.
+ * What this spec does **not** do is count requests, so it is not itself
+ * evidence that nothing refetched; the two specs above that do count are.
+ *
+ * **What neither spec measures.** The `reconcile` job that would carry a row
+ * from `submitted` through `downloading` to `completed` never dispatches
+ * here, for the reason `harness-2.ts`'s module doc gives, so `submitted` is
+ * the last status this suite will ever see on a row it created. Nor is
+ * there a draw: one client of one type means `selectClientForFeed` has one
+ * candidate, so acceptance item 3 (repeated picks reach more than one of
+ * several clients) is pinned at the unit level and nothing here is evidence
+ * about it. Four of the five refusals are unit-level too -- the second spec
+ * drives `no-client-of-type` because it is the only one reachable without a
+ * second feed, a second client or a second pick.
+ *
+ * **Acceptance item 6 is not met, and this is where that is visible rather
+ * than where it is fixed.** Picks design §3 and acceptance 6 say `Picking…`
+ * lasts until the download row arrives. It does not: `ReleaseRow`'s
+ * `finally { setPending(false) }` clears the flag when `POST /api/picks`
+ * answers. Measured on this spec's own path, on a warm local run: the
+ * button was enabled and reading `Pick` again **33ms** after the click, and
+ * the status replaced it **2934ms** after the click -- a ~2.9 second window
+ * in which the server already holds a `submitted` row for that release and
+ * the browser still offers a button that would submit another. Nothing
+ * below asserts either behaviour, so neither this spec nor a fix to
+ * `ReleaseList.tsx` has to move the other; the task report has the full
+ * account.
+ *
+ * **No credential is typed anywhere in either spec.** Unlike the download
+ * clients spec above, the qBittorrent api key the adapter sends with these
+ * picks never enters the browser at all -- `harness-2.ts` hands it to
+ * `Host.addDownloadClient` in process -- so it reaches no `fill` action, no
+ * DOM snapshot and no trace resource. The only credential either spec types
+ * is `PASSWORD`, through `claimInstall`.
+ */
+
+/**
+ * One release's name, shaped like the ones this screen exists to compare.
+ *
+ * It does **not** overflow the filename column at this viewport: the span's
+ * `scrollWidth` equals its `clientWidth` (measured, 687px against a 686.63px
+ * box), which is what "nothing is clipped" looks like. So nothing below is
+ * evidence about the ellipsis half of that rule. It is a filename and not a
+ * path -- nothing here names a directory (Global Constraint).
+ */
+const RELEASE_FILENAME = 'a.movie.2026.1080p.web-dl.h265-GRP.mkv';
+
+test('an operator can pick a release and watch its status take the button’s place', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await harness.seedPickableRelease({
+    pluginId: 'movie',
+    title: 'A Movie',
+    filename: RELEASE_FILENAME,
+    resolution: '1080p',
+    withDownloadClient: true,
+  });
+
+  // A nav click rather than `page.goto`, and `movie` rather than `tv`: `/`
+  // redirects to `/tv` (`Shell.tsx`'s index route), so the default screen
+  // would have been reached without opening anything. This is the
+  // category-opening click the brief asks for.
+  await page.getByRole('link', { name: 'Movies' }).click();
+
+  const disclosure = page.getByRole('button', { name: 'A Movie' });
+  await expect(disclosure).toBeVisible({ timeout: 15_000 });
+  await disclosure.click();
+
+  // The button's accessible name is composed from two spans of visible text
+  // -- its own label and the filename (`ReleaseList.tsx`) -- so naming it
+  // this way asserts that composition as well as finding the button.
+  const pick = page.getByRole('button', { name: `Pick ${RELEASE_FILENAME}` });
+  await expect(pick).toBeVisible();
+
+  // `library.css`'s own pin for this slice, in two properties, and neither
+  // is `list-style-type: none` -- see the download clients spec above for
+  // why that one pins only that a stylesheet exists.
+  //
+  // **`font-size` covers the rule that was already here** -- the pick
+  // button block, which arrived with the button itself and had no browser
+  // pin of its own. 12px has one producer: `base.css`'s `button` rule sets
+  // `--text-body`, and this reads **13px** with `library.css` removed and
+  // 13px again with it emptied down to its list resets (both measured).
+  //
+  // **`min-width` covers the rule the styling task added.** `styles/` has
+  // two other `min-width` declarations -- `base.css`'s `#root > div >
+  // section` and this file's own filename span -- and both are `0`, and
+  // neither reaches this button; the UA computes `auto` for a button. So
+  // 72px is `--size-pick-button` through this rule or it is nothing, and
+  // gutting the stylesheet reads **0px** (measured). It is also the one
+  // assertion here about behaviour rather than appearance: without it the
+  // button widens by 25.94px when its label becomes `Picking…` and takes
+  // that width off everything to its left (`tokens.css`'s own measurement).
+  await expect(pick).toHaveCSS('font-size', '12px');
+  await expect(pick).toHaveCSS('min-width', '72px');
+
+  await pick.click();
+
+  // `submitted` is where the row settles: the fake client answers inside
+  // the request, so `clients/downloads.ts` marks the row before
+  // `POST /api/picks` returns, and no reconcile ever runs to move it on
+  // (the block above). A tail poll landing between the insert and the
+  // update could show `submitting` first, which is why this waits for the
+  // settled value rather than asserting the first status to appear.
+  const row = page.getByRole('listitem', { name: RELEASE_FILENAME });
+  await expect(row).toContainText('Status: submitted', { timeout: 15_000 });
+
+  // The button is gone rather than merely disabled: `ReleaseList` renders
+  // one only for a release with no download, so its absence is the same
+  // fact as the status's presence read from the other side (picks design
+  // §2, acceptance item 5).
+  await expect(row.getByRole('button')).toHaveCount(0);
+});
+
+test('a pick with no download client set up says so, in words that are styled as the alarm they are', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await harness.seedPickableRelease({
+    pluginId: 'movie',
+    title: 'A Movie',
+    filename: RELEASE_FILENAME,
+    resolution: '1080p',
+    withDownloadClient: false,
+  });
+
+  await page.getByRole('link', { name: 'Movies' }).click();
+  const disclosure = page.getByRole('button', { name: 'A Movie' });
+  await expect(disclosure).toBeVisible({ timeout: 15_000 });
+  await disclosure.click();
+
+  await page.getByRole('button', { name: `Pick ${RELEASE_FILENAME}` }).click();
+
+  // `getByText`, not `getByRole('alert')`: the role is satisfied by an
+  // element with an `aria-label` and no visible content, which is
+  // `CLAUDE.md`'s longest hazard and the exact shape `IdentityChangeConfirm`
+  // shipped. This is the rendered sentence, and it is this client's own
+  // wording (`postPick.ts`'s `PICK_REFUSAL_MESSAGES`) -- the host's message
+  // for the same condition names a feed and is never sent to a browser.
+  const refusal = page.getByText(
+    'No download client that can take this kind of release is set up. Add one under Settings.',
+  );
+  await expect(refusal).toBeVisible();
+
+  // The other half of that hazard, and the pin for the other rule
+  // `library.css` already had for this slice -- the one whose own comment
+  // says "this rule existing is load-bearing". `toBeVisible()` passes
+  // against an unstyled block of text just as well as against a styled one,
+  // so this asserts the colour: with `library.css` gone or emptied, the
+  // `[role='alert']` block goes with it and the sentence inherits
+  // `--color-text` instead.
+  //
+  // Resolved in the browser rather than spelled `rgb(...)`, for the reason
+  // `borderTopAgainstLineToken` above gives: `--color-error` differs between
+  // the two palettes and nothing here pins which one a run resolves to.
+  const alarm = await colorAgainstErrorToken(page, "ul[aria-label='releases'] li > [role='alert']");
+  expect(alarm.color).toBe(alarm.errorTokenColor);
+
+  // And the button came back, so a refused pick is retryable rather than a
+  // dead row (acceptance item 4: no outcome leaves the button pending).
+  await expect(page.getByRole('button', { name: `Pick ${RELEASE_FILENAME}` })).toBeEnabled();
 });
