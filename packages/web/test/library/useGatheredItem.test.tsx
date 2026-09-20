@@ -30,7 +30,7 @@ function settle(): Promise<void> {
  */
 const quietInserts = {
   subscribeInserts: (): (() => void) => () => {},
-  getRow: async (): Promise<unknown> => undefined,
+  getRows: async (): Promise<Map<number, unknown>> => new Map(),
 };
 
 /** An `RssItemSyncRead` with everything but `id` defaulted -- this suite reads none of the rest. */
@@ -50,7 +50,7 @@ function rssItem(id: number): RssItemSyncRead {
   };
 }
 
-/** A `TorrentDownloadSyncRead` as the replica holds it -- the row `getRow` answers with below. */
+/** A `TorrentDownloadSyncRead` as the replica holds it -- the row `getRows` answers with below. */
 function torrentRow(id: number, rssItemId: number): TorrentDownloadSyncRead {
   return {
     id,
@@ -265,8 +265,10 @@ test('a gather still in flight when the card collapses does not surface, but its
 /**
  * A source whose first gather finds release 3 with nothing picked and every
  * later one finds `arrival` under it -- the sequence a pick produces -- over
- * a replica in which `arrival`'s row is the only thing `getRow` answers
- * with. `fire` is the `subscribeInserts` callback the hook registered for
+ * a replica in which `arrival`'s row is the only thing `getRows` answers
+ * with -- an id it does not name is simply absent from the map, which is
+ * `store/rows.ts`'s own contract for a tombstone or a row never
+ * replicated. `fire` is the `subscribeInserts` callback the hook registered for
  * `table`, or `undefined` if it registered none, so a test can tell a
  * subscription that did not fire from one that was never made.
  */
@@ -292,8 +294,12 @@ function pickHarness(
         callbacks.delete(table);
       };
     },
-    getRow: async (table: string, id: number) =>
-      table === arrival.table && id === arrival.id ? storedRow : undefined,
+    getRows: async (table: string, ids: readonly number[]) =>
+      new Map(
+        ids.flatMap((id): [number, unknown][] =>
+          table === arrival.table && id === arrival.id ? [[id, storedRow]] : [],
+        ),
+      ),
   };
   return {
     source,
@@ -378,7 +384,7 @@ test('unmounting takes down the download insert subscriptions as well as the row
         live.delete(key);
       };
     },
-    getRow: async () => undefined,
+    getRows: async () => new Map(),
   };
   const { unmount } = render(<Harness source={source} mediaItemId={7} enabled />);
   await waitFor(() => {
