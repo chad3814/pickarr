@@ -12,13 +12,16 @@
  * hide that; the wrong answer is temporary and corrects itself on the next
  * wake. **The justification here used to be "it is a read-only screen, so
  * the wrong answer is not actionable", and this slice is what ends that
- * premise** -- `ReleaseList` grows a per-release Pick button (picks design
- * §2), so during that window a release whose download row has not been read
- * yet renders exactly like one nobody has picked, and is therefore
- * pickable. What happens to a second submission is the host's answer to
- * give, not this hook's to claim: see the `already-submitted` refusal
- * (picks design §6). Naming the window rather than resting on a premise
- * that no longer holds.
+ * premise.** It has not ended yet: as of this commit nothing on these
+ * screens writes, so the old sentence is still true of the tree you are
+ * reading. It stops being true one task later, when `ReleaseList` grows a
+ * per-release Pick button (picks design §2) -- from then on, a release
+ * whose download row has not been read yet renders exactly like one nobody
+ * has picked, and is therefore pickable. What happens to a second
+ * submission is the host's answer to give, not this hook's to claim; the
+ * refusal named for it in picks design §6 is `already-submitted`, and it
+ * does not exist in this tree either. Recorded here rather than left for
+ * that task to notice, because this is the paragraph the premise lives in.
  *
  * **What "self-correcting" means here.** This hook subscribes to the
  * gathered media item's own row (`table: 'media_item'`) for as long as it is
@@ -45,8 +48,28 @@
  * else, so this hook reads each inserted row and re-gathers only when its
  * `rssItemId` is one of the releases the cached gather holds. Without that,
  * one pick anywhere would re-gather on every mounted card on all three
- * browse screens. The read is one `getRow` per inserted id, issued together
- * -- a keyed lookup each, against a gather that is 3+N transactions.
+ * browse screens.
+ *
+ * **The read is `getRows`, and the batched member is the whole point.** One
+ * wake costs **one** IndexedDB transaction regardless of how many ids the
+ * batch carried: `store/rows.ts`'s `getRows` opens `rowsStore(db)` once and
+ * issues a keyed `get` per id on that one transaction, exactly as
+ * `store/gather.ts` reads a cast's people. The first version of this hook
+ * used `getRow` per id instead, which opens a transaction *per call*.
+ * Measured through this hook against a real replica, with a four-id batch
+ * naming a release this item does not hold -- so the filter read is the
+ * only thing that runs: **4 transactions before, 1 after**. That cost is
+ * paid per wake per expanded card, on a table-wide channel every open card
+ * is subscribed to. Where the batch *does* match, the re-gather it triggers
+ * costs 4 more either way (8 before, 5 after, same measurement), so the
+ * saving is on the filter and not on the gather.
+ *
+ * The comment this replaces described the old cost as "a keyed lookup each,
+ * against a gather that is 3+N transactions". True of the lookups, and
+ * quietly wrong about what they cost: it compared them against the gather
+ * rather than against the batched sibling `store/rows.ts` declares
+ * immediately after `getRow` -- which is the comparison that would have
+ * changed the code.
  *
  * **What it still does not subscribe to, and what that costs.** An
  * *update* to a row already gathered wakes nothing here: `store/apply.ts`
@@ -76,19 +99,19 @@ import type { GatheredItem } from '../store/gather.ts';
  * and `MediaItemCard.test.tsx`). A real `Store` satisfies this by structural
  * assignment.
  *
- * It was two until the download-insert subscription landed. `getRow` is the
+ * It was two until the download-insert subscription landed. `getRows` is the
  * second of the two it gained and is not obviously implied by the first:
  * `subscribeInserts`'s callback is handed ids and no table-parent
  * information, and a download row's `id` is its own, unrelated to the
  * `rssItemId` it belongs to (`TorrentDownloadSyncRead` carries both), so
  * nothing in the wake itself can say whether the row is this item's. Reading
- * the row is what answers that.
+ * the rows is what answers that.
  */
 export interface GatheredSource {
   gatherMediaItem: Store['gatherMediaItem'];
   subscribe: Store['subscribe'];
   subscribeInserts: Store['subscribeInserts'];
-  getRow: Store['getRow'];
+  getRows: Store['getRows'];
 }
 
 /**
@@ -182,9 +205,9 @@ export function useGatheredItem(
       const releases = cache.current.get(mediaItemId)?.releases ?? [];
       if (releases.length === 0) return;
       const ours = new Set(releases.map((release) => release.id));
-      const values = await Promise.all(ids.map((id) => source.getRow(table, id)));
+      const values = await source.getRows(table, ids);
       if (cancelled) return;
-      const mine = values.some((value) => {
+      const mine = [...values.values()].some((value) => {
         const rssItemId = releaseOf(value);
         return rssItemId !== undefined && ours.has(rssItemId);
       });

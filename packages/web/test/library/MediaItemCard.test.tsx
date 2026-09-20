@@ -139,7 +139,7 @@ function gathered({
  */
 const quietInserts = {
   subscribeInserts: (): (() => void) => () => {},
-  getRow: async (): Promise<unknown> => undefined,
+  getRows: async (): Promise<Map<number, unknown>> => new Map(),
 };
 
 /** A `GatheredSource` returning one bare gathered item, for tests that do not care what expanding shows. */

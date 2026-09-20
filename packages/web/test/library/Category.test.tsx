@@ -5,7 +5,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { getRow, listByTablePlugin } from '../../src/store/rows.ts';
+import { getRows, listByTablePlugin } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import { gatherMediaItem } from '../../src/store/gather.ts';
 import { Category, type CategorySource } from '../../src/library/Category.tsx';
@@ -59,7 +59,7 @@ function sourceFor(db: IDBDatabase): CategorySource {
     subscribeInserts,
     gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
     subscribe,
-    getRow: (table, id) => getRow(db, table, id),
+    getRows: (table, ids) => getRows(db, table, ids),
   };
 }
 
