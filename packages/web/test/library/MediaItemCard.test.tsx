@@ -14,7 +14,8 @@ import type { GatheredDownload, GatheredItem, GatheredRelease } from '../../src/
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
  * that threw before its own call would leave a card mounted, still
- * subscribed to `media_item` through its stub `subscribe`.
+ * subscribed to `media_item` through its stub `subscribe` and to both
+ * download tables through its stub `subscribeInserts`.
  */
 afterEach(cleanup);
 
@@ -130,8 +131,20 @@ function gathered({
   };
 }
 
+/**
+ * `useGatheredItem`'s two download-insert members, defaulted: no card in
+ * this file exercises a pick arriving, so an insert subscription nothing
+ * fires and a replica holding no row are what they should see. That hook's
+ * own test file drives both properly.
+ */
+const quietInserts = {
+  subscribeInserts: (): (() => void) => () => {},
+  getRow: async (): Promise<unknown> => undefined,
+};
+
 /** A `GatheredSource` returning one bare gathered item, for tests that do not care what expanding shows. */
 const stubSource: GatheredSource = {
+  ...quietInserts,
   gatherMediaItem: async (id: number) => gathered({ id, title: 'The Thing' }),
   subscribe: () => () => {},
 };
@@ -147,6 +160,7 @@ test('a card shows its title as a real heading', () => {
 test('expanding gathers the item once, and collapsing does not re-gather', async () => {
   let gathers = 0;
   const source: GatheredSource = {
+    ...quietInserts,
     gatherMediaItem: async (id: number) => {
       gathers += 1;
       return gathered({ id, title: 'The Thing' });
@@ -172,6 +186,7 @@ test('expanding gathers the item once, and collapsing does not re-gather', async
 
 test('a release shows its resolution and its download status', async () => {
   const source: GatheredSource = {
+    ...quietInserts,
     gatherMediaItem: async () =>
       gathered({
         id: 7,
@@ -200,6 +215,7 @@ test('a release with no download row shows no status rather than a blank one', a
   // at all. That must read as "not picked", not as an empty status field --
   // this slice cannot pick, so every release starts here.
   const source: GatheredSource = {
+    ...quietInserts,
     gatherMediaItem: async () =>
       gathered({
         id: 7,
