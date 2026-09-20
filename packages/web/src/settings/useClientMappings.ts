@@ -33,6 +33,23 @@
  * table with a handful of rows in it, once per configured download client,
  * so the saving is not worth buying the same staleness class back.
  *
+ * **What that costs, written down rather than left to be rediscovered: N
+ * mounted clients means N whole-table walks per change.** Every hook reads
+ * the *whole* `filepath_mapping` table and filters to its own client in
+ * {@link toMappings} -- there is no per-client index, and `by_table_updated`
+ * has no `download_client_id` component to give one. `subscribeInserts` is
+ * table-wide, so one mapping added anywhere wakes every mounted hook, and
+ * each of them re-walks every row. `DownloadClients` renders one
+ * `ClientMappings` per configured client and each calls this hook
+ * unconditionally -- the expander gates what is *rendered*, not the read --
+ * so the work is quadratic in the install: C clients holding M
+ * mappings between them costs C × M rows read per write. It is accepted at
+ * the scale design spec §8 argues for -- an operator writes one mapping per
+ * mount point they have, so both C and M are single digits and the walk is
+ * a handful of rows out of an IndexedDB index. Anything that made either
+ * number large (a sync that rewrote the table row by row, say) would want a
+ * per-client index in `store/db.ts` rather than a change here.
+ *
  * **Lists come from the replica only. There is no remote fallback**
  * (Global Constraint). This hook never calls `fetch`; `listByTable`,
  * `subscribe` and `subscribeInserts` are the whole of what it is built on,
@@ -114,6 +131,19 @@ function isMapping(value: unknown): value is FilepathMappingSyncRead {
  * resolves by longest prefix, so display order is not something an
  * operator controls or should (design spec §10) -- which is exactly why it
  * may as well be the one that holds still.
+ *
+ * **This sort is pinned, and for a while it was not.** A whole-branch
+ * review measured the gap: with the list's only order test being a
+ * single-row one, deleting this `.toSorted` left **214/214 web tests
+ * green** and reversing it left **214/214 green** too, so the argued
+ * behaviour above had no guard of any kind and the hook's own exported
+ * docblock described the opposite of it. `test/settings/useClientMappings.test.tsx`'s
+ * `editing a mapping does not move it: the list is ordered by id, not by
+ * the index walk` seeds two rows whose `updatedAt` order is the reverse of
+ * their `id` order, then edits the one at the top of the list and asserts
+ * it is still there. Both mutants were re-run against it: deleting
+ * `.toSorted` is **1 red of 215**, reversing it is **1 red of 215**, and
+ * in both cases the red one is that test.
  */
 function toMappings(rows: readonly StoredRow[], downloadClientId: number): readonly FilepathMappingSyncRead[] {
   const result: FilepathMappingSyncRead[] = [];
@@ -151,9 +181,9 @@ function isStoreClosed(err: unknown): boolean {
 }
 
 /**
- * Every mapping belonging to `downloadClientId`, in the order
- * `by_table_updated` holds them, re-read whenever one is added, edited or
- * removed. `undefined` until the first read resolves -- distinct from an
+ * Every mapping belonging to `downloadClientId`, ordered by `id` --
+ * {@link toMappings} owns that order and argues it -- re-read whenever one
+ * is added, edited or removed. `undefined` until the first read resolves -- distinct from an
  * empty array, which means "loaded, and this client has none" (Global
  * Constraint: zero is an answer, and the two must not render the same
  * way).

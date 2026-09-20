@@ -137,6 +137,46 @@ test('an edited mapping updates in place, which the insert channel alone cannot 
   });
 });
 
+test('editing a mapping does not move it: the list is ordered by id, not by the index walk', async () => {
+  // The order is a decision, and it is the hook's rather than the index's.
+  // `listByTable` walks `by_table_updated`, which is keyed on `updatedAt`,
+  // so an edit moves the row it touched to the end of that walk: the row an
+  // operator just corrected jumps away from where they were looking, on a
+  // screen whose whole job is to let them fix a typo. `toMappings` sorts by
+  // `id` -- the order they were added in -- so the list holds still.
+  //
+  // **Two assertions, and the pair is what pins the sort in both
+  // directions.** The rows are seeded with `updatedAt` in the reverse of
+  // `id` order, so the first assertion already separates all three
+  // candidate orders: the index walk and a reversed comparator both put
+  // `/beta` first, and only a sort by ascending `id` puts `/alpha` there.
+  // The second then drives the behaviour the sort exists for -- the row
+  // edited is the one that must not move -- and reds a deleted sort on its
+  // own even if the seeding order were ever made kinder.
+  //
+  // With one mapping on screen -- which is all the rest of this file and
+  // the e2e ever put up -- neither mutant is visible at all: deleting
+  // `.toSorted` and reversing it each left 214/214 green before this test
+  // existed.
+  const db = await freshDb();
+  await seed(db, [
+    mappingOp({ id: 1, fromPath: '/alpha', toPath: '/media/alpha', updatedAt: 20 }),
+    mappingOp({ id: 2, fromPath: '/beta', toPath: '/media/beta', updatedAt: 10 }),
+  ]);
+  render(<MappingPaths source={sourceFor(db)} clientId={1} />);
+  await waitFor(() => {
+    assert.deepEqual(pathsShown(), ['/alpha|/media/alpha', '/beta|/media/beta']);
+  });
+
+  // The changed `toPath` is what the wait is on, not the order alone, so
+  // this cannot pass against a list the re-read has not reached yet.
+  await seed(db, [mappingOp({ id: 1, fromPath: '/alpha', toPath: '/tank/alpha', updatedAt: 30 })]);
+
+  await waitFor(() => {
+    assert.deepEqual(pathsShown(), ['/alpha|/tank/alpha', '/beta|/media/beta']);
+  });
+});
+
 test('a removed mapping leaves the list, through the delete tombstone', async () => {
   // `installSyncTriggers` emits `AFTER DELETE ... 'delete'`, so a removal
   // tombstones to the browser for free (design spec §5). A tombstone is
