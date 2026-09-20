@@ -433,8 +433,19 @@ export interface DownloadClientSyncRead {
 
 /**
  * One path translation for one download client, as the replica holds it --
- * the ninth host synced table, and the first whose projection is a whole
- * row rather than a chosen subset of one.
+ * the ninth host synced table.
+ *
+ * **Its projection is the whole row, and it is the fifth of those rather
+ * than the first**, which an earlier version of this sentence claimed.
+ * Counted against `PRAGMA table_info` rather than by eye: `media_item`
+ * (9 of 9), `person` (5 of 5), `role` (7 of 7) and `rss_feed` (9 of 9) all
+ * precede it, and `rss_item` (11 of 13), the two download tables (13 of 15,
+ * 12 of 14) and `download_client` (9 of 12) are the ones that hold columns
+ * back. What is unusual here is narrower and still worth saying: this table
+ * has six columns and no seventh a client is being spared, so unlike every
+ * other entry in this family there is no omission to justify -- and
+ * `rss_feed`, the whole-row projection nearest to it, still transforms its
+ * `url` on the way out, where nothing here is transformed at all.
  *
  * **Both fields are filesystem paths, and both are here deliberately.** See
  * `TorrentDownloadSyncRead` above for why that does not contradict the

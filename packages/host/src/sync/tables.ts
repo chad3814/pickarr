@@ -186,9 +186,14 @@ import { redactUrl } from '../clients/redact.ts';
  * `packages/contract/src/sync.ts` stands exactly as written.
  *
  * The projection is six columns and the whole row: `filepath_mapping` has
- * nothing else in it. There is no third thing this table knows that a
- * client is being spared, which is worth saying because every other
- * paragraph above is about a column held back.
+ * nothing else in it, so there is no seventh thing this table knows that a
+ * client is being spared. That is worth saying because the two paragraphs
+ * above are each about a column decided over -- one held back, one let
+ * through transformed -- and there is no such decision here. It is not the
+ * first whole-row projection, though: `media_item`, `person`, `role` and
+ * `rss_feed` all project every column of their table too, counted against
+ * `PRAGMA table_info` in `packages/contract/src/sync.ts`'s
+ * `FilepathMappingSyncRead`.
  *
  * **A table being in this list is not a promise that every one of its
  * columns is projected.** `selectSql` below names the subset of each

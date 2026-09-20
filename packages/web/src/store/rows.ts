@@ -55,7 +55,9 @@ export interface ListByTableOptions {
 }
 
 /**
- * The seven tables `by_table_updated` covers, and no others. The original five
+ * The seven tables `by_table_updated` is *read* for, and no others -- which
+ * is no longer the same as the tables whose rows it holds; see the
+ * `filepath_mapping` paragraph at the end. The original five
  * were measured rather than intended (design spec §3.2) -- this file's own
  * tests page `media_item` and `rss_item` through the index directly.
  *
@@ -97,6 +99,28 @@ export interface ListByTableOptions {
  * `test/settings/Settings.test.tsx` and one in `test/shell/Shell.test.tsx`
  * -- each of them seeding real rows through `applyBatch` into a real
  * `fake-indexeddb` store and reading them back through this function.
+ *
+ * **`filepath_mapping` is a ninth synced table and an eighth exclusion, and
+ * it is the first one excluded for a reason other than not having the
+ * column.** It joined `HOST_SYNCED_TABLES` in the path-mappings slice with
+ * an `updatedAt` of its own (migration 19), so its rows are already in
+ * `by_table_updated` and this set is the only thing between them and a
+ * caller -- exactly where `download_client` stood one slice ago. It is
+ * absent here because no caller lists it yet; the settings screen that
+ * will is the task after the one that made it synced, and that task adds
+ * the entry below.
+ *
+ * So the throw's message is, for this one table, not true of the table:
+ * it says `projects no updatedAt` and this table does. That is deliberate
+ * and it is bounded. **No caller can produce it** -- `listByTable`'s
+ * production callers name `rss_feed`, `download_client` and `rss_item`
+ * literally, and no call site anywhere passes a table computed at runtime,
+ * so the only way to reach that string is to write the name in and the
+ * same commit that would do so adds the entry. Rewording the message to
+ * suit a case nobody can reach would cost the seven cases anyone *can*:
+ * for `role` and the six plugin tables the sentence is exactly right and
+ * says *why*, where a message about this set's membership would only
+ * restate the guard.
  */
 const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'media_item',
@@ -241,9 +265,12 @@ function drain(cursorRequest: IDBRequest<IDBCursorWithValue | null>, limit: numb
 
 /**
  * `table` in modification order, walking `by_table_updated`. Throws for any
- * of the seven tables {@link TABLES_WITH_UPDATED_AT} excludes -- see that
- * constant's doc for the measurement and the reasoning against returning an
- * empty page instead.
+ * of the eight tables {@link TABLES_WITH_UPDATED_AT} excludes -- seven that
+ * carry no `updatedAt` at all, and `filepath_mapping`, which carries one
+ * and is excluded only because nothing lists it yet. See that constant's
+ * doc for the measurement, for why an empty page would be worse, and for
+ * why the message below is left saying `projects no updatedAt` even though
+ * it is untrue of that eighth table and unreachable for it.
  */
 export async function listByTable(
   db: IDBDatabase,
