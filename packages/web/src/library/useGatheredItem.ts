@@ -9,34 +9,86 @@
  * before that release's download row has arrived, because the release came
  * from one transaction (`byMediaItem`) and its downloads from a later one
  * (`byRssItem`) that a concurrent write can land between. This hook does not
- * hide that -- it is a read-only screen, so the wrong answer is temporary
- * and self-correcting rather than actionable.
+ * hide that; the wrong answer is temporary and corrects itself on the next
+ * wake. **The justification here used to be "it is a read-only screen, so
+ * the wrong answer is not actionable", and this slice is what ends that
+ * premise** -- `ReleaseList` grows a per-release Pick button (picks design
+ * §2), so during that window a release whose download row has not been read
+ * yet renders exactly like one nobody has picked, and is therefore
+ * pickable. What happens to a second submission is the host's answer to
+ * give, not this hook's to claim: see the `already-submitted` refusal
+ * (picks design §6). Naming the window rather than resting on a premise
+ * that no longer holds.
  *
  * **What "self-correcting" means here.** This hook subscribes to the
  * gathered media item's own row (`table: 'media_item'`) for as long as it is
  * `enabled`, and a notification on that row triggers a fresh gather that
  * replaces the cached one. It does *not* subscribe to every release or
  * download the first gather found, because it has no way to name a row that
- * gather never saw in the first place -- so a correction that depends on a
- * *new* download's own row notifying is only caught the next time something
- * touches the media item itself, or the next time this hook is asked to
- * gather this id again from cold. That is the honest scope of "corrects on
- * the next notification": this screen does not poll, and it does not
- * guarantee a bound on when a race resolves.
+ * gather never saw in the first place.
+ *
+ * **The `new download` half of that is now covered, by the channel built for
+ * rows with no id yet.** This paragraph used to end by saying a correction
+ * depending on a new download's own row notifying "is only caught the next
+ * time something touches the media item itself", and while that hook was
+ * read-only it was merely a slow correction. It stopped being tolerable when
+ * a pick became possible: `ReleaseList`'s button reads `Picking…` until the
+ * `torrent_download` or `nzb_download` row arrives, and a wake that waits on
+ * something else touching the media item is a button that wedges (picks
+ * design §3, §7). So this hook also subscribes to **inserts** on those two
+ * tables -- `store/notify.ts`'s `subscribeInserts`, which fires with the ids
+ * a batch made newly visible, which is exactly what a row nobody could name
+ * in advance needs.
+ *
+ * **Filtered to this item, because an insert subscription is table-wide.**
+ * A `subscribeInserts('torrent_download', …)` wake carries ids and nothing
+ * else, so this hook reads each inserted row and re-gathers only when its
+ * `rssItemId` is one of the releases the cached gather holds. Without that,
+ * one pick anywhere would re-gather on every mounted card on all three
+ * browse screens. The read is one `getRow` per inserted id, issued together
+ * -- a keyed lookup each, against a gather that is 3+N transactions.
+ *
+ * **What it still does not subscribe to, and what that costs.** An
+ * *update* to a row already gathered wakes nothing here: `store/apply.ts`
+ * counts an upsert over a row that already carried a value as `touched`,
+ * never `inserted` (`Changed`'s own doc), so a download's status and
+ * percentage advancing from `queued` to `downloading` to done is not
+ * something this hook notices -- the first pick is, the progress after it is
+ * not. Nor is a new `rss_item`: a release arriving for an item already on
+ * screen is still only caught the next time something touches the media item
+ * itself, or the next time this hook gathers this id from cold. Neither is
+ * the filter's doing; both are rows this hook does not watch at all. The
+ * filter has one cost of its own: a download insert that lands before the
+ * first gather resolves has no release set to be matched against and is
+ * dropped, which is sound for the pick path -- a release must have been
+ * gathered and rendered for anyone to press its button -- and is not a claim
+ * about any other writer. That is the honest scope of "corrects on the next
+ * notification": this screen does not poll, and outside the pick path it
+ * does not guarantee a bound on when a race resolves.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { Store } from '../store/index.ts';
 import type { GatheredItem } from '../store/gather.ts';
 
 /**
- * The two `Store` members this hook needs, and nothing else -- so a test can
- * hand it a bare stub instead of a whole `Store` (see this file's test and
- * `MediaItemCard.test.tsx`). A real `Store` satisfies this by structural
+ * The four `Store` members this hook needs, and nothing else -- so a test
+ * can hand it a bare stub instead of a whole `Store` (see this file's test
+ * and `MediaItemCard.test.tsx`). A real `Store` satisfies this by structural
  * assignment.
+ *
+ * It was two until the download-insert subscription landed. `getRow` is the
+ * second of the two it gained and is not obviously implied by the first:
+ * `subscribeInserts`'s callback is handed ids and no table-parent
+ * information, and a download row's `id` is its own, unrelated to the
+ * `rssItemId` it belongs to (`TorrentDownloadSyncRead` carries both), so
+ * nothing in the wake itself can say whether the row is this item's. Reading
+ * the row is what answers that.
  */
 export interface GatheredSource {
   gatherMediaItem: Store['gatherMediaItem'];
   subscribe: Store['subscribe'];
+  subscribeInserts: Store['subscribeInserts'];
+  getRow: Store['getRow'];
 }
 
 /**
@@ -50,6 +102,30 @@ export interface GatheredSource {
  */
 function isStoreClosed(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'name' in err && err.name === 'InvalidStateError';
+}
+
+/**
+ * The two tables a pick lands in -- the same two `store/gather.ts` reads a
+ * release's downloads from, and the only two `ctx.downloads.submit` can
+ * produce a row in.
+ */
+const DOWNLOAD_TABLES = ['torrent_download', 'nzb_download'] as const;
+
+/**
+ * The release a replica download row belongs to, or `undefined` when the
+ * stored value does not carry one.
+ *
+ * A check rather than a cast, for the reason `store/gather.ts`'s predicates
+ * give at length: a replica persists across client builds, so a row written
+ * by one build is read against whatever the contract means by the next.
+ * `rssItemId` is the only field this hook dereferences on a download row, so
+ * it is the only one verified here -- an unreadable row is one this hook
+ * declines to re-gather for, not a crash somewhere downstream.
+ */
+function releaseOf(value: unknown): number | undefined {
+  if (typeof value !== 'object' || value === null || !('rssItemId' in value)) return undefined;
+  const rssItemId: unknown = value.rssItemId;
+  return typeof rssItemId === 'number' ? rssItemId : undefined;
 }
 
 /**
@@ -96,12 +172,45 @@ export function useGatheredItem(
       safeGather();
     }
 
-    // Re-gathers on a notification for this item's own row -- see this
-    // file's docblock for exactly what that does and does not correct.
+    /**
+     * Re-gathers if any of `ids` is a download under one of this item's
+     * releases. The release set is read off `cache` rather than off `item`
+     * so this closure does not have to be rebuilt -- and the subscriptions
+     * with it -- every time a gather lands.
+     */
+    async function regatherIfOurs(table: string, ids: readonly number[]): Promise<void> {
+      const releases = cache.current.get(mediaItemId)?.releases ?? [];
+      if (releases.length === 0) return;
+      const ours = new Set(releases.map((release) => release.id));
+      const values = await Promise.all(ids.map((id) => source.getRow(table, id)));
+      if (cancelled) return;
+      const mine = values.some((value) => {
+        const rssItemId = releaseOf(value);
+        return rssItemId !== undefined && ours.has(rssItemId);
+      });
+      if (mine) safeGather();
+    }
+
+    function safeRegatherIfOurs(table: string): (ids: readonly number[]) => void {
+      return (ids) => {
+        regatherIfOurs(table, ids).catch((err: unknown) => {
+          if (isStoreClosed(err)) return;
+          throw err;
+        });
+      };
+    }
+
+    // Re-gathers on a notification for this item's own row, and on a
+    // download inserted under one of its releases -- see this file's
+    // docblock for exactly what those do and do not correct.
     const unsubscribe = source.subscribe('media_item', mediaItemId, safeGather);
+    const unsubscribeInserts = DOWNLOAD_TABLES.map((table) =>
+      source.subscribeInserts(table, safeRegatherIfOurs(table)),
+    );
     return () => {
       cancelled = true;
       unsubscribe();
+      for (const off of unsubscribeInserts) off();
     };
   }, [source, mediaItemId, enabled]);
 

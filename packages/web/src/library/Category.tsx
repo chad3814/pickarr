@@ -25,7 +25,7 @@ import { useMediaItems, type MediaItemsSource } from './useMediaItems.ts';
 import { MediaItemCard } from './MediaItemCard.tsx';
 import type { GatheredSource } from './useGatheredItem.ts';
 
-/** Everything this screen needs from a store: `useMediaItems`'s two members, plus `MediaItemCard`'s own two (through `useGatheredItem`). A real `Store` satisfies this by structural assignment. */
+/** Everything this screen needs from a store: `useMediaItems`'s two members, plus `MediaItemCard`'s own four (through `useGatheredItem`), one of which -- `subscribeInserts` -- both halves already wanted. A real `Store` satisfies this by structural assignment. */
 export interface CategorySource extends MediaItemsSource, GatheredSource {}
 
 export interface CategoryProps {

@@ -2,13 +2,15 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
+import type { NzbDownloadSyncRead, RssItemSyncRead, TorrentDownloadSyncRead } from '@pickarr/contract';
 import { useGatheredItem, type GatheredSource } from '../../src/library/useGatheredItem.ts';
-import type { GatheredItem } from '../../src/store/gather.ts';
+import type { GatheredDownload, GatheredItem, GatheredRelease } from '../../src/store/gather.ts';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
- * that threw before its own call would leave `Harness` mounted and its
- * stub `subscribe` still "registered".
+ * that threw before its own call would leave `Harness` mounted, and every
+ * channel it holds -- its stub `subscribe`, and now the two stub
+ * `subscribeInserts` -- still "registered".
  */
 afterEach(cleanup);
 
@@ -19,8 +21,78 @@ function settle(): Promise<void> {
   });
 }
 
-/** A bare `GatheredItem` naming only what this suite reads back: the title. */
-function stubItem(id: number, title: string): GatheredItem {
+/**
+ * The two members the download-insert tests below drive, defaulted for every
+ * test that does not: an insert subscription nothing ever fires, and a
+ * replica holding no row. Spelled once here rather than in each stub, so a
+ * test that cares overrides exactly the member it cares about and a reader
+ * can tell the difference at a glance.
+ */
+const quietInserts = {
+  subscribeInserts: (): (() => void) => () => {},
+  getRow: async (): Promise<unknown> => undefined,
+};
+
+/** An `RssItemSyncRead` with everything but `id` defaulted -- this suite reads none of the rest. */
+function rssItem(id: number): RssItemSyncRead {
+  return {
+    id,
+    feedId: 1,
+    filename: `release-${String(id)}.mkv`,
+    createdAt: 0,
+    updatedAt: 0,
+    downloadType: 'torrent',
+    mediaItemId: null,
+    rankingScore: null,
+    resolution: '1080p',
+    resolutionDetail: null,
+    deliveredAt: null,
+  };
+}
+
+/** A `TorrentDownloadSyncRead` as the replica holds it -- the row `getRow` answers with below. */
+function torrentRow(id: number, rssItemId: number): TorrentDownloadSyncRead {
+  return {
+    id,
+    rssItemId,
+    downloadClientId: 1,
+    infohash: null,
+    clientRef: null,
+    status: 'queued',
+    attempts: 0,
+    createdAt: 0,
+    updatedAt: 0,
+    percentage: null,
+    absentSince: null,
+    deliveredAt: null,
+    reclaimedAt: null,
+  };
+}
+
+/** The torrent shape minus `infohash`, which an nzb has no equivalent of. */
+function nzbRow(id: number, rssItemId: number): NzbDownloadSyncRead {
+  return {
+    id,
+    rssItemId,
+    downloadClientId: 1,
+    clientRef: null,
+    status: 'queued',
+    attempts: 0,
+    createdAt: 0,
+    updatedAt: 0,
+    percentage: null,
+    absentSince: null,
+    deliveredAt: null,
+    reclaimedAt: null,
+  };
+}
+
+function release(id: number, downloads: readonly GatheredDownload[]): GatheredRelease {
+  return { id, row: rssItem(id), downloads };
+}
+
+/** A bare `GatheredItem` naming only what this suite reads back: the title, and its releases' downloads. */
+function stubItem(id: number, title: string, releases: readonly GatheredRelease[] = []): GatheredItem {
   return {
     mediaItem: {
       id,
@@ -34,7 +106,7 @@ function stubItem(id: number, title: string): GatheredItem {
       description: null,
     },
     pluginId: 'tv',
-    releases: [],
+    releases,
     roles: [],
     artwork: { poster: '', background: '', logo: '' },
     feedIds: [],
@@ -51,16 +123,32 @@ function Harness({
   enabled: boolean;
 }): ReactElement {
   const gathered = useGatheredItem(source, mediaItemId, enabled);
-  return <div data-testid="result">{gathered === undefined ? 'none' : gathered.mediaItem.title}</div>;
+  return (
+    <>
+      <div data-testid="result">{gathered === undefined ? 'none' : gathered.mediaItem.title}</div>
+      <div data-testid="downloads">
+        {(gathered?.releases ?? [])
+          .flatMap((each) => each.downloads)
+          .map((download) => `${download.table}:${String(download.id)}`)
+          .join(',')}
+      </div>
+    </>
+  );
 }
 
 function resultText(): string {
   return screen.getByTestId('result').textContent ?? '';
 }
 
+/** Every download the hook currently reports, as `table:id` -- what `ReleaseList` reads a status off. */
+function downloadsText(): string {
+  return screen.getByTestId('downloads').textContent ?? '';
+}
+
 test('a disabled hook never gathers, and reads as undefined', () => {
   let gathers = 0;
   const source: GatheredSource = {
+    ...quietInserts,
     gatherMediaItem: async (id: number) => {
       gathers += 1;
       return stubItem(id, 'Title');
@@ -75,6 +163,7 @@ test('a disabled hook never gathers, and reads as undefined', () => {
 test('enabling gathers once, and disabling then re-enabling reuses the cached result', async () => {
   let gathers = 0;
   const source: GatheredSource = {
+    ...quietInserts,
     gatherMediaItem: async (id: number) => {
       gathers += 1;
       return stubItem(id, 'Title');
@@ -106,6 +195,7 @@ test("a notification on the item's own row, while enabled, replaces the cached r
   let subscribedTable: string | undefined;
   let subscribedId: number | undefined;
   const source: GatheredSource = {
+    ...quietInserts,
     gatherMediaItem: async (id: number) => {
       gathers += 1;
       return stubItem(id, gathers === 1 ? 'First' : 'Second');
@@ -123,7 +213,11 @@ test("a notification on the item's own row, while enabled, replaces the cached r
   await waitFor(() => {
     assert.equal(resultText(), 'First');
   });
-  assert.equal(subscribedTable, 'media_item', 'this hook watches the media item row, not a release or a download');
+  assert.equal(
+    subscribedTable,
+    'media_item',
+    "the per-row channel names the media item, and only it -- the download tables are watched through subscribeInserts instead, because a row that does not exist yet has no id to name here",
+  );
   assert.equal(subscribedId, 7);
 
   notify?.();
@@ -137,6 +231,7 @@ test('a gather still in flight when the card collapses does not surface, but its
   let gathers = 0;
   let resolveGather: ((item: GatheredItem) => void) | undefined;
   const source: GatheredSource = {
+    ...quietInserts,
     gatherMediaItem: () => {
       gathers += 1;
       return new Promise<GatheredItem>((resolve) => {
@@ -165,4 +260,136 @@ test('a gather still in flight when the card collapses does not surface, but its
     assert.equal(resultText(), 'Title');
   });
   assert.equal(gathers, 1, 'the late result was cached, so reopening did not gather again');
+});
+
+/**
+ * A source whose first gather finds release 3 with nothing picked and every
+ * later one finds `arrival` under it -- the sequence a pick produces -- over
+ * a replica in which `arrival`'s row is the only thing `getRow` answers
+ * with. `fire` is the `subscribeInserts` callback the hook registered for
+ * `table`, or `undefined` if it registered none, so a test can tell a
+ * subscription that did not fire from one that was never made.
+ */
+function pickHarness(
+  arrival: GatheredDownload,
+  storedRow: unknown,
+): {
+  source: GatheredSource;
+  gathers: () => number;
+  fire: (table: string, ids: readonly number[]) => void;
+} {
+  let gathers = 0;
+  const callbacks = new Map<string, (ids: readonly number[]) => void>();
+  const source: GatheredSource = {
+    gatherMediaItem: async (id: number) => {
+      gathers += 1;
+      return stubItem(id, 'Title', [release(3, gathers === 1 ? [] : [arrival])]);
+    },
+    subscribe: () => () => {},
+    subscribeInserts: (table: string, cb: (ids: readonly number[]) => void) => {
+      callbacks.set(table, cb);
+      return () => {
+        callbacks.delete(table);
+      };
+    },
+    getRow: async (table: string, id: number) =>
+      table === arrival.table && id === arrival.id ? storedRow : undefined,
+  };
+  return {
+    source,
+    gathers: () => gathers,
+    fire: (table, ids) => {
+      const cb = callbacks.get(table);
+      assert.ok(cb !== undefined, `nothing is subscribed to ${table} inserts`);
+      cb(ids);
+    },
+  };
+}
+
+test("a torrent_download insert for one of this item's releases re-gathers, and the new download appears", async () => {
+  const row = torrentRow(11, 3);
+  const { source, gathers, fire } = pickHarness({ table: 'torrent_download', id: 11, row }, row);
+  render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+  assert.equal(downloadsText(), '', 'nobody has picked this release yet');
+
+  fire('torrent_download', [11]);
+  await waitFor(() => {
+    assert.equal(downloadsText(), 'torrent_download:11');
+  });
+  assert.equal(gathers(), 2, 'the insert drove a fresh gather off the replica, not a refetch');
+});
+
+test("an nzb_download insert for one of this item's releases re-gathers, and the new download appears", async () => {
+  const row = nzbRow(12, 3);
+  const { source, gathers, fire } = pickHarness({ table: 'nzb_download', id: 12, row }, row);
+  render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+  assert.equal(downloadsText(), '');
+
+  fire('nzb_download', [12]);
+  await waitFor(() => {
+    assert.equal(downloadsText(), 'nzb_download:12');
+  });
+  assert.equal(gathers(), 2, 'the nzb table is watched too, not only the torrent one');
+});
+
+test("a download insert for another media item's release does not re-gather", async () => {
+  // Without the filter this hook would re-gather on every download inserted
+  // anywhere in the replica, on every mounted card, on all three browse
+  // screens. The inserted row here names release 999, which this item does
+  // not hold.
+  const row = torrentRow(11, 999);
+  const { source, gathers, fire } = pickHarness({ table: 'torrent_download', id: 11, row }, row);
+  render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+  assert.equal(gathers(), 1);
+
+  fire('torrent_download', [11]);
+  await settle();
+  assert.equal(gathers(), 1, 'a stranger’s download woke nothing');
+  assert.equal(downloadsText(), '', 'and nothing of theirs was shown under this item');
+});
+
+test('unmounting takes down the download insert subscriptions as well as the row one', async () => {
+  // A subscription that survives unmount is how the store gets touched after
+  // it closes -- the race `isStoreClosed` exists for, and one this hook
+  // should not be creating more of.
+  const live = new Set<string>();
+  const source: GatheredSource = {
+    gatherMediaItem: async (id: number) => stubItem(id, 'Title'),
+    subscribe: (table: string, id: number) => {
+      const key = `${table}:${String(id)}`;
+      live.add(key);
+      return () => {
+        live.delete(key);
+      };
+    },
+    subscribeInserts: (table: string) => {
+      const key = `inserts:${table}`;
+      live.add(key);
+      return () => {
+        live.delete(key);
+      };
+    },
+    getRow: async () => undefined,
+  };
+  const { unmount } = render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+  assert.deepEqual(
+    [...live].toSorted(),
+    ['inserts:nzb_download', 'inserts:torrent_download', 'media_item:7'],
+    'all three channels are up while the card is open',
+  );
+
+  unmount();
+  assert.deepEqual([...live], [], 'and all three are down again, leaving nothing to touch a closed store');
 });
