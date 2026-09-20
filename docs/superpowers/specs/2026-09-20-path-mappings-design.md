@@ -142,9 +142,22 @@ makes them impossible.
 
 A `from_path` may be `D:\Downloads`. The UI must not be stricter than
 the consumer, so nothing here checks for a leading `/`, rejects
-backslashes, or normalises. `empty-path` refuses only the empty string,
-because an empty `from_path` matches every path and an empty `to_path`
-maps everything to a relative path.
+backslashes, or normalises. `empty-path` refuses only the empty string.
+
+*Corrected after the fact.* This paragraph said an empty `from_path`
+"matches every path", and that is **false** — measured, it matches no
+Windows path at all (`D:\Downloads\x`, `C:/Downloads/x`) and no
+relative one, because `matchesBoundary` requires the remainder to be
+empty or to begin with `/`. It is a POSIX-only catch-all, not a
+universal one.
+
+The refusal is still right, for the plainer reason: a mapping whose
+`from_path` is empty is a rule with no subject, and an empty `to_path`
+maps everything it does match to a relative path. Note that this
+sentence contradicted **this same section** three paragraphs above,
+which insists on Windows paths — a comment refuted by a neighbouring
+comment rather than by the code, which is the one shape "construct the
+case it calls impossible" does not catch.
 
 **`to_path` existence.** The host may legitimately not have the volume
 mounted yet. A mapping that does not resolve today can resolve tomorrow,

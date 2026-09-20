@@ -113,13 +113,21 @@ export interface ListByTableOptions {
  * each download client's row on `/settings`.
  *
  * Measured the way the two entries above are, by deleting
- * `'filepath_mapping'` from the set below: **33 web tests red** of 214 --
- * fifteen in `test/settings/ClientMappings.test.tsx`, nine in
+ * `'filepath_mapping'` from the set below: **34 web tests red** of 215 --
+ * fifteen in `test/settings/ClientMappings.test.tsx`, ten in
  * `test/settings/useClientMappings.test.tsx`, seven in
  * `test/settings/DownloadClients.test.tsx` and two in
  * `test/settings/Settings.test.tsx` -- each of them seeding real rows
  * through `applyBatch` into a real `fake-indexeddb` store and reading them
  * back through this function.
+ *
+ * This figure said 33 of 214 for the length of one fix wave, and was
+ * wrong by the time it was written: the commit adding the order test to
+ * `useClientMappings.test.tsx` landed two commits *earlier in that same
+ * wave*, and that test fails under this mutation too. Nothing was
+ * mismeasured -- the count was correct when taken and stale when
+ * committed. A measured number is only true of the tree it was measured
+ * against, which is worth knowing before writing the next one.
  *
  * The last nine of those are worth naming, because they are collateral
  * rather than aim: **eight of the nine mention no mapping at all.** The
