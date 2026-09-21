@@ -7,6 +7,7 @@ import type {
   JobHandler,
   MediaPlugin,
   PluginContext,
+  TokenResolver,
 } from '@pickarr/contract';
 import { openTestDatabase } from '../src/db/open.ts';
 import { migrateHost } from '../src/db/migrate.ts';
@@ -15,6 +16,14 @@ import type { Host } from '../src/host.ts';
 import type { QueuedFetch } from '../src/fetch/queue.ts';
 import type { Timers } from '../src/jobs/dispatcher.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
+
+/**
+ * A token resolver that fails loudly. Nothing in this file imports a file,
+ * so a resolver running at all means a test reached further than intended.
+ */
+const unusedResolver: TokenResolver = async () => {
+  throw new Error('a token resolver: this test never imports anything');
+};
 
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
 const unusedFetch: QueuedFetch = {
@@ -159,7 +168,7 @@ function makePlugin(overrides: Partial<MediaPlugin> & { id: string }): MediaPlug
     migrations: [],
     jobs: {},
     synced: [],
-    tokens: [],
+    tokens: {},
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: unusedEntryPoint('onDownloadRequest'),
@@ -915,8 +924,12 @@ test('a destination is validated against the tokens the plugin registered with',
   // over the union of both, or over an empty list is a different answer in
   // at least one of the four cases below.
   const { raw, host } = setup();
-  host.register(makePlugin({ id: 'alpha', mediaType: 'tv', tokens: ['alphatoken', 'ext'] }));
-  host.register(makePlugin({ id: 'beta', mediaType: 'movie', tokens: ['betatoken', 'ext'] }));
+  host.register(makePlugin({
+    id: 'alpha', mediaType: 'tv', tokens: { alphatoken: unusedResolver, ext: unusedResolver },
+  }));
+  host.register(makePlugin({
+    id: 'beta', mediaType: 'movie', tokens: { betatoken: unusedResolver, ext: unusedResolver },
+  }));
 
   const alphaOwn = await host.saveDestination('alpha', {
     root: '/library/alpha', shape: '{alphatoken}.{ext}', unmatchedDir: undefined,

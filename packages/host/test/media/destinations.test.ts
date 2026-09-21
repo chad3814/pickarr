@@ -35,7 +35,12 @@ function shippedTokens(): (pluginId: string) => readonly string[] | undefined {
       baseUrl: 'https://lookup.example.test',
     }).map((plugin) => [plugin.id, plugin]),
   );
-  return (pluginId) => plugins.get(pluginId)?.tokens;
+  // `Object.keys`, exactly as `host.ts` does it: `MediaPlugin.tokens` maps
+  // each declared token to its resolver, and this rule wants the names.
+  return (pluginId) => {
+    const tokens = plugins.get(pluginId)?.tokens;
+    return tokens === undefined ? undefined : Object.keys(tokens);
+  };
 }
 
 interface Harness {

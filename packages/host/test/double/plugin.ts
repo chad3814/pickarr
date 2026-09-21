@@ -24,6 +24,7 @@ import type {
   MediaType,
   Migration,
   PluginContext,
+  PluginTokens,
 } from '@pickarr/contract';
 
 /** Also the required prefix for every table this plugin declares. */
@@ -498,6 +499,37 @@ async function attachPeople(
   }
 }
 
+/** The last segment of a local path, under either separator. */
+function baseName(path: string): string {
+  const parts = path.split(/[/\\]/);
+  return parts[parts.length - 1] ?? '';
+}
+
+/**
+ * What this double's own shape could name, and how each name resolves.
+ *
+ * Kept short and unlike any shipped plugin's list: the double stands in for
+ * a plugin, not for `plugin-movie`. Each resolver reads something the double
+ * really has, so a flow test that configures a destination gets a real path
+ * rather than three nulls -- and so the double models `PluginTokens`'
+ * property that a declared name always has a function behind it.
+ */
+const TOKENS: PluginTokens = {
+  title: async (file, ctx) => (
+    file.mediaItemId === null ? null : (await ctx.read.mediaItem(file.mediaItemId))?.title ?? null
+  ),
+  filename: async (file) => {
+    const name = baseName(file.path);
+    const dot = name.lastIndexOf('.');
+    return dot <= 0 ? name : name.slice(0, dot);
+  },
+  ext: async (file) => {
+    const name = baseName(file.path);
+    const dot = name.lastIndexOf('.');
+    return dot <= 0 ? null : name.slice(dot + 1).toLowerCase();
+  },
+};
+
 export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
   async function applyResolved(
     entry: LookupEntry,
@@ -687,10 +719,7 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     migrations: MIGRATIONS,
     jobs: { lookup, poll, artwork },
     synced: [],
-    // What this double's own shape could name, were one configured. Kept
-    // short and unlike any shipped plugin's list: the double stands in for
-    // a plugin, not for `plugin-movie`.
-    tokens: ['title', 'filename', 'ext'],
+    tokens: TOKENS,
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;
@@ -722,14 +751,37 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     // a plugin that cannot answer all three is not a plugin — and neither is
     // a stub: this is what the double would really do if called.
     async onDownloadedFile(file, ctx) {
+      // The same two steps the engine takes: resolve this plugin's declared
+      // tokens, then hand them to the host, which owns the destination and
+      // the copy. Modelled rather than stubbed, because `flow.test.ts`
+      // drives this through a real `Host` and a stub would prove nothing
+      // about `ctxFor` wiring `library` at all.
+      const outcome = await ctx.library.place(file, async () => {
+        const entries = Object.entries(TOKENS);
+        const values = await Promise.all(entries.map(async ([, resolve]) => resolve(file, ctx)));
+        return Object.fromEntries(entries.map(([name], index) => [name, values[index] ?? null]));
+      });
+
       // The ids and the size, never `file.path` -- importer design spec §7,
       // and the same line the engine logs. A double that leaked a path
       // where the real plugin does not would make this file a worse model
       // of a plugin than it claims to be.
+      if ('refusal' in outcome) {
+        ctx.log('could not put a finished download in the library', {
+          rssItemId: file.rssItemId,
+          mediaItemId: file.mediaItemId,
+          refusal: outcome.refusal,
+          errno: outcome.errno,
+        });
+        // Thrown so the row stays `completed` and the next tick retries --
+        // design spec §5 and §7, and what the engine does.
+        throw new Error(`${DOUBLE_ID}: this download was not imported (${outcome.refusal})`);
+      }
       ctx.log('a download finished', {
         rssItemId: file.rssItemId,
         mediaItemId: file.mediaItemId,
         sizeBytes: file.sizeBytes,
+        placed: outcome.placed,
       });
     },
 

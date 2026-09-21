@@ -158,7 +158,7 @@ function stubPlugin(id: Category): MediaPlugin {
     synced: [],
     // No library path shape is configured in an end-to-end run, so there is
     // nothing here for a token to appear in.
-    tokens: [],
+    tokens: {},
     async onNewRssItems() {},
     async onDownloadedFile() {},
     async onDownloadRequest(rssItemId: number, ctx: PluginContext) {

@@ -12,6 +12,22 @@
  * checked for length. A test that asserted `tokens.length > 0`, or compared
  * `plugin.tokens` to the constant the plugin itself exports, would pass
  * against any of the three lists pasted into any of the three plugins.
+ *
+ * **`MediaPlugin.tokens` is a map of resolvers, so "declared but not
+ * resolved" has no test here and cannot have one.** It was the gap this
+ * slice inherited -- a plugin could name `{season}` and never answer for it,
+ * the shape validating on save and producing a hole at import -- and it is
+ * closed by the type rather than by an assertion: the key and the function
+ * are one entry, so there is no way to write the first without the second.
+ * The final test below is what remains worth asserting, and it is a
+ * different property: that the host reads *names* off that map wherever it
+ * used to read a list.
+ *
+ * **"No plugin declares a token twice" went the same way**, and its test is
+ * gone rather than rewritten: an object cannot hold one key twice, so the
+ * assertion became one about `Object.keys` rather than about any plugin.
+ * A duplicate key in a literal is a lint error (`no-dupe-keys`) at the site
+ * that wrote it.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,20 +54,31 @@ function pluginById(id: string): MediaPlugin {
   return plugin;
 }
 
+/**
+ * What a plugin's shape may name, in declaration order.
+ *
+ * `Object.keys`, which is what `host.ts`'s `tokensFor` hands
+ * `saveDestination` -- so the order asserted below is the order an operator
+ * sees, and a plugin that reordered its own map is a visible change here.
+ */
+function tokenNames(plugin: MediaPlugin): string[] {
+  return Object.keys(plugin.tokens);
+}
+
 test('the television plugin declares the tokens a television path may name', () => {
-  assert.deepEqual(pluginById('tv').tokens, [
+  assert.deepEqual(tokenNames(pluginById('tv')), [
     'series', 'season', 'episode', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
   ]);
 });
 
 test('the film plugin declares the tokens a film path may name', () => {
-  assert.deepEqual(pluginById('movie').tokens, [
+  assert.deepEqual(tokenNames(pluginById('movie')), [
     'title', 'year', 'releaseDate', 'collection', 'resolution', 'filename', 'ext',
   ]);
 });
 
 test('the xxx plugin declares the tokens an xxx path may name', () => {
-  assert.deepEqual(pluginById('xxx').tokens, [
+  assert.deepEqual(tokenNames(pluginById('xxx')), [
     'site', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
   ]);
 });
@@ -63,8 +90,8 @@ test('no two shipped plugins declare the same token list', () => {
     for (const b of plugins) {
       if (a.id === b.id) continue;
       assert.notDeepEqual(
-        a.tokens,
-        b.tokens,
+        tokenNames(a),
+        tokenNames(b),
         `"${a.id}" and "${b.id}" declare the same tokens, which is what a copy-paste looks like`,
       );
     }
@@ -78,17 +105,23 @@ test('every shipped plugin declares the three tokens that come from the rss item
   // in fact resolve.
   for (const plugin of shipped().values()) {
     for (const shared of ['resolution', 'filename', 'ext']) {
-      assert.ok(plugin.tokens.includes(shared), `"${plugin.id}" does not declare "${shared}"`);
+      assert.ok(tokenNames(plugin).includes(shared), `"${plugin.id}" does not declare "${shared}"`);
     }
   }
 });
 
-test('no plugin declares a token twice', () => {
+test('every declared token is a function, so the names the host validates against are the ones the plugin answers', () => {
+  // Not the closed gap restated -- the type already forbids a key with no
+  // function. This is about the *other* end: `host.ts` hands
+  // `saveDestination` `Object.keys(plugin.tokens)`, so anything a plugin
+  // put on that object which is not a resolver would be offered to an
+  // operator as a token and then resolve to nothing. A plugin assembling
+  // its map by spreading something wider -- a config object, a partially
+  // built record -- is how that happens, and it is not a type error at the
+  // point it is read.
   for (const plugin of shipped().values()) {
-    assert.equal(
-      new Set(plugin.tokens).size,
-      plugin.tokens.length,
-      `"${plugin.id}" declares a token more than once`,
-    );
+    for (const [name, resolver] of Object.entries(plugin.tokens)) {
+      assert.equal(typeof resolver, 'function', `"${plugin.id}" declares "${name}" as something other than a resolver`);
+    }
   }
 });

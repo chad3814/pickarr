@@ -582,6 +582,11 @@ function unusedReadCall(name: string): () => Promise<never> {
   return async () => { throw new Error(`ctx.read.${name}: not used by this test`); };
 }
 
+/** The same, for the one method on `ctx.library`. */
+function unusedLibraryCall(): () => Promise<never> {
+  return async () => { throw new Error('ctx.library.place: not used by this test'); };
+}
+
 /**
  * A `PluginContext` whose every member fails loudly except `jobs`, which is
  * all this handler actually uses -- it passes `ctx.jobs` to
@@ -612,6 +617,7 @@ function fakeContext(jobs: JobQueue): PluginContext {
       downloadsFor: unusedReadCall('downloadsFor'),
     },
     jobs,
+    library: { place: unusedLibraryCall() },
     fetch: {
       json: async () => { throw new Error('ctx.fetch.json: not used by this test'); },
       bytes: async () => { throw new Error('ctx.fetch.bytes: not used by this test'); },

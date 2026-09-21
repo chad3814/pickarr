@@ -112,7 +112,7 @@ const ownerPlugin: MediaPlugin = {
   migrations: [],
   jobs: {},
   synced: [],
-  tokens: [],
+  tokens: {},
   onNewRssItems: async () => { throw new Error('onNewRssItems: not used by this test'); },
   onDownloadedFile: async () => { throw new Error('onDownloadedFile: not used by this test'); },
   onDownloadRequest: async () => { throw new Error('onDownloadRequest: not used by this test'); },

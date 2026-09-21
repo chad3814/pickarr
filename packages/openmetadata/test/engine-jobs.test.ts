@@ -11,9 +11,30 @@ import {
 import { MAX_BATCH } from '../src/client.ts';
 import type { ApplyArgs } from '../src/engine.ts';
 import type { LookupEnvelope, Media } from '../src/types.ts';
-import type { DownloadSubmission, HostFetch, PluginContext } from '@pickarr/contract';
+import type {
+  DownloadSubmission,
+  DownloadedFile,
+  HostFetch,
+  PluginContext,
+  TokenResolver,
+} from '@pickarr/contract';
 
 const NOW = 1_700_000_000_000;
+
+/**
+ * Three resolvers that answer something traceable to their argument, so a
+ * test can tell which token produced which value in the map the engine
+ * builds -- three copies of `async () => null` would make the whole map one
+ * indistinguishable answer.
+ */
+const siteToken: TokenResolver = async (file) => `site-${file.rssItemId}`;
+const titleToken: TokenResolver = async (file) => (
+  file.mediaItemId === null ? null : `title-${file.mediaItemId}`
+);
+const extToken: TokenResolver = async (file) => file.path.split('.').pop() ?? null;
+
+/** The two-token map most of the specs below declare. */
+const NAMED_TOKENS = { site: siteToken, title: titleToken };
 
 function sceneMedia(providerRef: string): Media {
   return {
@@ -45,8 +66,10 @@ function build(service?: { fetch: HostFetch }) {
     apply: async (args) => { applied.push(args); },
     // Not the real xxx plugin's list -- that one is asserted in the host,
     // against the plugin the host actually builds. Here it only has to be
-    // something the engine can be seen to pass through unchanged.
-    tokens: ['site', 'title'],
+    // something the engine can be seen to pass through unchanged, and each
+    // resolver answers a value derived from its argument so a test can tell
+    // which token produced which string.
+    tokens: NAMED_TOKENS,
   }, {
     now: () => NOW,
     baseUrl: 'https://openmetadata.test',
@@ -68,7 +91,7 @@ test('carries the engine state table as migration 1, before the spec migrations'
     migrations: [{ version: 2, up: (db) => db.exec('CREATE TABLE xxx_own (id INTEGER PRIMARY KEY)') }],
     check: (): void => {},
     apply: async () => {},
-    tokens: ['site', 'title'],
+    tokens: NAMED_TOKENS,
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
   assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2]);
@@ -85,14 +108,18 @@ test("carries the spec's tokens through to the plugin, unchanged and unmerged", 
     migrations: [],
     check: (): void => {},
     apply: async () => {},
-    tokens: ['site', 'title', 'ext'],
+    tokens: { site: siteToken, title: titleToken, ext: extToken },
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
-  // The exact array, in order. The engine adds nothing of its own here --
-  // unlike `migrations`, where it prepends its state table. A shared
-  // `filename`/`ext` tail merged in by the engine would be invisible to the
-  // plugin declaring the list, and this is what says it is not doing that.
-  assert.deepEqual(plugin.tokens, ['site', 'title', 'ext']);
+  // The exact map, in order, and identical resolvers. The engine adds
+  // nothing of its own here -- unlike `migrations`, where it prepends its
+  // state table. A shared `filename`/`ext` tail merged in by the engine
+  // would be invisible to the plugin declaring the list, and this is what
+  // says it is not doing that.
+  assert.deepEqual(Object.keys(plugin.tokens), ['site', 'title', 'ext']);
+  assert.equal(plugin.tokens['site'], siteToken);
+  assert.equal(plugin.tokens['title'], titleToken);
+  assert.equal(plugin.tokens['ext'], extToken);
 });
 
 test('keeps a spec job handler alongside its own two', () => {
@@ -104,7 +131,7 @@ test('keeps a spec job handler alongside its own two', () => {
     jobs: { sweep: async () => {} },
     check: (): void => {},
     apply: async () => {},
-    tokens: ['site', 'title'],
+    tokens: NAMED_TOKENS,
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
   assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [LOOKUP_JOB, POLL_JOB, 'sweep']);
@@ -264,47 +291,122 @@ test('a name the payload names but the database does not throws rather than bein
   );
 });
 
-test('the entry point this slice does not develop still does something real', async () => {
+/**
+ * A finished download, with a path carrying a distinctive segment.
+ *
+ * The marker is so that a leak anywhere in a log line -- under `path`,
+ * folded into the message, or renamed to something like `file` -- is
+ * findable by searching the serialised line rather than only by naming the
+ * key it was expected under. Importer design spec §7: a plugin's log detail
+ * is the channel `last_error` is written from, and `/api/downloads` serves
+ * that to a browser as `DownloadRead.lastError`.
+ */
+const PATH_MARKER = 'PICKARR-PATH-MARKER-3b91fe';
+function downloaded(over: Partial<DownloadedFile> = {}): DownloadedFile {
+  return {
+    path: `/downloads/${PATH_MARKER}/a.mp4`,
+    sizeBytes: 10,
+    downloadClientId: 1,
+    rssItemId: 7,
+    mediaItemId: 42,
+    ...over,
+  };
+}
+
+/** Every log line this plugin wrote, as one string a marker can be searched for. */
+function serialisedLogs(harness: { logs: readonly { message: string; detail: unknown }[] }): string {
+  return harness.logs.map((line) => `${line.message} ${JSON.stringify(line.detail)}`).join('\n');
+}
+
+test('a finished download is handed to the host, with a value for every token the plugin declares', async () => {
   const { plugin, harness } = build();
-  await plugin.onDownloadedFile(
-    { path: '/downloads/a.mp4', sizeBytes: 10, downloadClientId: 1, rssItemId: 7, mediaItemId: null },
-    harness.ctx,
-  );
-  assert.match(harness.logs[0]?.message ?? '', /download/);
+
+  await plugin.onDownloadedFile(downloaded(), harness.ctx);
+
+  // Keyed exactly by what the spec declared, and each key carrying that
+  // resolver's own answer. The map is built from `Object.entries` of the
+  // declaration, which is what makes "declared but never resolved"
+  // unwritable -- there is no key here that no function produced, and no
+  // function whose answer landed under the wrong name.
+  assert.equal(harness.imports.length, 1);
+  assert.deepEqual(harness.imports[0]?.values, { site: 'site-7', title: 'title-42' });
+  assert.deepEqual(harness.imports[0]?.file, downloaded());
 });
 
-test('the line it logs names the two ids and carries no path', async () => {
+test('a token resolving to null is carried as null rather than dropped from the map', async () => {
   const { plugin, harness } = build();
-  // A path with a distinctive segment, so a leak anywhere in the entry --
-  // under `path`, folded into the message, or renamed to something like
-  // `file` -- is findable by searching the serialised line rather than only
-  // by naming the key it was expected under. Importer design spec §7: a
-  // plugin's log detail is the channel `last_error` is written from, and
-  // `/api/downloads` serves that to a browser as `DownloadRead.lastError`.
-  const path = '/downloads/PICKARR-PATH-MARKER-3b91fe/a.mp4';
-  await plugin.onDownloadedFile(
-    { path, sizeBytes: 10, downloadClientId: 1, rssItemId: 7, mediaItemId: 42 },
-    harness.ctx,
-  );
+
+  await plugin.onDownloadedFile(downloaded({ mediaItemId: null }), harness.ctx);
+
+  // Present and null, not absent: `resolveShape` refuses `unknown-token`
+  // for a key the map has no entry for, and treats a null value as a
+  // resolution to drop (design spec §8.8). Dropping the key here would turn
+  // the second into the first and refuse every shape naming it.
+  assert.deepEqual(harness.imports[0]?.values, { site: 'site-7', title: null });
+});
+
+test('the line it logs names the two ids, says where the file went, and carries no path', async () => {
+  const { plugin, harness } = build();
+
+  await plugin.onDownloadedFile(downloaded(), harness.ctx);
 
   const line = harness.logs[0];
   assert.ok(line !== undefined, 'onDownloadedFile logged nothing');
-  assert.deepEqual(line.detail, { rssItemId: 7, mediaItemId: 42, sizeBytes: 10 });
-  const serialised = `${line.message} ${JSON.stringify(line.detail)}`;
-  assert.ok(!serialised.includes('PICKARR-PATH-MARKER-3b91fe'), 'the log line carries the path');
-  assert.ok(!serialised.includes('/downloads/'), 'the log line carries a path fragment');
+  assert.deepEqual(line.detail, { rssItemId: 7, mediaItemId: 42, sizeBytes: 10, placed: 'library' });
+  assert.ok(!serialisedLogs(harness).includes(PATH_MARKER), 'the log line carries the path');
+  assert.ok(!serialisedLogs(harness).includes('/downloads/'), 'the log line carries a path fragment');
 });
 
 test('the line it logs says so when nothing matched the release', async () => {
   const { plugin, harness } = build();
-  await plugin.onDownloadedFile(
-    { path: '/downloads/a.mp4', sizeBytes: 10, downloadClientId: 1, rssItemId: 7, mediaItemId: null },
-    harness.ctx,
-  );
+
+  await plugin.onDownloadedFile(downloaded({ mediaItemId: null }), harness.ctx);
+
   // `null`, not absent. An unmatched release is design spec §6's own state,
   // and a missing key reads in a log as "the plugin forgot" rather than as
-  // "nothing matched".
-  assert.deepEqual(harness.logs[0]?.detail, { rssItemId: 7, mediaItemId: null, sizeBytes: 10 });
+  // "nothing matched". `placed` says which of §6's two destinations took it.
+  assert.deepEqual(
+    harness.logs[0]?.detail,
+    { rssItemId: 7, mediaItemId: null, sizeBytes: 10, placed: 'unmatched' },
+  );
+});
+
+test('a refused import is logged with its rule and then thrown, so the row stays completed', async () => {
+  const { plugin, harness } = build();
+  harness.answerImport({ refusal: 'destination-exists', errno: null });
+
+  // Thrown, not returned: `deliverCompleted` marks a row `delivered` the
+  // moment `onDownloadedFile` returns, so swallowing a refusal would record
+  // a file as imported that is not there -- and design spec §5 requires
+  // exactly the opposite, that the next tick tries again.
+  await assert.rejects(
+    () => plugin.onDownloadedFile(downloaded(), harness.ctx),
+    /destination-exists/,
+  );
+  assert.deepEqual(harness.logs[0]?.detail, {
+    rssItemId: 7, mediaItemId: 42, refusal: 'destination-exists', errno: null,
+  });
+});
+
+test('a refusal carrying an errno keeps it, and still carries no path', async () => {
+  const { plugin, harness } = build();
+  harness.answerImport({ refusal: 'copy-failed', errno: 'ENOSPC' });
+
+  await assert.rejects(
+    () => plugin.onDownloadedFile(downloaded(), harness.ctx),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      // The message reaches `deliverCompleted`'s log, so it is part of the
+      // same rule as the detail below.
+      assert.ok(!error.message.includes(PATH_MARKER), 'the thrown message carries the path');
+      assert.match(error.message, /copy-failed/);
+      return true;
+    },
+  );
+  assert.deepEqual(harness.logs[0]?.detail, {
+    rssItemId: 7, mediaItemId: 42, refusal: 'copy-failed', errno: 'ENOSPC',
+  });
+  assert.ok(!serialisedLogs(harness).includes(PATH_MARKER), 'the log line carries the path');
 });
 
 /**
