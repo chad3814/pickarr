@@ -1,0 +1,320 @@
+/**
+ * The one writer of `plugin_destination`: where a plugin's library lives,
+ * what shape a path under it takes, and where an unmatched release goes
+ * (design spec §3 and §6).
+ *
+ * **An upsert, and one function rather than an add and an edit.** A plugin
+ * either has a destination or it does not -- the table's grain is one row
+ * per plugin, enforced by migration 20's unique index -- so there is no
+ * create/update distinction for a caller to make, and no id for it to hold.
+ * `clients/mappings.ts` next door is three functions because a client may
+ * have any number of mappings and each is addressed by its own id; that
+ * shape does not transfer.
+ *
+ * **Every refusal is a value, never a throw** -- the shape `feeds/add.ts`,
+ * `clients/add.ts`, `clients/mappings.ts` and `media/shape.ts` already
+ * answer in, narrowed by callers with `'refusal' in result`. As there, that
+ * is narrower than "never throws": a SQLite error is rethrown untouched,
+ * reaches `api/server.ts`'s outermost handler and becomes a 500, which is
+ * where an infrastructure fault belongs.
+ *
+ * **No refusal carries anything from the input.** Not the root, not the
+ * shape, not the plugin id, not the token that was unknown. A refusal says
+ * which rule was broken and nothing about the value that broke it -- the
+ * rule `clients/mappings.ts` and `media/shape.ts` both state, and a root
+ * *is* a path. Design spec §3 says the host "refuses an unknown token,
+ * naming it"; the **code** names the rule and the settings screen already
+ * holds both the shape the operator typed and the plugin's declared token
+ * list, so it can name the offending token without this response repeating
+ * it back.
+ *
+ * ---
+ *
+ * ## The shape is validated by resolving it, not by a second parser
+ *
+ * `resolveShape` (`media/shape.ts`) is handed the shape and a map holding
+ * {@link SHAPE_PROBE_VALUE} under every token the plugin declares. An
+ * unknown token is then `resolveShape`'s own `unknown-token`, because the
+ * map has no key for it.
+ *
+ * **The alternative was a token extractor here, and it was rejected because
+ * the two would drift.** A shape accepted on save and refused at every
+ * import is exactly the failure design spec §3 validates on save to prevent,
+ * and it is what a save-time check with its own idea of brace syntax
+ * eventually produces. Resolving against a probe makes "accepted on save"
+ * mean "this shape resolves, for values that are non-empty and contain no
+ * separator" -- one function's answer, given twice.
+ *
+ * **What that does not promise, stated so it is not discovered later.** The
+ * values are not known on save, so three of `resolveShape`'s refusals remain
+ * reachable at import against a shape this module accepted: a value carrying
+ * `/` or `\` (`separator-in-value`), a value that is exactly `..`
+ * (`escapes-root`), and a filename whose every token resolved to nothing
+ * (`empty-filename`). Those are conditions of the data, not of the shape,
+ * and design spec §5's retry is what handles them.
+ *
+ * ## `unmatched_dir` is not run through the resolver, deliberately
+ *
+ * Design spec §6: "It is not a token and is not interpolated. It is a
+ * literal directory name, so nothing in it resolves and nothing in it can
+ * fail to resolve." Handing it to `resolveShape` would refuse a directory
+ * literally called `{title}` as an unknown token, which is a rule the spec
+ * does not have. Its three checks are written out below instead.
+ *
+ * Synchronous, like `addMapping` and `addFeed`: `node:sqlite` is synchronous
+ * -- this repo's documented exception to preferring an async API -- and this
+ * is one prepared statement. The `Host` method wrapping it is `async` only
+ * because the interface it satisfies is.
+ */
+import type { DatabaseSync } from 'node:sqlite';
+import type { DestinationRefusalCode } from '@pickarr/contract';
+import { resolveShape } from './shape.ts';
+import type { ShapeRefusalCode } from './shape.ts';
+
+/**
+ * Where an unmatched release lands when no destination names a directory --
+ * design spec §6.
+ *
+ * **Here and nowhere else.** Migration 20 gives the column no `DEFAULT`, so
+ * this constant is the whole of the rule: two spellings of one default is
+ * the drift, and migration 19's docblock has the measured account of what a
+ * column default on a synced table costs once SQLite has no `ALTER COLUMN`
+ * to remove it.
+ */
+export const DEFAULT_UNMATCHED_DIR = '_unmatched';
+
+/**
+ * The value every declared token resolves to while a shape is being
+ * validated.
+ *
+ * **Exported for one test, and that test is load-bearing.** It must contain
+ * no `/` and no `\`, or an ordinary shape would come back
+ * `separator-in-value` -- the one `ShapeRefusalCode` this route has no code
+ * for, and which {@link destinationRefusalFor} therefore treats as a bug.
+ * It must also be non-empty, or every shape's last segment would resolve to
+ * nothing and `empty-filename` would refuse them all.
+ *
+ * A single character, and an unremarkable one: nothing downstream reads it,
+ * and `padNumeric` in `media/shape.ts` pads an all-digit value, so a digit
+ * would make the probe two characters for no reason.
+ */
+export const SHAPE_PROBE_VALUE = 'x';
+
+/**
+ * What `Host.saveDestination` needs to write one plugin's destination.
+ *
+ * **Every field is a primitive and none is optional**, for the reason
+ * `AddDownloadClientInput` and `AddMappingInput` each give at length: these
+ * values arrive unchecked out of a JSON request body and this module is the
+ * validator that narrows them.
+ *
+ * `unmatchedDir` is **required-but-nullable rather than optional**, the
+ * shape `ReadServerDeps.host` uses and for the same reason:
+ * `exactOptionalPropertyTypes` is on, so an optional property would make
+ * "absent" and "explicitly undefined" two different things for a route
+ * forwarding a value it read off a body, and there is only one thing they
+ * could mean here -- use the default.
+ *
+ * The plugin id is **not** a field. It comes from the request path, so
+ * putting it in the body too would give one request two places to name a
+ * plugin and a way for them to disagree; `editMapping` keeps its `id` out of
+ * `EditMappingInput` for the same reason.
+ */
+export interface SaveDestinationInput {
+  root: string;
+  shape: string;
+  /** `undefined` means {@link DEFAULT_UNMATCHED_DIR}; `''` is refused. */
+  unmatchedDir: string | undefined;
+}
+
+/**
+ * Why a destination write declined, returned as a value rather than thrown
+ * -- the one-field shape `MappingRefusal`, `AddFeedRefusal` and
+ * `ShapeRefusal` already have, so `api/server.ts` narrows all of them with
+ * `'refusal' in result`.
+ *
+ * The codes are `@pickarr/contract`'s `DESTINATION_REFUSALS`, not this
+ * file's, because the browser client has to agree with them exactly to pick
+ * the right sentence; that module's own doc has the reasoning and the
+ * mapping from `ShapeRefusalCode`.
+ */
+export interface DestinationRefusal {
+  refusal: DestinationRefusalCode;
+}
+
+/**
+ * What this module needs from the host.
+ *
+ * `tokensFor` is a **function**, not the plugin registry and not the `Host`
+ * -- the shape every other write rule here takes (`addFeed`'s
+ * `isRegistered`, `addDownloadClient`'s `saveSecret`). Only `host.ts` holds
+ * the registered plugins, and a module under `src/media` importing it would
+ * be a cycle; a function closed over that map is all this needs, and it is
+ * also all this may have. `undefined` for a plugin nothing registered is the
+ * whole of the `unknown-plugin` check.
+ */
+export interface SaveDestinationDeps {
+  raw: DatabaseSync;
+  now: () => number;
+  tokensFor: (pluginId: string) => readonly string[] | undefined;
+}
+
+/**
+ * `SHAPE_PROBE_VALUE` under each of `tokens`, which is what turns
+ * `resolveShape`'s `unknown-token` into "this plugin does not declare that".
+ *
+ * `Object.fromEntries` rather than a `Map`: `resolveShape` reads its values
+ * with `Object.hasOwn`, which is prototype-safe on a plain object -- a token
+ * called `toString` is unknown, and `contract/test/compose.test.ts`'s
+ * sibling in `media/shape.test.ts` pins that. `fromEntries` defines rather
+ * than assigns, so even a token called `__proto__` lands as an own property
+ * instead of replacing the prototype.
+ */
+function probeValues(tokens: readonly string[]): Record<string, string> {
+  return Object.fromEntries(tokens.map((token) => [token, SHAPE_PROBE_VALUE]));
+}
+
+/**
+ * One of `media/shape.ts`'s refusals, as the code this route answers with.
+ *
+ * Every case is written out rather than a `default`, so a sixth
+ * `ShapeRefusalCode` added later is a compile error here instead of silently
+ * taking whichever code the default named.
+ *
+ * **`separator-in-value` throws, and that is not a refusal being swallowed.**
+ * It reports that a *value* carried a separator, and the only values this
+ * module supplies are copies of {@link SHAPE_PROBE_VALUE}, which has none
+ * -- so reaching this branch means this module handed the resolver something
+ * other than the probe, which is a bug in it rather than a fault in the
+ * operator's input. A throw becomes `api/server.ts`'s 500, which is where a
+ * bug belongs; answering an operator-facing refusal would blame them for it.
+ */
+function destinationRefusalFor(code: ShapeRefusalCode): DestinationRefusalCode {
+  switch (code) {
+    case 'malformed-shape':
+      return 'malformed-shape';
+    case 'unknown-token':
+      return 'unknown-token';
+    case 'backslash-in-shape':
+      return 'backslash-in-shape';
+    case 'escapes-root':
+      // Renamed on the way out: `escaping-path` is the unmatched directory's
+      // version of this rule, and a client has to be able to say which field
+      // was wrong. See `DESTINATION_REFUSALS`.
+      return 'escaping-shape';
+    case 'empty-filename':
+      return 'empty-filename';
+    case 'separator-in-value':
+      throw new Error('a shape probe value contained a path separator');
+  }
+}
+
+/**
+ * Whether `dir` reaches outside the root it is relative to.
+ *
+ * **Both separators, and this is the one place a backslash is judged rather
+ * than banned.** `media/shape.ts` refuses `\` anywhere in a shape so that
+ * one stored shape cannot lay a library out two different ways on two hosts.
+ * The same hazard is here -- `..\..` is one segment under a `/` split and
+ * two levels of traversal on a host where `\` separates -- but the remedy
+ * differs, because an unmatched directory is a *literal name* (design spec
+ * §6) and `AC\DC` is a name a filesystem accepts. So the check is on the
+ * escape rather than on the character: split on either separator and look
+ * for a `..` segment.
+ *
+ * **A `..` substring is not an escape**, the distinction `media/shape.ts`
+ * draws and design spec §6 and §7 both state: `Rocky..Balboa` and `..hidden`
+ * reach nowhere, and refusing them would refuse real directory names.
+ *
+ * A leading separator of either kind is absolute and is the other half of
+ * the same rule: `<root>/<unmatched>` with an absolute `<unmatched>` is not
+ * under the root at all.
+ */
+function escapesRoot(dir: string): boolean {
+  if (dir.startsWith('/') || dir.startsWith('\\')) return true;
+  return dir.split(/[/\\]/).includes('..');
+}
+
+/**
+ * Writes `pluginId`'s destination, answering `{ id }` or a refusal.
+ *
+ * **The order the checks run in is a property, not an accident.** The plugin
+ * is resolved first, so a caller naming an unregistered plugin is told that
+ * and nothing else -- checking the root or the shape first would let the
+ * code that came back say which plugin ids exist. After that the order is
+ * field order (root, shape, unmatched directory) and nothing depends on it:
+ * exactly one field is wrong in every test that expects a refusal.
+ *
+ * **Nothing is scheduled afterwards**, the same as `Host.addMapping` and for
+ * a reason of the same kind: the importer reads this table at the moment it
+ * imports, so a changed destination is in force at the next delivery tick
+ * with nothing to invalidate and nothing to enqueue.
+ *
+ * **`ON CONFLICT (plugin_id) DO UPDATE`, not a `SELECT` and a branch.** Two
+ * concurrent saves for one plugin would both pass a pre-check and then race
+ * the unique index, which is the reasoning `clients/add.ts`,
+ * `clients/pick.ts` and `clients/mappings.ts` each record for catching a
+ * constraint rather than pre-checking it. Here the constraint is not merely
+ * caught, it is *handled by the statement*: there is no refusal for "already
+ * has one", because having one is the ordinary case.
+ *
+ * **`created_at` is not in the `SET` list**, so a row keeps the time it was
+ * first configured; `updated_at` always is, including when every value is
+ * unchanged. An `UPDATE` writing the values already there is still a write,
+ * and the sync trigger logs it -- which is what tells a replica the operator
+ * confirmed the setting.
+ *
+ * **`RETURNING id` rather than `lastInsertRowid`.** On the conflict branch
+ * nothing is inserted, so `lastInsertRowid` would answer whatever this
+ * connection last inserted -- a different table's row, or 0 on a fresh
+ * connection. `RETURNING` answers the row the statement actually touched on
+ * both branches.
+ */
+export function saveDestination(
+  deps: SaveDestinationDeps,
+  pluginId: string,
+  input: SaveDestinationInput,
+): { id: number } | DestinationRefusal {
+  const tokens = deps.tokensFor(pluginId);
+  if (tokens === undefined) return { refusal: 'unknown-plugin' };
+
+  // `startsWith('/')` and nothing else. Not `node:path`: `media/shape.ts`
+  // records that every `node:path` function which does more than concatenate
+  // also normalises, and `isAbsolute` read with `path.win32` semantics would
+  // make one stored root mean two things on two hosts. `/` is the separator
+  // here, in the shape and in the result, on every platform.
+  if (!input.root.startsWith('/')) return { refusal: 'not-absolute-root' };
+
+  const resolved = resolveShape(input.shape, probeValues(tokens));
+  if ('refusal' in resolved) return { refusal: destinationRefusalFor(resolved.refusal) };
+
+  const unmatchedDir = input.unmatchedDir ?? DEFAULT_UNMATCHED_DIR;
+  // `=== ''` and nothing else -- not `.trim()`, the decision
+  // `clients/mappings.ts`'s `emptyPathRefusal` records: a directory named
+  // with a space is one every filesystem here permits, and trimming would
+  // silently store a different name than the operator typed.
+  if (unmatchedDir === '') return { refusal: 'empty-path' };
+  if (escapesRoot(unmatchedDir)) return { refusal: 'escaping-path' };
+
+  const at = deps.now();
+  const row = deps.raw.prepare(`
+    INSERT INTO plugin_destination
+      (plugin_id, root, shape, unmatched_dir, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT (plugin_id) DO UPDATE SET
+      root          = excluded.root,
+      shape         = excluded.shape,
+      unmatched_dir = excluded.unmatched_dir,
+      updated_at    = excluded.updated_at
+    RETURNING id
+  `).get(pluginId, input.root, input.shape, unmatchedDir, at, at);
+  // Not a cast: `RETURNING id` on a statement that inserts or updates
+  // exactly one row always answers one, so an absent row is this module
+  // being wrong about its own SQL rather than a condition a caller caused --
+  // and a 500 is where that belongs. `'id' in row` narrows exactly as far as
+  // the check proves, the pattern `isConstraintViolation` uses next door.
+  if (row === undefined || !('id' in row)) {
+    throw new Error('the destination upsert returned no id');
+  }
+  return { id: Number(row.id) };
+}

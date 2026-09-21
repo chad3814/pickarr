@@ -1,0 +1,457 @@
+/**
+ * `saveDestination`: the one writer of `plugin_destination`.
+ *
+ * **Every token list here comes from the plugins `main` actually builds**,
+ * through `shippedPlugins`, rather than from a literal array this file
+ * invents. The property the whole file is about is that a shape is validated
+ * against the *declaring* plugin's list, and a test whose lists were its own
+ * could assert that while the host validated against something else
+ * entirely. `test/plugins/tokens.test.ts` is what pins the lists themselves;
+ * this file pins what is done with them.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { DatabaseSync } from 'node:sqlite';
+import { DESTINATION_REFUSALS } from '@pickarr/contract';
+import type { DestinationRefusalCode } from '@pickarr/contract';
+import { openTestDatabase } from '../../src/db/open.ts';
+import { migrateHost } from '../../src/db/migrate.ts';
+import { SHAPE_PROBE_VALUE, saveDestination } from '../../src/media/destinations.ts';
+import type { SaveDestinationInput } from '../../src/media/destinations.ts';
+import { shippedPlugins } from '../../src/main.ts';
+
+const CREATED_AT = 1_700_000_000_000;
+const EDITED_AT = 1_700_000_999_000;
+
+/**
+ * The tokens the three shipped plugins declare, keyed by id -- `tokensFor`
+ * exactly as `host.ts` builds it, from the same list `main` registers.
+ */
+function shippedTokens(): (pluginId: string) => readonly string[] | undefined {
+  const plugins = new Map(
+    shippedPlugins({
+      now: () => CREATED_AT,
+      resolveSecret: async () => { throw new Error('resolveSecret: not used by this test'); },
+      baseUrl: 'https://lookup.example.test',
+    }).map((plugin) => [plugin.id, plugin]),
+  );
+  return (pluginId) => plugins.get(pluginId)?.tokens;
+}
+
+interface Harness {
+  raw: DatabaseSync;
+  save: (pluginId: string, input: Partial<SaveDestinationInput>) => ReturnType<typeof saveDestination>;
+  setNow: (at: number) => void;
+}
+
+/**
+ * A migrated in-memory database and a `saveDestination` bound to it, with a
+ * clock a test can move.
+ *
+ * **The clock moves for the same reason `clients/mappings.test.ts`'s does.**
+ * With one fixed `now()`, an upsert that failed to touch `updated_at` would
+ * leave the insert's value -- which is the value the update should have
+ * written -- and the assertion would pass against a writer that forgot.
+ *
+ * `input` is partial so each test names only the field it is about; the
+ * defaults below are a destination that every plugin accepts, so exactly one
+ * thing is wrong in any test that expects a refusal.
+ */
+function setup(): Harness {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const tokensFor = shippedTokens();
+  let at = CREATED_AT;
+  return {
+    raw,
+    setNow: (next) => { at = next; },
+    save: (pluginId, input) => saveDestination(
+      { raw, now: () => at, tokensFor },
+      pluginId,
+      { root: '/library', shape: '{title}.{ext}', unmatchedDir: undefined, ...input },
+    ),
+  };
+}
+
+/** The whole row for `pluginId`, or `undefined` when the plugin has none. */
+function rowFor(raw: DatabaseSync, pluginId: string): Record<string, unknown> | undefined {
+  const row = raw.prepare(`
+    SELECT id, plugin_id, root, shape, unmatched_dir, created_at, updated_at
+      FROM plugin_destination WHERE plugin_id = ?
+  `).get(pluginId);
+  // Spread because `node:sqlite` rows have a null prototype and `deepEqual`
+  // compares prototypes -- `clients/mappings.test.ts` normalises the same way.
+  return row === undefined ? undefined : { ...row };
+}
+
+/** How many destinations exist at all, so a refusal can be shown to have written nothing. */
+function rowCount(raw: DatabaseSync): number {
+  const row = raw.prepare('SELECT COUNT(*) AS n FROM plugin_destination').get();
+  if (row === undefined || !('n' in row)) throw new Error('COUNT(*) returned no n');
+  return Number(row.n);
+}
+
+/** The refusal code a result carries, or a failure naming what it was instead. */
+function refusalOf(result: ReturnType<typeof saveDestination>): DestinationRefusalCode {
+  assert.ok('refusal' in result, `expected a refusal, got ${JSON.stringify(result)}`);
+  return result.refusal;
+}
+
+/** The id a result carries, or a failure naming the refusal that came back instead. */
+function idOf(result: ReturnType<typeof saveDestination>): number {
+  assert.ok(!('refusal' in result), `expected an id, got refusal ${JSON.stringify(result)}`);
+  return result.id;
+}
+
+// ---------------------------------------------------------------------------
+// The matched pair: a token is valid for the plugin that declares it and for
+// no other. This is the point of the task.
+// ---------------------------------------------------------------------------
+
+test('a television shape may name {season}, and a film shape naming it is refused', () => {
+  // **The pair is what makes this a test.** A validator checking against the
+  // union of every plugin's tokens accepts both halves, and would pass any
+  // test that only ever tried a nonsense token like `{seasn}`. `season` is a
+  // real, resolvable token -- for television. Design spec §3 gives each
+  // plugin its own list precisely because only the plugin knows.
+  const { raw, save } = setup();
+
+  const accepted = save('tv', {
+    shape: '{series}/Season {season}/{series} - S{season}E{episode}.{ext}',
+  });
+  assert.ok(!('refusal' in accepted), 'every token in that shape is one the tv plugin declares');
+  assert.equal(
+    rowFor(raw, 'tv')?.['shape'],
+    '{series}/Season {season}/{series} - S{season}E{episode}.{ext}',
+    'and the shape is stored exactly as typed',
+  );
+
+  const refused = save('movie', { shape: '{title}/Season {season}/{title}.{ext}' });
+  assert.equal(refusalOf(refused), 'unknown-token', '`season` is not a token a film can resolve');
+  assert.equal(rowFor(raw, 'movie'), undefined, 'and nothing was written for the film plugin');
+});
+
+test('a film shape may name {collection}, and a television shape naming it is refused', () => {
+  // The same pair the other way round, so neither direction can be the one
+  // that happens to work. `collection` is `plugin-movie`'s own; `plugin-tv`
+  // declares no such thing.
+  const { raw, save } = setup();
+
+  const accepted = save('movie', { shape: '{collection}/{title} ({year}).{ext}' });
+  assert.ok(!('refusal' in accepted), 'every token in that shape is one the movie plugin declares');
+
+  const refused = save('tv', { shape: '{collection}/{series}.{ext}' });
+  assert.equal(refusalOf(refused), 'unknown-token');
+  assert.equal(rowFor(raw, 'tv'), undefined);
+});
+
+test('{site} belongs to the xxx plugin alone, and {year} to the film plugin alone', () => {
+  // The third plugin, and a second film-only token -- so the accepted set is
+  // not "tv plus movie" either. Both legs of each pair, again.
+  const { save } = setup();
+
+  assert.ok(!('refusal' in save('xxx', { shape: '{site}/{title} {releaseDate}.{ext}' })));
+  assert.equal(refusalOf(save('movie', { shape: '{site}/{title}.{ext}' })), 'unknown-token');
+
+  assert.ok(!('refusal' in save('movie', { shape: '{title} ({year}).{ext}' })));
+  assert.equal(refusalOf(save('xxx', { shape: '{title} ({year}).{ext}' })), 'unknown-token');
+});
+
+test('the three shared tokens are accepted by every plugin', () => {
+  // The other side of the same rule: `resolution`, `filename` and `ext` come
+  // from `rss_item` and the source path (design spec §3), so a validator
+  // that was somehow *too* narrow -- one plugin's own columns only -- would
+  // refuse a shape the host can in fact resolve.
+  const { save } = setup();
+  for (const pluginId of ['tv', 'movie', 'xxx']) {
+    const result = save(pluginId, { shape: '{title} {resolution}/{filename}.{ext}' });
+    assert.ok(!('refusal' in result), `${pluginId} must accept the three shared tokens`);
+  }
+});
+
+test('a token no plugin declares is refused too', () => {
+  // The weak case, kept because it is the one an operator actually hits --
+  // and kept *beside* the pairs above rather than instead of them, since on
+  // its own it cannot tell a per-plugin validator from a union one.
+  const { save } = setup();
+  assert.equal(refusalOf(save('tv', { shape: '{seasn}/{series}.{ext}' })), 'unknown-token');
+});
+
+// ---------------------------------------------------------------------------
+// The plugin id
+// ---------------------------------------------------------------------------
+
+test('a plugin id nothing registered is refused, and the refusal names no id', () => {
+  // Pre-checked against the registry rather than caught from a constraint,
+  // unlike `clients/mappings.ts`'s `unknown-client`: there is no plugin
+  // table for a foreign key to point at. A plugin is code the host loaded.
+  const { raw, save } = setup();
+  const result = save('book', {});
+  assert.equal(refusalOf(result), 'unknown-plugin');
+  assert.deepEqual(result, { refusal: 'unknown-plugin' }, 'the refusal carries nothing from the request');
+  assert.equal(rowCount(raw), 0);
+});
+
+test('the plugin is checked before anything else, so an unknown one cannot be told what else was wrong', () => {
+  // Ordering, asserted rather than assumed: with a root that is also
+  // invalid, an unknown plugin still answers `unknown-plugin`. The reverse
+  // order would let a caller probe which plugin ids exist by watching the
+  // code change.
+  const { save } = setup();
+  assert.equal(refusalOf(save('book', { root: 'relative', shape: '{nope}', unmatchedDir: '' })), 'unknown-plugin');
+});
+
+// ---------------------------------------------------------------------------
+// The root
+// ---------------------------------------------------------------------------
+
+test('a root that is not absolute is refused, and the refusal names no path', () => {
+  const { raw, save } = setup();
+  for (const root of ['library', './library', 'C:\\Media', '']) {
+    const result = save('tv', { root });
+    assert.deepEqual(result, { refusal: 'not-absolute-root' }, `${JSON.stringify(root)} is not an absolute root`);
+  }
+  assert.equal(rowCount(raw), 0, 'and no refused save wrote a row');
+});
+
+test('an absolute root is accepted and stored verbatim', () => {
+  const { raw, save } = setup();
+  const id = idOf(save('tv', { root: '/srv/media/television' }));
+  assert.equal(rowFor(raw, 'tv')?.['root'], '/srv/media/television');
+  assert.ok(Number.isSafeInteger(id) && id > 0, 'the row id comes back');
+});
+
+// ---------------------------------------------------------------------------
+// The shape's own structure
+// ---------------------------------------------------------------------------
+
+test('a shape that could never resolve is refused on save, each way named separately', () => {
+  // Design spec §3's reason for validating on save at all is that "a typo is
+  // caught where it is typed, not months later as a wrong path", and an
+  // unknown token is not the only typo with that property. These are
+  // `resolveShape`'s own refusals, surfaced under this route's vocabulary --
+  // which is what keeps the check that runs on save and the resolution that
+  // runs at import from ever disagreeing about what a shape means.
+  const { raw, save } = setup();
+  const cases: [string, DestinationRefusalCode][] = [
+    ['{title.{ext}', 'malformed-shape'],
+    ['{title}}.{ext}', 'malformed-shape'],
+    ['{}.{ext}', 'malformed-shape'],
+    ['Shows\\{title}.{ext}', 'backslash-in-shape'],
+    ['/{title}.{ext}', 'escaping-shape'],
+    ['../{title}.{ext}', 'escaping-shape'],
+    ['{title}/', 'empty-filename'],
+    ['', 'empty-filename'],
+  ];
+  for (const [shape, refusal] of cases) {
+    assert.deepEqual(save('tv', { shape }), { refusal }, `${JSON.stringify(shape)}`);
+  }
+  assert.equal(rowCount(raw), 0);
+});
+
+test('a `..` inside a shape segment is not an escape', () => {
+  // `resolveShape` refuses a `..` *segment*, never a `..` substring -- design
+  // spec §6 and §7 both say segment, and `Rocky..Balboa` reaches nowhere.
+  // Pinned here as well as there because this is the module that decides
+  // what an operator may save.
+  const { save } = setup();
+  assert.ok(!('refusal' in save('movie', { shape: 'Rocky..Balboa/{title}.{ext}' })));
+});
+
+test('the probe the shape is validated against carries no path separator', () => {
+  // `saveDestination` resolves the shape against a placeholder value for
+  // every declared token, so `separator-in-value` -- the one
+  // `ShapeRefusalCode` this route has no code for -- is unreachable by
+  // construction rather than by argument. This is that construction, pinned:
+  // a probe containing `/` or `\` would make an ordinary shape throw a 500.
+  assert.ok(!SHAPE_PROBE_VALUE.includes('/'));
+  assert.ok(!SHAPE_PROBE_VALUE.includes('\\'));
+  assert.notEqual(SHAPE_PROBE_VALUE, '', 'and an empty probe would make every shape an empty filename');
+});
+
+// ---------------------------------------------------------------------------
+// The unmatched directory (design spec §6)
+// ---------------------------------------------------------------------------
+
+test('an absent unmatched directory stores the default', () => {
+  const { raw, save } = setup();
+  save('tv', { unmatchedDir: undefined });
+  assert.equal(rowFor(raw, 'tv')?.['unmatched_dir'], '_unmatched',
+    'design spec §6: `<unmatched>` defaults to `_unmatched`');
+});
+
+test('a configured unmatched directory is stored as typed, and a nested one is allowed', () => {
+  const { raw, save } = setup();
+  save('tv', { unmatchedDir: 'Unsorted' });
+  assert.equal(rowFor(raw, 'tv')?.['unmatched_dir'], 'Unsorted');
+
+  save('movie', { unmatchedDir: '_pickarr/unmatched' });
+  assert.equal(rowFor(raw, 'movie')?.['unmatched_dir'], '_pickarr/unmatched',
+    'design spec §6: nested is a legitimate answer');
+});
+
+test('an empty unmatched directory is refused', () => {
+  // Design spec §6: it would mean "put unmatched files in the library root",
+  // which interleaves unnamed releases with organised ones and leaves no way
+  // to tell them apart afterwards.
+  const { raw, save } = setup();
+  assert.deepEqual(save('tv', { unmatchedDir: '' }), { refusal: 'empty-path' });
+  assert.equal(rowCount(raw), 0);
+});
+
+test('an absolute unmatched directory is refused', () => {
+  // Its own test rather than a row in a table with the `..` case, because
+  // design spec §8.6b requires each way to be named separately.
+  const { raw, save } = setup();
+  assert.deepEqual(save('tv', { unmatchedDir: '/tmp/unmatched' }), { refusal: 'escaping-path' });
+  assert.equal(rowCount(raw), 0);
+});
+
+test('an unmatched directory with a `..` segment is refused', () => {
+  const { raw, save } = setup();
+  for (const dir of ['..', '../unmatched', 'a/../../b', 'unmatched/..']) {
+    assert.deepEqual(save('tv', { unmatchedDir: dir }), { refusal: 'escaping-path' }, dir);
+  }
+  assert.equal(rowCount(raw), 0);
+});
+
+test('a `..` that is not a segment is allowed in an unmatched directory', () => {
+  // The distinction `media/shape.ts` draws and this module has to draw the
+  // same way: a `..` *substring* reaches nowhere. `..hidden` is a directory
+  // name, not a traversal.
+  const { raw, save } = setup();
+  save('tv', { unmatchedDir: '..hidden' });
+  assert.equal(rowFor(raw, 'tv')?.['unmatched_dir'], '..hidden');
+
+  save('movie', { unmatchedDir: 'Rocky..Balboa' });
+  assert.equal(rowFor(raw, 'movie')?.['unmatched_dir'], 'Rocky..Balboa');
+});
+
+test('an unmatched directory that escapes only under a backslash separator is refused too', () => {
+  // The escape check splits on `\` as well as `/`, so `..\..` cannot be
+  // stored as one innocent-looking segment that traverses two levels on a
+  // host where `\` separates. That is `media/shape.ts`'s argument for
+  // refusing a backslash in a shape, applied to the one value here that is
+  // not a shape: one stored configuration must not lay out a library two
+  // different ways depending on where pickarr runs.
+  //
+  // A backslash that is *not* an escape stays legal, which is why this is an
+  // escape check over both separators rather than a ban on the character:
+  // `AC\DC` is a directory name on every filesystem this host writes to.
+  const { raw, save } = setup();
+  assert.deepEqual(save('tv', { unmatchedDir: '..\\..' }), { refusal: 'escaping-path' });
+  assert.deepEqual(save('tv', { unmatchedDir: 'a\\..\\b' }), { refusal: 'escaping-path' });
+  assert.deepEqual(save('tv', { unmatchedDir: '\\tmp' }), { refusal: 'escaping-path' });
+  assert.equal(rowCount(raw), 0);
+
+  save('tv', { unmatchedDir: 'AC\\DC' });
+  assert.equal(rowFor(raw, 'tv')?.['unmatched_dir'], 'AC\\DC');
+});
+
+test('the unmatched directory is never interpolated', () => {
+  // Design spec §6: "It is not a token and is not interpolated." A `{title}`
+  // in it is a directory literally called `{title}` -- odd, and not this
+  // module's business to refuse, since nothing in it resolves and nothing in
+  // it can fail to resolve.
+  const { raw, save } = setup();
+  save('tv', { unmatchedDir: '{title}' });
+  assert.equal(rowFor(raw, 'tv')?.['unmatched_dir'], '{title}',
+    'stored verbatim -- a validator that ran it through the shape resolver would have refused it');
+});
+
+// ---------------------------------------------------------------------------
+// The upsert
+// ---------------------------------------------------------------------------
+
+test('a second save replaces the row in place, keeping its id and created_at', () => {
+  // The whole reason this is one route rather than a create and an update:
+  // a plugin either has a destination or it does not. The row keeping its
+  // `id` is not cosmetic -- every replica keys its copy by that id, and
+  // `docs/database-migrations.md` makes a row's id immutable.
+  const { raw, save, setNow } = setup();
+  const first = idOf(save('tv', { root: '/library', shape: '{series}.{ext}', unmatchedDir: 'Unsorted' }));
+
+  setNow(EDITED_AT);
+  const second = idOf(save('tv', { root: '/srv/tv', shape: '{series}/{episode}.{ext}', unmatchedDir: undefined }));
+
+  assert.equal(second, first, 'the same row');
+  assert.deepEqual(rowFor(raw, 'tv'), {
+    id: first,
+    plugin_id: 'tv',
+    root: '/srv/tv',
+    shape: '{series}/{episode}.{ext}',
+    unmatched_dir: '_unmatched',
+    created_at: CREATED_AT,
+    updated_at: EDITED_AT,
+  }, 'every column but created_at is replaced, and an absent unmatched directory returns to the default');
+  assert.equal(rowCount(raw), 1, 'and there is still one row for this plugin');
+});
+
+test('a save that changes nothing still moves updated_at', () => {
+  // An `UPDATE` that writes the values already there is still a write: it is
+  // what tells a replica the operator confirmed the setting, and the sync
+  // trigger logs it either way. Nothing here depends on detecting a no-op.
+  const { raw, save, setNow } = setup();
+  save('tv', {});
+  setNow(EDITED_AT);
+  save('tv', {});
+  assert.equal(rowFor(raw, 'tv')?.['updated_at'], EDITED_AT);
+  assert.equal(rowFor(raw, 'tv')?.['created_at'], CREATED_AT);
+});
+
+test('a refused save leaves an existing row exactly as it was', () => {
+  // Every refusal is taken before the statement runs, so there is no partial
+  // write to roll back -- pinned through the row rather than asserted, since
+  // a writer that validated after binding would look identical from outside
+  // until it did not.
+  const { raw, save, setNow } = setup();
+  save('tv', { root: '/library', shape: '{series}.{ext}', unmatchedDir: 'Unsorted' });
+  const before = rowFor(raw, 'tv');
+
+  setNow(EDITED_AT);
+  assert.equal(refusalOf(save('tv', { shape: '{collection}.{ext}' })), 'unknown-token');
+  assert.equal(refusalOf(save('tv', { root: 'relative' })), 'not-absolute-root');
+  assert.equal(refusalOf(save('tv', { unmatchedDir: '../out' })), 'escaping-path');
+
+  assert.deepEqual(rowFor(raw, 'tv'), before, 'not even updated_at moved');
+});
+
+test('two plugins hold two destinations, and saving one does not touch the other', () => {
+  const { raw, save } = setup();
+  save('tv', { root: '/library/tv' });
+  save('movie', { root: '/library/films' });
+  assert.equal(rowCount(raw), 2);
+  assert.equal(rowFor(raw, 'tv')?.['root'], '/library/tv');
+  assert.equal(rowFor(raw, 'movie')?.['root'], '/library/films');
+});
+
+// ---------------------------------------------------------------------------
+// The contract's list
+// ---------------------------------------------------------------------------
+
+test('every code in DESTINATION_REFUSALS is one this module can actually answer', () => {
+  // The feeds slice shipped two of its four codes unpinned, so its status
+  // mapper could have dropped a case with every test still green. This is
+  // that guard, from the other end: a code in the contract that nothing here
+  // produces is either dead vocabulary or a rule that was never implemented.
+  const { save } = setup();
+  const produced = new Set<DestinationRefusalCode>();
+  const probes: [string, Partial<SaveDestinationInput>][] = [
+    ['book', {}],
+    ['tv', { root: 'relative' }],
+    ['tv', { shape: '{collection}.{ext}' }],
+    ['tv', { shape: '{title.{ext}' }],
+    ['tv', { shape: 'a\\b.{ext}' }],
+    ['tv', { shape: '/{series}.{ext}' }],
+    ['tv', { shape: '{series}/' }],
+    ['tv', { unmatchedDir: '' }],
+    ['tv', { unmatchedDir: '../out' }],
+  ];
+  for (const [pluginId, input] of probes) produced.add(refusalOf(save(pluginId, input)));
+
+  assert.deepEqual(
+    [...produced].toSorted(),
+    [...DESTINATION_REFUSALS].toSorted(),
+    'the contract`s codes and the ones this writer produces must be the same set',
+  );
+});
