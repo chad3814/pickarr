@@ -4,7 +4,7 @@
  *
  * ```
  * resolveShape('{series}/Season {season}/{series} - S{season}E{episode}.{ext}',
- *              { series: 'Severance', season: '2', episode: '3', ext: 'mkv' })
+ *              { series: 'Severance', season: '02', episode: '03', ext: 'mkv' })
  *   -> { path: 'Severance/Season 02/Severance - S02E03.mkv' }
  * ```
  *
@@ -12,9 +12,18 @@
  * own declared token list because only a plugin knows whether `{season}`
  * means anything; the plugin resolves its tokens from its own tables and
  * hands the values here as strings. So every rule below is a rule about the
- * *shape of a string*, never about which token it came from -- and where
- * that costs something, the cost is written down rather than papered over
- * (see the padding note).
+ * *shape of a string*, never about which token it came from.
+ *
+ * **Nothing here widens a number, and that is the point of the `02` above
+ * being an input rather than an output.** This function used to zero-pad any
+ * all-digit value to two characters, which is design spec §8.2 for a season
+ * and is wrong for a title: the 2009 film *9* landed as `09`, permanently,
+ * because §10 puts re-importing out of scope. The signal to tell the two
+ * apart does not exist here -- the values arrive as
+ * `Record<string, string | null>` with nothing on them saying which is a
+ * number -- so the padding moved to the only place that does know, the
+ * plugin's own token resolver (`contract`'s `TokenResolver`). A second
+ * padder here, disagreeing with that one, would be worse than either.
  *
  * **Pure, and it opens nothing.** No `node:fs`, no `node:path`, no clock, no
  * database. Design spec §7 requires a shape that escapes the root to be
@@ -118,42 +127,6 @@ export interface ResolvedShape {
 }
 
 /**
- * The minimum width a purely numeric value is padded to, and design spec
- * §8.2's "zero-padded to two digits" in full.
- *
- * **A minimum, not a field width.** An episode of `100` keeps all three
- * digits; truncating to two would name a different episode, and there is no
- * reading of §8.2 under which `S02E00` is the right answer for episode 100.
- */
-const MIN_NUMERIC_WIDTH = 2;
-
-/** ASCII digits only, start to end. `[0-9]` rather than `\d` so the class is visible. */
-const ALL_DIGITS = /^[0-9]+$/;
-
-/**
- * Zero-pads `value` to {@link MIN_NUMERIC_WIDTH} if it is entirely ASCII
- * digits, and returns it untouched otherwise.
- *
- * **Decided on the shape of the value, because the resolver has no other
- * signal.** It is handed `Record<string, string | null>`; nothing in that
- * says `{season}` is a number and `{series}` is not, and design spec §3 is
- * explicit that only a plugin knows. So "looks like a number" is the whole
- * of the test.
- *
- * **The cost of that, stated rather than discovered later: a one-character
- * all-digit *title* is padded too.** `9` is a real film, and it lands as
- * `09`. That is wrong, it is pinned by a test that says so, and the only
- * fixes available are for the plugin to hand a pre-padded string or for the
- * token list to gain a per-token numeric flag -- neither of which this
- * function can decide on its own. A title of two or more characters is
- * unaffected, because padding to a minimum width of 2 is already satisfied.
- */
-function padNumeric(value: string): string {
-  if (!ALL_DIGITS.test(value)) return value;
-  return value.padStart(MIN_NUMERIC_WIDTH, '0');
-}
-
-/**
  * One resolved segment, or the refusal that stopped it.
  *
  * A bare `string` would not do: `''` is a legitimate resolution (every
@@ -203,7 +176,9 @@ function resolveSegment(segment: string, values: Readonly<Record<string, string 
     const value = values[name] ?? null;
     if (value !== null) {
       if (value.includes('/') || value.includes('\\')) return { refusal: 'separator-in-value' };
-      out += padNumeric(value);
+      // Verbatim. See the module doc on padding for why nothing here widens
+      // a number.
+      out += value;
     }
     index = close + 1;
   }

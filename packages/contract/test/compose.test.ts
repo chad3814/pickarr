@@ -47,7 +47,17 @@ const fixture: MediaPlugin = {
   migrations: [{ version: 1, up: () => {} }],
   jobs: { lookup },
   synced: [],
-  tokens: ['title', 'year', 'filename', 'ext'],
+  // A resolver per key, which is the whole of `PluginTokens`: there is no
+  // way to declare `year` here and leave nothing to answer for it. Each
+  // reads something real off the two arguments a resolver is handed, so the
+  // signature is proven to compose rather than merely to be satisfiable by
+  // `async () => null`.
+  tokens: {
+    title: async (_file, ctx: PluginContext) => (await ctx.read.mediaItem(1))?.title ?? null,
+    year: async (_file, ctx: PluginContext) => (await ctx.read.mediaItem(1))?.releaseDate?.slice(0, 4) ?? null,
+    filename: async (file) => file.path,
+    ext: async (file) => String(file.rssItemId),
+  },
   onNewRssItems: async (ids, ctx: PluginContext) => {
     await ctx.jobs.enqueue({ kind: 'lookup', payload: { ids } });
   },

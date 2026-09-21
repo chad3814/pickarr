@@ -41,50 +41,39 @@ function assertRefusal(result: ReturnType<typeof resolveShape>, code: ShapeRefus
   assert.deepEqual(result, { refusal: code });
 }
 
-test('spec 8.2: season 2 and episode 3 pad to two digits, and a token used twice resolves at both occurrences', () => {
+test('spec 8.2: an already-padded season and episode land as they are, and a token used twice resolves at both occurrences', () => {
+  // The two digits are §8.2's, and they arrive already made: the plugin's
+  // `season` resolver pads, because it is the only thing in the chain that
+  // knows a season is a number. `plugin-tv/test/tokens.test.ts` is what pins
+  // that it does; this pins that nothing here undoes it.
   const result = resolveShape(TV_SHAPE, {
-    series: 'Severance', season: '2', episode: '3', ext: 'mkv',
+    series: 'Severance', season: '02', episode: '03', ext: 'mkv',
   });
 
   assert.equal(pathOf(result), 'Severance/Season 02/Severance - S02E03.mkv');
 });
 
-test('a three-digit number keeps all three digits: padding is a minimum width, not a field width', () => {
-  const result = resolveShape(TV_SHAPE, {
-    series: 'Severance', season: '2', episode: '100', ext: 'mkv',
+test('no value is widened, whether it is one digit, three digits, or not a number at all', () => {
+  // The whole of what replaced `padNumeric`. `2` stays one character -- so a
+  // caller that forgot to pad gets `Season 2` rather than a silently
+  // corrected path -- and so does everything else.
+  const result = resolveShape('{a}/{b}/{c}/{d}/{e}.mkv', {
+    a: '2', b: '100', c: '07', d: '2x', e: '-1',
   });
 
-  assert.equal(pathOf(result), 'Severance/Season 02/Severance - S02E100.mkv');
+  assert.equal(pathOf(result), '2/100/07/2x/-1.mkv');
 });
 
-test('a value that is not all digits is left exactly as it is, including one that merely begins with digits', () => {
-  // `2x` and `-1` each contain a digit and neither is a number this resolver
-  // may invent a width for; `Severance` is the ordinary case. All three come
-  // back byte-for-byte.
-  const result = resolveShape('{series}/{season}/{episode}.{ext}', {
-    series: 'Severance', season: '2x', episode: '-1', ext: 'mkv',
-  });
-
-  assert.equal(pathOf(result), 'Severance/2x/-1.mkv');
-});
-
-test('a value that is already two or more digits is not padded further, leading zeros included', () => {
-  const result = resolveShape('{a}/{b}/{c}.mkv', { a: '07', b: '007', c: '2024' });
-
-  assert.equal(pathOf(result), '07/007/2024.mkv');
-});
-
-test('the documented hazard: a one-digit *title* is padded too, because the resolver knows no schema', () => {
-  // `9` is a real film. The resolver is handed strings with no indication of
-  // which token is a number, so a one-character all-digit title takes the
-  // same padding a season does. Pinned rather than hidden: if a later change
-  // narrows padding to declared numeric tokens, this test is the one that
-  // says so out loud.
+test('the hazard that removing the padding closed: a one-digit *title* is left alone', () => {
+  // `9` is a real film, from 2009. While the resolver padded every all-digit
+  // value it landed as `09`, permanently -- design spec §10 puts
+  // re-importing out of scope. Nothing here can tell a title from a season,
+  // which is why the padding moved to the plugin rather than growing a rule.
   const result = resolveShape('{title} ({year}).{ext}', {
     title: '9', year: '2009', ext: 'mkv',
   });
 
-  assert.equal(pathOf(result), '09 (2009).mkv');
+  assert.equal(pathOf(result), '9 (2009).mkv');
 });
 
 test('spec 8.8: a null token leaves no empty segment, no literal brace, no doubled separator and no trailing separator', () => {
@@ -306,7 +295,7 @@ test('values a shape never mentions are ignored rather than refused', () => {
 
 test('the separator in the result is `/` and only `/`, on whichever platform this runs', () => {
   const resolved = pathOf(resolveShape(TV_SHAPE, {
-    series: 'Severance', season: '2', episode: '3', ext: 'mkv',
+    series: 'Severance', season: '02', episode: '03', ext: 'mkv',
   }));
 
   assert.ok(!resolved.includes('\\'), 'no backslash in the result');

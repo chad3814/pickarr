@@ -1,6 +1,7 @@
 import type { DownloadClients } from './downloads.ts';
 import type { HostFetch } from './fetch.ts';
 import type { JobQueue, JobRecord } from './jobs.ts';
+import type { LibraryImporter } from './library.ts';
 import type { MediaReader, MediaWriter } from './media.ts';
 import type { Migration } from './migrations.ts';
 import type { SyncedTable } from './sync.ts';
@@ -78,8 +79,56 @@ export interface PluginContext {
   jobs: JobQueue;
   fetch: HostFetch;
   downloads: DownloadClients;
+  /**
+   * Where a finished download is put. One per plugin context, closed over
+   * this plugin's id, so a plugin cannot import into another's library --
+   * the same shape `read` already has, and for the same reason: the id is
+   * never a parameter.
+   *
+   * Here rather than something a plugin does with `ctx.db` and `node:fs`
+   * itself: `plugin_destination` is a host table and the atomic copy is one
+   * rule (design spec §4) that three plugins would otherwise have three
+   * chances to get wrong. See `./library.ts`.
+   */
+  library: LibraryImporter;
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }
+
+/**
+ * Resolves one token's value for one finished download, or `null` when this
+ * release has nothing to put there.
+ *
+ * Takes `(file, ctx)` -- the same pair `onDownloadedFile` takes, deliberately,
+ * so a resolver reads as the thing it is: a slice of the work that entry
+ * point does.
+ *
+ * **`null` is an answer, not a failure.** A film with no collection resolves
+ * `null` and the host resolver drops the segment (design spec §8.8). A
+ * resolver that cannot answer because something is *wrong* -- a database
+ * fault, a row the schema says must exist and does not -- throws, which
+ * leaves the download row `completed` for the next tick.
+ *
+ * **A numeric token pads its own value.** `{season}` resolving to `'02'` is
+ * the plugin's doing, because design spec §8.2's two digits are a fact about
+ * season numbers and the host resolver is handed strings with nothing on
+ * them saying which is a number. The resolver used to pad any all-digit
+ * value itself, which rendered the 2009 film *9* as `09`; see
+ * `host/src/media/shape.ts` for the removal.
+ */
+export type TokenResolver = (file: DownloadedFile, ctx: PluginContext) => Promise<string | null>;
+
+/**
+ * What a plugin's library path shape may name, and how each name resolves.
+ *
+ * **A map rather than a list, and that is the whole of the guard.** The
+ * declaration and the resolver are one object, so a plugin cannot declare
+ * `{season}` and forget to resolve it: there is no way to write the key
+ * without writing the function. Before this, `tokens` was `readonly
+ * string[]` and nothing anywhere checked the pair -- the shape validated on
+ * save against the list and produced a hole at import, and no test could
+ * have caught it for a plugin nobody had written yet.
+ */
+export type PluginTokens = Readonly<Record<string, TokenResolver>>;
 
 /**
  * `signal` is optional so every handler written before the dispatcher
@@ -119,12 +168,18 @@ export interface MediaPlugin {
 
   /**
    * The tokens this plugin's library path shape may name, without braces --
-   * `season`, not `{season}`.
+   * `season`, not `{season}` -- each keying the function that resolves it.
    *
    * Declared by the plugin for the same reason `synced` is declared and its
    * triggers are not: only the plugin knows what it can resolve. `{season}`
    * means something for television and nothing for a film, and the host has
    * no way to tell which is which.
+   *
+   * **The declaration *is* the resolver** ({@link PluginTokens}), so
+   * "declared but never resolved" is not a state a plugin can be in. The
+   * host validates a saved shape against `Object.keys(plugin.tokens)` and
+   * the engine builds the values map from `Object.entries(plugin.tokens)`;
+   * one object, so the two sets cannot disagree.
    *
    * `PUT /api/destinations/:pluginId` validates a saved shape against **the
    * declaring plugin's** list -- `media/destinations.ts` reads it through a
@@ -151,7 +206,7 @@ export interface MediaPlugin {
    * merged in here so that one list answers "what may I type", with nothing
    * a reader has to know to add to it.
    */
-  readonly tokens: readonly string[];
+  readonly tokens: PluginTokens;
 
   onNewRssItems(ids: readonly number[], ctx: PluginContext): Promise<void>;
   onDownloadedFile(file: DownloadedFile, ctx: PluginContext): Promise<void>;

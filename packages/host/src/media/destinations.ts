@@ -94,9 +94,10 @@ export const DEFAULT_UNMATCHED_DIR = '_unmatched';
  * It must also be non-empty, or every shape's last segment would resolve to
  * nothing and `empty-filename` would refuse them all.
  *
- * A single character, and an unremarkable one: nothing downstream reads it,
- * and `padNumeric` in `media/shape.ts` pads an all-digit value, so a digit
- * would make the probe two characters for no reason.
+ * A single character, and an unremarkable one: nothing downstream reads it.
+ * It used to be documented as "not a digit, because `padNumeric` would
+ * widen one" -- `media/shape.ts` no longer pads anything, so that reason is
+ * gone and the choice is now arbitrary rather than load-bearing.
  */
 export const SHAPE_PROBE_VALUE = 'x';
 

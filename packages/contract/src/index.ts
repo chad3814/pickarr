@@ -1,4 +1,20 @@
-export type { DownloadedFile, JobHandler, MediaPlugin, MediaType, PluginContext } from './plugin.ts';
+export type {
+  DownloadedFile,
+  JobHandler,
+  MediaPlugin,
+  MediaType,
+  PluginContext,
+  PluginTokens,
+  TokenResolver,
+} from './plugin.ts';
+export type {
+  ImportOutcome,
+  ImportPlacement,
+  ImportRefusal,
+  ImportRefusalCode,
+  LibraryImporter,
+  TokenValues,
+} from './library.ts';
 export type { JobEnqueue, JobQueue, JobRecord } from './jobs.ts';
 export type {
   DownloadRead,
