@@ -32,8 +32,9 @@ afterEach(cleanup);
 /**
  * **The three plugins' own declarations, imported rather than retyped.**
  * This is the whole point of the section and of this file: `MediaPlugin.tokens`
- * is declared once, by the plugin that resolves them, and both the host's
- * validator and this screen read that one array. A list spelled again in
+ * is declared once, by the plugin that resolves them, against the names
+ * `@pickarr/contract` spells; the host's validator and this screen both
+ * read from that declaration. A list spelled again in
  * `packages/web` would pass every other test here and drift silently the
  * moment a plugin changed -- the same copy-inheritance defect an earlier
  * slice found in the refusal codes and had to fix.
@@ -45,14 +46,22 @@ afterEach(cleanup);
  * module `src/main.tsx` reaches fails `npm run build` outright, on
  * `import { DatabaseSync } from "node:sqlite"` -- `@pickarr/plugin-tv`
  * imports `@pickarr/openmetadata`, which depends on `drizzle-orm`, which
- * reaches node's SQLite driver. See this task's report: the consequence is
- * that the *production* wiring of this prop has no source inside
- * `packages/web`, and is the one thing about this section left unwired.
+ * reaches node's SQLite driver. `Settings.tsx` therefore builds its list
+ * from `@pickarr/contract`'s `TOKEN_NAMES_BY_PLUGIN`, which carries no node
+ * import. The plugin *ids* in that map are the one pair the compiler cannot
+ * lock -- `host/test/plugins/tokens.test.ts` compares them against the
+ * plugins `main` actually builds, which is why the ids below still come
+ * from the plugin packages rather than being retyped.
+ *
+ * `Object.keys`, not a name array: `MediaPlugin.tokens` is a
+ * `TokensFor<Name>` record of resolvers, so its keys *are* the declaration,
+ * and a token a plugin stopped resolving vanishes here rather than being
+ * offered to an operator who would get `unknown-token` on save.
  */
 const PLUGINS: readonly PluginTokens[] = [
-  { pluginId: TV_PLUGIN_ID, tokens: TV_TOKENS },
-  { pluginId: MOVIE_PLUGIN_ID, tokens: MOVIE_TOKENS },
-  { pluginId: XXX_PLUGIN_ID, tokens: XXX_TOKENS },
+  { pluginId: TV_PLUGIN_ID, tokens: Object.keys(TV_TOKENS) },
+  { pluginId: MOVIE_PLUGIN_ID, tokens: Object.keys(MOVIE_TOKENS) },
+  { pluginId: XXX_PLUGIN_ID, tokens: Object.keys(XXX_TOKENS) },
 ];
 
 /** Seeds `ops` into `db` in one batch -- the cursor value has no bearing on these tests. */

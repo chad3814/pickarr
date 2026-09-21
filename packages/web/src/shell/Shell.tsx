@@ -54,6 +54,7 @@ import { Settings } from '../settings/Settings.tsx';
 import { postFeed } from '../settings/AddFeed.tsx';
 import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
 import { mappingSubmit } from '../settings/postMapping.ts';
+import { destinationSubmit } from '../settings/postDestination.ts';
 import { postPick } from '../library/postPick.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
@@ -212,8 +213,8 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/*
-          `postFeed`, `postDownloadClient` and `mappingSubmit` are the
-          real `submit`s this screen needs
+          `postFeed`, `postDownloadClient`, `mappingSubmit` and
+          `destinationSubmit` are the real `submit`s this screen needs
           (`../settings/AddFeed.tsx`'s own doc on why each is injected
           rather than defaulted): wired here, explicitly, rather than given
           a default inside either form that would perform network I/O
@@ -234,6 +235,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
                 submitFeed={postFeed}
                 submitDownloadClient={postDownloadClient}
                 submitMapping={mappingSubmit}
+                submitDestination={destinationSubmit}
               />
             )
           }

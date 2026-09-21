@@ -933,14 +933,30 @@ const HOST_PATH = '/media/downloads';
 const HOST_PATH_CORRECTED = '/mnt/library/downloads';
 
 /**
- * A locator's box, or a failure naming the locator rather than a `null`
- * dereference. `boundingBox()` answers `null` for an element that is not
- * rendered, and an assertion comparing two `null`s would pass.
+ * A locator's box in **document** coordinates, or a failure naming the
+ * locator rather than a `null` dereference. `boundingBox()` answers `null`
+ * for an element that is not rendered, and an assertion comparing two
+ * `null`s would pass.
+ *
+ * **The scroll offset is added, and that is the point of this helper.**
+ * `boundingBox()` is relative to the viewport, so two readings of a
+ * motionless element disagree the moment anything scrolls the page between
+ * them -- and Playwright scrolls on its own, to bring the element it is
+ * about to click into view. The one caller below compares a box taken
+ * before an editor opens against one taken after, to assert the row did
+ * not move; when the `/settings` screen grew its destinations section the
+ * document became 2860px against a 720px viewport, the click on Edit
+ * scrolled it 10px, and the comparison failed on a row that had not moved
+ * at all -- `window.scrollY` went 676 -> 686 while the element's
+ * document-relative top stayed at 1378px exactly. Viewport coordinates
+ * were only ever stable here by the accident of a page short enough not to
+ * scroll, which is not a property this suite should depend on.
  */
 async function boxOf(locator: ReturnType<Page['locator']>, what: string): Promise<{ x: number; y: number; width: number; height: number }> {
   const box = await locator.boundingBox();
   if (box === null) throw new Error(`${what} has no bounding box, so it is not rendered`);
-  return box;
+  const scroll = await locator.page().evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+  return { x: box.x + scroll.x, y: box.y + scroll.y, width: box.width, height: box.height };
 }
 
 test('an operator can add, edit and remove a path mapping on a download client', async ({ page, harness }) => {
@@ -1011,7 +1027,10 @@ test('an operator can add, edit and remove a path mapping on a download client',
   // and Remove from the DOM while the row is being edited, so without a
   // height of its own the first line shrinks to the text and the paths
   // ride up under the pointer. Measured with only that one declaration
-  // removed, the client path's top edge went from 693.5px to 690px.
+  // removed, the client path's top edge rose by 3.5px (693.5 -> 690 in the
+  // viewport coordinates `boxOf` reported at the time; it reports document
+  // coordinates now, which moves both absolute numbers by the scroll
+  // offset and leaves the 3.5px shift this pin catches unchanged).
   //
   // The whole box rather than `y` alone: nothing about opening an editor
   // should move the path horizontally or resize it either, and all four
