@@ -239,7 +239,7 @@ const ECHOABLE_TOKEN = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
  * Every case is written out rather than a `default`, so a **seventh**
  * `ShapeRefusalCode` added later is a compile error here instead of
  * silently taking whichever code the default named. (There are six today
- * -- `shape.ts:121-127`. `media/import.ts` and `contract/library.ts` both
+ * -- `shape.ts:128-134`. `media/import.ts` and `contract/library.ts` both
  * say "seventh"; this line said "sixth" and was the one out of step.)
  *
  * **`separator-in-value` throws, and that is not a refusal being swallowed.**

@@ -152,7 +152,7 @@ const ERRNO = /^[A-Z][A-Z0-9_]*$/;
  * §7's "a copy that fails part way leaves only the temporary") has to be
  * shown against. It is also the only way to occupy the destination
  * *between* the two `presentAt` checks below. **Five of
- * `test/media/import.test.ts`'s 22 tests inject one**; the other seventeen
+ * `test/media/import.test.ts`'s 23 tests inject one**; the other eighteen
  * run the real `node:fs/promises` copy.
  */
 export type CopyFile = (source: string, destination: string) => Promise<void>;

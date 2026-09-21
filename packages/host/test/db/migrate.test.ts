@@ -1716,10 +1716,10 @@ test('migration 20 creates plugin_destination, keyed by id and unique on plugin_
   // Indexed, not cast. `node:sqlite` already types a row as
   // `Record<string, SQLOutputValue>`, so `row['name']` compiles on its own
   // and `(r as { … })` bought only a second, unchecked spelling of five
-  // column names. 61 lines of this file still carry the older spelling and
+  // column names. 60 lines of this file still carry the older spelling and
   // replacing those is not this task -- but these two were written on this
   // branch, so they are nobody's inheritance, and the plan for this slice
-  // forbids a cast to silence a type error. See `opsLogged` below for the
+  // forbids a cast to silence a type error. See `opsLogged` above for the
   // `in`-guard form, which is what a `.get()` needs.
   const columns = raw.prepare('PRAGMA table_info(plugin_destination)').all().map((row) => ({
     name: String(row['name']),
@@ -1768,7 +1768,7 @@ test('a plugin cannot hold two destinations', () => {
   );
   // And two plugins may each have one.
   seedDestination(raw, 2, 'movie');
-  // `'n' in count`, not a cast -- the guard shape `opsLogged` below uses,
+  // `'n' in count`, not a cast -- the guard shape `opsLogged` above uses,
   // and the one `test/media/destinations.test.ts`'s own `rowCount` uses for
   // this same query.
   const count = raw.prepare('SELECT COUNT(*) AS n FROM plugin_destination').get();

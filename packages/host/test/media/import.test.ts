@@ -10,8 +10,8 @@
  * for the two things a real `copyFile` will not do on demand: fail *part
  * way through*, writing some bytes and then throwing, and occupy the
  * destination in the instant between the copy and the rename. **Five of the
- * 22 tests here inject one** -- the two atomicity tests, the two errno
- * tests, and the clobber-race test; the other seventeen run the real
+ * 23 tests here inject one** -- the two atomicity tests, the two errno
+ * tests, and the clobber-race test; the other eighteen run the real
  * `node:fs/promises` copy, so the default path is exercised rather than
  * mocked away.
  */
