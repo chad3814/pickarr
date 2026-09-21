@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveShape } from '../../src/media/shape.ts';
+import type { ShapeRefusalCode } from '../../src/media/shape.ts';
 
 const TV_SHAPE = '{series}/Season {season}/{series} - S{season}E{episode}.{ext}';
 
@@ -26,12 +27,18 @@ function pathOf(result: ReturnType<typeof resolveShape>): string {
   return result.path;
 }
 
-/** The refusal code, or a failure quoting the path that came back instead. */
-function refusalOf(result: ReturnType<typeof resolveShape>): string {
-  if (!('refusal' in result)) {
-    assert.fail(`expected a refusal, got path ${result.path}`);
-  }
-  return result.refusal;
+/**
+ * Asserts the whole refusal object, not just its code.
+ *
+ * `deepEqual` rather than reading `.refusal` off it: that pins the
+ * one-field shape at every site, so a refusal that grew a field carrying
+ * the offending value -- the thing `DownloadRead.lastError` must never be
+ * handed -- reddens every one of these rather than none of them. The
+ * parameter is typed `ShapeRefusalCode`, so a mistyped code is a compile
+ * error rather than a test that pins a string nothing returns.
+ */
+function assertRefusal(result: ReturnType<typeof resolveShape>, code: ShapeRefusalCode): void {
+  assert.deepEqual(result, { refusal: code });
 }
 
 test('spec 8.2: season 2 and episode 3 pad to two digits, and a token used twice resolves at both occurrences', () => {
@@ -119,20 +126,47 @@ test('a null token inside a surviving filename removes only itself, leaving the 
   assert.equal(pathOf(result), 'Arrival.');
 });
 
+test('a NON-final `.` segment is dropped, which is the position the drop rule is actually about', () => {
+  // The two `.` tests below exercise the *final* segment, where the answer
+  // is to refuse. A mutant narrowing the drop to `isLast` therefore left
+  // them green while `./{title}` resolved to `./Live.mkv`. Both routes to a
+  // non-final `.` are pinned here: one an operator typed, one assembled out
+  // of null tokens.
+  assert.equal(pathOf(resolveShape('./{title}.{ext}', { title: 'Live', ext: 'mkv' })), 'Live.mkv');
+  assert.equal(
+    pathOf(resolveShape('{a}.{b}/{title}.{ext}', { a: null, b: null, title: 'Live', ext: 'mkv' })),
+    'Live.mkv',
+  );
+  assert.equal(
+    pathOf(resolveShape('Movies/./{title}.{ext}', { title: 'Live', ext: 'mkv' })),
+    'Movies/Live.mkv',
+  );
+});
+
+test('a doubled separator typed into a shape is swallowed by the same drop, not refused', () => {
+  const result = resolveShape('a//b/{title}.{ext}', { title: 'Live', ext: 'mkv' });
+
+  assert.equal(pathOf(result), 'a/b/Live.mkv');
+});
+
+test('a trailing separator on a shape is an empty final segment, and is refused', () => {
+  assertRefusal(resolveShape('{title}/', { title: 'Live' }), 'empty-filename');
+});
+
 test('a final segment that resolves to nothing at all is refused rather than importing into a directory name', () => {
   const result = resolveShape('{title}/{filename}', { title: 'Arrival', filename: null });
 
-  assert.equal(refusalOf(result), 'empty-filename');
+  assertRefusal(result, 'empty-filename');
 });
 
 test('a final segment of `.` -- every token in it null -- is refused, not written as a directory reference', () => {
   const result = resolveShape('Movies/{title}.{ext}', { title: null, ext: null });
 
-  assert.equal(refusalOf(result), 'empty-filename');
+  assertRefusal(result, 'empty-filename');
 });
 
 test('an empty shape is refused as an empty filename', () => {
-  assert.equal(refusalOf(resolveShape('', {})), 'empty-filename');
+  assertRefusal(resolveShape('', {}), 'empty-filename');
 });
 
 test("a resolved value containing `/` is refused: `AC/DC` may not become a directory level", () => {
@@ -140,7 +174,7 @@ test("a resolved value containing `/` is refused: `AC/DC` may not become a direc
     series: 'AC/DC', title: 'Live', ext: 'mkv',
   });
 
-  assert.equal(refusalOf(result), 'separator-in-value');
+  assertRefusal(result, 'separator-in-value');
 });
 
 test('a resolved value containing a backslash is refused on every platform, not only where it separates', () => {
@@ -148,15 +182,35 @@ test('a resolved value containing a backslash is refused on every platform, not 
     series: 'AC\\DC', title: 'Live', ext: 'mkv',
   });
 
-  assert.equal(refusalOf(result), 'separator-in-value');
+  assertRefusal(result, 'separator-in-value');
 });
 
 test('`..` inside a value is *not* refused: it traverses nothing unless it is the whole segment', () => {
-  // Spec 6 and 7 refuse a `..` *segment*. `Rocky..Balboa` is a legal name and
-  // refusing it would refuse a title that reaches nowhere.
+  // Spec 6 is the section that refuses a `..` *segment*; 7 says only
+  // "escapes the root". `Rocky..Balboa` is a legal name and refusing it
+  // would refuse a title that reaches nowhere.
   const result = resolveShape('{title}.{ext}', { title: 'Rocky..Balboa', ext: 'mkv' });
 
   assert.equal(pathOf(result), 'Rocky..Balboa.mkv');
+});
+
+test('a value of `.. ` -- two dots and a trailing space -- is refused, because Win32 would trim it to `..`', () => {
+  assertRefusal(
+    resolveShape('{series}/{title}.{ext}', { series: '.. ', title: 'Live', ext: 'mkv' }),
+    'escapes-root',
+  );
+});
+
+test('`...` is *not* refused, which is the stated edge of the trailing-whitespace rule', () => {
+  // Win32 trims a trailing period as well as a trailing space, so `...`
+  // may behave differently there. That is not measurable on this host and
+  // stripping dots would rewrite the `Arrival.` pinned above, so the rule
+  // stops at whitespace and this test is where that boundary is written.
+  const result = resolveShape('{series}/{title}.{ext}', {
+    series: '...', title: 'Live', ext: 'mkv',
+  });
+
+  assert.equal(pathOf(result), '.../Live.mkv');
 });
 
 test('a value that is exactly `..` is refused, because it makes the whole segment a traversal', () => {
@@ -164,7 +218,7 @@ test('a value that is exactly `..` is refused, because it makes the whole segmen
     series: '..', title: 'Live', ext: 'mkv',
   });
 
-  assert.equal(refusalOf(result), 'escapes-root');
+  assertRefusal(result, 'escapes-root');
 });
 
 test('two values that concatenate into a `..` segment are refused just the same', () => {
@@ -174,28 +228,25 @@ test('two values that concatenate into a `..` segment are refused just the same'
     a: '.', b: '.', title: 'Live', ext: 'mkv',
   });
 
-  assert.equal(refusalOf(result), 'escapes-root');
+  assertRefusal(result, 'escapes-root');
 });
 
-test("spec 7: a shape with a literal `..` segment is refused, and is not collapsed the way `node:path` would collapse it", () => {
+test("spec 6: a shape with a literal `..` segment is refused, and is not collapsed the way `node:path` would collapse it", () => {
   // Measured on this tree: `path.join('a','..','b')` is `'b'`. Normalising
   // first would delete the condition this refusal exists to catch.
   const result = resolveShape('a/../b/{title}.{ext}', { title: 'Live', ext: 'mkv' });
 
-  assert.equal(refusalOf(result), 'escapes-root');
+  assertRefusal(result, 'escapes-root');
 });
 
 test('spec 6: an absolute shape is refused rather than quietly made relative to the root', () => {
   const result = resolveShape('/{title}.{ext}', { title: 'Live', ext: 'mkv' });
 
-  assert.equal(refusalOf(result), 'escapes-root');
+  assertRefusal(result, 'escapes-root');
 });
 
 test('a leading `..` is refused even though it is the first thing in the shape', () => {
-  assert.equal(
-    refusalOf(resolveShape('../{title}.{ext}', { title: 'Live', ext: 'mkv' })),
-    'escapes-root',
-  );
+  assertRefusal(resolveShape('../{title}.{ext}', { title: 'Live', ext: 'mkv' }), 'escapes-root');
 });
 
 test('a backslash in the shape itself is refused, so one shape cannot mean two things on two hosts', () => {
@@ -203,13 +254,13 @@ test('a backslash in the shape itself is refused, so one shape cannot mean two t
     season: '2', title: 'Live', ext: 'mkv',
   });
 
-  assert.equal(refusalOf(result), 'backslash-in-shape');
+  assertRefusal(result, 'backslash-in-shape');
 });
 
 test('a token with no entry in the values map is refused rather than written out as a literal brace', () => {
   const result = resolveShape('{series}/{nosuchtoken}.{ext}', { series: 'Severance', ext: 'mkv' });
 
-  assert.equal(refusalOf(result), 'unknown-token');
+  assertRefusal(result, 'unknown-token');
 });
 
 test('a present key whose value is null is an entirely different answer from an absent key', () => {
@@ -218,7 +269,7 @@ test('a present key whose value is null is an entirely different answer from an 
     collection: null, title: 'Arrival', ext: 'mkv',
   });
 
-  assert.equal(refusalOf(absent), 'unknown-token');
+  assertRefusal(absent, 'unknown-token');
   assert.equal(pathOf(present), 'Arrival.mkv');
 });
 
@@ -226,17 +277,17 @@ test('a token named after an `Object.prototype` member is unknown, not inherited
   // `'toString' in {}` is true on any object literal a caller passes, so a
   // lookup written with `in` would "resolve" this token against
   // `Object.prototype`. `Object.hasOwn` is what stops it.
-  assert.equal(refusalOf(resolveShape('{toString}.mkv', { title: 'Live' })), 'unknown-token');
-  assert.equal(refusalOf(resolveShape('{constructor}.mkv', { title: 'Live' })), 'unknown-token');
+  assertRefusal(resolveShape('{toString}.mkv', { title: 'Live' }), 'unknown-token');
+  assertRefusal(resolveShape('{constructor}.mkv', { title: 'Live' }), 'unknown-token');
 });
 
 test('an unclosed brace, a lone closing brace and an empty token are each a malformed shape', () => {
   const values = { title: 'Live', ext: 'mkv' };
 
-  assert.equal(refusalOf(resolveShape('{title.{ext}', values)), 'malformed-shape');
-  assert.equal(refusalOf(resolveShape('{title}}.{ext}', values)), 'malformed-shape');
-  assert.equal(refusalOf(resolveShape('{}.{ext}', values)), 'malformed-shape');
-  assert.equal(refusalOf(resolveShape('{title}.{ext', values)), 'malformed-shape');
+  assertRefusal(resolveShape('{title.{ext}', values), 'malformed-shape');
+  assertRefusal(resolveShape('{title}}.{ext}', values), 'malformed-shape');
+  assertRefusal(resolveShape('{}.{ext}', values), 'malformed-shape');
+  assertRefusal(resolveShape('{title}.{ext', values), 'malformed-shape');
 });
 
 test('a shape with no tokens at all is a constant path, returned unchanged', () => {
@@ -260,12 +311,4 @@ test('the separator in the result is `/` and only `/`, on whichever platform thi
 
   assert.ok(!resolved.includes('\\'), 'no backslash in the result');
   assert.deepEqual(resolved.split('/'), ['Severance', 'Season 02', 'Severance - S02E03.mkv']);
-});
-
-test('a refusal carries a code and nothing else -- no shape text, no value, no path', () => {
-  const result = resolveShape('{series}/{title}.{ext}', {
-    series: 'AC/DC', title: 'Live', ext: 'mkv',
-  });
-
-  assert.deepEqual(result, { refusal: 'separator-in-value' });
 });

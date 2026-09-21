@@ -227,14 +227,22 @@ function resolveSegment(segment: string, values: Readonly<Record<string, string 
  *   `''`, converts a permanent data condition (a blank title in a plugin's
  *   table) into a retry that no operator action can ever clear. Design spec
  *   §5's retry is safe because the condition it retries on *does* clear.
- * - **A segment that resolves to `''` or to `.` is dropped entirely.**
- *   Dropping is the whole of §8.8's "no empty segment", and it cannot
- *   produce `//`, a leading separator or a trailing one, because a dropped
- *   segment contributes no separator either. `.` is dropped rather than
- *   refused because it denotes the directory the path is already in, so
- *   removing it does not change where the path points -- measured:
- *   `path.posix.normalize('a/./b')` is `'a/b'`. `..` is a different matter
- *   and is refused below.
+ * - **A non-final segment that resolves to `''` or to `.` is dropped**, and
+ *   a *final* one is refused -- see the last bullet, which is the only
+ *   place the two positions differ. Dropping is the whole of §8.8's "no
+ *   empty segment", and it cannot produce `//`, a leading separator or a
+ *   trailing one, because a dropped segment contributes no separator
+ *   either. `.` is dropped rather than refused because it denotes the
+ *   directory the path is already in, so removing it does not change where
+ *   the path points -- measured: `path.posix.normalize('a/./b')` is
+ *   `'a/b'`. `..` is a different matter and is refused below.
+ * - **The same drop is what swallows a doubled separator in the shape
+ *   itself.** `a//b/{title}.{ext}` resolves to `a/b/…`: the empty segment
+ *   between the two slashes is dropped like any other. That is a shape an
+ *   operator typed by accident rather than one a value produced, and it
+ *   goes through rather than being refused because the result is the path
+ *   they plainly meant and nothing about it is ambiguous. Pinned, so the
+ *   swallowing is a decision with a witness rather than a side effect.
  * - **A null token inside a segment that survives removes only itself.**
  *   `{title}.{ext}` with a null `ext` is `Arrival.` -- the dot the shape
  *   typed stays, because this function cannot know that dot was there only
@@ -262,10 +270,28 @@ function resolveSegment(segment: string, values: Readonly<Record<string, string 
  * cannot lay out a library two different ways depending on where pickarr
  * runs.
  *
- * `..` is **not** refused as a substring. Design spec §6 and §7 both say a
- * `..` *segment*, and `Rocky..Balboa` reaches nowhere: the segment check
- * below catches every traversal, including one assembled from two values
- * that are each innocent alone.
+ * `..` is **not** refused as a substring. Design spec **§6** is the one
+ * that says a `..` *segment* -- §7 says only "escapes the root" and names
+ * no mechanism, so it is not a second witness and this comment used to
+ * claim it was. `Rocky..Balboa` reaches nowhere: the segment check below
+ * catches every `..` segment, whether it was typed in the shape, supplied
+ * whole by one value, or assembled from two values that are each innocent
+ * alone.
+ *
+ * **"Every" there is POSIX, and the exception is trailing whitespace.**
+ * Win32 trims a trailing space from a path component -- documented
+ * Microsoft naming behaviour, not measured here, since only darwin was
+ * available -- so a value of `'.. '` would name the parent directory
+ * there while being an ordinary two-dot-and-a-space name on POSIX. The
+ * segment check therefore compares with trailing whitespace stripped, so
+ * `'.. '` is refused on both. What is deliberately **not** covered, and is
+ * left uncovered rather than guessed at: Win32 also trims a trailing
+ * *period*, which makes the handling of `'...'` and of the `Arrival.`
+ * above platform-dependent in ways this host cannot measure. Stripping
+ * trailing dots here would rewrite `Arrival.` -- a result this module
+ * pins deliberately -- so the line is drawn at whitespace and the residue
+ * is stated. A segment of spaces alone (`'   '`) is likewise kept as the
+ * directory name POSIX says it is.
  */
 export function resolveShape(
   shape: string,
@@ -283,7 +309,10 @@ export function resolveShape(
   for (const [index, segment] of shapeSegments.entries()) {
     const result = resolveSegment(segment, values);
     if ('refusal' in result) return result;
-    if (result.text === '..') return { refusal: 'escapes-root' };
+    // `trimEnd` before the comparison, not after: Win32 trims a trailing
+    // space from a component, so `'.. '` names the parent there. See the
+    // docblock's note on what that does and does not cover.
+    if (result.text.trimEnd() === '..') return { refusal: 'escapes-root' };
     const isLast = index === shapeSegments.length - 1;
     if (result.text === '' || result.text === '.') {
       if (isLast) return { refusal: 'empty-filename' };
