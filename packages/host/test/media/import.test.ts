@@ -6,16 +6,18 @@
  * only way a test gets a root -- so a test that forgot to clean up would
  * have had to write its own `mkdtemp` to do it.
  *
- * **The copy is injectable and the default is not.** `copyFile` is a seam so
- * that the atomicity test can fail *part way through* -- writing some bytes
- * and then throwing, which is the one thing a real `copyFile` will not do on
- * demand. Every other test here runs the real `node:fs/promises` copy, so
- * the default path is exercised rather than mocked away; the seam's own
- * tests say when they are using it.
+ * **The copy is injectable and the default is not.** `copyFile` is a seam
+ * for the two things a real `copyFile` will not do on demand: fail *part
+ * way through*, writing some bytes and then throwing, and occupy the
+ * destination in the instant between the copy and the rename. **Five of the
+ * 22 tests here inject one** -- the two atomicity tests, the two errno
+ * tests, and the clobber-race test; the other seventeen run the real
+ * `node:fs/promises` copy, so the default path is exercised rather than
+ * mocked away.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -183,11 +185,11 @@ test('spec 7: a copy that fails part way leaves no file at the final path', asyn
   await withHarness({}, async (h) => {
     h.destination({});
     const final = join(h.root, 'Severance', 'Season 02', 'Severance - S02E03.mkv');
-    // The one place the copy is replaced: a real `copyFile` cannot be asked
-    // to write half a file and then fail. This writes to whatever path the
-    // importer hands it -- so if the importer ever copies straight to the
-    // final name, the partial bytes land there and the assertion below
-    // reddens. That is the whole of this test.
+    // The seam, because a real `copyFile` cannot be asked to write half a
+    // file and then fail. This writes to whatever path the importer hands
+    // it -- so if the importer ever copies straight to the final name, the
+    // partial bytes land there and the assertion below reddens. That is the
+    // whole of this test.
     const place = h.withCopyFile(async (_source, target) => {
       await writeFile(target, 'half of ');
       throw Object.assign(new Error('the volume went away'), { code: 'EIO' });
@@ -241,6 +243,61 @@ test('spec 5: a destination that already exists is refused, and nothing at it ch
     assert.equal(await readFile(join(dir, 'Severance - S02E03.mkv'), 'utf8'), 'the copy already there');
     // No temporary either: the refusal is reached before anything is copied.
     assert.deepEqual(await tree(h.root), [join('Severance', 'Season 02', 'Severance - S02E03.mkv')]);
+  });
+});
+
+test('spec 5: a destination that appears *during* the copy is refused, and the file that appeared is not replaced', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const final = join(h.root, 'Severance', 'Season 02', 'Severance - S02E03.mkv');
+    const ALREADY_THERE = 'the copy that arrived while this one was running';
+    // The window the module doc argues at length -- `rename(2)` replaces an
+    // existing destination silently, so the occupied-destination check is
+    // made a second time immediately before the rename. The test above
+    // reaches only the *first* check and says so; this is the only way to
+    // reach the second, because the destination has to be empty when the
+    // first runs and occupied when the rename would fire. The `copyFile`
+    // seam is what supplies that instant: a real copy gives a test nothing
+    // between the two checks.
+    const place = h.withCopyFile(async (_source, temporary) => {
+      await writeFile(final, ALREADY_THERE);
+      await writeFile(temporary, SOURCE_BYTES);
+    });
+
+    const outcome = await place(h.file(), TV_VALUES);
+
+    assertRefusal(outcome, 'destination-exists');
+    // Delete the second check and this line is what reddens: the rename
+    // succeeds, `{ placed: 'library' }` comes back, and the bytes below are
+    // the download's. `contract/src/library.ts` says `destination-exists`
+    // exists because "overwriting destroys whichever copy was better with
+    // nothing recorded", and that is exactly this.
+    assert.equal(await readFile(final, 'utf8'), ALREADY_THERE,
+      'the rename replaced a file that appeared during the copy, and reported success');
+  });
+});
+
+test('spec 5: a dangling symlink at the destination is something already there, and is not replaced', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const dir = join(h.root, 'Severance', 'Season 02');
+    await mkdir(dir, { recursive: true });
+    const final = join(dir, 'Severance - S02E03.mkv');
+    // A link whose target does not exist. `stat` follows the link and
+    // reports `ENOENT`, so a check written with `stat` calls this
+    // destination empty and lets the rename replace the link; `lstat` sees
+    // the link itself. The link is a library entry someone made, and the
+    // volume it points at being unmounted is exactly when an import runs
+    // against it.
+    await symlink(join(h.dir, 'not-mounted', 'Severance - S02E03.mkv'), final);
+
+    const outcome = await h.place(h.file(), TV_VALUES);
+
+    assertRefusal(outcome, 'destination-exists');
+    assert.ok((await lstat(final)).isSymbolicLink(),
+      'the import replaced a symlink it should have treated as an occupied destination');
+    await assert.rejects(() => readFile(final, 'utf8'), { code: 'ENOENT' },
+      'the link is no longer dangling, so something was written at or through it');
   });
 });
 

@@ -137,8 +137,12 @@ const ERRNO = /^[A-Z][A-Z0-9_]*$/;
  * The copy itself, injectable so a test can fail part way through.
  *
  * A real `copyFile` cannot be asked to write some bytes and then reject,
- * which is the one thing the atomicity requirement (design spec §7) has to
- * be shown against. Every other test of this module runs the default.
+ * which is the one thing the atomicity requirement (design spec §4, with
+ * §7's "a copy that fails part way leaves only the temporary") has to be
+ * shown against. It is also the only way to occupy the destination
+ * *between* the two `presentAt` checks below. **Five of
+ * `test/media/import.test.ts`'s 22 tests inject one**; the other seventeen
+ * run the real `node:fs/promises` copy.
  */
 export type CopyFile = (source: string, destination: string) => Promise<void>;
 
