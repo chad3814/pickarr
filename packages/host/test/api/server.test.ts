@@ -205,10 +205,16 @@ async function start(
     // test that means to observe a removal overrides this and would fail
     // loudly against it if it forgot.
     removeMapping: async () => ({ refusal: 'unknown-mapping' }),
-    // Same reasoning as `addMapping` above: the guard probe reaches
-    // `PUT /api/destinations/1` with a session and a body of `{}`, which
-    // the shape guard refuses ahead of this -- so a stub that resolved
-    // would make that test pass for the wrong reason.
+    // A throwing stub, for `addMapping`'s reason -- a stub that *resolved*
+    // would make a test pass for the wrong reason -- but **not** for
+    // `addMapping`'s mechanism, which this comment used to claim.
+    // `probeFor` fills `:pluginId` with `'1'`, and `PLUGIN_ID` is
+    // `/^[a-z][a-z0-9_]{0,31}$/`, so `pluginIdFrom` answers `undefined` and
+    // the route returns `UNKNOWN_ROUTE` before the body is looked at at
+    // all. The `{}` body never reaches `destinationBodyFrom`, and this
+    // function never reaches the probe. (`mappingIdFrom` parses `'1'`
+    // happily, which is why its sibling is refused by a body guard and
+    // this one by a path guard.)
     saveDestination: () => {
       throw new Error('saveDestination not stubbed in this test');
     },

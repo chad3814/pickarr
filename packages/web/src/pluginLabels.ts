@@ -34,7 +34,23 @@ export const PLUGIN_LABELS: Readonly<Record<string, string>> = {
   xxx: 'XXX',
 };
 
-/** `PLUGIN_LABELS[pluginId]`, or `pluginId` itself for a plugin the map does not name. */
+/**
+ * `PLUGIN_LABELS[pluginId]`, or `pluginId` itself for a plugin the map does
+ * not name.
+ *
+ * **`Object.hasOwn`, not a bare index, and the difference is reachable.**
+ * `PLUGIN_LABELS` is an object literal, so it inherits `Object.prototype`
+ * -- and `api/server.ts`'s `PLUGIN_ID` is `/^[a-z][a-z0-9_]{0,31}$/`, which
+ * `constructor` matches. Measured before this guard: `pluginLabel('constructor')`
+ * answered the `Object` function itself, because a bare index found it on
+ * the prototype and `??` only fires on `undefined`. Whatever a heading
+ * would have done with a function child, it would not have been "read as
+ * its own id", which is the whole of what the fallback promises.
+ * `test/pluginLabels.test.tsx` pins it. It is the same
+ * prototype-safety `media/shape.ts`'s resolver already applies to a token
+ * name, for the same reason -- the key is not this module's to choose.
+ */
 export function pluginLabel(pluginId: string): string {
-  return PLUGIN_LABELS[pluginId] ?? pluginId;
+  const label = Object.hasOwn(PLUGIN_LABELS, pluginId) ? PLUGIN_LABELS[pluginId] : undefined;
+  return label ?? pluginId;
 }

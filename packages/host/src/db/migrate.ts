@@ -1220,12 +1220,19 @@ function migration19(db: DatabaseSync): void {
  *
  * **Keyed by `id`, with the plugin id a unique index rather than the primary
  * key.** One row per plugin is the grain, so `plugin_id` would read as the
- * natural key -- but `assertIntegerIdKey` (`sync/registry.ts`) refuses a
- * synced table whose primary key is anything but a lone `id`, because
- * `syncTriggerSql` reads `NEW.id`/`OLD.id` unconditionally. A `TEXT PRIMARY
- * KEY` here would install triggers that compile and then throw on the first
- * write. The unique index carries the grain instead, and
- * `media/destinations.ts` upserts against it by name.
+ * natural key -- but `syncTriggerSql` reads `NEW.id`/`OLD.id`
+ * unconditionally, so a `TEXT PRIMARY KEY` here installs triggers that
+ * compile and then throw `no such column: NEW.id` on the first insert.
+ * Measured.
+ *
+ * **What enforces that is a test, not `assertIntegerIdKey`.** That function
+ * (`sync/registry.ts`) does refuse such a key, but its only callers iterate
+ * `plugin.synced`, and `HOST_SYNCED_TABLES` is concatenated on *after* that
+ * loop -- so it never runs on a host table and never would have caught
+ * this one. `test/sync/tables.test.ts`'s `every synced table has an integer
+ * primary key named id` walks `HOST_SYNCED_TABLES` and is the real guard.
+ * The unique index carries the grain instead, and `media/destinations.ts`
+ * upserts against it by name.
  *
  * **No column carries a default, and `unmatched_dir` is the one that
  * matters.** Design spec §6 gives it a default of `_unmatched`, and that

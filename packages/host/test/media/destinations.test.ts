@@ -152,14 +152,21 @@ test('a film shape may name {collection}, and a television shape naming it is re
 
 test('{site} belongs to the xxx plugin alone, and {year} to the film plugin alone', () => {
   // The third plugin, and a second film-only token -- so the accepted set is
-  // not "tv plus movie" either. Both legs of each pair, again.
+  // not "tv plus movie" either. "Alone" means *every* other shipped plugin
+  // refuses it, so both are refused twice rather than once: this test named
+  // `alone` while checking one other plugin per token, which is a claim
+  // about three plugins tested against two.
   const { save } = setup();
 
   assert.ok(!('refusal' in save('xxx', { shape: '{site}/{title} {releaseDate}.{ext}' })));
-  assert.equal(refusalOf(save('movie', { shape: '{site}/{title}.{ext}' })), 'unknown-token');
+  for (const pluginId of ['tv', 'movie']) {
+    assert.equal(refusalOf(save(pluginId, { shape: '{site}/{title}.{ext}' })), 'unknown-token', pluginId);
+  }
 
   assert.ok(!('refusal' in save('movie', { shape: '{title} ({year}).{ext}' })));
-  assert.equal(refusalOf(save('xxx', { shape: '{title} ({year}).{ext}' })), 'unknown-token');
+  for (const pluginId of ['tv', 'xxx']) {
+    assert.equal(refusalOf(save(pluginId, { shape: '{title} ({year}).{ext}' })), 'unknown-token', pluginId);
+  }
 });
 
 test('the shared tokens are accepted by every plugin', () => {
@@ -190,13 +197,13 @@ test('{resolution} is refused by every plugin, because nothing in 2.0 records on
   }
 });
 
-test('an unknown token is named, so a shape of eight tokens says which one was wrong', () => {
+test('an unknown token is named, so a shape full of tokens says which one was wrong', () => {
   // Design spec §3: refused "naming it". The code alone leaves an operator
-  // with eight tokens on one line and no way to tell which they mistyped
-  // -- measured against the settings screen, not assumed. The name is the
-  // caller's own input echoed back to the caller in the same response, the
-  // distinction `sync/tables.ts` draws between a *dictated* value and a
-  // *discovered* one.
+  // with the seven tokens the television plugin declares -- counted from
+  // `TV_TOKENS`, and the longest of the three lists -- and no way to tell
+  // which they mistyped. The name is the caller's own input echoed back to
+  // the caller in the same response, the distinction `sync/tables.ts`
+  // draws between a *dictated* value and a *discovered* one.
   const { save } = setup();
 
   assert.deepEqual(

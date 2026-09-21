@@ -40,10 +40,17 @@
  * will never resolve.
  *
  * **A {@link resolveShape} refusal names the rule and carries nothing from
- * the input** -- no shape text, no token name, no value. `last_error` is
- * served by `/api/downloads` as `DownloadRead.lastError` (design spec §7),
- * so anything that refusal carried would leave the host, for a download
- * nobody is looking at.
+ * the input** -- no shape text, no token name, no value. **Where it goes,
+ * traced rather than assumed:** the plugin logs it (`ctx.log`, which
+ * `host.ts` builds as `console.log`) and then throws, and
+ * `deliverCompleted`'s catch logs the thrown message. Both are the host's
+ * stdout. It does **not** reach `last_error`: `clients/deliver.ts` never
+ * calls `failRow` and says so twice in its own comments, and `failRow`'s
+ * only caller is `clients/reconcile.ts`, for a download a *client* reported
+ * failed, which an import refusal never becomes. Design spec §7's rule is
+ * "no path, url or credential reaches a log line", and stdout is the line
+ * it means here. `errors.ts:20-49` is this same audit done for the six
+ * error classes, and correcting an identical earlier claim.
  *
  * **{@link validateShape} is the one exception, and it is a different
  * caller rather than a loosening.** It is the same parse with the unknown
@@ -269,6 +276,16 @@ function resolveSegment(segment: string, values: Readonly<Record<string, string 
  * cannot lay out a library two different ways depending on where pickarr
  * runs.
  *
+ * **Non-injectivity alone is not the argument, and this module does not
+ * get to pretend it is.** Dropping a null segment is not injective either
+ * -- measured: with `{collection}/{series}/{title}.mkv`, both
+ * `{collection: null, series: 'S'}` and `{collection: 'S', series: null}`
+ * resolve to `S/T.mkv`. Design spec §5 anticipates exactly that ("two
+ * releases resolving to one path") and it is designed behaviour, because
+ * the collision is *caught*: the second import is refused
+ * `destination-exists` and logged. Sanitising merges silently, and that is
+ * the difference.
+ *
  * `..` is **not** refused as a substring. Design spec **§6** is the one
  * that says a `..` *segment* -- §7 says only "escapes the root" and names
  * no mechanism, so it is not a second witness and this comment used to
@@ -300,10 +317,11 @@ export function resolveShape(
   // **The strip is the boundary, and it is structural.** A fresh object
   // literal carrying `refusal` alone -- not `result`, not a spread, not a
   // `delete` -- so there is no arrangement of this line under which a token
-  // name reaches an import-path caller. `clients/deliver.ts` puts an import
-  // refusal in `last_error`, which `/api/downloads` serves as
-  // `DownloadRead.lastError`, and a token name is operator-typed free text
-  // (design spec §7 is why nothing from the input may travel that way).
+  // name reaches an import-path caller. An import refusal reaches the
+  // host's **stdout**, twice: the plugin's `ctx.log` and `deliverCompleted`'s
+  // catch. It does not reach `last_error` -- see this module's docblock for
+  // the trace. A token name is operator-typed free text, and design spec §7
+  // forbids exactly that in a log line.
   return 'refusal' in result ? { refusal: result.refusal } : result;
 }
 
@@ -315,19 +333,21 @@ export function resolveShape(
  * implementation and `resolveShape` calls it -- but who is allowed to see
  * the name.
  *
- * - **`resolveShape` is the import-time resolver.** Its refusal reaches
- *   `last_error` and therefore a browser, for a download nobody is looking
- *   at, so it carries nothing from the input. That guarantee is unchanged
- *   and `media/shape.test.ts`'s `assertRefusal` still pins the one-field
- *   shape at every site.
+ * - **`resolveShape` is the import-time resolver.** Its refusal reaches the
+ *   host's stdout -- the plugin's `ctx.log` and then `deliverCompleted`'s
+ *   catch -- for a download nobody is looking at, so it carries nothing
+ *   from the input. That guarantee is unchanged and
+ *   `media/shape.test.ts`'s `assertRefusal` still pins the one-field shape
+ *   at every site.
  * - **This is the save-time validator.** Its caller is
  *   `media/destinations.ts`, answering the very request that carried the
  *   shape, to the operator who typed it -- so naming the token they got
  *   wrong is showing someone their own input, the same distinction
  *   `sync/tables.ts` draws between a *dictated* value and a *discovered*
  *   one. Design spec §3 asks for an unknown token "refused, naming it";
- *   this is what makes that possible, and eight tokens on one line with a
- *   typo in one of them is the case Task 4 measured it against.
+ *   this is what makes that possible, and a typo in one of the **seven**
+ *   tokens the television plugin declares -- counted from `TV_TOKENS`, and
+ *   the longest of the three lists -- is the case it exists for.
  *
  * **What it does not do is decide whether the name is fit to echo.** The
  * name is arbitrary text an operator typed between braces -- it cannot hold
@@ -344,7 +364,8 @@ export function validateShape(
   // Checked on the raw shape rather than after the split, because a leading
   // `/` produces an empty first segment, and an empty segment is dropped --
   // so splitting first would turn an absolute shape into a relative one
-  // silently, which is the one outcome design spec §6 names.
+  // silently. Design spec §7 is what forbids that: a shape that escapes the
+  // root is refused before any copy begins.
   if (shape.startsWith('/')) return { refusal: 'escapes-root', token: null };
 
   const shapeSegments = shape.split('/');

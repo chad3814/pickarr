@@ -310,6 +310,34 @@ test('a blank unmatched folder is sent as no field at all, so the host applies i
     'the key is absent, not present and empty');
 });
 
+test('a plugin this package has no label for is headed by its own id', async () => {
+  // `pluginLabels.ts`'s fallback, driven through the one call site that can
+  // reach it. `Settings.tsx` builds its rows from `TOKEN_NAMES_BY_PLUGIN`,
+  // so a fourth plugin added to the contract gets a row here with no edit
+  // to `PLUGIN_LABELS` -- and `CLAUDE.md`'s lesson is that pinning a pure
+  // function does not pin that anyone calls it. `Shell.tsx`'s nav cannot
+  // reach the fallback: it passes a `Category`, and all three are mapped.
+  //
+  // `'book'` written out, not `pluginLabel('book')`: the whole claim is
+  // about what the fallback returns, so computing the expectation from it
+  // would hold under every change to it.
+  const db = await freshDb();
+  render(
+    <Destinations
+      source={sourceFor(db)}
+      plugins={[...PLUGINS, { pluginId: 'book', tokens: ['title', 'ext'] }]}
+      submit={neverSubmit}
+    />,
+  );
+
+  await waitFor(() => {
+    assert.ok(screen.getByRole('listitem', { name: 'book' }),
+      'the fourth row has no accessible name, so its heading rendered nothing');
+  });
+  assert.ok(within(screen.getByRole('listitem', { name: 'book' })).getByRole('heading', { name: 'book' }),
+    'the id has to be visible text, not only an accessible name');
+});
+
 test('a refused save shows that refusal in rendered text, not only in an accessible name', async () => {
   // `CLAUDE.md`'s longest testing hazard: `getByRole`'s `name` is satisfied
   // by an `aria-label` on an element with nothing in it, and exactly that

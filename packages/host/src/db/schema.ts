@@ -70,9 +70,12 @@ export const filepathMapping = sqliteTable('filepath_mapping', {
  * and §6). Migration 20.
  *
  * Keyed by `id` with `plugin_id` a unique index rather than the primary key,
- * because `sync/registry.ts`'s `assertIntegerIdKey` refuses a synced table
- * keyed by anything else -- that migration's docblock has the whole of it,
- * including why no column here carries a default.
+ * because `syncTriggerSql` reads `NEW.id`/`OLD.id` and any other key gives
+ * triggers that throw on the first write -- pinned by
+ * `test/sync/tables.test.ts` and *not* by `sync/registry.ts`'s
+ * `assertIntegerIdKey`, which never runs on a host table. That migration's
+ * docblock has the whole of it, including why no column here carries a
+ * default.
  */
 export const pluginDestination = sqliteTable('plugin_destination', {
   id: integer('id').primaryKey(),

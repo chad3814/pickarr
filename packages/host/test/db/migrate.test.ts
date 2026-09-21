@@ -1379,11 +1379,15 @@ test('migration 17 installs the download client triggers and seeds a client alre
  *
  * The same guard shape the migration 17 seed test above uses inline, and the
  * reason it is a function here is that the test below reads `op` three
- * times. `(row as { … })` is the older spelling and 53 lines of this file
- * still use it, so replacing them is not this task -- but the two spellings
- * had ended up in *adjacent tests written in the same commit*, one of them
- * already using the guard, and that is the one place the inconsistency is
- * nobody's inheritance.
+ * times. `(row as { … })` is the older spelling and **60 places** in this
+ * file still use it -- counted on this tree, ignoring comment lines, where
+ * this line said 53 -- so replacing them is not this task. But the
+ * two spellings had ended up in *adjacent tests written in the same
+ * commit*, one of them already using the guard, and that is the one place
+ * the inconsistency is nobody's inheritance. The importer slice added two
+ * more of the older spelling, in migration 20's tests; both have since
+ * been narrowed, for the same reason and because that slice's plan forbids
+ * a cast to silence a type error.
  */
 function opsLogged(raw: ReturnType<typeof openTestDatabase>['raw'], table: string): string[] {
   return raw.prepare('SELECT op FROM sync_log WHERE table_name = ?').all(table)
@@ -1709,16 +1713,21 @@ test('migration 20 creates plugin_destination, keyed by id and unique on plugin_
 
   assert.ok(tableNames(raw).has('plugin_destination'), 'the table exists');
 
-  const columns = raw.prepare('PRAGMA table_info(plugin_destination)').all().map((r) => {
-    const row = r as { name: unknown; type: unknown; notnull: unknown; dflt_value: unknown; pk: unknown };
-    return {
-      name: String(row.name),
-      type: String(row.type),
-      notNull: Number(row.notnull) === 1,
-      default: row.dflt_value,
-      pk: Number(row.pk),
-    };
-  });
+  // Indexed, not cast. `node:sqlite` already types a row as
+  // `Record<string, SQLOutputValue>`, so `row['name']` compiles on its own
+  // and `(r as { … })` bought only a second, unchecked spelling of five
+  // column names. 61 lines of this file still carry the older spelling and
+  // replacing those is not this task -- but these two were written on this
+  // branch, so they are nobody's inheritance, and the plan for this slice
+  // forbids a cast to silence a type error. See `opsLogged` below for the
+  // `in`-guard form, which is what a `.get()` needs.
+  const columns = raw.prepare('PRAGMA table_info(plugin_destination)').all().map((row) => ({
+    name: String(row['name']),
+    type: String(row['type']),
+    notNull: Number(row['notnull']) === 1,
+    default: row['dflt_value'],
+    pk: Number(row['pk']),
+  }));
   assert.deepEqual(columns, [
     { name: 'id', type: 'INTEGER', notNull: false, default: null, pk: 1 },
     { name: 'plugin_id', type: 'TEXT', notNull: true, default: null, pk: 0 },
@@ -1759,10 +1768,12 @@ test('a plugin cannot hold two destinations', () => {
   );
   // And two plugins may each have one.
   seedDestination(raw, 2, 'movie');
-  assert.equal(
-    Number((raw.prepare('SELECT COUNT(*) AS n FROM plugin_destination').get() as { n: unknown }).n),
-    2,
-  );
+  // `'n' in count`, not a cast -- the guard shape `opsLogged` below uses,
+  // and the one `test/media/destinations.test.ts`'s own `rowCount` uses for
+  // this same query.
+  const count = raw.prepare('SELECT COUNT(*) AS n FROM plugin_destination').get();
+  if (count === undefined || !('n' in count)) throw new Error('COUNT(*) returned no n');
+  assert.equal(Number(count.n), 2);
 });
 
 test('migration 20\'s triggers log a destination written, edited and removed afterwards', () => {

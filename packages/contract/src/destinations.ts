@@ -138,10 +138,13 @@ export const DESTINATION_REFUSALS = [
  *
  * **Two fields, where most refusals in this codebase have one**, and the
  * second earns its place the way `ImportRefusal.errno` does. Design spec §3
- * asks for an unknown token to be "refused, naming it", and a settings
- * screen showing eight tokens on one line with a typo in one of them can
- * tell the operator only that *a* token was wrong without this -- measured
- * against the screen, not assumed.
+ * asks for an unknown token to be "refused, naming it", and a settings row
+ * listing **seven** tokens with a typo in one of them can tell the operator
+ * only that *a* token was wrong without this. Seven is `TV_TOKENS`,
+ * counted: the three shipped lists are tv 7, movie 6 and xxx 5, and
+ * `settings/Destinations.tsx` renders one `<li>` per declared token, so
+ * seven is also the most any row shows. (Eight is design spec §3's table,
+ * which still counts the `resolution` token this branch removed.)
  *
  * **`token` is `null` for every code but `unknown-token`**, and may be
  * `null` for that one too: the host repeats a name only when it matches the

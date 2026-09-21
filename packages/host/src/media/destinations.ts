@@ -69,7 +69,10 @@
  * literal directory name, so nothing in it resolves and nothing in it can
  * fail to resolve." Handing it to `resolveShape` would refuse a directory
  * literally called `{title}` as an unknown token, which is a rule the spec
- * does not have. Its three checks are written out below instead.
+ * does not have. Its three checks go through `unmatchedDirSegments`
+ * instead -- the same function `media/import.ts` calls, and not a copy;
+ * the comment at the call site below has the account of what two copies
+ * cost. The root now takes the same route, through `rootRefusal`.
  *
  * Synchronous, like `addMapping` and `addFeed`: `node:sqlite` is synchronous
  * -- this repo's documented exception to preferring an async API -- and this
@@ -188,10 +191,12 @@ export interface SaveDestinationDeps {
  *
  * `Object.fromEntries` rather than a `Map`: `resolveShape` reads its values
  * with `Object.hasOwn`, which is prototype-safe on a plain object -- a token
- * called `toString` is unknown, and `contract/test/compose.test.ts`'s
- * sibling in `media/shape.test.ts` pins that. `fromEntries` defines rather
- * than assigns, so even a token called `__proto__` lands as an own property
- * instead of replacing the prototype.
+ * called `toString` is unknown, pinned by `host/test/media/shape.test.ts`'s
+ * `a token named after an \`Object.prototype\` member is unknown, not
+ * inherited from the prototype`, which is the only test of it anywhere.
+ * `fromEntries` defines rather than assigns, so even a token called
+ * `__proto__` lands as an own property instead of replacing the
+ * prototype.
  */
 function probeValues(tokens: readonly string[]): Record<string, string> {
   return Object.fromEntries(tokens.map((token) => [token, SHAPE_PROBE_VALUE]));
@@ -231,9 +236,11 @@ const ECHOABLE_TOKEN = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
 /**
  * One of `media/shape.ts`'s refusals, as the code this route answers with.
  *
- * Every case is written out rather than a `default`, so a sixth
- * `ShapeRefusalCode` added later is a compile error here instead of silently
- * taking whichever code the default named.
+ * Every case is written out rather than a `default`, so a **seventh**
+ * `ShapeRefusalCode` added later is a compile error here instead of
+ * silently taking whichever code the default named. (There are six today
+ * -- `shape.ts:121-127`. `media/import.ts` and `contract/library.ts` both
+ * say "seventh"; this line said "sixth" and was the one out of step.)
  *
  * **`separator-in-value` throws, and that is not a refusal being swallowed.**
  * It reports that a *value* carried a separator, and the only values this
@@ -270,8 +277,14 @@ function destinationRefusalFor(code: ShapeRefusalCode): DestinationRefusalCode {
  * is resolved first, so a caller naming an unregistered plugin is told that
  * and nothing else -- checking the root or the shape first would let the
  * code that came back say which plugin ids exist. After that the order is
- * field order (root, shape, unmatched directory) and nothing depends on it:
- * exactly one field is wrong in every test that expects a refusal.
+ * field order (root, shape, unmatched directory), and no test depends on
+ * it: `setup`'s defaults are a destination every plugin accepts, so a test
+ * expecting a refusal names the one field it is about. The one exception
+ * is deliberate and is about the *first* check rather than the rest --
+ * `destinations.test.ts`'s `the plugin is checked before anything else, so
+ * an unknown one cannot be told what else was wrong` sets a bad plugin, a
+ * bad root, a bad shape and a bad unmatched directory at once, and pins
+ * that the plugin still wins.
  *
  * **Nothing is scheduled afterwards**, the same as `Host.addMapping` and for
  * a reason of the same kind: the importer reads this table at the moment it
@@ -327,8 +340,10 @@ export function saveDestination(
   // `validateShape`, not `resolveShape`: the same parse, with the unknown
   // token's name kept. That entry point exists for this caller alone --
   // the refusal answers the very request that carried the shape, to the
-  // operator who typed it, where `resolveShape`'s reaches `last_error` and
-  // therefore a browser looking at an unrelated download.
+  // operator who typed it, where `resolveShape`'s goes to the host's stdout
+  // (the plugin's `ctx.log`, then `deliverCompleted`'s catch) for a
+  // download nobody asked about. `media/shape.ts`'s docblock has the trace,
+  // including why it is stdout and not `last_error`.
   const resolved = validateShape(input.shape, probeValues(tokens));
   if ('refusal' in resolved) {
     const code = destinationRefusalFor(resolved.refusal);

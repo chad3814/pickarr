@@ -17,6 +17,17 @@
  * library is moved, renamed or deleted. The only two writes this module
  * performs are `mkdir` under the root and the creation of one new file.
  *
+ * **The `mkdir` outlives a refusal, and that is worth saying because the
+ * sentence above understates it.** It runs before the copy, so a refusal
+ * raised after it -- the second occupied-destination check, a failed copy,
+ * a failed rename -- leaves the directories behind: measured, an unmatched
+ * import whose copy fails with `unmatchedDir: 'a/b'` leaves `a/` and
+ * `a/b/` under the root and no file. Empty
+ * directories under a root an operator chose are not a deletion and not a
+ * path outside the root, so nothing removes them; a cleanup that did would
+ * be this module deleting things in a library, which §4 is about not
+ * doing.
+ *
  * **To a temporary in the destination directory, then a rename.** A rename
  * within a directory is atomic, so a reader never sees a half-copied file
  * and a crash mid-copy leaves a temporary nobody mistakes for a library

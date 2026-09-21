@@ -3,20 +3,26 @@
  * `PluginContext.library`, implemented once by the host in
  * `host/src/media/import.ts`.
  *
- * **Why the plugin does not do this itself.** Design spec §1 divides the
- * work as "the host notifies, the plugin imports", and §3 divides the
- * *knowledge* the other way: only a plugin can resolve `{season}`, and only
- * the host holds `plugin_destination` and this machine's filesystem. A
+ * **Why the plugin does not do this itself.** "The host notifies; the
+ * plugin imports" is the *reconcile* slice's division
+ * (`docs/superpowers/specs/2026-09-06-reconcile-design.md`), and this
+ * design supersedes half of it: the host performs the copy. What it keeps
+ * is the split of *knowledge* the importer spec §3 makes -- only a plugin
+ * can resolve `{season}`, and only the host holds `plugin_destination` and
+ * this machine's filesystem. A
  * plugin package cannot reach either -- `@pickarr/openmetadata` and the
  * three plugins built on it depend on this package and nothing else, and a
  * dependency on `@pickarr/host` would be a cycle. So the copy lives in the
  * host and arrives through the context, the same seam `jobs`, `media`,
  * `read` and `downloads` already use.
  *
- * **Declared here rather than in the host**, for the reason `./media.ts`
- * gives for `MediaWriter`: this is a boundary two packages have to agree on
- * exactly, and a second hand-written copy of it in a plugin is the pair that
- * drifts.
+ * **Declared here rather than in the host** for the reason every contract
+ * module gives -- `./mappings.ts` and `./download-clients.ts` each measure
+ * it: this is a boundary two packages have to agree on exactly, and a
+ * second hand-written copy of it is the pair that drifts, because renaming
+ * one half reddens only that half's tests. (`./media.ts`'s `MediaWriter`
+ * was cited here and does not argue this; its docblock is about scoping,
+ * which is a different question.)
  *
  * **Not a browser contract.** Nothing in this module reaches a client.
  * `./destinations.ts` holds the codes `PUT /api/destinations/:pluginId`
@@ -115,8 +121,11 @@ export type ImportRefusalCode =
 /**
  * A declined import.
  *
- * **Two fields, where every other refusal in this codebase has one**, and
- * the second is the reason to read this doc. A `copy-failed` with nothing
+ * **Two fields, where most refusals in this codebase have one** -- the
+ * hedge `./destinations.ts` already uses, and the exception is that file:
+ * `DestinationRefusal` and `DestinationRefusalBody`, added on this same
+ * branch, carry a `token` beside their code. The second field here is the
+ * reason to read this doc. A `copy-failed` with nothing
  * else on it cannot tell a full disk from a read-only mount from a
  * permission the host lost, and those are three different things for an
  * operator to do. `errno` is the platform's own symbolic code -- `ENOSPC`,

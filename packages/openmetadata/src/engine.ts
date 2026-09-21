@@ -633,9 +633,13 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
       const outcome = await ctx.library.place(file, async () => resolveTokens(spec.tokens, file, ctx));
 
       // **The ids and the verdict, never `file.path`.** Importer design spec
-      // §7: no path, url or credential reaches a log line, because a
-      // plugin's log detail is the same channel `last_error` is written from
-      // and `/api/downloads` serves that as `DownloadRead.lastError`. This
+      // §7: no path, url or credential reaches a log line. This detail goes
+      // to the host's **stdout** -- `ctx.log` is `console.log`, built at
+      // `host/src/host.ts` -- and so does the message of the throw below,
+      // through `deliverCompleted`'s catch. Neither reaches `last_error`;
+      // `clients/deliver.ts` never calls `failRow`, and `host/src/errors.ts`
+      // has the full audit of which host messages a browser can be shown.
+      // Stdout is enough: §7's rule is about a log line. This
       // line did log the path, and had to: until `DownloadedFile` carried
       // `rssItemId` and `mediaItemId` there was nothing else here that
       // identified the file. A refusal code and an `errno` are neither a

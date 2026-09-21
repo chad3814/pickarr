@@ -40,7 +40,15 @@ export function ownerPluginId(raw: DatabaseSync, rssItemId: number): string | un
 export function mediaItemIdForRssItem(raw: DatabaseSync, rssItemId: number): number | null {
   const row = raw.prepare('SELECT media_item_id FROM rss_item WHERE id = ?').get(rssItemId);
   if (!row) return null;
-  const value = (row as { media_item_id: unknown }).media_item_id;
+  const value = row['media_item_id'];
+  // An index read, not a cast. The plan for this slice forbids a cast to
+  // silence a type error, and `(row as { media_item_id: unknown })` was
+  // one: `node:sqlite` already types a row as
+  // `Record<string, SQLOutputValue>`, so indexing it compiles on its own
+  // and the assertion bought nothing but a second, unchecked spelling of
+  // the column name. `ownerPluginId` above still carries the older
+  // spelling and predates this branch.
+  //
   // The null is tested before the conversion, not after: `Number(null)` is
   // 0, and a 0 here reads as a media item this release matched.
   //

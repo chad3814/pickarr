@@ -1706,8 +1706,9 @@ export const ROUTES: readonly Route[] = [
         // **The one refusal body in this file with a second field**, and it
         // is `@pickarr/contract`'s `DestinationRefusalBody` rather than an
         // ad-hoc literal. Design spec §3 asks for an unknown token to be
-        // refused "naming it", and a settings screen showing eight tokens
-        // on one line cannot say which of them was wrong otherwise. The
+        // refused "naming it", and a settings row listing the seven tokens
+        // the television plugin declares -- the longest of the three lists,
+        // counted -- cannot say which of them was wrong otherwise. The
         // name is the caller's own input echoed to the caller, and it is
         // gated by a character class in `../media/destinations.ts`
         // (`ECHOABLE_TOKEN`, on `MEDIA_TYPE`'s reasoning above), so this
