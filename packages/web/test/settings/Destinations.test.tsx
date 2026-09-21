@@ -13,6 +13,7 @@ import { listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import { Destinations, type PluginTokens } from '../../src/settings/Destinations.tsx';
 import type { DestinationsSource } from '../../src/settings/useDestinations.ts';
+import { pluginLabel } from '../../src/pluginLabels.ts';
 import {
   DESTINATION_REFUSAL_MESSAGES,
   type DestinationSubmit,
@@ -129,17 +130,24 @@ function deferred<T>(): { promise: Promise<T>; settle: (value: T) => void } {
 async function renderDestinations(db: IDBDatabase, submit: DestinationSubmit): Promise<void> {
   render(<Destinations source={sourceFor(db)} plugins={PLUGINS} submit={submit} />);
   await waitFor(() => {
-    assert.ok(screen.getByRole('listitem', { name: TV_PLUGIN_ID }), 'the first read resolved');
+    assert.ok(screen.getByRole('listitem', { name: pluginLabel(TV_PLUGIN_ID) }), 'the first read resolved');
   });
 }
 
-/** One plugin's row, found by the accessible name its own visible heading gives it. */
+/**
+ * One plugin's row, found by the accessible name its own visible heading
+ * gives it -- which is `pluginLabel(pluginId)`, not `pluginId` itself, since
+ * `Destinations.tsx` renders the shared label there now (`../pluginLabels.ts`).
+ * Every call site below still addresses a row by plugin id; only this one
+ * function has to know the id and the heading text are no longer the same
+ * string.
+ */
 function row(pluginId: string): HTMLElement {
-  return screen.getByRole('listitem', { name: pluginId });
+  return screen.getByRole('listitem', { name: pluginLabel(pluginId) });
 }
 
 function saveButton(pluginId: string): HTMLButtonElement {
-  const button = within(row(pluginId)).getByRole('button', { name: `Save ${pluginId}` });
+  const button = within(row(pluginId)).getByRole('button', { name: `Save ${pluginLabel(pluginId)}` });
   assert.ok(button instanceof HTMLButtonElement, 'the save control is a button');
   return button;
 }
@@ -179,8 +187,8 @@ test('one row per plugin, each showing the root, shape and unmatched folder the 
   assert.equal(field('xxx', 'Library folder').value, '');
   assert.deepEqual(
     screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent ?? ''),
-    ['tv', 'movie', 'xxx'],
-    'one row per plugin, in the order the declarations were given',
+    ['TV', 'Movies', 'XXX'],
+    'one row per plugin, in the order the declarations were given, each named through the shared label map',
   );
 });
 

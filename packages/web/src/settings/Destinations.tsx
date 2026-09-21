@@ -63,6 +63,7 @@ import {
   type DestinationSubmit,
   type SaveDestinationInput,
 } from './postDestination.ts';
+import { pluginLabel } from '../pluginLabels.ts';
 
 /** Re-exported so a caller of this section needs one import, not two -- `useDestinations.ts` is where it is declared, since that hook is what needs it narrowed. */
 export type { DestinationsSource };
@@ -225,8 +226,18 @@ function DestinationRow({ plugin, destination, submit }: DestinationRowProps): R
 
   return (
     <li aria-labelledby={nameId}>
-      {/* An `<h3>`: one level under this section's `<h2>`, which is the level `Feeds.tsx` and `DownloadClients.tsx` fixed for anything inside a settings section. */}
-      <h3 id={nameId}>{plugin.pluginId}</h3>
+      {/*
+        An `<h3>`: one level under this section's `<h2>`, which is the level
+        `Feeds.tsx` and `DownloadClients.tsx` fixed for anything inside a
+        settings section.
+
+        `pluginLabel`, not `plugin.pluginId` -- `../pluginLabels.ts`'s own
+        docblock. The nav (`shell/Shell.tsx`) has read this same map since
+        task 4; before this, this heading read the raw id instead, so the
+        nav named this row's plugin **TV** while the row itself, one click
+        away, named it **tv**.
+      */}
+      <h3 id={nameId}>{pluginLabel(plugin.pluginId)}</h3>
       <form
         onSubmit={(event) => {
           void save(event);

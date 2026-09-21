@@ -187,9 +187,9 @@ test('the /settings heading hierarchy is three tiers deep in the markup, not onl
     '3 Add a download client',
     '3 Seedbox',
     '2 Library destinations',
-    '3 tv',
-    '3 movie',
-    '3 xxx',
+    '3 TV',
+    '3 Movies',
+    '3 XXX',
   ], 'one page heading, a section heading each, and everything inside a section one level further down');
 });
 
