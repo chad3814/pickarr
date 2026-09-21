@@ -53,7 +53,8 @@ visible at the boundary rather than discovered mid-import.
 
 ## 3. Destinations, and who owns a token
 
-A host table, one row per plugin: a **root** and a **shape**.
+A host table, one row per plugin: a **root**, a **shape**, and an
+**unmatched directory** (§6).
 
 **Each plugin declares its own tokens.** `MediaPlugin` gains a declared
 list beside `migrations` and `synced`. Only a plugin knows whether
@@ -103,17 +104,37 @@ makes refusing safe rather than silent.
 ## 6. An unmatched release
 
 A file whose release never matched has `mediaItemId: null`: no title,
-no series, no year. It is copied to **`<root>/_unmatched/<filename>`**
+no series, no year. It is copied to **`<root>/<unmatched>/<filename>`**
 and the row is marked delivered.
+
+**`<unmatched>` is configurable per plugin and defaults to
+`_unmatched`.** A third column on the same row as the root and the
+shape. Per-plugin because the three libraries may already have
+conventions, and a name that collides with an existing directory in one
+library should not have to be tolerated in the others.
+
+Three rules, each following one already in this spec:
+
+- **Relative to the root, and it may not escape it.** The same check
+  §7 applies to a resolved shape, applied to this value on save. An
+  absolute path or a `..` segment is refused.
+- **Empty is refused.** It would mean "put unmatched files in the
+  library root", which is a real outcome and a bad one — unnamed
+  releases interleaved with organised ones, and no way to tell them
+  apart afterwards. A rule with no subject, as the mappings slice put
+  it.
+- **Nested is allowed.** `_pickarr/unmatched` is a legitimate answer
+  and costs nothing to permit, since the escape check already governs
+  what it may reach.
+
+It is **not a token and not interpolated**. It is a literal directory
+name, so nothing in it resolves and nothing in it can fail to resolve.
 
 This is the owner's decision over not importing at all. The trade it
 accepts, stated so nobody rediscovers it: those files are gathered
 somewhere predictable and **nothing will ever organise them** — a later
 lookup that matches the release will not move a file already imported,
 because this slice has no notion of re-importing.
-
-`_unmatched` is not configurable and not a token. One fixed name means
-an operator can find it without consulting settings.
 
 ## 7. Failure, and what it must not do
 
@@ -145,8 +166,11 @@ the importer invents somewhere unintended.
    saving one whose tokens are all declared succeeds.
 5. A destination that exists is refused, the row stays `completed`, and
    the next tick tries again.
-6. An unmatched release lands in `<root>/_unmatched/` and is marked
-   delivered.
+6. An unmatched release lands in `<root>/<unmatched>/` and is marked
+   delivered, using the configured directory where one is set and
+   `_unmatched` where none is.
+6b. An unmatched directory that is empty, absolute, or escapes the root
+   is refused on save, naming which.
 7. The copy is atomic: an interrupted import leaves no file at the
    final path.
 8. A token that resolves to nothing — a film with no collection —
