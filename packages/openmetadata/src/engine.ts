@@ -298,12 +298,15 @@ export interface LookupPluginSpec {
    * What this plugin's library path shape may name (design spec §3).
    *
    * **Required, not optional like `synced` above.** `synced` defaults to
-   * none and a plugin that declares nothing keeps working; a token list
-   * that defaulted to none would make the host refuse every shape anyone
-   * saved for that plugin, with the settings UI offering an empty list of
-   * tokens and no hint that the plugin is the reason. The engine cannot
-   * supply a sensible default either -- what a shape may name is exactly
-   * the thing only the plugin knows.
+   * none and a plugin that declares nothing keeps working; an empty token
+   * list is not inert in the same way. `media/destinations.ts` validates a
+   * shape by resolving it against a probe value for each declared token, so
+   * a plugin declaring none would have every shape naming any token refused
+   * `unknown-token` -- and a shape naming none at all refused
+   * `empty-filename` -- leaving the settings screen an empty token list and
+   * nothing saying the plugin is why. The engine cannot supply a sensible
+   * default either: what a shape may name is exactly the thing only the
+   * plugin knows.
    */
   readonly tokens: readonly string[];
 }

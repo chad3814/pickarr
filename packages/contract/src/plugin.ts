@@ -124,10 +124,26 @@ export interface MediaPlugin {
    * Declared by the plugin for the same reason `synced` is declared and its
    * triggers are not: only the plugin knows what it can resolve. `{season}`
    * means something for television and nothing for a film, and the host has
-   * no way to tell which is which. The host validates a saved shape against
-   * the declaring plugin's list and refuses an unknown token by name, so a
-   * typo fails where it is typed rather than months later as a wrong path
-   * (design spec §3).
+   * no way to tell which is which.
+   *
+   * `PUT /api/destinations/:pluginId` validates a saved shape against **the
+   * declaring plugin's** list -- `media/destinations.ts` reads it through a
+   * `tokensFor(pluginId)` closure, not a union of every plugin's -- and
+   * refuses `unknown-token`, so a typo fails where it is typed rather than
+   * months later as a wrong path (design spec §3).
+   *
+   * **The refusal names the rule, not the token.** Design spec §3 asks for
+   * an unknown token "refused, naming it"; the route deliberately does not,
+   * because no refusal it answers carries anything from the input and the
+   * settings screen holds both the shape and this list already. See
+   * `media/destinations.ts`'s own docblock for that decision.
+   *
+   * **A shape is refused four further ways this list has no say in** --
+   * `malformed-shape`, `backslash-in-shape`, `escaping-shape` and
+   * `empty-filename`, none of which §3 asks for. They exist for §3's own
+   * stated reason: `{title` is a typo too, and storing it would refuse at
+   * every import for ever. A token being declared here is necessary for a
+   * shape naming it to save, and not sufficient.
    *
    * Includes the tokens every plugin shares -- `resolution`, `filename` and
    * `ext`, which come from `rss_item` and the source path rather than from

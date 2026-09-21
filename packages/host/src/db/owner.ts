@@ -42,9 +42,18 @@ export function mediaItemIdForRssItem(raw: DatabaseSync, rssItemId: number): num
   if (!row) return null;
   const value = (row as { media_item_id: unknown }).media_item_id;
   // The null is tested before the conversion, not after: `Number(null)` is
-  // 0, which is a media item id that would read as matched and point at
-  // nobody. Every other caller in this package narrows with `Number(...)`
-  // and none of them reads a nullable column.
+  // 0, and a 0 here reads as a media item this release matched.
+  //
+  // This is not the only reader of this column narrowed this way, and the
+  // first version of this comment wrongly claimed it was. `api/reads.ts`
+  // projects the same `rss_item.media_item_id` at :633 through its own
+  // `asNumberOrNull`, whose body is this same null-before-convert test --
+  // one of thirteen uses of that helper and its `asTextOrNull` twin, all in
+  // that one file. The two are not deduplicated onto one function because
+  // `asNumberOrNull` is module-private there and exporting a two-line
+  // narrowing across the `api`/`db` boundary buys less than it couples;
+  // they are cross-referenced instead, so a reader who changes one knows
+  // the other exists.
   if (value === null || value === undefined) return null;
   return Number(value);
 }

@@ -17,9 +17,13 @@ export const MOVIE_PLUGIN_ID = 'movie';
  * something a shape can express. `resolution`, `filename` and `ext` come
  * from `rss_item` and the source path, as they do for every plugin.
  *
- * There is no `season` and no `episode`: a shape naming either is refused on
- * save, which is the point of each plugin declaring its own list rather than
- * the host holding one.
+ * There is no `season` and no `episode`. A film shape naming either is
+ * refused `unknown-token` by `PUT /api/destinations/:pluginId`, while the
+ * identical `{season}` in a television shape saves -- which is the point of
+ * each plugin declaring its own list rather than the host holding one
+ * union. `host/test/media/destinations.test.ts` drives exactly that pair,
+ * because a test using only a nonsense token like `{seasn}` cannot tell a
+ * per-plugin validator from a union one.
  */
 export const MOVIE_TOKENS: readonly string[] = [
   'title', 'year', 'releaseDate', 'collection', 'resolution', 'filename', 'ext',
