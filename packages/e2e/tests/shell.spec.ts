@@ -933,14 +933,30 @@ const HOST_PATH = '/media/downloads';
 const HOST_PATH_CORRECTED = '/mnt/library/downloads';
 
 /**
- * A locator's box, or a failure naming the locator rather than a `null`
- * dereference. `boundingBox()` answers `null` for an element that is not
- * rendered, and an assertion comparing two `null`s would pass.
+ * A locator's box in **document** coordinates, or a failure naming the
+ * locator rather than a `null` dereference. `boundingBox()` answers `null`
+ * for an element that is not rendered, and an assertion comparing two
+ * `null`s would pass.
+ *
+ * **The scroll offset is added, and that is the point of this helper.**
+ * `boundingBox()` is relative to the viewport, so two readings of a
+ * motionless element disagree the moment anything scrolls the page between
+ * them -- and Playwright scrolls on its own, to bring the element it is
+ * about to click into view. The one caller below compares a box taken
+ * before an editor opens against one taken after, to assert the row did
+ * not move; when the `/settings` screen grew its destinations section the
+ * document became 2860px against a 720px viewport, the click on Edit
+ * scrolled it 10px, and the comparison failed on a row that had not moved
+ * at all -- `window.scrollY` went 676 -> 686 while the element's
+ * document-relative top stayed at 1378px exactly. Viewport coordinates
+ * were only ever stable here by the accident of a page short enough not to
+ * scroll, which is not a property this suite should depend on.
  */
 async function boxOf(locator: ReturnType<Page['locator']>, what: string): Promise<{ x: number; y: number; width: number; height: number }> {
   const box = await locator.boundingBox();
   if (box === null) throw new Error(`${what} has no bounding box, so it is not rendered`);
-  return box;
+  const scroll = await locator.page().evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+  return { x: box.x + scroll.x, y: box.y + scroll.y, width: box.width, height: box.height };
 }
 
 test('an operator can add, edit and remove a path mapping on a download client', async ({ page, harness }) => {
@@ -1011,7 +1027,10 @@ test('an operator can add, edit and remove a path mapping on a download client',
   // and Remove from the DOM while the row is being edited, so without a
   // height of its own the first line shrinks to the text and the paths
   // ride up under the pointer. Measured with only that one declaration
-  // removed, the client path's top edge went from 693.5px to 690px.
+  // removed, the client path's top edge rose by 3.5px (693.5 -> 690 in the
+  // viewport coordinates `boxOf` reported at the time; it reports document
+  // coordinates now, which moves both absolute numbers by the scroll
+  // offset and leaves the 3.5px shift this pin catches unchanged).
   //
   // The whole box rather than `y` alone: nothing about opening an editor
   // should move the path horizontally or resize it either, and all four
@@ -1128,4 +1147,103 @@ test('an operator can add, edit and remove a path mapping on a download client',
   await row.getByRole('button', { name: `Remove ${CLIENT_PATH}` }).click();
   await expect(row).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByText('No path mappings for this download client.')).toBeVisible();
+});
+
+/*
+ * The importer slice's own browser proof (task 5's brief), and the only
+ * place `Destinations.tsx` has run in a real browser.
+ *
+ * **What this spec measures.** `PUT /api/destinations/movie` answers `{ id
+ * }` and nothing else (`postDestination.ts`'s own doc on
+ * `SaveDestinationOutcome` -- no root, no shape and no unmatched folder in
+ * the body), so the row showing the values typed below, after the save,
+ * came off the replica -- through `plugin_destination`'s own `AFTER
+ * INSERT` trigger into `sync_log` (`sync/log.ts`'s `installSyncTriggers`,
+ * committed synchronously with the insert; `plugin_destination` is
+ * `HOST_SYNCED_TABLES`'s tenth member) and this tab's `/api/sync` tail --
+ * not from the draft `Destinations.tsx` keeps while the request is in
+ * flight (it clears that draft on an accepted save and falls back to
+ * whatever the replica holds, `DestinationRow`'s own doc). `settings.css`'s
+ * rules for this section resolving through a real cascade is the other
+ * half, which the computed-style assertion below is for.
+ *
+ * **The shape typed below names no `{token}`, and that is a property of
+ * this harness, not of the feature.** `harness-2.ts`'s `stubPlugin`
+ * declares `tokens: {}` for all three plugins -- "No library path shape is
+ * configured in an end-to-end run, so there is nothing here for a token to
+ * appear in" -- so a shape naming one here would be refused `unknown-token`
+ * against this harness specifically, for a reason that has nothing to do
+ * with `media/shape.ts`'s real rule against a real plugin. The token
+ * vocabulary itself -- that a tv row offers `{season}` and a movie row
+ * does not, and that saving a shape naming a token the plugin never
+ * declared is refused -- is proven at the unit level instead, against the
+ * real plugins' own declarations: `Destinations.test.tsx`'s `the tv row
+ * lists {season} and the movie row does not`, and
+ * `packages/host/test/media/destinations.test.ts`'s own `unknown-token`
+ * cases.
+ *
+ * **What this spec does not measure, stated exactly rather than as "the
+ * whole slice", and the answer to what `host.start()` not being called
+ * means for an *import* specifically.** Nothing below exercises an actual
+ * import: not the copy `media/import.ts`'s `createLibraryImporter`
+ * performs, not `media/shape.ts`'s `resolveShape` run against real
+ * resolved values rather than a save-time probe, and none of the three
+ * refusals that survive a shape accepted on save
+ * (`separator-in-value`, `escapes-root`, `empty-filename` --
+ * `media/destinations.ts`'s own doc on exactly why those three remain
+ * reachable at import against a shape this module already accepted). All
+ * of that runs from `deliverCompleted`, which only the job dispatcher
+ * calls, and -- exactly as the download-clients spec above records for its
+ * own reconcile job -- `harness-2.ts` builds a real `Host` and never calls
+ * `host.start()`, so no tick of any kind ever runs in this suite.
+ * `Host.saveDestination` itself schedules nothing in the first place
+ * (`media/destinations.ts`'s own doc: "nothing is scheduled afterwards ...
+ * the importer reads this table at the moment it imports"), so unlike the
+ * download-clients spec this costs the *write* nothing at all -- the gap is
+ * entirely on the reading side, and here it is total: nothing in this
+ * suite, or in any other harness in this repository, ever points a running
+ * `Host` at a real filesystem. Proving the destination this spec saves is
+ * ever actually used to copy a file is `media/import.ts`'s own unit tests'
+ * job, not this one's, and this spec is not evidence about it either way.
+ */
+test('an operator can set a plugin\'s library destination and see it listed', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await page.goto(`${harness.origin}/settings`);
+
+  // `exact: true`: the shell's own nav names this same plugin with the same
+  // word now (`pluginLabels.ts`'s `pluginLabel`, the ruling this task
+  // implements), so a loose `name: 'Movies'` would also match the nav
+  // link's own `<li>` were its accessible name not "Movies 0" -- the link
+  // text plus its count span, which `exact` tells apart from this row's
+  // heading, exactly "Movies" and nothing else.
+  const row = page.getByRole('listitem', { name: 'Movies', exact: true });
+  await row.getByLabel('Library folder').fill('/media/movies');
+  await row.getByLabel('Path shape').fill('movie.mkv');
+  await row.getByRole('button', { name: 'Save Movies' }).click();
+
+  // The round trip described above. `waitFor`'s default timeout is not
+  // enough for a real sync tail; `Feeds.tsx`'s own spec above needs the
+  // same allowance for the same reason.
+  await expect(row.getByLabel('Library folder')).toHaveValue('/media/movies', { timeout: 15_000 });
+  await expect(row.getByLabel('Path shape')).toHaveValue('movie.mkv');
+
+  // **The two-sided pin, `settings.css`'s own rule for this section's row
+  // list.** `borderTopAgainstLineToken`'s own doc, above, is the reasoning
+  // for resolving `--color-line` in the browser rather than a literal
+  // `rgb(...)`. A `<li>` computes `border-top-style: none` from the UA
+  // stylesheet, so a rule setting `border-top: 1px solid var(--color-line)`
+  // is the only plausible producer of a `border-top-color` that resolves to
+  // that token: with the rule missing, the computed colour falls back to
+  // `currentcolor`, i.e. `--color-text` -- a different token in both of
+  // `tokens.css`'s palettes -- which is what makes this survive the
+  // stylesheet being gutted as well as the `@import` being removed
+  // outright (both mutations run and observed, task 5's own report).
+  const destinationBorder = await borderTopAgainstLineToken(
+    page,
+    "ul[aria-labelledby='destinations-heading'] > li",
+  );
+  expect(destinationBorder.borderTopColor).toBe(destinationBorder.lineTokenColor);
 });

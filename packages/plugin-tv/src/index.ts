@@ -4,6 +4,7 @@ import { createLookupPlugin } from '@pickarr/openmetadata';
 import { applyTv, checkTv } from './apply.ts';
 import { TV_MIGRATIONS } from './migrations.ts';
 import { TV_SYNCED } from './sync.ts';
+import { TV_TOKENS } from './tokens.ts';
 
 /** Also the required prefix for every table this plugin declares. */
 export const TV_PLUGIN_ID = 'tv';
@@ -24,9 +25,11 @@ export function createTvPlugin(deps: LookupPluginDeps): MediaPlugin {
     check: checkTv,
     apply: applyTv,
     synced: TV_SYNCED,
+    tokens: TV_TOKENS,
   }, deps);
 }
 
 export { applyTv, checkTv } from './apply.ts';
 export { TV_MIGRATIONS } from './migrations.ts';
 export { TV_SYNCED } from './sync.ts';
+export { TV_TOKENS } from './tokens.ts';

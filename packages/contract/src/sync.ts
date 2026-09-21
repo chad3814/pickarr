@@ -476,3 +476,59 @@ export interface FilepathMappingSyncRead {
   createdAt: number;
   updatedAt: number;
 }
+
+/**
+ * One plugin's library destination as a replica holds it -- the tenth host
+ * synced table, and the second whole-row projection that carries a
+ * filesystem path on purpose.
+ *
+ * **Why a path is here at all**, on the same distinction
+ * `FilepathMappingSyncRead` above draws and not as a second exception to it:
+ * `root` is *dictated*, a string the operator typed into the settings screen
+ * that reads it back, where `TorrentDownloadSyncRead.storagePath` is
+ * *discovered* -- a client reporting a layout nobody chose to disclose. The
+ * `storagePath` rule stands exactly as written.
+ *
+ * **`pluginId` is not resolvable against any row a client holds.** There is
+ * no plugin table: a plugin is code the host loaded, and this string is the
+ * `MediaPlugin.id` it registered under -- the same value `MediaItemSyncRead.pluginId`
+ * and `RssFeedSyncRead.pluginId` already carry. A client groups by it and
+ * addresses `PUT /api/destinations/:pluginId` with it; it does not join on it.
+ *
+ * Seven columns and the whole row, like `filepath_mapping`: there is nothing
+ * else in this table for a client to be spared.
+ */
+export interface PluginDestinationSyncRead {
+  id: number;
+  /** The `MediaPlugin.id` this destination belongs to. Unique across the table. */
+  pluginId: string;
+  /**
+   * The absolute directory this plugin's library lives in.
+   *
+   * Absolute is checked on save (`not-absolute-root`), and nothing else about
+   * it is: design spec §7 is explicit that a root that does not exist is a
+   * misconfiguration an operator should see rather than a directory the
+   * importer invents. A client displays and edits this string; it does not
+   * parse it and must not assume it names a directory that exists.
+   */
+  root: string;
+  /**
+   * The `{token}` template a resolved path is built from, under `root`.
+   *
+   * Every token in it is one the owning plugin declared (`MediaPlugin.tokens`),
+   * which is checked on save -- a client rendering a token picker reads that
+   * same declaration rather than inferring the vocabulary from this string.
+   */
+  shape: string;
+  /**
+   * Where a release that matched nothing lands, relative to `root`.
+   *
+   * A literal directory name: design spec §6 is explicit that nothing in it
+   * is a token and nothing in it is interpolated, so a client renders it as
+   * typed. Never empty, never absolute and never escaping the root -- all
+   * three checked on save.
+   */
+  unmatchedDir: string;
+  createdAt: number;
+  updatedAt: number;
+}

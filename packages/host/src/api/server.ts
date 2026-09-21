@@ -1,6 +1,6 @@
 /**
- * The read-and-write API on a socket: `node:http`, fifteen routes --
- * thirteen behind a session and two open (`/api/health` and the static
+ * The read-and-write API on a socket: `node:http`, sixteen routes --
+ * fourteen behind a session and two open (`/api/health` and the static
  * bundle) -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
@@ -17,7 +17,9 @@
  * fifteen with `POST /api/mappings` and `/api/mappings/:id` -- the last of
  * those being one route answering two methods, so the route count and the
  * method count have stopped being the same number; the shape of the
- * sentence is what matters and has not changed.)
+ * sentence is what matters and has not changed -- and to sixteen with
+ * `PUT /api/destinations/:pluginId`, the importer slice's, and the first
+ * `PUT` this API has ever answered.)
  *
  * **It said "eleven" through two of those.** The download-clients slice
  * added its route and left both this line and `ROUTES`' own doc reading
@@ -132,6 +134,8 @@ import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
 import type { AddMappingInput, EditMappingInput, MappingRefusal } from '../clients/mappings.ts';
+import type { DestinationRefusalBody } from '@pickarr/contract';
+import type { DestinationRefusal, SaveDestinationInput } from '../media/destinations.ts';
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
@@ -362,6 +366,28 @@ export interface ReadServerDeps {
    */
   removeMapping: (id: number) => Promise<{ id: number } | MappingRefusal>;
   /**
+   * Writes one plugin's library destination -- `Host.saveDestination`,
+   * handed in as one function rather than the whole `Host`, for the reason
+   * `addFeed` above gives.
+   *
+   * `pluginId` is a separate argument rather than a field of the input
+   * because it comes from the request *path*, not from the body: see
+   * `pluginIdFrom`, and `editMapping` above for the same split.
+   *
+   * **The one dependency here that needs the plugin registry**, which is
+   * exactly why it arrives as a function. Validating a shape needs the
+   * declaring plugin's declared tokens (design spec §3), `host.ts` owns that
+   * registry, and nothing under `src/api` may import `host.ts` without
+   * putting the read layer in a cycle with it -- the same constraint
+   * `pluginIdForType` above solves the same way.
+   *
+   * Resolves a refusal *value* on failure and throws no refusal, with the
+   * same scope the four above state: a SQLite error, or an upsert that
+   * answered no row, is rethrown by `media/destinations.ts` and becomes a
+   * 500 here rather than a mapped status.
+   */
+  saveDestination: (pluginId: string, input: SaveDestinationInput) => Promise<{ id: number } | DestinationRefusal>;
+  /**
    * Host tables plus every plugin's declared tables, as one lookup --
    * `sync/registry.ts`'s `createSyncRegistry(raw, plugins)`. What `/api/sync`
    * and `/api/sync/backfill` read current state through; see `sync-route.ts`.
@@ -514,6 +540,34 @@ const MEDIA_TYPE = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
 
 /** An artwork id, as a path segment: digits only, so nothing else reaches a query parameter. */
 const DIGITS = /^\d+$/;
+
+/**
+ * What a plugin id may look like as a path segment, for
+ * `PUT /api/destinations/:pluginId`.
+ *
+ * **The class a plugin id already has to be in, bounded.**
+ * `MediaPlugin.id` is a bare `string` in the contract, but it is also "the
+ * required prefix for every table this plugin declares" -- and
+ * `assertSyncedTableName` (`@pickarr/contract`) refuses a table name outside
+ * `/^[a-z][a-z0-9_]*$/`, because that name is interpolated into a trigger
+ * body where SQLite binds no parameters. So a plugin whose id fell outside
+ * this class could declare no synced table at all. The 32-character bound is
+ * this module's own: a path segment is caller-chosen and unbounded, and
+ * nothing is served by letting an arbitrarily long one reach a route
+ * decision.
+ *
+ * **A segment outside it answers `UNKNOWN_ROUTE`, not `unknown-plugin`** --
+ * `mappingIdFrom`'s reasoning below, for a string rather than an integer.
+ * `unknown-plugin` claims "this is a well-formed plugin id and nothing
+ * registered it", which is a statement the host cannot make about
+ * `Tv%20Shows`; the 404 a path naming no route gets says the truthful thing
+ * instead, and tells a caller nothing a missing plugin would not have.
+ *
+ * `api/server.test.ts` drives every shipped plugin id through the route, so
+ * a class narrower than the ids the host actually registers fails there
+ * rather than making a real plugin's destination unreachable.
+ */
+const PLUGIN_ID = /^[a-z][a-z0-9_]{0,31}$/;
 
 /**
  * Only `readArtwork`'s two filesystem calls, and the real ones -- the async
@@ -1119,6 +1173,121 @@ function mappingIdFrom(pathname: string): number | undefined {
 }
 
 /**
+ * The plugin id in `/api/destinations/:pluginId`, or `undefined` for a
+ * segment that could not be one.
+ *
+ * **Read back off the pathname by index, never bound**, the shape
+ * `artworkAnswer` established and `mappingIdFrom` above follows: `Route.path`
+ * carries a `:name` segment so `matchesPath` can compare segment counts, and
+ * the value is this function's to recover. Every segment is checked rather
+ * than `!`-asserted -- `noUncheckedIndexedAccess` types each one
+ * `string | undefined`, and an assertion would be a claim rather than a
+ * check.
+ *
+ * **What differs from `mappingIdFrom`, and what does not.** A mapping id is
+ * an integer, so that function has `DIGITS` and then `Number.isSafeInteger`
+ * -- two checks, the second because a float id can silently address a
+ * *different* row. Nothing here parses: a plugin id is a string all the way
+ * to the prepared statement, so there is no coercion for a neighbouring
+ * value to collapse onto and the safe-integer hazard has no analogue. What
+ * is left is the class check alone, {@link PLUGIN_ID}, whose doc has what it
+ * is and why a segment outside it is `UNKNOWN_ROUTE` rather than a refusal.
+ *
+ * `undefined` rather than an `Answer`, for `mappingIdFrom`'s reason: the
+ * caller turns it into `UNKNOWN_ROUTE` and wants no opinion from here.
+ */
+function pluginIdFrom(pathname: string): string | undefined {
+  const segments = pathname.split('/');
+  if (segments.length !== 4) return undefined;
+  const raw = segments[3];
+  if (raw === undefined || !PLUGIN_ID.test(raw)) return undefined;
+  return raw;
+}
+
+/**
+ * `PUT /api/destinations/:pluginId`'s body as the host wants it, or
+ * `undefined` for one this route will not forward.
+ *
+ * **It builds a value where the other body guards assert a shape**, and
+ * that is because of the one optional field. `isMappingBody` and its
+ * siblings are `value is T` predicates, which is honest when every property
+ * is required: the checks prove exactly the type. Here `unmatchedDir` may
+ * be *absent*, and a predicate claiming `{ unmatchedDir: string | undefined }`
+ * of an object that has no such property would be asserting slightly more
+ * than it proved. Constructing the input instead turns "absent" into
+ * `undefined` by writing it, which is what `SaveDestinationInput` means by
+ * the field -- and `exactOptionalPropertyTypes` is why "absent" and
+ * "explicitly undefined" have to be collapsed somewhere rather than carried
+ * as two states.
+ *
+ * **A `null` is refused rather than read as absent.** A client that means
+ * "use the default" sends no field; `null` is a third thing, and giving it
+ * the same meaning as absence would make two spellings of one intent that
+ * this route would have to keep agreeing about.
+ *
+ * Nothing here checks a field's *value*. Not that the root is absolute --
+ * that is `not-absolute-root`; not that the shape's tokens are declared --
+ * that is `unknown-token`, and it needs the plugin registry this module
+ * deliberately cannot reach; and not the three unmatched-directory rules.
+ * Every one of them lives in `../media/destinations.ts`, per the module
+ * doc's rule that no business rule belongs in this file.
+ *
+ * `'root' in value` rather than a cast to `Record<string, unknown>`:
+ * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
+ * as far as each check proves -- the same pattern every guard above uses.
+ */
+function destinationBodyFrom(value: unknown): SaveDestinationInput | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  if (!('root' in value) || typeof value.root !== 'string') return undefined;
+  if (!('shape' in value) || typeof value.shape !== 'string') return undefined;
+  if (!('unmatchedDir' in value)) {
+    return { root: value.root, shape: value.shape, unmatchedDir: undefined };
+  }
+  if (typeof value.unmatchedDir !== 'string') return undefined;
+  return { root: value.root, shape: value.shape, unmatchedDir: value.unmatchedDir };
+}
+
+/**
+ * The status `PUT /api/destinations/:pluginId` answers for each way the host
+ * can refuse, on `statusForMappingRefusal`'s reasoning above.
+ *
+ * **`unknown-plugin` is `404` and everything else is `422`**, and the split
+ * is the one that file already draws: `unknown-plugin` is about the
+ * **request target** -- `/api/destinations/book` names a resource, and a
+ * resource that is not there is what `404` means -- exactly as
+ * `unknown-mapping` is. The other nine are about a *value in the body*: the
+ * request parsed fine and named fields that exist, and one of them carries
+ * something that cannot be acted on, which is what `422` means and what
+ * `empty-path` already gets on the mapping routes.
+ *
+ * There is no `409`. Its sibling has one because a mapping can collide with
+ * an existing row; a destination cannot -- the statement upserts, so having
+ * one already is the ordinary case rather than a conflict.
+ *
+ * Whatever the status, the body carries `refusal` itself and nothing else --
+ * never a message a human would read, and above all never the root. A root
+ * is a path, and although this table's roots do reach a client through the
+ * replica (design spec §3), that is not licence for an *error* body to quote
+ * the one it was just handed.
+ */
+function statusForDestinationRefusal(refusal: DestinationRefusal['refusal']): number {
+  switch (refusal) {
+    case 'unknown-plugin':
+      return 404;
+    case 'not-absolute-root':
+    case 'unusable-root':
+    case 'unknown-token':
+    case 'malformed-shape':
+    case 'backslash-in-shape':
+    case 'escaping-shape':
+    case 'empty-filename':
+    case 'empty-path':
+    case 'escaping-path':
+      return 422;
+  }
+}
+
+/**
  * The static route's own `path`, in `ROUTES` -- a sentinel `matchesPath`
  * recognises and handles before its ordinary segment comparison ever runs,
  * not a template built from `:name` segments the way every other route's is
@@ -1130,11 +1299,11 @@ function mappingIdFrom(pathname: string): number | undefined {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The fifteen routes -- thirteen guarded, two `open: true`, the same split
- * this module's own doc states. Fifteen *routes*, sixteen route-and-method
- * pairs: `/api/mappings/:id` is the first entry here to declare two
- * methods, so the two counts have parted company and a reader counting
- * "endpoints" will get a different number than `grep` does.
+ * The sixteen routes -- fourteen guarded, two `open: true`, the same split
+ * this module's own doc states. Sixteen *routes*, seventeen
+ * route-and-method pairs: `/api/mappings/:id` is the one entry here that
+ * declares two methods, so the two counts have parted company and a reader
+ * counting "endpoints" will get a different number than `grep` does.
  *
  * **It said "ten" until the final review counted them, and then "eleven"
  * for two slices while the table held twelve.** `POST /api/feeds` made
@@ -1142,9 +1311,9 @@ const STATIC_ROUTE_PATH = '/*';
  * above -- the one whose whole opening paragraph exists because its
  * predecessor said "six routes" and was wrong -- while missing this line;
  * the download-clients slice then added a twelfth and updated neither.
- * (The picks slice made it thirteen and corrected both; this slice makes
- * it fifteen. Measured with the `grep` below on each occasion, not
- * incremented on sight.) That is not an argument for deleting the number:
+ * (The picks slice made it thirteen and corrected both; the mappings slice
+ * made it fifteen and the importer slice sixteen. Measured with the `grep`
+ * below on each occasion, not incremented on sight -- `16` on this tree.) That is not an argument for deleting the number:
  * a reader wants to know whether the table below is the whole set. It is
  * an argument for checking it, because no test pins the total and none
  * can usefully. The one count assertion in `api/server.test.ts` is
@@ -1496,6 +1665,63 @@ export const ROUTES: readonly Route[] = [
       // 200 rather than 201: nothing was created, and the id is the one the
       // caller addressed. It is answered anyway, so an edit and an add have
       // the same success shape for a client to read.
+      return json(200, { id: result.id });
+    },
+  },
+  {
+    path: '/api/destinations/:pluginId',
+    // **A `PUT`, and the first this API answers.** An upsert: a plugin
+    // either has a destination or it does not (design spec §3), so there is
+    // no create/update distinction worth two routes and no collection to
+    // `POST` to. `PUT` is also the method whose semantics match -- the
+    // request names the resource in full and replaces it, and repeating it
+    // changes nothing beyond `updated_at`.
+    //
+    // One method, so no branch on `request.method` here: `refusalFor`
+    // answers 405 for everything else, and the session check still runs
+    // ahead of the method check, so an anonymous `PUT` is 401 exactly as an
+    // anonymous `POST` is.
+    methods: ['PUT'],
+    open: false,
+    // Four segments, so `matchesPath`'s segment-count comparison keeps this
+    // from colliding with anything -- the same arrangement
+    // `/api/mappings/:id` and `/api/artwork/:kind/:mediaItemId` have. The
+    // `:pluginId` is read back off the pathname by `pluginIdFrom`, never
+    // bound by the router.
+    answer: async ({ deps, pathname, body }) => {
+      const pluginId = pluginIdFrom(pathname);
+      // The same 404 a path naming no route gets. A segment that could not
+      // be a plugin id is not a plugin that could exist, and saying so in
+      // any other words would tell a caller which of their two mistakes it
+      // was.
+      if (pluginId === undefined) return UNKNOWN_ROUTE;
+
+      const input = destinationBodyFrom(body);
+      // `{ refusal }` and no prose, for the reason `MALFORMED_BODY`'s doc
+      // gives: these two are the only answers here that share a status.
+      if (input === undefined) return json(400, { refusal: 'invalid-shape' });
+
+      const result = await deps.saveDestination(pluginId, input);
+      if ('refusal' in result) {
+        // **The one refusal body in this file with a second field**, and it
+        // is `@pickarr/contract`'s `DestinationRefusalBody` rather than an
+        // ad-hoc literal. Design spec §3 asks for an unknown token to be
+        // refused "naming it", and a settings row listing the seven tokens
+        // the television plugin declares -- the longest of the three lists,
+        // counted -- cannot say which of them was wrong otherwise. The
+        // name is the caller's own input echoed to the caller, and it is
+        // gated by a character class in `../media/destinations.ts`
+        // (`ECHOABLE_TOKEN`, on `MEDIA_TYPE`'s reasoning above), so this
+        // is not a way to get a path or a query string into a body.
+        // `token` is `null` for every other code, and may be `null` for
+        // this one.
+        const refused: DestinationRefusalBody = { refusal: result.refusal, token: result.token };
+        return json(statusForDestinationRefusal(result.refusal), refused);
+      }
+      // 200 rather than 201: the caller addressed the resource, so nothing
+      // was created at an address they did not already know. The row id is
+      // answered anyway -- it is the key a replica holds the destination
+      // under, and a client that just saved one has no other way to learn it.
       return json(200, { id: result.id });
     },
   },

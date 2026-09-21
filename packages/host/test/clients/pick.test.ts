@@ -118,6 +118,7 @@ function pickingPlugin(id: string): MediaPlugin {
     migrations: [],
     jobs: {},
     synced: [],
+    tokens: {},
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: async (rssItemId, ctx) => {

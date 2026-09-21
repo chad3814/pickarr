@@ -4,6 +4,7 @@ import { createLookupPlugin } from '@pickarr/openmetadata';
 import { applyMovie, checkMovie } from './apply.ts';
 import { MOVIE_MIGRATIONS } from './migrations.ts';
 import { MOVIE_SYNCED } from './sync.ts';
+import { MOVIE_TOKENS } from './tokens.ts';
 
 /** Also the required prefix for every table this plugin declares. */
 export const MOVIE_PLUGIN_ID = 'movie';
@@ -24,9 +25,11 @@ export function createMoviePlugin(deps: LookupPluginDeps): MediaPlugin {
     check: checkMovie,
     apply: applyMovie,
     synced: MOVIE_SYNCED,
+    tokens: MOVIE_TOKENS,
   }, deps);
 }
 
 export { applyMovie, checkMovie } from './apply.ts';
 export { MOVIE_MIGRATIONS } from './migrations.ts';
 export { MOVIE_SYNCED } from './sync.ts';
+export { MOVIE_TOKENS } from './tokens.ts';

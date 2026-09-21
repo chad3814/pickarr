@@ -95,7 +95,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile } from '@pickarr/contract';
-import { ownerPluginId } from '../db/owner.ts';
+import { mediaItemIdForRssItem, ownerPluginId } from '../db/owner.ts';
 import { PluginNotRegisteredError } from '../errors.ts';
 import { mapClientPath } from './paths.ts';
 import { redactUrl } from './redact.ts';
@@ -219,7 +219,23 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
       return;
     }
 
-    const file: DownloadedFile = { path: mappedPath, sizeBytes, downloadClientId: row.downloadClientId };
+    // `row.rssItemId`, never `row.id`. Both are integers off the same row,
+    // so the wrong one compiles and names a real rss item belonging to some
+    // other download -- which is why `deliver.test.ts` seeds the two with
+    // different values rather than letting both sequences start at 1.
+    //
+    // `mediaItemIdForRssItem` is a second read of `rss_item`, on the row
+    // `ownerPluginId` has just joined from. Not folded into that query: its
+    // other two callers want the owner and not the media item, and a
+    // delivery pass runs once per completed download rather than per row of
+    // history.
+    const file: DownloadedFile = {
+      path: mappedPath,
+      sizeBytes,
+      downloadClientId: row.downloadClientId,
+      rssItemId: row.rssItemId,
+      mediaItemId: mediaItemIdForRssItem(deps.raw, row.rssItemId),
+    };
     await deps.deliver(pluginId, file);
 
     if (markDelivered(deps.raw, row, deps.now)) {

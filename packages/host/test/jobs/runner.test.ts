@@ -35,6 +35,9 @@ const fakeCtx: PluginContext = {
     downloadsFor: async () => { throw new Error('read.downloadsFor: not used by this test'); },
   },
   jobs: { enqueue: async () => { throw new Error('jobs.enqueue: not used by this test'); } },
+  library: {
+    place: async () => { throw new Error('library.place: not used by this test'); },
+  },
   fetch: {
     json: async () => { throw new Error('fetch.json: not used by this test'); },
     bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },

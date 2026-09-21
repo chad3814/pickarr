@@ -14,6 +14,7 @@ function fakePlugin(id: string, synced: readonly SyncedTable<unknown>[]): MediaP
     migrations: [],
     jobs: {},
     synced,
+    tokens: {},
     onNewRssItems: async () => {},
     onDownloadedFile: async () => {},
     onDownloadRequest: async () => {},

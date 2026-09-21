@@ -63,6 +63,26 @@ function seedRssItem(raw: DatabaseSync, name: string, pluginId = 'alpha'): numbe
   return Number(result.lastInsertRowid);
 }
 
+/**
+ * Inserts one `media_item` row at a caller-chosen id and returns it.
+ *
+ * The id is explicit so a test can keep it apart from the rss item's and the
+ * download row's: all three are integers, so a delivery that carried the
+ * wrong one of them would satisfy any assertion that only checked the type.
+ */
+function seedMediaItem(raw: DatabaseSync, id: number, title: string, pluginId = 'alpha'): number {
+  raw.prepare(`
+    INSERT INTO media_item (id, plugin_id, created_at, updated_at, title)
+    VALUES (?, ?, 1, 1, ?)
+  `).run(id, pluginId, title);
+  return id;
+}
+
+/** Points an existing `rss_item` at a media item, the way a resolved lookup does. */
+function linkRssItem(raw: DatabaseSync, rssItemId: number, mediaItemId: number): void {
+  raw.prepare('UPDATE rss_item SET media_item_id = ? WHERE id = ?').run(mediaItemId, rssItemId);
+}
+
 /** Inserts one `torrent_download` row and returns its id. */
 function insertTorrentRow(
   raw: DatabaseSync,
@@ -74,14 +94,21 @@ function insertTorrentRow(
     storagePath?: string | null;
     deliveredAt?: number | null;
     reclaimedAt?: number | null;
+    /**
+     * Chosen by the caller only where the row's own id has to differ from
+     * the rss item id it names -- see `seedMediaItem`. Left out everywhere
+     * else, so the rowid sequence stays the default.
+     */
+    id?: number;
   },
 ): number {
   const status = params.status ?? 'completed';
   const result = raw.prepare(`
     INSERT INTO torrent_download
-      (rss_item_id, download_client_id, client_ref, status, storage_path, delivered_at, reclaimed_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
+      (id, rss_item_id, download_client_id, client_ref, status, storage_path, delivered_at, reclaimed_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
   `).run(
+    params.id ?? null,
     params.rssItemId,
     params.downloadClientId,
     params.clientRef ?? null,
@@ -133,8 +160,12 @@ test('a completed row is delivered to the plugin owning its feed', async () => {
   const clientId = seedClient(raw);
   seedMapping(raw, clientId, '/downloads', '/media');
   const itemId = seedRssItem(raw, 'movie', 'alpha');
+  // `id: 42` so this test's own `rssItemId` assertion below can fail. Both
+  // sequences start at 1, so without it the download row and the rss item
+  // are both 1 and that line reads as a pin it is not -- it survived the
+  // `row.id`-for-`row.rssItemId` mutant that the test below kills.
   const id = insertTorrentRow(raw, {
-    rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
+    id: 42, rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
   });
 
   const statCalls: string[] = [];
@@ -149,10 +180,85 @@ test('a completed row is delivered to the plugin owning its feed', async () => {
   // the client's own stored path.
   assert.deepEqual(statCalls, ['/media/movie.mkv']);
   assert.deepEqual(deliverCalls, [
-    { pluginId: 'alpha', file: { path: '/media/movie.mkv', sizeBytes: 4096, downloadClientId: clientId } },
+    {
+      pluginId: 'alpha',
+      file: {
+        path: '/media/movie.mkv',
+        sizeBytes: 4096,
+        downloadClientId: clientId,
+        rssItemId: itemId,
+        mediaItemId: null,
+      },
+    },
   ]);
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'delivered_at'), 1000);
+});
+
+test('a delivered file names the rss item it came from and the media item that item resolved to', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/media');
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const mediaItemId = seedMediaItem(raw, 77, 'A Title');
+  linkRssItem(raw, itemId, mediaItemId);
+  // The download row's own id, the rss item's and the media item's are three
+  // different integers here, chosen so that a delivery carrying the wrong one
+  // fails this test rather than passing it. Pinned rather than trusted: the
+  // ids come from three sequences that all start at 1.
+  const id = insertTorrentRow(raw, {
+    id: 42, rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
+  });
+  assert.equal(id, 42);
+  assert.equal(itemId, 1);
+  assert.equal(mediaItemId, 77);
+
+  const deliverCalls: DownloadedFile[] = [];
+  const result = await deliverCompleted(baseDeps(raw, clientId, {
+    stat: async () => ({ sizeBytes: 4096 }),
+    deliver: async (_pluginId, file) => { deliverCalls.push(file); },
+  }));
+
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(deliverCalls, [{
+    path: '/media/movie.mkv',
+    sizeBytes: 4096,
+    downloadClientId: clientId,
+    rssItemId: 1,
+    mediaItemId: 77,
+  }]);
+});
+
+test('an rss item that resolved to no media item is delivered with mediaItemId null', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/media');
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  // A second rss item that *does* have one, so a delivery reading the column
+  // off the wrong row -- or off no row at all -- has something to find.
+  const matchedItemId = seedRssItem(raw, 'other', 'alpha');
+  linkRssItem(raw, matchedItemId, seedMediaItem(raw, 77, 'A Title'));
+  const id = insertTorrentRow(raw, {
+    id: 42, rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
+  });
+
+  const deliverCalls: DownloadedFile[] = [];
+  const result = await deliverCompleted(baseDeps(raw, clientId, {
+    stat: async () => ({ sizeBytes: 4096 }),
+    deliver: async (_pluginId, file) => { deliverCalls.push(file); },
+  }));
+
+  // Null, not a throw and not a zero: an unmatched release is a state the
+  // boundary reports, not an error the import discovers later.
+  assert.deepEqual(deliverCalls, [{
+    path: '/media/movie.mkv',
+    sizeBytes: 4096,
+    downloadClientId: clientId,
+    rssItemId: itemId,
+    mediaItemId: null,
+  }]);
+  assert.equal(result.delivered, 1);
+  assert.equal(readColumn(raw, id, 'status'), 'delivered');
 });
 
 test('a delivered row is not delivered again', async () => {
@@ -296,8 +402,10 @@ test('a path the client supplies later is delivered, with no un-failing needed',
   const clientId = seedClient(raw);
   seedMapping(raw, clientId, '/downloads', '/media');
   const itemId = seedRssItem(raw, 'movie', 'alpha');
+  // `id: 42` for the reason the first delivery test gives: otherwise the
+  // `rssItemId` in the `deepEqual` below cannot fail.
   const id = insertTorrentRow(raw, {
-    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
+    id: 42, rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
   });
 
   const deliverCalls: DownloadedFile[] = [];
@@ -316,7 +424,9 @@ test('a path the client supplies later is delivered, with no un-failing needed',
 
   const second = await deliverCompleted(deps);
   assert.deepEqual(second, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
-  assert.deepEqual(deliverCalls, [{ path: '/media/movie.mkv', sizeBytes: 8, downloadClientId: clientId }]);
+  assert.deepEqual(deliverCalls, [{
+    path: '/media/movie.mkv', sizeBytes: 8, downloadClientId: clientId, rssItemId: itemId, mediaItemId: null,
+  }]);
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'delivered_at'), 1000);
 });

@@ -148,6 +148,29 @@ export interface ListByTableOptions {
  * replaces recorded a deliberate, bounded inaccuracy in that sentence for
  * the one table that carried the column and was excluded anyway; nothing
  * here needs it now.
+ *
+ * **`plugin_destination` is the ninth**, on exactly the reasoning
+ * `filepath_mapping` joined by one slice earlier: the importer slice made
+ * it synced (`sync/tables.ts`), it projects `updatedAt`, and
+ * `settings/useDestinations.ts` is the caller it was admitted for -- the
+ * library-destinations section of `/settings`.
+ *
+ * Measured the way the entries above are, by deleting `'plugin_destination'`
+ * from the set below: **24 web tests red** of 258 -- all seventeen of
+ * `test/settings/Destinations.test.tsx` and seven of the eight in
+ * `test/settings/useDestinations.test.tsx`, each of them seeding real rows
+ * through `applyBatch` into a real `fake-indexeddb` store and reading them
+ * back through this function.
+ *
+ * Two things about that figure are worth saying rather than leaving to be
+ * re-derived. **None of the 24 is collateral**, where nine of
+ * `filepath_mapping`'s 34 were: no other screen reads this table, so the
+ * blast radius is exactly the two files that do. And the **one survivor**
+ * is `a store-closed rejection during refresh is caught` -- it hands the
+ * hook a `listByTable` of its own that rejects before this function is
+ * reached, so it is the only test in either file that never calls it. A
+ * silent `[]` in place of the throw would have left the whole destinations
+ * section rendering three permanently, invisibly blank rows.
  */
 const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'media_item',
@@ -158,6 +181,7 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
   'rss_feed',
   'download_client',
   'filepath_mapping',
+  'plugin_destination',
 ]);
 
 /**

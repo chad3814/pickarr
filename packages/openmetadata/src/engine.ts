@@ -8,12 +8,15 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { SQLOutputValue } from 'node:sqlite';
 import type {
+  DownloadedFile,
   JobHandler,
   MediaPlugin,
   MediaType,
   Migration,
   PluginContext,
+  PluginTokens,
   SyncedTable,
+  TokenValues,
 } from '@pickarr/contract';
 import { eq, inArray } from 'drizzle-orm';
 import { drizzle as createDrizzle } from 'drizzle-orm/node-sqlite';
@@ -294,6 +297,29 @@ export interface LookupPluginSpec {
    * once.
    */
   readonly synced?: readonly SyncedTable<unknown>[];
+  /**
+   * What this plugin's library path shape may name (design spec §3).
+   *
+   * **Required, not optional like `synced` above.** `synced` defaults to
+   * none and a plugin that declares nothing keeps working; an empty token
+   * list is not inert in the same way. `media/destinations.ts` validates a
+   * shape by resolving it against a probe value for each declared token, so
+   * a plugin declaring none would have every shape naming any token refused
+   * `unknown-token` -- and a shape naming none at all refused
+   * `empty-filename` -- leaving the settings screen an empty token list and
+   * nothing saying the plugin is why. The engine cannot supply a sensible
+   * default either: what a shape may name is exactly the thing only the
+   * plugin knows.
+   *
+   * **A map of resolvers, not a list of names** ({@link PluginTokens}), so
+   * a spec cannot declare `{season}` and leave nothing to resolve it: the
+   * key and the function are one entry. `onDownloadedFile` below builds the
+   * values map from `Object.entries` of this very object, and
+   * `media/destinations.ts` validates a saved shape against `Object.keys`
+   * of it, so the set the host accepts and the set the plugin answers
+   * cannot differ.
+   */
+  readonly tokens: PluginTokens;
 }
 
 export interface LookupPluginDeps {
@@ -429,6 +455,38 @@ async function logged<T>(ctx: PluginContext, baseUrl: string, run: () => Promise
 }
 
 /**
+ * Every token the plugin declares, resolved, keyed by the name it was
+ * declared under.
+ *
+ * **Built from the declaration itself, which is the whole guard.** The keys
+ * of the result are `Object.keys(tokens)` by construction, and
+ * `media/destinations.ts` validates a saved shape against the same
+ * `Object.keys(plugin.tokens)` -- so a token a shape may name is a token
+ * this map has a value for, and there is no way to write one without the
+ * other. That is the replacement for a test: `tokens` was `readonly
+ * string[]` and nothing in the tree checked that a declared name had a
+ * resolver, because no single place held both.
+ *
+ * `Promise.all` rather than a loop: the resolvers are independent by
+ * construction -- each is handed the same `(file, ctx)` and nothing else --
+ * and every read behind them is `node:sqlite`, which is synchronous anyway.
+ *
+ * **A resolver that throws is not caught here.** `null` is how a resolver
+ * says "this release has nothing to put there"; a throw means something is
+ * wrong, and it leaves the download row `completed` for the next tick,
+ * which is what design spec §7 asks of a fault.
+ */
+async function resolveTokens(
+  tokens: PluginTokens,
+  file: DownloadedFile,
+  ctx: PluginContext,
+): Promise<TokenValues> {
+  const entries = Object.entries(tokens);
+  const resolved = await Promise.all(entries.map(async ([, resolve]) => resolve(file, ctx)));
+  return Object.fromEntries(entries.map(([name], index) => [name, resolved[index] ?? null]));
+}
+
+/**
  * A complete `MediaPlugin` from a spec.
  *
  * Everything the three media types share is here; what they do not share is
@@ -509,6 +567,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     // that declares nothing still produces a valid `MediaPlugin`, whose own
     // `synced` is required.
     synced: spec.synced ?? [],
+    tokens: spec.tokens,
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;
@@ -562,10 +621,53 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     },
 
     async onDownloadedFile(file, ctx) {
-      // Importing is out of scope for this slice (the spec's §1.2). Logged
-      // rather than thrown: a plugin that failed a job for work it was never
-      // asked to do would dead-letter every completed download.
-      ctx.log('a download finished', { path: file.path, sizeBytes: file.sizeBytes });
+      // The whole of importing: resolve this plugin's declared tokens from
+      // its own tables, and hand them to the host, which owns
+      // `plugin_destination` and the copy. See `contract/src/library.ts` for
+      // why the copy is not here.
+      //
+      // `resolveTokens` is passed rather than called: the host takes design
+      // spec §6's unmatched branch for a release nothing matched, where
+      // there is no title to shape a path from and every query below would
+      // ask this plugin's tables for rows that do not exist.
+      const outcome = await ctx.library.place(file, async () => resolveTokens(spec.tokens, file, ctx));
+
+      // **The ids and the verdict, never `file.path`.** Importer design spec
+      // §7: no path, url or credential reaches a log line. This detail goes
+      // to the host's **stdout** -- `ctx.log` is `console.log`, built at
+      // `host/src/host.ts` -- and so does the message of the throw below,
+      // through `deliverCompleted`'s catch. Neither reaches `last_error`;
+      // `clients/deliver.ts` never calls `failRow`, and `host/src/errors.ts`
+      // has the full audit of which host messages a browser can be shown.
+      // Stdout is enough: §7's rule is about a log line. This
+      // line did log the path, and had to: until `DownloadedFile` carried
+      // `rssItemId` and `mediaItemId` there was nothing else here that
+      // identified the file. A refusal code and an `errno` are neither a
+      // path nor derived from one -- `media/import.ts` is where that is
+      // enforced rather than hoped for.
+      if ('refusal' in outcome) {
+        ctx.log('could not put a finished download in the library', {
+          rssItemId: file.rssItemId,
+          mediaItemId: file.mediaItemId,
+          refusal: outcome.refusal,
+          errno: outcome.errno,
+        });
+        // Thrown, having been returned as a value: `deliverCompleted` treats
+        // a throw as "leave the row `completed` and try next tick", which is
+        // exactly what design spec §5 and §7 require of every refusal here
+        // -- a destination that already exists, a shape an operator has yet
+        // to fix, a root not mounted yet. The message names the rule and the
+        // plugin and carries nothing else, because `deliverCompleted` logs
+        // it.
+        throw new Error(`${spec.id}: this download was not imported (${outcome.refusal})`);
+      }
+
+      ctx.log('a download finished', {
+        rssItemId: file.rssItemId,
+        mediaItemId: file.mediaItemId,
+        sizeBytes: file.sizeBytes,
+        placed: outcome.placed,
+      });
     },
 
     async onDownloadRequest(rssItemId, ctx) {

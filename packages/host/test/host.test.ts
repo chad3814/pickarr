@@ -7,6 +7,7 @@ import type {
   JobHandler,
   MediaPlugin,
   PluginContext,
+  TokenResolver,
 } from '@pickarr/contract';
 import { openTestDatabase } from '../src/db/open.ts';
 import { migrateHost } from '../src/db/migrate.ts';
@@ -15,6 +16,14 @@ import type { Host } from '../src/host.ts';
 import type { QueuedFetch } from '../src/fetch/queue.ts';
 import type { Timers } from '../src/jobs/dispatcher.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
+
+/**
+ * A token resolver that fails loudly. Nothing in this file imports a file,
+ * so a resolver running at all means a test reached further than intended.
+ */
+const unusedResolver: TokenResolver = async () => {
+  throw new Error('a token resolver: this test never imports anything');
+};
 
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
 const unusedFetch: QueuedFetch = {
@@ -159,6 +168,7 @@ function makePlugin(overrides: Partial<MediaPlugin> & { id: string }): MediaPlug
     migrations: [],
     jobs: {},
     synced: [],
+    tokens: {},
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: unusedEntryPoint('onDownloadRequest'),
@@ -903,4 +913,65 @@ test('a corrupt poll payload does not stop another feed from being scheduled', (
   assert.equal(typeof jobId, 'number', 'the healthy feed must still get a job id back');
   const rows = pollJobRows(raw).filter((r) => r.feedId === feedId);
   assert.equal(rows.length, 1, 'the healthy feed must still have its own poll job scheduled');
+});
+
+test('a destination is validated against the tokens the plugin registered with', async () => {
+  // **The wiring `media/destinations.test.ts` cannot see.** That file hands
+  // `saveDestination` a `tokensFor` of its own, so it pins the rule and not
+  // the fact that the `Host` supplies the *registered* plugin's list. Two
+  // plugins are registered here with disjoint token lists, and each is
+  // offered the other's token: a `tokensFor` closed over the wrong plugin,
+  // over the union of both, or over an empty list is a different answer in
+  // at least one of the four cases below.
+  const { raw, host } = setup();
+  host.register(makePlugin({
+    id: 'alpha', mediaType: 'tv', tokens: { alphatoken: unusedResolver, ext: unusedResolver },
+  }));
+  host.register(makePlugin({
+    id: 'beta', mediaType: 'movie', tokens: { betatoken: unusedResolver, ext: unusedResolver },
+  }));
+
+  const alphaOwn = await host.saveDestination('alpha', {
+    root: '/library/alpha', shape: '{alphatoken}.{ext}', unmatchedDir: undefined,
+  });
+  assert.ok(!('refusal' in alphaOwn), 'alpha may name its own token');
+
+  const betaOwn = await host.saveDestination('beta', {
+    root: '/library/beta', shape: '{betatoken}.{ext}', unmatchedDir: undefined,
+  });
+  assert.ok(!('refusal' in betaOwn), 'beta may name its own token');
+
+  assert.deepEqual(
+    await host.saveDestination('alpha', {
+      root: '/library/alpha', shape: '{betatoken}.{ext}', unmatchedDir: undefined,
+    }),
+    { refusal: 'unknown-token', token: 'betatoken' },
+    'and may not name beta\'s, by name',
+  );
+  assert.deepEqual(
+    await host.saveDestination('beta', {
+      root: '/library/beta', shape: '{alphatoken}.{ext}', unmatchedDir: undefined,
+    }),
+    { refusal: 'unknown-token', token: 'alphatoken' },
+    'nor beta alpha\'s',
+  );
+
+  // A plugin this host never registered, so `unknown-plugin` is the
+  // registry answering rather than a list this test supplied.
+  assert.deepEqual(
+    await host.saveDestination('gamma', {
+      root: '/library/gamma', shape: '{ext}', unmatchedDir: undefined,
+    }),
+    { refusal: 'unknown-plugin', token: null },
+  );
+
+  // Two rows, and neither refusal wrote one.
+  const rows = raw.prepare('SELECT plugin_id, root FROM plugin_destination ORDER BY plugin_id').all()
+    .map((row) => {
+      if (typeof row !== 'object' || row === null || !('plugin_id' in row) || !('root' in row)) {
+        throw new Error('plugin_destination row is not the shape this test read');
+      }
+      return [String(row.plugin_id), String(row.root)];
+    });
+  assert.deepEqual(rows, [['alpha', '/library/alpha'], ['beta', '/library/beta']]);
 });

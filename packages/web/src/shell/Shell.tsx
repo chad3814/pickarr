@@ -48,22 +48,18 @@ import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { Unmatched } from '../library/Unmatched.tsx';
-import { useCounts, CATEGORIES, type Category, type Counts } from './useCounts.ts';
+import { useCounts, CATEGORIES, type Counts } from './useCounts.ts';
 import { Category as CategoryScreen } from '../library/Category.tsx';
 import { Settings } from '../settings/Settings.tsx';
+import { pluginLabel } from '../pluginLabels.ts';
 import { postFeed } from '../settings/AddFeed.tsx';
 import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
 import { mappingSubmit } from '../settings/postMapping.ts';
+import { destinationSubmit } from '../settings/postDestination.ts';
 import { postPick } from '../library/postPick.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
-
-const CATEGORY_LABELS: Readonly<Record<Category, string>> = {
-  tv: 'TV',
-  movie: 'Movies',
-  xxx: 'XXX',
-};
 
 /** The real browser adapters (task 4, task 6's brief): `webLocksLease()`'s own default lease name, `Date.now`, `realFetch` and `idleScheduler`. */
 function defaultDeps(): CreateStoreDeps {
@@ -212,8 +208,8 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
         {/*
-          `postFeed`, `postDownloadClient` and `mappingSubmit` are the
-          real `submit`s this screen needs
+          `postFeed`, `postDownloadClient`, `mappingSubmit` and
+          `destinationSubmit` are the real `submit`s this screen needs
           (`../settings/AddFeed.tsx`'s own doc on why each is injected
           rather than defaulted): wired here, explicitly, rather than given
           a default inside either form that would perform network I/O
@@ -234,6 +230,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
                 submitFeed={postFeed}
                 submitDownloadClient={postDownloadClient}
                 submitMapping={mappingSubmit}
+                submitDestination={destinationSubmit}
               />
             )
           }
@@ -314,7 +311,7 @@ function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): Reac
           {CATEGORIES.map((category) => (
             <li key={category}>
               <NavLink to={`/${category}`}>
-                {CATEGORY_LABELS[category]} <span data-testid={`count-${category}`}>{counts[category]}</span>
+                {pluginLabel(category)} <span data-testid={`count-${category}`}>{counts[category]}</span>
               </NavLink>
             </li>
           ))}

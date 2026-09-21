@@ -195,6 +195,16 @@ import { redactUrl } from '../clients/redact.ts';
  * `PRAGMA table_info` in `packages/contract/src/sync.ts`'s
  * `FilepathMappingSyncRead`.
  *
+ * **`plugin_destination` is the tenth, and it carries a third path on the
+ * same distinction rather than on a second exception.** A `root` is
+ * *dictated* -- the operator types it into the settings screen this
+ * projection feeds -- exactly as a mapping's two paths are, so the
+ * `storage_path` rule below is untouched again. The other two columns are
+ * operator input too and neither is a resolved path: `shape` is a template
+ * of `{token}`s and `unmatched_dir` is a literal directory name relative to
+ * the root (design spec §3, §6). Seven columns and the whole row, like
+ * `filepath_mapping` -- the table holds nothing a client is being spared.
+ *
  * **A table being in this list is not a promise that every one of its
  * columns is projected.** `selectSql` below names the subset of each
  * included table that is safe to hand to a client at all -- see its own doc
@@ -210,6 +220,7 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
   'rss_feed',
   'download_client',
   'filepath_mapping',
+  'plugin_destination',
 ];
 
 /**
@@ -229,14 +240,14 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * builds its `ON ${table}` (safe there because it never reads a column),
  * makes this check fail closed and demand `CREDENTIAL_ALLOW_LIST` grow a
  * third entry, which the project's global constraints fix at exactly two.
- * Nine short, literal, unremarkable `SELECT`s cost less than that entry
+ * Ten short, literal, unremarkable `SELECT`s cost less than that entry
  * would.
  *
  * **The aliases are the wire's naming convention, and they exist for one
  * concrete reason.** A column name reaches a client verbatim: `readHostRows`
  * spreads the row `node:sqlite` hands back, and the result is serialised as
  * an op's `value` with no mapping step anywhere between. Unaliased, these
- * nine tables would speak snake_case while all six plugin read shapes
+ * ten tables would speak snake_case while all six plugin read shapes
  * (`packages/contract/src/sync.ts`) speak camelCase, so the same logical
  * field was `media_item_id` on three host tables and `mediaItemId` on three
  * plugin ones. The client's storage provider is designed (and not yet
@@ -374,6 +385,17 @@ function selectSql(table: string, placeholders: string): string | undefined {
       return `SELECT id, download_client_id AS downloadClientId, from_path AS fromPath,
                       to_path AS toPath, created_at AS createdAt, updated_at AS updatedAt
                  FROM filepath_mapping WHERE id IN (${placeholders})`;
+    case 'plugin_destination':
+      // A third filesystem path, projected on the same distinction
+      // `filepath_mapping` above is: a `root` is dictated by the operator,
+      // not discovered from a client. Design spec §3, and the file's top
+      // docblock. `shape` and `unmatched_dir` are operator input too, and
+      // neither is a path this host has resolved -- a shape is a template
+      // and the unmatched directory is a literal name relative to the root.
+      return `SELECT id, plugin_id AS pluginId, root, shape,
+                      unmatched_dir AS unmatchedDir,
+                      created_at AS createdAt, updated_at AS updatedAt
+                 FROM plugin_destination WHERE id IN (${placeholders})`;
     case 'download_client':
       // `url` travels raw out of this `SELECT` and is rebuilt by
       // `readHostRows`, the same division of labour `rss_feed` above uses
@@ -438,7 +460,7 @@ function clientAddress(url: string): string {
  * is a normal outcome of that walk rather than a case worth a round trip --
  * so this returns `{}` before ever touching `raw`.
  *
- * `table` decides *which* of `selectSql`'s nine literal statements runs; it
+ * `table` decides *which* of `selectSql`'s ten literal statements runs; it
  * never reaches SQL text itself. A name outside `HOST_SYNCED_TABLES` throws
  * rather than reading `undefined` columns or silently returning nothing.
  *

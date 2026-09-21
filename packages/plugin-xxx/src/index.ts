@@ -4,6 +4,7 @@ import { createLookupPlugin } from '@pickarr/openmetadata';
 import { applyXxx, checkXxx } from './apply.ts';
 import { XXX_MIGRATIONS } from './migrations.ts';
 import { XXX_SYNCED } from './sync.ts';
+import { XXX_TOKENS } from './tokens.ts';
 
 /** Also the required prefix for every table this plugin declares. */
 export const XXX_PLUGIN_ID = 'xxx';
@@ -17,9 +18,11 @@ export function createXxxPlugin(deps: LookupPluginDeps): MediaPlugin {
     check: checkXxx,
     apply: applyXxx,
     synced: XXX_SYNCED,
+    tokens: XXX_TOKENS,
   }, deps);
 }
 
 export { applyXxx, checkXxx } from './apply.ts';
 export { XXX_MIGRATIONS } from './migrations.ts';
 export { XXX_SYNCED } from './sync.ts';
+export { XXX_TOKENS } from './tokens.ts';

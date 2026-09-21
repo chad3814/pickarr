@@ -18,6 +18,16 @@ export { readBatchResponse, readEnvelope } from './validate.ts';
 export type { LookupClient, LookupClientDeps } from './client.ts';
 export { MAX_BATCH, createLookupClient } from './client.ts';
 export { lookupTable, lookupTableMigration, lookupTableName } from './table.ts';
+export {
+  mediaItemInteger,
+  mediaItemText,
+  paddedNumber,
+  resolveExtension,
+  resolveFilename,
+  resolveReleaseDate,
+  resolveTitle,
+  resolveYear,
+} from './tokens.ts';
 export type { ApplyArgs, ApplyTarget, EnvelopeDeps, LookupDb, LookupStateTable } from './engine.ts';
 export type { LookupPluginDeps, LookupPluginSpec } from './engine.ts';
 export {

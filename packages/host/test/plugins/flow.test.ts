@@ -3,12 +3,21 @@
  *
  * Real migrations (through `host.register`, which runs `migratePlugin`), the
  * real `MediaWriter`/`MediaReader` pair, the real job queue, the real
- * delivery path (`host.notifyNewRssItems`), and the §5.1 fake service at the
- * real wire shape. Nothing here hand-builds a `PluginContext` or a job
- * payload, and that is the whole point of the file: what these tests prove
- * that the library's own tests cannot is the **enqueue-to-dispatch
- * contract** -- that the job `onNewRssItems` creates is one the engine's own
- * handler can read. A hand-written payload proves that only by coincidence.
+ * delivery paths (`host.notifyNewRssItems` and `host.deliverToPlugin`), and
+ * the §5.1 fake service at the real wire shape. Nothing here hand-builds a
+ * `PluginContext` or a job payload, and that is the whole point of the
+ * file: what these tests prove that the library's own tests cannot is the
+ * **enqueue-to-dispatch contract** -- that the job `onNewRssItems` creates
+ * is one the engine's own handler can read. A hand-written payload proves
+ * that only by coincidence.
+ *
+ * The import tests at the end are the same argument one layer further on.
+ * A path is asserted whole, against rows the *lookup* wrote: the season
+ * number the fake service sent becomes `Season 03` through the plugin's own
+ * resolver, the host's `plugin_destination` row and `resolveShape`, with
+ * nothing in this file padding, joining or naming a series. And they are the
+ * only tests in the tree that drive `ctxFor`'s `library`, which no
+ * hand-assembled context could.
  *
  * The dispatcher is deliberately not started, and no timer is faked. What is
  * under test is the payload, not the scheduling: the job row the host
@@ -18,6 +27,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DownloadClients, MediaPlugin, PluginContext } from '@pickarr/contract';
@@ -316,4 +326,140 @@ test('each plugin identifies its own feed item end to end, through the job the h
   // one place this slice's design could silently send the wrong category to
   // the service, which is why `batchCategories` exists at all.
   assert.deepEqual(service.batchCategories, ['tv', 'movies', 'xxx']);
+});
+
+/**
+ * Identifies one item through the real flow, then answers the media item id
+ * the television plugin ended up with.
+ *
+ * Shared by the import tests below so that none of them hand-writes a
+ * `tv_release`, a `tv_season` or a `media_item`: what the shape resolves
+ * against is what the lookup actually wrote, which is the only way an
+ * end-to-end path assertion says anything about the plugin.
+ */
+async function identifiedEpisode(
+  fixtureResult: ReturnType<typeof fixture>,
+): Promise<{ rssItemId: number; mediaItemId: number }> {
+  const { raw, host, wrapped } = fixtureResult;
+  const tv = wrapped.find((entry) => entry.plugin.id === 'tv');
+  assert.ok(tv !== undefined, 'the television plugin is registered');
+  const { rssItemId } = seedFeed(raw, 'tv', 'episode.mkv');
+
+  await host.notifyNewRssItems([rssItemId]);
+  const job = enqueuedLookup(raw, 'tv');
+  const handler = tv.plugin.jobs[job.kind];
+  assert.ok(handler !== undefined);
+  await handler(job, tv.context());
+
+  const mediaItemId = raw.prepare('SELECT media_item_id AS id FROM tv_release').get()?.['id'];
+  assert.equal(typeof mediaItemId, 'number', 'the lookup wrote no tv_release row to import against');
+  return { rssItemId, mediaItemId: Number(mediaItemId) };
+}
+
+/** Writes one plugin's destination directly -- `saveDestination` has its own tests. */
+function destinationFor(raw: DatabaseSync, pluginId: string, root: string, shape: string): void {
+  raw.prepare(
+    `INSERT INTO plugin_destination (plugin_id, root, shape, unmatched_dir, created_at, updated_at)
+     VALUES (?, ?, ?, '_unmatched', ?, ?)`,
+  ).run(pluginId, root, shape, NOW, NOW);
+}
+
+test('spec 8.2: an identified episode lands at exactly the path its shape names, zero-padded', async () => {
+  const result = fixture();
+  const { raw, host } = result;
+  const { rssItemId, mediaItemId } = await identifiedEpisode(result);
+
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-import-'));
+  try {
+    const root = join(dir, 'tv');
+    await mkdir(root);
+    const source = join(dir, 'downloads', 'episode.mkv');
+    await mkdir(join(dir, 'downloads'));
+    await writeFile(source, 'the episode');
+    destinationFor(raw, 'tv', root, '{series}/Season {season}/{series} - S{season}E{episode}.{ext}');
+
+    // The host's own dispatch, not a `PluginContext` this file assembled:
+    // `deliverToPlugin` is what `deliverCompleted` calls, and it is the only
+    // way to prove `ctxFor` wires `library` at all.
+    await host.deliverToPlugin('tv', {
+      path: source, sizeBytes: 11, downloadClientId: 1, rssItemId, mediaItemId,
+    });
+
+    // Every segment spelled out. `Season 03` and `S03E01` come from a
+    // `season_number` of 3 and an `episode_number` of 1 that the *lookup*
+    // wrote -- nothing in this test pads anything, and nothing in it names
+    // the series either.
+    assert.equal(
+      await readFile(join(root, 'The Bear', 'Season 03', 'The Bear - S03E01.mkv'), 'utf8'),
+      'the episode',
+    );
+    // Copy, not move: design spec §4 and §9.
+    assert.equal(await readFile(source, 'utf8'), 'the episode');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('spec 5: a destination that already exists leaves the plugin rejecting, so the row stays completed', async () => {
+  const result = fixture();
+  const { raw, host } = result;
+  const { rssItemId, mediaItemId } = await identifiedEpisode(result);
+
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-import-'));
+  try {
+    const root = join(dir, 'tv');
+    await mkdir(join(root, 'The Bear', 'Season 03'), { recursive: true });
+    await writeFile(join(root, 'The Bear', 'Season 03', 'The Bear - S03E01.mkv'), 'the better copy');
+    const source = join(dir, 'episode.mkv');
+    await writeFile(source, 'the episode');
+    destinationFor(raw, 'tv', root, '{series}/Season {season}/{series} - S{season}E{episode}.{ext}');
+
+    // Rejecting is what `deliverCompleted` reads as "leave it `completed`
+    // and try next tick" -- and the message is logged there, so it names
+    // the rule and nothing else.
+    await assert.rejects(
+      () => host.deliverToPlugin('tv', {
+        path: source, sizeBytes: 11, downloadClientId: 1, rssItemId, mediaItemId,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /destination-exists/);
+        assert.ok(!error.message.includes(dir), 'the thrown message carries a path');
+        return true;
+      },
+    );
+    assert.equal(
+      await readFile(join(root, 'The Bear', 'Season 03', 'The Bear - S03E01.mkv'), 'utf8'),
+      'the better copy',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('spec 6: a release nothing matched lands under the unmatched directory, keeping its own filename', async () => {
+  const { raw, host } = fixture();
+  const { rssItemId } = seedFeed(raw, 'tv', 'episode.mkv');
+
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-import-'));
+  try {
+    const root = join(dir, 'tv');
+    await mkdir(root);
+    const source = join(dir, 'Something.Nobody.Identified.mkv');
+    await writeFile(source, 'the mystery');
+    destinationFor(raw, 'tv', root, '{series}/Season {season}/{series} - S{season}E{episode}.{ext}');
+
+    await host.deliverToPlugin('tv', {
+      path: source, sizeBytes: 11, downloadClientId: 1, rssItemId, mediaItemId: null,
+    });
+
+    // The shape is not consulted: no `The Bear`, no `Season`. And the whole
+    // source filename survives, extension included.
+    assert.equal(
+      await readFile(join(root, '_unmatched', 'Something.Nobody.Identified.mkv'), 'utf8'),
+      'the mystery',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

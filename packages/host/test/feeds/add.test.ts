@@ -47,6 +47,7 @@ function makePlugin(id: string): MediaPlugin {
     migrations: [],
     jobs: {},
     synced: [],
+    tokens: {},
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: unusedEntryPoint('onDownloadRequest'),
