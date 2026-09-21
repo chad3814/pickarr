@@ -184,10 +184,79 @@ test('{resolution} is refused by every plugin, because nothing in 2.0 records on
   for (const pluginId of ['tv', 'movie', 'xxx']) {
     assert.deepEqual(
       save(pluginId, { shape: '{title} {resolution}.{ext}' }),
-      { refusal: 'unknown-token' },
+      { refusal: 'unknown-token', token: 'resolution' },
       pluginId,
     );
   }
+});
+
+test('an unknown token is named, so a shape of eight tokens says which one was wrong', () => {
+  // Design spec §3: refused "naming it". The code alone leaves an operator
+  // with eight tokens on one line and no way to tell which they mistyped
+  // -- measured against the settings screen, not assumed. The name is the
+  // caller's own input echoed back to the caller in the same response, the
+  // distinction `sync/tables.ts` draws between a *dictated* value and a
+  // *discovered* one.
+  const { save } = setup();
+
+  assert.deepEqual(
+    save('tv', { shape: '{series}/Season {season}/{seasn}.{ext}' }),
+    { refusal: 'unknown-token', token: 'seasn' },
+    'the mistyped token, not the first token, and not the shape',
+  );
+  // The matched pair again, through the name: `{collection}` is a real
+  // token and the refusal says so by name rather than leaving the operator
+  // to guess which of two plausible ones a film does not have.
+  assert.deepEqual(
+    save('tv', { shape: '{collection}/{series}.{ext}' }),
+    { refusal: 'unknown-token', token: 'collection' },
+  );
+});
+
+test('every refusal that is not about a token carries no token', () => {
+  // One field to read, not a switch on the code first -- and, more to the
+  // point, nothing from the input on any of the other eight.
+  const { save } = setup();
+  const probes: [string, Partial<SaveDestinationInput>][] = [
+    ['book', {}],
+    ['tv', { root: 'relative' }],
+    ['tv', { shape: '{title.{ext}' }],
+    ['tv', { shape: 'a\\b.{ext}' }],
+    ['tv', { shape: '/{series}.{ext}' }],
+    ['tv', { shape: '{series}/' }],
+    ['tv', { unmatchedDir: '' }],
+    ['tv', { unmatchedDir: '../out' }],
+  ];
+  for (const [pluginId, input] of probes) {
+    const result = save(pluginId, input);
+    assert.ok('refusal' in result, JSON.stringify(input));
+    assert.equal(result.token, null, `${result.refusal} must carry no token`);
+  }
+});
+
+test('a token name this host will not repeat is refused without being repeated', () => {
+  // **`api/server.ts`'s `MEDIA_TYPE` precedent, applied to a token.** A
+  // name is whatever an operator typed between braces: the parse already
+  // refuses `/`, `{`, `}` and a backslash, and what is left can still be a
+  // query string. No response body this API composes may carry one, and
+  // that rule does not carve out a value because the caller supplied it.
+  // So the refusal stands and the name does not travel.
+  const { save } = setup();
+  for (const name of ['http:host?apikey=k', 'season number', 'etc\u0000passwd', 'a'.repeat(33)]) {
+    const result = save('tv', { shape: `{${name}}.{ext}` });
+    assert.deepEqual(
+      result,
+      { refusal: 'unknown-token', token: null },
+      `${JSON.stringify(name)} is refused, and not echoed`,
+    );
+  }
+
+  // And the class is not so narrow that a real typo falls out of it: every
+  // token any plugin declares is inside it, so a near-miss of one is too.
+  assert.deepEqual(
+    save('tv', { shape: '{releaseDat}.{ext}' }),
+    { refusal: 'unknown-token', token: 'releaseDat' },
+  );
 });
 
 test('a token no plugin declares is refused too', () => {
@@ -209,7 +278,7 @@ test('a plugin id nothing registered is refused, and the refusal names no id', (
   const { raw, save } = setup();
   const result = save('book', {});
   assert.equal(refusalOf(result), 'unknown-plugin');
-  assert.deepEqual(result, { refusal: 'unknown-plugin' }, 'the refusal carries nothing from the request');
+  assert.deepEqual(result, { refusal: 'unknown-plugin', token: null }, 'the refusal carries nothing from the request');
   assert.equal(rowCount(raw), 0);
 });
 
@@ -230,7 +299,7 @@ test('a root that is not absolute is refused, and the refusal names no path', ()
   const { raw, save } = setup();
   for (const root of ['library', './library', 'C:\\Media', '']) {
     const result = save('tv', { root });
-    assert.deepEqual(result, { refusal: 'not-absolute-root' }, `${JSON.stringify(root)} is not an absolute root`);
+    assert.deepEqual(result, { refusal: 'not-absolute-root', token: null }, `${JSON.stringify(root)} is not an absolute root`);
   }
   assert.equal(rowCount(raw), 0, 'and no refused save wrote a row');
 });
@@ -265,7 +334,7 @@ test('a shape that could never resolve is refused on save, each way named separa
     ['', 'empty-filename'],
   ];
   for (const [shape, refusal] of cases) {
-    assert.deepEqual(save('tv', { shape }), { refusal }, `${JSON.stringify(shape)}`);
+    assert.deepEqual(save('tv', { shape }), { refusal, token: null }, `${JSON.stringify(shape)}`);
   }
   assert.equal(rowCount(raw), 0);
 });
@@ -316,7 +385,7 @@ test('an empty unmatched directory is refused', () => {
   // which interleaves unnamed releases with organised ones and leaves no way
   // to tell them apart afterwards.
   const { raw, save } = setup();
-  assert.deepEqual(save('tv', { unmatchedDir: '' }), { refusal: 'empty-path' });
+  assert.deepEqual(save('tv', { unmatchedDir: '' }), { refusal: 'empty-path', token: null });
   assert.equal(rowCount(raw), 0);
 });
 
@@ -324,14 +393,14 @@ test('an absolute unmatched directory is refused', () => {
   // Its own test rather than a row in a table with the `..` case, because
   // design spec §8.6b requires each way to be named separately.
   const { raw, save } = setup();
-  assert.deepEqual(save('tv', { unmatchedDir: '/tmp/unmatched' }), { refusal: 'escaping-path' });
+  assert.deepEqual(save('tv', { unmatchedDir: '/tmp/unmatched' }), { refusal: 'escaping-path', token: null });
   assert.equal(rowCount(raw), 0);
 });
 
 test('an unmatched directory with a `..` segment is refused', () => {
   const { raw, save } = setup();
   for (const dir of ['..', '../unmatched', 'a/../../b', 'unmatched/..']) {
-    assert.deepEqual(save('tv', { unmatchedDir: dir }), { refusal: 'escaping-path' }, dir);
+    assert.deepEqual(save('tv', { unmatchedDir: dir }), { refusal: 'escaping-path', token: null }, dir);
   }
   assert.equal(rowCount(raw), 0);
 });
@@ -347,7 +416,7 @@ test('an unmatched directory that means the library root is refused, however it 
   // own copy and the copy was missing it.
   const { raw, save } = setup();
   for (const dir of ['', '.', './', './.', './/.', '.\\.']) {
-    assert.deepEqual(save('tv', { unmatchedDir: dir }), { refusal: 'empty-path' }, JSON.stringify(dir));
+    assert.deepEqual(save('tv', { unmatchedDir: dir }), { refusal: 'empty-path', token: null }, JSON.stringify(dir));
   }
   assert.equal(rowCount(raw), 0);
 });
@@ -392,8 +461,8 @@ test('a trailing space cannot smuggle a `..` segment past the escape check', () 
   // POSIX. Delegating gave this module that rule; its own copy never had
   // it.
   const { raw, save } = setup();
-  assert.deepEqual(save('tv', { unmatchedDir: '.. ' }), { refusal: 'escaping-path' });
-  assert.deepEqual(save('tv', { unmatchedDir: 'a/.. /b' }), { refusal: 'escaping-path' });
+  assert.deepEqual(save('tv', { unmatchedDir: '.. ' }), { refusal: 'escaping-path', token: null });
+  assert.deepEqual(save('tv', { unmatchedDir: 'a/.. /b' }), { refusal: 'escaping-path', token: null });
   assert.equal(rowCount(raw), 0);
 });
 
@@ -421,9 +490,9 @@ test('an unmatched directory that escapes only under a backslash separator is re
   // escape check over both separators rather than a ban on the character:
   // `AC\DC` is a directory name on every filesystem this host writes to.
   const { raw, save } = setup();
-  assert.deepEqual(save('tv', { unmatchedDir: '..\\..' }), { refusal: 'escaping-path' });
-  assert.deepEqual(save('tv', { unmatchedDir: 'a\\..\\b' }), { refusal: 'escaping-path' });
-  assert.deepEqual(save('tv', { unmatchedDir: '\\tmp' }), { refusal: 'escaping-path' });
+  assert.deepEqual(save('tv', { unmatchedDir: '..\\..' }), { refusal: 'escaping-path', token: null });
+  assert.deepEqual(save('tv', { unmatchedDir: 'a\\..\\b' }), { refusal: 'escaping-path', token: null });
+  assert.deepEqual(save('tv', { unmatchedDir: '\\tmp' }), { refusal: 'escaping-path', token: null });
   assert.equal(rowCount(raw), 0);
 
   save('tv', { unmatchedDir: 'AC\\DC' });

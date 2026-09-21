@@ -134,6 +134,7 @@ import type { Auth } from '../auth/instance.ts';
 import { redactUrl } from '../clients/redact.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
 import type { AddMappingInput, EditMappingInput, MappingRefusal } from '../clients/mappings.ts';
+import type { DestinationRefusalBody } from '@pickarr/contract';
 import type { DestinationRefusal, SaveDestinationInput } from '../media/destinations.ts';
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
@@ -1701,7 +1702,19 @@ export const ROUTES: readonly Route[] = [
 
       const result = await deps.saveDestination(pluginId, input);
       if ('refusal' in result) {
-        return json(statusForDestinationRefusal(result.refusal), { refusal: result.refusal });
+        // **The one refusal body in this file with a second field**, and it
+        // is `@pickarr/contract`'s `DestinationRefusalBody` rather than an
+        // ad-hoc literal. Design spec §3 asks for an unknown token to be
+        // refused "naming it", and a settings screen showing eight tokens
+        // on one line cannot say which of them was wrong otherwise. The
+        // name is the caller's own input echoed to the caller, and it is
+        // gated by a character class in `../media/destinations.ts`
+        // (`ECHOABLE_TOKEN`, on `MEDIA_TYPE`'s reasoning above), so this
+        // is not a way to get a path or a query string into a body.
+        // `token` is `null` for every other code, and may be `null` for
+        // this one.
+        const refused: DestinationRefusalBody = { refusal: result.refusal, token: result.token };
+        return json(statusForDestinationRefusal(result.refusal), refused);
       }
       // 200 rather than 201: the caller addressed the resource, so nothing
       // was created at an address they did not already know. The row id is

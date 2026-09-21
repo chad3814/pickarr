@@ -3342,12 +3342,16 @@ test('every destination refusal answers its own status', async () => {
   await Promise.all(cases.map(async ([refusal, status]) => {
     const { raw, db } = setup();
     const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
-      saveDestination: async () => ({ refusal }),
+      saveDestination: async () => ({ refusal, token: null }),
     });
     try {
       const answer = await send(server, 'PUT', '/api/destinations/tv', cookie, validDestinationBody());
       assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
-      assert.deepEqual(JSON.parse(answer.text), { refusal }, 'and the whole body is that one stable code');
+      assert.deepEqual(
+        JSON.parse(answer.text),
+        { refusal, token: null },
+        'the body is that one stable code, and a token field that is null unless there is a token',
+      );
       assert.ok(
         !answer.text.includes('/library'),
         'a refusal body carries no path, not even the one it was just handed',
@@ -3356,6 +3360,45 @@ test('every destination refusal answers its own status', async () => {
       await server.close();
     }
   }));
+});
+
+test('an unknown token is named in the body, and only when it is a name this host repeats', async () => {
+  // Design spec §3's "naming it", over the wire. The host decides whether
+  // a name may be repeated (`media/destinations.ts`'s `ECHOABLE_TOKEN`);
+  // this route serialises whatever it decided, so both legs are driven
+  // through a stub that answers each.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    saveDestination: async (_pluginId, input) => (
+      input.shape.includes('seasn')
+        ? { refusal: 'unknown-token', token: 'seasn' }
+        : { refusal: 'unknown-token', token: null }
+    ),
+  });
+  try {
+    const named = await send(
+      server, 'PUT', '/api/destinations/movie', cookie, validDestinationBody({ shape: '{seasn}.{ext}' }),
+    );
+    assert.equal(named.status, 422);
+    assert.deepEqual(
+      JSON.parse(named.text),
+      { refusal: 'unknown-token', token: 'seasn' },
+      'the code and the token, and nothing else -- not the shape, not the root',
+    );
+
+    const unnamed = await send(
+      server, 'PUT', '/api/destinations/movie', cookie, validDestinationBody({ shape: '{x?apikey=k}.{ext}' }),
+    );
+    assert.equal(unnamed.status, 422);
+    assert.deepEqual(
+      JSON.parse(unnamed.text),
+      { refusal: 'unknown-token', token: null },
+      'a name the host would not repeat still refuses, and the field is present and null',
+    );
+    assert.ok(!unnamed.text.includes('apikey'), 'and nothing of it reaches the body');
+  } finally {
+    await server.close();
+  }
 });
 
 test('a destination route throw is a 500 that names no path', async () => {

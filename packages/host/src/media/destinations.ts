@@ -68,7 +68,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DestinationRefusalCode } from '@pickarr/contract';
-import { resolveShape, unmatchedDirSegments } from './shape.ts';
+import { unmatchedDirSegments, validateShape } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
 /**
@@ -141,6 +141,18 @@ export interface SaveDestinationInput {
  */
 export interface DestinationRefusal {
   refusal: DestinationRefusalCode;
+  /**
+   * The token `unknown-token` is about, or `null` -- see
+   * {@link ECHOABLE_TOKEN} for when a name is repeated and when it is not.
+   *
+   * Required-but-nullable rather than optional, the shape
+   * `ImportRefusal.errno` has and for the same reason
+   * `SaveDestinationInput.unmatchedDir` gives:
+   * `exactOptionalPropertyTypes` is on, so an optional property would make
+   * "absent" and "explicitly null" two different things for a route
+   * serialising this, and there is only one thing they could mean.
+   */
+  token: string | null;
 }
 
 /**
@@ -174,6 +186,37 @@ export interface SaveDestinationDeps {
 function probeValues(tokens: readonly string[]): Record<string, string> {
   return Object.fromEntries(tokens.map((token) => [token, SHAPE_PROBE_VALUE]));
 }
+
+/**
+ * A refusal naming no token -- the eight codes that are not
+ * `unknown-token`, and the `unknown-token` whose name this host will not
+ * repeat.
+ */
+function refuse(code: DestinationRefusalCode): DestinationRefusal {
+  return { refusal: code, token: null };
+}
+
+/**
+ * What an unknown token has to look like for this host to repeat it back.
+ *
+ * **`api/server.ts`'s `MEDIA_TYPE` precedent, and its reasoning verbatim.**
+ * A "token" here is whatever an operator typed between braces: it cannot
+ * hold `/`, `{` or `}` (the parse would have refused it first) and cannot
+ * hold `\` (`backslash-in-shape` is checked before any token is read), but
+ * `{http:host/x?apikey=k}` minus its slashes is still a query string, and
+ * no response body this API composes may carry one -- the rule does not
+ * carve out a value because the caller supplied it. So a name outside this
+ * class is refused `unknown-token` *without* being repeated, and the rule
+ * holds for every possible input rather than for the inputs that were
+ * thought of.
+ *
+ * The class is what a declared token is: a short camelCase word.
+ * `releaseDate` is the longest any plugin declares, and a typo of a real
+ * token is overwhelmingly in the same class as the token it missed. Where
+ * it is not, the operator still gets `unknown-token` and the settings
+ * screen still holds the shape they typed.
+ */
+const ECHOABLE_TOKEN = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
 
 /**
  * One of `media/shape.ts`'s refusals, as the code this route answers with.
@@ -251,17 +294,30 @@ export function saveDestination(
   input: SaveDestinationInput,
 ): { id: number } | DestinationRefusal {
   const tokens = deps.tokensFor(pluginId);
-  if (tokens === undefined) return { refusal: 'unknown-plugin' };
+  if (tokens === undefined) return refuse('unknown-plugin');
 
   // `startsWith('/')` and nothing else. Not `node:path`: `media/shape.ts`
   // records that every `node:path` function which does more than concatenate
   // also normalises, and `isAbsolute` read with `path.win32` semantics would
   // make one stored root mean two things on two hosts. `/` is the separator
   // here, in the shape and in the result, on every platform.
-  if (!input.root.startsWith('/')) return { refusal: 'not-absolute-root' };
+  if (!input.root.startsWith('/')) return refuse('not-absolute-root');
 
-  const resolved = resolveShape(input.shape, probeValues(tokens));
-  if ('refusal' in resolved) return { refusal: destinationRefusalFor(resolved.refusal) };
+  // `validateShape`, not `resolveShape`: the same parse, with the unknown
+  // token's name kept. That entry point exists for this caller alone --
+  // the refusal answers the very request that carried the shape, to the
+  // operator who typed it, where `resolveShape`'s reaches `last_error` and
+  // therefore a browser looking at an unrelated download.
+  const resolved = validateShape(input.shape, probeValues(tokens));
+  if ('refusal' in resolved) {
+    const code = destinationRefusalFor(resolved.refusal);
+    // Named only when the name is one this host will repeat. Every other
+    // code carries `null`, so a client reads one field rather than
+    // switching on the code first.
+    return resolved.token !== null && ECHOABLE_TOKEN.test(resolved.token)
+      ? { refusal: code, token: resolved.token }
+      : refuse(code);
+  }
 
   const unmatchedDir = input.unmatchedDir ?? DEFAULT_UNMATCHED_DIR;
   // Delegated to `media/shape.ts`, not checked here, and that is the fix
@@ -287,7 +343,7 @@ export function saveDestination(
     // because `''` is the spelling §6 names and the one an operator
     // reaches first; that code's own doc in `@pickarr/contract` carries
     // the full condition, which is wider than the name.
-    return { refusal: unmatched.refusal === 'escapes-root' ? 'escaping-path' : 'empty-path' };
+    return refuse(unmatched.refusal === 'escapes-root' ? 'escaping-path' : 'empty-path');
   }
 
   const at = deps.now();

@@ -39,7 +39,7 @@ export type { RequestPickRefusalCode } from './picks.ts';
 export { REQUEST_PICK_REFUSALS } from './picks.ts';
 export type { MappingRefusalCode } from './mappings.ts';
 export { MAPPING_REFUSALS } from './mappings.ts';
-export type { DestinationRefusalCode } from './destinations.ts';
+export type { DestinationRefusalBody, DestinationRefusalCode } from './destinations.ts';
 export { DESTINATION_REFUSALS } from './destinations.ts';
 export type { MovieTokenName, TokensFor, TvTokenName, XxxTokenName } from './tokens.ts';
 export {

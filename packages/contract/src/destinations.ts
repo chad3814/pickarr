@@ -76,7 +76,8 @@
  * - `unknown-token` -- the shape names a token the **declaring plugin** does
  *   not list in `MediaPlugin.tokens`. `{season}` is valid for television and
  *   invalid for a film; validating against the union of every plugin's
- *   tokens would accept both.
+ *   tokens would accept both. The one code that also carries a
+ *   {@link DestinationRefusalBody.token}.
  * - `malformed-shape` -- a brace that does not open and close a token.
  * - `backslash-in-shape` -- a literal `\` in the shape text. `/` is the
  *   separator on every platform, and a second spelling of it would lay one
@@ -87,9 +88,17 @@
  *   no token, so the shape names a directory and no file.
  *
  * The unmatched directory (design spec §6):
- * - `empty-path` -- `unmatchedDir` is `''`, which would mean "put unmatched
- *   files in the library root" -- unnamed releases interleaved with
- *   organised ones, and no way to tell them apart afterwards.
+ * - `empty-path` -- `unmatchedDir` names no directory at all, so unmatched
+ *   files would land in the library root itself -- unnamed releases
+ *   interleaved with organised ones, and no way to tell them apart
+ *   afterwards. **Wider than the name**: `''` is the spelling §6 gives and
+ *   the one an operator reaches first, but `'.'`, `'./'` and any value
+ *   whose every segment is `.` or empty mean the same thing and get the
+ *   same code. A client wording this should say "must name a directory",
+ *   not "must not be empty". (`host/src/media/import.ts` calls the
+ *   identical condition `unmatched-dir-is-root`, which is the better name;
+ *   these two lists are separate vocabularies and neither is renamed to
+ *   match the other.)
  * - `escaping-path` -- `unmatchedDir` is absolute, or one of its segments is
  *   `..`, under either separator. Nested is allowed: `_pickarr/unmatched` is
  *   a legitimate answer, and the escape check is what governs what it may
@@ -106,6 +115,33 @@ export const DESTINATION_REFUSALS = [
   'empty-path',
   'escaping-path',
 ] as const;
+
+/**
+ * What `PUT /api/destinations/:pluginId` answers a refusal with: the code,
+ * and the token name when there is one.
+ *
+ * **Two fields, where most refusals in this codebase have one**, and the
+ * second earns its place the way `ImportRefusal.errno` does. Design spec §3
+ * asks for an unknown token to be "refused, naming it", and a settings
+ * screen showing eight tokens on one line with a typo in one of them can
+ * tell the operator only that *a* token was wrong without this -- measured
+ * against the screen, not assumed.
+ *
+ * **`token` is `null` for every code but `unknown-token`**, and may be
+ * `null` for that one too: the host repeats a name only when it matches the
+ * character class a declared token is in, on `api/server.ts`'s `MEDIA_TYPE`
+ * precedent. A "token" is arbitrary text an operator typed between braces,
+ * and no response body this API composes may carry a url, a path or a query
+ * string -- including one the caller supplied. A client must therefore
+ * handle `unknown-token` with no name, rather than assuming one.
+ *
+ * **It is never a sentence.** The client owns the wording, as it does for
+ * every code here; this is a datum to put in one.
+ */
+export interface DestinationRefusalBody {
+  refusal: DestinationRefusalCode;
+  token: string | null;
+}
 
 /**
  * One of {@link DESTINATION_REFUSALS}, as a type.

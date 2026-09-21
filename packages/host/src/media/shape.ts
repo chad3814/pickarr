@@ -39,10 +39,21 @@
  * right answer for a transient fault and the wrong one for a shape that
  * will never resolve.
  *
- * **A refusal names the rule and carries nothing from the input** -- no
- * shape text, no token name, no value. `last_error` is served by
- * `/api/downloads` as `DownloadRead.lastError` (design spec §7), so
- * anything a refusal carried would leave the host.
+ * **A {@link resolveShape} refusal names the rule and carries nothing from
+ * the input** -- no shape text, no token name, no value. `last_error` is
+ * served by `/api/downloads` as `DownloadRead.lastError` (design spec §7),
+ * so anything that refusal carried would leave the host, for a download
+ * nobody is looking at.
+ *
+ * **{@link validateShape} is the one exception, and it is a different
+ * caller rather than a loosening.** It is the same parse with the unknown
+ * token's *name* kept, for the save-time validator alone
+ * (`media/destinations.ts`): there the refusal answers the very request
+ * that carried the shape, to the operator who typed it, so naming the token
+ * they got wrong is showing someone their own input -- the distinction
+ * `sync/tables.ts` draws between a *dictated* value and a *discovered* one.
+ * `resolveShape` is a wrapper that builds a fresh one-field object, so the
+ * import path cannot receive the name by any arrangement of the call.
  *
  * ---
  *
@@ -127,12 +138,23 @@ export interface ResolvedShape {
 }
 
 /**
+ * A refusal with the offending token name kept -- what {@link validateShape}
+ * answers and {@link resolveShape} strips.
+ *
+ * `token` is the name for `unknown-token` and `null` for every other code,
+ * so a caller reads one field rather than switching first.
+ */
+export interface NamedShapeRefusal extends ShapeRefusal {
+  token: string | null;
+}
+
+/**
  * One resolved segment, or the refusal that stopped it.
  *
  * A bare `string` would not do: `''` is a legitimate resolution (every
  * token in the segment was null) and has to be told apart from a failure.
  */
-type SegmentResult = { text: string } | ShapeRefusal;
+type SegmentResult = { text: string } | NamedShapeRefusal;
 
 /**
  * Substitutes every `{token}` in one shape segment.
@@ -154,28 +176,30 @@ function resolveSegment(segment: string, values: Readonly<Record<string, string 
   let index = 0;
   while (index < segment.length) {
     const char = segment[index];
-    if (char === '}') return { refusal: 'malformed-shape' };
+    if (char === '}') return { refusal: 'malformed-shape', token: null };
     if (char !== '{') {
       out += char;
       index += 1;
       continue;
     }
     const close = segment.indexOf('}', index + 1);
-    if (close === -1) return { refusal: 'malformed-shape' };
+    if (close === -1) return { refusal: 'malformed-shape', token: null };
     const name = segment.slice(index + 1, close);
     // An empty name is not a token, and a `{` inside one means the `}` found
     // above closes a later brace rather than this one.
-    if (name === '' || name.includes('{')) return { refusal: 'malformed-shape' };
+    if (name === '' || name.includes('{')) return { refusal: 'malformed-shape', token: null };
     // `Object.hasOwn`, not `name in values`: `in` walks the prototype, so a
     // token called `toString` or `constructor` would "resolve" against
     // `Object.prototype` on any plain object literal a caller passes.
-    if (!Object.hasOwn(values, name)) return { refusal: 'unknown-token' };
+    // The one refusal that names something from the input. See
+    // {@link validateShape} for who may see it and who may not.
+    if (!Object.hasOwn(values, name)) return { refusal: 'unknown-token', token: name };
     // `?? null` only satisfies `noUncheckedIndexedAccess`, which types an
     // index read as possibly `undefined`; the declared value type has no
     // `undefined` in it and `Object.hasOwn` has already established the key.
     const value = values[name] ?? null;
     if (value !== null) {
-      if (value.includes('/') || value.includes('\\')) return { refusal: 'separator-in-value' };
+      if (value.includes('/') || value.includes('\\')) return { refusal: 'separator-in-value', token: null };
       // Verbatim. See the module doc on padding for why nothing here widens
       // a number.
       out += value;
@@ -272,12 +296,56 @@ export function resolveShape(
   shape: string,
   values: Readonly<Record<string, string | null>>,
 ): ResolvedShape | ShapeRefusal {
-  if (shape.includes('\\')) return { refusal: 'backslash-in-shape' };
+  const result = validateShape(shape, values);
+  // **The strip is the boundary, and it is structural.** A fresh object
+  // literal carrying `refusal` alone -- not `result`, not a spread, not a
+  // `delete` -- so there is no arrangement of this line under which a token
+  // name reaches an import-path caller. `clients/deliver.ts` puts an import
+  // refusal in `last_error`, which `/api/downloads` serves as
+  // `DownloadRead.lastError`, and a token name is operator-typed free text
+  // (design spec §7 is why nothing from the input may travel that way).
+  return 'refusal' in result ? { refusal: result.refusal } : result;
+}
+
+/**
+ * {@link resolveShape}'s work, with the unknown token's **name** kept.
+ *
+ * **Two entry points over one parse, and the split is the point.** The
+ * difference is not what is computed -- this function is the whole
+ * implementation and `resolveShape` calls it -- but who is allowed to see
+ * the name.
+ *
+ * - **`resolveShape` is the import-time resolver.** Its refusal reaches
+ *   `last_error` and therefore a browser, for a download nobody is looking
+ *   at, so it carries nothing from the input. That guarantee is unchanged
+ *   and `media/shape.test.ts`'s `assertRefusal` still pins the one-field
+ *   shape at every site.
+ * - **This is the save-time validator.** Its caller is
+ *   `media/destinations.ts`, answering the very request that carried the
+ *   shape, to the operator who typed it -- so naming the token they got
+ *   wrong is showing someone their own input, the same distinction
+ *   `sync/tables.ts` draws between a *dictated* value and a *discovered*
+ *   one. Design spec §3 asks for an unknown token "refused, naming it";
+ *   this is what makes that possible, and eight tokens on one line with a
+ *   typo in one of them is the case Task 4 measured it against.
+ *
+ * **What it does not do is decide whether the name is fit to echo.** The
+ * name is arbitrary text an operator typed between braces -- it cannot hold
+ * `/`, `{` or `}`, and cannot hold `\` either since `backslash-in-shape` is
+ * checked first, but it can hold anything else. `media/destinations.ts`
+ * holds the character class it will repeat, on `api/server.ts`'s
+ * `MEDIA_TYPE` precedent; this function reports what it found.
+ */
+export function validateShape(
+  shape: string,
+  values: Readonly<Record<string, string | null>>,
+): ResolvedShape | NamedShapeRefusal {
+  if (shape.includes('\\')) return { refusal: 'backslash-in-shape', token: null };
   // Checked on the raw shape rather than after the split, because a leading
   // `/` produces an empty first segment, and an empty segment is dropped --
   // so splitting first would turn an absolute shape into a relative one
   // silently, which is the one outcome design spec §6 names.
-  if (shape.startsWith('/')) return { refusal: 'escapes-root' };
+  if (shape.startsWith('/')) return { refusal: 'escapes-root', token: null };
 
   const shapeSegments = shape.split('/');
   const resolved: string[] = [];
@@ -287,10 +355,10 @@ export function resolveShape(
     // `trimEnd` before the comparison, not after: Win32 trims a trailing
     // space from a component, so `'.. '` names the parent there. See the
     // docblock's note on what that does and does not cover.
-    if (result.text.trimEnd() === '..') return { refusal: 'escapes-root' };
+    if (result.text.trimEnd() === '..') return { refusal: 'escapes-root', token: null };
     const isLast = index === shapeSegments.length - 1;
     if (result.text === '' || result.text === '.') {
-      if (isLast) return { refusal: 'empty-filename' };
+      if (isLast) return { refusal: 'empty-filename', token: null };
       continue;
     }
     resolved.push(result.text);

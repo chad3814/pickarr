@@ -945,14 +945,14 @@ test('a destination is validated against the tokens the plugin registered with',
     await host.saveDestination('alpha', {
       root: '/library/alpha', shape: '{betatoken}.{ext}', unmatchedDir: undefined,
     }),
-    { refusal: 'unknown-token' },
-    'and may not name beta\'s',
+    { refusal: 'unknown-token', token: 'betatoken' },
+    'and may not name beta\'s, by name',
   );
   assert.deepEqual(
     await host.saveDestination('beta', {
       root: '/library/beta', shape: '{alphatoken}.{ext}', unmatchedDir: undefined,
     }),
-    { refusal: 'unknown-token' },
+    { refusal: 'unknown-token', token: 'alphatoken' },
     'nor beta alpha\'s',
   );
 
@@ -962,7 +962,7 @@ test('a destination is validated against the tokens the plugin registered with',
     await host.saveDestination('gamma', {
       root: '/library/gamma', shape: '{ext}', unmatchedDir: undefined,
     }),
-    { refusal: 'unknown-plugin' },
+    { refusal: 'unknown-plugin', token: null },
   );
 
   // Two rows, and neither refusal wrote one.

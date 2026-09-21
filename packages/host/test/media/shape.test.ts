@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveShape } from '../../src/media/shape.ts';
+import { resolveShape, validateShape } from '../../src/media/shape.ts';
 import type { ShapeRefusalCode } from '../../src/media/shape.ts';
 
 const TV_SHAPE = '{series}/Season {season}/{series} - S{season}E{episode}.{ext}';
@@ -36,6 +36,13 @@ function pathOf(result: ReturnType<typeof resolveShape>): string {
  * handed -- reddens every one of these rather than none of them. The
  * parameter is typed `ShapeRefusalCode`, so a mistyped code is a compile
  * error rather than a test that pins a string nothing returns.
+ *
+ * **`validateShape` is the deliberate exception and is not asserted
+ * through this.** It is the same parse with the unknown token's name
+ * kept, for the save-time validator whose caller is the operator who
+ * typed the shape; the last test in this file is where the two are
+ * compared side by side, and `resolveShape` -- everything this helper is
+ * used on -- is the wrapper that strips.
  */
 function assertRefusal(result: ReturnType<typeof resolveShape>, code: ShapeRefusalCode): void {
   assert.deepEqual(result, { refusal: code });
@@ -300,4 +307,46 @@ test('the separator in the result is `/` and only `/`, on whichever platform thi
 
   assert.ok(!resolved.includes('\\'), 'no backslash in the result');
   assert.deepEqual(resolved.split('/'), ['Severance', 'Season 02', 'Severance - S02E03.mkv']);
+});
+
+test('the save-time validator names the unknown token, and the import-time resolver does not', () => {
+  // **One parse, two entry points, and the difference is who may see the
+  // name.** `resolveShape`'s refusal reaches `clients/deliver.ts`'s
+  // `last_error`, which `/api/downloads` serves as
+  // `DownloadRead.lastError` -- a browser looking at an unrelated
+  // download -- so it carries nothing from the input, which is what
+  // `assertRefusal` above pins at every other site in this file.
+  // `validateShape`'s answers the very request that carried the shape, to
+  // the operator who typed it, so design spec §3's "refused, naming it"
+  // is reachable there.
+  const values = { series: 'Severance', ext: 'mkv' };
+
+  assert.deepEqual(
+    validateShape('{series}/{seasn}.{ext}', values),
+    { refusal: 'unknown-token', token: 'seasn' },
+    'the validator names the token the values map has no key for',
+  );
+  assert.deepEqual(
+    resolveShape('{series}/{seasn}.{ext}', values),
+    { refusal: 'unknown-token' },
+    'and the resolver answers the same rule with the name gone',
+  );
+
+  // Not only for `unknown-token`: every other refusal carries `token:
+  // null` out of the validator, so a caller reads one field rather than
+  // switching on the code first -- and every one of them is still a bare
+  // `{ refusal }` out of the resolver.
+  for (const shape of ['{series', '/x.{ext}', 'a\\b.{ext}', '{series}/']) {
+    const validated = validateShape(shape, values);
+    assert.ok('refusal' in validated, shape);
+    assert.equal(validated.token, null, `${shape} names no token`);
+    assert.deepEqual(resolveShape(shape, values), { refusal: validated.refusal }, shape);
+  }
+
+  // The two agree on every accept, because there is one parse: the
+  // validator is the implementation and the resolver is a strip.
+  assert.deepEqual(
+    validateShape('{series}.{ext}', values),
+    resolveShape('{series}.{ext}', values),
+  );
 });
