@@ -1214,6 +1214,68 @@ function migration19(db: DatabaseSync): void {
 }
 
 /**
+ * **Where a plugin's library goes**: one row per plugin, holding a root, a
+ * path shape and the directory an unmatched release lands in (design spec §3
+ * and §6).
+ *
+ * **Keyed by `id`, with the plugin id a unique index rather than the primary
+ * key.** One row per plugin is the grain, so `plugin_id` would read as the
+ * natural key -- but `assertIntegerIdKey` (`sync/registry.ts`) refuses a
+ * synced table whose primary key is anything but a lone `id`, because
+ * `syncTriggerSql` reads `NEW.id`/`OLD.id` unconditionally. A `TEXT PRIMARY
+ * KEY` here would install triggers that compile and then throw on the first
+ * write. The unique index carries the grain instead, and
+ * `media/destinations.ts` upserts against it by name.
+ *
+ * **No column carries a default, and `unmatched_dir` is the one that
+ * matters.** Design spec §6 gives it a default of `_unmatched`, and that
+ * default lives in `media/destinations.ts` as a constant rather than in this
+ * DDL. Two spellings of one default is the drift; and migration 19's
+ * docblock above has the measured account of what a `DEFAULT` on a synced
+ * table's column costs once it is there -- SQLite has no `ALTER COLUMN` to
+ * take one away, so the only route back is another table rebuild. A `NOT
+ * NULL` with no default is legal here because this statement creates the
+ * table empty, which is exactly the case `ADD COLUMN` could not have had.
+ *
+ * **The root is a filesystem path and it reaches the replica**, which is the
+ * distinction `sync/tables.ts`'s top docblock draws rather than an exception
+ * to it: a root is *dictated* -- a string the operator types into the
+ * settings screen -- where `storage_path` is *discovered*, reported by a
+ * download client about a layout nobody chose to disclose. `filepath_mapping`
+ * joined the synced set on the same reasoning one migration earlier.
+ */
+const MIGRATION_20 = `
+CREATE TABLE plugin_destination (
+  id            INTEGER PRIMARY KEY,
+  plugin_id     TEXT    NOT NULL,
+  root          TEXT    NOT NULL,
+  shape         TEXT    NOT NULL,
+  unmatched_dir TEXT    NOT NULL,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX plugin_destination_plugin ON plugin_destination (plugin_id);
+`;
+
+/**
+ * The DDL above, then the one call replication needs.
+ *
+ * **`installSyncTriggers` and no `seedSyncLog`**, where migrations 16, 17 and
+ * 19 each call both. Those three brought an *existing* table into the synced
+ * set, so each could be holding rows written before any trigger existed, and
+ * a client's backfill reads `sync_log` as the index of which rows exist --
+ * an unseeded row is invisible to every replica forever. This statement
+ * creates the table, so at the instant the triggers are installed it holds no
+ * row: there is nothing for a seed to index, and `seedSyncLog` over it would
+ * insert nothing. Checkable rather than asserted -- `CREATE TABLE` is two
+ * lines above and no `INSERT` stands between it and this call.
+ */
+function migration20(db: DatabaseSync): void {
+  db.exec(MIGRATION_20);
+  installSyncTriggers(db, ['plugin_destination']);
+}
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -1238,6 +1300,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 17, up: (db) => migration17(db) },
   { version: 18, up: (db) => db.exec(MIGRATION_18) },
   { version: 19, up: (db) => migration19(db) },
+  { version: 20, up: (db) => migration20(db) },
 ];
 
 /**

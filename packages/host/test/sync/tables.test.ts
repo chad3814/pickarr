@@ -10,6 +10,7 @@ import type {
   DownloadClientSyncRead,
   FilepathMappingSyncRead,
   MediaItemSyncRead,
+  PluginDestinationSyncRead,
   NzbDownloadSyncRead,
   PersonSyncRead,
   RoleSyncRead,
@@ -47,7 +48,7 @@ test('no credential-bearing table is synced', () => {
   }
 });
 
-test('download_client is one of the nine host synced tables', () => {
+test('download_client is one of the ten host synced tables', () => {
   // The bootstrap assertion for the download-clients slice, and the first
   // comment here was
   // wrong about why -- recorded because the wrong version is the plausible
@@ -67,8 +68,8 @@ test('download_client is one of the nine host synced tables', () => {
   // one first written down here.
   assert.ok(HOST_SYNCED_TABLES.includes('download_client'),
     'download_client must be synced -- a settings list reads it from the replica');
-  assert.equal(HOST_SYNCED_TABLES.length, 9,
-    'the host syncs nine of its own tables; a tenth needs a read shape, a migration and a decision');
+  assert.equal(HOST_SYNCED_TABLES.length, 10,
+    'the host syncs ten of its own tables; an eleventh needs a read shape, a migration and a decision');
 });
 
 test('filepath_mapping is the ninth host synced table', () => {
@@ -93,6 +94,21 @@ test('filepath_mapping is the ninth host synced table', () => {
   // measurement is what replaced the guess.
   assert.ok(HOST_SYNCED_TABLES.includes('filepath_mapping'),
     'filepath_mapping must be synced -- the mappings under each client are read from the replica');
+});
+
+test('plugin_destination is the tenth host synced table', () => {
+  // The bootstrap assertion for the importer slice, the same shape the two
+  // above have -- and it covers the same blind spot, because every test that
+  // iterates `HOST_SYNCED_TABLES` loses its check for an entry that is
+  // missing rather than failing over it.
+  //
+  // Measured, dropping `'plugin_destination'` from the list and running this
+  // file: **4 red, 24 green** -- this one, the length assertion above, `a
+  // destination reaches a client as its root, shape and unmatched
+  // directory`, and `every host synced table has a read shape in the
+  // contract`.
+  assert.ok(HOST_SYNCED_TABLES.includes('plugin_destination'),
+    'plugin_destination must be synced -- the settings screen reads each library root from the replica');
 });
 
 test('every synced table has an integer primary key named id', () => {
@@ -547,6 +563,36 @@ test('a filepath mapping reaches a client as both of its paths and nothing else'
   });
 });
 
+test('a destination reaches a client as its root, shape and unmatched directory', () => {
+  // The second projection here that carries a path on purpose, on exactly
+  // the distinction the mapping test above draws: a root is *dictated* --
+  // the operator types it into the settings screen that then reads it back
+  // -- where `storage_path` is *discovered* and stays out. Design spec §3.
+  //
+  // All three strings are asserted literally, and none is a prefix or a
+  // rearrangement of another, so a projection that aliased `unmatched_dir`
+  // onto `shape` (or swapped any pair) fails here rather than passing the
+  // key-set comparison at the bottom of this file, which only checks names.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.prepare(`
+    INSERT INTO plugin_destination (id, plugin_id, root, shape, unmatched_dir, created_at, updated_at)
+    VALUES (1, 'movie', '/srv/films', '{title} ({year})/{title}.{ext}', '_pickarr/unmatched', 10, 20)
+  `).run();
+
+  const registry = createSyncRegistry(raw, []);
+  const row = registry.readRows(raw, 'plugin_destination', [1])[1];
+  assert.deepEqual(row, {
+    id: 1,
+    pluginId: 'movie',
+    root: '/srv/films',
+    shape: '{title} ({year})/{title}.{ext}',
+    unmatchedDir: '_pickarr/unmatched',
+    createdAt: 10,
+    updatedAt: 20,
+  });
+});
+
 /**
  * One row in every host synced table, with every nullable column filled, so a
  * projection's key set can be read off a real row rather than declared.
@@ -612,6 +658,10 @@ function seedOneRowPerSyncedTable(raw: ReturnType<typeof openTestDatabase>['raw'
     INSERT INTO filepath_mapping (id, download_client_id, from_path, to_path, created_at, updated_at)
     VALUES (1, 1, '/downloads', '/media', 10, 20)
   `).run();
+  raw.prepare(`
+    INSERT INTO plugin_destination (id, plugin_id, root, shape, unmatched_dir, created_at, updated_at)
+    VALUES (1, 'tv', '/library/tv', '{series}/Season {season}/{series} - S{season}E{episode}.{ext}', '_unmatched', 10, 20)
+  `).run();
 }
 
 /** The projection of row 1 from each host synced table, keyed by table name. */
@@ -670,8 +720,8 @@ test('the media item a row belongs to has one name across every table that names
  * One witness object per host read shape: `Record<keyof T, true>`, which the
  * compiler makes exhaustive in both directions for an object literal -- a
  * missing key is an error, and an extra one is an excess property. So the
- * *names* in these nine objects are `@pickarr/contract`'s nine host shapes,
- * mechanically, and the test below compares them against what the nine
+ * *names* in these ten objects are `@pickarr/contract`'s ten host shapes,
+ * mechanically, and the test below compares them against what the ten
  * `SELECT`s actually project.
  *
  * This is `test/db/schema.test.ts`'s pattern applied to the other pair that
@@ -733,14 +783,18 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
     id: true, downloadClientId: true, fromPath: true, toPath: true,
     createdAt: true, updatedAt: true,
   } satisfies Record<keyof FilepathMappingSyncRead, true>,
+  plugin_destination: {
+    id: true, pluginId: true, root: true, shape: true, unmatchedDir: true,
+    createdAt: true, updatedAt: true,
+  } satisfies Record<keyof PluginDestinationSyncRead, true>,
 };
 
 test('every host synced table has a read shape in the contract', () => {
-  // The set, before the fields: a tenth synced table added with no shape
+  // The set, before the fields: an eleventh synced table added with no shape
   // would leave a client back on `unknown` for it, which is the state this
   // whole comparison exists to end -- `rss_feed` was the seventh,
-  // `download_client` the eighth and `filepath_mapping` the ninth, and this
-  // guard is what each had to pass.
+  // `download_client` the eighth, `filepath_mapping` the ninth and
+  // `plugin_destination` the tenth, and this guard is what each had to pass.
   assert.deepEqual(
     Object.keys(HOST_READ_SHAPE_FIELDS).toSorted(),
     [...HOST_SYNCED_TABLES].toSorted(),

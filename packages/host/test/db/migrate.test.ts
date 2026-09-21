@@ -1684,3 +1684,103 @@ test('migration 19\'s triggers log a mapping written, edited and removed afterwa
   raw.prepare('DELETE FROM filepath_mapping WHERE id = 1').run();
   assert.deepEqual(opsLogged(raw, 'filepath_mapping'), ['delete'], 'the delete trigger tombstones it');
 });
+
+/**
+ * Inserts one `plugin_destination` row for `pluginId`, binding every column.
+ *
+ * Every column named explicitly, including both timestamps: the table has no
+ * default on any of them, and an insert that leans on one would not be the
+ * insert the writer in `media/destinations.ts` makes.
+ */
+function seedDestination(
+  raw: ReturnType<typeof openTestDatabase>['raw'],
+  id: number,
+  pluginId: string,
+): void {
+  raw.prepare(`
+    INSERT INTO plugin_destination (id, plugin_id, root, shape, unmatched_dir, created_at, updated_at)
+    VALUES (?, ?, '/library', '{title}.{ext}', '_unmatched', 10, 20)
+  `).run(id, pluginId);
+}
+
+test('migration 20 creates plugin_destination, keyed by id and unique on plugin_id', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  assert.ok(tableNames(raw).has('plugin_destination'), 'the table exists');
+
+  const columns = raw.prepare('PRAGMA table_info(plugin_destination)').all().map((r) => {
+    const row = r as { name: unknown; type: unknown; notnull: unknown; dflt_value: unknown; pk: unknown };
+    return {
+      name: String(row.name),
+      type: String(row.type),
+      notNull: Number(row.notnull) === 1,
+      default: row.dflt_value,
+      pk: Number(row.pk),
+    };
+  });
+  assert.deepEqual(columns, [
+    { name: 'id', type: 'INTEGER', notNull: false, default: null, pk: 1 },
+    { name: 'plugin_id', type: 'TEXT', notNull: true, default: null, pk: 0 },
+    { name: 'root', type: 'TEXT', notNull: true, default: null, pk: 0 },
+    { name: 'shape', type: 'TEXT', notNull: true, default: null, pk: 0 },
+    { name: 'unmatched_dir', type: 'TEXT', notNull: true, default: null, pk: 0 },
+    { name: 'created_at', type: 'INTEGER', notNull: true, default: null, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notNull: true, default: null, pk: 0 },
+  ], 'a lone integer `id` key, and no column carries a default');
+
+  // The default `_unmatched` lives in `media/destinations.ts`, not here, and
+  // the absence of a column default is what keeps it to one place: an insert
+  // that omits the column fails at the moment it is written rather than
+  // quietly storing whatever the DDL happened to say.
+  assert.throws(
+    () => raw.prepare(`
+      INSERT INTO plugin_destination (plugin_id, root, shape, created_at, updated_at)
+      VALUES ('tv', '/library', '{title}.{ext}', 1, 1)
+    `).run(),
+    /NOT NULL constraint failed: plugin_destination.unmatched_dir/,
+    'an insert that omits unmatched_dir is refused rather than defaulted',
+  );
+});
+
+test('a plugin cannot hold two destinations', () => {
+  // One row per plugin is the whole grain of the table (design spec §3), and
+  // it is a unique index rather than a convention because
+  // `media/destinations.ts` upserts on exactly this key -- an
+  // `ON CONFLICT (plugin_id)` clause needs the index to have something to
+  // conflict against.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  seedDestination(raw, 1, 'tv');
+  assert.throws(
+    () => seedDestination(raw, 2, 'tv'),
+    /UNIQUE constraint failed: plugin_destination.plugin_id/,
+  );
+  // And two plugins may each have one.
+  seedDestination(raw, 2, 'movie');
+  assert.equal(
+    Number((raw.prepare('SELECT COUNT(*) AS n FROM plugin_destination').get() as { n: unknown }).n),
+    2,
+  );
+});
+
+test('migration 20\'s triggers log a destination written, edited and removed afterwards', () => {
+  // `migration19`'s equivalent, and it drives the triggers rather than
+  // reading `sqlite_master`: a trigger that exists and a trigger that logs
+  // are not the same claim. There is no seed leg here, unlike migrations 16,
+  // 17 and 19 -- this migration creates the table, so at the instant the
+  // triggers are installed it holds no row for a seed to index.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  seedDestination(raw, 1, 'tv');
+  assert.deepEqual(opsLogged(raw, 'plugin_destination'), ['upsert'], 'the insert trigger logs');
+
+  raw.prepare("UPDATE plugin_destination SET root = '/library/tv' WHERE id = 1").run();
+  assert.deepEqual(opsLogged(raw, 'plugin_destination'), ['upsert'],
+    'the update trigger re-logs the row, collapsed onto one entry');
+
+  raw.prepare('DELETE FROM plugin_destination WHERE id = 1').run();
+  assert.deepEqual(opsLogged(raw, 'plugin_destination'), ['delete'], 'the delete trigger tombstones it');
+});

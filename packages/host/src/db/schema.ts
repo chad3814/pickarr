@@ -64,6 +64,36 @@ export const filepathMapping = sqliteTable('filepath_mapping', {
   uniqueIndex('filepath_mapping_from_path').on(t.downloadClientId, t.fromPath),
 ]);
 
+/**
+ * Where one plugin's library lives: a root, the shape a resolved path takes
+ * under it, and the directory an unmatched release lands in (design spec §3
+ * and §6). Migration 20.
+ *
+ * Keyed by `id` with `plugin_id` a unique index rather than the primary key,
+ * because `sync/registry.ts`'s `assertIntegerIdKey` refuses a synced table
+ * keyed by anything else -- that migration's docblock has the whole of it,
+ * including why no column here carries a default.
+ */
+export const pluginDestination = sqliteTable('plugin_destination', {
+  id: integer('id').primaryKey(),
+  pluginId: text('plugin_id').notNull(),
+  /** Absolute, and never created by the importer -- design spec §7. */
+  root: text('root').notNull(),
+  /** A `{token}` template, validated on save against the plugin's own declared list. */
+  shape: text('shape').notNull(),
+  /**
+   * Relative to `root`. A literal directory name: design spec §6 is explicit
+   * that nothing in it is a token and nothing in it is interpolated.
+   */
+  unmatchedDir: text('unmatched_dir').notNull(),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => [
+  // One destination per plugin, which is the table's whole grain and what
+  // `media/destinations.ts` upserts against.
+  uniqueIndex('plugin_destination_plugin').on(t.pluginId),
+]);
+
 export const rssFeed = sqliteTable('rss_feed', {
   id: integer('id').primaryKey(),
   pluginId: text('plugin_id').notNull(),

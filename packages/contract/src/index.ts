@@ -33,6 +33,7 @@ export type {
   MovieRead,
   NzbDownloadSyncRead,
   PersonSyncRead,
+  PluginDestinationSyncRead,
   RoleSyncRead,
   RssFeedSyncRead,
   RssItemSyncRead,
