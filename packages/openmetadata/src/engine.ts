@@ -294,6 +294,18 @@ export interface LookupPluginSpec {
    * once.
    */
   readonly synced?: readonly SyncedTable<unknown>[];
+  /**
+   * What this plugin's library path shape may name (design spec §3).
+   *
+   * **Required, not optional like `synced` above.** `synced` defaults to
+   * none and a plugin that declares nothing keeps working; a token list
+   * that defaulted to none would make the host refuse every shape anyone
+   * saved for that plugin, with the settings UI offering an empty list of
+   * tokens and no hint that the plugin is the reason. The engine cannot
+   * supply a sensible default either -- what a shape may name is exactly
+   * the thing only the plugin knows.
+   */
+  readonly tokens: readonly string[];
 }
 
 export interface LookupPluginDeps {
@@ -509,6 +521,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     // that declares nothing still produces a valid `MediaPlugin`, whose own
     // `synced` is required.
     synced: spec.synced ?? [],
+    tokens: spec.tokens,
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;

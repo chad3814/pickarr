@@ -43,6 +43,10 @@ function build(service?: { fetch: HostFetch }) {
     // to refuse -- these tests are about jobs, not about what a plugin accepts.
     check: (): void => {},
     apply: async (args) => { applied.push(args); },
+    // Not the real xxx plugin's list -- that one is asserted in the host,
+    // against the plugin the host actually builds. Here it only has to be
+    // something the engine can be seen to pass through unchanged.
+    tokens: ['site', 'title'],
   }, {
     now: () => NOW,
     baseUrl: 'https://openmetadata.test',
@@ -64,12 +68,31 @@ test('carries the engine state table as migration 1, before the spec migrations'
     migrations: [{ version: 2, up: (db) => db.exec('CREATE TABLE xxx_own (id INTEGER PRIMARY KEY)') }],
     check: (): void => {},
     apply: async () => {},
+    tokens: ['site', 'title'],
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
   assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2]);
   assert.equal(plugin.id, 'xxx');
   assert.equal(plugin.mediaType, 'xxx');
   assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [LOOKUP_JOB, POLL_JOB]);
+});
+
+test("carries the spec's tokens through to the plugin, unchanged and unmerged", () => {
+  const plugin = createLookupPlugin({
+    id: 'xxx',
+    mediaType: 'xxx',
+    category: 'xxx',
+    migrations: [],
+    check: (): void => {},
+    apply: async () => {},
+    tokens: ['site', 'title', 'ext'],
+  }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
+
+  // The exact array, in order. The engine adds nothing of its own here --
+  // unlike `migrations`, where it prepends its state table. A shared
+  // `filename`/`ext` tail merged in by the engine would be invisible to the
+  // plugin declaring the list, and this is what says it is not doing that.
+  assert.deepEqual(plugin.tokens, ['site', 'title', 'ext']);
 });
 
 test('keeps a spec job handler alongside its own two', () => {
@@ -81,6 +104,7 @@ test('keeps a spec job handler alongside its own two', () => {
     jobs: { sweep: async () => {} },
     check: (): void => {},
     apply: async () => {},
+    tokens: ['site', 'title'],
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
   assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [LOOKUP_JOB, POLL_JOB, 'sweep']);

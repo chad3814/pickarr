@@ -687,6 +687,10 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     migrations: MIGRATIONS,
     jobs: { lookup, poll, artwork },
     synced: [],
+    // What this double's own shape could name, were one configured. Kept
+    // short and unlike any shipped plugin's list: the double stands in for
+    // a plugin, not for `plugin-movie`.
+    tokens: ['title', 'filename', 'ext'],
 
     async onNewRssItems(ids, ctx) {
       if (ids.length === 0) return;

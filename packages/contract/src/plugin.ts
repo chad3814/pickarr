@@ -117,6 +117,26 @@ export interface MediaPlugin {
    */
   readonly synced: readonly SyncedTable<unknown>[];
 
+  /**
+   * The tokens this plugin's library path shape may name, without braces --
+   * `season`, not `{season}`.
+   *
+   * Declared by the plugin for the same reason `synced` is declared and its
+   * triggers are not: only the plugin knows what it can resolve. `{season}`
+   * means something for television and nothing for a film, and the host has
+   * no way to tell which is which. The host validates a saved shape against
+   * the declaring plugin's list and refuses an unknown token by name, so a
+   * typo fails where it is typed rather than months later as a wrong path
+   * (design spec §3).
+   *
+   * Includes the tokens every plugin shares -- `resolution`, `filename` and
+   * `ext`, which come from `rss_item` and the source path rather than from
+   * the plugin's own tables. They are listed by each plugin rather than
+   * merged in here so that one list answers "what may I type", with nothing
+   * a reader has to know to add to it.
+   */
+  readonly tokens: readonly string[];
+
   onNewRssItems(ids: readonly number[], ctx: PluginContext): Promise<void>;
   onDownloadedFile(file: DownloadedFile, ctx: PluginContext): Promise<void>;
   onDownloadRequest(rssItemId: number, ctx: PluginContext): Promise<void>;

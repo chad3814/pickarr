@@ -9,6 +9,23 @@ import { MOVIE_SYNCED } from './sync.ts';
 export const MOVIE_PLUGIN_ID = 'movie';
 
 /**
+ * What a film library path may name (design spec §3).
+ *
+ * `year` and `collection` are this plugin's own; `year` is offered beside
+ * `releaseDate` because the convention every film library already uses is
+ * `Title (2024)`, and deriving it from a date string in a shape is not
+ * something a shape can express. `resolution`, `filename` and `ext` come
+ * from `rss_item` and the source path, as they do for every plugin.
+ *
+ * There is no `season` and no `episode`: a shape naming either is refused on
+ * save, which is the point of each plugin declaring its own list rather than
+ * the host holding one.
+ */
+export const MOVIE_TOKENS: readonly string[] = [
+  'title', 'year', 'releaseDate', 'collection', 'resolution', 'filename', 'ext',
+];
+
+/**
  * The film plugin.
  *
  * `id` and `mediaType` are `movie`, singular, because that is the contract's
@@ -24,6 +41,7 @@ export function createMoviePlugin(deps: LookupPluginDeps): MediaPlugin {
     check: checkMovie,
     apply: applyMovie,
     synced: MOVIE_SYNCED,
+    tokens: MOVIE_TOKENS,
   }, deps);
 }
 

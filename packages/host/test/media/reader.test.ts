@@ -230,6 +230,7 @@ function makePlugin(overrides: Partial<MediaPlugin> & { id: string }): MediaPlug
     migrations: [],
     jobs: {},
     synced: [],
+    tokens: [],
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: unusedEntryPoint('onDownloadRequest'),
