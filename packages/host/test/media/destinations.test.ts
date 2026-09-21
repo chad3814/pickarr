@@ -576,13 +576,38 @@ test('a root that is absolute but not the directory it resolves to is refused on
   for (const root of ['/', '//', '/lib/../..']) {
     assert.equal(refusalOf(save('tv', { root })), 'unusable-root', root);
   }
-  // And the spellings that merely differ from what they resolve to, which
-  // would import fine and store a value that is not the directory written
-  // to.
-  for (const root of ['/library/', '/library/./tv', '/library//tv']) {
-    assert.equal(refusalOf(save('tv', { root })), 'unusable-root', root);
-  }
   assert.equal(rowCount(raw), 0, 'a refused root wrote a row');
+});
+
+test('a root that merely differs from what it resolves to is stored as what it resolves to', () => {
+  // The spellings that name a real directory and were refused only for how
+  // they were spelled. Refusing them was a regression with teeth: a root
+  // stored as `/library/` before this branch imported fine, and would have
+  // begun refusing at *every* import for an operator who never opened
+  // settings.
+  //
+  // Canonicalising rather than accepting them as typed is what closes the
+  // other half -- the settings screen now reads back the directory the
+  // importer will write to. `/library/./tv` stored verbatim would import
+  // to `/library/tv` while showing something else, which is the silent
+  // disagreement `/lib/../..` was refused for.
+  //
+  // `media/import.ts` still calls `rootRefusal`, which every value below
+  // passes once stored, so the two sides continue to judge one value by
+  // one rule -- `test/media/shape.test.ts` drives that invariant directly.
+  const { raw, save } = setup();
+
+  const canonical: readonly (readonly [string, string])[] = [
+    ['/library/', '/library'],
+    ['/library/./tv', '/library/tv'],
+    ['/library//tv', '/library/tv'],
+    ['/library/staging/../tv', '/library/tv'],
+  ];
+  for (const [typed, stored] of canonical) {
+    const result = save('tv', { root: typed });
+    assert.ok(!('refusal' in result), `"${typed}" names a directory and was refused`);
+    assert.equal(rowFor(raw, 'tv')?.['root'], stored, `"${typed}" was not stored as "${stored}"`);
+  }
 });
 
 test('an ordinary absolute root is still accepted, spaces and backslashes included', () => {

@@ -553,3 +553,61 @@ export function rootRefusal(root: string): RootRefusalCode | undefined {
   }
   return undefined;
 }
+
+/**
+ * The one spelling of a root this host stores, or why it cannot be stored
+ * at all.
+ *
+ * **Why canonicalise on save rather than accept both spellings.** The
+ * validity rule is {@link rootRefusal} and both callers still use it --
+ * that shared rule is the whole content of the save/import fix this module
+ * carries twice over. What this adds is applied on the save side only, and
+ * it does not make the two sides disagree: it makes the value they both
+ * judge canonical before either judges it. The invariant is
+ * `rootRefusal(canonicalRoot(x).root) === undefined` for every `x` this
+ * accepts, and `test/media/shape.test.ts` drives it over the same spellings
+ * rather than asserting it here.
+ *
+ * The alternative considered and rejected was a lenient importer: refuse
+ * `'/media/tv/'` on save, normalise it at import so an already-stored one
+ * still works. That restores exactly the asymmetry that caused the bug --
+ * save and import applying different rules to one value -- to spare a case
+ * this removes outright.
+ *
+ * **What each spelling becomes, and why refusal is not the answer for
+ * most of them:**
+ *
+ * - `'/media/tv/'`, `'/media//tv'`, `'/media/./tv'` and `'/media/x/../tv'`
+ *   all name the directory `/media/tv`, and an operator who typed one of
+ *   them meant that. They are stored as `/media/tv`, so the settings
+ *   screen reads back what the importer will use -- which is the half of
+ *   the complaint against `'/lib/../..'` that refusing it never fixed.
+ * - `'/'`, `'//'` and `'/lib/../..'` reduce to nothing above the root.
+ *   They are refused rather than stored as `/`: a library root of `/` puts
+ *   `<title>/` directories at the top of the system disk, and it is also
+ *   the one value the importer's `target.startsWith(root + '/')` check can
+ *   never satisfy.
+ * - A `..` that would climb above `/` is refused rather than clamped.
+ *   Clamping is how `'/lib/../..'` becomes `/` silently, and silence is
+ *   the defect.
+ *
+ * Still no `node:path`, for this module's standing reason: `resolve`
+ * absolutises against the process's working directory, which is not a
+ * question to ask of a stored string. The loop below is lexical, and `/`
+ * is the separator here on every platform.
+ */
+export function canonicalRoot(root: string): { root: string } | { refusal: RootRefusalCode } {
+  if (!root.startsWith('/')) return { refusal: 'not-absolute' };
+  const segments: string[] = [];
+  for (const segment of root.slice(1).split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (segments.length === 0) return { refusal: 'unusable' };
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  if (segments.length === 0) return { refusal: 'unusable' };
+  return { root: `/${segments.join('/')}` };
+}

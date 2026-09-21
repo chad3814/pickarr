@@ -449,8 +449,13 @@ test('a stored root that is not the directory it resolves to is refused here too
   // save half of. Both call `rootRefusal`, so a root the save refuses
   // cannot arrive here under a different name -- and a row written before
   // that rule existed gets the same answer rather than the `escapes-root`
-  // these three used to produce. `escapes-root` means reaching *outside*
-  // the root (`contract/src/library.ts`), and nothing had.
+  // these used to produce. `escapes-root` means reaching *outside* the
+  // root (`contract/src/library.ts`), and nothing had.
+  //
+  // The trailing-slash case is the one the save no longer produces:
+  // `canonicalRoot` stores `${h.root}` for it. It stays here precisely
+  // because this side must still answer for a row the save did not write
+  // -- one stored before that rule, or edited in the database by hand.
   await withHarness({}, async (h) => {
     for (const root of ['/', '//', '/lib/../..', `${h.root}/`]) {
       h.destination({ root });

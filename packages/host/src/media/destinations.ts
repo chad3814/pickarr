@@ -72,7 +72,9 @@
  * does not have. Its three checks go through `unmatchedDirSegments`
  * instead -- the same function `media/import.ts` calls, and not a copy;
  * the comment at the call site below has the account of what two copies
- * cost. The root now takes the same route, through `rootRefusal`.
+ * cost. The root now takes the same route, through `canonicalRoot` here
+ * and `rootRefusal` at the import -- one rule, and this side additionally
+ * settles which spelling is stored.
  *
  * Synchronous, like `addMapping` and `addFeed`: `node:sqlite` is synchronous
  * -- this repo's documented exception to preferring an async API -- and this
@@ -81,7 +83,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DestinationRefusalCode } from '@pickarr/contract';
-import { rootRefusal, unmatchedDirSegments, validateShape } from './shape.ts';
+import { canonicalRoot, unmatchedDirSegments, validateShape } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
 /**
@@ -328,13 +330,22 @@ export function saveDestination(
   // fixed for `unmatched_dir` twenty lines down. One function, called from
   // both sides, is what makes "checked twice" mean checked twice.
   //
-  // Still not `node:path`: `rootRefusal` is a pure string rule, because
-  // `resolve` absolutises against the host's working directory and that is
-  // not a question to ask of a stored value. `/` is the separator here, in
-  // the shape and in the result, on every platform.
-  const rootProblem = rootRefusal(input.root);
-  if (rootProblem !== undefined) {
-    return refuse(rootProblem === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
+  // Still not `node:path`: these are pure string rules, because `resolve`
+  // absolutises against the host's working directory and that is not a
+  // question to ask of a stored value. `/` is the separator here, in the
+  // shape and in the result, on every platform.
+  //
+  // `canonicalRoot`, not `rootRefusal`, and only on this side: it applies
+  // that same rule and additionally settles *which* spelling gets stored.
+  // `'/media/tv/'` named a directory the importer could write to, but was
+  // refused for its trailing separator -- a real regression for a root
+  // stored before this branch, breaking every import for an operator who
+  // never opened settings. It is stored as `/media/tv` instead. The import
+  // side goes on calling `rootRefusal`, which canonical values always
+  // pass, so the two sides still judge one value by one rule.
+  const canonical = canonicalRoot(input.root);
+  if ('refusal' in canonical) {
+    return refuse(canonical.refusal === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
   }
 
   // `validateShape`, not `resolveShape`: the same parse, with the unknown
@@ -393,7 +404,7 @@ export function saveDestination(
       unmatched_dir = excluded.unmatched_dir,
       updated_at    = excluded.updated_at
     RETURNING id
-  `).get(pluginId, input.root, input.shape, unmatchedDir, at, at);
+  `).get(pluginId, canonical.root, input.shape, unmatchedDir, at, at);
   // Not a cast: `RETURNING id` on a statement that inserts or updates
   // exactly one row always answers one, so an absent row is this module
   // being wrong about its own SQL rather than a condition a caller caused --

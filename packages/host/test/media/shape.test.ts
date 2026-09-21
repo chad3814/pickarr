@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveShape, validateShape } from '../../src/media/shape.ts';
+import { canonicalRoot, resolveShape, rootRefusal, validateShape } from '../../src/media/shape.ts';
 import type { ShapeRefusalCode } from '../../src/media/shape.ts';
 
 const TV_SHAPE = '{series}/Season {season}/{series} - S{season}E{episode}.{ext}';
@@ -349,4 +349,72 @@ test('the save-time validator names the unknown token, and the import-time resol
     validateShape('{series}.{ext}', values),
     resolveShape('{series}.{ext}', values),
   );
+});
+
+test('canonicalRoot keeps the directory and drops only the spelling', () => {
+  // Every pair names one directory. The left side is what an operator may
+  // type; the right is the single spelling stored, so the settings screen
+  // reads back the directory the importer writes to.
+  const cases: readonly (readonly [string, string])[] = [
+    ['/media/tv', '/media/tv'],
+    ['/media/tv/', '/media/tv'],
+    ['/media//tv', '/media/tv'],
+    ['/media/./tv', '/media/tv'],
+    ['/media/x/../tv', '/media/tv'],
+    ['/a/../b', '/b'],
+    ['/mnt/media/tv shows/', '/mnt/media/tv shows'],
+  ];
+
+  for (const [typed, stored] of cases) {
+    const result = canonicalRoot(typed);
+    assert.ok(!('refusal' in result), `"${typed}" names a directory`);
+    assert.equal(result.root, stored, typed);
+  }
+});
+
+test('canonicalRoot refuses what no import could ever write under', () => {
+  // `/`, `//` and `/lib/../..` all reduce to nothing above the root. They
+  // are refused rather than stored as `/`, because a library root of `/`
+  // puts `<title>/` directories at the top of the system disk, and because
+  // the importer's `target.startsWith(root + '/')` check is
+  // `startsWith('//')` there, which no target satisfies.
+  //
+  // `/..` and `/a/../..` climb above `/`. Refused rather than clamped:
+  // clamping is exactly how `/lib/../..` became `/` silently, and the
+  // silence was the defect.
+  for (const root of ['/', '//', '///', '/.', '/lib/../..', '/..', '/a/../..']) {
+    const result = canonicalRoot(root);
+    assert.ok('refusal' in result, `"${root}" was accepted`);
+    assert.equal(result.refusal, 'unusable', root);
+  }
+
+  for (const root of ['', 'media/tv', './media', '../media']) {
+    const result = canonicalRoot(root);
+    assert.ok('refusal' in result, `"${root}" was accepted`);
+    assert.equal(result.refusal, 'not-absolute', root);
+  }
+});
+
+test('every root canonicalRoot stores is one rootRefusal accepts, so the save and the import cannot disagree', () => {
+  // The invariant the two-sided rule rests on, driven rather than argued.
+  // `media/destinations.ts` canonicalises on save; `media/import.ts` calls
+  // `rootRefusal` on the stored value. If a value could pass the first and
+  // fail the second, a destination would save and then refuse at every
+  // import -- which is the bug both functions exist to prevent, and the
+  // one a trailing slash used to cause.
+  const typed = [
+    '/media/tv', '/media/tv/', '/media//tv', '/media/./tv', '/media/x/../tv',
+    '/a/../b', '/mnt/media/tv shows/', '/mnt/AC\\DC', '/one', '/a/b/c/d/e/',
+    '/', '//', '/lib/../..', '/..', 'media/tv', '',
+  ];
+
+  let stored = 0;
+  for (const root of typed) {
+    const result = canonicalRoot(root);
+    if ('refusal' in result) continue;
+    stored += 1;
+    assert.equal(rootRefusal(result.root), undefined, `"${root}" stored as "${result.root}", which the import refuses`);
+    assert.deepEqual(canonicalRoot(result.root), { root: result.root }, `"${result.root}" is not a fixed point`);
+  }
+  assert.equal(stored, 10, 'the loop stopped finding storable roots, so it stopped proving anything');
 });
