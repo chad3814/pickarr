@@ -578,7 +578,20 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
       // Importing is out of scope for this slice (the spec's §1.2). Logged
       // rather than thrown: a plugin that failed a job for work it was never
       // asked to do would dead-letter every completed download.
-      ctx.log('a download finished', { path: file.path, sizeBytes: file.sizeBytes });
+      //
+      // **The ids, never `file.path`.** Importer design spec §7: no path,
+      // url or credential reaches a log line, because a plugin's log detail
+      // is the same channel `last_error` is written from and
+      // `/api/downloads` serves that as `DownloadRead.lastError`. This line
+      // did log the path, and had to: until `DownloadedFile` carried
+      // `rssItemId` and `mediaItemId` there was nothing else here that
+      // identified the file. Both say more about *which* download this is
+      // than a path did, and neither is a filesystem location.
+      ctx.log('a download finished', {
+        rssItemId: file.rssItemId,
+        mediaItemId: file.mediaItemId,
+        sizeBytes: file.sizeBytes,
+      });
     },
 
     async onDownloadRequest(rssItemId, ctx) {

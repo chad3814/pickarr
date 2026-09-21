@@ -722,7 +722,15 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     // a plugin that cannot answer all three is not a plugin — and neither is
     // a stub: this is what the double would really do if called.
     async onDownloadedFile(file, ctx) {
-      ctx.log('a download finished', { path: file.path, sizeBytes: file.sizeBytes });
+      // The ids and the size, never `file.path` -- importer design spec §7,
+      // and the same line the engine logs. A double that leaked a path
+      // where the real plugin does not would make this file a worse model
+      // of a plugin than it claims to be.
+      ctx.log('a download finished', {
+        rssItemId: file.rssItemId,
+        mediaItemId: file.mediaItemId,
+        sizeBytes: file.sizeBytes,
+      });
     },
 
     async onDownloadRequest(rssItemId, ctx) {

@@ -273,6 +273,40 @@ test('the entry point this slice does not develop still does something real', as
   assert.match(harness.logs[0]?.message ?? '', /download/);
 });
 
+test('the line it logs names the two ids and carries no path', async () => {
+  const { plugin, harness } = build();
+  // A path with a distinctive segment, so a leak anywhere in the entry --
+  // under `path`, folded into the message, or renamed to something like
+  // `file` -- is findable by searching the serialised line rather than only
+  // by naming the key it was expected under. Importer design spec §7: a
+  // plugin's log detail is the channel `last_error` is written from, and
+  // `/api/downloads` serves that to a browser as `DownloadRead.lastError`.
+  const path = '/downloads/PICKARR-PATH-MARKER-3b91fe/a.mp4';
+  await plugin.onDownloadedFile(
+    { path, sizeBytes: 10, downloadClientId: 1, rssItemId: 7, mediaItemId: 42 },
+    harness.ctx,
+  );
+
+  const line = harness.logs[0];
+  assert.ok(line !== undefined, 'onDownloadedFile logged nothing');
+  assert.deepEqual(line.detail, { rssItemId: 7, mediaItemId: 42, sizeBytes: 10 });
+  const serialised = `${line.message} ${JSON.stringify(line.detail)}`;
+  assert.ok(!serialised.includes('PICKARR-PATH-MARKER-3b91fe'), 'the log line carries the path');
+  assert.ok(!serialised.includes('/downloads/'), 'the log line carries a path fragment');
+});
+
+test('the line it logs says so when nothing matched the release', async () => {
+  const { plugin, harness } = build();
+  await plugin.onDownloadedFile(
+    { path: '/downloads/a.mp4', sizeBytes: 10, downloadClientId: 1, rssItemId: 7, mediaItemId: null },
+    harness.ctx,
+  );
+  // `null`, not absent. An unmatched release is design spec §6's own state,
+  // and a missing key reads in a log as "the plugin forgot" rather than as
+  // "nothing matched".
+  assert.deepEqual(harness.logs[0]?.detail, { rssItemId: 7, mediaItemId: null, sizeBytes: 10 });
+});
+
 /**
  * `harness.ctx` with a `downloads` that records instead of throwing, and the
  * submissions it recorded. The harness's own `downloads.submit` refuses,
