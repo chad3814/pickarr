@@ -7,10 +7,34 @@ import type { SyncedTable } from './sync.ts';
 
 export type MediaType = 'tv' | 'movie' | 'xxx' | 'book';
 
+/**
+ * A finished download, as the host hands it to the plugin that owns it.
+ *
+ * `path` is the **mapped** path -- what this host can open, not what the
+ * download client called it. That is also why `rssItemId` is a field rather
+ * than something a plugin recovers for itself: `torrent_download` and
+ * `nzb_download` store the client's raw `storage_path`, so a plugin looking
+ * itself up by `(storage_path, download_client_id)` would find nothing
+ * exactly when a `filepath_mapping` row applies. See the importer design
+ * spec §2.
+ */
 export interface DownloadedFile {
   path: string;
   sizeBytes: number;
   downloadClientId: number;
+  /** The rss item this download was started for. */
+  rssItemId: number;
+  /**
+   * The media item that rss item resolved to, or `null` for a release
+   * nothing matched.
+   *
+   * Nullable and required rather than optional: an unmatched release is a
+   * real outcome with its own destination (design spec §6), and stating it
+   * at the boundary is what keeps it from being discovered part-way through
+   * an import. A plugin that forgot the case gets a type error, not a
+   * `NaN` in a path.
+   */
+  mediaItemId: number | null;
 }
 
 export interface PluginContext {

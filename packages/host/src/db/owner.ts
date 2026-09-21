@@ -19,3 +19,32 @@ export function ownerPluginId(raw: DatabaseSync, rssItemId: number): string | un
   if (!row) return undefined;
   return String((row as { plugin_id: unknown }).plugin_id);
 }
+
+/**
+ * Which media item an rss item resolved to, or `null` if it resolved to
+ * none.
+ *
+ * Here beside `ownerPluginId` because delivery asks both questions about the
+ * same row at the same moment, and for the same reason: `clients/deliver.ts`
+ * cannot import `host.ts`.
+ *
+ * **One `null` for two conditions, deliberately.** An rss item with a NULL
+ * `media_item_id` and an rss item that does not exist both answer `null`,
+ * where `ownerPluginId` distinguishes the second with `undefined`. That
+ * asymmetry is not an oversight: the caller needs the distinction for the
+ * owner because "no owner" means nobody to deliver to, and it does not need
+ * it here because "no media item" is already a state delivery handles --
+ * design spec §6's unmatched release. Delivery also never reaches this
+ * without an owner, so the missing-row case cannot arrive through it.
+ */
+export function mediaItemIdForRssItem(raw: DatabaseSync, rssItemId: number): number | null {
+  const row = raw.prepare('SELECT media_item_id FROM rss_item WHERE id = ?').get(rssItemId);
+  if (!row) return null;
+  const value = (row as { media_item_id: unknown }).media_item_id;
+  // The null is tested before the conversion, not after: `Number(null)` is
+  // 0, which is a media item id that would read as matched and point at
+  // nobody. Every other caller in this package narrows with `Number(...)`
+  // and none of them reads a nullable column.
+  if (value === null || value === undefined) return null;
+  return Number(value);
+}

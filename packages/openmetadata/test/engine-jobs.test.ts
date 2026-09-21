@@ -242,7 +242,10 @@ test('a name the payload names but the database does not throws rather than bein
 
 test('the entry point this slice does not develop still does something real', async () => {
   const { plugin, harness } = build();
-  await plugin.onDownloadedFile({ path: '/downloads/a.mp4', sizeBytes: 10, downloadClientId: 1 }, harness.ctx);
+  await plugin.onDownloadedFile(
+    { path: '/downloads/a.mp4', sizeBytes: 10, downloadClientId: 1, rssItemId: 7, mediaItemId: null },
+    harness.ctx,
+  );
   assert.match(harness.logs[0]?.message ?? '', /download/);
 });
 
