@@ -187,11 +187,14 @@ export interface MediaPlugin {
    * refuses `unknown-token`, so a typo fails where it is typed rather than
    * months later as a wrong path (design spec §3).
    *
-   * **The refusal names the rule, not the token.** Design spec §3 asks for
-   * an unknown token "refused, naming it"; the route deliberately does not,
-   * because no refusal it answers carries anything from the input and the
-   * settings screen holds both the shape and this list already. See
-   * `media/destinations.ts`'s own docblock for that decision.
+   * **The refusal names the token**, which is design spec §3's "refused,
+   * naming it": `DestinationRefusalBody.token` (`./destinations.ts`) carries
+   * the name beside the code. It is the one thing any refusal on that route
+   * repeats back from the input, and it is gated to the character class a
+   * declared token is in -- `ECHOABLE_TOKEN` in `media/destinations.ts`,
+   * whose docblock has the reasoning. A name outside that class comes back
+   * as `unknown-token` with `token: null`, so a client must handle an
+   * unnamed one.
    *
    * **A shape is refused four further ways this list has no say in** --
    * `malformed-shape`, `backslash-in-shape`, `escaping-shape` and
@@ -200,11 +203,17 @@ export interface MediaPlugin {
    * every import for ever. A token being declared here is necessary for a
    * shape naming it to save, and not sufficient.
    *
-   * Includes the tokens every plugin shares -- `resolution`, `filename` and
-   * `ext`, which come from `rss_item` and the source path rather than from
-   * the plugin's own tables. They are listed by each plugin rather than
-   * merged in here so that one list answers "what may I type", with nothing
-   * a reader has to know to add to it.
+   * Includes the four tokens every plugin shares -- `title` and
+   * `releaseDate`, which come from the shared `media_item` row, and
+   * `filename` and `ext`, which come from the source path rather than from
+   * the plugin's own tables. (`resolution` was a fifth until this branch
+   * removed it: `rss_item.resolution` is the *lookup* state, not a video
+   * resolution, so it resolved to nothing and dropped a segment at every
+   * import. Counted, not inherited -- `host/test/plugins/tokens.test.ts`
+   * holds the lists, which are seven for television, six for film and five
+   * for xxx.) They are listed by each plugin rather than merged in here so
+   * that one list answers "what may I type", with nothing a reader has to
+   * know to add to it.
    */
   readonly tokens: PluginTokens;
 

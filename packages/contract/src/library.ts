@@ -70,6 +70,14 @@ import type { DownloadedFile } from './plugin.ts';
  * - `not-absolute-root` -- the stored root does not begin with `/`. Refused
  *   on save; re-checked because a relative root would place the library
  *   against whatever directory the host happens to be running in.
+ * - `unusable-root` -- the stored root begins with `/` but is not a
+ *   directory *under* `/` spelled exactly as it resolves: it is `/` itself,
+ *   or it holds an empty, `.` or `..` segment. Refused on save under the
+ *   same name (`./destinations.ts`), and re-checked here through the same
+ *   function (`host/src/media/shape.ts`'s `rootRefusal`) because a row can
+ *   predate the rule -- and because until that rule existed every one of
+ *   these values saved and then answered `escapes-root` at every import,
+ *   which is the next code down and does not mean this.
  * - `missing-root` -- the root does not exist, or is not a directory.
  *   **Never created** (design spec §7): a missing root is a
  *   misconfiguration an operator should see, not a directory tree the
@@ -97,6 +105,7 @@ export type ImportRefusalCode =
   | 'empty-filename'
   | 'no-destination'
   | 'not-absolute-root'
+  | 'unusable-root'
   | 'missing-root'
   | 'unmatched-dir-is-root'
   | 'control-character'

@@ -1255,7 +1255,7 @@ function destinationBodyFrom(value: unknown): SaveDestinationInput | undefined {
  * is the one that file already draws: `unknown-plugin` is about the
  * **request target** -- `/api/destinations/book` names a resource, and a
  * resource that is not there is what `404` means -- exactly as
- * `unknown-mapping` is. The other eight are about a *value in the body*: the
+ * `unknown-mapping` is. The other nine are about a *value in the body*: the
  * request parsed fine and named fields that exist, and one of them carries
  * something that cannot be acted on, which is what `422` means and what
  * `empty-path` already gets on the mapping routes.
@@ -1275,6 +1275,7 @@ function statusForDestinationRefusal(refusal: DestinationRefusal['refusal']): nu
     case 'unknown-plugin':
       return 404;
     case 'not-absolute-root':
+    case 'unusable-root':
     case 'unknown-token':
     case 'malformed-shape':
     case 'backslash-in-shape':

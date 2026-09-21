@@ -4,6 +4,7 @@ import { DESTINATION_REFUSALS } from '@pickarr/contract';
 import {
   putDestination,
   destinationSubmit,
+  destinationRefusalMessage,
   DESTINATION_REFUSAL_MESSAGES,
 } from '../../src/settings/postDestination.ts';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
@@ -31,11 +32,12 @@ const ANY_INPUT = { root: '/media/tv', shape: '{series}/{title}.{ext}' };
  * expectation computed by the code under test cannot detect that code
  * changing. Deriving this from `DESTINATION_REFUSALS` alone would make it
  * true under every rename, which is the one thing it exists to see. There
- * are **nine**, not the five design spec §3 and §6 name between them:
+ * are **ten**, not the five design spec §3 and §6 name between them:
  * `media/destinations.ts` validates a shape by resolving it, which makes
- * four structural failures reachable on save.
+ * four structural failures reachable on save, and it refuses a root that is
+ * not the directory it resolves to, which makes a fifth.
  */
-test('the refusal codes this screen has sentences for are exactly the nine the contract declares', () => {
+test('the refusal codes this screen has sentences for are exactly the ten the contract declares', () => {
   const spoken = Object.keys(DESTINATION_REFUSAL_MESSAGES)
     .filter((key) => key !== 'offline' && key !== 'unrecognised')
     .toSorted();
@@ -53,6 +55,7 @@ test('the refusal codes this screen has sentences for are exactly the nine the c
     'not-absolute-root',
     'unknown-plugin',
     'unknown-token',
+    'unusable-root',
   ]);
 });
 
@@ -60,7 +63,7 @@ test('no destination refusal borrows another one\'s sentence', () => {
   const sentences = Object.values(DESTINATION_REFUSAL_MESSAGES);
   assert.equal(new Set(sentences).size, sentences.length,
     'each outcome gets words of its own, so a refusal is legible without reading a code');
-  assert.equal(sentences.length, 11, 'the contract\'s nine, plus offline and unrecognised');
+  assert.equal(sentences.length, 12, 'the contract\'s ten, plus offline and unrecognised');
 });
 
 /**
@@ -80,19 +83,53 @@ test('the shape\'s escape refusal and the unmatched folder\'s name different fie
 });
 
 /**
- * Ruling 15 of this slice: spec §3 promised the host would name the unknown
- * token and `media/destinations.ts` deliberately declined, so the wire
- * carries `{ refusal: 'unknown-token' }` and nothing else. The sentence must
- * not imply this client knows which token it was, because it does not -- and
- * parsing the shape here to guess would be a second token vocabulary in
- * `packages/web`, which is the drift the whole section is built to avoid.
+ * Design spec §3: an unknown token is "refused, naming it". The host does
+ * -- `DestinationRefusalBody.token` -- and for a whole slice this client
+ * discarded the field and told the operator outright that Pickarr "does not
+ * say which one it refused". These three pin the repair from both ends: the
+ * name reaches the sentence, the sentence stops disclaiming, and the
+ * fallback for a token the host would not repeat is still there.
  */
-test('the unknown-token sentence does not claim to know which token was refused', () => {
-  const sentence = DESTINATION_REFUSAL_MESSAGES['unknown-token'];
-  assert.ok(sentence.includes('{token}') || sentence.includes('token'),
-    'it is about a token');
-  assert.ok(sentence.includes('does not say which'),
-    'and it says outright that the refusal did not name one, rather than leaving the operator to infer it');
+test('a named token reaches the sentence the operator reads', () => {
+  const named = destinationRefusalMessage({ refusal: 'unknown-token', token: 'seasn' });
+
+  assert.ok(named.includes('{seasn}'),
+    'the host named the token and this client has to say which one it was');
+  assert.notEqual(named, DESTINATION_REFUSAL_MESSAGES['unknown-token'],
+    'naming it has to change the sentence, or reading `token` changed nothing');
+});
+
+test('an unknown-token the host would not name falls back to the fixed sentence', () => {
+  // `ECHOABLE_TOKEN` in `host/src/media/destinations.ts` repeats a name
+  // only when it matches the class a declared token is in, so
+  // `token: null` on an `unknown-token` is a real answer rather than a
+  // missing one -- as is an older host that sends no field at all.
+  assert.equal(
+    destinationRefusalMessage({ refusal: 'unknown-token', token: null }),
+    DESTINATION_REFUSAL_MESSAGES['unknown-token'],
+  );
+});
+
+test('no destination sentence tells the operator that Pickarr cannot name the token', () => {
+  // The shipped sentence said this for a whole slice while the name was in
+  // the response body. A literal, because the claim was prose rather than
+  // a code and only its words can pin it.
+  for (const [code, sentence] of Object.entries(DESTINATION_REFUSAL_MESSAGES)) {
+    assert.ok(!sentence.includes('does not say which'),
+      `"${code}" still disclaims a name the wire carries`);
+  }
+  assert.ok(DESTINATION_REFUSAL_MESSAGES['unknown-token'].includes('{token}'),
+    'the fallback still points at the list of tokens on screen');
+});
+
+test('every other refusal ignores token, so no sentence is composed from a field that is not about it', () => {
+  // `token` is `null` for every code but `unknown-token`, but the wire is
+  // not a promise -- a host that sent one anyway must not change what a
+  // `not-absolute-root` reads as.
+  assert.equal(
+    destinationRefusalMessage({ refusal: 'not-absolute-root', token: 'series' }),
+    DESTINATION_REFUSAL_MESSAGES['not-absolute-root'],
+  );
 });
 
 test('putDestination reports the id of an accepted destination', async () => {
@@ -144,39 +181,55 @@ test('an unmatched folder that was set crosses the wire exactly as typed', async
 });
 
 test('putDestination branches on the refusal field, not the HTTP status', async () => {
-  // `unknown-plugin` is a 404 and the other eight are 422s
+  // `unknown-plugin` is a 404 and the other nine are 422s
   // (`statusForDestinationRefusal`), and both read back through the same
   // field -- proven by driving both statuses and never reading
   // `response.status`.
-  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'unknown-plugin' }, 404)));
-  assert.deepEqual(await putDestination('book', ANY_INPUT), { refusal: 'unknown-plugin' });
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'unknown-plugin', token: null }, 404)));
+  assert.deepEqual(await putDestination('book', ANY_INPUT), { refusal: 'unknown-plugin', token: null });
 
-  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'unknown-token' }, 422)));
-  assert.deepEqual(await putDestination('movie', ANY_INPUT), { refusal: 'unknown-token' });
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'unknown-token', token: null }, 422)));
+  assert.deepEqual(await putDestination('movie', ANY_INPUT), { refusal: 'unknown-token', token: null });
 
   // The one shape that would fool a status branch outright: a refusal
   // answered with a 200.
-  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'escaping-path' }, 200)));
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'escaping-path' });
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'escaping-path', token: null }, 200)));
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'escaping-path', token: null });
 });
 
-test('every one of the nine codes survives the trip back unchanged', async () => {
+test('every one of the ten codes survives the trip back unchanged', async () => {
   for (const refusal of DESTINATION_REFUSALS) {
-    globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal }, 422)));
+    globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal, token: null }, 422)));
     // eslint-disable-next-line no-await-in-loop -- one shared `globalThis.fetch`: two of these in flight at once would answer each other's request.
-    assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal },
+    assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal, token: null },
       `${refusal} is read back as itself`);
   }
 });
 
+test('the token the host named survives the trip back, and a token that is not a string does not', async () => {
+  // The whole of what `putDestination` has to do with the second field:
+  // carry a string through, and answer `null` for anything else a body
+  // might hold under that key. A client that dropped it would redden the
+  // first of these and pass the second, which is why both are here.
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'unknown-token', token: 'seasn' }, 422)));
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unknown-token', token: 'seasn' });
+
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'unknown-token', token: 7 }, 422)));
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unknown-token', token: null });
+
+  // An older host that never learnt to send the field at all.
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'unknown-token' }, 422)));
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unknown-token', token: null });
+});
+
 test('a 200 carrying no id is not an acceptance this client will claim', async () => {
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({}, 200)));
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised' });
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised', token: null });
 });
 
 test('a bare { error } with no refusal key -- the expired session -- reads as unrecognised', async () => {
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised' });
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised', token: null });
 });
 
 test('invalid-shape, the envelope refusal no contract module declares, reads as unrecognised', async () => {
@@ -185,17 +238,17 @@ test('invalid-shape, the envelope refusal no contract module declares, reads as 
   // `DESTINATION_REFUSALS`, so this client has no sentence for it and must
   // not invent one.
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'invalid-shape' }, 400)));
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised' });
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised', token: null });
 });
 
 test('a refusal code this build has never heard of reads as unrecognised', async () => {
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ refusal: 'root-does-not-exist' }, 422)));
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised' });
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised', token: null });
 });
 
 test('putDestination reports offline for a rejected fetch, never a server answer', async () => {
   globalThis.fetch = fetchStub(() => Promise.reject(new TypeError('Failed to fetch')));
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'offline' });
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'offline', token: null });
 });
 
 test('an unparseable body reads as offline, not as an unrecognised answer', async () => {
@@ -207,7 +260,7 @@ test('an unparseable body reads as offline, not as an unrecognised answer', asyn
       headers: { 'content-type': 'text/html' },
     })),
   );
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'offline' });
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'offline', token: null });
 });
 
 test('putDestination never throws, however the network misbehaves', async () => {
@@ -216,7 +269,7 @@ test('putDestination never throws, however the network misbehaves', async () => 
   globalThis.fetch = fetchStub(() => {
     throw new TypeError('Failed to fetch');
   });
-  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'offline' },
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'offline', token: null },
     'the caller invokes this as `void handleSubmit(event)`, so a rejection here is swallowed and the form wedges');
 });
 

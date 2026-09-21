@@ -60,6 +60,7 @@ import type { PluginDestinationSyncRead } from '@pickarr/contract';
 import { useDestinations, type DestinationsSource } from './useDestinations.ts';
 import {
   DESTINATION_REFUSAL_MESSAGES,
+  destinationRefusalMessage,
   type DestinationSubmit,
   type SaveDestinationInput,
 } from './postDestination.ts';
@@ -210,7 +211,12 @@ function DestinationRow({ plugin, destination, submit }: DestinationRowProps): R
           : { root: shown.root, shape: shown.shape, unmatchedDir: shown.unmatchedDir };
       const outcome = await submit(plugin.pluginId, input);
       if ('refusal' in outcome) {
-        setError(DESTINATION_REFUSAL_MESSAGES[outcome.refusal]);
+        // `destinationRefusalMessage`, not the map directly: an
+        // `unknown-token` the host named gets a sentence with the name in
+        // it, and every other outcome gets the map's fixed text. The map is
+        // still read directly for the `catch` below, which has no outcome
+        // to hand it.
+        setError(destinationRefusalMessage(outcome));
         return;
       }
       // Back to following the replica, every field of it. The row the host

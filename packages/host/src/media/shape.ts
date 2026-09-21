@@ -463,3 +463,72 @@ export function unmatchedDirSegments(dir: string): UnmatchedDirPath | UnmatchedD
   if (segments.length === 0) return { refusal: 'names-the-root' };
   return { segments };
 }
+
+/**
+ * Why {@link rootRefusal} declined a configured root.
+ *
+ * Host-local, like {@link UnmatchedDirRefusalCode} and for the same reason:
+ * each caller maps it into its own vocabulary. `media/destinations.ts` maps
+ * both to `DestinationRefusalCode`s an operator is shown and
+ * `media/import.ts` to `ImportRefusalCode`s a log line carries; in this one
+ * case both lists happen to spell them the same way.
+ *
+ * - `not-absolute` -- the root does not begin with `/`.
+ * - `unusable` -- it begins with `/` but is not a directory *under* `/`
+ *   spelled exactly as it resolves. See {@link rootRefusal} for the whole
+ *   condition and for what each spelling costs.
+ */
+export type RootRefusalCode = 'not-absolute' | 'unusable';
+
+/**
+ * Whether a configured library root is one an import can ever write under,
+ * or `undefined` when it is.
+ *
+ * **Both callers, one rule -- which is the fix for a save/import
+ * disagreement this module already carries the other half of.** The save
+ * (`media/destinations.ts`) and the import (`media/import.ts`) each checked
+ * `root.startsWith('/')` and nothing more, so `'/'`, `'//'` and
+ * `'/lib/../..'` all saved happily and then refused `escapes-root` at
+ * *every* import, for ever. That is precisely the failure
+ * {@link unmatchedDirSegments} exists to stop for the unmatched directory,
+ * three lines away in the same function, and it was left for the root.
+ *
+ * **Why each spelling is refused, measured on this tree:**
+ *
+ * - `'/'` resolves to itself, so a rule written as `resolve(root) !== root`
+ *   -- the obvious one -- does **not** catch it. It is refused on its own
+ *   merits: the importer's containment check is
+ *   `target.startsWith(root + '/')`, which is `startsWith('//')` here and
+ *   which no target satisfies, and the reading that would make it work is
+ *   worse than the bug -- a library root of `/` puts `<title>/` directories
+ *   at the top of the system disk.
+ * - `'//'` and `'/lib/../..'` both resolve to `'/'`, so they reach the same
+ *   dead containment check. `'/lib/../..'` is the worst of the three: the
+ *   settings screen shows what the operator typed and the importer uses
+ *   something else, with nothing saying so.
+ * - `'/lib/'` and `'/a/./b'` resolve to something *other* than themselves
+ *   too. They would import fine, but the stored value and the effective
+ *   root differ, which is the same silent disagreement in a case that
+ *   happens not to hurt yet.
+ *
+ * **Spelled out rather than delegated to `node:path`,** for this module's
+ * own reason: nothing here imports it (see the docblock), and `resolve`
+ * absolutises against the process's working directory, which is not a
+ * question a pure rule about a stored string may ask. The condition below
+ * is exactly "`resolve(root) === root`, and `root` is not `/`" for every
+ * absolute POSIX path -- `resolve` drops `.`, applies `..`, collapses
+ * repeated separators and strips a trailing one, and those four are what
+ * an empty, `.` or `..` segment spells.
+ *
+ * A backslash is not judged here. On POSIX it is an ordinary character in a
+ * directory name, and unlike a shape -- which this host lays out itself and
+ * so may insist on one separator for -- a root is a path the operator's
+ * filesystem already has.
+ */
+export function rootRefusal(root: string): RootRefusalCode | undefined {
+  if (!root.startsWith('/')) return 'not-absolute';
+  for (const segment of root.slice(1).split('/')) {
+    if (segment === '' || segment === '.' || segment === '..') return 'unusable';
+  }
+  return undefined;
+}

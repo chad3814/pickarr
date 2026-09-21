@@ -315,7 +315,7 @@ test('a refused save shows that refusal in rendered text, not only in an accessi
   // by an `aria-label` on an element with nothing in it, and exactly that
   // shipped here once. `getByText` reads the rendered string.
   const db = await freshDb();
-  await renderDestinations(db, () => Promise.resolve({ refusal: 'unknown-token' }));
+  await renderDestinations(db, () => Promise.resolve({ refusal: 'unknown-token', token: null }));
 
   save('tv');
 
@@ -327,14 +327,36 @@ test('a refused save shows that refusal in rendered text, not only in an accessi
     'the announced element is the one carrying the words, so the two cannot drift apart');
 });
 
-test('the unknown-token sentence sends the operator to the list on screen and does not name a token it was not told', async () => {
-  // Ruling 15: the host answers `{ refusal: 'unknown-token' }` and nothing
-  // else, so this client does not know which token was refused. Parsing
-  // the shape here to guess would be a second token vocabulary in
-  // `packages/web` -- the very drift the token list above is read from the
+test('the token the host refused is named on the row, not left for the operator to find', async () => {
+  // Design spec §3: refused "naming it". The host answers
+  // `{ refusal: 'unknown-token', token: 'seasn' }` and did so for a whole
+  // slice while this screen discarded the name and told the operator
+  // Pickarr could not say which one. The tv row lists seven tokens, so a
+  // code alone leaves them comparing strings by eye.
+  const db = await freshDb();
+  await renderDestinations(db, () => Promise.resolve({ refusal: 'unknown-token', token: 'seasn' }));
+
+  fireEvent.change(field('tv', 'Path shape'), { target: { value: '{seasn}/{title}.{ext}' } });
+  save('tv');
+
+  await waitFor(() => {
+    assert.ok(within(row('tv')).getByRole('alert'));
+  });
+  const alert = within(row('tv')).getByRole('alert');
+  assert.ok((alert.textContent ?? '').includes('{seasn}'),
+    'the row does not say which token the host refused, so the field the host sent was dropped');
+  assert.ok(!(alert.textContent ?? '').includes('does not say which'),
+    'and it no longer claims Pickarr cannot name one');
+});
+
+test('an unknown-token the host declined to name still sends the operator to the list on screen', async () => {
+  // `token: null` is a real answer: `ECHOABLE_TOKEN` refuses to repeat a
+  // name outside the class a declared token is in. The client must not
+  // guess by parsing the shape -- that would be a second token vocabulary
+  // in `packages/web`, the very drift the token list above is read from the
   // declaration to prevent.
   const db = await freshDb();
-  await renderDestinations(db, () => Promise.resolve({ refusal: 'unknown-token' }));
+  await renderDestinations(db, () => Promise.resolve({ refusal: 'unknown-token', token: null }));
 
   fireEvent.change(field('tv', 'Path shape'), { target: { value: '{seasn}/{title}.{ext}' } });
   save('tv');
@@ -342,17 +364,17 @@ test('the unknown-token sentence sends the operator to the list on screen and do
   await waitFor(() => {
     assert.ok(within(row('tv')).getByText(DESTINATION_REFUSAL_MESSAGES['unknown-token']));
   });
-  assert.ok(gone('{seasn}'), 'the token the operator typed is not quoted back as though Pickarr had identified it');
+  assert.ok(gone('{seasn}'), 'the token the operator typed is quoted back as though Pickarr had identified it');
 });
 
-test('each of the eleven outcomes reads as its own sentence', async () => {
-  // Nine contract codes plus this client's `offline` and `unrecognised`. A
+test('each of the twelve outcomes reads as its own sentence', async () => {
+  // Ten contract codes plus this client's `offline` and `unrecognised`. A
   // test covering three of them would pass against a component that
   // rendered one fixed string for every refusal.
   const outcomes = [
-    ...DESTINATION_REFUSALS.map((refusal) => ({ refusal }) as const),
-    { refusal: 'offline' } as const,
-    { refusal: 'unrecognised' } as const,
+    ...DESTINATION_REFUSALS.map((refusal) => ({ refusal, token: null }) as const),
+    { refusal: 'offline', token: null } as const,
+    { refusal: 'unrecognised', token: null } as const,
   ];
   const seen = new Set<string>();
 
@@ -372,7 +394,7 @@ test('each of the eleven outcomes reads as its own sentence', async () => {
     cleanup();
   }
 
-  assert.equal(seen.size, 11, 'eleven outcomes, eleven different things on screen');
+  assert.equal(seen.size, 12, 'twelve outcomes, twelve different things on screen');
 });
 
 test('a submit that rejects outright reads as offline rather than wedging the row', async () => {
@@ -392,9 +414,9 @@ test('every control re-enables after every outcome, a rejecting submit included'
   // on five of six real host answers.
   const outcomes: (SaveDestinationOutcome | 'reject')[] = [
     { id: 7 },
-    ...DESTINATION_REFUSALS.map((refusal) => ({ refusal })),
-    { refusal: 'offline' as const },
-    { refusal: 'unrecognised' as const },
+    ...DESTINATION_REFUSALS.map((refusal) => ({ refusal, token: null })),
+    { refusal: 'offline' as const, token: null },
+    { refusal: 'unrecognised' as const, token: null },
     'reject',
   ];
 
@@ -458,7 +480,7 @@ test('saving one plugin\'s row leaves the other rows alone', async () => {
   assert.equal(field('movie', 'Library folder').disabled, false, 'and are still editable');
   assert.equal(field('movie', 'Library folder').value, '/media/films', 'with what was typed into them intact');
 
-  settle({ refusal: 'not-absolute-root' });
+  settle({ refusal: 'not-absolute-root', token: null });
   await waitFor(() => {
     assert.ok(within(row('tv')).getByText(DESTINATION_REFUSAL_MESSAGES['not-absolute-root']));
   });

@@ -8,8 +8,8 @@
  * inherited here rather than re-argued:
  *
  * **Never throws.** A rejected `fetch` and a body that fails to parse both
- * answer `{ refusal: 'offline' }`; a body that parses but is neither a
- * success shape nor a known refusal answers `{ refusal: 'unrecognised' }`.
+ * answer `offline`; a body that parses but is neither a success shape nor a
+ * known refusal answers `unrecognised`.
  * The feeds slice shipped a sibling that threw, and because its caller
  * invoked it as `void handleSubmit(event)` the rejection was swallowed: the
  * pending flag never cleared and the form wedged on five of six real host
@@ -58,7 +58,15 @@ import { DESTINATION_REFUSALS, type DestinationRefusalCode } from '@pickarr/cont
  * way for a body to name one plugin while the url names another.
  */
 export interface SaveDestinationInput {
-  /** Absolute. `not-absolute-root` is the host's only rule about it -- design spec §7 is explicit that a root which does not exist is a misconfiguration to see, not a directory to invent. */
+  /**
+   * Absolute, and spelled as it resolves: the host refuses
+   * `not-absolute-root` without a leading `/`, and `unusable-root` for `/`
+   * itself or for any value holding an empty, `.` or `..` segment. Whether
+   * it *exists* is still not checked -- design spec §7 is explicit that a
+   * root which does not exist is a misconfiguration to see, not a
+   * directory to invent, so that one surfaces in the host's log at import
+   * rather than here.
+   */
   root: string;
   /** The `{token}` template, validated on save against the declaring plugin's own list. */
   shape: string;
@@ -89,6 +97,25 @@ export interface SaveDestinationInput {
  */
 export interface DestinationRefusal {
   refusal: DestinationRefusalCode | 'offline' | 'unrecognised';
+  /**
+   * The token the host refused, for `unknown-token`, and `null` for every
+   * other outcome -- including an `unknown-token` the host declined to
+   * name, and both of this client's own two, which never saw a body.
+   *
+   * **Read, not ignored, and the distinction cost an operator the feature.**
+   * `@pickarr/contract`'s `DestinationRefusalBody` has carried this field
+   * since the host started answering it, and this client dropped it on the
+   * floor while telling the operator in so many words that Pickarr "does
+   * not say which one it refused". It does. See
+   * {@link destinationRefusalMessage}.
+   *
+   * Required-but-nullable rather than optional, matching the host's own
+   * `DestinationRefusal` and for the reason
+   * {@link SaveDestinationInput.unmatchedDir} gives about
+   * `exactOptionalPropertyTypes`: absent and explicitly null would be two
+   * spellings of one thing.
+   */
+  token: string | null;
 }
 
 /** An accepted save: the row id the host upserted. Answered on an update as well as an insert, which is the only way a client learns the key its replica holds the row under. */
@@ -150,11 +177,18 @@ export async function putDestination(
     });
     body = await response.json();
   } catch {
-    return { refusal: 'offline' };
+    return { refusal: 'offline', token: null };
   }
   if (isRecord(body) && typeof body.id === 'number') return { id: body.id };
-  if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
-  return { refusal: 'unrecognised' };
+  if (isRecord(body) && isRefusalCode(body.refusal)) {
+    // `typeof === 'string'` rather than a cast: the body is `unknown` and
+    // an older or newer host may send anything at all under this key. A
+    // host that sends no `token` -- every refusal but `unknown-token`, and
+    // some of those -- lands on `null`, which is the value the sentence
+    // below falls back on.
+    return { refusal: body.refusal, token: typeof body.token === 'string' ? body.token : null };
+  }
+  return { refusal: 'unrecognised', token: null };
 }
 
 /**
@@ -166,29 +200,30 @@ export const destinationSubmit: DestinationSubmit = putDestination;
 
 /**
  * A fixed sentence per non-accepted outcome -- never the server's own words
- * (Global Constraint). One map covers all eleven, `offline` and
+ * (Global Constraint). One map covers all twelve, `offline` and
  * `unrecognised` included, so no two plugin rows can word the same outcome
- * differently.
+ * differently. The one outcome that is not a fixed sentence is an
+ * `unknown-token` the host named, which {@link destinationRefusalMessage}
+ * composes from this map's key set plus the one datum the wire carries.
  *
  * **The keyed `Record` is load-bearing, not decoration.** Its key type is
- * the contract's nine codes plus this client's own two, so a code added to
+ * the contract's ten codes plus this client's own two, so a code added to
  * `DESTINATION_REFUSALS` fails to compile here until someone writes the
  * sentence for it, and a code renamed there fails twice -- an unwritten key
  * and an unreachable one. The three tests at the top of
  * `postDestination.test.tsx` -- one pinning this object's key set against
- * `DESTINATION_REFUSALS` *and* against a literal list of nine, one pinning
+ * `DESTINATION_REFUSALS` *and* against a literal list of ten, one pinning
  * that no two of its sentences are the same, one pinning that the two
  * escape refusals name different fields -- are the runtime half, and they
  * exist because `npm run test:web` does not typecheck.
  *
  * **Distinctness is only half of it; the rendering has to pick the right
- * one.** Measured against the 258 web tests, by replacing every
- * `setError(DESTINATION_REFUSAL_MESSAGES[...])` in `Destinations.tsx` with
- * one fixed sentence: **5 red**, and the one that names the property is
- * `each of the eleven outcomes reads as its own sentence`. The three tests
- * above all stay green under that mutation, because this object is still
- * correct -- which is why the component has a walk of its own rather than
- * trusting this one.
+ * one.** Measured against the web suite by replacing every
+ * `setError(destinationRefusalMessage(...))` in `Destinations.tsx` with one
+ * fixed sentence: the test that names the property is `each of the twelve
+ * outcomes reads as its own sentence`. The three tests above all stay green
+ * under that mutation, because this object is still correct -- which is why
+ * the component has a walk of its own rather than trusting this one.
  *
  * **Each sentence names the field it is about.** The refusal is rendered
  * once per row rather than once per input, so the field has to be in the
@@ -212,20 +247,36 @@ export const DESTINATION_REFUSAL_MESSAGES: Record<
   'not-absolute-root':
     'The library folder has to be an absolute path — it must start with a slash.',
   /**
-   * **It says outright that it cannot name the token, because it cannot.**
-   * Design spec §3 says the host refuses an unknown token "naming it";
-   * `media/destinations.ts` declined that, deliberately, so that no refusal
-   * carries anything from the input, and the wire gives
-   * `{ refusal: 'unknown-token' }` and nothing else. Guessing which token it
-   * was by parsing the shape here would put a second token vocabulary in
-   * `packages/web` -- the exact copy-inheritance defect the token list on
-   * this screen is read from the plugin's declaration to avoid. So the
-   * sentence points at the list that *is* on screen and admits what it does
-   * not know. See this task's report on why that is worth fixing at the
-   * host rather than here.
+   * **One sentence for two limbs**, because the code is one
+   * (`unusable-root`) and a refusal is rendered once per row. The host
+   * refuses `/` itself and any value holding an empty, `.` or `..`
+   * segment; "a folder of its own" covers the first and "written out
+   * plainly" the rest, and the three examples are the three spellings that
+   * were measured saving happily and then failing at every import.
+   */
+  'unusable-root':
+    'The library folder has to be a folder of its own, written out plainly — not / itself, and no //, no trailing slash and no . or .. in it.',
+  /**
+   * **The fallback, for an `unknown-token` the host did not name.** That
+   * is a real answer and not a defect on either side: `ECHOABLE_TOKEN` in
+   * `host/src/media/destinations.ts` repeats a name only when it matches
+   * the character class a declared token is in, so `{http:host/x?apikey=k}`
+   * minus its slashes comes back `unknown-token` with `token: null` rather
+   * than as a query string in a response body. An older host that sends no
+   * `token` at all lands here too.
+   *
+   * This sentence therefore does **not** name a token, and equally does not
+   * claim none can be named -- it said the latter for a whole slice, while
+   * the host was sending the name and this client was discarding it. When
+   * there is a name, {@link destinationRefusalMessage} uses it instead.
+   *
+   * Guessing the token by parsing the shape here is still refused: that
+   * would put a second token vocabulary in `packages/web`, the exact
+   * copy-inheritance defect the token list on this screen is read from the
+   * plugin's declaration to avoid.
    */
   'unknown-token':
-    'The path shape names a token this plugin does not have. Check each {token} in it against the list of available tokens above — Pickarr does not say which one it refused.',
+    'The path shape names a token this plugin does not have. Check each {token} in it against the list of available tokens above.',
   'malformed-shape':
     'Every brace in the path shape has to open and close one token. Look for a { with no matching }, or a } on its own.',
   'backslash-in-shape':
@@ -255,3 +306,39 @@ export const DESTINATION_REFUSAL_MESSAGES: Record<
   unrecognised:
     'Pickarr refused this destination, but did not say why. The host may be a different version than this page expects — reload and try again.',
 };
+
+/**
+ * The sentence for one refused save: {@link DESTINATION_REFUSAL_MESSAGES}'s
+ * fixed text, except for an `unknown-token` the host named, which gets a
+ * sentence with the name in it.
+ *
+ * **This function exists because the client was ignoring a field the wire
+ * has always carried.** `@pickarr/contract`'s `DestinationRefusalBody`
+ * declares `token`, `api/server.ts` sends it, and design spec §3 asks for an
+ * unknown token to be "refused, naming it" -- and this screen told the
+ * operator, in a shipped sentence, that Pickarr "does not say which one it
+ * refused" while the name sat unread in the response. Naming it is the
+ * whole point of the second field, and a `{token}` list of seven on the tv
+ * row is exactly the case where a code alone leaves an operator comparing
+ * strings by eye.
+ *
+ * **The client still owns every word.** The host sends a datum, not a
+ * sentence (`contract/src/destinations.ts`: "It is never a sentence"), and
+ * the name is the operator's own input coming back to the operator who
+ * typed it. It is safe to render for a reason that lives at the host and is
+ * worth knowing here: `ECHOABLE_TOKEN` gates it to `/^[A-Za-z][A-Za-z0-9]{0,31}$/`,
+ * so a "token" that is really a query string is answered with `token: null`
+ * and falls through to the fixed sentence. React escapes what it renders,
+ * so this braces the name for legibility rather than for safety.
+ *
+ * A function rather than a second entry in the map, because the map's keys
+ * are the outcome codes and this is not a new outcome -- it is the same
+ * `unknown-token` with one more thing known about it. Keeping the map a
+ * total `Record` over the codes is what makes a new code a compile error.
+ */
+export function destinationRefusalMessage(refusal: DestinationRefusal): string {
+  if (refusal.refusal === 'unknown-token' && refusal.token !== null) {
+    return `The path shape names {${refusal.token}}, which this plugin does not have. Check it against the list of available tokens above.`;
+  }
+  return DESTINATION_REFUSAL_MESSAGES[refusal.refusal];
+}

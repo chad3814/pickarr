@@ -444,6 +444,28 @@ test('a root that is not absolute is refused, rather than resolved against whate
   });
 });
 
+test('a stored root that is not the directory it resolves to is refused here too, not as an escape', async () => {
+  // The import half of the pair `test/media/destinations.test.ts` holds the
+  // save half of. Both call `rootRefusal`, so a root the save refuses
+  // cannot arrive here under a different name -- and a row written before
+  // that rule existed gets the same answer rather than the `escapes-root`
+  // these three used to produce. `escapes-root` means reaching *outside*
+  // the root (`contract/src/library.ts`), and nothing had.
+  await withHarness({}, async (h) => {
+    for (const root of ['/', '//', '/lib/../..', `${h.root}/`]) {
+      h.destination({ root });
+
+      // eslint-disable-next-line no-await-in-loop -- each iteration asserts the filesystem is untouched, which the next one would race
+      const outcome = await h.place(h.file(), TV_VALUES);
+
+      assertRefusal(outcome, 'unusable-root');
+      // eslint-disable-next-line no-await-in-loop -- see above
+      assert.deepEqual(await tree(h.dir), [join('downloads', `${PATH_MARKER}.mkv`)],
+        `"${root}" wrote something`);
+    }
+  });
+});
+
 test("the resolver's refusals arrive under their own names, before anything is copied", async () => {
   const cases: readonly { values: TokenValues; shape?: string; code: ImportRefusalCode }[] = [
     { values: { ...TV_VALUES, series: 'AC/DC' }, code: 'separator-in-value' },

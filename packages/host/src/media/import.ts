@@ -105,7 +105,7 @@ import type {
   LibraryImporter,
   TokenValues,
 } from '@pickarr/contract';
-import { resolveShape, unmatchedDirSegments } from './shape.ts';
+import { resolveShape, rootRefusal, unmatchedDirSegments } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
 /**
@@ -237,9 +237,10 @@ function unmatchedDestination(unmatchedDir: string, filename: string): { path: s
     // each list is the one its own consumer branches on.
     return refuse(unmatched.refusal === 'escapes-root' ? 'escapes-root' : 'unmatched-dir-is-root');
   }
-  // A source path ending in a separator has no filename to keep. Nothing
-  // this host hands over should look like that, which is exactly why it is
-  // refused rather than defaulted to something invented.
+  // `basename` answers `''` for exactly two source paths: `'/'` and `''`.
+  // Measured -- a trailing separator is *not* one of them, `basename('/a/b/')`
+  // being `'b'`. Neither is a path this host should ever be handed, which is
+  // why the case is refused rather than defaulted to something invented.
   if (filename === '') return refuse('empty-filename');
   return { path: [...unmatched.segments, filename].join('/') };
 }
@@ -260,7 +261,7 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
     return 'refusal' in resolved ? refuse(importRefusalFor(resolved.refusal)) : resolved;
   }
 
-  /** `path`'s stats, or `null` when nothing is there. */
+  /** Whether anything at all is at `path`, a dangling symlink included. */
   async function presentAt(path: string): Promise<boolean> {
     try {
       // `lstat`, not `stat`: a dangling symlink at the destination is
@@ -278,11 +279,17 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
     async place(file, resolveTokens): Promise<ImportOutcome> {
       const destination = readDestination(deps.raw, deps.pluginId);
       if (destination === undefined) return refuse('no-destination');
-      // `startsWith('/')` and nothing else, matching `media/destinations.ts`'s
-      // own check on the way in. Re-read rather than trusted for the same
-      // reason the unmatched directory is: a relative root would place the
-      // library against whatever directory the host happens to be running in.
-      if (!destination.root.startsWith('/')) return refuse('not-absolute-root');
+      // `rootRefusal` (`media/shape.ts`), the same function
+      // `media/destinations.ts` applies on the way in -- not a second copy
+      // of the rule. Re-checked rather than trusted for the same reason the
+      // unmatched directory is: a row can predate a rule. Both sides once
+      // carried their own `startsWith('/')` and nothing else, which is how
+      // `'/'`, `'//'` and `'/lib/../..'` came to save and then refuse at
+      // every import for ever.
+      const rootProblem = rootRefusal(destination.root);
+      if (rootProblem !== undefined) {
+        return refuse(rootProblem === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
+      }
 
       const relative = await relativeDestination(file, destination, resolveTokens);
       if ('refusal' in relative) return relative;
@@ -290,10 +297,20 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
 
       const root = resolve(destination.root);
       const target = resolve(root, relative.path);
-      // Last line of defence, after the normalisation `resolve` performs:
-      // every rule above already refuses a `..`, so reaching this means one
-      // of them has a hole. Refused rather than thrown -- a throw from here
-      // reaches `deliverCompleted`'s log carrying two paths.
+      // Last line of defence, after the normalisation `resolve` performs --
+      // and it is a live check rather than a belt over a proven brace, so
+      // do not read it as unreachable. The unmatched branch takes its
+      // filename from `basename(file.path)`, and `basename('/a/..')` is
+      // `'..'` (measured), so a source path ending in `/..` builds
+      // `_unmatched/..` out of two values each of which passed its own
+      // rule, and *this* line is what refuses it. The shape branch is the
+      // one with no known way through. Refused rather than thrown -- a
+      // throw from here reaches `deliverCompleted`'s log carrying two
+      // paths.
+      //
+      // `root` is already what it resolves to: `rootRefusal` above refuses
+      // an empty, `.` or `..` segment and refuses `/` itself, so
+      // `root + sep` is a real prefix rather than `'//'`.
       if (!target.startsWith(root + sep)) return refuse('escapes-root');
 
       const placed = file.mediaItemId === null ? 'unmatched' : 'library';

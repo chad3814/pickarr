@@ -67,10 +67,25 @@
  *   foreign key to point at.
  *
  * The root:
- * - `not-absolute-root` -- `root` does not begin with `/`. Nothing else
- *   about it is checked; design spec §7 is explicit that a root which does
- *   not exist is a misconfiguration an operator should see rather than a
- *   directory tree the importer invents.
+ * - `not-absolute-root` -- `root` does not begin with `/`.
+ * - `unusable-root` -- `root` begins with `/` but is not a directory
+ *   *under* `/` spelled exactly as it resolves. Two limbs, and the code is
+ *   the one name true of both: `/` itself, which names the whole
+ *   filesystem rather than a library; and a value with an empty, `.` or
+ *   `..` segment -- `//`, `/lib/`, `/a/./b`, `/lib/../..` -- where the
+ *   value stored and the directory actually written to are not the same
+ *   place. Refused on save because every one of them was accepted on save
+ *   and then refused at *every* import, for ever: `/`, `//` and
+ *   `/lib/../..` all answered `escapes-root`, which the importer's own
+ *   list defines as reaching outside the root, when nothing had escaped
+ *   anything. `host/src/media/shape.ts`'s `rootRefusal` is the one
+ *   implementation and both sides call it.
+ *
+ *   **Whether the root exists is still not checked here.** Design spec §7
+ *   is explicit that a root which does not exist is a misconfiguration an
+ *   operator should see rather than a directory tree the importer invents,
+ *   so that condition is the importer's `missing-root` and arrives at a
+ *   log line rather than at this response.
  *
  * The shape:
  * - `unknown-token` -- the shape names a token the **declaring plugin** does
@@ -107,6 +122,7 @@
 export const DESTINATION_REFUSALS = [
   'unknown-plugin',
   'not-absolute-root',
+  'unusable-root',
   'unknown-token',
   'malformed-shape',
   'backslash-in-shape',

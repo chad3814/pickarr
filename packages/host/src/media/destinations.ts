@@ -18,15 +18,25 @@
  * reaches `api/server.ts`'s outermost handler and becomes a 500, which is
  * where an infrastructure fault belongs.
  *
- * **No refusal carries anything from the input.** Not the root, not the
- * shape, not the plugin id, not the token that was unknown. A refusal says
- * which rule was broken and nothing about the value that broke it -- the
- * rule `clients/mappings.ts` and `media/shape.ts` both state, and a root
- * *is* a path. Design spec §3 says the host "refuses an unknown token,
- * naming it"; the **code** names the rule and the settings screen already
- * holds both the shape the operator typed and the plugin's declared token
- * list, so it can name the offending token without this response repeating
- * it back.
+ * **No refusal carries anything from the input, with one gated exception.**
+ * Not the root, not the shape, not the plugin id. A refusal says which rule
+ * was broken and nothing about the value that broke it -- the rule
+ * `clients/mappings.ts` and `media/shape.ts` both state, and a root *is* a
+ * path.
+ *
+ * The exception is the token, and it is design spec §3's requirement rather
+ * than a relaxation of the rule: §3 says the host "refuses an unknown
+ * token, **naming it**", and a settings screen listing the seven tokens the
+ * television plugin declares can otherwise tell the operator only that *a*
+ * token was wrong. This module declined that for one round and the decision
+ * was reversed; {@link DestinationRefusal.token} carries the name and
+ * `api/server.ts` sends it as `DestinationRefusalBody.token`.
+ *
+ * **What keeps that from being a hole is {@link ECHOABLE_TOKEN}**, not the
+ * caller's good manners. A "token" is arbitrary text an operator typed
+ * between braces, so the name is repeated only when it matches the class a
+ * declared token is in; anything else is refused `unknown-token` with
+ * `token: null`. Every other code carries `null` unconditionally.
  *
  * ---
  *
@@ -68,7 +78,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DestinationRefusalCode } from '@pickarr/contract';
-import { unmatchedDirSegments, validateShape } from './shape.ts';
+import { rootRefusal, unmatchedDirSegments, validateShape } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
 /**
@@ -188,9 +198,9 @@ function probeValues(tokens: readonly string[]): Record<string, string> {
 }
 
 /**
- * A refusal naming no token -- the eight codes that are not
- * `unknown-token`, and the `unknown-token` whose name this host will not
- * repeat.
+ * A refusal naming no token -- the nine `DESTINATION_REFUSALS` that are not
+ * `unknown-token`, and the `unknown-token` whose name {@link ECHOABLE_TOKEN}
+ * will not let this host repeat.
  */
 function refuse(code: DestinationRefusalCode): DestinationRefusal {
   return { refusal: code, token: null };
@@ -296,12 +306,23 @@ export function saveDestination(
   const tokens = deps.tokensFor(pluginId);
   if (tokens === undefined) return refuse('unknown-plugin');
 
-  // `startsWith('/')` and nothing else. Not `node:path`: `media/shape.ts`
-  // records that every `node:path` function which does more than concatenate
-  // also normalises, and `isAbsolute` read with `path.win32` semantics would
-  // make one stored root mean two things on two hosts. `/` is the separator
-  // here, in the shape and in the result, on every platform.
-  if (!input.root.startsWith('/')) return refuse('not-absolute-root');
+  // Delegated to `media/shape.ts`, not checked here, and for the same
+  // reason the unmatched directory below is: `startsWith('/')` was the
+  // whole of this rule and `media/import.ts` carried its own copy of the
+  // identical line, so `'/'`, `'//'` and `'/lib/../..'` saved happily and
+  // then refused `escapes-root` at *every* import -- the exact failure §3
+  // validates on save to prevent, with the same shape as the `.` hole
+  // fixed for `unmatched_dir` twenty lines down. One function, called from
+  // both sides, is what makes "checked twice" mean checked twice.
+  //
+  // Still not `node:path`: `rootRefusal` is a pure string rule, because
+  // `resolve` absolutises against the host's working directory and that is
+  // not a question to ask of a stored value. `/` is the separator here, in
+  // the shape and in the result, on every platform.
+  const rootProblem = rootRefusal(input.root);
+  if (rootProblem !== undefined) {
+    return refuse(rootProblem === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
+  }
 
   // `validateShape`, not `resolveShape`: the same parse, with the unknown
   // token's name kept. That entry point exists for this caller alone --

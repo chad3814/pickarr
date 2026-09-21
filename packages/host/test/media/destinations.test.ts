@@ -215,11 +215,12 @@ test('an unknown token is named, so a shape of eight tokens says which one was w
 
 test('every refusal that is not about a token carries no token', () => {
   // One field to read, not a switch on the code first -- and, more to the
-  // point, nothing from the input on any of the other eight.
+  // point, nothing from the input on any of the other nine.
   const { save } = setup();
   const probes: [string, Partial<SaveDestinationInput>][] = [
     ['book', {}],
     ['tv', { root: 'relative' }],
+    ['tv', { root: '/lib/../..' }],
     ['tv', { shape: '{title.{ext}' }],
     ['tv', { shape: 'a\\b.{ext}' }],
     ['tv', { shape: '/{series}.{ext}' }],
@@ -550,6 +551,48 @@ test('a save that changes nothing still moves updated_at', () => {
   assert.equal(rowFor(raw, 'tv')?.['created_at'], CREATED_AT);
 });
 
+test('a root that is absolute but not the directory it resolves to is refused on save', () => {
+  // Measured before the fix: `/`, `//` and `/lib/../..` all saved happily
+  // and then answered `escapes-root` at *every* import, for ever, because
+  // all three resolve to `/` and the importer's containment check is
+  // `target.startsWith(root + '/')` -- `startsWith('//')`, which no target
+  // satisfies. `/lib/../..` was the worst of them: the settings screen
+  // showed what the operator typed and the importer used `/`.
+  //
+  // This is the same save/import disagreement §3 validates on save to
+  // prevent, and the same one this module already fixed one field over for
+  // `unmatched_dir`. `host/src/media/shape.ts`'s `rootRefusal` is the one
+  // implementation and `media/import.ts` calls it too --
+  // `test/media/import.test.ts` holds the other half of this pair.
+  const { raw, save } = setup();
+
+  for (const root of ['/', '//', '/lib/../..']) {
+    assert.equal(refusalOf(save('tv', { root })), 'unusable-root', root);
+  }
+  // And the spellings that merely differ from what they resolve to, which
+  // would import fine and store a value that is not the directory written
+  // to.
+  for (const root of ['/library/', '/library/./tv', '/library//tv']) {
+    assert.equal(refusalOf(save('tv', { root })), 'unusable-root', root);
+  }
+  assert.equal(rowCount(raw), 0, 'a refused root wrote a row');
+});
+
+test('an ordinary absolute root is still accepted, spaces and backslashes included', () => {
+  // The other side of the rule, because a check that refused everything
+  // would pass the test above. A backslash is an ordinary character in a
+  // POSIX directory name and a root is a path the operator's filesystem
+  // already has -- unlike a shape, which this host lays out itself and so
+  // insists on one separator for.
+  const { raw, save } = setup();
+
+  for (const root of ['/library', '/mnt/media/tv shows', '/mnt/AC\\DC']) {
+    const result = save('tv', { root });
+    assert.ok(!('refusal' in result), `"${root}" is a directory a filesystem permits`);
+    assert.equal(rowFor(raw, 'tv')?.['root'], root, 'and it is stored exactly as typed');
+  }
+});
+
 test('a refused save leaves an existing row exactly as it was', () => {
   // Every refusal is taken before the statement runs, so there is no partial
   // write to roll back -- pinned through the row rather than asserted, since
@@ -590,6 +633,7 @@ test('every code in DESTINATION_REFUSALS is one this module can actually answer'
   const probes: [string, Partial<SaveDestinationInput>][] = [
     ['book', {}],
     ['tv', { root: 'relative' }],
+    ['tv', { root: '/lib/../..' }],
     ['tv', { shape: '{collection}.{ext}' }],
     ['tv', { shape: '{title.{ext}' }],
     ['tv', { shape: 'a\\b.{ext}' }],
