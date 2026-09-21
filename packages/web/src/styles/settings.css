@@ -109,25 +109,52 @@ section[aria-labelledby='settings-heading'] > section + section {
  * `--text-body` rather than `--text-meta`: the detail lines under each list
  * item are already `--text-meta` and dimmed (below), and a name has to
  * out-rank the lines that describe it.
+ *
+ * **`ul[aria-labelledby='destinations-heading'] li h3` joined this list in
+ * the styling task, and it is the row heading `Destinations.tsx` names
+ * through `pluginLabel` -- "TV", "Movies", "XXX" -- not through
+ * `AddFeed.tsx`'s or `AddDownloadClient.tsx`'s own form headings.** Unlike
+ * the two list-item selectors beside it, this one is *not* overridden to
+ * `margin: 0` below: a destination row's `<h3>` is immediately followed by
+ * that row's own `<form>`, the same shape as "Add a feed" and "Add a
+ * download client" above it, not by a dimmed detail line the way a listed
+ * feed's or client's name is. Before this rule reached it, deleting
+ * `settings.css` outright and measuring in Chromium gave the same
+ * **18.72px at weight 700** this file's own history already recorded for
+ * the other four headings -- `body` sets no `font-size`, so an unstyled
+ * `<h3>` inherits the UA's 16px and scales *up* from it with the UA's own
+ * `h3 { font-size: 1.17em }`, bigger and heavier than the 16px/600 `<h2>`
+ * it sits under.
  */
 form[aria-labelledby='add-feed-heading'] > h3,
 form[aria-labelledby='add-download-client-heading'] > h3,
 ul[aria-label='feeds'] li h3,
-ul[aria-label='download clients'] li h3 {
+ul[aria-label='download clients'] li h3,
+ul[aria-labelledby='destinations-heading'] li h3 {
   font-size: var(--text-body);
   font-weight: 600;
   margin: 0 0 var(--space-4);
 }
 
 /*
- * Every configured feed and every configured download client (`Feeds.tsx`'s
- * `<ul aria-label='feeds'>` and `DownloadClients.tsx`'s
- * `<ul aria-label='download clients'>`). Unstyled, both render as bulleted
- * lists with the UA's own indent -- the same gap `library.css`'s two lists
- * closed for browse's own markup, closed here identically.
+ * Every configured feed, every configured download client and every
+ * plugin's destination row (`Feeds.tsx`'s `<ul aria-label='feeds'>`,
+ * `DownloadClients.tsx`'s `<ul aria-label='download clients'>`,
+ * `Destinations.tsx`'s `<ul aria-labelledby='destinations-heading'>`).
+ * Unstyled, all three render as bulleted lists with the UA's own indent --
+ * the same gap `library.css`'s two lists closed for browse's own markup,
+ * closed here identically.
+ *
+ * The third selector is `aria-labelledby`, not `aria-label`: `Destinations.tsx`
+ * names its outer list the same way it names the section around it (both
+ * point at `destinations-heading`), where the other two sections' lists
+ * carry a literal `aria-label` string instead. Either attribute is
+ * load-bearing for accessibility already, which is this file's own bar for
+ * selecting on one.
  */
 ul[aria-label='feeds'],
-ul[aria-label='download clients'] {
+ul[aria-label='download clients'],
+ul[aria-labelledby='destinations-heading'] {
   list-style: none;
   margin: var(--space-2) 0 0;
   padding: 0;
@@ -135,6 +162,21 @@ ul[aria-label='download clients'] {
 
 ul[aria-label='feeds'] li,
 ul[aria-label='download clients'] li {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-line);
+}
+
+/*
+ * The destinations list's own row rule, kept apart from the pair above
+ * rather than folded into their selector, and with a `>` where theirs uses
+ * a bare descendant combinator. `Destinations.tsx` nests a second list
+ * inside each row's `<form>` -- the `{token}` chips (below) -- so a
+ * descendant `li` here would reach those too and put a hairline and
+ * `--space-2` of padding above and below every token, which is not a row
+ * separator on anything. The `>` is what confines this to the three
+ * plugin rows themselves.
+ */
+ul[aria-labelledby='destinations-heading'] > li {
   padding: var(--space-2) 0;
   border-top: 1px solid var(--color-line);
 }
@@ -483,6 +525,126 @@ ul[aria-label='download clients'] li [role='alert'] p {
   margin: 0;
   font-size: var(--text-body);
   font-style: normal;
+  font-weight: 600;
+  color: var(--color-error);
+}
+
+/*
+ * The destinations section (`Destinations.tsx`, design spec §3, §6): the
+ * third section `Settings.tsx` renders, and until this task the only one
+ * with no rule in this file naming it at all -- three rows of a form each,
+ * rendering with nothing but the UA stylesheet under them.
+ *
+ * **The three fields, laid out exactly as the screen's other forms are.**
+ * Same four declarations as the add-feed and add-download-client field
+ * rule near the top of this file, on purpose -- a destination row's form
+ * is not a different kind of thing from those two. `:not([role='alert'])`
+ * is not needed here the way it is there: `Destinations.tsx` renders its
+ * refusal as a sibling of the `<form>`, inside the `<li>`, never as a
+ * `<div>` the form itself contains, so every direct-child `<div>` of this
+ * form is a field.
+ */
+ul[aria-labelledby='destinations-heading'] li form > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+ul[aria-labelledby='destinations-heading'] li form label {
+  color: var(--color-text-dim);
+  font-size: var(--text-label);
+}
+
+/*
+ * The unmatched-folder hint ("Leave this blank and Pickarr uses
+ * _unmatched.") -- the one `<p>` `Destinations.tsx` nests inside a field
+ * `<div>` rather than beside it (`DestinationRow`'s own JSX: the hint sits
+ * under that field's input, inside the same `<div>` the label and input
+ * share). `form > div p` reaches only that one paragraph: neither of the
+ * other two field `<div>`s contains a `<p>`, and the "Available tokens"
+ * caption below is a direct child of the `<form>`, not of a field `<div>`.
+ * Same dimmed, smaller treatment as a listed feed's or client's detail
+ * line above, for the same reason -- a hint is secondary to the field it
+ * explains.
+ */
+ul[aria-labelledby='destinations-heading'] li form > div p {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+}
+
+/*
+ * "Available tokens" -- the caption naming the `{token}` list below it,
+ * pointed at by the path-shape field's own `aria-describedby`
+ * (`Destinations.tsx`). A direct child of the `<form>`, between the three
+ * fields and the token list, so `form > p` reaches it without touching the
+ * unmatched-folder hint (nested inside a field `<div>`, not a direct
+ * child) or the refusal (outside the `<form>` entirely).
+ */
+ul[aria-labelledby='destinations-heading'] li form > p {
+  margin: 0 0 var(--space-1);
+  color: var(--color-text-dim);
+  font-size: var(--text-label);
+}
+
+/*
+ * The `{token}` list itself. Unstyled, `Destinations.tsx`'s
+ * `<ul aria-labelledby={tokensId}>` renders as a bulleted vertical list --
+ * legible, but not read as a set of short, equal things an operator picks
+ * one of, and a shape can name several in one line (`{series}/Season
+ * {season}/{title}.{ext}`), so a column of one-per-line bullets reads
+ * oddly next to the field it describes. `flex` with wrapping and a `gap`
+ * lays the tokens out in a run instead, wrapping onto a second line rather
+ * than overflowing when a plugin declares enough of them.
+ */
+ul[aria-labelledby='destinations-heading'] li form > ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+}
+
+/*
+ * One `{token}` chip. `--color-surface-2` (a step up from the section's own
+ * `--color-surface`, `tokens.css`) and `--radius-sm` give it a small filled
+ * background of its own, so a chip reads as a discrete piece of UI rather
+ * than a fragment of running text -- which matters here specifically, since
+ * each chip's content is a `<code>` element that would otherwise sit
+ * directly on the section's background with nothing marking where one
+ * token ends and the next begins.
+ */
+ul[aria-labelledby='destinations-heading'] li form > ul > li {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-1);
+  background: var(--color-surface-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-meta);
+  color: var(--color-text-dim);
+}
+
+/*
+ * A refused save. `Destinations.tsx` renders this as a sibling of the row's
+ * `<form>`, inside the row's own `<li>` -- never inside the form itself --
+ * so the two mapping-row alert rules above, both scoped under `li form >
+ * div` or `li > div > ul > li`, cannot reach it, and without a rule here it
+ * would fall through to nothing at all rather than to a wrong one: no rule
+ * above touches a bare `[role='alert']` under `ul[aria-labelledby=
+ * 'destinations-heading']`. Same treatment as the two add forms' banners
+ * and the mapping rows' own refusal -- `--color-error`, `--text-body`,
+ * weight 600 -- so a refusal here reads as the same kind of thing
+ * everywhere else on this screen does.
+ */
+ul[aria-labelledby='destinations-heading'] > li > [role='alert'] {
+  margin: var(--space-2) 0 0;
+}
+
+ul[aria-labelledby='destinations-heading'] > li > [role='alert'] p {
+  margin: 0;
+  font-size: var(--text-body);
   font-weight: 600;
   color: var(--color-error);
 }
