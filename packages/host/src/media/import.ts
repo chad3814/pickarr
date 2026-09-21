@@ -105,7 +105,7 @@ import type {
   LibraryImporter,
   TokenValues,
 } from '@pickarr/contract';
-import { resolveShape } from './shape.ts';
+import { resolveShape, unmatchedDirSegments } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
 /**
@@ -217,37 +217,27 @@ function readDestination(raw: DatabaseSync, pluginId: string): Destination | und
  * `<unmatched>/<filename>`, relative to the root.
  *
  * The three rules §6 states, checked here rather than taken on trust from
- * the save -- see the module doc. Relative to the root and may not escape
- * it; empty is refused, and so is anything that *means* empty; nested is
- * allowed.
- *
- * Split on **either** separator, the one place this module judges a
- * backslash rather than banning it: an unmatched directory is a literal name
- * (§6) and `AC\DC` is a name a filesystem accepts, but `..\..` is one
- * segment under a `/` split and two levels of traversal where `\` separates.
- * So the check is on the escape rather than on the character.
+ * the save -- see the module doc -- but no longer *restated* here.
+ * `unmatchedDirSegments` (`media/shape.ts`) is the one implementation, and
+ * `media/destinations.ts` calls the same function on the way in. This
+ * module used to carry its own copy; the save side carried another, and
+ * that one was missing the `.` drop, so `'.'` saved and then refused
+ * forever. Two copies of a rule checked in two places is how "checked
+ * twice" stops meaning what it says.
  */
 function unmatchedDestination(unmatchedDir: string, filename: string): { path: string } | ImportRefusal {
-  if (unmatchedDir.startsWith('/') || unmatchedDir.startsWith('\\')) return refuse('escapes-root');
-  const segments: string[] = [];
-  for (const segment of unmatchedDir.split(/[/\\]/)) {
-    // `trimEnd` before the comparison, for the reason `media/shape.ts`
-    // records: Win32 trims a trailing space from a component, so `'.. '`
-    // names the parent there while being an ordinary name on POSIX.
-    if (segment.trimEnd() === '..') return refuse('escapes-root');
-    // An empty segment and a `.` both name the directory the path is already
-    // in, so neither contributes a level -- the same drop `resolveShape`
-    // makes, and the reason `'.'` and `'./'` reach the refusal below rather
-    // than putting a file in the library root.
-    if (segment === '' || segment === '.') continue;
-    segments.push(segment);
+  const unmatched = unmatchedDirSegments(unmatchedDir);
+  if ('refusal' in unmatched) {
+    // This module's vocabulary, not that function's: `names-the-root` is
+    // `unmatched-dir-is-root` here and `empty-path` at the route, because
+    // each list is the one its own consumer branches on.
+    return refuse(unmatched.refusal === 'escapes-root' ? 'escapes-root' : 'unmatched-dir-is-root');
   }
-  if (segments.length === 0) return refuse('unmatched-dir-is-root');
   // A source path ending in a separator has no filename to keep. Nothing
   // this host hands over should look like that, which is exactly why it is
   // refused rather than defaulted to something invented.
   if (filename === '') return refuse('empty-filename');
-  return { path: [...segments, filename].join('/') };
+  return { path: [...unmatched.segments, filename].join('/') };
 }
 
 export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporter {

@@ -68,7 +68,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DestinationRefusalCode } from '@pickarr/contract';
-import { resolveShape } from './shape.ts';
+import { resolveShape, unmatchedDirSegments } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
 /**
@@ -211,32 +211,6 @@ function destinationRefusalFor(code: ShapeRefusalCode): DestinationRefusalCode {
 }
 
 /**
- * Whether `dir` reaches outside the root it is relative to.
- *
- * **Both separators, and this is the one place a backslash is judged rather
- * than banned.** `media/shape.ts` refuses `\` anywhere in a shape so that
- * one stored shape cannot lay a library out two different ways on two hosts.
- * The same hazard is here -- `..\..` is one segment under a `/` split and
- * two levels of traversal on a host where `\` separates -- but the remedy
- * differs, because an unmatched directory is a *literal name* (design spec
- * §6) and `AC\DC` is a name a filesystem accepts. So the check is on the
- * escape rather than on the character: split on either separator and look
- * for a `..` segment.
- *
- * **A `..` substring is not an escape**, the distinction `media/shape.ts`
- * draws and design spec §6 and §7 both state: `Rocky..Balboa` and `..hidden`
- * reach nowhere, and refusing them would refuse real directory names.
- *
- * A leading separator of either kind is absolute and is the other half of
- * the same rule: `<root>/<unmatched>` with an absolute `<unmatched>` is not
- * under the root at all.
- */
-function escapesRoot(dir: string): boolean {
-  if (dir.startsWith('/') || dir.startsWith('\\')) return true;
-  return dir.split(/[/\\]/).includes('..');
-}
-
-/**
  * Writes `pluginId`'s destination, answering `{ id }` or a refusal.
  *
  * **The order the checks run in is a property, not an accident.** The plugin
@@ -290,12 +264,31 @@ export function saveDestination(
   if ('refusal' in resolved) return { refusal: destinationRefusalFor(resolved.refusal) };
 
   const unmatchedDir = input.unmatchedDir ?? DEFAULT_UNMATCHED_DIR;
-  // `=== ''` and nothing else -- not `.trim()`, the decision
-  // `clients/mappings.ts`'s `emptyPathRefusal` records: a directory named
-  // with a space is one every filesystem here permits, and trimming would
-  // silently store a different name than the operator typed.
-  if (unmatchedDir === '') return { refusal: 'empty-path' };
-  if (escapesRoot(unmatchedDir)) return { refusal: 'escaping-path' };
+  // Delegated to `media/shape.ts`, not checked here, and that is the fix
+  // for a hole this module shipped: it had its own copy of design spec
+  // §6's rules, the copy was missing `resolveShape`'s `.` drop, and so
+  // `'.'`, `'./'` and `'./.'` saved happily and then refused at *every*
+  // import -- the exact failure §3 validates on save to prevent.
+  // `media/import.ts` checks the same value again through the same
+  // function, so "checked twice" now means checked twice rather than
+  // checked two different ways.
+  //
+  // Nothing trims, there or here. A directory named with spaces is one
+  // every filesystem this host writes to permits, and trimming would store
+  // a different name than the operator typed -- `clients/mappings.ts`'s
+  // `emptyPathRefusal` records the same decision for the same reason, and
+  // `test/media/destinations.test.ts` pins it, because a comment is not a
+  // check.
+  const unmatched = unmatchedDirSegments(unmatchedDir);
+  if ('refusal' in unmatched) {
+    // Two codes, not one: a client has to put the error beside the input
+    // that caused it, and `escaping-path` and `empty-path` are different
+    // things for an operator to fix. `names-the-root` maps to `empty-path`
+    // because `''` is the spelling §6 names and the one an operator
+    // reaches first; that code's own doc in `@pickarr/contract` carries
+    // the full condition, which is wider than the name.
+    return { refusal: unmatched.refusal === 'escapes-root' ? 'escaping-path' : 'empty-path' };
+  }
 
   const at = deps.now();
   const row = deps.raw.prepare(`

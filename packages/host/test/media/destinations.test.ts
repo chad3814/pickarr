@@ -336,6 +336,67 @@ test('an unmatched directory with a `..` segment is refused', () => {
   assert.equal(rowCount(raw), 0);
 });
 
+test('an unmatched directory that means the library root is refused, however it is spelled', () => {
+  // **`empty-path` has more than one spelling, and this module shipped
+  // knowing only the first.** `<root>/.` and `<root>/./` are `<root>`, so
+  // each of these is the outcome design spec §6 refuses `''` to prevent --
+  // unnamed releases interleaved with organised ones, with no way to tell
+  // them apart afterwards. They saved happily until the rule was delegated
+  // to `media/shape.ts`'s `unmatchedDirSegments`, which the importer
+  // already used and which already dropped a `.`; the save side had its
+  // own copy and the copy was missing it.
+  const { raw, save } = setup();
+  for (const dir of ['', '.', './', './.', './/.', '.\\.']) {
+    assert.deepEqual(save('tv', { unmatchedDir: dir }), { refusal: 'empty-path' }, JSON.stringify(dir));
+  }
+  assert.equal(rowCount(raw), 0);
+});
+
+test('a `.` that still leaves a directory behind is accepted', () => {
+  // The other side of the drop, and the line it draws: `<root>/a/.` is
+  // `<root>/a`, which is a directory under the root and not the root -- so
+  // a rule that refused every `.` outright would refuse a value that names
+  // somewhere perfectly good. The stored string is the one the operator
+  // typed; nothing here rewrites it.
+  const { raw, save } = setup();
+  save('tv', { unmatchedDir: 'a/.' });
+  assert.equal(rowFor(raw, 'tv')?.['unmatched_dir'], 'a/.');
+
+  save('movie', { unmatchedDir: './unsorted' });
+  assert.equal(rowFor(raw, 'movie')?.['unmatched_dir'], './unsorted');
+});
+
+test('an unmatched directory of nothing but spaces is a directory named with spaces', () => {
+  // **A comment is not a check, and this one was only a comment.** The
+  // rule is `=== ''`, deliberately not `.trim() === ''`: every filesystem
+  // this host writes to permits a directory named with a space, and
+  // trimming would store a different name than the operator typed --
+  // `clients/mappings.ts`'s `emptyPathRefusal` records the same decision.
+  // Nothing pinned it, and a reviewer's `.trim()` mutant passed the whole
+  // suite. This is that mutant's test.
+  const { raw, save } = setup();
+  const result = save('tv', { unmatchedDir: '   ' });
+  assert.ok(!('refusal' in result), 'spaces are a name, not an absent value');
+  assert.equal(rowFor(raw, 'tv')?.['unmatched_dir'], '   ', 'and the name is stored exactly as typed');
+
+  // The same line, one level down: a *segment* of spaces survives too, so
+  // `<root>/   /unsorted` is three levels and not two.
+  save('movie', { unmatchedDir: '   /unsorted' });
+  assert.equal(rowFor(raw, 'movie')?.['unmatched_dir'], '   /unsorted');
+});
+
+test('a trailing space cannot smuggle a `..` segment past the escape check', () => {
+  // `media/shape.ts` compares with trailing whitespace stripped, because
+  // Win32 trims a trailing space from a path component -- so `'.. '` names
+  // the parent there while being an ordinary two-dot-and-a-space name on
+  // POSIX. Delegating gave this module that rule; its own copy never had
+  // it.
+  const { raw, save } = setup();
+  assert.deepEqual(save('tv', { unmatchedDir: '.. ' }), { refusal: 'escaping-path' });
+  assert.deepEqual(save('tv', { unmatchedDir: 'a/.. /b' }), { refusal: 'escaping-path' });
+  assert.equal(rowCount(raw), 0);
+});
+
 test('a `..` that is not a segment is allowed in an unmatched directory', () => {
   // The distinction `media/shape.ts` draws and this module has to draw the
   // same way: a `..` *substring* reaches nowhere. `..hidden` is a directory

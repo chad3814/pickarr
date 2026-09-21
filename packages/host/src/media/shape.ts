@@ -297,3 +297,101 @@ export function resolveShape(
   }
   return { path: resolved.join('/') };
 }
+
+/**
+ * Why {@link unmatchedDirSegments} declined, in the one-field shape every
+ * refusal in this codebase has.
+ *
+ * **Not `ShapeRefusalCode`, and the two must not be merged.** An unmatched
+ * directory is not a shape: nothing in it is interpolated (design spec §6),
+ * so `malformed-shape`, `unknown-token` and `separator-in-value` have no
+ * meaning here -- and `empty-filename` has the wrong one, because the last
+ * segment of this value is a *directory* rather than a file. What is left
+ * is the pair below, and each caller maps it to a code in its own
+ * vocabulary: `media/destinations.ts` to `escaping-path`/`empty-path` and
+ * `media/import.ts` to `escapes-root`/`unmatched-dir-is-root`.
+ *
+ * - `escapes-root` -- absolute, or a segment is `..`.
+ * - `names-the-root` -- no segment survives, so the value names the library
+ *   root itself. `''`, `'.'` and `'./'` are all this.
+ */
+export type UnmatchedDirRefusalCode = 'escapes-root' | 'names-the-root';
+
+/** A declined unmatched directory. */
+export interface UnmatchedDirRefusal {
+  refusal: UnmatchedDirRefusalCode;
+}
+
+/** An accepted one, as the levels it actually contributes under the root. */
+export interface UnmatchedDirPath {
+  /** Non-empty, with every `.` and every empty segment already dropped. */
+  segments: readonly string[];
+}
+
+/**
+ * The directory levels an unmatched directory contributes under a plugin's
+ * root, or the refusal that stops it -- design spec §6's three rules, in
+ * one place.
+ *
+ * **One implementation, because there were two and they disagreed.**
+ * `media/destinations.ts` checks this on save and `media/import.ts` checks
+ * it again at import, deliberately: the second is not trust in the first,
+ * since a row can predate a rule. But they were two hand-written copies of
+ * the same rule, and the save-side copy was missing the `.` drop -- so
+ * `'.'`, `'./'` and `'./.'` saved happily and then refused at *every*
+ * import, for ever, which is exactly the failure design spec §3 validates
+ * on save to prevent. Sharing the function is what makes "checked twice"
+ * mean checked twice rather than checked two different ways.
+ *
+ * **It lives here, beside {@link resolveShape}, because it is the same
+ * three rules.** A `..` segment, a `.` segment and an empty segment mean
+ * here exactly what that function's docblock argues they mean there,
+ * trailing-whitespace note included; co-location is what stops the second
+ * copy growing back.
+ *
+ * **What it deliberately does *not* do is parse.** Design spec §6: the
+ * value "is not a token and is not interpolated. It is a literal directory
+ * name, so nothing in it resolves and nothing in it can fail to resolve."
+ * A directory called `{title}` is a directory called `{title}`, and running
+ * this through `resolveShape` -- the obvious way to share code, and the
+ * wrong one -- would refuse it as an unknown token.
+ *
+ * **Split on either separator, the one place a backslash is judged rather
+ * than banned.** `resolveShape` refuses `\` anywhere in a shape so that one
+ * stored shape cannot lay a library out two ways on two hosts. The hazard
+ * is the same here -- `..\..` is one segment under a `/` split and two
+ * levels of traversal where `\` separates -- but the remedy differs,
+ * because this value is a literal name and `AC\DC` is a name a filesystem
+ * accepts. So the check is on the escape, not on the character.
+ *
+ * Nothing is joined and nothing is rewritten: the caller owns what it does
+ * with the surviving levels, and the *stored* value is always the string
+ * the operator typed.
+ */
+export function unmatchedDirSegments(dir: string): UnmatchedDirPath | UnmatchedDirRefusal {
+  // On the raw string, before the split, for `resolveShape`'s own reason: a
+  // leading separator produces an empty first segment, and an empty segment
+  // is dropped -- so splitting first would turn an absolute value into a
+  // relative one silently.
+  if (dir.startsWith('/') || dir.startsWith('\\')) return { refusal: 'escapes-root' };
+
+  const segments: string[] = [];
+  for (const segment of dir.split(/[/\\]/)) {
+    // `trimEnd` before the comparison, for the reason `resolveShape`
+    // records: Win32 trims a trailing space from a component, so `'.. '`
+    // names the parent there while being an ordinary name on POSIX.
+    if (segment.trimEnd() === '..') return { refusal: 'escapes-root' };
+    // An empty segment and a `.` both name the directory the path is
+    // already in, so neither contributes a level. `'   '` is not one of
+    // them: a directory named with spaces is a directory POSIX permits, and
+    // dropping it would store a different name than the operator typed.
+    if (segment === '' || segment === '.') continue;
+    segments.push(segment);
+  }
+  // Nothing survived, so `<root>/<unmatched>` is `<root>`. Design spec §6
+  // refuses `''` to prevent exactly that outcome -- unnamed releases
+  // interleaved with organised ones, indistinguishable afterwards -- and
+  // `'.'` reaches it by a different spelling.
+  if (segments.length === 0) return { refusal: 'names-the-root' };
+  return { segments };
+}
