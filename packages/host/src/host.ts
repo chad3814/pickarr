@@ -5,6 +5,7 @@ import type { HostDb } from './db/open.ts';
 import { migratePlugin } from './db/migrate.ts';
 import { createMediaWriter } from './media/writer.ts';
 import { createMediaReader } from './media/reader.ts';
+import { createLibraryImporter } from './media/import.ts';
 import { createRunner } from './jobs/runner.ts';
 import type { Runner } from './jobs/runner.ts';
 import { createDispatcher } from './jobs/dispatcher.ts';
@@ -526,6 +527,13 @@ export function createHost(deps: {
       },
       fetch: deps.fetch,
       downloads,
+      // One importer per context, closed over this plugin's id -- the same
+      // shape `read` above has, and for the same reason: a plugin cannot
+      // name another plugin's library because it never gets to name one at
+      // all. It reads `plugin_destination` at the moment it imports, so a
+      // destination saved between two ticks is in force on the second with
+      // nothing to invalidate.
+      library: createLibraryImporter({ raw: deps.raw, pluginId }),
       log: (message, detail) => {
         console.log(`[${pluginId}] ${message}`, detail ?? {});
       },
@@ -867,7 +875,15 @@ export function createHost(deps: {
           // the narrower dependency is the one that makes it hard to write.
           // `undefined` for an unregistered id is the `unknown-plugin`
           // refusal, the shape `addFeed`'s `isRegistered` already uses.
-          tokensFor: (id) => plugins.get(id)?.tokens,
+          // `Object.keys`, because `MediaPlugin.tokens` maps each declared
+          // token to the function that resolves it: the rule wants the
+          // names, and the very same object is what the engine builds its
+          // values map from, so what may be typed and what can be resolved
+          // are one list by construction.
+          tokensFor: (id) => {
+            const tokens = plugins.get(id)?.tokens;
+            return tokens === undefined ? undefined : Object.keys(tokens);
+          },
         },
         pluginId,
         input,
