@@ -222,6 +222,14 @@ test('a present key whose value is null is an entirely different answer from an 
   assert.equal(pathOf(present), 'Arrival.mkv');
 });
 
+test('a token named after an `Object.prototype` member is unknown, not inherited from the prototype', () => {
+  // `'toString' in {}` is true on any object literal a caller passes, so a
+  // lookup written with `in` would "resolve" this token against
+  // `Object.prototype`. `Object.hasOwn` is what stops it.
+  assert.equal(refusalOf(resolveShape('{toString}.mkv', { title: 'Live' })), 'unknown-token');
+  assert.equal(refusalOf(resolveShape('{constructor}.mkv', { title: 'Live' })), 'unknown-token');
+});
+
 test('an unclosed brace, a lone closing brace and an empty token are each a malformed shape', () => {
   const values = { title: 'Live', ext: 'mkv' };
 
