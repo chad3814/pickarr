@@ -112,6 +112,9 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     removeMapping: () => {
       throw new Error('removeMapping not stubbed in this test');
     },
+    saveDestination: () => {
+      throw new Error('saveDestination not stubbed in this test');
+    },
     registry,
     generation,
     host: undefined,

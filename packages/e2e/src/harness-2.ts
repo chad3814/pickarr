@@ -447,6 +447,7 @@ async function boot(): Promise<Booted> {
     addMapping: (input) => host.addMapping(input),
     editMapping: (id, input) => host.editMapping(id, input),
     removeMapping: (id) => host.removeMapping(id),
+    saveDestination: (pluginId, input) => host.saveDestination(pluginId, input),
     registry,
     generation,
     host: '127.0.0.1',

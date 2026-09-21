@@ -15,7 +15,9 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import type { AddFeedInput } from '../../src/feeds/add.ts';
 import type { AddDownloadClientInput } from '../../src/clients/add.ts';
 import type { MappingRefusal } from '../../src/clients/mappings.ts';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS, MAPPING_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
+import { ADD_DOWNLOAD_CLIENT_REFUSALS, DESTINATION_REFUSALS, MAPPING_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
+import type { DestinationRefusalCode } from '@pickarr/contract';
+import { shippedPlugins } from '../../src/main.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
@@ -203,6 +205,13 @@ async function start(
     // test that means to observe a removal overrides this and would fail
     // loudly against it if it forgot.
     removeMapping: async () => ({ refusal: 'unknown-mapping' }),
+    // Same reasoning as `addMapping` above: the guard probe reaches
+    // `PUT /api/destinations/1` with a session and a body of `{}`, which
+    // the shape guard refuses ahead of this -- so a stub that resolved
+    // would make that test pass for the wrong reason.
+    saveDestination: () => {
+      throw new Error('saveDestination not stubbed in this test');
+    },
     // No plugin in this file declares a synced table -- what `/api/sync` and
     // `/api/sync/backfill` do with a real one is `sync-route.test.ts`'s.
     // This file only needs the guard on both routes, which an empty registry
@@ -3133,5 +3142,240 @@ test('a signed-in protocol-relative target is an unknown route, not the bundle',
   } finally {
     await server.close();
     await rm(webRoot, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A well-shaped `PUT /api/destinations/:pluginId` body.
+ *
+ * `unmatchedDir` is **absent by default**, because that is the ordinary
+ * request: design spec §6 gives the column a default and a settings screen
+ * that never touched the field sends nothing. A test that wants the field
+ * passes it.
+ *
+ * Nothing here is a value any rule would refuse -- an absolute root, a shape
+ * whose tokens the plugin declares -- because every value-level invariant is
+ * the host's (`media/destinations.ts`) and a route-level check on any of
+ * them would be caught by every test in this group rather than by one.
+ */
+function validDestinationBody(
+  overrides: Partial<{ root: string; shape: string; unmatchedDir: string }> = {},
+): Record<string, unknown> {
+  return { root: '/library/tv', shape: '{series}/{series} - S{season}E{episode}.{ext}', ...overrides };
+}
+
+test('a well-shaped destination body is written and answered 200 with the row id', async () => {
+  const { raw, db } = setup();
+  const seen: { pluginId: string; input: unknown }[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    saveDestination: async (pluginId, input) => {
+      seen.push({ pluginId, input });
+      return { id: 12 };
+    },
+  });
+  try {
+    const answer = await send(server, 'PUT', '/api/destinations/tv', cookie, validDestinationBody());
+
+    assert.equal(answer.status, 200, 'an upsert creates nothing addressable of its own, so it is not a 201');
+    assert.deepEqual(JSON.parse(answer.text), { id: 12 });
+    assert.deepEqual(seen, [{
+      pluginId: 'tv',
+      input: {
+        root: '/library/tv',
+        shape: '{series}/{series} - S{season}E{episode}.{ext}',
+        unmatchedDir: undefined,
+      },
+    }], 'the plugin comes off the path, the two strings off the body, and an absent unmatchedDir arrives as undefined');
+  } finally {
+    await server.close();
+  }
+});
+
+test('an unmatched directory in the body reaches the host verbatim', async () => {
+  // The route neither applies the default nor normalises the value: design
+  // spec §6 makes it a literal directory name and `media/destinations.ts`
+  // owns both the default and the three rules, per the module doc's rule
+  // that no business rule belongs in `api/server.ts`.
+  const { raw, db } = setup();
+  const seen: unknown[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    saveDestination: async (_pluginId, input) => {
+      seen.push(input);
+      return { id: 1 };
+    },
+  });
+  try {
+    await send(server, 'PUT', '/api/destinations/tv', cookie, validDestinationBody({ unmatchedDir: '_pickarr/odds' }));
+    assert.deepEqual(seen, [{
+      root: '/library/tv',
+      shape: '{series}/{series} - S{season}E{episode}.{ext}',
+      unmatchedDir: '_pickarr/odds',
+    }]);
+  } finally {
+    await server.close();
+  }
+});
+
+test('a destination body missing a field, or carrying the wrong type, is invalid-shape', async () => {
+  // Including `unmatchedDir: null`, which is the case the optional field
+  // creates: absent means "use the default" and a `null` means nothing at
+  // all, so it is refused rather than silently read as absent.
+  const { raw, db } = setup();
+  let reached = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    saveDestination: async () => {
+      reached += 1;
+      return { id: 1 };
+    },
+  });
+  try {
+    const bodies: unknown[] = [
+      {},
+      { root: '/library' },
+      { shape: '{title}.{ext}' },
+      { root: 7, shape: '{title}.{ext}' },
+      { root: '/library', shape: 7 },
+      { root: '/library', shape: '{title}.{ext}', unmatchedDir: null },
+      { root: '/library', shape: '{title}.{ext}', unmatchedDir: 7 },
+      [],
+      null,
+    ];
+    const answers = await Promise.all(bodies.map(async (body, index) => {
+      const { status, text } = await send(server, 'PUT', '/api/destinations/tv', cookie, body);
+      return { index, status, text };
+    }));
+    for (const { index, status, text } of answers) {
+      assert.equal(status, 400, `body ${String(index)} is refused`);
+      assert.deepEqual(JSON.parse(text), { refusal: 'invalid-shape' }, `body ${String(index)}`);
+    }
+    assert.equal(reached, 0, 'and none of them reached the host');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a :pluginId that could not be a plugin id is an unknown route, and never reaches the host', async () => {
+  // `mappingIdFrom`'s reasoning, for a string segment rather than an
+  // integer one: `unknown-plugin` claims "this is a well-formed plugin id
+  // and nothing registered it", which is a statement the host cannot make
+  // about `Tv%20Shows`. Refused here, the caller gets the same 404 a path
+  // naming no route gets -- so a segment that could never name a plugin
+  // reads as a bad request target rather than as a missing plugin, and no
+  // unvalidated segment reaches a prepared statement.
+  const { raw, db } = setup();
+  let reached = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    saveDestination: async () => {
+      reached += 1;
+      return { id: 1 };
+    },
+  });
+  try {
+    const segments = ['TV', 'tv-shows', '1', '_tv', 'tv.shows', 'a'.repeat(33), '%20'];
+    const answers = await Promise.all(segments.map(async (segment) => {
+      const { status, text } = await send(
+        server, 'PUT', `/api/destinations/${segment}`, cookie, validDestinationBody(),
+      );
+      return { segment, status, text };
+    }));
+    for (const { segment, status, text } of answers) {
+      assert.equal(status, 404, `${segment} names no route`);
+      assert.deepEqual(JSON.parse(text), { error: 'unknown route' }, segment);
+    }
+    assert.equal(reached, 0, 'and none of them reached the host');
+  } finally {
+    await server.close();
+  }
+});
+
+test('every shipped plugin id is addressable on this route', async () => {
+  // The other half of the segment check, and the half that would otherwise
+  // be a claim: a validator narrower than the ids the host actually
+  // registers would make a real plugin's destination unreachable, with the
+  // caller told only "unknown route". Driven through the route against the
+  // ids `main` builds rather than asserted against the pattern.
+  const { raw, db } = setup();
+  const seen: string[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    saveDestination: async (pluginId) => {
+      seen.push(pluginId);
+      return { id: 1 };
+    },
+  });
+  try {
+    const ids = shippedPlugins({
+      now: () => 1_700_000_000_000,
+      resolveSecret: async () => { throw new Error('resolveSecret: not used by this test'); },
+      baseUrl: 'https://lookup.example.test',
+    }).map((plugin) => plugin.id);
+    assert.ok(ids.length >= 3, 'three plugins ship, and each must be addressable');
+
+    for (const id of ids) {
+      // Sequential rather than `Promise.all`: `seen` is asserted in order
+      // below, and one server is enough for a check that writes nothing.
+      // eslint-disable-next-line no-await-in-loop -- three requests, and the order is the assertion
+      const answer = await send(server, 'PUT', `/api/destinations/${id}`, cookie, validDestinationBody());
+      assert.equal(answer.status, 200, `${id} must reach the host`);
+    }
+    assert.deepEqual(seen, ids, 'each id arrives at the host exactly as it was registered');
+  } finally {
+    await server.close();
+  }
+});
+
+test('every destination refusal answers its own status', async () => {
+  // All nine of `DESTINATION_REFUSALS`, not a sample -- the feeds slice
+  // shipped two of its four unpinned, so its status mapper could have
+  // dropped a `case` and fallen through with every test still green.
+  const cases = DESTINATION_REFUSALS.map((refusal): [DestinationRefusalCode, number] => (
+    [refusal, refusal === 'unknown-plugin' ? 404 : 422]
+  ));
+  // The split is a real one rather than nine rows of the same number: a
+  // mapper answering 422 for everything would satisfy every per-case
+  // assertion below if the table said 422 nine times.
+  assert.equal(new Set(cases.map(([, status]) => status)).size, 2, 'the table distinguishes two statuses');
+
+  // A fresh `setup()` per case, run concurrently rather than in a loop with
+  // an `await` in it: an install gets exactly one account, so a second
+  // sign-up against one database would be refused for a reason that has
+  // nothing to do with this property.
+  await Promise.all(cases.map(async ([refusal, status]) => {
+    const { raw, db } = setup();
+    const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+      saveDestination: async () => ({ refusal }),
+    });
+    try {
+      const answer = await send(server, 'PUT', '/api/destinations/tv', cookie, validDestinationBody());
+      assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
+      assert.deepEqual(JSON.parse(answer.text), { refusal }, 'and the whole body is that one stable code');
+      assert.ok(
+        !answer.text.includes('/library'),
+        'a refusal body carries no path, not even the one it was just handed',
+      );
+    } finally {
+      await server.close();
+    }
+  }));
+});
+
+test('a destination route throw is a 500 that names no path', async () => {
+  // The rule every write route here follows: anything the host does not
+  // recognise as a refusal is an infrastructure fault, and neither the
+  // response nor the log may carry the root that was submitted.
+  const { raw, db } = setup();
+  const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+    saveDestination: () => {
+      throw new Error('the destination upsert returned no id');
+    },
+  });
+  try {
+    const answer = await send(server, 'PUT', '/api/destinations/tv', cookie, validDestinationBody());
+    assert.equal(answer.status, 500);
+    assert.ok(!answer.text.includes('/library'), 'the 500 body carries no path');
+    for (const line of logs) {
+      assert.ok(!JSON.stringify(line).includes('/library'), 'and neither does the log line');
+    }
+  } finally {
+    await server.close();
   }
 });

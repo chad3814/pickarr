@@ -22,6 +22,8 @@ import {
   removeMapping as removeMappingRule,
 } from './clients/mappings.ts';
 import type { AddMappingInput, EditMappingInput, MappingRefusal } from './clients/mappings.ts';
+import { saveDestination as saveDestinationRule } from './media/destinations.ts';
+import type { DestinationRefusal, SaveDestinationInput } from './media/destinations.ts';
 import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';
 import { assertSyncable } from './sync/registry.ts';
 import type { QueuedFetch } from './fetch/queue.ts';
@@ -39,6 +41,7 @@ export type { AddFeedInput, AddFeedRefusal };
 export type { AddDownloadClientInput, AddDownloadClientRefusal };
 export type { PickAccepted, PickRefusal };
 export type { AddMappingInput, EditMappingInput, MappingRefusal };
+export type { DestinationRefusal, SaveDestinationInput };
 export { MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S } from './feeds/add.ts';
 
 /**
@@ -258,6 +261,33 @@ export interface Host {
    * method (design spec §5).
    */
   removeMapping(id: number): Promise<{ id: number } | MappingRefusal>;
+  /**
+   * Writes `pluginId`'s library destination -- root, path shape and
+   * unmatched directory -- answering `{ id }` or one of
+   * `@pickarr/contract`'s `DESTINATION_REFUSALS`. The rules live in
+   * `media/destinations.ts`, this method's own delegate, not here: the same
+   * split `addFeed`, `addDownloadClient` and `addMapping` use.
+   *
+   * **An upsert, not an add and an edit.** A plugin has one destination or
+   * none, so there is no create/update distinction for a caller to make.
+   *
+   * **This is the one write rule that needs the plugin registry**, which is
+   * why it is a `Host` method rather than something a route could call
+   * directly: only this closure holds the registered plugins, and only a
+   * plugin knows whether `{season}` means anything (design spec §3). The
+   * delegate is handed a `tokensFor` function rather than the map, the same
+   * way `addFeed` is handed `isRegistered`.
+   *
+   * **Nothing is scheduled afterwards**, for the reason `addMapping` gives:
+   * the importer reads this table at the moment it imports, so a changed
+   * destination is in force at the next delivery tick with nothing to
+   * enqueue.
+   *
+   * Returns every refusal as a value and throws none of them, with the same
+   * scope the four above state: a SQLite error is rethrown by
+   * `media/destinations.ts` and becomes a 500 at the route.
+   */
+  saveDestination(pluginId: string, input: SaveDestinationInput): Promise<{ id: number } | DestinationRefusal>;
   /**
    * Delivers `file` to the plugin `pluginId` names, calling its
    * `onDownloadedFile`. The shape `deliverCompleted`
@@ -823,6 +853,25 @@ export function createHost(deps: {
     async removeMapping(id) {
       // No `now`, because a delete writes no column. See `removeMapping`.
       return removeMappingRule({ raw: deps.raw }, id);
+    },
+
+    async saveDestination(pluginId, input) {
+      return saveDestinationRule(
+        {
+          raw: deps.raw,
+          now: deps.now,
+          // The one thing the rule may have of the registry: a plugin's
+          // declared tokens, by id. Handing it the map would give it every
+          // plugin's list -- and validating a shape against the union of
+          // those is exactly the defect design spec §3 exists to prevent, so
+          // the narrower dependency is the one that makes it hard to write.
+          // `undefined` for an unregistered id is the `unknown-plugin`
+          // refusal, the shape `addFeed`'s `isRegistered` already uses.
+          tokensFor: (id) => plugins.get(id)?.tokens,
+        },
+        pluginId,
+        input,
+      );
     },
 
     start() {

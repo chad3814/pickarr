@@ -144,7 +144,16 @@ test('a renamed table logs twice until the old triggers are dropped by name', ()
   installSyncTriggers(raw, ['plug']);
   raw.exec('ALTER TABLE plug RENAME TO plug2');
   assert.deepEqual(
-    raw.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'plug%'").all()
+    // `ESCAPE '#'`, not a bare `LIKE 'plug%'`. `_` is a single-character
+    // wildcard in `LIKE`, so the unescaped pattern also matched any other
+    // trigger whose name merely *starts* with those four letters -- and it
+    // began doing so the moment the host gained a `plugin_destination`
+    // table with sync triggers of its own, which has nothing to do with
+    // what this test is about. `#` rather than the conventional backslash
+    // because the escape character travels through a TypeScript string
+    // literal on its way to SQLite, where `'\\'` is one character to
+    // TypeScript and two to nobody -- one spelling fewer to get wrong.
+    raw.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'plug#_%' ESCAPE '#'").all()
       .map((r) => `${String((r as { name: unknown }).name)}@${String((r as { tbl_name: unknown }).tbl_name)}`),
     ['plug_sync_ins@plug2', 'plug_sync_upd@plug2', 'plug_sync_del@plug2'],
     'the rename moves the triggers to the new table and leaves their names and bodies alone',

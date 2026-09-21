@@ -340,6 +340,7 @@ function fakeHost(overrides: Partial<Host>): Host {
     addMapping: async () => { throw new Error('addMapping: not used by this test'); },
     editMapping: async () => { throw new Error('editMapping: not used by this test'); },
     removeMapping: async () => { throw new Error('removeMapping: not used by this test'); },
+    saveDestination: async () => { throw new Error('saveDestination: not used by this test'); },
     start: () => { throw new Error('start: not used by this test'); },
     stop: () => { throw new Error('stop: not used by this test'); },
     idle: async () => { throw new Error('idle: not used by this test'); },

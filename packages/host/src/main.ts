@@ -901,6 +901,16 @@ export async function main(
     addMapping: (input) => host.addMapping(input),
     editMapping: (id, input) => host.editMapping(id, input),
     removeMapping: (id) => host.removeMapping(id),
+    // `PUT /api/destinations/:pluginId`'s one operation, wired the same way
+    // again. `host.saveDestination` and not the rule in
+    // `media/destinations.ts` directly: that rule needs the declaring
+    // plugin's token list, and only the `Host` closure holds the registered
+    // plugins -- so wiring the rule here would mean `main` building a second
+    // `tokensFor` from its own `plugins` array, which is the same list by a
+    // different route and free to drift from what `host.register` actually
+    // accepted. Nothing is scheduled afterwards, for the reason the three
+    // mappings above give.
+    saveDestination: (pluginId, input) => host.saveDestination(pluginId, input),
     registry,
     // Resolved once, here, rather than per request: this value cannot change
     // while the process holds `raw` open, so a route reading it would be a
