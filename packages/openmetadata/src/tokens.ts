@@ -186,17 +186,38 @@ export const resolveYear: TokenResolver = async (file, ctx) => {
 };
 
 /**
- * `rss_item.resolution` for the item this download was started for.
+ * The release's video resolution -- `1080p`, `2160p` -- which **2.0 does
+ * not store anywhere**, so this answers `null` until something does.
  *
- * Hand-written SQL against a host table, like `engine.ts`'s own
- * `readRssItems` and for the same reason: `MediaReader` reaches rss items
- * only *through* a media item, and this one is reached through the download
- * instead. `rssItemsFor(mediaItemId)` would answer every item that ever
- * matched the same media item, which is a list of the releases this one beat
- * rather than this one.
+ * ## The measurement, because design spec §3 says otherwise
+ *
+ * §3 lists `resolution` among the tokens that "come from `rss_item` and the
+ * source path, so every plugin has them". There *is* an
+ * `rss_item.resolution` column and it is **not** a video resolution: it is
+ * the lookup state, `'pending' | 'resolved' | 'refused' | 'unresolved'`
+ * (`contract`'s `Resolution`, written by `MediaWriter.setResolution`,
+ * inserted as `'pending'` by `feeds/reader.ts`). Interpolating it would
+ * name a television episode `The Bear - S03E01 resolved.mkv`, permanently:
+ * design spec §10 puts re-importing out of scope.
+ *
+ * Searched for a real one before concluding it does not exist: `1080p`,
+ * `2160p`, `720p`, `videoCodec` and `qualit` across `packages/host/src`,
+ * `packages/contract/src`, `packages/openmetadata/src`, the `src` of each
+ * of the three plugin packages, and `packages/web/src` -- nothing. The only
+ * `QualityTokens.resolution` in the repository is 1.x's
+ * `packages/plugin-api`, which 2.0 shares no schema with.
+ *
+ * **So the token stays declared and resolves to nothing**, rather than
+ * being removed. Removing it would refuse `{resolution}` on save -- which
+ * is arguably the better operator experience and is the owner's call, not
+ * this file's -- and would contradict §3, `MediaPlugin.tokens`' own
+ * documentation and two tests in `host/test/media/destinations.test.ts`
+ * written against them. `null` is a defined answer here, not a stub: a
+ * release with no recorded video resolution genuinely has nothing to put
+ * there, and `resolveShape` drops the token under §8.8 exactly as it does
+ * for a film with no collection.
  */
-export const resolveResolution: TokenResolver = async (file, ctx) =>
-  queryText(ctx, 'SELECT resolution FROM rss_item WHERE id = ?', file.rssItemId);
+export const resolveResolution: TokenResolver = async () => null;
 
 /**
  * The source file's name **without** its extension.
