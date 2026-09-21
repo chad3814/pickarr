@@ -77,7 +77,7 @@ function connection(ctx: PluginContext): DatabaseSync {
  * Something genuinely broken -- a column that is not text -- does throw, and
  * a throw leaves the download row `completed` for the next tick.
  */
-export function queryText(
+function queryText(
   ctx: PluginContext,
   sql: string,
   ...parameters: readonly (string | number)[]
@@ -88,7 +88,7 @@ export function queryText(
 }
 
 /** The same, for a column the schema declares `INTEGER`. */
-export function queryInteger(
+function queryInteger(
   ctx: PluginContext,
   sql: string,
   ...parameters: readonly (string | number)[]

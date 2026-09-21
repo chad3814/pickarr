@@ -22,8 +22,6 @@ export {
   mediaItemInteger,
   mediaItemText,
   paddedNumber,
-  queryInteger,
-  queryText,
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
