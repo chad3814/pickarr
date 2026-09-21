@@ -18,7 +18,7 @@
 import { useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
 import { useGatheredItem, type GatheredSource } from './useGatheredItem.ts';
-import { ReleaseList } from './ReleaseList.tsx';
+import { ReleaseList } from '@pickarr/plugin-ui';
 import type { PickSubmit } from './postPick.ts';
 
 export interface MediaItemCardProps {

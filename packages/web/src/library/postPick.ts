@@ -45,30 +45,18 @@
  * half's tests.
  */
 import { REQUEST_PICK_REFUSALS, type RequestPickRefusalCode } from '@pickarr/contract';
+import { PICK_REFUSAL_MESSAGES, type PickOutcome, type PickSubmit } from '@pickarr/plugin-ui';
 
 /**
- * What a pick submission resolves to.
- *
- * `offline` is this client's own outcome for a submit that never reached
- * the host, and `unrecognised` its outcome for an answer it cannot read --
- * a refusal code this build has never heard of, or a body with no
- * `refusal` key at all. That last shape is the most ordinary real failure
- * there is: a 401 from an expired session answers `{ error }`, as do 405,
- * 413 and 500, and none of them carries a `refusal`. A client is routinely
- * older than its host, so neither of these two is a defect in either side.
+ * `PickOutcome`, `PickSubmit` and `PICK_REFUSAL_MESSAGES` all now live in
+ * `@pickarr/plugin-ui`, re-exported here rather than declared twice:
+ * `ReleaseList` reads all three and must not import web, so the seam moved
+ * the declaration, not just a reference to it. This module keeps every
+ * other import site -- `Category.tsx`, `MediaItemCard.tsx`,
+ * `postPick.test.tsx` -- unchanged.
  */
-export type PickOutcome =
-  | { accepted: true }
-  | { refusal: RequestPickRefusalCode }
-  | { refusal: 'offline' | 'unrecognised' };
-
-/**
- * The shape `ReleaseList` takes its `submit` prop in: a release id in, an
- * outcome out. {@link postPick} is the only production implementation;
- * `shell/Shell.tsx` wires it in explicitly, through `Category` and
- * `MediaItemCard`.
- */
-export type PickSubmit = (rssItemId: number) => Promise<PickOutcome>;
+export { PICK_REFUSAL_MESSAGES };
+export type { PickOutcome, PickSubmit };
 
 /** The codes this client recognises, built from the contract's list rather than spelled again here. */
 const REFUSAL_CODES: ReadonlySet<string> = new Set(REQUEST_PICK_REFUSALS);
@@ -99,35 +87,3 @@ export async function postPick(rssItemId: number): Promise<PickOutcome> {
   if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
   return { refusal: 'unrecognised' };
 }
-
-/**
- * A fixed sentence per non-accepted outcome -- never the server's own words
- * (Global Constraint). One map covers all seven, `offline` and
- * `unrecognised` included, so the button below has no special case to get
- * wrong between them.
- *
- * **The keyed `Record` is load-bearing, not decoration.** Its key type is
- * the contract's five codes plus this client's own two, so a code added to
- * `REQUEST_PICK_REFUSALS` fails to compile here until someone writes the
- * sentence for it, and a code renamed there fails twice -- an unwritten key
- * and an unreachable one. `postPick.test.tsx`'s two `refusal codes` tests
- * are the runtime half, and they exist because `npm run test:web` does not
- * typecheck.
- *
- * **No sentence names a release, a feed, a client or an address.** Each
- * says which rule was broken and, where there is one, the action that
- * resolves it. That is the same discipline `contract/src/picks.ts` keeps on
- * the other side of the wire.
- */
-export const PICK_REFUSAL_MESSAGES: Record<RequestPickRefusalCode | 'offline' | 'unrecognised', string> = {
-  'unknown-release': 'Pickarr no longer has that release on file. Reload the page and try again.',
-  'plugin-not-registered': 'No plugin in this Pickarr handles that kind of media, so nothing can fetch this release.',
-  'no-client-of-type': 'No download client that can take this kind of release is set up. Add one under Settings.',
-  'client-type-mismatch': 'The download client this release’s feed names cannot take this kind of release.',
-  'already-submitted': 'This release has already been sent to a download client.',
-  /** Distinct from every named refusal above, which are answers from the host -- this one means the submit never reached it. Worded exactly as `AddDownloadClient.tsx`'s own `offline`, because it is the same event and a second wording for it would be two sentences for one condition. */
-  offline: 'Could not reach Pickarr. Check your connection and try again.',
-  /** {@link postPick}'s catch-all. Names no code and no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
-  unrecognised:
-    'Pickarr refused this pick, but did not say why. The host may be a different version than this page expects — reload and try again.',
-};

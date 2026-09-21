@@ -35,6 +35,7 @@ import type {
   RssItemSyncRead,
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
+import type { GatheredItemView } from '@pickarr/plugin-ui';
 import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
 
 /**
@@ -242,4 +243,24 @@ export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Pro
   const feedIds = [...new Set(releases.map((release) => release.row.feedId))].toSorted((a, b) => a - b);
 
   return { mediaItem, pluginId: mediaItem.pluginId, releases, roles, artwork: artworkUrls(mediaItemId), feedIds };
+}
+
+/**
+ * The gather satisfies the view the seam hands plugins.
+ *
+ * A type-level check and not a runtime one: `@pickarr/plugin-ui` must not
+ * import web (web imports it), so the two shapes cannot be one
+ * declaration. This function is what fails the build if they drift --
+ * without it, a field removed here would be a plugin's runtime
+ * `undefined`.
+ *
+ * A function rather than the cast the plan's own draft used
+ * (`null as unknown as GatheredItem`, a cast twice over, which the Global
+ * Constraints forbid outright): TypeScript accepts the bare `return item`
+ * below only because every field `GatheredItemView` declares is already
+ * present, with a compatible type, on `GatheredItem` -- the same
+ * assignability check, proven with no cast anywhere in it.
+ */
+export function gatherSatisfiesView(item: GatheredItem): GatheredItemView {
+  return item;
 }

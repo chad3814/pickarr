@@ -15,7 +15,7 @@
     "test-hygiene": "node --import tsx --conditions development scripts/check-test-hygiene.ts",
     "typecheck": "npm run typecheck --workspaces --if-present && tsgo --noEmit -p scripts",
     "test:server": "node --import tsx --conditions development --test \"packages/*/test/**/*.test.ts\" \"scripts/**/*.test.ts\"",
-    "test:web": "TSX_TSCONFIG_PATH=packages/web/tsconfig.json node --import tsx --import ./packages/web/test/setup.ts --conditions development --test \"packages/web/test/**/*.test.tsx\"",
+    "test:web": "TSX_TSCONFIG_PATH=tsconfig.test-web.json node --import tsx --import ./packages/web/test/setup.ts --conditions development --test \"packages/*/test/**/*.test.tsx\"",
     "test": "npm run test:server && npm run test:web",
     "corpus": "node --import tsx --conditions development scripts/parse-corpus.ts",
     "reclassify-artwork": "node --import tsx --conditions development scripts/reclassify-artwork.ts",
