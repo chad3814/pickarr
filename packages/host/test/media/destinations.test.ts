@@ -162,15 +162,31 @@ test('{site} belongs to the xxx plugin alone, and {year} to the film plugin alon
   assert.equal(refusalOf(save('xxx', { shape: '{title} ({year}).{ext}' })), 'unknown-token');
 });
 
-test('the three shared tokens are accepted by every plugin', () => {
-  // The other side of the same rule: `resolution`, `filename` and `ext` come
-  // from `rss_item` and the source path (design spec §3), so a validator
-  // that was somehow *too* narrow -- one plugin's own columns only -- would
-  // refuse a shape the host can in fact resolve.
+test('the shared tokens are accepted by every plugin', () => {
+  // The other side of the same rule: `title` and `releaseDate` come from
+  // the shared `media_item` row and `filename` and `ext` from the source
+  // path (design spec §3), so a validator that was somehow *too* narrow --
+  // one plugin's own columns only -- would refuse a shape the host can in
+  // fact resolve.
   const { save } = setup();
   for (const pluginId of ['tv', 'movie', 'xxx']) {
-    const result = save(pluginId, { shape: '{title} {resolution}/{filename}.{ext}' });
-    assert.ok(!('refusal' in result), `${pluginId} must accept the three shared tokens`);
+    const result = save(pluginId, { shape: '{title} {releaseDate}/{filename}.{ext}' });
+    assert.ok(!('refusal' in result), `${pluginId} must accept the shared tokens`);
+  }
+});
+
+test('{resolution} is refused by every plugin, because nothing in 2.0 records one', () => {
+  // Issue #98: design spec §3 lists `resolution` and `rss_item.resolution`
+  // is the *lookup* state, not a video resolution. It briefly shipped as a
+  // declared token resolving to `null`; a shape naming it now fails where
+  // it is typed rather than silently dropping a segment at every import.
+  const { save } = setup();
+  for (const pluginId of ['tv', 'movie', 'xxx']) {
+    assert.deepEqual(
+      save(pluginId, { shape: '{title} {resolution}.{ext}' }),
+      { refusal: 'unknown-token' },
+      pluginId,
+    );
   }
 });
 

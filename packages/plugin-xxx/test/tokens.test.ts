@@ -71,10 +71,6 @@ test('every declared token resolves, and the whole map is what a scene shape may
     site: 'A Site',
     title: 'A Scene',
     releaseDate: '2026-01-15',
-    // Design spec §3 says this comes from `rss_item`; the column of that
-    // name is the lookup state, not a video resolution, and 2.0 records no
-    // video resolution anywhere. See `openmetadata`'s `resolveResolution`.
-    resolution: null,
     filename: 'A.Site.26.01.15.A.Scene.XXX.1080p',
     // Lowercased from `MP4`, so two spellings of one release cannot land as
     // two files.

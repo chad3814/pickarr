@@ -15,7 +15,6 @@ import {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
-  resolveResolution,
   resolveTitle,
   resolveYear,
 } from '../src/tokens.ts';
@@ -117,17 +116,6 @@ test('the source name is the last segment under either separator, so a directory
   assert.equal(await resolveExtension(downloaded({ path: 'D:\\downloads\\pack\\a.mkv' }), ctx), 'mkv');
 });
 
-test('the video resolution resolves to nothing, because 2.0 records none', async () => {
-  const ctx = await withMediaItem({ title: 'Tomorrow', releaseDate: null });
-
-  // Design spec §3 says `{resolution}` comes from `rss_item`. It does not:
-  // `rss_item.resolution` is the *lookup* state -- `pending`, `resolved`,
-  // `refused`, `unresolved` -- and interpolating it would name an episode
-  // `The Bear - S03E01 resolved.mkv`, permanently, since §10 puts
-  // re-importing out of scope. Nothing in 2.0 stores a video resolution;
-  // see the resolver's docblock for where that was searched for.
-  assert.equal(await resolveResolution(downloaded(), ctx), null);
-});
 
 test('a token resolved for a release nothing matched is a hole, not a query for row zero', async () => {
   const ctx = await withMediaItem({ title: 'Tomorrow', releaseDate: '2024-06-26' });

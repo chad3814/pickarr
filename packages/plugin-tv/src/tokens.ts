@@ -4,9 +4,12 @@
  *
  * `series`, `season` and `episode` are this plugin's own -- they come from
  * `tv_series`, `tv_season` and `tv_release`, which no other plugin has.
- * `title`, `releaseDate`, `resolution`, `filename` and `ext` are resolved by
- * functions shared with every plugin, because they come from `media_item`,
- * `rss_item` and the source path rather than from any plugin's tables.
+ * `title`, `releaseDate`, `filename` and `ext` are resolved by functions
+ * shared with every plugin, because they come from `media_item` and the
+ * source path rather than from any plugin's tables. There is no
+ * `resolution`, which design spec §3 lists and issue #98 removes: the
+ * column of that name is the lookup state, not a video resolution, and 2.0
+ * records no video resolution anywhere.
  *
  * **Every key is written out here**, shared resolvers included, rather than
  * spread in from a constant: `MediaPlugin.tokens` promises that one object
@@ -14,7 +17,7 @@
  * would put part of the answer somewhere a reader has to go and find. The
  * *functions* are shared; the list is not.
  */
-import type { PluginTokens, TokenResolver } from '@pickarr/contract';
+import type { TokenResolver, TokensFor, TvTokenName } from '@pickarr/contract';
 import {
   mediaItemInteger,
   mediaItemText,
@@ -22,7 +25,6 @@ import {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
-  resolveResolution,
   resolveTitle,
 } from '@pickarr/openmetadata';
 
@@ -65,13 +67,12 @@ const resolveEpisode: TokenResolver = async (file, ctx) => paddedNumber(mediaIte
   'SELECT episode_number FROM tv_release WHERE media_item_id = ?',
 ));
 
-export const TV_TOKENS: PluginTokens = {
+export const TV_TOKENS: TokensFor<TvTokenName> = {
   series: resolveSeries,
   season: resolveSeason,
   episode: resolveEpisode,
   title: resolveTitle,
   releaseDate: resolveReleaseDate,
-  resolution: resolveResolution,
   filename: resolveFilename,
   ext: resolveExtension,
 };

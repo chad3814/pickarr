@@ -118,10 +118,6 @@ test('every declared token resolves, and the whole map is what a television shap
     episode: '01',
     title: 'Tomorrow',
     releaseDate: '2024-06-26',
-    // Design spec §3 says this comes from `rss_item`; the column of that
-    // name is the lookup state, not a video resolution, and 2.0 records no
-    // video resolution anywhere. See `openmetadata`'s `resolveResolution`.
-    resolution: null,
     filename: 'The.Bear.S03E01',
     ext: 'mkv',
   });

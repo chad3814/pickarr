@@ -8,6 +8,21 @@
  * `releaseDate` join the first group here, because both come from the
  * shared `media_item` row rather than from any plugin's table.
  *
+ * **`resolution` is gone, and §3 is wrong about it** (issue #98). There is
+ * an `rss_item.resolution` column and it is not a video resolution: it is
+ * the lookup state, `'pending' | 'resolved' | 'refused' | 'unresolved'`
+ * (`contract`'s `Resolution`, written by `MediaWriter.setResolution`,
+ * inserted as the literal `'pending'` by `feeds/reader.ts`). 2.0 records no
+ * video resolution anywhere -- searched for one across the host, the
+ * contract, this package, all three plugins and the web client before
+ * concluding it; the only `QualityTokens.resolution` in the repository is
+ * 1.x's `packages/plugin-api`, which 2.0 shares no schema with. This
+ * package briefly shipped `resolveResolution` answering `null` so the
+ * declared token stayed declared; a token that can only ever resolve to
+ * nothing is a shape an operator can type and never get anything from, so
+ * the three lists dropped it and `{resolution}` is now `unknown-token` on
+ * save. It comes back the day something stores one.
+ *
  * **Shared implementations, but never a shared list.** Each plugin still
  * writes out every key it declares -- `{ title: resolveTitle, … }`, not
  * `{ ...SHARED, … }` -- so `MediaPlugin.tokens`' own promise holds: one
@@ -184,40 +199,6 @@ export const resolveYear: TokenResolver = async (file, ctx) => {
   const year = date === null ? '' : date.slice(0, 4);
   return /^[0-9]{4}$/.test(year) ? year : null;
 };
-
-/**
- * The release's video resolution -- `1080p`, `2160p` -- which **2.0 does
- * not store anywhere**, so this answers `null` until something does.
- *
- * ## The measurement, because design spec §3 says otherwise
- *
- * §3 lists `resolution` among the tokens that "come from `rss_item` and the
- * source path, so every plugin has them". There *is* an
- * `rss_item.resolution` column and it is **not** a video resolution: it is
- * the lookup state, `'pending' | 'resolved' | 'refused' | 'unresolved'`
- * (`contract`'s `Resolution`, written by `MediaWriter.setResolution`,
- * inserted as `'pending'` by `feeds/reader.ts`). Interpolating it would
- * name a television episode `The Bear - S03E01 resolved.mkv`, permanently:
- * design spec §10 puts re-importing out of scope.
- *
- * Searched for a real one before concluding it does not exist: `1080p`,
- * `2160p`, `720p`, `videoCodec` and `qualit` across `packages/host/src`,
- * `packages/contract/src`, `packages/openmetadata/src`, the `src` of each
- * of the three plugin packages, and `packages/web/src` -- nothing. The only
- * `QualityTokens.resolution` in the repository is 1.x's
- * `packages/plugin-api`, which 2.0 shares no schema with.
- *
- * **So the token stays declared and resolves to nothing**, rather than
- * being removed. Removing it would refuse `{resolution}` on save -- which
- * is arguably the better operator experience and is the owner's call, not
- * this file's -- and would contradict §3, `MediaPlugin.tokens`' own
- * documentation and two tests in `host/test/media/destinations.test.ts`
- * written against them. `null` is a defined answer here, not a stub: a
- * release with no recorded video resolution genuinely has nothing to put
- * there, and `resolveShape` drops the token under §8.8 exactly as it does
- * for a film with no collection.
- */
-export const resolveResolution: TokenResolver = async () => null;
 
 /**
  * The source file's name **without** its extension.

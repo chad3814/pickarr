@@ -144,15 +144,30 @@ test('a renamed table logs twice until the old triggers are dropped by name', ()
   installSyncTriggers(raw, ['plug']);
   raw.exec('ALTER TABLE plug RENAME TO plug2');
   assert.deepEqual(
-    // `ESCAPE '#'`, not a bare `LIKE 'plug%'`. `_` is a single-character
-    // wildcard in `LIKE`, so the unescaped pattern also matched any other
-    // trigger whose name merely *starts* with those four letters -- and it
-    // began doing so the moment the host gained a `plugin_destination`
-    // table with sync triggers of its own, which has nothing to do with
-    // what this test is about. `#` rather than the conventional backslash
-    // because the escape character travels through a TypeScript string
-    // literal on its way to SQLite, where `'\\'` is one character to
-    // TypeScript and two to nobody -- one spelling fewer to get wrong.
+    // `'plug#_%' ESCAPE '#'`, not a bare `LIKE 'plug%'`. **`%` is what
+    // over-matched**: it stands for any sequence, so `'plug%'` claimed
+    // every trigger whose name merely *begins* with those four letters --
+    // and the host gaining a `plugin_destination` table with sync triggers
+    // of its own put three such names in the database, which has nothing
+    // to do with what this test is about.
+    //
+    // **`_` is why the fix needs escaping, not why the bug happened.** It
+    // is a single-character wildcard, so the obvious repair `'plug_%'`
+    // would still match `plugin_destination_sync_ins` -- `_` taking the
+    // `i`. Escaped, the `_` is the literal one in `plug_sync_ins` and the
+    // pattern matches the three triggers installed two lines above and
+    // nothing else.
+    //
+    // (An earlier version of this comment blamed `_` for the over-match.
+    // There is no `_` in `'plug%'`. Recorded rather than quietly replaced:
+    // a comment stating a reason is where this codebase's defects live,
+    // and this one reached a review and a ledger before anyone checked
+    // it.)
+    //
+    // `#` rather than the conventional backslash because the escape
+    // character travels through a TypeScript string literal on its way to
+    // SQLite, and the backslash spelling was tried first and produced
+    // `ESCAPE expression must be a single character`.
     raw.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'plug#_%' ESCAPE '#'").all()
       .map((r) => `${String((r as { name: unknown }).name)}@${String((r as { tbl_name: unknown }).tbl_name)}`),
     ['plug_sync_ins@plug2', 'plug_sync_upd@plug2', 'plug_sync_del@plug2'],

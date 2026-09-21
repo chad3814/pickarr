@@ -7,13 +7,12 @@
  * where a film's library convention wants the year alone. The rest are
  * resolved by functions shared with every plugin.
  */
-import type { PluginTokens, TokenResolver } from '@pickarr/contract';
+import type { TokenResolver, TokensFor, XxxTokenName } from '@pickarr/contract';
 import {
   mediaItemText,
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
-  resolveResolution,
   resolveTitle,
 } from '@pickarr/openmetadata';
 
@@ -33,11 +32,10 @@ const resolveSite: TokenResolver = async (file, ctx) => mediaItemText(
     WHERE s.media_item_id = ?`,
 );
 
-export const XXX_TOKENS: PluginTokens = {
+export const XXX_TOKENS: TokensFor<XxxTokenName> = {
   site: resolveSite,
   title: resolveTitle,
   releaseDate: resolveReleaseDate,
-  resolution: resolveResolution,
   filename: resolveFilename,
   ext: resolveExtension,
 };

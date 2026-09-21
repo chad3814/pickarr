@@ -71,10 +71,6 @@ test('every declared token resolves, and the whole map is what a film shape may 
     year: '2024',
     releaseDate: '2024-03-01',
     collection: 'Dune Collection',
-    // Design spec §3 says this comes from `rss_item`; the column of that
-    // name is the lookup state, not a video resolution, and 2.0 records no
-    // video resolution anywhere. See `openmetadata`'s `resolveResolution`.
-    resolution: null,
     filename: 'Dune.Part.Two.2024.2160p',
     ext: 'mkv',
   });

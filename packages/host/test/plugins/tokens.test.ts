@@ -32,6 +32,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MediaPlugin } from '@pickarr/contract';
+import {
+  MOVIE_TOKEN_NAMES,
+  TOKEN_NAMES_BY_PLUGIN,
+  TV_TOKEN_NAMES,
+  XXX_TOKEN_NAMES,
+} from '@pickarr/contract';
 import { shippedPlugins } from '../../src/main.ts';
 
 const NOW = 1_700_000_000_000;
@@ -67,19 +73,19 @@ function tokenNames(plugin: MediaPlugin): string[] {
 
 test('the television plugin declares the tokens a television path may name', () => {
   assert.deepEqual(tokenNames(pluginById('tv')), [
-    'series', 'season', 'episode', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
+    'series', 'season', 'episode', 'title', 'releaseDate', 'filename', 'ext',
   ]);
 });
 
 test('the film plugin declares the tokens a film path may name', () => {
   assert.deepEqual(tokenNames(pluginById('movie')), [
-    'title', 'year', 'releaseDate', 'collection', 'resolution', 'filename', 'ext',
+    'title', 'year', 'releaseDate', 'collection', 'filename', 'ext',
   ]);
 });
 
 test('the xxx plugin declares the tokens an xxx path may name', () => {
   assert.deepEqual(tokenNames(pluginById('xxx')), [
-    'site', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
+    'site', 'title', 'releaseDate', 'filename', 'ext',
   ]);
 });
 
@@ -98,15 +104,64 @@ test('no two shipped plugins declare the same token list', () => {
   }
 });
 
-test('every shipped plugin declares the three tokens that come from the rss item and the source path', () => {
-  // Design spec §3: `resolution`, `filename` and `ext` are not the plugin's
-  // own -- they are read off `rss_item` and the path the download client
-  // gave -- so a plugin missing one would be refusing a shape the host can
-  // in fact resolve.
+test('every shipped plugin declares the tokens that come from the shared row and the source path', () => {
+  // Design spec §3's second group: `filename` and `ext` come from the path
+  // the download client gave, and `title` and `releaseDate` from the shared
+  // `media_item` row -- none of them from a plugin's own tables -- so a
+  // plugin missing one would be refusing a shape the host can in fact
+  // resolve.
   for (const plugin of shipped().values()) {
-    for (const shared of ['resolution', 'filename', 'ext']) {
+    for (const shared of ['title', 'releaseDate', 'filename', 'ext']) {
       assert.ok(tokenNames(plugin).includes(shared), `"${plugin.id}" does not declare "${shared}"`);
     }
+  }
+});
+
+test('no plugin declares {resolution}, because nothing in 2.0 records one', () => {
+  // Design spec §3 lists it; issue #98 removes it. `rss_item.resolution` is
+  // the *lookup* state -- inserted as the literal `'pending'` by
+  // `feeds/reader.ts` -- so interpolating it would name an episode
+  // `The Bear - S03E01 resolved.mkv`, permanently (§10 puts re-importing
+  // out of scope). It briefly shipped as a resolver answering `null`, which
+  // is a token an operator can type and never get anything from.
+  //
+  // Asserted here rather than in a plugin package, because the property is
+  // that *no* plugin has it -- which no test inside one plugin can see.
+  for (const plugin of shipped().values()) {
+    assert.ok(
+      !tokenNames(plugin).includes('resolution'),
+      `"${plugin.id}" declares "resolution", which resolves to nothing`,
+    );
+  }
+});
+
+test('the names the contract publishes are the names each plugin resolves', () => {
+  // **The pair the compiler cannot lock.** `TokensFor<TvTokenName>` makes a
+  // plugin's map exhaustive against the contract's list in both directions
+  // -- measured: an extra key is TS2353 and a missing one TS2741 -- so this
+  // is not re-checking that. What it checks is the two things the type
+  // cannot see: that the plugin the host actually *builds* carries that map
+  // (rather than some other one assembled at construction), and that
+  // `TOKEN_NAMES_BY_PLUGIN` is keyed by the ids those plugins register
+  // under. The second is genuinely unlockable -- `TV_PLUGIN_ID` lives in
+  // `packages/plugin-tv` and `@pickarr/contract` must not import it -- and
+  // a drift there leaves a settings screen offering tokens under a key
+  // nothing matches.
+  assert.deepEqual(tokenNames(pluginById('tv')), [...TV_TOKEN_NAMES]);
+  assert.deepEqual(tokenNames(pluginById('movie')), [...MOVIE_TOKEN_NAMES]);
+  assert.deepEqual(tokenNames(pluginById('xxx')), [...XXX_TOKEN_NAMES]);
+
+  assert.deepEqual(
+    Object.keys(TOKEN_NAMES_BY_PLUGIN).toSorted(),
+    [...shipped().keys()].toSorted(),
+    'the contract names a plugin the host does not ship, or misses one it does',
+  );
+  for (const [pluginId, names] of Object.entries(TOKEN_NAMES_BY_PLUGIN)) {
+    assert.deepEqual(
+      [...names],
+      tokenNames(pluginById(pluginId)),
+      `TOKEN_NAMES_BY_PLUGIN["${pluginId}"] is not what that plugin resolves`,
+    );
   }
 });
 

@@ -12,17 +12,17 @@
  * refused `unknown-token` by `PUT /api/destinations/:pluginId`, while the
  * identical `{season}` in a television shape saves -- which is the point of
  * each plugin declaring its own list rather than the host holding one
- * union. Under `PluginTokens` it is also the point of the list being a map:
+ * union. Under `TokensFor<MovieTokenName>` it is also the point of the
+ * declaration being a map:
  * adding `season` here would mean writing a function that resolves a season
  * for a film, which is a thing nobody can write by accident.
  */
-import type { PluginTokens, TokenResolver } from '@pickarr/contract';
+import type { TokenResolver, TokensFor, MovieTokenName } from '@pickarr/contract';
 import {
   mediaItemText,
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
-  resolveResolution,
   resolveTitle,
   resolveYear,
 } from '@pickarr/openmetadata';
@@ -38,12 +38,11 @@ const resolveCollection: TokenResolver = async (file, ctx) => mediaItemText(
   'SELECT collection_name FROM movie_detail WHERE media_item_id = ?',
 );
 
-export const MOVIE_TOKENS: PluginTokens = {
+export const MOVIE_TOKENS: TokensFor<MovieTokenName> = {
   title: resolveTitle,
   year: resolveYear,
   releaseDate: resolveReleaseDate,
   collection: resolveCollection,
-  resolution: resolveResolution,
   filename: resolveFilename,
   ext: resolveExtension,
 };
