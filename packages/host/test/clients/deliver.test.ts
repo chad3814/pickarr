@@ -160,8 +160,12 @@ test('a completed row is delivered to the plugin owning its feed', async () => {
   const clientId = seedClient(raw);
   seedMapping(raw, clientId, '/downloads', '/media');
   const itemId = seedRssItem(raw, 'movie', 'alpha');
+  // `id: 42` so this test's own `rssItemId` assertion below can fail. Both
+  // sequences start at 1, so without it the download row and the rss item
+  // are both 1 and that line reads as a pin it is not -- it survived the
+  // `row.id`-for-`row.rssItemId` mutant that the test below kills.
   const id = insertTorrentRow(raw, {
-    rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
+    id: 42, rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/movie.mkv',
   });
 
   const statCalls: string[] = [];
@@ -398,8 +402,10 @@ test('a path the client supplies later is delivered, with no un-failing needed',
   const clientId = seedClient(raw);
   seedMapping(raw, clientId, '/downloads', '/media');
   const itemId = seedRssItem(raw, 'movie', 'alpha');
+  // `id: 42` for the reason the first delivery test gives: otherwise the
+  // `rssItemId` in the `deepEqual` below cannot fail.
   const id = insertTorrentRow(raw, {
-    rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
+    id: 42, rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', storagePath: null,
   });
 
   const deliverCalls: DownloadedFile[] = [];
