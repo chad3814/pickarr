@@ -35,3 +35,15 @@ test('numbers past two digits are padded, not truncated', () => {
   const line = tvHeadline(tv({ seasonNumber: 2, episodeNumber: 147 }), 'x');
   assert.equal(line, 'Jo Jo’s Bizarre Adventure S02E147 x');
 });
+
+test('a series row that carries season/episode numbers still renders them -- the rule reads the numbers, not kind', () => {
+  // Nothing above pins this: every `kind: 'series'` fixture here has both
+  // numbers `null`, so a branch reading `kind` instead of the numbers
+  // (`if (kind === 'series') return seriesTitle`) would agree with every
+  // one of them and still pass. A `kind: 'series'` row with numbers set is
+  // data that should not occur, but `tvHeadline`'s own docblock is explicit
+  // that the numbers are the one rule, not `kind` -- so a row where the two
+  // disagree still has to render the numbers.
+  const line = tvHeadline(tv({ kind: 'series', seasonNumber: 2, episodeNumber: 47 }), 'Special Edition');
+  assert.equal(line, 'Jo Jo’s Bizarre Adventure S02E47 Special Edition');
+});
