@@ -25,7 +25,7 @@
  * Query parameter names known to carry a client's credential in the url
  * itself. SABnzbd's `apikey` is the only one anything in this codebase
  * sends; a future client with another credential-bearing query parameter
- * must add its name here rather than assume `redactUrl` already knows every
+ * must add its name here rather than assume `redactText` already knows every
  * shape a credential can take.
  */
 const CREDENTIAL_QUERY_PARAM_NAMES = ['apikey'];
@@ -44,8 +44,25 @@ const CREDENTIAL_QUERY_PARAM_PATTERN = new RegExp(
 );
 
 /** Replaces the value of any credential-bearing query parameter with ***. */
-export function redactUrl(url: string): string {
-  return redactSecrets(url.replace(CREDENTIAL_QUERY_PARAM_PATTERN, '$1***'));
+/**
+ * Free text on its way to a log line or a stored column, with anything
+ * credential-shaped masked.
+ *
+ * **It was called `redactUrl`, and that name was wrong for most of its
+ * callers.** Ten of its fifteen call sites pass an error message, not a
+ * url -- `clients/reconcile.ts`'s `failMessage`, `jobs/run-job.ts`'s
+ * caught error, `api/server.ts`'s two log lines. A name that describes one
+ * caller in three is the false-name problem this codebase keeps paying
+ * for, so the url-shaped work moved to a real {@link redactUrl} and this
+ * kept the job it was actually doing.
+ *
+ * Two passes: the `?apikey=` **name** rule, which catches a short value no
+ * shape rule could, and {@link redactSecrets}, which catches a
+ * credential-shaped run wherever it sits -- including a path segment,
+ * which has no name to match on.
+ */
+export function redactText(text: string): string {
+  return redactSecrets(text.replace(CREDENTIAL_QUERY_PARAM_PATTERN, '$1***'));
 }
 
 /** What a redacted secret reads as, wherever one is found. */
@@ -95,7 +112,7 @@ function hasTwoOfEachClass(run: string): boolean {
 /**
  * Replaces anything shaped like a credential with {@link MASK}.
  *
- * **Why a shape rather than a list of names (issue #78).** {@link redactUrl}
+ * **Why a shape rather than a list of names (issue #78).** {@link redactText}
  * knew one parameter name. A private tracker's credential is conventionally
  * `passkey=`, and often has no parameter at all --
  * `/announce/<secret>/file.torrent` -- which #78 records as the reason

@@ -98,7 +98,7 @@ import type { DownloadedFile } from '@pickarr/contract';
 import { mediaItemIdForRssItem, ownerPluginId } from '../db/owner.ts';
 import { PluginNotRegisteredError } from '../errors.ts';
 import { mapClientPath } from './paths.ts';
-import { redactUrl } from './redact.ts';
+import { redactText } from './redact.ts';
 import {
   markDelivered, markReclaimed, rowsForClientByStatus, unreclaimedRowsForClient,
 } from './rows.ts';
@@ -251,7 +251,7 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
     // there: logged, and the row stays `completed` for the next tick. See
     // the module doc for why this never calls `failRow`.
     //
-    // `redactUrl`, matching `reclaimRows` below. Defence in depth rather
+    // `redactText`, matching `reclaimRows` below. Defence in depth rather
     // than a live leak: nothing that reaches this catch holds a credential
     // today -- steps 1-4 are two sqlite reads, `deps.stat`, and the
     // plugin's own `onDownloadedFile` -- so there is no url with an api key
@@ -261,7 +261,7 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
     // url, say) cannot leak through the one that was left raw.
     deps.log('failed to deliver a completed download, leaving it completed for the next tick', {
       rowId: row.id,
-      error: error instanceof Error ? redactUrl(error.message) : String(error),
+      error: error instanceof Error ? redactText(error.message) : String(error),
     });
   }
 }
@@ -301,7 +301,7 @@ async function reclaimRows(
       result.reclaimFailures += 1;
       deps.log('reclaim failed, leaving the download for the next tick', {
         rowId: row.id,
-        reason: error instanceof Error ? redactUrl(error.message) : String(error),
+        reason: error instanceof Error ? redactText(error.message) : String(error),
       });
     }
   }

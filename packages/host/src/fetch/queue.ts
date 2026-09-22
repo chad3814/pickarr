@@ -1,7 +1,7 @@
 import type { HostFetch } from '@pickarr/contract';
 import { createBoundedQueue, isValidLimit } from '../util/bounded-queue.ts';
 import type { BoundedQueue } from '../util/bounded-queue.ts';
-import { redactUrl } from '../clients/redact.ts';
+import { redactText } from '../clients/redact.ts';
 
 /**
  * `createHostFetch`'s actual return shape: `HostFetch`'s two methods plus
@@ -25,7 +25,7 @@ export interface QueuedFetch extends HostFetch {
  * `status` alongside the message. Without this, telling a 401 or 403 apart
  * from any other failure meant pattern-matching this class's own message
  * text (`failed: 401 Unauthorized`) -- which breaks the moment that text is
- * reworded, and it already was once this slice, when `redactUrl` went in.
+ * reworded, and it already was once this slice, when `redactText` went in.
  * Subclassing `Error` rather than a plain object keeps every existing
  * `instanceof Error`/message-matching test passing unchanged.
  */
@@ -280,21 +280,21 @@ export function createHostFetch(
       return await enqueue(hostname, () => {
         if (callerSignal?.aborted === true) {
           return Promise.reject(new Error(
-            `fetch ${redactUrl(url)} abandoned: the caller aborted while it waited for a slot`,
+            `fetch ${redactText(url)} abandoned: the caller aborted while it waited for a slot`,
           ));
         }
         const timeout = AbortSignal.timeout(timeoutMs);
         const signal = callerSignal === undefined ? timeout : AbortSignal.any([callerSignal, timeout]);
         const onTimeout = new Promise<never>((_resolve, reject) => {
           timeout.addEventListener('abort', () => {
-            reject(new Error(`fetch ${redactUrl(url)} timed out after ${timeoutMs}ms`));
+            reject(new Error(`fetch ${redactText(url)} timed out after ${timeoutMs}ms`));
           }, { once: true, signal: settled.signal });
         });
         return Promise.race([
           (async () => {
             const res = await deps.fetch(url, { ...init, signal });
             if (!res.ok) {
-              throw new FetchFailedError(`fetch ${redactUrl(url)} failed: ${res.status} ${res.statusText}`, res.status);
+              throw new FetchFailedError(`fetch ${redactText(url)} failed: ${res.status} ${res.statusText}`, res.status);
             }
             return read(res);
           })(),

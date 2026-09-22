@@ -58,7 +58,7 @@ import { HOST_SYNCED_TABLES } from './sync/tables.ts';
  *
  * **Six call sites pass a detail today, and their values are not all
  * strings.** `api/server.ts` has two (`read failed`, `read response
- * failed`), whose `error` has already been through `redactUrl`;
+ * failed`), whose `error` has already been through `redactText`;
  * `clients/downloads.ts` has four, all sharing one
  * `{rssItemId: number, downloadClientId: number, kind: string}` -- `main`'s
  * `log` is handed to `createDownloadClients` as well as to the read server.
@@ -79,7 +79,7 @@ function log(message: string, detail?: Readonly<Record<string, unknown>>): void 
   const suffix = detail === undefined ? '' : ` ${formatLogDetail(detail)}`;
   // Redacted at the sink rather than trusted to every caller (issue #78).
   // Most messages that could carry a credential already went through
-  // `redactUrl` on the way here; this is the net for the ones that did not,
+  // `redactText` on the way here; this is the net for the ones that did not,
   // and for a detail value composed somewhere that never considered it. The
   // `[host]` prefix stays outside, being ours and constant.
   console.log(`[host] ${redactSecrets(`${message}${suffix}`)}`);

@@ -145,7 +145,7 @@ export async function requestPick(
   } catch (err) {
     const refusal = refusalFor(err);
     // Rethrown, not folded into a refusal -- see the module doc. `err` is
-    // rethrown as it arrived rather than wrapped, so whatever `redactUrl`
+    // rethrown as it arrived rather than wrapped, so whatever `redactText`
     // the 500 handler applies sees the original message.
     if (refusal === undefined) throw err;
     return { refusal };

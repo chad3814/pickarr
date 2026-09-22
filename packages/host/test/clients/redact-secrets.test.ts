@@ -2,7 +2,7 @@
  * Secret-*shaped* strings, redacted wherever free text reaches a log line or
  * a stored column (issue #78).
  *
- * **Why a shape and not a list of known names.** `redactUrl` knew one
+ * **Why a shape and not a list of known names.** `redactText` knew one
  * parameter name, `apikey`. A private tracker's credential is conventionally
  * `passkey=`, or has no parameter at all -- `/announce/<secret>/file.torrent`
  * -- and #78 records that adding names "would cover two more shapes and
@@ -39,7 +39,7 @@ const UPPER_HASH = '9F8E7D6C5B4A39281706F5E4D3C2B1A0';
 const MIXED_KEY = 'Ab12Cd34Ef56';
 
 test('a passkey in a query parameter is redacted, whatever the parameter is called', () => {
-  // The case #78 opens with. `redactUrl` covered `apikey` and nothing else.
+  // The case #78 opens with. `redactText` covered `apikey` and nothing else.
   assert.equal(
     redactSecrets(`https://tracker.example/rss?passkey=${PASSKEY}`),
     'https://tracker.example/rss?passkey=*****',

@@ -28,7 +28,7 @@
  * and this walk is a run of synchronous sqlite writes.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import { redactUrl } from './redact.ts';
+import { redactText } from './redact.ts';
 import {
   DOWNLOAD_STATUSES, advanceStatus, failRow, heldRefs, rowByRef, rowsForClientByStatus, setAbsent,
   setProgress, setRef, setStoragePath,
@@ -198,7 +198,7 @@ function walkHistoryEntry(
       return;
     }
     case 'failed': {
-      const message = redactUrl(entry.failMessage ?? defaultFailMessage(deps.clientId));
+      const message = redactText(entry.failMessage ?? defaultFailMessage(deps.clientId));
       // Guarded the same way the `completed` arm above is -- see
       // `alreadyFailedForThisReason` for what the unguarded version cost and
       // why this is not the same thing as making `failed` terminal.
@@ -389,7 +389,7 @@ function recoverRefs(deps: ReconcileDeps, result: ReconcileResult): void {
       result.recoverFailures += 1;
       deps.log('ref recovery write failed, leaving the download unconfirmed for the next tick', {
         rowId: claim.row.id,
-        reason: error instanceof Error ? redactUrl(error.message) : String(error),
+        reason: error instanceof Error ? redactText(error.message) : String(error),
       });
     }
   }

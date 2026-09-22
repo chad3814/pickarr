@@ -58,7 +58,7 @@
  * rejection quotes both paths into its `message`** --
  * `"ENOENT: no such file or directory, copyfile '/…' -> '/…'"` -- and
  * `deliverCompleted`'s catch logs an escaping error's message. Design spec
- * §7 forbids a path in any log line, and `redactUrl` there redacts urls, not
+ * §7 forbids a path in any log line, and `redactText` there redacts urls, not
  * paths. So a throw from here would be a leak on the very first disk that
  * filled up.
  *

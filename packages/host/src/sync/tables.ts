@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { redactUrl } from '../clients/redact.ts';
+import { redactText } from '../clients/redact.ts';
 
 /**
  * The host's own tables that a client replicates, and the reason each of the
@@ -46,7 +46,7 @@ import { redactUrl } from '../clients/redact.ts';
  * the raw url. What changed is that the operator needs to tell two feeds
  * apart in a settings screen that a name alone cannot always do, so the url
  * now travels **redacted**: `readHostRows` calls `clients/redact.ts`'s
- * `redactUrl` on it, after the `SELECT` runs and before the row is handed
+ * `redactText` on it, after the `SELECT` runs and before the row is handed
  * back. That makes `rss_feed` the first synced table whose projection is not
  * purely SQL -- every other `case` below is the whole of that table's
  * transformation, and this one is not.
@@ -94,10 +94,10 @@ import { redactUrl } from '../clients/redact.ts';
  *
  * **That second guarantee is stronger than `rss_feed`'s, and the difference
  * is the whole reason this table could join the list when that clause said
- * it never would.** `redactUrl`, two paragraphs up, knows one credential
+ * it never would.** `redactText`, two paragraphs up, knows one credential
  * shape. It does not touch userinfo at all: `http://user:hunter2@qbit:8080`
  * -- a download client behind basic auth, which is an ordinary way to run
- * one -- passes through `redactUrl` **unchanged**, credential included.
+ * one -- passes through `redactText` **unchanged**, credential included.
  * `test/sync/tables.test.ts` constructs that call rather than trusting this
  * sentence. The same url reaches the replica from here as
  * `http://qbit:8080/`. A closed door, not a pattern match. #78 stays open
@@ -119,8 +119,8 @@ import { redactUrl } from '../clients/redact.ts';
  * every unrelated table's rows in that page with it, on that request and on
  * every retry, since the row does not change: a client stuck at its cursor
  * with no way to pass the row and nothing telling it which row. And that
- * handler logs `redactUrl(messageOf(error))` -- so a thrown message quoting
- * the url would put a userinfo credential in a log line, since `redactUrl`
+ * handler logs `redactText(messageOf(error))` -- so a thrown message quoting
+ * the url would put a userinfo credential in a log line, since `redactText`
  * is exactly the function that does not catch that shape. Throwing here
  * would reopen, in the log, the hole this projection closes on the wire.
  *
@@ -331,7 +331,7 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * through anyway, because each is transformed after this `SELECT` runs --
  * the feed's redacted, the client's rebuilt from its origin and path. See
  * this file's top docblock for why each was judged to clear the bar, for
- * what `redactUrl` reaches now that #78 has closed and what it still does
+ * what `redactText` reaches now that #78 has closed and what it still does
  * not, and for why the two are not the same guarantee.
  *
  * **`download_client`'s two secret-name columns are a fifth and sixth
@@ -475,14 +475,14 @@ function clientAddress(url: string): string {
  *
  * **Two tables get one extra step after the row comes back, and the other
  * seven get none.** `rss_feed`'s `url` is redacted by `clients/redact.ts`'s
- * `redactUrl`; `download_client`'s is rebuilt from its origin and path by
+ * `redactText`; `download_client`'s is rebuilt from its origin and path by
  * `clientAddress`. Both happen on the spread copy this function already
  * makes -- not in `selectSql`, which cannot run JavaScript, and not in
  * storage, which would make the raw url unrecoverable, for a future slice
  * that redacts better in the feed's case and for the adapter that has to
  * dial the thing in the client's. These are the only two places the wire's
  * content is not simply what the `SELECT` returned; see this file's top
- * docblock for why each was judged acceptable, what `redactUrl` does not yet
+ * docblock for why each was judged acceptable, what `redactText` does not yet
  * catch, and why the two are deliberately not the same transformation.
  */
 export function readHostRows(
@@ -515,7 +515,7 @@ export function readHostRows(
     // different reasons, and a merged branch would invite a later change to
     // one of them to quietly apply to both.
     if (table === 'rss_feed' && typeof projected.url === 'string') {
-      projected.url = redactUrl(projected.url);
+      projected.url = redactText(projected.url);
     }
     if (table === 'download_client' && typeof projected.url === 'string') {
       projected.url = clientAddress(projected.url);

@@ -46,7 +46,7 @@
  *
  * **No response body this file composes carries a url, a path or a query
  * string.** A thrown error becomes a 500 with a fixed message; the thrown
- * message goes through `redactUrl` on its way to the log and never into the
+ * message goes through `redactText` on its way to the log and never into the
  * response at all. The one caller-supplied value any body repeats is a media
  * type, which the brief requires an unknown type to name -- and `MEDIA_TYPE`
  * below is what keeps that from becoming a way to get a path echoed back.
@@ -55,7 +55,7 @@
  * `/api/sync/backfill`'s bodies carry an `rss_feed` op whose `value.url` is a
  * url.** It is not this sentence's rule quietly slipping -- `sync/tables.ts`'s
  * top docblock is where that rule was deliberately amended, and the value
- * here is `redactUrl`'s output, not the raw column, composed by
+ * here is `redactText`'s output, not the raw column, composed by
  * `sync-route.ts` and `readHostRows` rather than by anything in this file.
  * The redaction is narrower than a raw url deserves -- it catches the
  * `?apikey=` name, plus anything credential-shaped since issue #78, but a
@@ -132,7 +132,7 @@ import type { AddressInfo } from 'node:net';
 import type { DatabaseSync } from 'node:sqlite';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
-import { redactUrl } from '../clients/redact.ts';
+import { redactText } from '../clients/redact.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
 import type { AddMappingInput, EditMappingInput, MappingRefusal } from '../clients/mappings.ts';
 import type { DestinationRefusalBody } from '@pickarr/contract';
@@ -2069,7 +2069,7 @@ function readBody(request: IncomingMessage): Promise<{ body: unknown } | { refus
  * an artwork path or a client's api key (SQLite's own messages name tables
  * and constraints; a client adapter's name whatever url it was reaching), and
  * none of that is a caller's to see. The message is written down instead --
- * through `redactUrl`, so a credential in a url does not reach the log
+ * through `redactText`, so a credential in a url does not reach the log
  * either -- against the request's *path*, never its query string. A throw out
  * of the auth handler is answered the same way, for the same reason.
  */
@@ -2133,10 +2133,10 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
     // that happens to have a destroyed request no answer at all.
     //
     // `route` is `target.pathname`, never the query string, and the message
-    // goes through `redactUrl` -- the same two rules the 500 path follows, so
+    // goes through `redactText` -- the same two rules the 500 path follows, so
     // no url reaches this line either.
     const aborted = request.destroyed && !response.headersSent;
-    deps.log(aborted ? 'request aborted' : 'read failed', { route, error: redactUrl(messageOf(error)) });
+    deps.log(aborted ? 'request aborted' : 'read failed', { route, error: redactText(messageOf(error)) });
     if (response.headersSent) {
       // Nothing safe left to say -- the status line is already gone. Dropping
       // the connection is what tells a client the response is incomplete;
@@ -2240,7 +2240,7 @@ export async function createReadServer(deps: ReadServerDeps): Promise<ReadServer
       // *answering* threw -- a socket that died mid-write, say. Logged rather
       // than swallowed, because the alternative is an empty catch that hides
       // a real defect in `handle`.
-      deps.log('read response failed', { error: redactUrl(messageOf(error)) });
+      deps.log('read response failed', { error: redactText(messageOf(error)) });
       response.destroy();
     });
   });

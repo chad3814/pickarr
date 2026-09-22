@@ -35,7 +35,7 @@
  *   in `clients/pick.ts` and are discarded.
  * - **`AlreadySubmittedError` is the one that persists**, into
  *   `torrent_download.last_error` / `nzb_download.last_error`, through
- *   `redactUrl`. `sync/tables.ts` deliberately keeps that column out of the
+ *   `redactText`. `sync/tables.ts` deliberately keeps that column out of the
  *   replica, but `/api/downloads` does serve it to a session holder as
  *   `DownloadRead.lastError` -- so it is the one message here a browser can
  *   be shown, and that, not a log file, is why none of these may carry a

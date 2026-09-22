@@ -35,7 +35,7 @@ import { readClientConfig } from './config.ts';
 import type { Secrets } from '../secrets/instance.ts';
 import type { ClientConfig } from './config.ts';
 import { createQbittorrentClient, infohashFromMagnet } from './qbittorrent.ts';
-import { redactUrl } from './redact.ts';
+import { redactText } from './redact.ts';
 import { createSabnzbdClient } from './sabnzbd.ts';
 import { selectClientForFeed } from './select.ts';
 import type { ChooseIndex } from './select.ts';
@@ -365,7 +365,7 @@ export function createDownloadClients(deps: {
           )
           : err;
         const message = failure instanceof Error ? failure.message : String(failure);
-        plan.markFailed(raw, rowId, redactUrl(message), now());
+        plan.markFailed(raw, rowId, redactText(message), now());
         log('download submission failed', logDetail);
         throw failure;
       }

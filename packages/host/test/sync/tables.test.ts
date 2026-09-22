@@ -5,7 +5,7 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { HOST_SYNCED_TABLES, readHostRows } from '../../src/sync/tables.ts';
 import { syncedTriggerNames } from '../../src/sync/log.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
-import { redactUrl } from '../../src/clients/redact.ts';
+import { redactText } from '../../src/clients/redact.ts';
 import type {
   DownloadClientSyncRead,
   FilepathMappingSyncRead,
@@ -196,7 +196,7 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
   // private tracker's passkey (`api/server.ts`'s module doc; `guid` falls
   // back to `link` verbatim in `feeds/parse-rss.ts` when a feed omits its
   // own `<guid>`). `last_error` is redacted of a credential's *value* only
-  // (`clients/redact.ts`'s `redactUrl`), not of the url or path around it.
+  // (`clients/redact.ts`'s `redactText`), not of the url or path around it.
   // Every value below is deliberately shaped like the thing that must never
   // reach a client, so a regression that reintroduces any of them fails on
   // its actual content, not only on the key existing.
@@ -299,7 +299,7 @@ test('a feed reaches a client with its apikey redacted', () => {
 
 test('a passkey-bearing url IS redacted now, which is issue #78 closing', () => {
   // This test used to assert the opposite, and said so: "when #78 broadens
-  // `redactUrl` this test fails -- which is the point: the gap closing must
+  // `redactText` this test fails -- which is the point: the gap closing must
   // be observable rather than silent. Do not 'fix' this by changing the
   // expectation; change it when #78 changes the behaviour, and say so
   // there." This is that change.
@@ -464,25 +464,25 @@ test('a download client url reaches the replica as origin and path, with userinf
 
   const url = clientUrl(registry.readRows(raw, 'download_client', [1])[1]);
 
-  assert.ok(!url.includes('hunter2'), 'userinfo must be dropped -- this is the case redactUrl would pass through intact');
+  assert.ok(!url.includes('hunter2'), 'userinfo must be dropped -- this is the case redactText would pass through intact');
   assert.ok(!url.includes('token'), 'the query string must be dropped, parameter name and all');
   assert.ok(!url.includes('frag'), 'the fragment must be dropped');
   assert.equal(url, 'http://qbit.local:8080/base',
     'origin and path, nothing else -- host and port are the address and must survive');
 });
 
-test('redactUrl would not have caught the userinfo this projection drops', () => {
+test('redactText would not have caught the userinfo this projection drops', () => {
   // Not a test of this module: a test of the premise the module doc argues
   // from. The doc says `origin + pathname` is stronger than the feeds
-  // precedent *because* `redactUrl` returns `http://user:hunter2@qbit:8080`
+  // precedent *because* `redactText` returns `http://user:hunter2@qbit:8080`
   // unchanged, and an argued reason is exactly what this codebase has found
   // to be wrong most often. So construct it rather than assert it in prose.
-  // If issue #78 ever widens `redactUrl` to cover userinfo, this reds and the
+  // If issue #78 ever widens `redactText` to cover userinfo, this reds and the
   // docblock's contrast needs rewording -- which is the point.
   assert.equal(
-    redactUrl('http://user:hunter2@qbit.local:8080/base?token=abc#frag'),
+    redactText('http://user:hunter2@qbit.local:8080/base?token=abc#frag'),
     'http://user:hunter2@qbit.local:8080/base?token=abc#frag',
-    'redactUrl knows one query parameter name and nothing structural',
+    'redactText knows one query parameter name and nothing structural',
   );
 });
 
