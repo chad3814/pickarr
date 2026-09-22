@@ -2,7 +2,7 @@ import type { SabnzbdConfig } from './config.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
 import { normalizeClientCategory } from './snapshot.ts';
-import { redactText } from './redact.ts';
+import { redactText, redactUrl } from './redact.ts';
 import type { SubmitResult } from './types.ts';
 
 /**
@@ -413,7 +413,7 @@ export function createSabnzbdClient(
         // id is refused for the same reason as a missing one: it is not a
         // reference to anything, and 1.x rejects it too.
         throw new Error(
-          `sabnzbd client ${config.id} submitted ${redactText(url)} but got no nzo id back`,
+          `sabnzbd client ${config.id} submitted ${redactUrl(url)} but got no nzo id back`,
         );
       }
       return { ref: first };

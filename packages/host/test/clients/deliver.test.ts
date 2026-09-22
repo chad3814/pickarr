@@ -646,7 +646,7 @@ test('a delivery failure\'s message is redacted, the same way a reclaim failure\
       message: 'failed to deliver a completed download, leaving it completed for the next tick',
       detail: {
         rowId: id,
-        error: 'plugin refused: https://sab.example.com/api?apikey=***&mode=queue',
+        error: 'plugin refused: https://sab.example.com/api?apikey=*****&mode=queue',
       },
     }],
     'the logged message must carry the redacted url, not the raw one',

@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { redactText } from '../clients/redact.ts';
+import { redactUrl } from '../clients/redact.ts';
 
 /**
  * The host's own tables that a client replicates, and the reason each of the
@@ -92,20 +92,30 @@ import { redactText } from '../clients/redact.ts';
  *   *structurally*: nothing recognises and removes them, they are simply
  *   not among the two parts the projected value is assembled from.
  *
- * **That second guarantee is stronger than `rss_feed`'s, and the difference
- * is the whole reason this table could join the list when that clause said
- * it never would.** `redactText`, two paragraphs up, knows one credential
- * shape. It does not touch userinfo at all: `http://user:hunter2@qbit:8080`
- * -- a download client behind basic auth, which is an ordinary way to run
- * one -- passes through `redactText` **unchanged**, credential included.
- * `test/sync/tables.test.ts` constructs that call rather than trusting this
- * sentence. The same url reaches the replica from here as
- * `http://qbit:8080/`. A closed door, not a pattern match. #78 stays open
- * for feeds because a tracker's passkey is genuinely part of the path or
- * query it is sent in, so dropping those would leave a url that no longer
- * reaches the feed; a download client's address is host, port and base path,
- * and nothing else is part of its identity, so nothing is lost by keeping
- * only those.
+ * **That second guarantee is still stronger than `rss_feed`'s, and the
+ * difference is the whole reason this table could join the list when that
+ * clause said it never would -- but the gap between them narrowed when #78
+ * closed, so the old contrast is restated rather than repeated.** This
+ * paragraph used to say `redactUrl` "does not touch userinfo at all", and
+ * that `http://user:hunter2@qbit:8080` reached the replica credential
+ * included. It no longer does: `redactUrl` parses the url and masks
+ * `password`, so that address arrives as `http://user:*****@qbit:8080`.
+ * `test/clients/redact-url.test.ts` constructs it rather than trusting
+ * this sentence.
+ *
+ * **What keeps the two guarantees different is the kind of thing they
+ * are.** `rss_feed.url` is *filtered*: three rules run over it, and a
+ * credential that matches none of them survives -- `hunter2` in a query
+ * parameter named `q` would. `download_client.url` is *rebuilt* from
+ * origin and pathname, so anything that is not host, port and base path is
+ * absent structurally, with nothing to recognise and nothing to miss. A
+ * closed door still beats a good filter.
+ *
+ * The reason feeds get the filter and clients get the door is unchanged: a
+ * tracker's passkey is genuinely part of the path or query it is sent in,
+ * so dropping those would leave a url that no longer reaches the feed; a
+ * download client's address is host, port and base path, and nothing else
+ * is part of its identity, so nothing is lost by keeping only those.
  *
  * **A url that is not an http(s) address projects as `''`, and the row
  * reaches the replica anyway.** A deliberate choice between three
@@ -515,7 +525,7 @@ export function readHostRows(
     // different reasons, and a merged branch would invite a later change to
     // one of them to quietly apply to both.
     if (table === 'rss_feed' && typeof projected.url === 'string') {
-      projected.url = redactText(projected.url);
+      projected.url = redactUrl(projected.url);
     }
     if (table === 'download_client' && typeof projected.url === 'string') {
       projected.url = clientAddress(projected.url);

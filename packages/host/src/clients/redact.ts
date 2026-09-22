@@ -28,6 +28,15 @@
  * must add its name here rather than assume `redactText` already knows every
  * shape a credential can take.
  */
+/**
+ * What a redacted secret reads as, everywhere in this module.
+ *
+ * One spelling, because two would be a distinction without a difference:
+ * a reader meeting `***` beside `*****` has to work out whether the
+ * length means something. It does not.
+ */
+const MASK = '*****';
+
 const CREDENTIAL_QUERY_PARAM_NAMES = ['apikey'];
 
 /**
@@ -62,11 +71,9 @@ const CREDENTIAL_QUERY_PARAM_PATTERN = new RegExp(
  * which has no name to match on.
  */
 export function redactText(text: string): string {
-  return redactSecrets(text.replace(CREDENTIAL_QUERY_PARAM_PATTERN, '$1***'));
+  return redactSecrets(text.replace(CREDENTIAL_QUERY_PARAM_PATTERN, `$1${MASK}`));
 }
 
-/** What a redacted secret reads as, wherever one is found. */
-const MASK = '*****';
 
 /**
  * A run of 8 or more hexadecimal characters in a single case.
@@ -154,7 +161,7 @@ const CREDENTIAL_HEADER_NAMES = new Set(['authorization']);
  */
 function redactHeaderValue(value: string): string {
   const schemeEnd = value.indexOf(' ');
-  return schemeEnd === -1 ? '***' : `${value.slice(0, schemeEnd)} ***`;
+  return schemeEnd === -1 ? MASK : `${value.slice(0, schemeEnd)} ${MASK}`;
 }
 
 /** Replaces the value of a credential-bearing header with ***. */
@@ -187,7 +194,7 @@ const CREDENTIAL_FORM_FIELD_PATTERN = new RegExp(
 
 /** Replaces the value of a credential-bearing form field with ***. */
 export function redactFormBody(body: string): string {
-  return body.replace(CREDENTIAL_FORM_FIELD_PATTERN, '$1***');
+  return body.replace(CREDENTIAL_FORM_FIELD_PATTERN, `$1${MASK}`);
 }
 
 /**
@@ -211,4 +218,74 @@ export function redactDetail(
     redacted[key] = typeof value === 'string' ? redactSecrets(value) : value;
   }
   return redacted;
+}
+
+/**
+ * A query parameter whose **name** suggests it carries a credential.
+ *
+ * Substrings rather than exact names, matched case-insensitively, so
+ * `apikey`, `API_KEY`, `passkey`, `x-auth-token` and `private_key` are all
+ * caught by four short words. A name list is what {@link redactText}
+ * carried and what issue #78 found too narrow; this is the same idea with
+ * a far wider net, and it runs *alongside* the shape rules rather than
+ * instead of them -- a name match catches a short value no shape rule can.
+ */
+const CREDENTIAL_PARAM_HINTS = ['api', 'token', 'key', 'pass'];
+
+function namesACredential(parameter: string): boolean {
+  const lowered = parameter.toLowerCase();
+  return CREDENTIAL_PARAM_HINTS.some((hint) => lowered.includes(hint));
+}
+
+/**
+ * A url with its credentials masked, parsed as a url rather than matched as
+ * text.
+ *
+ * Three passes, each reaching something the others cannot:
+ *
+ * 1. **`password`** -- the userinfo credential in
+ *    `http://user:hunter2@qbit:8080`, which is an ordinary way to run a
+ *    download client behind basic auth. No shape rule reaches `hunter2`:
+ *    it is seven characters with no case mixture.
+ * 2. **Any query parameter whose name hints at a credential**
+ *    ({@link CREDENTIAL_PARAM_HINTS}), whatever its value looks like.
+ * 3. **{@link redactSecrets} over the result**, which catches a
+ *    credential-shaped run anywhere else -- most importantly a path
+ *    segment, `/announce/<secret>/`, which has no name to match on.
+ *
+ * **The password is set only when there is one.** Assigning it
+ * unconditionally *invents* userinfo: `new URL('https://tr.example/rss')`
+ * with `password = '*****'` serialises as
+ * `https://:*****@tr.example/rss`, which would rewrite every clean feed
+ * url in the sync projection into something that is not the url the
+ * operator entered. Measured, not assumed.
+ *
+ * **A string that is not a url falls back to {@link redactText}.**
+ * `new URL` throws on one, and callers include `sync/tables.ts` projecting
+ * a column a human typed. Throwing inside a log line or a sync projection
+ * would turn a redaction miss into an outage, so the unparseable case gets
+ * the text treatment instead of an exception.
+ */
+export function redactUrl(url: string | URL): string {
+  let parsed: URL;
+  try {
+    parsed = typeof url === 'string' ? new URL(url) : new URL(url.href);
+  } catch {
+    return redactText(typeof url === 'string' ? url : String(url));
+  }
+
+  if (parsed.password !== '') parsed.password = MASK;
+
+  // Two passes, because `URLSearchParams` is live: collecting the names
+  // first means the second loop is not mutating the thing the first is
+  // walking. Only existing keys are `set`, so today's single pass would
+  // survive -- but "it happens to be safe for the mutation we do now" is
+  // the kind of premise that breaks when someone adds a `delete`.
+  const credentialNames: string[] = [];
+  for (const name of parsed.searchParams.keys()) {
+    if (namesACredential(name)) credentialNames.push(name);
+  }
+  for (const name of credentialNames) parsed.searchParams.set(name, MASK);
+
+  return redactSecrets(parsed.href);
 }

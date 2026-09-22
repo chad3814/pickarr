@@ -5,7 +5,7 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { HOST_SYNCED_TABLES, readHostRows } from '../../src/sync/tables.ts';
 import { syncedTriggerNames } from '../../src/sync/log.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
-import { redactText } from '../../src/clients/redact.ts';
+import { redactUrl } from '../../src/clients/redact.ts';
 import type {
   DownloadClientSyncRead,
   FilepathMappingSyncRead,
@@ -223,7 +223,7 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
     INSERT INTO torrent_download (
       id, rss_item_id, download_client_id, status, last_error, storage_path, created_at, updated_at
     ) VALUES (
-      1, 1, 1, 'failed', 'connect to http://tracker.example/announce?apikey=***: /downloads/incomplete/x.mkv not writable',
+      1, 1, 1, 'failed', 'connect to http://tracker.example/announce?apikey=*****: /downloads/incomplete/x.mkv not writable',
       '/downloads/incomplete/x.mkv', 10, 20
     )
   `).run();
@@ -231,7 +231,7 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
     INSERT INTO nzb_download (
       id, rss_item_id, download_client_id, status, last_error, storage_path, created_at, updated_at
     ) VALUES (
-      1, 1, 1, 'failed', 'connect to http://sab.example/api?apikey=***: /downloads/incomplete/y.nzb not writable',
+      1, 1, 1, 'failed', 'connect to http://sab.example/api?apikey=*****: /downloads/incomplete/y.nzb not writable',
       '/downloads/incomplete/y.nzb', 10, 20
     )
   `).run();
@@ -294,7 +294,7 @@ test('a feed reaches a client with its apikey redacted', () => {
   const registry = createSyncRegistry(raw, []);
   seedFeed(raw, { url: 'https://tracker.example/rss?apikey=SECRET' });
   const rows = registry.readRows(raw, 'rss_feed', [1]);
-  assert.equal(rowUrl(rows[1]), 'https://tracker.example/rss?apikey=***');
+  assert.equal(rowUrl(rows[1]), 'https://tracker.example/rss?apikey=*****');
 });
 
 test('a passkey-bearing url IS redacted now, which is issue #78 closing', () => {
@@ -471,18 +471,32 @@ test('a download client url reaches the replica as origin and path, with userinf
     'origin and path, nothing else -- host and port are the address and must survive');
 });
 
-test('redactText would not have caught the userinfo this projection drops', () => {
+test('a filter still misses what a rebuilt url cannot carry, which is the premise the module doc argues from', () => {
   // Not a test of this module: a test of the premise the module doc argues
-  // from. The doc says `origin + pathname` is stronger than the feeds
-  // precedent *because* `redactText` returns `http://user:hunter2@qbit:8080`
-  // unchanged, and an argued reason is exactly what this codebase has found
-  // to be wrong most often. So construct it rather than assert it in prose.
-  // If issue #78 ever widens `redactText` to cover userinfo, this reds and the
-  // docblock's contrast needs rewording -- which is the point.
+  // from, constructed rather than asserted in prose -- an argued reason is
+  // what this codebase has found to be wrong most often.
+  //
+  // **The premise changed when #78 closed, and so did this test.** It used
+  // to read "`redactUrl` would not have caught the userinfo this projection
+  // drops", because `redactUrl` left `http://user:hunter2@qbit:8080`
+  // untouched. It no longer does -- it parses the url and masks the
+  // password -- so that contrast is gone and the doc no longer claims it.
+  //
+  // What survives is the difference in *kind*. `rss_feed.url` is filtered:
+  // three rules run, and a credential matching none of them lives.
+  // `download_client.url` is rebuilt from origin and pathname, so anything
+  // that is not host, port or base path is absent structurally. The first
+  // assertion is the filter working; the second is the filter missing, and
+  // it is the one that makes the rebuild worth its extra strictness.
   assert.equal(
-    redactText('http://user:hunter2@qbit.local:8080/base?token=abc#frag'),
-    'http://user:hunter2@qbit.local:8080/base?token=abc#frag',
-    'redactText knows one query parameter name and nothing structural',
+    redactUrl('http://user:hunter2@qbit.local:8080/base'),
+    'http://user:*****@qbit.local:8080/base',
+    'the filter does now catch userinfo, which it did not before #78',
+  );
+  assert.equal(
+    redactUrl('https://tr.example/rss?q=hunter2'),
+    'https://tr.example/rss?q=hunter2',
+    'and it misses a short credential under a name that hints at nothing -- a rebuilt url could not carry one at all',
   );
 });
 

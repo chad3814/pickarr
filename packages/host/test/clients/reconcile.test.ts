@@ -190,7 +190,7 @@ test('a failed history entry fails the row with the client\'s message, redacted'
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'failed');
   assert.equal(
     readColumn(raw, 'torrent_download', id, 'last_error'),
-    'fetch failed for https://sab.example.com/api?apikey=***&mode=queue',
+    'fetch failed for https://sab.example.com/api?apikey=*****&mode=queue',
   );
 });
 
