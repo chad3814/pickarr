@@ -20,7 +20,15 @@ export type MediaType = 'tv' | 'movie' | 'xxx' | 'book';
  * spec §2.
  */
 export interface DownloadedFile {
+  /**
+   * The client's completed path, mapped: a file for a single-file download,
+   * a directory otherwise. `LibraryImporter.list` is what looks inside it.
+   */
   path: string;
+  /**
+   * The size `stat` reported for `path` -- meaningless for a directory;
+   * `DownloadEntry.sizeBytes` is each file's.
+   */
   sizeBytes: number;
   downloadClientId: number;
   /** The rss item this download was started for. */

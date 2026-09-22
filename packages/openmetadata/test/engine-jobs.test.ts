@@ -331,6 +331,7 @@ test('a finished download is handed to the host, with a value for every token th
   assert.equal(harness.imports.length, 1);
   assert.deepEqual(harness.imports[0]?.values, { site: 'site-7', title: 'title-42' });
   assert.deepEqual(harness.imports[0]?.file, downloaded());
+  assert.deepEqual(harness.imports[0]?.entry, { path: downloaded().path, relativePath: 'a.mp4', sizeBytes: 10 });
 });
 
 test('a token resolving to null is carried as null rather than dropped from the map', async () => {
@@ -352,7 +353,7 @@ test('the line it logs names the two ids, says where the file went, and carries 
 
   const line = harness.logs[0];
   assert.ok(line !== undefined, 'onDownloadedFile logged nothing');
-  assert.deepEqual(line.detail, { rssItemId: 7, mediaItemId: 42, sizeBytes: 10, placed: 'library' });
+  assert.deepEqual(line.detail, { rssItemId: 7, mediaItemId: 42, listed: 1, copied: 1, placed: 'library' });
   assert.ok(!serialisedLogs(harness).includes(PATH_MARKER), 'the log line carries the path');
   assert.ok(!serialisedLogs(harness).includes('/downloads/'), 'the log line carries a path fragment');
 });
@@ -367,7 +368,7 @@ test('the line it logs says so when nothing matched the release', async () => {
   // "nothing matched". `placed` says which of §6's two destinations took it.
   assert.deepEqual(
     harness.logs[0]?.detail,
-    { rssItemId: 7, mediaItemId: null, sizeBytes: 10, placed: 'unmatched' },
+    { rssItemId: 7, mediaItemId: null, listed: 1, copied: 1, placed: 'unmatched' },
   );
 });
 
@@ -407,6 +408,40 @@ test('a refusal carrying an errno keeps it, and still carries no path', async ()
     rssItemId: 7, mediaItemId: 42, refusal: 'copy-failed', errno: 'ENOSPC',
   });
   assert.ok(!serialisedLogs(harness).includes(PATH_MARKER), 'the log line carries the path');
+});
+
+test('a listing refusal is logged with its errno and thrown, and nothing is placed', async () => {
+  const { plugin, harness } = build();
+  harness.answerList({ refusal: 'list-failed', errno: 'EACCES' });
+
+  await assert.rejects(() => plugin.onDownloadedFile(downloaded(), harness.ctx), /list-failed/);
+  assert.equal(harness.imports.length, 0);
+  assert.deepEqual(harness.logs[0]?.detail, { rssItemId: 7, mediaItemId: 42, refusal: 'list-failed', errno: 'EACCES' });
+  assert.ok(!serialisedLogs(harness).includes(PATH_MARKER));
+});
+
+test('each entry resolves its tokens over its own path, not the download directory', async () => {
+  // A path-derived token, so the values show which path the resolvers were
+  // handed: resolved over the directory, `ext` would be the whole of `dir`,
+  // which holds no dot.
+  const plugin = createLookupPlugin({
+    id: 'xxx',
+    mediaType: 'xxx',
+    category: 'xxx',
+    migrations: [],
+    check: (): void => {},
+    apply: async () => {},
+    tokens: { ext: extToken },
+  }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
+  const harness = createTestHarness();
+  const dir = `/downloads/${PATH_MARKER}`;
+  harness.answerList([{ path: `${dir}/Show.S01E01.mkv`, relativePath: 'Show.S01E01.mkv', sizeBytes: 5 }]);
+
+  await plugin.onDownloadedFile(downloaded({ path: dir, sizeBytes: 4096 }), harness.ctx);
+
+  assert.equal(harness.imports[0]?.file.path, dir, 'place is handed the whole download');
+  assert.equal(harness.imports[0]?.entry.relativePath, 'Show.S01E01.mkv');
+  assert.deepEqual(harness.imports[0]?.values, { ext: 'mkv' });
 });
 
 /**

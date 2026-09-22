@@ -751,37 +751,45 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     // a plugin that cannot answer all three is not a plugin — and neither is
     // a stub: this is what the double would really do if called.
     async onDownloadedFile(file, ctx) {
-      // The same two steps the engine takes: resolve this plugin's declared
-      // tokens, then hand them to the host, which owns the destination and
-      // the copy. Modelled rather than stubbed, because `flow.test.ts`
-      // drives this through a real `Host` and a stub would prove nothing
-      // about `ctxFor` wiring `library` at all.
-      const outcome = await ctx.library.place(file, async () => {
-        const entries = Object.entries(TOKENS);
-        const values = await Promise.all(entries.map(async ([, resolve]) => resolve(file, ctx)));
-        return Object.fromEntries(entries.map(([name], index) => [name, values[index] ?? null]));
-      });
-
-      // The ids and the size, never `file.path` -- importer design spec §7,
-      // and the same line the engine logs. A double that leaked a path
-      // where the real plugin does not would make this file a worse model
-      // of a plugin than it claims to be.
-      if ('refusal' in outcome) {
+      // The same steps the engine takes: list, then place each entry,
+      // resolving this plugin's declared tokens for it and handing them to
+      // the host, which owns the destination and the copy. Modelled rather
+      // than stubbed, because `flow.test.ts` drives this through a real
+      // `Host` and a stub would prove nothing about `ctxFor` wiring
+      // `library` at all.
+      // A declaration rather than an arrow in a `const`: TypeScript narrows
+      // past a `never` call only when the callee's type is declared, and
+      // the narrowing is what lets the loop below read `listing` as entries.
+      function refuse(refusal: string, errno: string | null): never {
+        // The ids and the verdict, never a path -- importer design spec §7,
+        // and the same line the engine logs.
         ctx.log('could not put a finished download in the library', {
-          rssItemId: file.rssItemId,
-          mediaItemId: file.mediaItemId,
-          refusal: outcome.refusal,
-          errno: outcome.errno,
+          rssItemId: file.rssItemId, mediaItemId: file.mediaItemId, refusal, errno,
         });
         // Thrown so the row stays `completed` and the next tick retries --
         // design spec §5 and §7, and what the engine does.
-        throw new Error(`${DOUBLE_ID}: this download was not imported (${outcome.refusal})`);
+        throw new Error(`${DOUBLE_ID}: this download was not imported (${refusal})`);
+      }
+
+      const listing = await ctx.library.list(file);
+      if ('refusal' in listing) refuse(listing.refusal, listing.errno);
+
+      let copied = 0;
+      let placed: 'library' | 'unmatched' | null = null;
+      for (const entry of listing) {
+        const entryFile = { ...file, path: entry.path, sizeBytes: entry.sizeBytes };
+        // eslint-disable-next-line no-await-in-loop -- one copy at a time, as the engine does
+        const outcome = await ctx.library.place(file, entry, async () => {
+          const entries = Object.entries(TOKENS);
+          const values = await Promise.all(entries.map(async ([, resolve]) => resolve(entryFile, ctx)));
+          return Object.fromEntries(entries.map(([name], index) => [name, values[index] ?? null]));
+        });
+        if ('refusal' in outcome) refuse(outcome.refusal, outcome.errno);
+        copied += 1;
+        placed = outcome.placed;
       }
       ctx.log('a download finished', {
-        rssItemId: file.rssItemId,
-        mediaItemId: file.mediaItemId,
-        sizeBytes: file.sizeBytes,
-        placed: outcome.placed,
+        rssItemId: file.rssItemId, mediaItemId: file.mediaItemId, listed: listing.length, copied, placed,
       });
     },
 

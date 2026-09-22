@@ -585,8 +585,8 @@ function unusedReadCall(name: string): () => Promise<never> {
 }
 
 /** The same, for the one method on `ctx.library`. */
-function unusedLibraryCall(): () => Promise<never> {
-  return async () => { throw new Error('ctx.library.place: not used by this test'); };
+function unusedLibraryCall(method: 'list' | 'place'): () => Promise<never> {
+  return async () => { throw new Error(`ctx.library.${method}: not used by this test`); };
 }
 
 /**
@@ -619,7 +619,7 @@ function fakeContext(jobs: JobQueue): PluginContext {
       downloadsFor: unusedReadCall('downloadsFor'),
     },
     jobs,
-    library: { place: unusedLibraryCall() },
+    library: { list: unusedLibraryCall('list'), place: unusedLibraryCall('place') },
     fetch: {
       json: async () => { throw new Error('ctx.fetch.json: not used by this test'); },
       bytes: async () => { throw new Error('ctx.fetch.bytes: not used by this test'); },

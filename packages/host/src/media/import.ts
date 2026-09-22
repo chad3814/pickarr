@@ -3,12 +3,35 @@
  * download in a plugin's library.
  *
  * `media/shape.ts` decides *where* a matched release goes and opens nothing;
- * this decides where an *unmatched* one goes (design spec §6), reads the
- * plugin's `plugin_destination` row, and performs the copy. One per plugin
+ * this lists what a download holds, decides where an *unmatched* one goes
+ * (the download file selection design spec's §4.3, which replaced the
+ * importer design's §6 layout), reads the plugin's `plugin_destination`
+ * row, and performs the copy. One per plugin
  * context, closed over the plugin's id, so a plugin never names a library
  * that is not its own -- the shape `createMediaReader` next door already has.
  *
  * ---
+ *
+ * ## Listing
+ *
+ * `list` is how a plugin learns what a download holds: a download is a
+ * single file or a directory, and a directory cannot be copied as one. It
+ * answers every regular file below `file.path`, recursively, each with its
+ * absolute path, its `/`-separated path relative to the download, and its
+ * size; a plain-file download answers one entry, itself, under its own
+ * basename. Sorted by `relativePath` by plain code-unit comparison, so the
+ * order is the same on every host and a retry places in the same order.
+ *
+ * **The root is followed and nothing below it is.** The root is read with
+ * `stat`, because a client may hand over a symlinked download and following
+ * it is what the operator meant. Below it, a symlink -- to a file or to a
+ * directory -- is skipped, never followed: `readdir`'s `Dirent` describes
+ * the link rather than its target, so a link is neither a file nor a
+ * directory there. Following one would let a download name anything on this
+ * host as part of itself, and `place` would copy it.
+ *
+ * **A rejection is `list-failed`, carrying the `errno` and nothing else**,
+ * for the reason the section on `node:fs` errors below gives.
  *
  * ## The copy
  *
@@ -20,13 +43,19 @@
  * **The `mkdir` outlives a refusal, and that is worth saying because the
  * sentence above understates it.** It runs before the copy, so a refusal
  * raised after it -- the second occupied-destination check, a failed copy,
- * a failed rename -- leaves the directories behind: measured, an unmatched
- * import whose copy fails with `unmatchedDir: 'a/b'` leaves `a/` and
- * `a/b/` under the root and no file. Empty
+ * a failed rename -- leaves the directories behind: an unmatched import
+ * whose copy fails with `unmatchedDir: 'a/b'` leaves `a/`, `a/b/` and
+ * `a/b/<release name>/` under the root and no file. Empty
  * directories under a root an operator chose are not a deletion and not a
  * path outside the root, so nothing removes them; a cleanup that did would
  * be this module deleting things in a library, which §4 is about not
  * doing.
+ *
+ * **The source is `entry.path`**, never `file.path`: `file` is the whole
+ * download, which may be a directory, and `entry` is the one file of it
+ * being copied. `place` refuses an entry that is not inside `file` --
+ * `foreign-entry` -- before anything else is looked at, so a plugin cannot
+ * hand it an arbitrary path to copy.
  *
  * **To a temporary in the destination directory, then a rename.** A rename
  * within a directory is atomic, so a reader never sees a half-copied file
@@ -75,10 +104,10 @@
  *
  * It is caught here rather than in `media/shape.ts` for a reason the
  * resolver cannot address: **only one of the two destination branches goes
- * through the resolver.** Design spec §6's unmatched path is a configured
- * directory joined to the source filename, and never touches `resolveShape`
- * at all -- so a check there would leave uncovered exactly the branch with
- * no resolver in it. Here, one check covers both.
+ * through the resolver.** §4.3's unmatched path is a configured directory
+ * joined to the release name and the entry's relative path, and never
+ * touches `resolveShape` at all -- so a check there would leave uncovered
+ * exactly the branch with no resolver in it. Here, one check covers both.
  *
  * ## The unmatched directory is re-checked, not trusted
  *
@@ -105,10 +134,11 @@
  * then compared against the root, so a path that somehow reached outside it
  * is refused rather than written.
  */
-import { copyFile as realCopyFile, lstat, mkdir, rename, stat } from 'node:fs/promises';
-import { basename, dirname, resolve, sep } from 'node:path';
+import { copyFile as realCopyFile, lstat, mkdir, readdir, rename, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type {
+  DownloadEntry,
   DownloadedFile,
   ImportOutcome,
   ImportRefusal,
@@ -152,7 +182,7 @@ const ERRNO = /^[A-Z][A-Z0-9_]*$/;
  * §7's "a copy that fails part way leaves only the temporary") has to be
  * shown against. It is also the only way to occupy the destination
  * *between* the two `presentAt` checks below. **Five of
- * `test/media/import.test.ts`'s 23 tests inject one**; the other eighteen
+ * `test/media/import.test.ts`'s 33 tests inject one**; the other twenty-eight
  * run the real `node:fs/promises` copy.
  */
 export type CopyFile = (source: string, destination: string) => Promise<void>;
@@ -228,11 +258,19 @@ function readDestination(raw: DatabaseSync, pluginId: string): Destination | und
 }
 
 /**
- * Design spec §6's destination for a release nothing matched:
- * `<unmatched>/<filename>`, relative to the root.
+ * Design spec 2026-09-22 §4.3's destination for a release nothing matched:
+ * `<unmatched>/<release name>/<relative path>`, relative to the root.
  *
- * The three rules §6 states, checked here rather than taken on trust from
- * the save -- see the module doc -- but no longer *restated* here.
+ * The release name is its own segment, so it is checked on its own: `..`
+ * here would otherwise resolve `_unmatched/../file` to a path *inside* the
+ * root, which the final `startsWith` check cannot see. `basename('/a/..')`
+ * is `'..'` (measured), so this is reachable from a source path. The
+ * relative path needs no such check: `place` has already refused, as
+ * `foreign-entry`, one holding an empty, `.` or `..` segment.
+ *
+ * The unmatched directory's three rules (importer design spec §6), checked
+ * here rather than taken on trust from the save -- see the module doc --
+ * but no longer *restated* here.
  * `unmatchedDirSegments` (`media/shape.ts`) is the one implementation, and
  * `media/destinations.ts` calls the same function on the way in. This
  * module used to carry its own copy; the save side carried another, and
@@ -240,7 +278,11 @@ function readDestination(raw: DatabaseSync, pluginId: string): Destination | und
  * forever. Two copies of a rule checked in two places is how "checked
  * twice" stops meaning what it says.
  */
-function unmatchedDestination(unmatchedDir: string, filename: string): { path: string } | ImportRefusal {
+function unmatchedDestination(
+  unmatchedDir: string,
+  release: string,
+  relativePath: string,
+): { path: string } | ImportRefusal {
   const unmatched = unmatchedDirSegments(unmatchedDir);
   if ('refusal' in unmatched) {
     // This module's vocabulary, not that function's: `names-the-root` is
@@ -252,8 +294,61 @@ function unmatchedDestination(unmatchedDir: string, filename: string): { path: s
   // Measured -- a trailing separator is *not* one of them, `basename('/a/b/')`
   // being `'b'`. Neither is a path this host should ever be handed, which is
   // why the case is refused rather than defaulted to something invented.
-  if (filename === '') return refuse('empty-filename');
-  return { path: [...unmatched.segments, filename].join('/') };
+  if (release === '') return refuse('empty-filename');
+  if (release === '.' || release === '..') return refuse('escapes-root');
+  return { path: [...unmatched.segments, release, relativePath].join('/') };
+}
+
+/**
+ * The directory an unmatched download is kept under (§4.3): a directory's
+ * own name, or a single file's name without its extension.
+ *
+ * "A single file" is read off the entry rather than the disk, costing no
+ * second `stat`: `list` gives a plain-file download exactly one entry, the
+ * file itself, and a directory download never lists its own path, so
+ * `entry.path === file.path` is the single-file case. Any other entry
+ * `isForeign` lets through for a plain file names a path *beneath* a file,
+ * which the copy cannot open. A leading dot is not an extension -- `.hidden`
+ * keeps its name -- so the cut is at a dot after the first character.
+ */
+function releaseName(file: DownloadedFile, entry: DownloadEntry): string {
+  const name = basename(file.path);
+  if (entry.path !== file.path) return name;
+  const dot = name.lastIndexOf('.');
+  return dot <= 0 ? name : name.slice(0, dot);
+}
+
+/**
+ * Whether `entry` is really a file inside `file` (spec §5): its relative
+ * path is plain segments, and joining it to the download gives its path. A
+ * plain-file download's only entry is the file itself under its basename.
+ */
+function isForeign(file: DownloadedFile, entry: DownloadEntry): boolean {
+  const segments = entry.relativePath.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return true;
+  if (entry.path === file.path) return segments.length !== 1 || segments[0] !== basename(file.path);
+  return resolve(file.path, ...segments) !== resolve(entry.path);
+}
+
+/** Every regular file below `dir`, relative to it. Symlinks are skipped, not followed. */
+async function walk(dir: string, prefix: string): Promise<DownloadEntry[]> {
+  const children = await readdir(dir, { withFileTypes: true });
+  const nested = await Promise.all(children.map(async (child): Promise<DownloadEntry[]> => {
+    const path = join(dir, child.name);
+    const relativePath = prefix === '' ? child.name : `${prefix}/${child.name}`;
+    // A `Dirent` describes the link, not its target, so a symlink is
+    // neither a directory nor a file here and falls through to `[]`.
+    if (child.isDirectory()) return walk(path, relativePath);
+    if (!child.isFile()) return [];
+    const { size } = await lstat(path);
+    return [{ path, relativePath, sizeBytes: size }];
+  }));
+  return nested.flat();
+}
+
+function byRelativePath(a: DownloadEntry, b: DownloadEntry): number {
+  if (a.relativePath < b.relativePath) return -1;
+  return a.relativePath > b.relativePath ? 1 : 0;
 }
 
 export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporter {
@@ -262,11 +357,12 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
   /** The path under the root, or the refusal that stopped it. */
   async function relativeDestination(
     file: DownloadedFile,
+    entry: DownloadEntry,
     destination: Destination,
     resolveTokens: () => Promise<TokenValues>,
   ): Promise<{ path: string } | ImportRefusal> {
     if (file.mediaItemId === null) {
-      return unmatchedDestination(destination.unmatchedDir, basename(file.path));
+      return unmatchedDestination(destination.unmatchedDir, releaseName(file, entry), entry.relativePath);
     }
     const resolved = resolveShape(destination.shape, await resolveTokens());
     return 'refusal' in resolved ? refuse(importRefusalFor(resolved.refusal)) : resolved;
@@ -287,7 +383,21 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
   }
 
   return {
-    async place(file, resolveTokens): Promise<ImportOutcome> {
+    async list(file): Promise<readonly DownloadEntry[] | ImportRefusal> {
+      try {
+        // `stat`, not `lstat`, for the root alone: a client may hand over a
+        // symlinked download, and following it is what the operator meant.
+        const top = await stat(file.path);
+        if (top.isFile()) return [{ path: file.path, relativePath: basename(file.path), sizeBytes: top.size }];
+        if (!top.isDirectory()) return [];
+        return (await walk(file.path, '')).toSorted(byRelativePath);
+      } catch (error) {
+        // Every `node:fs` message quotes the path -- see the module doc.
+        return { refusal: 'list-failed', errno: importErrno(error) };
+      }
+    },
+
+    async place(file, entry, resolveTokens): Promise<ImportOutcome> {
       const destination = readDestination(deps.raw, deps.pluginId);
       if (destination === undefined) return refuse('no-destination');
       // `rootRefusal` (`media/shape.ts`), the same function
@@ -302,7 +412,9 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
         return refuse(rootProblem === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
       }
 
-      const relative = await relativeDestination(file, destination, resolveTokens);
+      if (isForeign(file, entry)) return refuse('foreign-entry');
+
+      const relative = await relativeDestination(file, entry, destination, resolveTokens);
       if ('refusal' in relative) return relative;
       if (hasControlCharacter(relative.path)) return refuse('control-character');
 
@@ -310,12 +422,13 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
       const target = resolve(root, relative.path);
       // Last line of defence, after the normalisation `resolve` performs --
       // and it is a live check rather than a belt over a proven brace, so
-      // do not read it as unreachable. The unmatched branch takes its
-      // filename from `basename(file.path)`, and `basename('/a/..')` is
-      // `'..'` (measured), so a source path ending in `/..` builds
-      // `_unmatched/..` out of two values each of which passed its own
-      // rule, and *this* line is what refuses it. The shape branch is the
-      // one with no known way through. Refused rather than thrown -- a
+      // do not read it as unreachable, even though neither branch has a
+      // known way through today. It is not what refuses a release name of
+      // `..` -- `_unmatched/../x.mkv` resolves to `<root>/x.mkv`, inside
+      // the root, so this line would let it pass; `unmatchedDestination`
+      // refuses that segment on its own. What this line catches is a path
+      // that leaves the root altogether, from either branch, by a route no
+      // earlier rule anticipated. Refused rather than thrown -- a
       // throw from here reaches `deliverCompleted`'s log carrying two
       // paths.
       //
@@ -335,7 +448,7 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
 
         await mkdir(dirname(target), { recursive: true });
         const temporary = `${target}${TEMPORARY_SUFFIX}`;
-        await copyFile(file.path, temporary);
+        await copyFile(entry.path, temporary);
         // Again, immediately before the rename. See the module doc for what
         // this narrows and what it does not close.
         if (await presentAt(target)) return refuse('destination-exists');

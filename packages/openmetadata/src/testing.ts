@@ -13,8 +13,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import type {
   DownloadClients,
+  DownloadEntry,
   DownloadedFile,
   ImportOutcome,
+  ImportRefusal,
   JobEnqueue,
   JobQueue,
   MediaItemInit,
@@ -331,24 +333,37 @@ export function createRecordingMedia(): RecordingMedia {
 /** One `library.place` call, and what the plugin resolved for it. */
 export interface RecordedImport {
   readonly file: DownloadedFile;
+  /** The entry that was placed; `file` is the whole download. */
+  readonly entry: DownloadEntry;
   readonly values: TokenValues;
 }
 
 export interface TestHarness {
   readonly ctx: PluginContext;
   /**
-   * Every import this plugin asked for, with the token values it resolved.
+   * Every import this plugin asked for, with the token values it resolved
+   * over the entry being placed.
    *
    * The values are recorded because they are the plugin's whole
    * contribution to a destination: the host owns `plugin_destination`, the
    * shape and the copy, so what a test of a plugin can assert is exactly
    * this map. `resolveTokens` is always called here, unlike the real
-   * importer, which skips it for an unmatched release (design spec §6) --
+   * importer, which skips it for an unmatched release --
    * that branch is the host's and `host/test/media/import.test.ts` is what
    * pins it.
    */
   readonly imports: readonly RecordedImport[];
-  /** Makes the next `place` answer `outcome` rather than a plain success. */
+  /**
+   * Makes the next `list` answer `result`. Unscripted, a download lists as
+   * one plain file, itself.
+   */
+  answerList(result: readonly DownloadEntry[] | ImportRefusal): void;
+  /**
+   * Queues answers for the next `place` calls, in order; `undefined` is the
+   * default success. Once the queue is empty every `place` succeeds.
+   */
+  answerImports(outcomes: readonly (ImportOutcome | undefined)[]): void;
+  /** `answerImports([outcome])`: the next `place` answers `outcome`. */
   answerImport(outcome: ImportOutcome): void;
   readonly raw: DatabaseSync;
   readonly media: RecordingMedia;
@@ -396,15 +411,21 @@ export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number 
   const enqueued: (JobEnqueue & { id: number })[] = [];
   const logs: { message: string; detail: Readonly<Record<string, unknown>> | undefined }[] = [];
   const imports: RecordedImport[] = [];
-  let nextOutcome: ImportOutcome | null = null;
+  let nextList: readonly DownloadEntry[] | ImportRefusal | null = null;
+  const scriptedImports: (ImportOutcome | undefined)[] = [];
 
   const library: LibraryImporter = {
-    async place(file, resolveTokens): Promise<ImportOutcome> {
+    async list(file): Promise<readonly DownloadEntry[] | ImportRefusal> {
+      const scripted = nextList;
+      nextList = null;
+      // By default a download is one plain file, listed as itself -- what
+      // every test written before listing existed was describing.
+      return scripted ?? [{ path: file.path, relativePath: baseName(file.path), sizeBytes: file.sizeBytes }];
+    },
+    async place(file, entry, resolveTokens): Promise<ImportOutcome> {
       const values = await resolveTokens();
-      imports.push({ file, values });
-      const scripted = nextOutcome;
-      nextOutcome = null;
-      return scripted ?? { placed: file.mediaItemId === null ? 'unmatched' : 'library' };
+      imports.push({ file, entry, values });
+      return scriptedImports.shift() ?? { placed: file.mediaItemId === null ? 'unmatched' : 'library' };
     },
   };
 
@@ -443,7 +464,9 @@ export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number 
     enqueued,
     logs,
     imports,
-    answerImport(outcome: ImportOutcome): void { nextOutcome = outcome; },
+    answerList(result: readonly DownloadEntry[] | ImportRefusal): void { nextList = result; },
+    answerImports(outcomes: readonly (ImportOutcome | undefined)[]): void { scriptedImports.push(...outcomes); },
+    answerImport(outcome: ImportOutcome): void { scriptedImports.push(outcome); },
     insertRssItem(filename: string, feedId?: number): number {
       const result = raw.prepare('INSERT INTO rss_item (filename, feed_id) VALUES (?, ?)')
         .run(filename, feedId ?? null);
@@ -454,4 +477,14 @@ export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number 
       return Number(result.lastInsertRowid);
     },
   };
+}
+
+/**
+ * The last segment of a path, on either separator -- the default listing's
+ * `relativePath`. The same body as `tokens.ts`'s private `baseName`, and
+ * for the same reason `node:path` is not used there.
+ */
+function baseName(path: string): string {
+  const parts = path.split(/[/\\]/);
+  return parts[parts.length - 1] ?? '';
 }

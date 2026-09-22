@@ -10,8 +10,8 @@
  * for the two things a real `copyFile` will not do on demand: fail *part
  * way through*, writing some bytes and then throwing, and occupy the
  * destination in the instant between the copy and the rename. **Five of the
- * 23 tests here inject one** -- the two atomicity tests, the two errno
- * tests, and the clobber-race test; the other eighteen run the real
+ * 33 tests here inject one** -- the two atomicity tests, the two errno
+ * tests, and the clobber-race test; the other twenty-eight run the real
  * `node:fs/promises` copy, so the default path is exercised rather than
  * mocked away.
  */
@@ -19,9 +19,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { DownloadedFile, ImportOutcome, ImportRefusalCode, TokenValues } from '@pickarr/contract';
+import type { DownloadEntry, DownloadedFile, ImportOutcome, ImportRefusalCode, TokenValues } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createLibraryImporter } from '../../src/media/import.ts';
@@ -57,6 +57,16 @@ interface Harness {
   ) => Promise<ImportOutcome>;
   /** Replaces the copy for the next importer built. Only the atomicity tests use it. */
   withCopyFile: (copyFile: CopyFile) => Harness['place'];
+  /** An entry for a plain-file download: the file itself, under its own basename. */
+  entryFor: (file: DownloadedFile) => DownloadEntry;
+  /** `place` with an explicit entry. */
+  placeEntry: (file: DownloadedFile, entry: DownloadEntry, values: TokenValues) => Promise<ImportOutcome>;
+  list: (file: DownloadedFile) => ReturnType<ReturnType<typeof createLibraryImporter>['list']>;
+}
+
+/** The entry `list` gives a plain-file download: the file itself, under its own basename. */
+function entryFor(file: DownloadedFile): DownloadEntry {
+  return { path: file.path, relativePath: basename(file.path), sizeBytes: file.sizeBytes };
 }
 
 async function withHarness(
@@ -89,9 +99,11 @@ async function withHarness(
         : createLibraryImporter({ raw, pluginId: PLUGIN_ID, copyFile });
       return async (file, values) => importer.place(
         file,
+        entryFor(file),
         typeof values === 'function' ? values : async () => values,
       );
     }
+    const importer = createLibraryImporter({ raw, pluginId: PLUGIN_ID });
 
     const harness: Harness = {
       raw,
@@ -109,6 +121,9 @@ async function withHarness(
       destination,
       place: placeWith(),
       withCopyFile: (copyFile) => placeWith(copyFile),
+      entryFor,
+      placeEntry: async (file, entry, values) => importer.place(file, entry, async () => values),
+      list: async (file) => importer.list(file),
     };
     await run(harness);
   } finally {
@@ -327,7 +342,7 @@ test('spec 7: a root that exists but is a file is refused the same way, and is n
   });
 });
 
-test('spec 6: an unmatched release lands in the configured unmatched directory under the source filename', async () => {
+test('spec 4.3: an unmatched single-file download lands in its own directory, named for the file without its extension', async () => {
   await withHarness({}, async (h) => {
     h.destination({ unmatchedDir: '_pickarr/unmatched' });
 
@@ -337,7 +352,7 @@ test('spec 6: an unmatched release lands in the configured unmatched directory u
     // Nested is allowed (design spec §6) and the whole source filename is
     // kept -- the shape is not consulted at all, so `Severance` appears
     // nowhere.
-    assert.deepEqual(await tree(h.root), [join('_pickarr', 'unmatched', `${PATH_MARKER}.mkv`)]);
+    assert.deepEqual(await tree(h.root), [join('_pickarr', 'unmatched', PATH_MARKER, `${PATH_MARKER}.mkv`)]);
   });
 });
 
@@ -358,7 +373,7 @@ test('spec 6: an unmatched release lands in `_unmatched` when the destination wa
     const outcome = await h.place(h.file({ mediaItemId: null }), TV_VALUES);
 
     assert.deepEqual(outcome, { placed: 'unmatched' });
-    assert.deepEqual(await tree(h.root), [join('_unmatched', `${PATH_MARKER}.mkv`)]);
+    assert.deepEqual(await tree(h.root), [join('_unmatched', PATH_MARKER, `${PATH_MARKER}.mkv`)]);
   });
 });
 
@@ -557,5 +572,161 @@ test('a resolver that throws is not swallowed: a fault is not a refusal', async 
       () => h.place(h.file(), async () => { throw new Error('the plugin database is gone'); }),
       /the plugin database is gone/,
     );
+  });
+});
+
+/** A directory download under `<dir>/downloads/<name>/`, holding `files` (relative path -> bytes). */
+async function directoryDownload(h: Harness, name: string, files: Record<string, string>): Promise<DownloadedFile> {
+  const root = join(h.dir, 'downloads', name);
+  for (const [relativePath, bytes] of Object.entries(files)) {
+    const path = join(root, ...relativePath.split('/'));
+    // eslint-disable-next-line no-await-in-loop -- fixture setup, order irrelevant
+    await mkdir(join(path, '..'), { recursive: true });
+    // eslint-disable-next-line no-await-in-loop -- see above
+    await writeFile(path, bytes);
+  }
+  return h.file({ path: root, sizeBytes: 4096 });
+}
+
+test('list: a plain file lists as itself, under its own basename', async () => {
+  await withHarness({}, async (h) => {
+    assert.deepEqual(await h.list(h.file()), [
+      { path: h.source, relativePath: `${PATH_MARKER}.mkv`, sizeBytes: SOURCE_BYTES.length },
+    ]);
+  });
+});
+
+test('list: a directory lists every regular file below it, nested, sorted, with sizes', async () => {
+  await withHarness({}, async (h) => {
+    const file = await directoryDownload(h, 'Release', { 'b.mkv': 'bb', 'a.nfo': 'a', 'Sub/c.srt': 'ccc' });
+    assert.deepEqual(await h.list(file), [
+      { path: join(file.path, 'Sub', 'c.srt'), relativePath: 'Sub/c.srt', sizeBytes: 3 },
+      { path: join(file.path, 'a.nfo'), relativePath: 'a.nfo', sizeBytes: 1 },
+      { path: join(file.path, 'b.mkv'), relativePath: 'b.mkv', sizeBytes: 2 },
+    ]);
+  });
+});
+
+test('list: the order is plain code-unit order over the whole relative path, across directory boundaries', async () => {
+  await withHarness({}, async (h) => {
+    // `.` (U+002E) sorts before `/` (U+002F), so `a.nfo` precedes `a/x.mkv`
+    // even though a walk meets directory `a` first wherever `readdir`
+    // answers in name order; and `Z` precedes `a`, which a locale-aware
+    // comparison would reverse.
+    const file = await directoryDownload(h, 'Release', { 'a/x.mkv': 'x', 'a.nfo': 'n', 'Z.srt': 'z' });
+    const listed = await h.list(file);
+    assert.ok(!('refusal' in listed));
+    assert.deepEqual(listed.map((entry) => entry.relativePath), ['Z.srt', 'a.nfo', 'a/x.mkv']);
+  });
+});
+
+test('list: a download root that is itself a symlink is followed', async () => {
+  await withHarness({}, async (h) => {
+    // A client may hand over a symlinked download; the root alone is read
+    // with `stat`, so the link is looked through rather than skipped.
+    const real = await directoryDownload(h, 'Real', { 'a.mkv': 'a' });
+    const link = join(h.dir, 'downloads', 'Linked');
+    await symlink(real.path, link);
+    const listed = await h.list(h.file({ path: link }));
+    assert.deepEqual(listed, [{ path: join(link, 'a.mkv'), relativePath: 'a.mkv', sizeBytes: 1 }]);
+  });
+});
+
+test('list: a symlink inside the download is skipped, not followed', async () => {
+  await withHarness({}, async (h) => {
+    const file = await directoryDownload(h, 'Release', { 'a.mkv': 'a' });
+    await symlink(h.source, join(file.path, 'link.mkv'));
+    await mkdir(join(h.dir, 'elsewhere'));
+    await writeFile(join(h.dir, 'elsewhere', 'x.mkv'), 'x');
+    await symlink(join(h.dir, 'elsewhere'), join(file.path, 'linkdir'));
+    const listed = await h.list(file);
+    assert.ok(!('refusal' in listed));
+    assert.deepEqual(listed.map((entry) => entry.relativePath), ['a.mkv']);
+  });
+});
+
+test('list: a download that is not there refuses list-failed with an errno and no path', async () => {
+  await withHarness({}, async (h) => {
+    const outcome = await h.list(h.file({ path: join(h.dir, 'downloads', `${PATH_MARKER}-gone`) }));
+    assert.deepEqual(outcome, { refusal: 'list-failed', errno: 'ENOENT' });
+    assert.ok(!JSON.stringify(outcome).includes(PATH_MARKER));
+  });
+});
+
+test('spec 9: the Swiss Family Robinson iso, placed from inside its directory, lands at the shaped path', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({ shape: '{title}.{ext}' });
+    const file = await directoryDownload(h, 'Swiss.Family.Robinson.1960.WIDESCREEN.NTSC.USA.DVD9-AndreMor', {
+      'Swiss Family Robinson (1960) (USA).iso': 'iso bytes',
+      'Swiss Family Robinson (1960) (USA).mds.mds': 'mds',
+    });
+    const listed = await h.list(file);
+    assert.ok(!('refusal' in listed));
+    const iso = listed.find((entry) => entry.relativePath.endsWith('.iso'));
+    assert.ok(iso !== undefined);
+
+    const outcome = await h.placeEntry(file, iso, { title: 'Swiss Family Robinson', ext: 'iso' });
+
+    assert.deepEqual(outcome, { placed: 'library' });
+    assert.equal(await readFile(join(h.root, 'Swiss Family Robinson.iso'), 'utf8'), 'iso bytes');
+  });
+});
+
+test('spec 4.3: an unmatched directory download keeps its layout under a directory named as the download is', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const file = await directoryDownload(h, 'Some.Release.2020-GRP', { 'a.mkv': 'a', 'Sub/b.srt': 'b' });
+    const listed = await h.list(file);
+    assert.ok(!('refusal' in listed));
+    for (const entry of listed) {
+      // eslint-disable-next-line no-await-in-loop -- sequential, as the engine places them
+      assert.deepEqual(await h.placeEntry(h.file({ ...file, mediaItemId: null }), entry, TV_VALUES), { placed: 'unmatched' });
+    }
+    // The dots in the directory name are kept: it is not a filename, so
+    // nothing is taken off it as an extension.
+    assert.deepEqual(await tree(h.root), [
+      join('_unmatched', 'Some.Release.2020-GRP', 'Sub', 'b.srt'),
+      join('_unmatched', 'Some.Release.2020-GRP', 'a.mkv'),
+    ]);
+  });
+});
+
+test('an entry that is not inside the download is refused foreign-entry, and nothing is copied', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const file = await directoryDownload(h, 'Release', { 'a.mkv': 'a' });
+    const outside: DownloadEntry = { path: h.source, relativePath: 'a.mkv', sizeBytes: 1 };
+    const lying: DownloadEntry = { path: join(file.path, 'a.mkv'), relativePath: 'b.mkv', sizeBytes: 1 };
+    const escaping: DownloadEntry = { path: h.source, relativePath: `../${PATH_MARKER}.mkv`, sizeBytes: 1 };
+    for (const entry of [outside, lying, escaping]) {
+      // eslint-disable-next-line no-await-in-loop -- each asserts an empty library
+      assertRefusal(await h.placeEntry(file, entry, TV_VALUES), 'foreign-entry');
+    }
+    // A plain-file download whose entry names another basename is foreign too.
+    assertRefusal(
+      await h.placeEntry(h.file(), { path: h.source, relativePath: 'other.mkv', sizeBytes: 1 }, TV_VALUES),
+      'foreign-entry',
+    );
+    assert.deepEqual(await tree(h.root), []);
+  });
+});
+
+test('spec 4.3: a directory download whose release name is `..` or `.` is refused, not written into the library root', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    for (const tail of ['..', '.']) {
+      // A directory-shaped download: `basename` of it is `..` / `.` (measured),
+      // and `join` normalises the entry path, so the entry is genuinely
+      // inside it and passes the ownership check. Only the release-name rule
+      // stands between this and `_unmatched/../x.mkv`, which resolves to
+      // `<root>/x.mkv` -- inside the root, so the final `startsWith` check
+      // would let it through.
+      const path = `${join(h.dir, 'downloads')}/${tail}`;
+      const file = h.file({ path, mediaItemId: null });
+      const entry: DownloadEntry = { path: join(path, 'x.mkv'), relativePath: 'x.mkv', sizeBytes: 1 };
+      // eslint-disable-next-line no-await-in-loop -- each asserts an empty library
+      assertRefusal(await h.placeEntry(file, entry, TV_VALUES), 'escapes-root');
+    }
+    assert.deepEqual(await tree(h.root), []);
   });
 });

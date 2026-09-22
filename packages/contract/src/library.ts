@@ -34,7 +34,8 @@ import type { DownloadedFile } from './plugin.ts';
 
 /**
  * Every way {@link LibraryImporter.place} can decline to put a file in the
- * library.
+ * library, and the one way {@link LibraryImporter.list} can decline to say
+ * what a download holds.
  *
  * **Returned as a value, never thrown** -- the shape `MappingRefusal`,
  * `AddFeedRefusal`, `DestinationRefusal` and the host's own `ShapeRefusal`
@@ -101,6 +102,12 @@ import type { DownloadedFile } from './plugin.ts';
  *   destroys whichever copy was better with nothing recorded.
  * - `copy-failed` -- the filesystem refused the copy or the rename.
  *   {@link ImportRefusal.errno} carries the `errno` code and nothing else.
+ * - `list-failed` -- the filesystem refused the listing of the download.
+ *   `errno` carries the code and nothing else, for the reason `copy-failed`
+ *   gives.
+ * - `foreign-entry` -- the entry handed to `place` is not a file inside the
+ *   download it was handed with, so a plugin cannot use `place` to copy an
+ *   arbitrary file.
  */
 export type ImportRefusalCode =
   | 'malformed-shape'
@@ -116,7 +123,9 @@ export type ImportRefusalCode =
   | 'unmatched-dir-is-root'
   | 'control-character'
   | 'destination-exists'
-  | 'copy-failed';
+  | 'copy-failed'
+  | 'list-failed'
+  | 'foreign-entry';
 
 /**
  * A declined import.
@@ -152,7 +161,10 @@ export interface ImportRefusal {
  * went to.
  *
  * `'unmatched'` is §6's: the release matched nothing, so there was no title
- * to shape a path from and the file went to `<root>/<unmatched>/<filename>`.
+ * to shape a path from and the file went to
+ * `<root>/<unmatched>/<release name>/<relative path>` (the download file
+ * selection design spec's §4.3, which replaced §6's
+ * `<root>/<unmatched>/<filename>`).
  * Reported rather than inferred by the caller from `file.mediaItemId`,
  * because the branch is the host's to take and a caller re-deriving it would
  * be a second copy of §6's rule.
@@ -172,16 +184,50 @@ export type ImportOutcome = ImportPlacement | ImportRefusal;
  */
 export type TokenValues = Readonly<Record<string, string | null>>;
 
+/**
+ * One regular file inside a finished download, as `list` found it. `path` is
+ * absolute and host-built, handed back to `place` and never logged;
+ * `relativePath` is `/`-separated under the download root, and a plain-file
+ * download lists as its own basename.
+ */
+export interface DownloadEntry {
+  readonly path: string;
+  readonly relativePath: string;
+  readonly sizeBytes: number;
+}
+
 /** Puts a finished download in one plugin's library. One per plugin context. */
 export interface LibraryImporter {
   /**
-   * Copies `file` into this plugin's library, or declines.
+   * Every regular file in `file`, or a refusal.
+   *
+   * Recursive, and regular files only: a symlink *below* the root is
+   * skipped, not followed, and so is anything else that is not a regular
+   * file. The root itself is followed, since a client may hand over a
+   * symlinked download. A plain-file download lists as one entry, itself.
+   * Sorted by `relativePath` by plain code-unit comparison, so the order is
+   * the same on every host. The only refusal is `list-failed`.
+   */
+  list(file: DownloadedFile): Promise<readonly DownloadEntry[] | ImportRefusal>;
+
+  /**
+   * Copies `entry`, one file of the download `file`, into this plugin's
+   * library, or declines.
+   *
+   * **`file` is the whole download; `entry` is what is copied.** Both are
+   * needed because an unmatched release keeps its layout (the download file
+   * selection design spec's §4.3): it lands at
+   * `<root>/<unmatched>/<release name>/<entry.relativePath>`, the release
+   * name coming from `file.path` -- a directory's own name, or a single
+   * file's name without its extension. An `entry` that is not a file inside
+   * `file.path` is refused as `foreign-entry`, so `place` cannot be used to
+   * copy an arbitrary file.
    *
    * **`resolveTokens` is a function, not a map, because the host owns the
-   * branch that decides whether any token is needed.** Design spec §6 sends
-   * an unmatched release to `<root>/<unmatched>/<filename>` with no shape
-   * and no tokens at all, and `file.mediaItemId` -- the thing that decides
-   * which branch applies -- is the host's to read. Handing over an
+   * branch that decides whether any token is needed.** An unmatched release
+   * goes to the unmatched directory with no shape and no tokens at all,
+   * and `file.mediaItemId` -- the thing that decides which branch applies
+   * -- is the host's to read. Handing over an
    * already-built map would mean every plugin querying its own tables for a
    * title that does not exist, on every unmatched import, and discarding
    * the answer. It is called at most once.
@@ -191,5 +237,9 @@ export interface LibraryImporter {
    * to the final name; and never a move or a hardlink, so nothing leaves
    * the download client and nothing already in the library is touched.
    */
-  place(file: DownloadedFile, resolveTokens: () => Promise<TokenValues>): Promise<ImportOutcome>;
+  place(
+    file: DownloadedFile,
+    entry: DownloadEntry,
+    resolveTokens: () => Promise<TokenValues>,
+  ): Promise<ImportOutcome>;
 }

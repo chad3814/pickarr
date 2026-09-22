@@ -437,7 +437,7 @@ test('spec 5: a destination that already exists leaves the plugin rejecting, so 
   }
 });
 
-test('spec 6: a release nothing matched lands under the unmatched directory, keeping its own filename', async () => {
+test('spec 4.3: a release nothing matched lands under the unmatched directory, in a directory named for it, keeping its own filename', async () => {
   const { raw, host } = fixture();
   const { rssItemId } = seedFeed(raw, 'tv', 'episode.mkv');
 
@@ -453,10 +453,12 @@ test('spec 6: a release nothing matched lands under the unmatched directory, kee
       path: source, sizeBytes: 11, downloadClientId: 1, rssItemId, mediaItemId: null,
     });
 
-    // The shape is not consulted: no `The Bear`, no `Season`. And the whole
-    // source filename survives, extension included.
+    // The shape is not consulted: no `The Bear`, no `Season`. The single
+    // file gets a directory named for it without its extension (download
+    // file selection spec §4.3), and the whole source filename survives
+    // inside it, extension included.
     assert.equal(
-      await readFile(join(root, '_unmatched', 'Something.Nobody.Identified.mkv'), 'utf8'),
+      await readFile(join(root, '_unmatched', 'Something.Nobody.Identified', 'Something.Nobody.Identified.mkv'), 'utf8'),
       'the mystery',
     );
   } finally {

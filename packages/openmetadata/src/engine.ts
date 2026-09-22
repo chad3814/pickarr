@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { SQLOutputValue } from 'node:sqlite';
 import type {
   DownloadedFile,
+  ImportPlacement,
   JobHandler,
   MediaPlugin,
   MediaType,
@@ -487,6 +488,48 @@ async function resolveTokens(
 }
 
 /**
+ * Logs a refused download by ids and code and throws, so `deliverCompleted`
+ * leaves the row `completed` for the next tick. `never`, so a caller's
+ * narrowing continues past it.
+ *
+ * **The ids and the verdict, never `file.path`.** Importer design spec §7:
+ * no path, url or credential reaches a log line. This detail goes to the
+ * host's **stdout** -- `ctx.log` is `console.log`, built at
+ * `host/src/host.ts` -- and so does the message of the throw below, through
+ * `deliverCompleted`'s catch. Neither reaches `last_error`;
+ * `clients/deliver.ts` never calls `failRow`, and `host/src/errors.ts` has
+ * the full audit of which host messages a browser can be shown. Stdout is
+ * enough: §7's rule is about a log line. This line did log the path, and
+ * had to: until `DownloadedFile` carried `rssItemId` and `mediaItemId`
+ * there was nothing else here that identified the file. A refusal code and
+ * an `errno` are neither a path nor derived from one -- `media/import.ts`
+ * is where that is enforced rather than hoped for.
+ *
+ * **Thrown, having been returned as a value**: `deliverCompleted` treats a
+ * throw as "leave the row `completed` and try next tick", which is exactly
+ * what design spec §5 and §7 require of every refusal here -- a listing the
+ * filesystem refused, a destination that already exists, a shape an
+ * operator has yet to fix, a root not mounted yet. The message names the
+ * rule and the plugin and carries nothing else, because `deliverCompleted`
+ * logs it.
+ */
+function refuseDownload(
+  ctx: PluginContext,
+  pluginId: string,
+  file: DownloadedFile,
+  refusal: string,
+  errno: string | null,
+): never {
+  ctx.log('could not put a finished download in the library', {
+    rssItemId: file.rssItemId,
+    mediaItemId: file.mediaItemId,
+    refusal,
+    errno,
+  });
+  throw new Error(`${pluginId}: this download was not imported (${refusal})`);
+}
+
+/**
  * A complete `MediaPlugin` from a spec.
  *
  * Everything the three media types share is here; what they do not share is
@@ -621,52 +664,40 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     },
 
     async onDownloadedFile(file, ctx) {
-      // The whole of importing: resolve this plugin's declared tokens from
-      // its own tables, and hand them to the host, which owns
-      // `plugin_destination` and the copy. See `contract/src/library.ts` for
-      // why the copy is not here.
+      // The whole of importing: list the download, resolve this plugin's
+      // declared tokens from its own tables for each entry, and hand both
+      // to the host, which owns `plugin_destination` and the copy. See
+      // `contract/src/library.ts` for why the copy is not here.
       //
-      // `resolveTokens` is passed rather than called: the host takes design
-      // spec §6's unmatched branch for a release nothing matched, where
-      // there is no title to shape a path from and every query below would
-      // ask this plugin's tables for rows that do not exist.
-      const outcome = await ctx.library.place(file, async () => resolveTokens(spec.tokens, file, ctx));
+      // For now every entry is placed; choosing which ones is the download
+      // file selection design's next step.
+      //
+      // `resolveTokens` is passed rather than called: the host takes the
+      // unmatched branch for a release nothing matched, where there is no
+      // title to shape a path from and every query below would ask this
+      // plugin's tables for rows that do not exist.
+      const listing = await ctx.library.list(file);
+      if ('refusal' in listing) refuseDownload(ctx, spec.id, file, listing.refusal, listing.errno);
 
-      // **The ids and the verdict, never `file.path`.** Importer design spec
-      // §7: no path, url or credential reaches a log line. This detail goes
-      // to the host's **stdout** -- `ctx.log` is `console.log`, built at
-      // `host/src/host.ts` -- and so does the message of the throw below,
-      // through `deliverCompleted`'s catch. Neither reaches `last_error`;
-      // `clients/deliver.ts` never calls `failRow`, and `host/src/errors.ts`
-      // has the full audit of which host messages a browser can be shown.
-      // Stdout is enough: §7's rule is about a log line. This
-      // line did log the path, and had to: until `DownloadedFile` carried
-      // `rssItemId` and `mediaItemId` there was nothing else here that
-      // identified the file. A refusal code and an `errno` are neither a
-      // path nor derived from one -- `media/import.ts` is where that is
-      // enforced rather than hoped for.
-      if ('refusal' in outcome) {
-        ctx.log('could not put a finished download in the library', {
-          rssItemId: file.rssItemId,
-          mediaItemId: file.mediaItemId,
-          refusal: outcome.refusal,
-          errno: outcome.errno,
-        });
-        // Thrown, having been returned as a value: `deliverCompleted` treats
-        // a throw as "leave the row `completed` and try next tick", which is
-        // exactly what design spec §5 and §7 require of every refusal here
-        // -- a destination that already exists, a shape an operator has yet
-        // to fix, a root not mounted yet. The message names the rule and the
-        // plugin and carries nothing else, because `deliverCompleted` logs
-        // it.
-        throw new Error(`${spec.id}: this download was not imported (${outcome.refusal})`);
+      let copied = 0;
+      let placed: ImportPlacement['placed'] | null = null;
+      for (const entry of listing) {
+        // Tokens resolve over the entry, not the download, so `{filename}`
+        // and `{ext}` describe the file being copied rather than its folder.
+        const entryFile: DownloadedFile = { ...file, path: entry.path, sizeBytes: entry.sizeBytes };
+        // eslint-disable-next-line no-await-in-loop -- one copy at a time, stopping at the first refusal, so a retry resumes in order
+        const outcome = await ctx.library.place(file, entry, async () => resolveTokens(spec.tokens, entryFile, ctx));
+        if ('refusal' in outcome) refuseDownload(ctx, spec.id, file, outcome.refusal, outcome.errno);
+        copied += 1;
+        placed = outcome.placed;
       }
 
       ctx.log('a download finished', {
         rssItemId: file.rssItemId,
         mediaItemId: file.mediaItemId,
-        sizeBytes: file.sizeBytes,
-        placed: outcome.placed,
+        listed: listing.length,
+        copied,
+        placed,
       });
     },
 

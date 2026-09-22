@@ -8,6 +8,7 @@ export type {
   TokenResolver,
 } from './plugin.ts';
 export type {
+  DownloadEntry,
   ImportOutcome,
   ImportPlacement,
   ImportRefusal,

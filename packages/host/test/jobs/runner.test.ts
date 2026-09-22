@@ -36,6 +36,7 @@ const fakeCtx: PluginContext = {
   },
   jobs: { enqueue: async () => { throw new Error('jobs.enqueue: not used by this test'); } },
   library: {
+    list: async () => { throw new Error('library.list: not used by this test'); },
     place: async () => { throw new Error('library.place: not used by this test'); },
   },
   fetch: {
