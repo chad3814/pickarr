@@ -83,7 +83,7 @@ function tvRelease(rows: CardProps['rows']): TvRead | undefined {
   return (rows[TV_RELEASE_TABLE] ?? []).find(isTvRelease);
 }
 
-function TvCard({ item, rows, gathered, onExpand, submit }: CardProps): ReactElement {
+function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): ReactElement {
   const [expanded, setExpanded] = useState(false);
   const release = tvRelease(rows);
   // An item with no `tv_release` row, or one that failed `isTvRelease`,
@@ -98,12 +98,16 @@ function TvCard({ item, rows, gathered, onExpand, submit }: CardProps): ReactEle
           type="button"
           aria-expanded={expanded}
           onClick={() => {
-            // `onExpand` is idempotent (`@pickarr/plugin-ui`'s own doc), but
-            // it is called only on the transition into expanded rather than
-            // on every click, so collapsing this card back down asks web for
-            // nothing.
-            if (!expanded) onExpand();
-            setExpanded(!expanded);
+            // Reported on *every* transition, closing included
+            // (`@pickarr/plugin-ui`'s own doc on why this is one callback
+            // taking the new value rather than an `onExpand`/`onCollapse`
+            // pair): web tears its subscriptions down for a card that has
+            // closed, and an earlier version of this seam that only
+            // signalled the opening left 72 of them live for 24 cards
+            // nobody had left open.
+            const next = !expanded;
+            setExpanded(next);
+            onExpandedChange(next);
           }}
         >
           {headline}

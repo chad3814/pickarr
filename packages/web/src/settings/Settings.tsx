@@ -50,9 +50,11 @@ import { TOKEN_NAMES_BY_PLUGIN } from '@pickarr/contract';
  * the one map `@pickarr/contract` holds rather than spelled here.
  *
  * **Why contract and not the plugins.** `MediaPlugin.tokens` is the
- * declaration, but `@pickarr/plugin-tv` reaches `node:sqlite` through
- * `@pickarr/openmetadata` -> `drizzle-orm`, so importing it from a module
- * `main.tsx` reaches fails `npm run build` outright. The names live in
+ * declaration, but every media plugin's *package root* reaches
+ * `node:sqlite` through `@pickarr/openmetadata` -> `drizzle-orm`, so
+ * importing one from a module `main.tsx` reaches fails `npm run build`
+ * outright. (Only the `/browser` subpaths are safe, which is why
+ * `plugins/registry.ts` imports those and nothing else does.) The names live in
  * contract, which carries no node import, and `TokensFor<Name>` makes each
  * plugin's resolver record have exactly those keys -- so this list cannot
  * drift from what the host's validator will accept.

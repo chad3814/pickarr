@@ -29,8 +29,36 @@ export interface CardProps {
    * without this, which is what keeps a collapsed row free.
    */
   readonly gathered: GatheredItemView | undefined;
-  /** Tells web to start gathering. Idempotent; call it when the card expands. */
-  readonly onExpand: () => void;
+  /**
+   * Tells web this card's expanded state changed, so it can start gathering
+   * and stop again. Call it on **every** transition, with the state the
+   * card is moving *to*.
+   *
+   * **One callback carrying the new value, rather than an `onExpand` and an
+   * `onCollapse`.** The first version of this seam had only `onExpand`,
+   * documented "idempotent; call it when the card expands", and gave web no
+   * way to learn a card had closed. Web answered with a latch -- "has this
+   * card ever been opened" -- which kept `useGatheredItem` enabled for the
+   * life of the list. Measured on 24 cards opened and then closed again:
+   * **72 live subscriptions, and 24 IndexedDB transactions for a single
+   * `torrent_download` insert with nothing expanded on screen.** The
+   * subscription fan-out had moved from "cards currently open" to "cards
+   * ever opened", which is unbounded in a paging list.
+   *
+   * A pair of callbacks would have fixed the fan-out and left a worse
+   * hazard: a card may call one and forget the other, which silently
+   * reinstates the latch for that plugin alone and is invisible to every
+   * test of the other two. A single callback taking the new value cannot
+   * be half-implemented -- there is one call site per card, and the value
+   * is the whole message.
+   *
+   * **A card still owns its own expanded state**; this reports it. Web
+   * mirrors it to decide what to gather (design spec §2: the plugin owns
+   * the card body, web owns the replica). A card that never calls this
+   * renders an expander that reveals nothing, which is a loud failure
+   * rather than a quiet one.
+   */
+  readonly onExpandedChange: (expanded: boolean) => void;
   readonly submit: PickSubmit;
 }
 

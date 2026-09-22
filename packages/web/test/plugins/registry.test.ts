@@ -33,26 +33,49 @@ async function sources(): Promise<readonly (readonly [string, string])[]> {
   return Promise.all(files.map(async (file) => [file, await readFile(file, 'utf8')] as const));
 }
 
+/**
+ * Files exempted from the plugin-id scan, by name, with the reason. Empty,
+ * and that is the finding rather than the default: fix round 1's review
+ * found **seven** id sites in `src/` that the first version of this test
+ * could not see, and all seven were reworded rather than exempted. The
+ * entry shape is kept so that adding one is a visible, reviewable decision
+ * and not a regex tweak.
+ *
+ * An entry must name the file, the id, and the **exact** number of
+ * occurrences expected, so that a new one in an exempted file still fails.
+ * A whole-file exemption is not available on purpose: `Destinations.tsx`
+ * was the near-miss, and it needed one line of prose changed, not a licence
+ * for its code.
+ */
+const EXEMPT: readonly { readonly file: string; readonly id: string; readonly occurrences: number }[] = [];
+
 test('no plugin id is spelled in packages/web/src outside the registry', async () => {
-  // The registry is the seam's whole point. A second place naming `tv`
-  // makes adding a plugin two edits again, silently.
+  // The registry is the seam's whole point. A second place naming a plugin
+  // makes adding one two edits again, silently.
   //
-  // **The ids come from the registry, so a fourth plugin is scanned
-  // without editing this test.** That makes this one weak against a
-  // registry mutated to hold nothing -- which is why the test below
-  // spells all three out, and why the two belong together.
+  // **Matched on word boundaries, which is the whole of what this test is
+  // worth.** The first version required a quote adjacent on *both* sides
+  // (`/['"`]tv['"`]/`), and fix round 1's review showed that let `'/tv'`,
+  // `'category-tv'` and `` `/api/feeds/tv` `` all through -- seven real
+  // sites survived undetected, and `Shell.tsx`'s own former
+  // `<Navigate to="/tv">` would have passed too. Acceptance 7 was
+  // decorative. `\b` catches an id wherever it appears, in a path segment,
+  // a template, a package specifier or prose.
   //
-  // **Comments count.** A docblock naming `tv` goes stale exactly the way
-  // code does, and this repo's own hazard list is about prose that stopped
-  // being true. Two comments were reworded rather than exempted when this
-  // landed: `store/rows.ts`'s measured `listByTablePlugin` example, and
-  // `settings/AddFeed.tsx`'s default-plugin fallback.
+  // Case-sensitive, and that is not an oversight: the ids are lowercase and
+  // the *labels* are not (`TV`, `XXX`), so a case-insensitive scan would
+  // flag every legitimate mention of a display name.
   //
-  // **There is no exemption list, and adding one is a decision, not a
-  // fix.** If a literal id ever becomes genuinely unavoidable -- a route
-  // path that cannot be derived, say -- name the file and the reason here
-  // rather than loosening the match; a substring match would pass on the
-  // very drift this exists to catch.
+  // **The ids come from the registry**, so a fourth plugin is scanned with
+  // no edit here. That alone would be weak against a registry mutated to
+  // hold nothing, which is why `ids.length > 0` is asserted and why the
+  // literal id/label test below sits beside it.
+  //
+  // **Comments count.** A docblock naming a plugin goes stale exactly the
+  // way code does, and this repo's own hazard list is about prose that
+  // stopped being true. Seven comments were reworded to clear this scan,
+  // one of them by citing a test's leading clause instead of its full name
+  // (`settings/Destinations.tsx`); none was exempted.
   const ids = BROWSER_PLUGINS.map((plugin) => plugin.id);
   assert.ok(ids.length > 0, 'the registry is empty, so this test would scan for nothing');
 
@@ -60,10 +83,36 @@ test('no plugin id is spelled in packages/web/src outside the registry', async (
   for (const [file, text] of await sources()) {
     if (file.endsWith(join('plugins', 'registry.ts'))) continue;
     for (const id of ids) {
-      if (new RegExp(`['"\`]${id}['"\`]`).test(text)) offenders.push(`${file}: ${id}`);
+      const hits = text.match(new RegExp(`\\b${id}\\b`, 'g'))?.length ?? 0;
+      if (hits === 0) continue;
+      const allowed = EXEMPT.find((entry) => file.endsWith(entry.file) && entry.id === id);
+      if (allowed !== undefined && allowed.occurrences === hits) continue;
+      offenders.push(`${file}: ${id} x${String(hits)}`);
     }
   }
   assert.deepEqual(offenders, [], 'a plugin id is spelled outside the registry');
+});
+
+test('every exemption names a file that exists and still has exactly the occurrences it claims', async () => {
+  // An exemption that outlives the line it was written for is a hole
+  // nobody can see. This is what makes the list above self-cleaning: a
+  // reworded or deleted file reddens here rather than quietly widening the
+  // scan. Vacuously true while `EXEMPT` is empty, and that is the state it
+  // is meant to stay in.
+  const byPath = new Map(await sources());
+  const wrong: string[] = [];
+  for (const entry of EXEMPT) {
+    const found = [...byPath].find(([file]) => file.endsWith(entry.file));
+    if (found === undefined) {
+      wrong.push(`${entry.file}: no such file under src/`);
+      continue;
+    }
+    const hits = found[1].match(new RegExp(`\\b${entry.id}\\b`, 'g'))?.length ?? 0;
+    if (hits !== entry.occurrences) {
+      wrong.push(`${entry.file}: ${entry.id} claims ${String(entry.occurrences)}, found ${String(hits)}`);
+    }
+  }
+  assert.deepEqual(wrong, [], 'an exemption no longer describes the file it exempts');
 });
 
 test("web's src imports each plugin's /browser subpath, never its package root", async () => {

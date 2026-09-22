@@ -208,58 +208,66 @@ test('a card gathers nothing until it is opened, and opening it gathers once', a
   assert.equal(gathers, 1);
 });
 
-test('closing a card keeps its subscription, so it neither re-gathers on reopen nor misses a wake', async () => {
-  // **What the plugin seam changed here, and why the count going from 2 to
-  // 1 is not a loss.** `CardProps` gives web `onExpand` and no matching
-  // collapse (`@pickarr/plugin-ui`'s own doc), so `MediaItemCard` hands
-  // `useGatheredItem` a latch -- "has this ever been opened" -- and the
-  // hook never learns the card closed. Before, it did: it tore both
-  // subscriptions down on collapse, missed whatever landed in that window,
-  // and re-gathered on re-expand to make up for it (the count of 2 the
-  // review that added it called I2). A subscription that never goes away
-  // has no such window, so there is nothing left for a re-gather to
-  // correct.
+test('closing a card tears its subscriptions down, and reopening gathers again behind the cache', async () => {
+  // **The behaviour `CardProps.onExpandedChange` exists to make possible.**
+  // The seam first shipped with only an `onExpand`, so web could not learn
+  // a card had closed and passed `useGatheredItem` a latch instead. Fix
+  // round 1's review measured what that cost -- 72 live subscriptions for
+  // 24 cards opened and closed again, and 24 IndexedDB transactions for one
+  // `torrent_download` insert with nothing open on screen -- and the seam
+  // gained a collapse signal. This is the original pre-seam behaviour,
+  // restored: the count of 2 is the review-mandated re-gather (I2), because
+  // a download row landing while the card was collapsed was not watched for
+  // and must not be answered from the cache alone.
   //
-  // Both halves are asserted, because the first alone would pass just as
-  // well if the card had simply stopped watching: the `media_item` callback
-  // is fired *while the card is closed*, and must still be live.
+  // The teardown is asserted directly, not inferred from the count: a
+  // gather count of 2 would also be produced by a card that re-gathered
+  // while *keeping* its subscriptions, which is the regression this pins
+  // shut.
   let gathers = 0;
-  let wake: (() => void) | undefined;
+  let liveSubscriptions = 0;
   const source: GatheredSource = {
     ...quietInserts,
+    subscribeInserts: () => {
+      liveSubscriptions += 1;
+      return () => {
+        liveSubscriptions -= 1;
+      };
+    },
     gatherMediaItem: async (id: number) => {
       gathers += 1;
       return gathered({ id, title: 'The Thing' });
     },
-    subscribe: (_table, _id, listener) => {
-      wake = listener;
+    subscribe: () => {
+      liveSubscriptions += 1;
       return () => {
-        wake = undefined;
+        liveSubscriptions -= 1;
       };
     },
   };
   render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  assert.equal(liveSubscriptions, 0, 'a card nobody has opened watches nothing');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   await waitFor(() => {
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
   assert.equal(gathers, 1);
+  // One on `media_item`, one per download table (`useGatheredItem`'s own
+  // `DOWNLOAD_TABLES`, which holds two).
+  assert.equal(liveSubscriptions, 3, 'an open card watches its own row and both download tables');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   assert.ok(!screen.queryByRole('list', { name: /releases/i }), 'the card is closed again');
-
-  assert.ok(wake !== undefined, 'the media_item subscription outlived the close');
-  wake();
-  await waitFor(() => {
-    assert.equal(gathers, 2, 'a row landing while the card is closed is still noticed');
-  });
+  assert.equal(gathers, 1, 'collapsing gathers nothing');
+  assert.equal(liveSubscriptions, 0, 'and the close tore every subscription down, which the latch could not');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   await waitFor(() => {
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
-  assert.equal(gathers, 2, 'and reopening gathers nothing further, because nothing was missed');
+  assert.equal(gathers, 2, 'reopening re-gathers behind the cache, since the collapsed window was unwatched');
+  assert.equal(liveSubscriptions, 3, 'and watches again');
 });
 
 test("a TV item's card is the tv plugin's, and its headline names the series and the episode", async () => {

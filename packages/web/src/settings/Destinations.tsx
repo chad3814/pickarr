@@ -17,9 +17,13 @@
  *
  * Measured against the 258 web tests, by replacing `plugin.tokens` below
  * with the union of the three plugins' lists written out here: **2 red** --
- * `the tv row lists {season} and the movie row does not` and `every token a
- * plugin declared is offered on its row, and no token it did not`. Every
- * other test in the file stays green under it, which is the point: a row
+ * `the tokens a row offers are the ones that plugin declared: …` and
+ * `every token a plugin declared is offered on its row, and no token it
+ * did not`. (The first is cited by its leading clause because its full name
+ * ends by naming two plugins, and `test/plugins/registry.test.ts` refuses a
+ * plugin id anywhere in `src/`. Both names are verbatim prefixes and grep
+ * finds them.) Every other test in the file stays green under it, which is
+ * the point: a row
  * that renders *some* plausible token list satisfies everything except a
  * test that checks the list against the plugin that owns it.
  *

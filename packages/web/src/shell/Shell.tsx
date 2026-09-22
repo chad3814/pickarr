@@ -115,8 +115,9 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
   /**
    * Whether `createStore` rejected -- the one state that is neither "still
    * opening" nor "open", and which every screen below would otherwise
-   * render identically to both (whole-branch review §3: `/tv`'s section had
-   * an innerHTML of `""`, the counts read `0/0/0`, and no alert appeared,
+   * render identically to both (whole-branch review §3: the landing
+   * category's section had an innerHTML of `""`, all three counts read
+   * zero, and no alert appeared,
    * indefinitely). A boolean, not the error: a `VersionError`'s or an
    * `OpenBlockedError`'s message names the database, and nothing this
    * component renders may carry one (Global Constraints). The error itself
@@ -345,8 +346,8 @@ function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): Reac
             disagree before: these links were already derived, from
             `useCounts.ts`'s `CATEGORIES`, while the routes were three
             literals -- which is exactly the gap task 4's own review found
-            when swapping which screen rendered at `/tv` against `/movie`
-            passed every test in `Shell.test.tsx`.
+            when swapping which screen rendered at one category's path
+            against another's passed every test in `Shell.test.tsx`.
 
             `counts[plugin.id] ?? 0`: `Counts` is keyed by plugin id and
             `useCounts` seeds every registered id to zero, so the `??` is

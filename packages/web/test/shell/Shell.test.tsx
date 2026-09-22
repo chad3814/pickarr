@@ -372,15 +372,22 @@ test('the nav has exactly one link per registered plugin, plus Unmatched and Set
     </MemoryRouter>,
   );
 
+  // The **whole** accessible name, not its first word. The first version of
+  // this compared `textContent.split(/\s+/)[0]`, and renaming `label: 'TV'`
+  // to `'TV Shows'` passed all fifteen tests in this file (fix round 1,
+  // review-found). A category link's name is its label followed by its
+  // count span, so the expected strings below carry the zero every count
+  // reads on a replica this test never seeds -- which also pins that the
+  // count renders at all, beside the label, rather than somewhere else.
   const nav = screen.getByRole('navigation', { name: 'Primary' });
   const links = within(nav)
     .getAllByRole<HTMLAnchorElement>('link')
-    .map((link) => [link.textContent?.trim().split(/\s+/)[0] ?? '', link.getAttribute('href')]);
+    .map((link) => [link.textContent ?? '', link.getAttribute('href')]);
 
   assert.deepEqual(links, [
-    ['TV', '/tv'],
-    ['Movies', '/movie'],
-    ['XXX', '/xxx'],
+    ['TV 0', '/tv'],
+    ['Movies 0', '/movie'],
+    ['XXX 0', '/xxx'],
     ['Unmatched', '/unmatched'],
     ['Settings', '/settings'],
   ]);

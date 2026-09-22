@@ -39,7 +39,7 @@ test('the item’s title renders in the expander button’s accessible name', ()
       item={mediaItem({ title: 'The Room' })}
       rows={{}}
       gathered={undefined}
-      onExpand={() => {}}
+      onExpandedChange={() => {}}
       submit={submit}
     />,
   );
@@ -49,19 +49,31 @@ test('the item’s title renders in the expander button’s accessible name', ()
   );
 });
 
-test('clicking the expander button fires onExpand', () => {
-  let calls = 0;
+test('every expand and every collapse is reported, with the state the card moved to', () => {
+  // **The close is asserted, not only the open.** This card is one of three
+  // implementations of the same seam, and the regression fix round 1 found
+  // is exactly what a card reporting only its opening produces: web cannot
+  // tear the gather's subscriptions down, so the fan-out becomes "cards
+  // ever opened" rather than "cards currently open" -- measured at 72 live
+  // subscriptions for 24 cards nobody had left open. A single callback
+  // carrying the new value is what makes that impossible to half-implement
+  // (`@pickarr/plugin-ui`'s `onExpandedChange` doc), and asserting the
+  // sequence here is what holds this card to it.
+  const reported: boolean[] = [];
   render(
     <Card
       item={mediaItem()}
       rows={{}}
       gathered={undefined}
-      onExpand={() => {
-        calls += 1;
+      onExpandedChange={(expanded) => {
+        reported.push(expanded);
       }}
       submit={submit}
     />,
   );
-  fireEvent.click(screen.getByRole('button'));
-  assert.equal(calls, 1, 'the click, from collapsed, tells web to start gathering');
+  const button = screen.getByRole('button');
+  fireEvent.click(button);
+  fireEvent.click(button);
+  fireEvent.click(button);
+  assert.deepEqual(reported, [true, false, true], 'open, close, open -- each reported once, in order');
 });

@@ -18,8 +18,9 @@
  * `rows` is this item's plugin rows, batched for the whole page by
  * `library/usePluginRows.ts` -- so a collapsed card's headline costs
  * nothing beyond what the list already paid for. Releases, and whatever
- * download each has, come from `useGatheredItem` and are fetched only once
- * the plugin's card says it expanded.
+ * download each has, come from `useGatheredItem` and are fetched only while
+ * the plugin's card reports itself expanded -- which it does through
+ * `CardProps.onExpandedChange`, on the way down as well as up.
  *
  * **Artwork is not replicated** (design spec §1.2, #79). The poster below is
  * a request to `/api/artwork/poster/:mediaItemId`, which 404s for most items
@@ -58,30 +59,33 @@ export interface MediaItemCardProps {
 
 export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps): ReactElement {
   /**
-   * Whether this card has *ever* been expanded -- a latch, not the plugin's
-   * own expanded/collapsed state, which web does not see.
+   * The plugin card's own expanded state, mirrored here because that is
+   * what decides whether to gather. The plugin owns the state and reports
+   * every transition through `CardProps.onExpandedChange`; this holds no
+   * opinion of its own and never renders from it.
    *
-   * `CardProps` gives a plugin one signal, `onExpand`, and no matching
-   * collapse (`@pickarr/plugin-ui`'s own doc: "Tells web to start
-   * gathering. Idempotent"). So gathering starts on the first expand and
-   * never stops, which is a deliberate trade and not an oversight: the
-   * reason `useGatheredItem` used to re-gather on re-expand was that it
-   * tore its subscriptions down while collapsed and so missed anything that
-   * landed in that window. A subscription that is never torn down cannot
-   * miss it, so the re-gather has nothing left to correct. What it costs is
-   * a `media_item` subscription and two insert subscriptions per card the
-   * operator has opened at least once, held until the list unmounts.
+   * **It mirrors, rather than latching on the first expand, because a latch
+   * cost 72 live subscriptions for 24 cards.** The first version of this
+   * seam gave web only an `onExpand` and no collapse, so this state could
+   * only ever be a "has it ever been opened" latch -- and
+   * `useGatheredItem`'s fan-out moved from "cards currently open" to "cards
+   * ever opened", which a paging list makes unbounded. Measured before the
+   * seam gained `onExpandedChange`: 24 cards opened and closed again held
+   * 72 subscriptions, and one `torrent_download` insert cost **24**
+   * IndexedDB transactions with nothing open on screen. The same scenario
+   * now holds 0 and costs 0. `@pickarr/plugin-ui`'s `onExpandedChange` doc
+   * has the contract reasoning.
    */
-  const [everExpanded, setEverExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
-  const gathered = useGatheredItem(source, item.id, everExpanded);
+  const gathered = useGatheredItem(source, item.id, expanded);
 
   // `useCallback` so the plugin's card gets the same function every render.
   // Nothing in the three shipped cards puts it in a dependency array, but
   // `CardProps` is a public seam and a card that did would otherwise
   // rebuild an effect on every keystroke anywhere in the list.
-  const onExpand = useCallback(() => {
-    setEverExpanded(true);
+  const onExpandedChange = useCallback((next: boolean) => {
+    setExpanded(next);
   }, []);
 
   const plugin = pluginFor(item.pluginId);
@@ -110,7 +114,7 @@ export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps
       {plugin === undefined ? (
         <h2>{item.title}</h2>
       ) : (
-        <plugin.Card item={item} rows={rows} gathered={gathered} onExpand={onExpand} submit={submit} />
+        <plugin.Card item={item} rows={rows} gathered={gathered} onExpandedChange={onExpandedChange} submit={submit} />
       )}
     </article>
   );

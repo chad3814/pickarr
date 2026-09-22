@@ -26,18 +26,22 @@
  * The 3+N race below is unchanged and is a different thing: that one
  * resolves on the next wake, this one had no wake to resolve on.
  *
- * **Web's only caller no longer toggles `enabled` back off, and the two
- * paragraphs above are why that is safe rather than why it is a loss.**
- * `library/MediaItemCard.tsx` passes a latch -- "has this card ever been
- * expanded" -- because the plugin card owns the expanded/collapsed state
- * and `CardProps` gives web one signal, `onExpand`, with no matching
- * collapse (`@pickarr/plugin-ui`'s own doc). So the re-gather-on-re-expand
- * described above no longer fires, and it no longer has anything to
- * correct: it existed because the subscriptions went away while collapsed,
- * and they now do not. What that costs instead is those subscriptions
- * staying live on a card the operator opened once and closed again, until
- * the list unmounts. The `enabled === false` path below is still real and
- * still tested -- it is what every card reads before its first expand.
+ * **`enabled` is the plugin card's own expanded state, and the seam was
+ * changed so that it could be.** The plugin owns that state now
+ * (`library/MediaItemCard.tsx` mirrors it), and the first version of
+ * `@pickarr/plugin-ui`'s `CardProps` reported only the *opening* -- one
+ * `onExpand`, no collapse -- which left web able to pass nothing better
+ * than a latch: "has this card ever been opened". That kept this effect
+ * mounted for the life of the list, and it is the two paragraphs above
+ * that make the cost concrete rather than theoretical, because every
+ * subscription they describe stayed live. Measured on 24 cards opened and
+ * then closed again: **72 live subscriptions, and 24 IndexedDB
+ * transactions for one `torrent_download` insert with nothing open on
+ * screen** -- against 0 and 0 before the cards moved out of web, since the
+ * fan-out had moved from "cards currently open" to "cards ever opened".
+ * `CardProps.onExpandedChange` replaced `onExpand` for that reason, and
+ * the behaviour this file describes -- teardown on collapse, cache shown
+ * and re-gather started on re-expand -- is restored intact.
  *
  * **`gatherMediaItem` is 3+N transactions, and cannot be made atomic** --
  * `store/rows.ts` does not accept a caller's transaction, and that is a
@@ -195,11 +199,10 @@ function releaseOf(value: unknown): number | undefined {
  * `true`, and caches the result for as long as this hook is mounted: a
  * second `enabled` transition back to `true` for the same id renders the
  * cached value immediately *and* gathers again behind it, so nothing that
- * landed while it was `false` stays unseen. A card that has never expanded
+ * landed while the card was collapsed stays unseen. A collapsed card
  * (`enabled === false`) costs nothing -- no gather, no subscription -- and
- * `undefined` is what it reads then, while still loading, or when the
- * replica holds no such item. Web's own caller never transitions back to
- * `false`; see this file's docblock for why, and for what that costs.
+ * `undefined` is what it reads while collapsed, while still loading, or
+ * when the replica holds no such item.
  */
 export function useGatheredItem(
   source: GatheredSource,

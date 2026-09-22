@@ -194,3 +194,25 @@ test('emptyPluginRows seeds every named table to an empty array, and no others',
   assert.deepEqual(emptyPluginRows(['tv_release', 'movie_detail']), { tv_release: [], movie_detail: [] });
   assert.deepEqual(emptyPluginRows([]), {});
 });
+
+test('a plugin that declared no tables gets one shared frozen value, not an object per call', () => {
+  // Two of the three shipped plugins declare `tables: []`, so this is the
+  // `rows` prop every card on two of the three browse screens receives on
+  // every render. `{} !== {}`, so a fresh literal defeats any memoisation a
+  // plugin's `Card` applied to `rows` -- `CardProps` is a public seam and
+  // its `onExpandedChange` is memoised for exactly that reason (fix round
+  // 1, review-found).
+  //
+  // An identity comparison, and safe to write as one: these are plain
+  // objects, never DOM nodes, so `CLAUDE.md`'s live-element hazard does not
+  // apply. Written as a boolean anyway, which is the house form.
+  assert.ok(emptyPluginRows([]) === emptyPluginRows([]), 'the empty answer is one value, reused');
+  assert.ok(Object.isFrozen(emptyPluginRows([])), 'and frozen, because every card shares it');
+
+  // A non-empty `tables` cannot share, since the answer depends on the
+  // argument -- so it is frozen rather than shared, and the caller holds it
+  // stable instead (`library/Category.tsx` memoises on `tables`).
+  const named = emptyPluginRows(['tv_release']);
+  assert.ok(Object.isFrozen(named), 'a named-table answer is frozen too');
+  assert.ok(named !== emptyPluginRows(['tv_release']), 'but not shared: it depends on its argument');
+});

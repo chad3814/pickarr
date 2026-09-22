@@ -7,15 +7,23 @@
  * sets a class, and this file does not become the first exception. Verified
  * against the actual 2.0 markup, not assumed: `<article>`, `<img>` and
  * `ul[aria-label='releases']` each appear exactly once in the browse markup,
- * outside `styles/` and `test/`. **Two of those three are no longer in
- * `packages/web/src` at all**, and this file reaches them anyway because a
- * stylesheet is matched against the rendered document rather than against a
- * package: the card seam moved `ul[aria-label='releases']` to
- * `@pickarr/plugin-ui`'s `ReleaseList.tsx` and the card's `<h2>` and
- * expander button to each plugin's own `browser.tsx`, while `<article>` and
- * `<img>` stayed in `library/MediaItemCard.tsx`. That is the coupling to
- * know about before editing either side: a plugin renaming its heading
- * element silently drops the two `article h2` rules below.
+ * outside `styles/` and `test/`. **Some of that markup is no longer in
+ * `packages/web/src`**, and this file reaches it anyway because a stylesheet
+ * is matched against the rendered document rather than against a package.
+ * Counted on the tree as it stands:
+ *
+ * - `<article>` and `<img>`: `library/MediaItemCard.tsx`, one each, and web
+ *   still owns both.
+ * - `ul[aria-label='releases']`: `@pickarr/plugin-ui`'s `ReleaseList.tsx`.
+ * - `<h2>`: **two producers.** Each plugin's `browser.tsx` renders one
+ *   holding the expander button, and `MediaItemCard.tsx` renders a plain
+ *   one on its unknown-plugin fallback path -- an item whose `pluginId` the
+ *   registry has no card for gets a title and no expander. So `article h2`
+ *   below styles both, and `article h2 button` reaches only the first.
+ *
+ * That is the coupling to know about before editing either side: a plugin
+ * renaming its heading element silently drops `article h2 button`, and the
+ * fallback path would keep `article h2` looking fine while it did.
  *
  * `<p>` appeared exactly three times when
  * this paragraph was written -- `Category`'s and `Unmatched`'s empty-list
