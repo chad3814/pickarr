@@ -10,16 +10,16 @@
   },
   "dependencies": {
     "@pickarr/contract": "*",
+    "@pickarr/plugin-movie": "*",
+    "@pickarr/plugin-tv": "*",
     "@pickarr/plugin-ui": "*",
+    "@pickarr/plugin-xxx": "*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router": "^7.1.0"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^16.0.0",
-    "@pickarr/plugin-movie": "*",
-    "@pickarr/plugin-tv": "*",
-    "@pickarr/plugin-xxx": "*",
     "@testing-library/react": "^16.1.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

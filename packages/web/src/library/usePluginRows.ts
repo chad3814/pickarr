@@ -5,7 +5,7 @@
  * **Why this exists separately from `useGatheredItem`.** That hook -- and
  * `store/gather.ts`'s `gatherMediaItem` underneath it -- only runs while a
  * card is `enabled`, which `library/MediaItemCard.tsx` ties to whether the
- * card is expanded. A collapsed card's headline still needs its plugin's
+ * card has ever been expanded. A card nobody has opened still needs its plugin's
  * rows (a TV row reads the series and episode even before anyone clicks
  * it), so a per-card fetch gated on expansion cannot serve it: an earlier
  * version of `gatherMediaItem` returned `pluginRows` for exactly this
@@ -68,7 +68,8 @@ function isStoreClosed(err: unknown): boolean {
  * with either changing -- `library/Category.tsx`'s own call site memoises
  * `mediaItemIds` off `items` for exactly this reason, and a plugin's
  * `tables` (`@pickarr/plugin-ui`'s `BrowserPlugin.tables`) is a stable
- * module-level value once the registry supplies it.
+ * module-level value that `shell/Shell.tsx` passes straight through from
+ * `plugins/registry.ts` rather than copying.
  */
 export function usePluginRows(
   source: PluginRowsSource,

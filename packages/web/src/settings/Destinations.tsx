@@ -64,7 +64,7 @@ import {
   type DestinationSubmit,
   type SaveDestinationInput,
 } from './postDestination.ts';
-import { pluginLabel } from '../pluginLabels.ts';
+import { pluginFor } from '../plugins/registry.ts';
 
 /** Re-exported so a caller of this section needs one import, not two -- `useDestinations.ts` is where it is declared, since that hook is what needs it narrowed. */
 export type { DestinationsSource };
@@ -237,13 +237,24 @@ function DestinationRow({ plugin, destination, submit }: DestinationRowProps): R
         `Feeds.tsx` and `DownloadClients.tsx` fixed for anything inside a
         settings section.
 
-        `pluginLabel`, not `plugin.pluginId` -- `../pluginLabels.ts`'s own
-        docblock. The nav (`shell/Shell.tsx`) has read this same map since
-        task 4; before this, this heading read the raw id instead, so the
-        nav named this row's plugin **TV** while the row itself, one click
-        away, named it **tv**.
+        The registry's `label`, not `plugin.pluginId`. The nav
+        (`shell/Shell.tsx`) reads the same `BrowserPlugin.label`; before the
+        two were joined, this heading read the raw id instead, so the nav
+        named this row's plugin **TV** while the row itself, one click away,
+        named its own id.
+
+        **Falling back to the id is deliberate, and reachable.** This
+        screen's rows come from `@pickarr/contract`'s
+        `TOKEN_NAMES_BY_PLUGIN` (`Settings.tsx`'s own `Object.entries` over
+        it), which is a different list from `plugins/registry.ts`: one
+        declares which plugins have path tokens, the other which have a
+        browse card, and nothing holds the two in step. A plugin in the
+        first and not the second has no label here, and its own id is the
+        only honest thing to head the row with -- without the `??` the
+        `<h3>` renders empty and the row loses its accessible name
+        altogether.
       */}
-      <h3 id={nameId}>{pluginLabel(plugin.pluginId)}</h3>
+      <h3 id={nameId}>{pluginFor(plugin.pluginId)?.label ?? plugin.pluginId}</h3>
       <form
         onSubmit={(event) => {
           void save(event);

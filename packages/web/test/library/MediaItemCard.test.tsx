@@ -13,8 +13,26 @@ import type { GatheredSource } from '../../src/library/useGatheredItem.ts';
 import type { GatheredDownload, GatheredItem, GatheredRelease } from '../../src/store/gather.ts';
 import type { PluginRows } from '@pickarr/plugin-ui';
 
-/** No test in this file reads `rows` -- `MediaItemCard` accepts it but does not yet render it -- so every render below passes this one stable empty object. */
+/**
+ * What `library/Category.tsx` hands a card whose plugin declared no tables.
+ * The plugin's card then renders `item.title`, with no headline built from
+ * anything.
+ *
+ * `MediaItemCard` does not read `rows` itself -- it forwards them to the
+ * plugin's `Card` -- so the only test here that seeds any is the TV
+ * headline one below; the rule that builds the headline is pinned against
+ * literals in `packages/plugin-tv/test/headline.test.ts`.
+ */
 const NO_ROWS: PluginRows = {};
+
+/**
+ * A `tv_release` row as `plugin-tv`'s card narrows it (`TvRead`'s
+ * `seriesTitle`, `seasonNumber` and `episodeNumber`), under the table name
+ * `tvBrowser.tables` declares.
+ */
+function tvRows(row: { seriesTitle: string; seasonNumber: number | null; episodeNumber: number | null }): PluginRows {
+  return { tv_release: [row] };
+}
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -170,15 +188,7 @@ test('a card shows its title as a real heading', () => {
   assert.equal(heading.textContent, 'The Thing');
 });
 
-test('expanding gathers the item once, and collapsing costs nothing while reopening refreshes', async () => {
-  // **`gathers` was pinned at 1 across the reopen**, which is the review's
-  // I2: both subscriptions are torn down while a card is collapsed, so a
-  // download row landing in that window is never noticed, and answering
-  // the reopen from the cache alone left a live `Pick` button on a release
-  // that already had one. `useGatheredItem`'s docblock has the decision;
-  // what this card-level test still pins is the half that did not change
-  // -- a collapsed card gathers nothing at all.
-  //
+test('a card gathers nothing until it is opened, and opening it gathers once', async () => {
   let gathers = 0;
   const source: GatheredSource = {
     ...quietInserts,
@@ -189,7 +199,46 @@ test('expanding gathers the item once, and collapsing costs nothing while reopen
     subscribe: () => () => {},
   };
   render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
-  assert.equal(gathers, 0, 'a collapsed card costs nothing');
+  assert.equal(gathers, 0, 'an unopened card costs nothing');
+
+  fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
+  await waitFor(() => {
+    assert.ok(screen.getByRole('list', { name: /releases/i }));
+  });
+  assert.equal(gathers, 1);
+});
+
+test('closing a card keeps its subscription, so it neither re-gathers on reopen nor misses a wake', async () => {
+  // **What the plugin seam changed here, and why the count going from 2 to
+  // 1 is not a loss.** `CardProps` gives web `onExpand` and no matching
+  // collapse (`@pickarr/plugin-ui`'s own doc), so `MediaItemCard` hands
+  // `useGatheredItem` a latch -- "has this ever been opened" -- and the
+  // hook never learns the card closed. Before, it did: it tore both
+  // subscriptions down on collapse, missed whatever landed in that window,
+  // and re-gathered on re-expand to make up for it (the count of 2 the
+  // review that added it called I2). A subscription that never goes away
+  // has no such window, so there is nothing left for a re-gather to
+  // correct.
+  //
+  // Both halves are asserted, because the first alone would pass just as
+  // well if the card had simply stopped watching: the `media_item` callback
+  // is fired *while the card is closed*, and must still be live.
+  let gathers = 0;
+  let wake: (() => void) | undefined;
+  const source: GatheredSource = {
+    ...quietInserts,
+    gatherMediaItem: async (id: number) => {
+      gathers += 1;
+      return gathered({ id, title: 'The Thing' });
+    },
+    subscribe: (_table, _id, listener) => {
+      wake = listener;
+      return () => {
+        wake = undefined;
+      };
+    },
+  };
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   await waitFor(() => {
@@ -198,16 +247,56 @@ test('expanding gathers the item once, and collapsing costs nothing while reopen
   assert.equal(gathers, 1);
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
-  // Collapsed. Asserted before reopening, because after the reopen a count
-  // of 2 would be satisfied by a collapse that gathered and a reopen that
-  // did not, which is the opposite of what this claims.
-  assert.equal(gathers, 1, 'collapsing gathers nothing');
+  assert.ok(!screen.queryByRole('list', { name: /releases/i }), 'the card is closed again');
+
+  assert.ok(wake !== undefined, 'the media_item subscription outlived the close');
+  wake();
+  await waitFor(() => {
+    assert.equal(gathers, 2, 'a row landing while the card is closed is still noticed');
+  });
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   await waitFor(() => {
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
-  assert.equal(gathers, 2, 'reopening refreshes what it shows from the cache');
+  assert.equal(gathers, 2, 'and reopening gathers nothing further, because nothing was missed');
+});
+
+test("a TV item's card is the tv plugin's, and its headline names the series and the episode", async () => {
+  // Design spec acceptance 1, at the seam web owns. The registry is what
+  // turns `item.pluginId` into a card; until it was wired, every row
+  // rendered `item.title` no matter which plugin wrote it, which is the
+  // defect the whole slice exists to fix. The headline *rule* is
+  // `plugin-tv`'s and is pinned there -- what this asserts is that web
+  // reached that card at all and handed it the rows it was given.
+  render(
+    <MediaItemCard
+      source={stubSource}
+      item={summary({ id: 7, title: "Dio's World(3)" })}
+      rows={tvRows({ seriesTitle: "Jo Jo's Bizarre Adventure", seasonNumber: 2, episodeNumber: 47 })}
+      submit={acceptsPick}
+    />,
+  );
+
+  const heading = await screen.findByRole('heading', {
+    name: "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)",
+  });
+  assert.equal(heading.textContent, "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)");
+});
+
+test('an item whose plugin this build does not carry still shows its poster and its title', () => {
+  // Not a defensive branch: the replica persists across client builds and
+  // its rows were written by whatever plugins the *host* registered, so a
+  // build that drops a plugin -- or one that meets a host carrying an extra
+  // -- reads a `pluginId` the registry has no card for. Throwing would take
+  // the whole paged list down with it; rendering nothing would leave a
+  // poster with no name under it.
+  const item: MediaItemSyncRead = { ...summary({ id: 7, title: 'The Thing' }), pluginId: 'book' };
+  render(<MediaItemCard source={stubSource} item={item} rows={NO_ROWS} submit={acceptsPick} />);
+
+  assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the row is still identifiable');
+  assert.ok(screen.getByRole('img', { name: 'The Thing' }), 'and web still renders the poster it owns');
+  assert.ok(!screen.queryByRole('button'), 'with no expander, because there is no card body to expand into');
 });
 
 test('a release shows its resolution and its download status', async () => {

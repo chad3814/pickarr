@@ -39,15 +39,15 @@ export interface CategorySource extends MediaItemsSource, GatheredSource, Plugin
 
 export interface CategoryProps {
   store: CategorySource | undefined;
-  /** `media_item.pluginId` for this category -- `'tv' | 'movie' | 'xxx'` in practice, but this component does not need to know the closed set (`useCounts.ts`'s own doc on why a category is a plugin id, not a table). */
+  /** `media_item.pluginId` for this category -- one of the registry's ids in practice, but this component does not need to know which (`useCounts.ts`'s own doc on why a category is a plugin id, not a table). */
   pluginId: string;
   /**
-   * This category's plugin's declared replica tables (`@pickarr/plugin-ui`'s
-   * `BrowserPlugin.tables`), threaded the same way `pluginId` is. Defaults
-   * to nothing here because the plugin registry that would supply it does
-   * not exist until Task 6 (`packages/web/src/plugins/registry.ts`);
-   * `Shell.tsx` passes a stable empty array for now, with a comment saying
-   * the same.
+   * This category's plugin's declared replica tables
+   * (`@pickarr/plugin-ui`'s `BrowserPlugin.tables`), threaded the same way
+   * `pluginId` is. `Shell.tsx` passes the registry entry's own array by
+   * reference: it is a module-level constant inside the plugin package, and
+   * `usePluginRows` refetches the page whenever this reference changes, so
+   * a copy made per render would refetch per render.
    */
   tables: readonly string[];
   /** Submits one pick, forwarded to each card's `ReleaseList` and never called here. A prop rather than a member of `CategorySource`: a store is the replica, and posting to `/api/picks` is not something a replica does. */

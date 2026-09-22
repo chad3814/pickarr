@@ -211,10 +211,14 @@ const TABLES_WITH_UPDATED_AT: ReadonlySet<string> = new Set([
  * set admits eight tables and only two of them, `media_item` and `rss_feed`,
  * project a `pluginId`; the two readers below originally reused it, so for
  * `rss_item`, `torrent_download`, `nzb_download` and `person` the guard
- * passed and the index answered nothing -- measured as
- * `listByTablePlugin('rss_item','tv') -> []` and
- * `countByPlugin('rss_item','tv') -> 0` against a store holding two real
- * `rss_item` rows. That is precisely the lie the other set's own doc exists
+ * passed and the index answered nothing -- measured, with a registered
+ * plugin's own id as the second argument, as
+ * `listByTablePlugin('rss_item', pluginId) -> []` and
+ * `countByPlugin('rss_item', pluginId) -> 0` against a store holding two
+ * real `rss_item` rows. (The id is written as a name rather than spelled
+ * out because `test/plugins/registry.test.ts` refuses a plugin id anywhere
+ * in `src/` outside the registry, comments included; the measurement is
+ * the one originally recorded here and is unchanged.) That is precisely the lie the other set's own doc exists
  * to refuse: an empty answer reading as "this table is empty", which a
  * caller has no way to catch.
  */

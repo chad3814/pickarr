@@ -1,7 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { Shell } from '../../src/shell/Shell.tsx';
 import type { CreateStoreDeps } from '../../src/store/index.ts';
@@ -341,6 +341,49 @@ test('the nav links to each category, and marks the current one', async () => {
 
   const other = screen.getByRole<HTMLAnchorElement>('link', { name: /TV/ });
   assert.ok(!other.hasAttribute('aria-current'), 'a category that is not current is not announced as the page');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
+/**
+ * Acceptance 8's nav half: "deleting a plugin from the registry removes its
+ * route, its nav entry and its count, with no other edit."
+ *
+ * **Spelled out, not derived from `BROWSER_PLUGINS`.** A loop over the
+ * registry would build both sides of the comparison from the thing under
+ * test and stay green through any change to it -- `CLAUDE.md`'s
+ * `groupAnchor` entry, where eight sites computed their expectation and a
+ * mutation to a constant passed all 70 web tests. Measured here rather than
+ * argued: with `xxxBrowser` removed from the registry, the route test and
+ * the three count tests redden and the nav test above does not, because it
+ * only names TV and Movies. This is the test that reddens.
+ *
+ * The labels are the registry's (`test/plugins/registry.test.ts` pins those
+ * three strings against the plugin packages); the hrefs are the ids, which
+ * is `Shell.tsx`'s route table read from the other side.
+ */
+test('the nav has exactly one link per registered plugin, plus Unmatched and Settings', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/tv']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  const nav = screen.getByRole('navigation', { name: 'Primary' });
+  const links = within(nav)
+    .getAllByRole<HTMLAnchorElement>('link')
+    .map((link) => [link.textContent?.trim().split(/\s+/)[0] ?? '', link.getAttribute('href')]);
+
+  assert.deepEqual(links, [
+    ['TV', '/tv'],
+    ['Movies', '/movie'],
+    ['XXX', '/xxx'],
+    ['Unmatched', '/unmatched'],
+    ['Settings', '/settings'],
+  ]);
 
   await waitFor(() => {
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');

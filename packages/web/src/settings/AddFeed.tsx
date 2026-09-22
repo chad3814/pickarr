@@ -21,14 +21,15 @@
  * missing prop. {@link postFeed} below is the real implementation;
  * `shell/Shell.tsx` wires it in explicitly.
  *
- * **`pluginId` offers `CATEGORIES`, the same three ids the shell's nav
+ * **`pluginId` offers `CATEGORIES`, the same ids the shell's nav
  * uses, and the host stays the authority on whether one is registered**
  * (design spec §4, §6). This select only narrows what a person can *try* --
  * `feeds/add.ts`'s `addFeed` (`packages/host`) is what actually checks a
  * `pluginId` against the host's registered plugins, and a value this select
  * never offered can still come back refused. Registering a fourth plugin
- * means adding it to `CATEGORIES` (`shell/useCounts.ts`); there is no
- * endpoint that would let this form discover one on its own.
+ * means adding it to `plugins/registry.ts`, which `CATEGORIES`
+ * (`shell/useCounts.ts`) is derived from; there is no endpoint that would
+ * let this form discover one on its own.
  *
  * **Which package a thing may come from, and why the refusal codes come
  * from one and the bounds do not.** This package is bundled and run in a
@@ -222,7 +223,12 @@ export interface AddFeedProps {
 export function AddFeed({ submit }: AddFeedProps): ReactElement {
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
-  const [pluginId, setPluginId] = useState<string>(CATEGORIES[0] ?? 'tv');
+  // The first registered plugin, the same one the nav's leftmost tab and
+  // `/`'s redirect land on (`shell/Shell.tsx`'s `HOME_CATEGORY`). The `??`
+  // is what `noUncheckedIndexedAccess` requires of `[0]`, and `''` is the
+  // only answer available to a build carrying no plugins at all -- which is
+  // also a `<select>` with no options, so there is nothing else to pick.
+  const [pluginId, setPluginId] = useState<string>(CATEGORIES[0] ?? '');
   const [downloadType, setDownloadType] = useState(DEFAULT_DOWNLOAD_TYPE);
   const [pollIntervalS, setPollIntervalS] = useState(DEFAULT_POLL_INTERVAL_S);
   const [pending, setPending] = useState(false);

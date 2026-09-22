@@ -1214,8 +1214,10 @@ test('an operator can set a plugin\'s library destination and see it listed', as
   await page.goto(`${harness.origin}/settings`);
 
   // `exact: true`: the shell's own nav names this same plugin with the same
-  // word now (`pluginLabels.ts`'s `pluginLabel`, the ruling this task
-  // implements), so a loose `name: 'Movies'` would also match the nav
+  // word (both read `BrowserPlugin.label` through
+  // `web/src/plugins/registry.ts`; the ruling that joined them predates
+  // that file and was first implemented in a `pluginLabels.ts` the registry
+  // replaced), so a loose `name: 'Movies'` would also match the nav
   // link's own `<li>` were its accessible name not "Movies 0" -- the link
   // text plus its count span, which `exact` tells apart from this row's
   // heading, exactly "Movies" and nothing else.

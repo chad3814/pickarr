@@ -11,6 +11,15 @@
  * `index.ts` reaches `@pickarr/openmetadata` and, through it, `node:sqlite`
  * -- exactly the import `npm run build`'s browser bundle cannot carry
  * (Global Constraint). This module reaches only into `@pickarr/plugin-ui`.
+ *
+ * **No wrapper element of its own.** `web/src/library/MediaItemCard.tsx`
+ * renders the `<article>` that *is* one card, puts the poster in it, and
+ * renders this body beneath -- so a body opening an `<article>` of its own
+ * would make two per row: `web/src/styles/library.css`'s `article img`
+ * rule would stop reaching the poster, and
+ * `packages/e2e/tests/shell.spec.ts`'s `getByRole('article')` would resolve
+ * to two elements and fail Playwright's strict mode. Web keeps the poster
+ * and the card element; a plugin owns everything below it (design spec §2).
  */
 import { useState, type ReactElement } from 'react';
 import { ReleaseList, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
@@ -19,7 +28,7 @@ function XxxCard({ item, gathered, onExpand, submit }: CardProps): ReactElement 
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <article>
+    <>
       <h2>
         <button
           type="button"
@@ -37,7 +46,7 @@ function XxxCard({ item, gathered, onExpand, submit }: CardProps): ReactElement 
         </button>
       </h2>
       {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submit} />}
-    </article>
+    </>
   );
 }
 
@@ -45,10 +54,12 @@ function XxxCard({ item, gathered, onExpand, submit }: CardProps): ReactElement 
  * `@pickarr/plugin-ui`'s `BrowserPlugin` for this plugin. `id: 'xxx'`
  * matches `index.ts`'s `XXX_PLUGIN_ID` and `MediaItemSyncRead.pluginId`
  * for every item this plugin creates (not imported from `index.ts` -- see
- * this file's own doc); `label: 'XXX'` matches
- * `packages/web/src/pluginLabels.ts`'s `PLUGIN_LABELS.xxx`, the one other
- * place this repo spells this plugin's display name. `tables: []` -- see
- * this file's own doc.
+ * this file's own doc). `label: 'XXX'` is the single source of this
+ * plugin's display name: `web/src/plugins/registry.ts` is what the nav and
+ * the settings destination row both read it through, so there is no second
+ * spelling to drift from. It used to have one -- `web/src/pluginLabels.ts`,
+ * deleted when the registry landed. `tables: []` -- see this file's own
+ * doc.
  */
 export const xxxBrowser: BrowserPlugin = {
   id: 'xxx',

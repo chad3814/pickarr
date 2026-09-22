@@ -6,8 +6,18 @@
  * parent/child relationship -- because no component this stylesheet reaches
  * sets a class, and this file does not become the first exception. Verified
  * against the actual 2.0 markup, not assumed: `<article>`, `<img>` and
- * `ul[aria-label='releases']` each appear exactly once in `packages/web/src`
- * outside `styles/` and `test/`. `<p>` appeared exactly three times when
+ * `ul[aria-label='releases']` each appear exactly once in the browse markup,
+ * outside `styles/` and `test/`. **Two of those three are no longer in
+ * `packages/web/src` at all**, and this file reaches them anyway because a
+ * stylesheet is matched against the rendered document rather than against a
+ * package: the card seam moved `ul[aria-label='releases']` to
+ * `@pickarr/plugin-ui`'s `ReleaseList.tsx` and the card's `<h2>` and
+ * expander button to each plugin's own `browser.tsx`, while `<article>` and
+ * `<img>` stayed in `library/MediaItemCard.tsx`. That is the coupling to
+ * know about before editing either side: a plugin renaming its heading
+ * element silently drops the two `article h2` rules below.
+ *
+ * `<p>` appeared exactly three times when
  * this paragraph was written -- `Category`'s and `Unmatched`'s empty-list
  * states, and `Shell`'s store-failure explanation -- and the feed-settings
  * slice added two more in `Feeds.tsx`: see `section > p`'s own comment
@@ -20,9 +30,11 @@
  */
 
 /*
- * One media item, collapsed to its title and poster until expanded
- * (`MediaItemCard.tsx`'s own doc). `<article>` is the only one in this app,
- * so this reaches it without a class this task would be the first to add.
+ * One media item: the poster, and beneath it whatever its plugin's card
+ * renders (`MediaItemCard.tsx`'s own doc). `<article>` is the only one in
+ * this app -- one per row, held by web rather than by the plugin for
+ * exactly that reason -- so this reaches it without a class this task
+ * would be the first to add.
  */
 article {
   border: 1px solid var(--color-line);
@@ -46,8 +58,9 @@ article img {
 
 article h2 { margin: 0; font-size: var(--text-title); font-weight: 600; }
 
-/* The disclosure control that expands a card into its releases
-   (`MediaItemCard.tsx`'s `aria-expanded` button) reads as the card's own
+/* The disclosure control that expands a card into its releases (the
+   `aria-expanded` button in the rendering plugin's own `browser.tsx`; web
+   holds the `<article>` around it) reads as the card's own
    title, not as a bordered form control: `base.css`'s `button` rule is in
    the `base` layer, so this rule beats it regardless of specificity
    (`styles/index.css`'s own doc on why that bet is off the table). */

@@ -26,6 +26,19 @@
  * The 3+N race below is unchanged and is a different thing: that one
  * resolves on the next wake, this one had no wake to resolve on.
  *
+ * **Web's only caller no longer toggles `enabled` back off, and the two
+ * paragraphs above are why that is safe rather than why it is a loss.**
+ * `library/MediaItemCard.tsx` passes a latch -- "has this card ever been
+ * expanded" -- because the plugin card owns the expanded/collapsed state
+ * and `CardProps` gives web one signal, `onExpand`, with no matching
+ * collapse (`@pickarr/plugin-ui`'s own doc). So the re-gather-on-re-expand
+ * described above no longer fires, and it no longer has anything to
+ * correct: it existed because the subscriptions went away while collapsed,
+ * and they now do not. What that costs instead is those subscriptions
+ * staying live on a card the operator opened once and closed again, until
+ * the list unmounts. The `enabled === false` path below is still real and
+ * still tested -- it is what every card reads before its first expand.
+ *
  * **`gatherMediaItem` is 3+N transactions, and cannot be made atomic** --
  * `store/rows.ts` does not accept a caller's transaction, and that is a
  * finding parked from an earlier slice's review, not something to fix here.
@@ -182,10 +195,11 @@ function releaseOf(value: unknown): number | undefined {
  * `true`, and caches the result for as long as this hook is mounted: a
  * second `enabled` transition back to `true` for the same id renders the
  * cached value immediately *and* gathers again behind it, so nothing that
- * landed while the card was collapsed stays unseen. A collapsed card
+ * landed while it was `false` stays unseen. A card that has never expanded
  * (`enabled === false`) costs nothing -- no gather, no subscription -- and
- * `undefined` is what it reads while collapsed, while still loading, or
- * when the replica holds no such item.
+ * `undefined` is what it reads then, while still loading, or when the
+ * replica holds no such item. Web's own caller never transitions back to
+ * `false`; see this file's docblock for why, and for what that costs.
  */
 export function useGatheredItem(
   source: GatheredSource,

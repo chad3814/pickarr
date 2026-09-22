@@ -13,7 +13,7 @@ import { listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import { Destinations, type PluginTokens } from '../../src/settings/Destinations.tsx';
 import type { DestinationsSource } from '../../src/settings/useDestinations.ts';
-import { pluginLabel } from '../../src/pluginLabels.ts';
+import { pluginFor } from '../../src/plugins/registry.ts';
 import {
   DESTINATION_REFUSAL_MESSAGES,
   type DestinationSubmit,
@@ -130,24 +130,36 @@ function deferred<T>(): { promise: Promise<T>; settle: (value: T) => void } {
 async function renderDestinations(db: IDBDatabase, submit: DestinationSubmit): Promise<void> {
   render(<Destinations source={sourceFor(db)} plugins={PLUGINS} submit={submit} />);
   await waitFor(() => {
-    assert.ok(screen.getByRole('listitem', { name: pluginLabel(TV_PLUGIN_ID) }), 'the first read resolved');
+    assert.ok(screen.getByRole('listitem', { name: rowHeading(TV_PLUGIN_ID) }), 'the first read resolved');
   });
 }
 
 /**
+ * The heading text `Destinations.tsx` gives a row: the registry's label
+ * where this build carries the plugin, its own id where it does not.
+ * Mirrors the component's own expression rather than importing one, because
+ * there is no shared helper left to import -- `pluginLabels.ts` held one and
+ * was deleted with the registry's arrival. That makes this a computed
+ * expectation, which `CLAUDE.md` warns about; the literal spelling of all
+ * three labels lives in `test/plugins/registry.test.ts`, and the literal
+ * spelling of the fallback lives in this file's own `'book'` test below.
+ */
+function rowHeading(pluginId: string): string {
+  return pluginFor(pluginId)?.label ?? pluginId;
+}
+
+/**
  * One plugin's row, found by the accessible name its own visible heading
- * gives it -- which is `pluginLabel(pluginId)`, not `pluginId` itself, since
- * `Destinations.tsx` renders the shared label there now (`../pluginLabels.ts`).
- * Every call site below still addresses a row by plugin id; only this one
- * function has to know the id and the heading text are no longer the same
- * string.
+ * gives it -- which is {@link rowHeading}, not `pluginId` itself. Every call
+ * site below still addresses a row by plugin id; only these two functions
+ * have to know the id and the heading text are no longer the same string.
  */
 function row(pluginId: string): HTMLElement {
-  return screen.getByRole('listitem', { name: pluginLabel(pluginId) });
+  return screen.getByRole('listitem', { name: rowHeading(pluginId) });
 }
 
 function saveButton(pluginId: string): HTMLButtonElement {
-  const button = within(row(pluginId)).getByRole('button', { name: `Save ${pluginLabel(pluginId)}` });
+  const button = within(row(pluginId)).getByRole('button', { name: `Save ${rowHeading(pluginId)}` });
   assert.ok(button instanceof HTMLButtonElement, 'the save control is a button');
   return button;
 }
@@ -188,7 +200,7 @@ test('one row per plugin, each showing the root, shape and unmatched folder the 
   assert.deepEqual(
     screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent ?? ''),
     ['TV', 'Movies', 'XXX'],
-    'one row per plugin, in the order the declarations were given, each named through the shared label map',
+    'one row per plugin, in the order the declarations were given, each named through the registry label',
   );
 });
 
@@ -311,16 +323,19 @@ test('a blank unmatched folder is sent as no field at all, so the host applies i
 });
 
 test('a plugin this package has no label for is headed by its own id', async () => {
-  // `pluginLabels.ts`'s fallback, driven through the one call site that can
-  // reach it. `Settings.tsx` builds its rows from `TOKEN_NAMES_BY_PLUGIN`,
-  // so a fourth plugin added to the contract gets a row here with no edit
-  // to `PLUGIN_LABELS` -- and `CLAUDE.md`'s lesson is that pinning a pure
-  // function does not pin that anyone calls it. `Shell.tsx`'s nav cannot
-  // reach the fallback: it passes a `Category`, and all three are mapped.
+  // `Destinations.tsx`'s `?? plugin.pluginId` fallback, driven through the
+  // one call site that can reach it. `Settings.tsx` builds its rows from
+  // `@pickarr/contract`'s `TOKEN_NAMES_BY_PLUGIN` -- which plugins have
+  // path tokens -- while `plugins/registry.ts` says which have a browse
+  // card, and nothing holds the two lists in step. So a plugin in the first
+  // and not the second gets a row here with no edit anywhere, and
+  // `CLAUDE.md`'s lesson is that pinning a pure function does not pin that
+  // anyone calls it. `Shell.tsx`'s nav cannot reach the
+  // fallback: it walks the registry itself, so every entry has a label.
   //
-  // `'book'` written out, not `pluginLabel('book')`: the whole claim is
-  // about what the fallback returns, so computing the expectation from it
-  // would hold under every change to it.
+  // `'book'` written out, not `rowHeading('book')`: the whole claim is about
+  // what the fallback returns, so computing the expectation from it would
+  // hold under every change to it.
   const db = await freshDb();
   render(
     <Destinations
