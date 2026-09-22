@@ -155,9 +155,8 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
   const listed = await store.listByTable('media_item', { direction: 'next', limit: 10 });
   assert.deepEqual(listed.map((row) => row.id), [7]);
 
-  // gatherMediaItem assembles one media item from all of the above. No
-  // plugin table is under test here, so an empty table list.
-  const gathered = await store.gatherMediaItem(7, []);
+  // gatherMediaItem assembles one media item from all of the above.
+  const gathered = await store.gatherMediaItem(7);
   assert.ok(gathered !== undefined);
   assert.deepEqual(gathered.mediaItem, mediaItem);
   assert.equal(gathered.pluginId, 'demo');
@@ -171,6 +170,16 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
   assert.equal(gathered.roles[0]?.id, 2);
   assert.deepEqual(gathered.roles[0]?.person, person);
   assert.deepEqual(gathered.feedIds, [40]);
+
+  // pluginRowsByMediaItems reaches the same db, wired the same way the five
+  // reads above are -- proven with `role`, the one non-plugin table this
+  // fixture already seeded, rather than adding a plugin table row just for
+  // this. `999` has no rows and no media item at all; it still gets every
+  // declared table, empty, because a caller supplies `mediaItemIds` and
+  // this function does not re-derive which of them exist.
+  const pluginRows = await store.pluginRowsByMediaItems([7, 999], ['role']);
+  assert.equal(pluginRows.get(7)?.role?.length, 1, "the role row item 7 owns is partitioned into its own map entry");
+  assert.deepEqual(pluginRows.get(999), { role: [] }, 'an id with no rows still gets every declared table, empty');
 
   // The cursors in `meta` match the last page each loop served: the tail's
   // last page carried cursor 20, and the backfill's last page carried a null

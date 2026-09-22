@@ -1,13 +1,17 @@
 /**
- * The row-level read surface: seven functions. Five of them -- `getRow`,
- * `getRows`, `byMediaItem`, `byRssItem` and `listByTable` -- do not know
- * what a plugin is; `listByTablePlugin` and `countByPlugin` take a
- * `pluginId`, because the index they read (`by_table_plugin_updated`)
- * partitions on one. Even those two know nothing *about* a plugin: the id
- * is a key component they pass through, not a behaviour they switch on.
- * Design spec §7 says why the seam sits here -- joining across tables is
- * `store/gather.ts`'s job and a plugin's `compose.ts`'s, both built on top
- * of this rather than folded into it.
+ * The row-level read surface: eight functions. Six of them -- `getRow`,
+ * `getRows`, `byMediaItem`, `byRssItem`, `listByTable` and
+ * `pluginRowsByMediaItems` -- do not know what a plugin is; `listByTablePlugin`
+ * and `countByPlugin` take a `pluginId`, because the index they read
+ * (`by_table_plugin_updated`) partitions on one. Even those two know nothing
+ * *about* a plugin: the id is a key component they pass through, not a
+ * behaviour they switch on. `pluginRowsByMediaItems` takes a list of table
+ * names instead, the same as `tables` on `store/gather.ts`'s
+ * `gatherMediaItem` used to and now does not -- see that function's own
+ * doc for where the partition moved and why. Design spec §7 says why the
+ * seam sits here -- joining across tables is `store/gather.ts`'s job and a
+ * plugin's `compose.ts`'s, both built on top of this rather than folded
+ * into it.
  *
  * **`getRow` cannot tell "not yet replicated" from "does not exist", and
  * must not pretend to (spec §9).** Both a tombstone (a record with no
@@ -32,6 +36,7 @@
  */
 import { request } from './idb.ts';
 import type { StoredRow } from './db.ts';
+import type { PluginRows } from '@pickarr/plugin-ui';
 
 /**
  * Options for {@link listByTable}. `from` is the full key
@@ -258,6 +263,62 @@ export async function byMediaItem(db: IDBDatabase, mediaItemId: number): Promise
 /** A release's downloads, across `torrent_download` and `nzb_download` alike. */
 export async function byRssItem(db: IDBDatabase, rssItemId: number): Promise<readonly StoredRow[]> {
   return request<StoredRow[]>(rowsStore(db).index('by_rss_item').getAll(rssItemId));
+}
+
+/**
+ * Every row `tables` names, for every id in `mediaItemIds`, grouped first
+ * by media item and then by table -- one transaction regardless of how
+ * many ids or tables, the way {@link getRows} already batches N keyed
+ * reads for one table onto one transaction rather than opening one per id.
+ *
+ * **One transaction, measured rather than assumed.** `rowsStore` opens a
+ * fresh transaction on every call, so calling {@link byMediaItem} once per
+ * id -- the shape a per-card fetch would have taken -- opens one
+ * transaction per id. This function opens exactly one `IDBObjectStore` and
+ * issues every id's `getAll` against it before any of them resolves
+ * (`Promise.all` over synchronous `IDBRequest` creation, the same
+ * structure `getRows` already uses), which is what keeps the transaction
+ * open across all of them rather than auto-committing between calls.
+ * `test/store/rows.test.ts` counts this directly, for a page of 50, rather
+ * than trusting the shape of the code.
+ *
+ * **Every table `tables` names is a key for every id, always, even when
+ * that id has no rows in it.** An absent key would read as "not fetched",
+ * and a caller cannot tell that from "fetched, and empty" unless this
+ * function keeps the two apart itself -- `@pickarr/plugin-ui`'s
+ * `PluginRows` own doc says the same, and this is the function that now
+ * has to honour it: `store/gather.ts` no longer does (see that module's
+ * doc for why the partition moved here).
+ *
+ * An id in `mediaItemIds` that the replica holds nothing for still gets an
+ * entry in the returned map -- every declared table, each an empty array
+ * -- rather than being left out of the map entirely. A caller that wants
+ * to distinguish "this item does not exist" from "this item has no rows in
+ * these tables" already has that answer from wherever it got
+ * `mediaItemIds`; this function does not re-derive it.
+ */
+export async function pluginRowsByMediaItems(
+  db: IDBDatabase,
+  mediaItemIds: readonly number[],
+  tables: readonly string[],
+): Promise<ReadonlyMap<number, PluginRows>> {
+  const index = rowsStore(db).index('by_media_item');
+  const held = await Promise.all(
+    mediaItemIds.map(async (mediaItemId) => ({
+      mediaItemId,
+      rows: await request<StoredRow[]>(index.getAll(mediaItemId)),
+    })),
+  );
+  const result = new Map<number, PluginRows>();
+  for (const { mediaItemId, rows } of held) {
+    const pluginRows: Record<string, unknown[]> = {};
+    for (const table of tables) pluginRows[table] = [];
+    for (const row of rows) {
+      pluginRows[row.table]?.push(row.value);
+    }
+    result.set(mediaItemId, pluginRows);
+  }
+  return result;
 }
 
 /**

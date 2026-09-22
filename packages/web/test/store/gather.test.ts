@@ -10,16 +10,6 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
   await applyBatch(db, ops, { since: 1, before: null });
 }
 
-/** A `media_item` upsert, for the tests below that need one without spelling out every field. */
-function mediaItemOp({ id, pluginId, title }: { id: number; pluginId: string; title: string }): SyncOp {
-  return { op: 'upsert', table: 'media_item', id, value: { pluginId, title } };
-}
-
-/** An upsert into a plugin's own table -- `gather.ts` neither names nor recognises `table` here, by design. */
-function pluginOp(table: string, id: number, value: unknown): SyncOp {
-  return { op: 'upsert', table, id, value };
-}
-
 test('one media item is gathered from a single byMediaItem query', async () => {
   const db = await freshDb();
   await seed(db, [
@@ -33,7 +23,7 @@ test('one media item is gathered from a single byMediaItem query', async () => {
     { op: 'upsert', table: 'rss_item', id: 4, value: { mediaItemId: 8, feedId: 41, filename: 'b' } },
   ]);
 
-  const gathered = await gatherMediaItem(db, 7, []);
+  const gathered = await gatherMediaItem(db, 7);
 
   assert.ok(gathered !== undefined);
   assert.deepEqual(gathered.mediaItem, { pluginId: 'demo', title: 'A Show' });
@@ -47,7 +37,7 @@ test('one media item is gathered from a single byMediaItem query', async () => {
 test('gatherMediaItem answers undefined for a media item never replicated', async () => {
   const db = await freshDb();
 
-  assert.equal(await gatherMediaItem(db, 999, []), undefined);
+  assert.equal(await gatherMediaItem(db, 999), undefined);
   db.close();
 });
 
@@ -61,7 +51,7 @@ test('downloads are attached to the release that owns them, not to the item', as
     { op: 'upsert', table: 'nzb_download', id: 11, value: { rssItemId: 2, downloadClientId: 5, status: 'queued' } },
   ]);
 
-  const gathered = await gatherMediaItem(db, 7, []);
+  const gathered = await gatherMediaItem(db, 7);
 
   assert.ok(gathered !== undefined);
   const releaseOne = gathered.releases.find((release) => release.id === 1);
@@ -93,7 +83,7 @@ test('a role is paired with its person, and a role whose person has not arrived 
     { op: 'upsert', table: 'role', id: 2, value: { mediaItemId: 7, personId: 200, role: 'actor', name: 'Not Yet Arrived' } },
   ]);
 
-  const gathered = await gatherMediaItem(db, 7, []);
+  const gathered = await gatherMediaItem(db, 7);
 
   assert.ok(gathered !== undefined);
   assert.equal(gathered.roles.length, 2);
@@ -109,7 +99,7 @@ test('artwork is three urls, not rows', async () => {
   const db = await freshDb();
   await seed(db, [{ op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } }]);
 
-  const gathered = await gatherMediaItem(db, 7, []);
+  const gathered = await gatherMediaItem(db, 7);
 
   assert.ok(gathered !== undefined);
   assert.deepEqual(gathered.artwork, {
@@ -131,7 +121,7 @@ test('feedId and downloadClientId are surfaced as ids, because the replica canno
     { op: 'upsert', table: 'torrent_download', id: 10, value: { rssItemId: 1, downloadClientId: 77, status: 'downloading' } },
   ]);
 
-  const gathered = await gatherMediaItem(db, 7, []);
+  const gathered = await gatherMediaItem(db, 7);
 
   assert.ok(gathered !== undefined);
   // Pinned deliberately: both tables are synced now (`rss_feed` in the feed
@@ -165,7 +155,7 @@ test('a row that does not match its contract shape is declined, not asserted int
     { op: 'upsert', table: 'role', id: 4, value: { mediaItemId: 7, personId: 9, role: 'actor' } },
   ]);
 
-  const gathered = await gatherMediaItem(db, 7, []);
+  const gathered = await gatherMediaItem(db, 7);
   assert.ok(gathered !== undefined, 'the item itself still matches, so it is still assembled');
   assert.deepEqual(gathered.releases.map((release) => release.id), [2], 'the unshaped release is left out');
   assert.deepEqual(gathered.roles.map((role) => role.id), [4], 'and so is the unshaped role');
@@ -180,31 +170,6 @@ test('a media item that does not match its shape reads as absent', async () => {
   await seed(db, [
     { op: 'upsert', table: 'media_item', id: 7, value: { title: 'no pluginId' } },
   ]);
-  assert.equal(await gatherMediaItem(db, 7, []), undefined);
-  db.close();
-});
-
-test('the gather keeps rows from the tables a caller names, and still ignores the rest', async () => {
-  const db = await freshDb();
-  await seed(db, [
-    mediaItemOp({ id: 7, pluginId: 'tv', title: "Dio's World(3)" }),
-    pluginOp('tv_release', 1, { mediaItemId: 7, kind: 'episode', seriesTitle: 'JoJo', seriesRef: 'r', seasonNumber: 2, episodeNumber: 47 }),
-    pluginOp('movie_detail', 2, { mediaItemId: 7, runtimeMinutes: 116, tagline: null }),
-  ]);
-
-  const gathered = await gatherMediaItem(db, 7, ['tv_release']);
-
-  assert.equal(gathered?.pluginRows['tv_release']?.length, 1, 'the named table is carried');
-  assert.ok(!('movie_detail' in (gathered?.pluginRows ?? {})), 'an unnamed table is not');
-  db.close();
-});
-
-test('a named table with no rows is an empty array, not an absent key', async () => {
-  const db = await freshDb();
-  await seed(db, [mediaItemOp({ id: 7, pluginId: 'tv', title: 'x' })]);
-
-  const gathered = await gatherMediaItem(db, 7, ['tv_release']);
-
-  assert.deepEqual(gathered?.pluginRows['tv_release'], [], 'the key exists and is empty');
+  assert.equal(await gatherMediaItem(db, 7), undefined);
   db.close();
 });

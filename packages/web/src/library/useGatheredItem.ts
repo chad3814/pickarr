@@ -186,26 +186,11 @@ function releaseOf(value: unknown): number | undefined {
  * (`enabled === false`) costs nothing -- no gather, no subscription -- and
  * `undefined` is what it reads while collapsed, while still loading, or
  * when the replica holds no such item.
- *
- * **`tables` is a plugin's declared replica tables, threaded straight
- * through to `gatherMediaItem`** (`store/gather.ts`'s own doc on why that
- * costs no second query). The cache above stays keyed by `mediaItemId`
- * alone: a card's table list is fixed by its plugin and cannot vary for
- * one id, so it is not part of what makes a cache entry distinct.
- *
- * **Callers must pass a stable `tables` reference.** It sits in this
- * effect's dependency array below, so a fresh array literal built on every
- * render would be a new dependency every render, tearing down and
- * rebuilding both subscriptions each time. `BrowserPlugin.tables`
- * (`@pickarr/plugin-ui`) is a stable module-level value, so a real plugin
- * card already has one to pass; this hook does not memoise it itself, the
- * same way it does not memoise `source`.
  */
 export function useGatheredItem(
   source: GatheredSource,
   mediaItemId: number,
   enabled: boolean,
-  tables: readonly string[],
 ): GatheredItem | undefined {
   const [item, setItem] = useState<GatheredItem | undefined>(undefined);
   // A ref, not state: this cache must survive the `enabled` toggle that
@@ -223,7 +208,7 @@ export function useGatheredItem(
 
     function safeGather(): void {
       source
-        .gatherMediaItem(mediaItemId, tables)
+        .gatherMediaItem(mediaItemId)
         .then(apply)
         .catch((err: unknown) => {
           if (isStoreClosed(err)) return;
@@ -279,10 +264,7 @@ export function useGatheredItem(
       unsubscribe();
       for (const off of unsubscribeInserts) off();
     };
-    // `tables` is in this list, not left out: see the docblock above for
-    // why a caller must hand this hook a stable reference rather than a
-    // fresh array literal.
-  }, [source, mediaItemId, enabled, tables]);
+  }, [source, mediaItemId, enabled]);
 
   return enabled ? item : undefined;
 }

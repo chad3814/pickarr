@@ -61,6 +61,16 @@ import { postPick } from '../library/postPick.ts';
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
 
+/**
+ * A category's plugin table list, until the plugin registry
+ * (`packages/web/src/plugins/registry.ts`, Task 6) exists to supply the
+ * real one. A stable module-level constant rather than a `[]` literal at
+ * each `<CategoryScreen>` below: `Category.tsx`'s own doc says a fresh
+ * array there refetches `usePluginRows` on every render for reasons
+ * unrelated to `tables` changing.
+ */
+const NO_TABLES: readonly string[] = [];
+
 /** The real browser adapters (task 4, task 6's brief): `webLocksLease()`'s own default lease name, `Date.now`, `realFetch` and `idleScheduler`. */
 function defaultDeps(): CreateStoreDeps {
   return {
@@ -193,9 +203,12 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           and would be a second, weaker statement of the same fact to keep
           in step.
         */}
-        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" submit={postPick} />} />
-        <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" submit={postPick} />} />
-        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" submit={postPick} />} />
+        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" tables={NO_TABLES} submit={postPick} />} />
+        <Route
+          path="movie"
+          element={<CategoryScreen store={store} pluginId="movie" tables={NO_TABLES} submit={postPick} />}
+        />
+        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" tables={NO_TABLES} submit={postPick} />} />
         {/*
           `store` is `undefined` until `createStore` resolves (this component's
           own effect, above); `Unmatched`'s `source` prop is not optional, so

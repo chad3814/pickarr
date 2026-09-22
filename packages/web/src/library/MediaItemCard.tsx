@@ -17,26 +17,30 @@
  */
 import { useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
+import type { PluginRows } from '@pickarr/plugin-ui';
 import { useGatheredItem, type GatheredSource } from './useGatheredItem.ts';
 import { ReleaseList } from '@pickarr/plugin-ui';
 import type { PickSubmit } from './postPick.ts';
 
-/**
- * This card does not yet render a plugin's own body -- that is
- * `packages/web/src/plugins/registry.ts` and the rewrite of this component
- * that consumes it, both later tasks in this slice -- so there is no
- * `BrowserPlugin.tables` to pass `useGatheredItem` yet. A stable
- * module-level empty array rather than a `[]` literal at the call site:
- * `useGatheredItem`'s own doc says a fresh literal there is a new
- * dependency every render, tearing its subscriptions down and rebuilding
- * them on every render this component makes for reasons unrelated to
- * `tables`.
- */
-const NO_TABLES: readonly string[] = [];
-
 export interface MediaItemCardProps {
   source: GatheredSource;
   item: MediaItemSyncRead;
+  /**
+   * This item's rows in whatever tables its plugin declared -- fetched by
+   * the list this card renders inside, one batched read for the whole
+   * page (`library/usePluginRows.ts`), and handed down rather than
+   * fetched here. A card cannot fetch its own: it needs these rows to
+   * render its headline while *collapsed* (design spec §4, acceptance 1),
+   * and `gatherMediaItem`/`useGatheredItem` only run once a card expands
+   * (`useGatheredItem.ts`'s own doc on why).
+   *
+   * Not yet read by this component -- rendering a plugin's own card body
+   * is `packages/web/src/plugins/registry.ts` and the rewrite of this
+   * component that consumes it, both later tasks in this slice. Accepted
+   * here so the data path exists all the way to this boundary before that
+   * rewrite needs it.
+   */
+  rows: PluginRows;
   /**
    * Submits one pick, handed straight to `ReleaseList` and never called
    * here. Required and threaded from `Shell.tsx` rather than defaulted to
@@ -50,7 +54,7 @@ export interface MediaItemCardProps {
 export function MediaItemCard({ source, item, submit }: MediaItemCardProps): ReactElement {
   const [expanded, setExpanded] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
-  const gathered = useGatheredItem(source, item.id, expanded, NO_TABLES);
+  const gathered = useGatheredItem(source, item.id, expanded);
 
   return (
     <article>
