@@ -74,6 +74,27 @@ export function formatLogDetail(detail: Readonly<Record<string, unknown>>): stri
   return Object.entries(detail).map(([key, value]) => `${key}=${String(value)}`).join(' ');
 }
 
+/**
+ * A line this process prints **without** redaction, for the one thing it
+ * deliberately discloses.
+ *
+ * The claim token is a credential, printed on purpose so an operator can
+ * claim the install. Issue #78's sink redaction masked it: measured on this
+ * tree, **979 of 1000** freshly generated tokens come back mangled, because
+ * `randomBytes(32).toString('base64url')` reliably contains an alphanumeric
+ * run of eight or more carrying two uppercase, two lowercase and two digits.
+ * That is not a redaction miss, it is first-run setup broken about
+ * ninety-eight times in a hundred -- and it survived a green suite because
+ * the fixture was `placeholder-not-a-real-claim-token`, which trips no rule.
+ *
+ * So this exists, is used exactly once, and should stay that way. A second
+ * caller is a reason to ask whether the sink is redacting the right thing,
+ * not a reason to widen the exemption.
+ */
+function logDisclosing(message: string): void {
+  console.log(`[host] ${message}`);
+}
+
 /** The process's own log line, and the `log` the read server is given. */
 function log(message: string, detail?: Readonly<Record<string, unknown>>): void {
   const suffix = detail === undefined ? '' : ` ${formatLogDetail(detail)}`;
@@ -984,7 +1005,9 @@ export async function main(
   // install whose token was spent months ago, and printing that row would be
   // printing a credential for an account that already exists.
   if (!isClaimed(raw)) {
-    log(
+    // `logDisclosing`, not `log`: the sink redacts credential-shaped runs and
+    // a claim token is exactly one. See that function for the measurement.
+    logDisclosing(
       'this install is unclaimed: the first sign-up must carry claim token '
       + `${ensureClaimToken(raw, Date.now())} -- it is single-use, spent only by a sign-up that `
       + 'succeeds, so a refused attempt leaves it usable, and it is printed on every boot until '

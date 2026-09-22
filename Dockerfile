@@ -6,6 +6,7 @@ WORKDIR /app
 # Manifests first so dependency installation caches independently of source.
 COPY package.json package-lock.json tsconfig.base.json .oxlintrc.json ./
 COPY packages/contract/package.json      packages/contract/
+COPY packages/plugin-ui/package.json     packages/plugin-ui/
 COPY packages/openmetadata/package.json  packages/openmetadata/
 COPY packages/plugin-tv/package.json     packages/plugin-tv/
 COPY packages/plugin-movie/package.json  packages/plugin-movie/
@@ -23,14 +24,26 @@ COPY . .
 # neither builds nor ships and whose dependencies it had no reason to install.
 # An image build should fail when the image cannot be built.
 #
-# Targeted, not `npm run build`: the root script also builds `plugin-ui` and
-# the browser subpaths, whose manifests this image does copy — but listing
-# the workspaces here keeps the image's contents a decision this file makes
-# rather than one it inherits. It named 1.x's workspaces as the reason until
-# they were deleted; the reason is now simply that an image should say what
-# it ships.
+# Targeted, not `npm run build`: listing the workspaces here keeps the
+# image's contents a decision this file makes rather than one it inherits.
+# It named 1.x's workspaces as the reason until they were deleted.
+#
+# **The cost of that decision, paid once and worth stating.** A workspace
+# added to the root script is not added here, and nothing notices until an
+# image build fails. `@pickarr/plugin-ui` was added to the root script and
+# not to this list or the COPY block above, and three pushes built no
+# container: `vite build` cannot resolve `@pickarr/plugin-ui` because
+# `npm ci` above never saw its manifest, so the workspace symlink does not
+# exist. `plugin-tv`, `plugin-movie` and `plugin-xxx` all depend on it --
+# their `./browser` subpath is what `packages/web` imports -- so it is not
+# optional for the web bundle.
+#
+# Order matters: `plugin-ui` before `web`, because a production `vite build`
+# does not use the `development` condition and resolves the package to
+# `dist/index.js`, which has to exist by then.
 RUN npm run build \
       -w @pickarr/contract \
+      -w @pickarr/plugin-ui \
       -w @pickarr/openmetadata \
       -w @pickarr/plugin-tv \
       -w @pickarr/plugin-movie \
@@ -44,6 +57,12 @@ ENV NODE_ENV=production
 
 COPY package.json package-lock.json ./
 COPY packages/contract/package.json      packages/contract/
+# Not installed as a workspace below and its `dist` is never copied: nothing
+# server-side imports it. `plugin-tv`, `plugin-movie` and `plugin-xxx` each
+# declare it a dependency for their `./browser` subpath, which only the web
+# bundle uses, so the manifest is here to keep the installed tree matching
+# the lockfile rather than because any runtime code loads it.
+COPY packages/plugin-ui/package.json     packages/plugin-ui/
 COPY packages/openmetadata/package.json  packages/openmetadata/
 COPY packages/plugin-tv/package.json     packages/plugin-tv/
 COPY packages/plugin-movie/package.json  packages/plugin-movie/

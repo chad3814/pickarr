@@ -318,7 +318,18 @@ function insertOwner(raw: DatabaseSync): void {
  * install for as long as it is unspent, and this one is worth nothing outside
  * the temporary database it was written to.
  */
-const PLACEHOLDER_CLAIM_TOKEN = 'placeholder-not-a-real-claim-token';
+/**
+ * Shaped like a real token, not merely obviously fake.
+ *
+ * It was `placeholder-not-a-real-claim-token`, which trips none of the
+ * redaction rules -- so when the sink began masking credential-shaped runs,
+ * this test kept passing while **979 of 1000** real tokens printed mangled
+ * and first-run setup was broken. A fixture too tidy to match the rule
+ * cannot observe the rule. `Not4A-Real9Claim7Token2Aa` carries the two
+ * uppercase, two lowercase and two digits the second rule wants, so this
+ * test reds if the claim line ever goes back through the redacting sink.
+ */
+const PLACEHOLDER_CLAIM_TOKEN = 'placeholder-Not4A-Real9Claim7Token2Aa';
 const PASSWORD = 'placeholder-not-a-real-password';
 const OWNER_EMAIL = 'owner@example.invalid';
 

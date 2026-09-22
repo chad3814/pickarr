@@ -14,12 +14,19 @@ on:
 permissions:
   contents: read
 
-# Two jobs, not one, and deliberately not chained. `check` finishes in about a
-# minute; `e2e` has to download a browser and build the SPA first. Making `e2e`
-# wait on `check` would mean a lint error and a client/server seam failure are
-# reported minutes apart, when they are independent facts about the same
-# commit. Running them in parallel costs nothing — GitHub schedules them on
-# separate runners — and each one answers its own question as soon as it can.
+# Three jobs, not one, and deliberately not chained. `check` finishes in about
+# a minute; `e2e` has to download a browser and build the SPA first;
+# `container` builds the image. Chaining them would mean a lint error, a
+# client/server seam failure and a broken image are reported minutes apart,
+# when they are independent facts about the same commit. Running them in
+# parallel costs nothing — GitHub schedules them on separate runners — and
+# each one answers its own question as soon as it can.
+#
+# `container` is the one whose value is easiest to under-rate, so: it caught
+# `@pickarr/plugin-ui` missing from the Dockerfile's manifest list and stayed
+# red for three consecutive pushes while `check` and `e2e` were green. The
+# image is the only artifact that ships, and it is the only job that builds
+# it — a green `check` says nothing about whether the thing runs.
 jobs:
   check:
     name: Build, lint, typecheck, unit tests
