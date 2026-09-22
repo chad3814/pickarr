@@ -22,7 +22,7 @@ permissions:
 # separate runners — and each one answers its own question as soon as it can.
 jobs:
   check:
-    name: Lint, typecheck, unit tests
+    name: Build, lint, typecheck, unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -37,6 +37,25 @@ jobs:
       # `ci`, not `install`: install exactly what the lockfile pins and fail if
       # the lockfile and package.json disagree.
       - run: npm ci
+
+      # Build first, and this order is load-bearing rather than tidy.
+      # `packages/web/test/plugins/bundle.test.ts` asserts over the built
+      # bundle — it is the only thing that asserts the design spec's
+      # acceptance 5, "no `node:` import in the production bundle, by a test
+      # over the built artifact and not by inspection" — and it *skips* when
+      # `packages/web/dist/assets` is absent, because `npm run check` does not
+      # build and failing there would red every developer's check on a clean
+      # tree. Until this step existed, that skip was CI's permanent state: the
+      # guard reported success in every run without ever reading a bundle, and
+      # the hazard it guards (web's `src/` importing a plugin package's root
+      # entry, which fails `npm run build` while typecheck and every unit test
+      # pass) was caught in CI only incidentally, by the `e2e` job's own build.
+      # A build here makes the assertion real in the job that owns it.
+      #
+      # It is also the order every task gate in this repo has always used
+      # locally — build, then check — so this makes CI honour a convention
+      # that until now lived only in a dispatch document.
+      - run: npm run build
 
       # One command, not three. `check` is already `lint && typecheck && test`
       # in package.json, where the developer running it locally reads the same
