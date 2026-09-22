@@ -1,9 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from '../../src/config/schemas.ts';
+import { DEFAULT_TRUSTED_PROXIES, databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from '../../src/config/schemas.ts';
 
 test('every host namespace parses an absent section into its defaults', () => {
-  assert.deepEqual(serverConfigSchema.parse(undefined), { host: '0.0.0.0', port: 7676 });
+  assert.deepEqual(serverConfigSchema.parse(undefined), {
+    host: '0.0.0.0',
+    port: 7676,
+    // Empty, not absent: a host with no proxy and no alternate name trusts
+    // only `publicUrl` and private-range IP literals, exactly as before
+    // these fields existed.
+    trustedOrigins: [],
+    // Non-empty by default, which is the one security-relevant default here
+    // -- see `DEFAULT_TRUSTED_PROXIES` for what it costs. Compared against
+    // the exported constant rather than a second copy of the list: two
+    // spellings of the same six CIDRs is a thing to keep in step for no gain.
+    trustedProxies: [...DEFAULT_TRUSTED_PROXIES],
+  });
   assert.deepEqual(databaseConfigSchema.parse(undefined), { path: '/config/pickarr.db' });
   assert.deepEqual(secretsConfigSchema.parse(undefined), { baseDir: '/run/secrets' });
 });

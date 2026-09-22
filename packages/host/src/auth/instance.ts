@@ -70,6 +70,20 @@ export interface AuthDeps {
   /** `PICKARR_PUBLIC_URL`: the externally reachable origin, when behind a proxy. */
   publicUrl: string | undefined;
   /**
+   * `server.trustedOrigins`: further origins a browser may sign in from.
+   *
+   * A host is reachable at more than one address and only one can be
+   * {@link publicUrl}, which is also `baseURL`. Without this, a deployment
+   * proxied at one name and reached directly at another was refused
+   * `Invalid origin` at whichever was not configured, and could not be
+   * claimed from it.
+   */
+  trustedOrigins: readonly string[];
+  /** `server.trustedProxies`: CIDRs whose addresses are proxies, for client-IP resolution. */
+  trustedProxies: readonly string[];
+  /** `server.ipAddressHeaders`: where to read the client address, or `undefined` for the library default. */
+  ipAddressHeaders: readonly string[] | undefined;
+  /**
    * The host's log, for the one line `createAuth` writes.
    *
    * **The library does not use it, and logs past it to the process console.**
@@ -304,9 +318,17 @@ function publicOrigin(publicUrl: string): string {
  * page rather than an origin, on the request shape least able to prove
  * anything about itself.
  */
-function trustedOriginsFor(publicUrl: string | undefined, request?: Request): string[] {
+function trustedOriginsFor(
+  publicUrl: string | undefined,
+  configured: readonly string[],
+  request?: Request,
+): string[] {
   const trusted: string[] = [];
   if (publicUrl !== undefined) trusted.push(publicOrigin(publicUrl));
+  // Configured origins are trusted whether or not the request asked for one,
+  // exactly as `publicUrl` is: an operator naming an origin here has made the
+  // same statement about it that `publicUrl` makes about the canonical one.
+  for (const origin of configured) trusted.push(publicOrigin(origin));
   const origin = request?.headers.get('origin');
   if (origin !== null && origin !== undefined && isPlaceableOrigin(origin)) {
     trusted.push(new URL(origin).origin);
@@ -462,6 +484,21 @@ export function createAuth(deps: AuthDeps) {
   }
   return betterAuth({
     baseURL: deps.baseURL,
+    // **Client-IP resolution, which rate limiting buckets on.** Without this
+    // block Better Auth reads `x-forwarded-for` with no trusted hops, and
+    // refuses any value carrying more than one -- so every proxied
+    // deployment logs "could not determine a client IP" and shares a single
+    // per-path bucket across all callers. `trustedProxies` is what lets it
+    // walk past the proxy to the client; `config/schemas.ts`'s
+    // `DEFAULT_TRUSTED_PROXIES` says what the default trusts and what that
+    // costs. `ipAddressHeaders` is omitted when unset rather than defaulted
+    // here, so the library's own `x-forwarded-for` stays the one default.
+    advanced: {
+      ipAddress: {
+        trustedProxies: [...deps.trustedProxies],
+        ...(deps.ipAddressHeaders === undefined ? {} : { ipAddressHeaders: [...deps.ipAddressHeaders] }),
+      },
+    },
     secret: deps.secret,
     database: drizzleAdapter(deps.db, { provider: 'sqlite', schema: authSchema }),
     emailAndPassword: { enabled: true },
@@ -515,7 +552,7 @@ export function createAuth(deps: AuthDeps) {
     },
     // Not `async`: there is nothing to await, and the option's type accepts a
     // plain return.
-    trustedOrigins: (request) => trustedOriginsFor(publicUrl, request),
+    trustedOrigins: (request) => trustedOriginsFor(publicUrl, deps.trustedOrigins, request),
     // Off is already the default; saying so means a later default keeps this
     // host from reporting its configuration to a third party. `enabled` is
     // *not* the whole switch -- `BETTER_AUTH_TELEMETRY=1` in the environment

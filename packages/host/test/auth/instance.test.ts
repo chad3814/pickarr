@@ -63,7 +63,7 @@ interface Harness {
 }
 
 /** A migrated in-memory database and an instance over it, with the log captured. */
-function harness(publicUrl: string | undefined): Harness {
+function harness(publicUrl: string | undefined, trustedOrigins: readonly string[] = []): Harness {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const claimToken = ensureClaimToken(raw, 1_000);
@@ -74,6 +74,9 @@ function harness(publicUrl: string | undefined): Harness {
     secret: SECRET,
     baseURL: BASE_URL,
     publicUrl,
+    trustedOrigins,
+    trustedProxies: [],
+    ipAddressHeaders: undefined,
     log: (message) => {
       lines.push(message);
     },
@@ -130,6 +133,55 @@ function userRow(raw: DatabaseSync): Record<string, unknown> | undefined {
   return raw.prepare('SELECT * FROM auth_user').get() as Record<string, unknown> | undefined;
 }
 
+test('a hostname origin is refused until it is configured, and then it is not', async () => {
+  // Both halves of the reported failure, in one test because the second is
+  // only meaningful against the first.
+  //
+  // A deployment proxied at one name and reached directly at another had no
+  // way to trust the second: `isPlaceableOrigin` trusts a private-range IP
+  // *literal* on sight, because the address proves where it came from, and
+  // nothing distinguishes `http://box:7676` from an attacker-controlled DNS
+  // name that resolves anywhere. So the install could not be claimed from
+  // the direct address, which is what `server.trustedOrigins` is for.
+  const refused = harness(undefined);
+  const before = await signUp(refused.auth, 'http://box:7676', 'owner@example.invalid', refused.claimToken);
+  assert.equal(before.status, 403, 'a hostname is not trusted on sight');
+
+  const allowed = harness(undefined, ['http://box:7676']);
+  const after = await signUp(allowed.auth, 'http://box:7676', 'owner@example.invalid', allowed.claimToken);
+  assert.equal(after.status, 200, 'and naming it in trustedOrigins is what makes it work');
+});
+
+test('a proxied public origin and a direct one are both trusted at once', async () => {
+  // The shape that made a list necessary rather than a second scalar:
+  // `publicUrl` is also Better Auth's `baseURL`, so it can only ever be the
+  // canonical address. The operator reaches this host at two.
+  const proxied = 'https://pickarr.example';
+  const direct = 'http://box:7676';
+
+  const viaProxy = harness(proxied, [direct]);
+  assert.equal(
+    (await signUp(viaProxy.auth, proxied, 'owner@example.invalid', viaProxy.claimToken)).status,
+    200,
+    'the canonical origin',
+  );
+
+  const viaDirect = harness(proxied, [direct]);
+  assert.equal(
+    (await signUp(viaDirect.auth, direct, 'owner@example.invalid', viaDirect.claimToken)).status,
+    200,
+    'and the listed one, from the same configuration',
+  );
+});
+
+test('an origin that is neither configured nor placeable is still refused', async () => {
+  // The other side. Without this, a `trustedOrigins` that returned every
+  // origin it was asked about would pass both tests above.
+  const { auth, claimToken } = harness('https://pickarr.example', ['http://box:7676']);
+  const response = await signUp(auth, 'https://evil.example', 'attacker@example.invalid', claimToken);
+  assert.equal(response.status, 403);
+});
+
 test('a user signs up and the row lands in auth_user with snake_case columns', async () => {
   const { raw, auth, claimToken } = harness(undefined);
 
@@ -184,14 +236,25 @@ test('the secret the caller passed is the one the cookie is signed with', async 
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const claimToken = ensureClaimToken(raw, 1_000);
-  const first = createAuth({ raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined, log: noop });
-  const restarted = createAuth({ raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined, log: noop });
+  const first = createAuth({
+    raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined,
+    trustedOrigins: [], trustedProxies: [], ipAddressHeaders: undefined,
+    log: noop,
+  });
+  const restarted = createAuth({
+    raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined,
+    trustedOrigins: [], trustedProxies: [], ipAddressHeaders: undefined,
+    log: noop,
+  });
   const stranger = createAuth({
     raw,
     db,
     secret: 'placeholder-a-different-signing-secret',
     baseURL: BASE_URL,
     publicUrl: undefined,
+    trustedOrigins: [],
+    trustedProxies: [],
+    ipAddressHeaders: undefined,
     log: noop,
   });
 
@@ -241,6 +304,9 @@ test('BETTER_AUTH_SECRET decides the secret when it is set, and the persisted ro
     secret: resolveAuthSecret(configured, raw, at),
     baseURL: BASE_URL,
     publicUrl: undefined,
+    trustedOrigins: [],
+    trustedProxies: [],
+    ipAddressHeaders: undefined,
     log: noop,
   });
 

@@ -75,6 +75,35 @@ export function formatLogDetail(detail: Readonly<Record<string, unknown>>): stri
 }
 
 /**
+ * A comma-separated environment list, or `undefined` when the variable says
+ * nothing.
+ *
+ * Empty entries are dropped so a trailing comma is not a setting, and an
+ * all-blank value reads as "say nothing" rather than "set this to nothing" --
+ * the same rule `configuredEnvValue` applies to a single value, kept here so
+ * one variable cannot mean two different kinds of absent.
+ */
+function resolveStringList(raw: string | undefined): readonly string[] | undefined {
+  const configured = configuredEnvValue(raw);
+  if (configured === undefined) return undefined;
+  const entries = configured.split(',').map((entry) => entry.trim()).filter((entry) => entry !== '');
+  return entries.length === 0 ? undefined : entries;
+}
+
+/**
+ * {@link resolveStringList} for origins, validating each the way
+ * `PICKARR_PUBLIC_URL` is validated -- so a typo fails boot naming the
+ * variable, rather than being carried into the trusted list and refusing
+ * sign-ins at runtime for a reason nothing explains.
+ */
+function resolveOriginList(raw: string | undefined, fallback: readonly string[]): readonly string[] {
+  const entries = resolveStringList(raw);
+  if (entries === undefined) return fallback;
+  for (const entry of entries) assertOriginOnly(entry, 'PICKARR_TRUSTED_ORIGINS');
+  return entries;
+}
+
+/**
  * A line this process prints **without** redaction, for the one thing it
  * deliberately discloses.
  *
@@ -361,6 +390,12 @@ export interface HostSettings {
   readHost: string;
   port: number;
   publicUrl: string | undefined;
+  /** `server.trustedOrigins` / `PICKARR_TRUSTED_ORIGINS`: further origins a browser may sign in from. */
+  trustedOrigins: readonly string[];
+  /** `server.trustedProxies` / `PICKARR_TRUSTED_PROXIES`: CIDRs whose addresses are proxies, not clients. */
+  trustedProxies: readonly string[];
+  /** `server.ipAddressHeaders` / `PICKARR_IP_ADDRESS_HEADERS`, or `undefined` for the library default. */
+  ipAddressHeaders: readonly string[] | undefined;
   databasePath: string;
   secretsBaseDir: string;
   /** Where the lookup plugins ask. See {@link resolveOpenmetadataUrl}. */
@@ -468,6 +503,9 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
     readHost: hostRaw === undefined ? server.current.host : resolveReadHost(hostRaw),
     port: portRaw === undefined ? server.current.port : resolveReadPort(portRaw),
     publicUrl: publicUrlRaw === undefined ? server.current.publicUrl : resolvePublicUrl(publicUrlRaw),
+    trustedOrigins: resolveOriginList(env['PICKARR_TRUSTED_ORIGINS'], server.current.trustedOrigins),
+    trustedProxies: resolveStringList(env['PICKARR_TRUSTED_PROXIES']) ?? server.current.trustedProxies,
+    ipAddressHeaders: resolveStringList(env['PICKARR_IP_ADDRESS_HEADERS']) ?? server.current.ipAddressHeaders,
     databasePath: databasePathRaw ?? database.current.path,
     secretsBaseDir: secrets.current.baseDir,
     openmetadataUrl: resolveOpenmetadataUrl(openmetadataUrlRaw),
@@ -979,6 +1017,9 @@ export async function main(
       secret: resolveAuthSecret(configuredEnvValue(process.env['BETTER_AUTH_SECRET']), raw, Date.now()),
       baseURL: settings.publicUrl ?? baseURL,
       publicUrl: settings.publicUrl,
+      trustedOrigins: settings.trustedOrigins,
+      trustedProxies: settings.trustedProxies,
+      ipAddressHeaders: settings.ipAddressHeaders,
       log,
     }),
     log,

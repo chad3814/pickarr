@@ -103,6 +103,9 @@ key inside one is a boot failure rather than a setting that silently does nothin
 | `server.host` | `0.0.0.0` | Bind address. Not loopback: from the auth slice on, a session is what protects this socket rather than the interface it listens on. |
 | `server.port` | `7676` | Port for the read and sync API. |
 | `server.publicUrl` | *(none)* | The externally reachable origin, for a host behind a reverse proxy. Must be an origin — no path, query string or fragment. Absent means "derive it from the bind address". |
+| `server.trustedOrigins` | `[]` | Further origins a browser may sign in from. A request whose origin is a private-range IP literal is trusted without configuration; a **hostname** never is, because nothing distinguishes yours from an attacker-controlled name. List the direct address here when you also reach the host past the proxy. |
+| `server.trustedProxies` | loopback + RFC1918 + ULA | CIDRs whose addresses are proxies rather than clients, for resolving the client IP that rate limiting buckets on. Any host inside these ranges can forge `x-forwarded-for`; narrow it to your proxy to prevent that. |
+| `server.ipAddressHeaders` | *(none)* | Headers to read the client address from, in order. Absent leaves the library default, `x-forwarded-for`. |
 | `database.path` | `/config/pickarr.db` | The SQLite file. Artwork is stored in a directory derived from it. |
 | `secrets.baseDir` | `/run/secrets` | Where the secrets chain looks for files. |
 
@@ -121,6 +124,9 @@ unbootable install.
 | `PICKARR_READ_API_HOST` | `server.host` |
 | `PICKARR_READ_API_PORT` | `server.port` |
 | `PICKARR_PUBLIC_URL` | `server.publicUrl` |
+| `PICKARR_TRUSTED_ORIGINS` | `server.trustedOrigins`, comma-separated |
+| `PICKARR_TRUSTED_PROXIES` | `server.trustedProxies`, comma-separated |
+| `PICKARR_IP_ADDRESS_HEADERS` | `server.ipAddressHeaders`, comma-separated |
 | `PICKARR_OPENMETADATA_URL` | Where the lookup service lives (default `https://openmetadata.nexus`). An origin, and it may carry no username or password. |
 | `BETTER_AUTH_SECRET` | The session signing secret. Generated and persisted on first boot if unset, so it only needs setting to share one across replicas. |
 | `PICKARR_SECRET_<NAME>` | One credential — see [Secrets](#secrets). |
@@ -176,9 +182,36 @@ Every route requires a session except `/api/health`, which is open because a con
 health check has no credential to offer and the body it answers names nothing a caller
 could not guess. The test suite asserts that count rather than trusting it.
 
-Behind a reverse proxy, set `server.publicUrl` or `PICKARR_PUBLIC_URL` to the origin
-browsers actually use. Sign-in is rejected if the request's origin is not trusted, and
-the bound address is not the one a browser sees.
+### Behind a reverse proxy
+
+Set `server.publicUrl` (or `PICKARR_PUBLIC_URL`) to the origin browsers actually use.
+Sign-in is rejected if the request's origin is not trusted, and the bound address is
+not the one a browser sees.
+
+**If you also reach the host directly, list that address too.** `publicUrl` is the
+canonical origin — it is Better Auth's `baseURL` — so it can only be one. A deployment
+proxied at `https://pickarr.example` that you also open at `http://box:7676` needs:
+
+```json
+{ "server": {
+    "publicUrl": "https://pickarr.example",
+    "trustedOrigins": ["http://box:7676"]
+} }
+```
+
+Without the second, that address answers `Invalid origin` and the install cannot be
+claimed from it. A private-range IP literal — `http://192.168.1.9:7676` — is trusted
+without configuration, because the address proves where the request came from; a
+hostname is not, because nothing distinguishes yours from an attacker-controlled name
+that resolves anywhere.
+
+**Rate limiting needs the client's address.** It comes from `x-forwarded-for`, and a
+value carrying more than one hop resolves only if the proxy's own address matches
+`server.trustedProxies`. The default covers loopback, RFC1918 and ULA, so a proxy on
+your LAN or in a Docker network works unconfigured — at the cost that any host in
+those ranges can forge the header. Narrow it to your proxy's address to remove that.
+A host with no `trustedProxies` match logs `could not determine a client IP` and puts
+every caller in one shared bucket.
 
 ## The API
 

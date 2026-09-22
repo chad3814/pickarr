@@ -643,6 +643,12 @@ async function boot(): Promise<Booted> {
     authFor: (baseURL) => createAuth({
       raw,
       db,
+      // Empty, matching a host with no proxy and no alternate name: the
+      // suite drives the bound loopback origin, which `isPlaceableOrigin`
+      // trusts on sight without any of these being set.
+      trustedOrigins: [],
+      trustedProxies: [],
+      ipAddressHeaders: undefined,
       secret: AUTH_SECRET,
       baseURL,
       publicUrl: undefined,

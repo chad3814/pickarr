@@ -237,6 +237,9 @@ async function start(
       secret: AUTH_SECRET,
       baseURL,
       publicUrl: undefined,
+      trustedOrigins: [],
+      trustedProxies: [],
+      ipAddressHeaders: undefined,
       log: dropLine,
     }),
     log: (message, detail) => {

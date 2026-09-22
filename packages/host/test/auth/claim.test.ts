@@ -68,7 +68,11 @@ function harness(): Harness {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const claimToken = ensureClaimToken(raw, 1_000);
-  const auth = createAuth({ raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined, log: noop });
+  const auth = createAuth({
+    raw, db, secret: SECRET, baseURL: BASE_URL, publicUrl: undefined,
+    trustedOrigins: [], trustedProxies: [], ipAddressHeaders: undefined,
+    log: noop,
+  });
   return { raw, auth, claimToken };
 }
 
