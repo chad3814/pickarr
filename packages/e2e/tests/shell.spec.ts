@@ -444,10 +444,13 @@ test('a TV card reads its series and episode before anyone expands it, under a c
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
 
-  // One call, on purpose: the `media_item`, the `poster` row and the
-  // `tv_release` row have to reach this tab's replica in the same
-  // `/api/sync` batch or the card renders wrong and stays wrong. See
-  // `Harness.seedTvRelease`'s own doc for both failure modes.
+  // One call, on purpose. The `poster` row must share a batch with its
+  // `media_item` or `MediaItemCard`'s `posterFailed` latches on a 404 and
+  // there is no `<img>` left to measure; the `tv_release` shares it so that
+  // what this spec asserts is the headline on a row nobody has expanded and
+  // nothing has woken, rather than the late-arrival recovery path
+  // `usePluginRows` grew in fix round 1. `Harness.seedTvRelease`'s own doc
+  // has both, and says which of the two is mandatory.
   harness.seedTvRelease({
     title: TV_ITEM_TITLE,
     seriesTitle: TV_SERIES,

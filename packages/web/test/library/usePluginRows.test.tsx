@@ -7,7 +7,8 @@ import type { PluginRows } from '@pickarr/plugin-ui';
 import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { pluginRowsByMediaItems } from '../../src/store/rows.ts';
+import { getRows, pluginRowsByMediaItems } from '../../src/store/rows.ts';
+import { subscribeInserts } from '../../src/store/notify.ts';
 import { usePluginRows, emptyPluginRows, type PluginRowsSource } from '../../src/library/usePluginRows.ts';
 
 /**
@@ -31,6 +32,28 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
 function sourceFor(db: IDBDatabase): PluginRowsSource {
   return {
     pluginRowsByMediaItems: (mediaItemIds, tables) => pluginRowsByMediaItems(db, mediaItemIds, tables),
+    // The module-level registry `applyBatch` itself emits into, so a second
+    // `seed` below wakes this hook exactly as a second `/api/sync` batch
+    // would.
+    subscribeInserts,
+    getRows: (table, ids) => getRows(db, table, ids),
+  };
+}
+
+/**
+ * A source whose fetch is `fetchRows` and whose other two members answer
+ * nothing.
+ *
+ * For the tests that count fetches against no database at all. The no-op
+ * `subscribeInserts` still returns an unsubscribe, so the hook's teardown
+ * path runs; `getRows` is never reached, because nothing in those tests
+ * applies a batch and so nothing can wake it.
+ */
+function countingSource(fetchRows: PluginRowsSource['pluginRowsByMediaItems']): PluginRowsSource {
+  return {
+    pluginRowsByMediaItems: fetchRows,
+    subscribeInserts: () => () => {},
+    getRows: async () => new Map(),
   };
 }
 
@@ -58,12 +81,10 @@ function resultText(): string {
 
 test('an empty mediaItemIds list fetches nothing and answers an empty map', async () => {
   let calls = 0;
-  const source: PluginRowsSource = {
-    pluginRowsByMediaItems: async () => {
-      calls += 1;
-      return new Map();
-    },
-  };
+  const source = countingSource(async () => {
+    calls += 1;
+    return new Map();
+  });
   render(<Harness source={source} mediaItemIds={[]} tables={['tv_release']} />);
   await settle();
   assert.equal(calls, 0, 'nothing to fetch for a page with no items');
@@ -72,12 +93,10 @@ test('an empty mediaItemIds list fetches nothing and answers an empty map', asyn
 
 test("an empty tables list fetches nothing -- there is nothing a caller declared to partition", async () => {
   let calls = 0;
-  const source: PluginRowsSource = {
-    pluginRowsByMediaItems: async () => {
-      calls += 1;
-      return new Map();
-    },
-  };
+  const source = countingSource(async () => {
+    calls += 1;
+    return new Map();
+  });
   render(<Harness source={source} mediaItemIds={[1, 2]} tables={[]} />);
   await settle();
   assert.equal(calls, 0, 'a plugin with no declared tables costs nothing here either');
@@ -108,6 +127,7 @@ test('re-rendering with the same stable mediaItemIds and tables references does 
   let calls = 0;
   const real = sourceFor(db);
   const source: PluginRowsSource = {
+    ...real,
     pluginRowsByMediaItems: (mediaItemIds, tables) => {
       calls += 1;
       return real.pluginRowsByMediaItems(mediaItemIds, tables);
@@ -136,6 +156,7 @@ test('a new mediaItemIds reference -- a new page -- refetches', async () => {
   let calls = 0;
   const real = sourceFor(db);
   const source: PluginRowsSource = {
+    ...real,
     pluginRowsByMediaItems: (mediaItemIds, tables) => {
       calls += 1;
       return real.pluginRowsByMediaItems(mediaItemIds, tables);
@@ -160,12 +181,12 @@ test('a store-closed rejection is caught, not left as an unhandled rejection', a
   // manufactures, and for the same reason: a list can still be mounted
   // when the store it reads from stops (sign-out, a 401).
   let rejectFetch: ((err: unknown) => void) | undefined;
-  const source: PluginRowsSource = {
-    pluginRowsByMediaItems: () =>
+  const source = countingSource(
+    () =>
       new Promise((_resolve, reject) => {
         rejectFetch = reject;
       }),
-  };
+  );
 
   const escaped: unknown[] = [];
   const onUnhandledRejection = (reason: unknown): void => {
@@ -188,6 +209,118 @@ test('a store-closed rejection is caught, not left as an unhandled rejection', a
   } finally {
     process.off('unhandledRejection', onUnhandledRejection);
   }
+});
+
+/**
+ * One `create` `SyncOp` for `tv_release`, carrying only the field this hook's
+ * own filter dereferences.
+ *
+ * `mediaItemId` and no more, deliberately: `usePluginRows` reads an inserted
+ * row to answer one question -- does it belong to a media item on this page
+ * -- and a fixture carrying the whole `TvRead` would not say which field
+ * that question is asked of. `Category.test.tsx` drives the full read shape,
+ * because that is where a card actually renders one.
+ */
+function tvReleaseFor(id: number, mediaItemId: number): SyncOp {
+  return { op: 'create', table: 'tv_release', id, value: { mediaItemId } };
+}
+
+test('a plugin row inserted under an id on this page refetches; one under an id that is not, does not', async () => {
+  // The staleness this subscription exists for, and its cost control, in one
+  // test -- they are two halves of the same decision and a test of either
+  // alone would let the other rot.
+  //
+  // `subscribeInserts` is **table-wide**: a wake carries ids and nothing
+  // else, so without a filter one `tv_release` insert anywhere would refetch
+  // the page for every mounted browse screen. The filter is a read of the
+  // inserted rows, and `getRows` is the batched member -- one transaction per
+  // wake however many ids the batch carried, which is exactly the trade
+  // `useGatheredItem`'s own `regatherIfOurs` measured at 4 transactions
+  // before and 1 after.
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv' } },
+    { op: 'upsert', table: 'media_item', id: 2, value: { pluginId: 'tv' } },
+  ]);
+  let fetches = 0;
+  let reads = 0;
+  const real = sourceFor(db);
+  const source: PluginRowsSource = {
+    ...real,
+    pluginRowsByMediaItems: (mediaItemIds, tables) => {
+      fetches += 1;
+      return real.pluginRowsByMediaItems(mediaItemIds, tables);
+    },
+    getRows: (table, ids) => {
+      reads += 1;
+      return real.getRows(table, ids);
+    },
+  };
+  const mediaItemIds = [1];
+  const tables = ['tv_release'];
+
+  render(<Harness source={source} mediaItemIds={mediaItemIds} tables={tables} />);
+  await waitFor(() => {
+    assert.equal(fetches, 1, 'the first read, before any wake');
+  });
+  assert.equal(reads, 0, 'and no filter read yet: nothing has been inserted');
+
+  // Item 2 is not on this page.
+  await seed(db, [tvReleaseFor(20, 2)]);
+  await waitFor(() => {
+    assert.equal(reads, 1, 'the wake cost exactly one batched read');
+  });
+  await settle();
+  assert.equal(fetches, 1, 'and no refetch: the inserted row belongs to a media item this page does not hold');
+
+  // Item 1 is.
+  await seed(db, [tvReleaseFor(10, 1)]);
+  await waitFor(() => {
+    assert.equal(fetches, 2, 'an insert under an id on this page does refetch');
+  });
+  assert.equal(reads, 2, 'one batched read per wake, whichever way the filter went');
+  assert.equal(resultText(), textOf(new Map([[1, { tv_release: [{ mediaItemId: 1 }] }]])), 'and the refetch carried the new row');
+
+  db.close();
+});
+
+test('unmounting drops every insert subscription, one per declared table', async () => {
+  // Task 6's fix round spent a whole round removing a latch that leaked
+  // three subscriptions per opened card. Closing a staleness by adding a
+  // subscription is how that gets reintroduced, so the teardown is asserted
+  // directly rather than inferred from a refetch that stopped happening --
+  // a hook that kept its subscriptions but ignored their wakes would pass
+  // the weaker version of this.
+  const db = await freshDb();
+  await seed(db, [{ op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv' } }]);
+  let live = 0;
+  const subscribedTo: string[] = [];
+  const real = sourceFor(db);
+  const source: PluginRowsSource = {
+    ...real,
+    subscribeInserts: (table, cb) => {
+      live += 1;
+      subscribedTo.push(table);
+      const off = real.subscribeInserts(table, cb);
+      return () => {
+        live -= 1;
+        off();
+      };
+    },
+  };
+
+  const { unmount } = render(
+    <Harness source={source} mediaItemIds={[1]} tables={['tv_release', 'tv_season']} />,
+  );
+  await waitFor(() => {
+    assert.equal(live, 2, 'one subscription per table the plugin declared, and no more');
+  });
+  assert.deepEqual(subscribedTo, ['tv_release', 'tv_season'], 'each declared table, in the order declared');
+
+  unmount();
+  assert.equal(live, 0, 'and none left behind');
+
+  db.close();
 });
 
 test('emptyPluginRows seeds every named table to an empty array, and no others', () => {

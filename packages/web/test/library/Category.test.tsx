@@ -11,8 +11,24 @@ import { gatherMediaItem } from '../../src/store/gather.ts';
 import { Category, type CategorySource } from '../../src/library/Category.tsx';
 import type { PickSubmit } from '../../src/library/postPick.ts';
 
-/** No test in this file names a real plugin table; `usePluginRows.test.tsx` is where a non-empty `tables` list is driven. */
+/**
+ * The `tables` value for the tests that are not about plugin rows at all --
+ * which is most of this file. Two below do name a real one
+ * (`TV_RELEASE_TABLE`): the batched-fetch shape, and the late-batch test at
+ * the end. This constant used to claim none did, which was false the moment
+ * the batched-fetch test landed.
+ */
 const NO_TABLES: readonly string[] = [];
+
+/**
+ * The one table `@pickarr/plugin-tv`'s card declares
+ * (`plugin-tv/src/browser.tsx`'s `TV_RELEASE_TABLE`). Named here rather
+ * than imported: this file drives `Category` against the registry's real
+ * cards, and a literal is what pins that the two agree -- reading the
+ * plugin's own constant would make both sides of the comparison move
+ * together (`CLAUDE.md`'s `groupAnchor` hazard).
+ */
+const TV_RELEASE_TABLE = 'tv_release';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -52,6 +68,44 @@ function mediaItem({
       title,
       releaseDate: null,
       description: null,
+    },
+  };
+}
+
+/**
+ * One `create` `SyncOp` for `tv_release`, shaped as the `TvRead` a client
+ * receives (`plugin-tv/src/sync.ts`'s `release.read`).
+ *
+ * `seriesRef` and `kind` are carried because the read shape has them, not
+ * because anything here reads them back: `plugin-tv`'s card dereferences
+ * `seriesTitle`, `seasonNumber` and `episodeNumber` and no more, and its
+ * `isTvRelease` guard checks exactly those three. A row missing any of them
+ * is declined rather than rendered, which is a different test's business.
+ */
+function tvRelease({
+  id,
+  mediaItemId,
+  seriesTitle,
+  seasonNumber,
+  episodeNumber,
+}: {
+  id: number;
+  mediaItemId: number;
+  seriesTitle: string;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+}): SyncOp {
+  return {
+    op: 'create',
+    table: TV_RELEASE_TABLE,
+    id,
+    value: {
+      mediaItemId,
+      kind: 'episode',
+      seriesTitle,
+      seriesRef: `series-ref-${String(id)}`,
+      seasonNumber,
+      episodeNumber,
     },
   };
 }
@@ -167,14 +221,66 @@ test("a category fetches its page's plugin rows once, batched by every item's id
       return pluginRowsByMediaItems(db, mediaItemIds, tables);
     },
   };
-  render(<Category store={source} pluginId="tv" tables={['tv_release']} submit={acceptsPick} />);
+  render(<Category store={source} pluginId="tv" tables={[TV_RELEASE_TABLE]} submit={acceptsPick} />);
 
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Newer Show', 'Older Show']);
   });
   assert.equal(calls, 1, 'one batched call for the whole page, not one per card');
   assert.deepEqual([...lastIds].toSorted((a, b) => a - b), [1, 2], 'every item on the page was named');
-  assert.deepEqual(lastTables, ['tv_release']);
+  assert.deepEqual(lastTables, [TV_RELEASE_TABLE]);
+
+  db.close();
+});
+
+test("a plugin row that replicates in a later batch than its media item still reaches the card", async () => {
+  // **A staleness that the e2e proof of this feature could not see, because
+  // that harness writes both rows in one synchronous call and they share a
+  // sync batch.** Replication does not promise that: `/api/sync` is a
+  // `sync_log` walk applied in batches and the contract says plainly that
+  // ordering is not preserved across it -- `@pickarr/contract`'s
+  // `TvSeasonRead` doc has a client holding a season whose series has not
+  // arrived yet, with the referent arriving "elsewhere in the same walk".
+  // So a `tv_release` can land in a later batch than its `media_item`
+  // whatever the host wrote atomically, and mid-backfill -- 2.0's normal
+  // first-run condition, since the database is greenfield and rebuilds from
+  // feeds -- is when that is most likely.
+  //
+  // Before `usePluginRows` subscribed to anything, this card rendered
+  // `item.title` and **nothing ever woke it**: no poll, no subscription, and
+  // no change to the one effect's `[source, mediaItemIds, tables]`
+  // dependencies. The headline appeared only after a remount or a reload.
+  //
+  // Two batches, deliberately, and this test is worthless as one: a single
+  // `applyBatch` carrying both rows passes against the broken code, because
+  // the first fetch then already finds the release.
+  const db = await freshDb();
+  const tables = [TV_RELEASE_TABLE];
+  await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: "Dio's World(3)", updatedAt: 10 })]);
+
+  render(<Category store={sourceFor(db)} pluginId="tv" tables={tables} submit={acceptsPick} />);
+
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ["Dio's World(3)"], 'no tv_release yet, so the card reads the media item title');
+  });
+
+  await seed(db, [tvRelease({
+    id: 10,
+    mediaItemId: 1,
+    seriesTitle: "Jo Jo's Bizarre Adventure",
+    seasonNumber: 2,
+    episodeNumber: 47,
+  })]);
+
+  // The literal, not a call to `tvHeadline` -- the same reason
+  // `packages/e2e/tests/shell.spec.ts`'s `TV_HEADLINE` is a literal.
+  await waitFor(() => {
+    assert.deepEqual(
+      titlesShown(),
+      ["Jo Jo's Bizarre Adventure S02E47 Dio's World(3)"],
+      'the later batch woke the page, with no remount and no reload',
+    );
+  });
 
   db.close();
 });

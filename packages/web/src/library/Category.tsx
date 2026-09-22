@@ -26,6 +26,14 @@
  * because a collapsed card needs its plugin's rows too (design spec §4,
  * acceptance 1), and a per-card fetch gated on expansion cannot answer for
  * one that never expands.
+ *
+ * **And again whenever one of those rows replicates in late.** A plugin row
+ * is not promised to arrive in the same `/api/sync` batch as its media
+ * item, and while nothing here watched for it the card rendered
+ * `item.title` permanently -- see `usePluginRows.ts`'s own doc for the
+ * contract sentence that makes the late batch reachable and for what the
+ * subscription costs. One listener per declared table lives here, above the
+ * list, not one per card.
  */
 import { useMemo, type ReactElement } from 'react';
 import { useMediaItems, type MediaItemsSource } from './useMediaItems.ts';

@@ -409,19 +409,28 @@ export interface Harness {
    * and, optionally, a poster the `<img>` will actually load. Returns the
    * `media_item` id.
    *
-   * **Every insert happens in one synchronous call, and that is
-   * load-bearing.** A card whose `media_item` reaches the replica in an
-   * earlier `/api/sync` batch than its `tv_release` renders `item.title`
-   * alone and never corrects itself: `library/Category.tsx` re-reads the
-   * page's plugin rows only when its store, `mediaItemIds` or `tables`
-   * changes (`library/usePluginRows.ts`'s dependency array), and a
-   * `tv_release` arriving for an id already on screen changes none of the
-   * three. The poster has a
-   * second, sharper version of the same hazard -- one 404 latches
+   * **Every insert happens in one synchronous call**: nothing here `await`s,
+   * so the host's own `/api/sync` handler cannot run between two of these
+   * inserts and a browser sees all of them or none.
+   *
+   * **The poster is what makes that mandatory.** One 404 latches
    * `MediaItemCard`'s `posterFailed` and the `<img>` is gone for the life of
-   * the card. Both are closed the same way: nothing here `await`s, so the
-   * host's own `/api/sync` handler cannot run between two of these inserts,
-   * and a browser sees all of them or none.
+   * the card, so the `poster` row has to reach the replica in the same batch
+   * as the `media_item` it belongs to or there is nothing left to measure.
+   *
+   * **The `tv_release` half used to be mandatory too, and is not any more.**
+   * A card whose `media_item` arrived in an earlier batch than its
+   * `tv_release` used to render `item.title` and never correct itself, since
+   * nothing woke `library/usePluginRows.ts`. That was a real client defect,
+   * found while writing this method and fixed in this task's fix round 1:
+   * the hook now subscribes to inserts on each declared table, so a late
+   * `tv_release` reaches the card with no remount
+   * (`packages/web/test/library/Category.test.tsx`'s `a plugin row that
+   * replicates in a later batch than its media item still reaches the
+   * card`). The seed stays atomic anyway, because what the browser spec
+   * asserts is the headline on a row **nobody has expanded and nothing has
+   * woken** -- which is acceptance 1 -- and a two-call seed would quietly
+   * turn it into an assertion about the recovery path instead.
    *
    * Callers therefore get one method rather than a composable
    * `seedPoster(mediaItemId)` beside a `seedTvRelease(mediaItemId)`. Two
