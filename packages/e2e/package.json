@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@pickarr/contract": "*",
-    "@pickarr/host": "*"
+    "@pickarr/host": "*",
+    "@pickarr/plugin-tv": "*"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"

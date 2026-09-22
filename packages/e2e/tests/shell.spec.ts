@@ -386,6 +386,116 @@ test("a media item's release list is laid out as a list, not just present", asyn
   await expect(releases).toHaveCSS('list-style-type', 'none');
 });
 
+/*
+ * Acceptance 1's own three strings, spelled out rather than composed.
+ *
+ * `TV_HEADLINE` is **not** built from the other two plus `S02E47`, and that
+ * is deliberate: `CLAUDE.md`'s `groupAnchor` hazard is a test whose expected
+ * value was computed by the code under test, and `plugin-tv`'s `tvHeadline`
+ * is exactly such a producer -- it decides the separator, the order, the
+ * `SxxEyy` form, the two-digit padding, and whether the item's own title is
+ * appended at all. A template built from the seeded parts would move with
+ * every one of those. The literal is the only end of this that the plugin
+ * cannot change under the test.
+ *
+ * The values themselves are the plan's, and each is carrying its weight:
+ * season 2 and episode 47 both pad (`S02`, and `E47` proving the pad does
+ * not truncate), and the item title differs from the series title, which is
+ * the branch `tvHeadline` drops the title on.
+ */
+const TV_SERIES = "Jo Jo's Bizarre Adventure";
+const TV_ITEM_TITLE = "Dio's World(3)";
+const TV_HEADLINE = "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)";
+
+/*
+ * **The one spec that proves a plugin owns its card body, in a browser.**
+ * Acceptance 1 of the plugin-cards design says a TV row reads its series and
+ * episode *before being expanded*, and for six tasks the only evidence was
+ * jsdom: this harness declared `synced: []` for every plugin, so there was
+ * no `tv_release` table to seed, `TvCard` fell back to `item.title`, and the
+ * rendered text was byte-identical to the shared card the plugin cards
+ * replaced. `harness.seedTvRelease` is the capability that closes that
+ * (`../src/harness-2.ts`'s own doc on what it had to change to get there).
+ *
+ * Four things, none of which the other browse specs above can see:
+ *
+ * 1. The headline is `plugin-tv`'s, on **rendered text** -- `toHaveText`
+ *    reads `textContent`, not an accessible name, which is the distinction
+ *    `CLAUDE.md`'s longest hazard is about.
+ * 2. It is there while the row is **collapsed**: `aria-expanded="false"`,
+ *    and no release list in the DOM at all.
+ * 3. `library.css`'s `article h2 button` rule reaches markup that now lives
+ *    in `@pickarr/plugin-tv`. `text-align: left` is the pin, and it has
+ *    exactly one producer -- `grep -rn '^ *text-align:'
+ *    packages/web/src/styles/` answers one line, that rule's -- while the
+ *    UA default for a `<button>` is `center`. So both mutations red it: the
+ *    rule deleted, and the stylesheet emptied. The task report has the
+ *    observed output of each.
+ * 4. `article img` still reaches the poster, which is the whole reason the
+ *    `<article>` stayed in `packages/web/src` when the card body left
+ *    (`MediaItemCard.tsx`'s own doc, task 6's report §2). Nothing pinned
+ *    that, so the decision could have been reversed without a red test.
+ *    This is the suite's only spec whose poster actually loads -- every
+ *    other one 404s its artwork, and `MediaItemCard`'s `onError` then takes
+ *    the `<img>` out of the DOM for good, leaving nothing to measure.
+ */
+test('a TV card reads its series and episode before anyone expands it, under a cropped poster', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  // One call, on purpose: the `media_item`, the `poster` row and the
+  // `tv_release` row have to reach this tab's replica in the same
+  // `/api/sync` batch or the card renders wrong and stays wrong. See
+  // `Harness.seedTvRelease`'s own doc for both failure modes.
+  harness.seedTvRelease({
+    title: TV_ITEM_TITLE,
+    seriesTitle: TV_SERIES,
+    seasonNumber: 2,
+    episodeNumber: 47,
+    withPoster: true,
+  });
+
+  const card = page.getByRole('article');
+  const headline = card.getByRole('heading').getByRole('button');
+
+  // The full round trip: three direct inserts, `media_item`'s and
+  // `tv_release`'s own `AFTER INSERT` triggers into `sync_log`, this tab's
+  // `/api/sync` tail, the replica, `usePluginRows`' batched read, and
+  // `TvCard` composing the line out of `rows.tv_release`.
+  await expect(headline).toHaveText(TV_HEADLINE, { timeout: 15_000 });
+
+  // Collapsed, which is the whole claim. `TvCard` renders its `ReleaseList`
+  // only while expanded, so a zero count here is stronger than the
+  // attribute alone: it rules out a card that reported itself closed while
+  // showing its contents.
+  await expect(headline).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('list', { name: 'releases' })).toHaveCount(0);
+
+  // `library.css`'s `article h2 button`, reaching an element rendered by
+  // another package -- see this spec's own comment, point 3.
+  await expect(headline).toHaveCSS('text-align', 'left');
+
+  // `library.css`'s `article img`, reaching the poster web kept. All three
+  // declarations, because all three are what "a 96px frame at 2:3, cropped"
+  // means and any one of them alone leaves the other two free to drift.
+  // `96px` is `--size-poster`'s `6rem` against an unchanged root font size;
+  // the seeded bytes are 1x1, so every number here comes from the rule and
+  // none from the image.
+  const poster = card.getByRole('img', { name: TV_ITEM_TITLE });
+  await expect(poster).toHaveCSS('width', '96px');
+  await expect(poster).toHaveCSS('aspect-ratio', '2 / 3');
+  await expect(poster).toHaveCSS('object-fit', 'cover');
+
+  // And the card is poster-led: the plugin's body starts below the poster
+  // rather than beside or behind it. `boxOf` rather than `boundingBox()` --
+  // see that helper's own doc; this page scrolls and viewport coordinates
+  // are not a property to depend on.
+  const posterBox = await boxOf(poster, 'the poster');
+  const headlineBox = await boxOf(headline, 'the card headline');
+  expect(headlineBox.y).toBeGreaterThanOrEqual(posterBox.y + posterBox.height);
+});
+
 test('the empty state reads as an aside, not as content waiting to be filled in', async ({ page, harness }) => {
   await page.goto(harness.origin);
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
@@ -942,7 +1052,7 @@ const HOST_PATH_CORRECTED = '/mnt/library/downloads';
  * `boundingBox()` is relative to the viewport, so two readings of a
  * motionless element disagree the moment anything scrolls the page between
  * them -- and Playwright scrolls on its own, to bring the element it is
- * about to click into view. The one caller below compares a box taken
+ * about to click into view. The mapping caller below compares a box taken
  * before an editor opens against one taken after, to assert the row did
  * not move; when the `/settings` screen grew its destinations section the
  * document became 2860px against a 720px viewport, the click on Edit
@@ -951,6 +1061,14 @@ const HOST_PATH_CORRECTED = '/mnt/library/downloads';
  * document-relative top stayed at 1378px exactly. Viewport coordinates
  * were only ever stable here by the accident of a page short enough not to
  * scroll, which is not a property this suite should depend on.
+ *
+ * The TV headline spec above is the second caller. It compares two
+ * different elements in one reading rather than one element across an
+ * interaction, so the scroll offset cancels either way -- it reaches for
+ * this anyway rather than `boundingBox()` twice, because reaching for
+ * viewport coordinates in this file is what went wrong once already, and
+ * because `boundingBox()` answers `null` for an element that is not
+ * rendered where this throws naming it.
  */
 async function boxOf(locator: ReturnType<Page['locator']>, what: string): Promise<{ x: number; y: number; width: number; height: number }> {
   const box = await locator.boundingBox();

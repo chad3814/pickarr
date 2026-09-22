@@ -25,6 +25,31 @@
  * renaming its heading element silently drops `article h2 button`, and the
  * fallback path would keep `article h2` looking fine while it did.
  *
+ * **Two of those cross-package reaches are pinned in a real browser, and
+ * both pins were measured against deletion rather than asserted.**
+ * `packages/e2e/tests/shell.spec.ts`'s `a TV card reads its series and
+ * episode before anyone expands it, under a cropped poster` reads
+ * `text-align: left` off the `article h2 button` that the rendering
+ * plugin's own `browser.tsx` produces, and
+ * `width`/`aspect-ratio`/`object-fit` off the `article img` that web keeps.
+ * Four mutations, each run and each reported in that task's report:
+ *
+ * - `article h2 button` deleted -> the button computes `center`, the UA
+ *   default, and that one spec reds. Nothing else in the suite noticed.
+ * - this whole file emptied -> `center` again, plus five other specs.
+ * - `article img` deleted -> the poster computes `1px`, its seeded image's
+ *   intrinsic width, instead of 96px.
+ * - the `<article>` opened by the plugin instead of by web -> the poster
+ *   falls outside it, so `article img` reaches nothing and the pin reds on
+ *   an element it cannot find. That is the measurement
+ *   `MediaItemCard.tsx`'s own doc argues from, and until that spec existed
+ *   nothing could see it.
+ *
+ * That spec is also the only one in the suite whose poster loads at all.
+ * Every other card's artwork 404s and `MediaItemCard`'s `onError` removes
+ * the `<img>` from the DOM for good, so there is nothing left there to
+ * measure -- which is why the poster went unpinned for as long as it did.
+ *
  * `<p>` appeared exactly three times when
  * this paragraph was written -- `Category`'s and `Unmatched`'s empty-list
  * states, and `Shell`'s store-failure explanation -- and the feed-settings
@@ -53,7 +78,12 @@ article {
 }
 
 /* The poster. `--size-poster` (`tokens.css`) carries the crop reasoning now,
-   since that is where the number lives. The only `<img>` in this app. */
+   since that is where the number lives. The only `<img>` in this app.
+
+   All three of `width`, `aspect-ratio` and `object-fit` are pinned in a
+   browser -- see this file's own header for the spec and for what each
+   mutation computes instead. This is the rule that only reaches the poster
+   while web owns the `<article>`. */
 article img {
   display: block;
   width: var(--size-poster);
@@ -71,7 +101,12 @@ article h2 { margin: 0; font-size: var(--text-title); font-weight: 600; }
    holds the `<article>` around it) reads as the card's own
    title, not as a bordered form control: `base.css`'s `button` rule is in
    the `base` layer, so this rule beats it regardless of specificity
-   (`styles/index.css`'s own doc on why that bet is off the table). */
+   (`styles/index.css`'s own doc on why that bet is off the table).
+
+   `text-align: left` is the declaration a browser pin reads back, because
+   it is the only `text-align:` declaration anywhere under
+   `packages/web/src/styles/` and a `<button>` computes `center` without it
+   -- see this file's own header. */
 article h2 button {
   display: block;
   width: 100%;

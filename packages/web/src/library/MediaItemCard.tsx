@@ -13,6 +13,19 @@
  * reason -- an `<article>` inside this one would be two per row, and the
  * poster would fall outside the bordered card that `article img` styles.
  *
+ * **That last sentence is now enforced rather than argued.** It rested on a
+ * measurement no test in the tree could reproduce, so the decision could
+ * have been reversed by anyone who disagreed with the prose.
+ * `packages/e2e/tests/shell.spec.ts`'s `a TV card reads its series and
+ * episode before anyone expands it, under a cropped poster` reads
+ * `width`, `aspect-ratio` and `object-fit` back off the real poster in
+ * Chromium, and both ways of putting `article img` out of its reach were
+ * run against it: with that rule deleted the poster computes `1px` -- the
+ * seeded image's own intrinsic width -- and with the wrapper opened by the
+ * plugin instead of here the poster sits outside the `<article>` entirely
+ * and the pin reds on an element it cannot find. `styles/library.css`'s own
+ * header lists both, and the two mutations of the heading rule beside them.
+ *
  * **The poster renders immediately from `item`, before anything is
  * gathered.** `item` is the `MediaItemSyncRead` the list already holds, and
  * `rows` is this item's plugin rows, batched for the whole page by
@@ -26,6 +39,16 @@
  * a request to `/api/artwork/poster/:mediaItemId`, which 404s for most items
  * for a long while yet; `onError` swaps it out rather than letting a broken
  * image blank the rest of the card.
+ *
+ * **`posterFailed` is a latch, and nothing resets it.** One failed request
+ * takes the `<img>` out of the DOM for the life of the card, so artwork
+ * that arrives later does not bring it back until the list remounts. That
+ * is the right trade for a product where most items have no poster -- the
+ * alternative is retrying a 404 on every render -- but it is also why an
+ * end-to-end test that wants to measure the poster has to have the bytes on
+ * disk *before* the item reaches the replica, which is what
+ * `packages/e2e/src/harness-2.ts`'s `seedTvRelease` does in one synchronous
+ * call for exactly this reason.
  */
 import { useCallback, useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
