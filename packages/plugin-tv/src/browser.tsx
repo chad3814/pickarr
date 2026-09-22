@@ -27,9 +27,9 @@
  * to two elements and fail Playwright's strict mode. Web keeps the poster
  * and the card element; a plugin owns everything below it (design spec §2).
  */
-import { useState, type ReactElement } from 'react';
+import type { ReactElement } from 'react';
 import type { TvRead } from '@pickarr/contract';
-import { ReleaseList, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
+import { CardHeading, ReleaseList, useExpansion, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
 import { tvHeadline } from './headline.ts';
 
 /**
@@ -83,8 +83,15 @@ function tvRelease(rows: CardProps['rows']): TvRead | undefined {
   return (rows[TV_RELEASE_TABLE] ?? []).find(isTvRelease);
 }
 
+/**
+ * The expander is `@pickarr/plugin-ui`'s, not this card's (issue #106).
+ * `useExpansion` owns the state and the rule that every transition is
+ * reported to web, closing included; `CardHeading` owns the `<h2>` and its
+ * announcement. What is left here is the only thing that differs between
+ * the three shipped cards: which string the headline is.
+ */
 function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): ReactElement {
-  const [expanded, setExpanded] = useState(false);
+  const { expanded, toggle } = useExpansion(onExpandedChange);
   const release = tvRelease(rows);
   // An item with no `tv_release` row, or one that failed `isTvRelease`,
   // renders `item.title` alone -- there is no series or episode number to
@@ -93,41 +100,12 @@ function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): 
 
   return (
     <>
-      <h2>
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => {
-            // Reported on *every* transition, closing included
-            // (`@pickarr/plugin-ui`'s own doc on why this is one callback
-            // taking the new value rather than an `onExpand`/`onCollapse`
-            // pair): web tears its subscriptions down for a card that has
-            // closed, and an earlier version of this seam that only
-            // signalled the opening left 72 of them live for 24 cards
-            // nobody had left open.
-            const next = !expanded;
-            setExpanded(next);
-            onExpandedChange(next);
-          }}
-        >
-          {headline}
-        </button>
-      </h2>
+      <CardHeading headline={headline} expanded={expanded} onToggle={toggle} />
       {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submit} />}
     </>
   );
 }
 
-/**
- * `@pickarr/plugin-ui`'s `BrowserPlugin` for television. `id: 'tv'` matches
- * `index.ts`'s `TV_PLUGIN_ID` and `MediaItemSyncRead.pluginId` for every
- * item this plugin creates (not imported from `index.ts` -- see this file's
- * own doc). `label: 'TV'` is the single source of this plugin's display
- * name: `web/src/plugins/registry.ts` is what the nav and the settings
- * destination row both read it through, so there is no second spelling to
- * drift from. It used to have one -- `web/src/pluginLabels.ts`, deleted
- * when the registry landed.
- */
 export const tvBrowser: BrowserPlugin = {
   id: 'tv',
   label: 'TV',
