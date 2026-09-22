@@ -1,14 +1,17 @@
 /**
- * Tells a plugin its file landed, and only then lets the download client
- * forget it.
+ * Tells a plugin its download landed, and only then lets the download
+ * client forget it.
  *
  * `onDownloadedFile` is a required `MediaPlugin` entry point (see
  * `packages/contract/src/plugin.ts`) that nothing in 2.0 has called until
  * now: it is the host's half of "the host notifies, the plugin imports" --
  * this codebase's replacement for 1.x's `pipeline/import.ts`, which pulled a
  * finished file into place itself. Here the host does none of that; it maps
- * the client's own path, measures the file, and hands both to the plugin
- * that owns it. What the plugin does with them is the plugin's business.
+ * the client's own path, `stat`s it, and hands both to the plugin that owns
+ * it -- `path` may be a file or a directory (`DownloadedFile`'s own doc
+ * comment), and it is the plugin, through `LibraryImporter.list` and
+ * `.place`, that looks inside it. What the plugin does with them is the
+ * plugin's business.
  *
  * **Ordering, and why each step is where it is.** For every `completed` row
  * with a `storage_path` and no `delivered_at` (one without a path is
