@@ -73,11 +73,16 @@
  * `store/gather.ts` with no transformation of its own.
  */
 import { useState, type ReactElement } from 'react';
-import type { GatheredDownload, GatheredItem, GatheredRelease } from '../store/gather.ts';
-import { PICK_REFUSAL_MESSAGES, type PickSubmit } from './postPick.ts';
+import {
+  PICK_REFUSAL_MESSAGES,
+  type GatheredDownloadView as GatheredDownload,
+  type GatheredItemView,
+  type GatheredReleaseView as GatheredRelease,
+  type PickSubmit,
+} from './types.ts';
 
 export interface ReleaseListProps {
-  releases: GatheredItem['releases'];
+  releases: GatheredItemView['releases'];
   /** Submits one pick. Required, never defaulted -- see this file's docblock. */
   submit: PickSubmit;
 }

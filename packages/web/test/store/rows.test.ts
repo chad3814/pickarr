@@ -5,6 +5,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import {
   getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
+  pluginRowsByMediaItems,
 } from '../../src/store/rows.ts';
 import { done } from '../../src/store/idb.ts';
 import type { StoredRow } from '../../src/store/db.ts';
@@ -89,6 +90,81 @@ test('byRssItem returns downloads across tables for one release', async () => {
       ['nzb_download', 2],
     ],
   );
+  db.close();
+});
+
+test('pluginRowsByMediaItems partitions each item its own rows, from the tables named and no others', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'tv' } },
+    { op: 'upsert', table: 'tv_release', id: 1, value: { mediaItemId: 7, kind: 'episode' } },
+    { op: 'upsert', table: 'movie_detail', id: 2, value: { mediaItemId: 7, runtimeMinutes: 100 } },
+    { op: 'upsert', table: 'media_item', id: 8, value: { pluginId: 'tv' } },
+    { op: 'upsert', table: 'tv_release', id: 3, value: { mediaItemId: 8, kind: 'season' } },
+  ]);
+
+  const result = await pluginRowsByMediaItems(db, [7, 8], ['tv_release']);
+
+  assert.equal(result.get(7)?.tv_release?.length, 1, "item 7's named table is carried");
+  assert.ok(!('movie_detail' in (result.get(7) ?? {})), 'an unnamed table is not, even though it belongs to the same item');
+  assert.equal(result.get(8)?.tv_release?.length, 1, "item 8's rows are not mixed into item 7's entry");
+  db.close();
+});
+
+test('pluginRowsByMediaItems: a named table with no rows is an empty array, not an absent key', async () => {
+  const db = await freshDb();
+  await seed(db, [{ op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'tv' } }]);
+
+  const result = await pluginRowsByMediaItems(db, [7], ['tv_release']);
+
+  assert.deepEqual(result.get(7), { tv_release: [] }, 'the key exists and is empty');
+  db.close();
+});
+
+test('pluginRowsByMediaItems answers every declared table for an id the replica holds nothing for', async () => {
+  const db = await freshDb();
+
+  const result = await pluginRowsByMediaItems(db, [999], ['tv_release']);
+
+  assert.deepEqual(result.get(999), { tv_release: [] }, 'an id with no media item at all still gets a full entry');
+  db.close();
+});
+
+test('pluginRowsByMediaItems opens one transaction for a page of ids, not one per id -- measured, not assumed', async () => {
+  // The property this function exists for: `byMediaItem` opens a fresh
+  // transaction on every call (`rowsStore`'s own doc), so calling it once
+  // per card -- the shape a per-card fetch took before this design replaced
+  // it -- would open one transaction per card. This counts the real thing
+  // rather than trusting the shape of the code, the same way
+  // `getRows answers only the ids actually held` above does not just for
+  // that function but this file's own `the count comes from the index, not
+  // from a filtered scan` did for `countByPlugin`.
+  const db = await freshDb();
+  const ids = Array.from({ length: 50 }, (_, i) => i + 1);
+  await seed(
+    db,
+    ids.flatMap((id) => [
+      { op: 'upsert' as const, table: 'media_item', id, value: { pluginId: 'tv' } },
+      { op: 'upsert' as const, table: 'tv_release', id: 1000 + id, value: { mediaItemId: id, kind: 'episode' } },
+    ]),
+  );
+
+  const original = db.transaction.bind(db);
+  let transactions = 0;
+  db.transaction = (storeNames, mode, options) => {
+    transactions += 1;
+    return original(storeNames, mode, options);
+  };
+
+  let result: ReadonlyMap<number, unknown>;
+  try {
+    result = await pluginRowsByMediaItems(db, ids, ['tv_release']);
+  } finally {
+    db.transaction = original;
+  }
+
+  assert.equal(transactions, 1, 'one transaction served all 50 ids');
+  assert.equal(result.size, 50, 'every id still got its own entry');
   db.close();
 });
 

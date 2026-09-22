@@ -3,8 +3,8 @@
  * read through `countByPlugin` and kept current by `subscribeInserts`
  * (design spec §6). `countByPlugin` counts the `by_table_plugin_updated`
  * index -- `IDBIndex.count()` over a key range scoped to one `pluginId` --
- * so this hook never reads a row to produce a number, only three index
- * counts.
+ * so this hook never reads a row to produce a number, only one index
+ * count per registered plugin.
  *
  * **Counts come from the replica only. There is no remote fallback**
  * (Global Constraint; storage design spec §9). A media item table with
@@ -12,25 +12,46 @@
  * to find out otherwise -- the one screen that proves offline capability must
  * not be the screen that quietly hides its own absence.
  *
- * A category is `media_item.pluginId` (`'tv' | 'movie' | 'xxx'`), not a
- * table of its own: `by_table_plugin_updated` has one entry per *row*, keyed
+ * A category is `media_item.pluginId`, not a table of its own:
+ * `by_table_plugin_updated` has one entry per *row*, keyed
  * `[table, pluginId, updatedAt, id]`, so `(table, pluginId)` is a key prefix
- * naming a contiguous range rather than a single entry. The three counts are
- * therefore three range counts against that index -- one per `pluginId` --
- * rather than one read of `media_item` split in memory by its own `pluginId`
- * field.
+ * naming a contiguous range rather than a single entry. The counts are
+ * therefore one range count against that index per `pluginId` -- rather than
+ * one read of `media_item` split in memory by its own `pluginId` field.
  */
 import { useEffect, useState } from 'react';
 import type { Store } from '../store/index.ts';
+import { BROWSER_PLUGINS } from '../plugins/registry.ts';
 
-export type Category = 'tv' | 'movie' | 'xxx';
+/**
+ * One tab per registered plugin (design spec §6). Order is display order,
+ * which is `BROWSER_PLUGINS`' order.
+ *
+ * **Derived, not written down.** This was a literal list of three ids until
+ * the registry existed; a fourth plugin then meant editing this line, the
+ * nav, the route table and the label map, and forgetting any one of them
+ * was silent. `plugins/registry.ts` is now the only place a plugin is
+ * named, and `test/plugins/registry.test.ts` fails if an id reappears
+ * anywhere else under `src/`.
+ *
+ * A module-level constant, not a value recomputed per render:
+ * `settings/AddFeed.tsx` puts it in a `<select>`'s option list and this
+ * hook's effect walks it on every wake.
+ */
+export const CATEGORIES: readonly string[] = BROWSER_PLUGINS.map((plugin) => plugin.id);
 
-/** The three tabs the shell has (design spec §6). Order is display order. */
-export const CATEGORIES: readonly Category[] = ['tv', 'movie', 'xxx'];
+/** One count per {@link CATEGORIES} entry, keyed by plugin id. */
+export type Counts = Readonly<Record<string, number>>;
 
-export type Counts = Readonly<Record<Category, number>>;
-
-const ZERO_COUNTS: Counts = { tv: 0, movie: 0, xxx: 0 };
+/**
+ * Zero for every registered category, reduced from {@link CATEGORIES}
+ * rather than written out: a literal here would be a second list of plugin
+ * ids, which is the thing the registry exists to stop.
+ */
+const ZERO_COUNTS: Counts = CATEGORIES.reduce<Record<string, number>>((counts, category) => {
+  counts[category] = 0;
+  return counts;
+}, {});
 
 /**
  * The two operations this hook needs, and nothing else `Store` offers.
@@ -63,7 +84,7 @@ function isStoreClosed(err: unknown): boolean {
 }
 
 /**
- * Three index counts, one per category, kept current by re-counting on
+ * One index count per category, kept current by re-counting on
  * every `subscribeInserts('media_item', …)` wake rather than adjusting the
  * previous counts incrementally. `countByPlugin` is an `IDBIndex.count()`
  * over a key range -- it reads no rows -- so a full re-count on each wake

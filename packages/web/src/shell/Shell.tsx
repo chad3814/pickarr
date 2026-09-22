@@ -1,6 +1,7 @@
 /**
- * The first screen that proves replication (design spec §6): a header, three
- * category tabs, and per category a count read from the replica. It owns the
+ * The first screen that proves replication (design spec §6): a header, one
+ * category tab per registered plugin (`../plugins/registry.ts`), and per
+ * category a count read from the replica. It owns the
  * store's whole lifetime -- creates one with the real browser adapters on
  * mount, stops it on unmount -- because signing in and never running the
  * store would ship `store/` without ever exercising it in a browser, which is
@@ -24,8 +25,8 @@
  * component or `sync.ts` ever inspecting a response body.
  *
  * **Routing (task 4, task 5 adds `/settings`).** `Shell` is also where the
- * app's five routes live -- `/tv`, `/movie`, `/xxx`, `/unmatched`,
- * `/settings`, with `/` redirecting to `/tv` -- via
+ * app's routes live -- one per registered plugin, plus `/unmatched` and
+ * `/settings`, with `/` redirecting to the first plugin's -- via
  * a pathless layout `Route` (`ShellChrome`, below) that renders the header
  * and nav once and an `<Outlet />` for whichever category matched. A
  * trailing `path="*"` route keeps that chrome on screen for any path this
@@ -48,10 +49,10 @@ import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { Unmatched } from '../library/Unmatched.tsx';
-import { useCounts, CATEGORIES, type Counts } from './useCounts.ts';
+import { useCounts, type Counts } from './useCounts.ts';
 import { Category as CategoryScreen } from '../library/Category.tsx';
 import { Settings } from '../settings/Settings.tsx';
-import { pluginLabel } from '../pluginLabels.ts';
+import { BROWSER_PLUGINS } from '../plugins/registry.ts';
 import { postFeed } from '../settings/AddFeed.tsx';
 import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
 import { mappingSubmit } from '../settings/postMapping.ts';
@@ -60,6 +61,17 @@ import { postPick } from '../library/postPick.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
+
+/**
+ * Where `/` sends a signed-in tab: the first registered plugin's category,
+ * because there is no "all" screen to land on and the nav's leftmost tab is
+ * the least surprising default.
+ *
+ * `undefined` only when {@link BROWSER_PLUGINS} is empty, which is a build
+ * with no plugins in it at all. That case renders no redirect rather than a
+ * `<Navigate to="/">` that would route to itself forever.
+ */
+const HOME_CATEGORY: string | undefined = BROWSER_PLUGINS[0]?.id;
 
 /** The real browser adapters (task 4, task 6's brief): `webLocksLease()`'s own default lease name, `Date.now`, `realFetch` and `idleScheduler`. */
 function defaultDeps(): CreateStoreDeps {
@@ -103,8 +115,9 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
   /**
    * Whether `createStore` rejected -- the one state that is neither "still
    * opening" nor "open", and which every screen below would otherwise
-   * render identically to both (whole-branch review §3: `/tv`'s section had
-   * an innerHTML of `""`, the counts read `0/0/0`, and no alert appeared,
+   * render identically to both (whole-branch review §3: the landing
+   * category's section had an innerHTML of `""`, all three counts read
+   * zero, and no alert appeared,
    * indefinitely). A boolean, not the error: a `VersionError`'s or an
    * `OpenBlockedError`'s message names the database, and nothing this
    * component renders may carry one (Global Constraints). The error itself
@@ -169,7 +182,10 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
   return (
     <Routes>
       <Route element={<ShellChrome counts={counts} onSignOut={handleSignOut} storeFailed={storeFailed} />}>
-        <Route index element={<Navigate to="/tv" replace />} />
+        <Route
+          index
+          element={HOME_CATEGORY === undefined ? null : <Navigate to={`/${HOME_CATEGORY}`} replace />}
+        />
         {/*
           `postPick` is the third real `submit` this file wires, on the same
           rule as the two below: a form or a button that performs network I/O
@@ -193,9 +209,25 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           and would be a second, weaker statement of the same fact to keep
           in step.
         */}
-        <Route path="tv" element={<CategoryScreen store={store} pluginId="tv" submit={postPick} />} />
-        <Route path="movie" element={<CategoryScreen store={store} pluginId="movie" submit={postPick} />} />
-        <Route path="xxx" element={<CategoryScreen store={store} pluginId="xxx" submit={postPick} />} />
+        {/*
+          One route per registered plugin, and the path *is* the id --
+          design spec §6 keeps that equality deliberately, under "what stays
+          hardcoded and why". `tables` is the
+          plugin's own `BrowserPlugin.tables`, passed by reference and never
+          copied: it is a module-level constant inside the plugin package,
+          and `usePluginRows` refetches the whole page whenever that
+          reference changes (`library/usePluginRows.ts`'s own doc), so a
+          `.map` or a spread here would refetch on every render.
+        */}
+        {BROWSER_PLUGINS.map((plugin) => (
+          <Route
+            key={plugin.id}
+            path={plugin.id}
+            element={
+              <CategoryScreen store={store} pluginId={plugin.id} tables={plugin.tables} submit={postPick} />
+            }
+          />
+        ))}
         {/*
           `store` is `undefined` until `createStore` resolves (this component's
           own effect, above); `Unmatched`'s `source` prop is not optional, so
@@ -308,10 +340,25 @@ function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): Reac
       */}
       <nav aria-label="Primary">
         <ul>
-          {CATEGORIES.map((category) => (
-            <li key={category}>
-              <NavLink to={`/${category}`}>
-                {pluginLabel(category)} <span data-testid={`count-${category}`}>{counts[category]}</span>
+          {/*
+            The nav and the route table above walk the same array, so a tab
+            that exists cannot point at a path that does not. They could
+            disagree before: these links were already derived, from
+            `useCounts.ts`'s `CATEGORIES`, while the routes were three
+            literals -- which is exactly the gap task 4's own review found
+            when swapping which screen rendered at one category's path
+            against another's passed every test in `Shell.test.tsx`.
+
+            `counts[plugin.id] ?? 0`: `Counts` is keyed by plugin id and
+            `useCounts` seeds every registered id to zero, so the `??` is
+            only what `noUncheckedIndexedAccess` requires for a string
+            index. Zero is also the right reading if it ever did fire -- the
+            same answer an empty replica gets (`useCounts.ts`'s own doc).
+          */}
+          {BROWSER_PLUGINS.map((plugin) => (
+            <li key={plugin.id}>
+              <NavLink to={`/${plugin.id}`}>
+                {plugin.label} <span data-testid={`count-${plugin.id}`}>{counts[plugin.id] ?? 0}</span>
               </NavLink>
             </li>
           ))}

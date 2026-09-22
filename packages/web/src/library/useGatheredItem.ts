@@ -26,6 +26,23 @@
  * The 3+N race below is unchanged and is a different thing: that one
  * resolves on the next wake, this one had no wake to resolve on.
  *
+ * **`enabled` is the plugin card's own expanded state, and the seam was
+ * changed so that it could be.** The plugin owns that state now
+ * (`library/MediaItemCard.tsx` mirrors it), and the first version of
+ * `@pickarr/plugin-ui`'s `CardProps` reported only the *opening* -- one
+ * `onExpand`, no collapse -- which left web able to pass nothing better
+ * than a latch: "has this card ever been opened". That kept this effect
+ * mounted for the life of the list, and it is the two paragraphs above
+ * that make the cost concrete rather than theoretical, because every
+ * subscription they describe stayed live. Measured on 24 cards opened and
+ * then closed again: **72 live subscriptions, and 24 IndexedDB
+ * transactions for one `torrent_download` insert with nothing open on
+ * screen** -- against 0 and 0 before the cards moved out of web, since the
+ * fan-out had moved from "cards currently open" to "cards ever opened".
+ * `CardProps.onExpandedChange` replaced `onExpand` for that reason, and
+ * the behaviour this file describes -- teardown on collapse, cache shown
+ * and re-gather started on re-expand -- is restored intact.
+ *
  * **`gatherMediaItem` is 3+N transactions, and cannot be made atomic** --
  * `store/rows.ts` does not accept a caller's transaction, and that is a
  * finding parked from an earlier slice's review, not something to fix here.

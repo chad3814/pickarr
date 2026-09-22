@@ -11,6 +11,28 @@ import { MediaItemCard } from '../../src/library/MediaItemCard.tsx';
 import type { PickSubmit } from '../../src/library/postPick.ts';
 import type { GatheredSource } from '../../src/library/useGatheredItem.ts';
 import type { GatheredDownload, GatheredItem, GatheredRelease } from '../../src/store/gather.ts';
+import type { PluginRows } from '@pickarr/plugin-ui';
+
+/**
+ * What `library/Category.tsx` hands a card whose plugin declared no tables.
+ * The plugin's card then renders `item.title`, with no headline built from
+ * anything.
+ *
+ * `MediaItemCard` does not read `rows` itself -- it forwards them to the
+ * plugin's `Card` -- so the only test here that seeds any is the TV
+ * headline one below; the rule that builds the headline is pinned against
+ * literals in `packages/plugin-tv/test/headline.test.ts`.
+ */
+const NO_ROWS: PluginRows = {};
+
+/**
+ * A `tv_release` row as `plugin-tv`'s card narrows it (`TvRead`'s
+ * `seriesTitle`, `seasonNumber` and `episodeNumber`), under the table name
+ * `tvBrowser.tables` declares.
+ */
+function tvRows(row: { seriesTitle: string; seasonNumber: number | null; episodeNumber: number | null }): PluginRows {
+  return { tv_release: [row] };
+}
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -161,20 +183,12 @@ const stubSource: GatheredSource = {
 test('a card shows its title as a real heading', () => {
   // CLAUDE.md's longest hazard: the accessible name must come from a visible
   // heading, not an aria-label, or a query passes against an unstyled block.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
+  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
   const heading = screen.getByRole('heading', { name: 'The Thing' });
   assert.equal(heading.textContent, 'The Thing');
 });
 
-test('expanding gathers the item once, and collapsing costs nothing while reopening refreshes', async () => {
-  // **`gathers` was pinned at 1 across the reopen**, which is the review's
-  // I2: both subscriptions are torn down while a card is collapsed, so a
-  // download row landing in that window is never noticed, and answering
-  // the reopen from the cache alone left a live `Pick` button on a release
-  // that already had one. `useGatheredItem`'s docblock has the decision;
-  // what this card-level test still pins is the half that did not change
-  // -- a collapsed card gathers nothing at all.
-  //
+test('a card gathers nothing until it is opened, and opening it gathers once', async () => {
   let gathers = 0;
   const source: GatheredSource = {
     ...quietInserts,
@@ -184,26 +198,122 @@ test('expanding gathers the item once, and collapsing costs nothing while reopen
     },
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
-  assert.equal(gathers, 0, 'a collapsed card costs nothing');
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  assert.equal(gathers, 0, 'an unopened card costs nothing');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   await waitFor(() => {
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
   assert.equal(gathers, 1);
+});
 
-  fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
-  // Collapsed. Asserted before reopening, because after the reopen a count
-  // of 2 would be satisfied by a collapse that gathered and a reopen that
-  // did not, which is the opposite of what this claims.
-  assert.equal(gathers, 1, 'collapsing gathers nothing');
+test('closing a card tears its subscriptions down, and reopening gathers again behind the cache', async () => {
+  // **The behaviour `CardProps.onExpandedChange` exists to make possible.**
+  // The seam first shipped with only an `onExpand`, so web could not learn
+  // a card had closed and passed `useGatheredItem` a latch instead. Fix
+  // round 1's review measured what that cost -- 72 live subscriptions for
+  // 24 cards opened and closed again, and 24 IndexedDB transactions for one
+  // `torrent_download` insert with nothing open on screen -- and the seam
+  // gained a collapse signal. This is the original pre-seam behaviour,
+  // restored: the count of 2 is the review-mandated re-gather (I2), because
+  // a download row landing while the card was collapsed was not watched for
+  // and must not be answered from the cache alone.
+  //
+  // The teardown is asserted directly, not inferred from the count: a
+  // gather count of 2 would also be produced by a card that re-gathered
+  // while *keeping* its subscriptions, which is the regression this pins
+  // shut.
+  let gathers = 0;
+  let liveSubscriptions = 0;
+  const source: GatheredSource = {
+    ...quietInserts,
+    subscribeInserts: () => {
+      liveSubscriptions += 1;
+      return () => {
+        liveSubscriptions -= 1;
+      };
+    },
+    gatherMediaItem: async (id: number) => {
+      gathers += 1;
+      return gathered({ id, title: 'The Thing' });
+    },
+    subscribe: () => {
+      liveSubscriptions += 1;
+      return () => {
+        liveSubscriptions -= 1;
+      };
+    },
+  };
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  assert.equal(liveSubscriptions, 0, 'a card nobody has opened watches nothing');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
   await waitFor(() => {
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
-  assert.equal(gathers, 2, 'reopening refreshes what it shows from the cache');
+  assert.equal(gathers, 1);
+  // One on `media_item`, one per download table (`useGatheredItem`'s own
+  // `DOWNLOAD_TABLES`, which holds two).
+  assert.equal(liveSubscriptions, 3, 'an open card watches its own row and both download tables');
+
+  fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
+  assert.ok(!screen.queryByRole('list', { name: /releases/i }), 'the card is closed again');
+  assert.equal(gathers, 1, 'collapsing gathers nothing');
+  assert.equal(liveSubscriptions, 0, 'and the close tore every subscription down, which the latch could not');
+
+  fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
+  await waitFor(() => {
+    assert.ok(screen.getByRole('list', { name: /releases/i }));
+  });
+  assert.equal(gathers, 2, 'reopening re-gathers behind the cache, since the collapsed window was unwatched');
+  assert.equal(liveSubscriptions, 3, 'and watches again');
+});
+
+test("a TV item's card is the tv plugin's, and its headline names the series and the episode", async () => {
+  // Design spec acceptance 1, at the seam web owns. The registry is what
+  // turns `item.pluginId` into a card; until it was wired, every row
+  // rendered `item.title` no matter which plugin wrote it, which is the
+  // defect the whole slice exists to fix. The headline *rule* is
+  // `plugin-tv`'s and is pinned there -- what this asserts is that web
+  // reached that card at all and handed it the rows it was given.
+  render(
+    <MediaItemCard
+      source={stubSource}
+      item={summary({ id: 7, title: "Dio's World(3)" })}
+      rows={tvRows({ seriesTitle: "Jo Jo's Bizarre Adventure", seasonNumber: 2, episodeNumber: 47 })}
+      submit={acceptsPick}
+    />,
+  );
+
+  const heading = await screen.findByRole('heading', {
+    name: "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)",
+  });
+  assert.equal(heading.textContent, "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)");
+});
+
+test('an item whose plugin this build does not carry still shows its poster and its title', () => {
+  // **A defensive branch, pinned as one**, and the fixture below says so:
+  // `pluginId: 'book'` is a value no screen in this build can deliver.
+  // `Category` gets its `pluginId` from the registry and `useMediaItems`
+  // lists through a key range scoped to that one id, so every item reaching
+  // `MediaItemCard` in the app carries a registered id -- `MediaItemCard`'s
+  // own comment on the branch has the full call graph. An earlier version
+  // of this comment claimed the branch was reachable; it is not.
+  //
+  // What it is worth pinning anyway is that rendering a card stays a total
+  // function over replica data. A `media_item` row's `pluginId` comes from
+  // IndexedDB, which persists across client builds and was written by
+  // whatever plugins the host had registered, so the value is of open range
+  // even though no current caller can widen it past the registry. Throwing
+  // would take the whole paged list down; rendering nothing would leave a
+  // poster with no name under it.
+  const item: MediaItemSyncRead = { ...summary({ id: 7, title: 'The Thing' }), pluginId: 'book' };
+  render(<MediaItemCard source={stubSource} item={item} rows={NO_ROWS} submit={acceptsPick} />);
+
+  assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the row is still identifiable');
+  assert.ok(screen.getByRole('img', { name: 'The Thing' }), 'and web still renders the poster it owns');
+  assert.ok(!screen.queryByRole('button'), 'with no expander, because there is no card body to expand into');
 });
 
 test('a release shows its resolution and its download status', async () => {
@@ -223,7 +333,7 @@ test('a release shows its resolution and its download status', async () => {
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.2160p.mkv/ });
@@ -246,7 +356,7 @@ test('a release with no download row shows no status rather than a blank one', a
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.1080p.mkv/ });
@@ -258,7 +368,7 @@ test('a card whose artwork 404s still renders', () => {
   // Artwork is not replicated: the client asks `/api/artwork/:kind/:id` and
   // handles a 404 (host `sync/tables.ts`). Most items will have no poster for
   // a while, so a missing one must not blank the card.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} submit={acceptsPick} />);
+  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
   const image = screen.getByRole('img', { name: /The Thing/ });
   fireEvent.error(image);
   assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the card survives its poster failing');
@@ -293,6 +403,7 @@ test('the submit a card is handed is the one its Pick button calls', async () =>
     <MediaItemCard
       source={source}
       item={summary({ id: 7, title: 'The Thing' })}
+      rows={NO_ROWS}
       submit={(rssItemId) => {
         asked.push(rssItemId);
         return Promise.resolve({ accepted: true });

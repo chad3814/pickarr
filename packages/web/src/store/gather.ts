@@ -10,6 +10,17 @@
  * out. A plugin's own `compose.ts` reads the rows this one ignores. That
  * split is what makes a new plugin a new directory rather than an edit here.
  *
+ * **A card's plugin rows do not come from here.** An earlier version of
+ * this module took a `tables` parameter and returned `pluginRows`,
+ * partitioned out of the same `byMediaItem` read below -- which worked for
+ * an *expanded* card, but a collapsed one never calls this function at all
+ * (`useGatheredItem.ts`'s `enabled` gate), and a collapsed row needs its
+ * plugin's headline too (design spec §4, acceptance 1). `pluginRows` is a
+ * page-level concern now: `store/rows.ts`'s `pluginRowsByMediaItems` reads
+ * every card's rows in one batched query when the page's item list is
+ * known, before any card expands, and `library/usePluginRows.ts` is what a
+ * screen calls it through.
+ *
  * **No artwork rows.** Artwork is not replicated (design spec §1.2, #79); the
  * three urls below are the whole of what this gatherer can say about it.
  *
@@ -35,6 +46,7 @@ import type {
   RssItemSyncRead,
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
+import type { GatheredItemView } from '@pickarr/plugin-ui';
 import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
 
 /**
@@ -242,4 +254,24 @@ export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Pro
   const feedIds = [...new Set(releases.map((release) => release.row.feedId))].toSorted((a, b) => a - b);
 
   return { mediaItem, pluginId: mediaItem.pluginId, releases, roles, artwork: artworkUrls(mediaItemId), feedIds };
+}
+
+/**
+ * The gather satisfies the view the seam hands plugins.
+ *
+ * A type-level check and not a runtime one: `@pickarr/plugin-ui` must not
+ * import web (web imports it), so the two shapes cannot be one
+ * declaration. This function is what fails the build if they drift --
+ * without it, a field removed here would be a plugin's runtime
+ * `undefined`.
+ *
+ * A function rather than the cast the plan's own draft used
+ * (`null as unknown as GatheredItem`, a cast twice over, which the Global
+ * Constraints forbid outright): TypeScript accepts the bare `return item`
+ * below only because every field `GatheredItemView` declares is already
+ * present, with a compatible type, on `GatheredItem` -- the same
+ * assignability check, proven with no cast anywhere in it.
+ */
+export function gatherSatisfiesView(item: GatheredItem): GatheredItemView {
+  return item;
 }

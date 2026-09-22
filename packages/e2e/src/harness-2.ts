@@ -14,16 +14,42 @@
  * `ReadServerDeps` `main` does, by hand, and gets back a `close()` it can
  * actually call.
  *
- * **No plugin is registered in the sync registry, and none is needed there.**
- * `media_item` -- the one table the shell's three counts read (`useCounts.ts`'s
- * `CATEGORIES`) -- is a *host* synced table (`HOST_SYNCED_TABLES`), synced with
- * no plugin involved at all. `seedMediaItem` below inserts into it directly,
- * the same seam `packages/host/test/api/sync-route.test.ts`'s own
- * `seedMediaItem` uses, so a spec can grow the replica's source of truth with
- * no feed, no lookup service and no job to produce one. (`stubPlugin`, below,
- * *is* registered -- on the `Host` this file builds for `addFeed`, a
- * different map from the sync registry's -- see that paragraph for why this
- * one no longer means "no plugin exists anywhere in this harness".)
+ * **`media_item` needs no plugin registered in the sync registry, and a TV
+ * headline does.** `media_item` -- the one table the shell's three counts read
+ * (`useCounts.ts`'s `CATEGORIES`) -- is a *host* synced table
+ * (`HOST_SYNCED_TABLES`), synced with no plugin involved at all.
+ * `seedMediaItem` below inserts into it directly, the same seam
+ * `packages/host/test/api/sync-route.test.ts`'s own `seedMediaItem` uses, so
+ * a spec can grow the replica's source of truth with no feed, no lookup
+ * service and no job to produce one. (`stubPlugin`, below, is *also*
+ * registered on the `Host` this file builds for `addFeed`, a different map
+ * from the sync registry's -- see that paragraph.)
+ *
+ * What `media_item` alone is not enough for is the line a collapsed TV card
+ * reads. `plugin-tv`'s browser card builds `<series> SxxEyy <title>` out of
+ * this item's `tv_release` row (`packages/plugin-tv/src/browser.tsx`, design
+ * spec §4, acceptance 1), and while every `stubPlugin` declared
+ * `migrations: []` and `synced: []` there was no such table in this
+ * harness's database and nothing replicating it to the browser -- so every
+ * TV card here fell back to `item.title` and rendered text byte-identical to
+ * the shared card the plugin cards replaced. That is why acceptance 1 went
+ * six tasks with a green suite and no browser evidence at all.
+ * {@link PLUGIN_SCHEMA} therefore gives the `tv` stub `@pickarr/plugin-tv`'s
+ * own `TV_MIGRATIONS` and `TV_SYNCED`, and {@link Harness.seedTvRelease}
+ * writes a row into them.
+ *
+ * **Importing `@pickarr/plugin-tv`'s package root here is deliberate.** The
+ * rule that a plugin may only be reached through its `/browser` subpath
+ * binds `packages/web/src`, whose bundle cannot carry `node:sqlite` and
+ * whose own test enforces it (`packages/web/test/plugins/registry.test.ts`).
+ * This file runs in Node beside the host, and `@pickarr/host` imports the
+ * same root.
+ *
+ * **`createSyncRegistry` is built after every `register`, never before.**
+ * `assertSyncable` (`sync/registry.ts`) reads `PRAGMA table_info` for each
+ * declared table, and a plugin's tables do not exist until `register` has
+ * run `migratePlugin` for it. `main.ts` states that order as load-bearing;
+ * this file was free to ignore it only while its plugins declared nothing.
  *
  * **The `Host` this file builds for `addFeed` is deliberately never
  * started.** `createHost` gets real `fetch`/`downloads`/`secrets` wiring and
@@ -75,13 +101,13 @@
  * loopback connection identically on every platform this suite might run on
  * -- `127.0.0.1` is unambiguous.
  */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test as base } from '@playwright/test';
-import type { MediaPlugin, PluginContext } from '@pickarr/contract';
+import type { MediaPlugin, Migration, PluginContext, SyncedTable } from '@pickarr/contract';
 import {
   createAuth,
   createDownloadClients,
@@ -97,6 +123,7 @@ import {
   type Host,
   type ReadServer,
 } from '@pickarr/host';
+import { TV_MIGRATIONS, TV_SYNCED } from '@pickarr/plugin-tv';
 import { webDist } from './paths.ts';
 
 /**
@@ -118,19 +145,50 @@ const now = (): number => Date.now();
 export type Category = 'tv' | 'movie' | 'xxx';
 
 /**
- * A `MediaPlugin` that does the least possible: no migrations, no synced
- * tables, no job handlers, and a no-op for two of the three callbacks
- * `Host` ever invokes. Registered once per category (below) so
+ * The schema each stub plugin declares as its own: television's real one,
+ * and nothing for the other two.
+ *
+ * **Asymmetric on purpose, and the asymmetry is the point.** `tv` is the
+ * only category any spec here reads a plugin-owned row back through, so it
+ * is the only one that needs a table to read -- and giving the other two
+ * their real schemas would replicate `movie_detail`, `xxx_scene` and
+ * `xxx_site` to every browser in the suite for nothing. If a spec ever
+ * needs a movie or scene row, the entry to change is here and the import is
+ * the same shape.
+ *
+ * `TV_MIGRATIONS`' one migration is version 2, not 1 -- version 1 is the
+ * lookup engine's own state table, which `createLookupPlugin` prepends and
+ * this harness has no engine to prepend it (`plugin-tv/src/migrations.ts`'s
+ * own doc). `migratePlugin` applies every version it holds no
+ * `plugin_migrations` row for, in sorted order, and asks for no contiguity
+ * at all, so a list starting at 2 applies cleanly; what it does enforce is
+ * the `<pluginId>_` prefix on every table `up()` creates, which all three
+ * of television's carry.
+ */
+const PLUGIN_SCHEMA: Record<Category, {
+  migrations: readonly Migration[];
+  synced: readonly SyncedTable<unknown>[];
+}> = {
+  tv: { migrations: TV_MIGRATIONS, synced: TV_SYNCED },
+  movie: { migrations: [], synced: [] },
+  xxx: { migrations: [], synced: [] },
+};
+
+/**
+ * A `MediaPlugin` that does the least possible beyond its own schema
+ * ({@link PLUGIN_SCHEMA}): no job handlers, and a no-op for two of the three
+ * callbacks `Host` ever invokes. Registered once per category (below) so
  * `feeds/add.ts`'s own `isRegistered` check -- reached through
  * `Host.addFeed`, the real validator this harness now wires to
  * `POST /api/feeds` -- accepts the same three plugin ids `AddFeed.tsx`'s
  * form offers (`CATEGORIES`, `shell/useCounts.ts`), the same way a real
  * `createTvPlugin` et al. would. A stub is enough for those two: no spec in
- * this file ever polls a feed to completion or reads a plugin-owned table,
- * so nothing here needs `onNewRssItems` to do anything but resolve. This is
- * the same "no plugin is needed beyond what `isRegistered` checks" the
- * module doc's `media_item` paragraph already argues, applied to
- * `addFeed`'s own gate instead.
+ * this file ever polls a feed to completion, so nothing here needs
+ * `onNewRssItems` to do anything but resolve -- the plugin-owned rows a
+ * spec *does* read come from {@link Harness.seedTvRelease}'s direct
+ * inserts, not from a notification. This is the same "no plugin is needed
+ * beyond what `isRegistered` checks" the module doc's `media_item`
+ * paragraph already argues, applied to `addFeed`'s own gate instead.
  *
  * **`onDownloadRequest` is the exception, and it submits for real.** It was
  * empty until the picks slice, which is why `createReadServer`'s
@@ -153,9 +211,9 @@ function stubPlugin(id: Category): MediaPlugin {
   return {
     id,
     mediaType: id,
-    migrations: [],
+    migrations: PLUGIN_SCHEMA[id].migrations,
     jobs: {},
-    synced: [],
+    synced: PLUGIN_SCHEMA[id].synced,
     // No library path shape is configured in an end-to-end run, so there is
     // nothing here for a token to appear in.
     tokens: {},
@@ -191,6 +249,59 @@ const QBITTORRENT_API_KEY = 'placeholder-not-a-real-qbittorrent-api-key';
  * `(download_client_id, client_ref)` therefore has one row to police.
  */
 const MAGNET = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
+
+/**
+ * A 1x1 PNG, decoded once at module scope: the smallest bytes
+ * `api/artwork-route.ts` will answer a poster request with.
+ *
+ * **The content matters in exactly two ways and no others.** The eight-byte
+ * PNG signature is what `readArtwork` sniffs to choose a content type -- it
+ * stores none, deliberately (that module's own doc) -- and the bytes have to
+ * decode, or Chromium raises `error` on the `<img>` and
+ * `library/MediaItemCard.tsx`'s `onError` removes the element from the DOM
+ * for good. That latch is why an e2e poster has to be real: a 404 or a
+ * corrupt file does not leave a broken image to measure, it leaves no image
+ * at all, and `posterFailed` never resets.
+ *
+ * Its 1x1 dimensions are not the frame the operator sees. `library.css`'s
+ * `article img` rule fixes the frame at `--size-poster` by `2 / 3` with
+ * `object-fit: cover`, so what this image contributes to layout is nothing --
+ * which is the property the poster pin in `tests/shell.spec.ts` measures.
+ */
+const POSTER_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAE/wH+6CVCqwAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/**
+ * The `provider` every row {@link Harness.seedTvRelease} writes claims, and
+ * the prefix of every `provider_ref` it mints.
+ *
+ * `tv_series` and `tv_season` both carry `provider`/`provider_ref` as `NOT
+ * NULL` under a unique index (`plugin-tv/src/migrations.ts`), so a seeded row
+ * needs a pair, and no real provider answered for these: naming the harness
+ * says so at the row rather than leaving `tmdb` on data no lookup service
+ * ever produced.
+ */
+const SEED_PROVIDER = 'e2e-harness';
+
+/**
+ * `tv_release.kind` for a release naming these numbers.
+ *
+ * **Derived from the numbers rather than taken as an argument, for the same
+ * reason `plugin-tv/src/headline.ts` refuses to branch on `kind` at all**:
+ * the three kinds differ from each other only in which of the two numbers is
+ * present, so a caller free to pass any `kind` could seed a row whose `kind`
+ * and numbers disagree -- which is a fixture no lookup service writes
+ * (`plugin-tv/src/apply.ts`'s `checkTv`/`applyTv`). The column is `NOT NULL`
+ * and `sync.ts`'s `tvKind` throws on any value outside these three, so it
+ * cannot be left blank or filled with a placeholder either.
+ */
+function tvKindFor(seasonNumber: number | null, episodeNumber: number | null): 'series' | 'season' | 'episode' {
+  if (episodeNumber !== null) return 'episode';
+  if (seasonNumber !== null) return 'season';
+  return 'series';
+}
 
 /** A listening fake, and the one call that stops it. */
 interface FakeClient {
@@ -293,6 +404,59 @@ export interface Harness {
    */
   seedMediaItem(pluginId: Category, title: string): number;
   /**
+   * One television media item and the `tv_release` row that gives its
+   * collapsed card a headline -- the series, the season and episode numbers,
+   * and, optionally, a poster the `<img>` will actually load. Returns the
+   * `media_item` id.
+   *
+   * **Every insert happens in one synchronous call**: nothing here `await`s,
+   * so the host's own `/api/sync` handler cannot run between two of these
+   * inserts and a browser sees all of them or none.
+   *
+   * **The poster is what makes that mandatory.** One 404 latches
+   * `MediaItemCard`'s `posterFailed` and the `<img>` is gone for the life of
+   * the card, so the `poster` row has to reach the replica in the same batch
+   * as the `media_item` it belongs to or there is nothing left to measure.
+   *
+   * **The `tv_release` half used to be mandatory too, and is not any more.**
+   * A card whose `media_item` arrived in an earlier batch than its
+   * `tv_release` used to render `item.title` and never correct itself, since
+   * nothing woke `library/usePluginRows.ts`. That was a real client defect,
+   * found while writing this method and fixed in this task's fix round 1:
+   * the hook now subscribes to inserts on each declared table, so a late
+   * `tv_release` reaches the card with no remount
+   * (`packages/web/test/library/Category.test.tsx`'s `a plugin row that
+   * replicates in a later batch than its media item still reaches the
+   * card`). The seed stays atomic anyway, because what the browser spec
+   * asserts is the headline on a row **nobody has expanded and nothing has
+   * woken** -- which is acceptance 1 -- and a two-call seed would quietly
+   * turn it into an assertion about the recovery path instead.
+   *
+   * Callers therefore get one method rather than a composable
+   * `seedPoster(mediaItemId)` beside a `seedTvRelease(mediaItemId)`. Two
+   * calls would still be safe back to back -- both would be synchronous --
+   * but nothing at either call site would say that an `await` between them
+   * is what breaks the spec.
+   *
+   * **`withPoster` is required rather than defaulted**, the same reason
+   * `seedPickableRelease`'s `withDownloadClient` is: a spec that omitted it
+   * would get one behaviour or the other with nothing at the call site
+   * saying which. `false` leaves the item with no `poster` row, which is the
+   * 404 every other spec in this suite renders a card under.
+   *
+   * `seasonNumber` and `episodeNumber` are `number | null` rather than
+   * optional because both are genuinely nullable in `tv_release` and a
+   * series pack names neither (`plugin-tv/src/apply.ts`); {@link tvKindFor}
+   * turns whichever are present into the row's `kind`.
+   */
+  seedTvRelease(input: {
+    title: string;
+    seriesTitle: string;
+    seasonNumber: number | null;
+    episodeNumber: number | null;
+    withPoster: boolean;
+  }): number;
+  /**
    * Everything a pick needs that a browser cannot create for itself: a
    * torrent download client pointed at this test's fake qBittorrent, a
    * torrent feed, a `media_item` to expand, and one `rss_item` under it
@@ -342,6 +506,8 @@ interface Booted {
   server: ReadServer;
   host: Host;
   qbittorrent: FakeClient;
+  /** The file {@link Harness.seedTvRelease}'s `withPoster` points a `poster` row at. */
+  posterPath: string;
 }
 
 /**
@@ -360,12 +526,20 @@ async function boot(): Promise<Booted> {
   // `seedPickableRelease` and then presses `Pick`.
   const qbittorrent = await startFakeQbittorrent();
 
-  // Empty plugin list: see this module's doc for why `media_item` needs none.
-  // `Host`'s own `plugins` map (below) is separate from this registry and is
-  // what `addFeed`'s `isRegistered` check reads -- registering a plugin
-  // there does not have to mean registering it here too, since none of the
-  // three stub plugins below declares a `synced` table of its own.
-  const registry = createSyncRegistry(raw, []);
+  // Written for every test, on the same reasoning as the fake client above:
+  // one 70-byte file costs about nothing, and the alternative is an `await`
+  // in the middle of a seed. `seedTvRelease` has to insert the `media_item`
+  // and the `poster` row that names this file in one synchronous call -- see
+  // its own doc for why -- so the bytes cannot be written at the moment the
+  // row is, and the only other place to put the write is here.
+  const artworkDir = join(dir, 'artwork');
+  await mkdir(artworkDir, { recursive: true });
+  // `.bin`, matching `artwork/store.ts`'s own naming: the suffix is
+  // deliberately not the measured type, because `readArtwork` sniffs the
+  // magic bytes on every request and stores no content type at all.
+  const posterPath = join(artworkDir, 'seeded-poster.bin');
+  await writeFile(posterPath, POSTER_PNG);
+
   const generation = ensureSyncGeneration(raw, Date.now());
 
   const hostFetch = createHostFetch({ fetch: globalThis.fetch });
@@ -406,11 +580,21 @@ async function boot(): Promise<Booted> {
     downloads: (deps) => createDownloadClients({ raw, fetch: hostFetch, secrets: deps, now, chooseIndex: randomIndex, log: dropLine }),
     secrets,
     now,
-    artworkDir: join(dir, 'artwork'),
+    artworkDir,
   });
   // `stubPlugin`'s own doc: enough for `Host.addFeed`'s `isRegistered`
   // check to accept the same three ids `AddFeed.tsx`'s form offers.
-  for (const category of ['tv', 'movie', 'xxx'] as const) host.register(stubPlugin(category));
+  const plugins = (['tv', 'movie', 'xxx'] as const).map((category) => stubPlugin(category));
+  for (const plugin of plugins) host.register(plugin);
+
+  // After every `register`, never before -- `main.ts` does these same two in
+  // this same order (`:857`, then `:863`), and this module's own doc says why:
+  // `createSyncRegistry` runs `assertSyncable` over each declared table,
+  // which reads `PRAGMA table_info`, and `tv_release` does not exist until
+  // `register` has run `migratePlugin`. The same plugin objects are handed to
+  // both, so the registry cannot describe a different set than the host
+  // registered.
+  const registry = createSyncRegistry(raw, plugins);
 
   const server = await createReadServer({
     raw,
@@ -467,7 +651,7 @@ async function boot(): Promise<Booted> {
     log: dropLine,
   });
 
-  return { raw, dir, server, host, qbittorrent };
+  return { raw, dir, server, host, qbittorrent, posterPath };
 }
 
 /**
@@ -512,7 +696,7 @@ async function boot(): Promise<Booted> {
  */
 export const test = base.extend<{ harness: Harness }>({
   harness: async ({ context }, use) => {
-    const { raw, dir, server, host, qbittorrent } = await boot();
+    const { raw, dir, server, host, qbittorrent, posterPath } = await boot();
     try {
       const claimToken = ensureClaimToken(raw, Date.now());
       function seedMediaItem(pluginId: Category, title: string): number {
@@ -523,10 +707,68 @@ export const test = base.extend<{ harness: Harness }>({
         return Number(info.lastInsertRowid);
       }
 
+      // Synchronous from end to end -- see `Harness.seedTvRelease`'s own doc
+      // for why nothing in here may `await`.
+      function seedTvRelease(
+        { title, seriesTitle, seasonNumber, episodeNumber, withPoster }: {
+          title: string;
+          seriesTitle: string;
+          seasonNumber: number | null;
+          episodeNumber: number | null;
+          withPoster: boolean;
+        },
+      ): number {
+        const at = Date.now();
+        const mediaItemId = seedMediaItem('tv', title);
+        if (withPoster) {
+          // `width`/`height` are the real 1x1 of `POSTER_PNG`, not the frame
+          // the card renders: nothing reads these two back (`poster` is not
+          // a synced table -- artwork is not replicated, design spec §1.2),
+          // and recording the frame's numbers here would be a measurement of
+          // the wrong thing written into a `NOT NULL` column.
+          //
+          // `url` is `.invalid` (RFC 2606) for the same reason
+          // `seedPickableRelease`'s feed url is: it is under a unique index
+          // with `media_item_id`, so it needs a value, and nothing should be
+          // able to resolve it even if some future change did try.
+          raw.prepare(
+            'INSERT INTO poster (media_item_id, url, width, height, created_at, path) VALUES (?, ?, ?, ?, ?, ?)',
+          ).run(mediaItemId, `http://artwork.invalid/${String(mediaItemId)}.png`, 1, 1, at, posterPath);
+        }
+        const series = raw.prepare(`
+          INSERT INTO tv_series (provider, provider_ref, title, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(SEED_PROVIDER, `series-${String(mediaItemId)}`, seriesTitle, at, at);
+        const seriesId = Number(series.lastInsertRowid);
+        // A season row only where there is a season number to put in it.
+        // `tv_release.season_id` is nullable and `sync.ts` reaches it by a
+        // *left* join, so a null here reads back as `seasonNumber: null` --
+        // which is exactly what a series pack looks like.
+        const seasonId = seasonNumber === null ? null : Number(raw.prepare(`
+          INSERT INTO tv_season (series_id, provider, provider_ref, season_number, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(seriesId, SEED_PROVIDER, `season-${String(mediaItemId)}`, seasonNumber, at, at).lastInsertRowid);
+        raw.prepare(`
+          INSERT INTO tv_release
+            (media_item_id, kind, series_id, season_id, episode_number, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          mediaItemId,
+          tvKindFor(seasonNumber, episodeNumber),
+          seriesId,
+          seasonId,
+          episodeNumber,
+          at,
+          at,
+        );
+        return mediaItemId;
+      }
+
       await use({
         origin: `http://${server.host}:${server.port}`,
         claimToken,
         seedMediaItem,
+        seedTvRelease,
         async seedPickableRelease({ pluginId, title, filename, resolution, withDownloadClient }) {
           if (withDownloadClient) {
             const client = await host.addDownloadClient({

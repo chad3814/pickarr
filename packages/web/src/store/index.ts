@@ -35,8 +35,10 @@ import { openStore } from './db.ts';
 import type { StoredRow } from './db.ts';
 import {
   getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
+  pluginRowsByMediaItems,
   type ListByTableOptions,
 } from './rows.ts';
+import type { PluginRows } from '@pickarr/plugin-ui';
 import { subscribe, subscribeInserts, subscribeReset } from './notify.ts';
 import { gatherMediaItem, type GatheredItem } from './gather.ts';
 import { startSync, type Lease, type Schedule, type SyncFetch } from './sync.ts';
@@ -90,6 +92,13 @@ export interface Store {
   getRows(table: string, ids: readonly number[]): Promise<Map<number, unknown>>;
   byMediaItem(mediaItemId: number): Promise<readonly StoredRow[]>;
   byRssItem(rssItemId: number): Promise<readonly StoredRow[]>;
+  /**
+   * A page's plugin rows, one batched read regardless of how many ids or
+   * tables -- `store/rows.ts`'s own doc on why this exists separately from
+   * `gatherMediaItem` (a collapsed card needs its rows too, and this is the
+   * only shape that can answer for a whole page of them at once).
+   */
+  pluginRowsByMediaItems(mediaItemIds: readonly number[], tables: readonly string[]): Promise<ReadonlyMap<number, PluginRows>>;
   listByTable(table: string, opts: ListByTableOptions): Promise<readonly StoredRow[]>;
   listByTablePlugin(table: string, pluginId: string, opts: ListByTableOptions): Promise<readonly StoredRow[]>;
   countByPlugin(table: string, pluginId: string): Promise<number>;
@@ -146,6 +155,7 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     getRows: (table, ids) => getRows(db, table, ids),
     byMediaItem: (mediaItemId) => byMediaItem(db, mediaItemId),
     byRssItem: (rssItemId) => byRssItem(db, rssItemId),
+    pluginRowsByMediaItems: (mediaItemIds, tables) => pluginRowsByMediaItems(db, mediaItemIds, tables),
     listByTable: (table, opts) => listByTable(db, table, opts),
     listByTablePlugin: (table, pluginId, opts) => listByTablePlugin(db, table, pluginId, opts),
     countByPlugin: (table, pluginId) => countByPlugin(db, table, pluginId),

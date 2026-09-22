@@ -112,7 +112,8 @@ section[aria-labelledby='settings-heading'] > section + section {
  *
  * **`ul[aria-labelledby='destinations-heading'] li h3` joined this list in
  * the styling task, and it is the row heading `Destinations.tsx` names
- * through `pluginLabel` -- "TV", "Movies", "XXX" -- not through
+ * through the plugin registry's `label` -- "TV", "Movies", "XXX" -- not
+ * through
  * `AddFeed.tsx`'s or `AddDownloadClient.tsx`'s own form headings.** Unlike
  * the two list-item selectors beside it, this one is *not* overridden to
  * `margin: 0` below: a destination row's `<h3>` is immediately followed by

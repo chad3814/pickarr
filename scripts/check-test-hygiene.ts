@@ -37,12 +37,26 @@
  * enough to name the test that failed — it presents as a bare SIGKILL, or as
  * `'test failed'` with no reason, and costs an hour to trace.
  */
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
 
-/** Where rule 1 applies. Server tests have no DOM to hand anyone. */
-const TEST_DIR = 'packages/web/test';
+/**
+ * Where rule 1 looks for a package's tests: every workspace package,
+ * discovered rather than named one at a time.
+ *
+ * This used to be the single constant `TEST_DIR = 'packages/web/test'`, and
+ * that hardcoding is exactly what let `packages/plugin-ui/test/ReleaseList.test.tsx`
+ * go unscanned once the plugin-cards work moved it out of `packages/web/test`
+ * -- `npm run test-hygiene` stayed green over a file it never looked at.
+ * `test:web`'s own glob widened to `packages/*` for the same move
+ * (`package.json`); rule 1 now reaches the same set by walking `packages/`
+ * itself, so the two cannot drift apart again. A server-only package's test
+ * directory costs one extra directory walk and flags nothing -- there is no
+ * DOM in it to hand `node:assert` -- which is cheaper than a second constant
+ * someone has to remember to extend.
+ */
+const PACKAGES_DIR = 'packages';
 
 /** Where rule 2's allow-list paths are rooted, and one of the roots it scans. */
 const HOST_SRC_DIR = 'packages/host/src';
@@ -1008,9 +1022,36 @@ async function sourceFiles(dir: string): Promise<string[]> {
   return nested.flat().toSorted();
 }
 
-/** Rule 1 across `TEST_DIR`, reported. Resolves `true` when the tree is clean. */
+/**
+ * Every immediate subdirectory of `root` that has its own `test` directory,
+ * sorted.
+ *
+ * `root` is a parameter, not baked in as `PACKAGES_DIR` directly, for the
+ * same reason `findCredentialSelections`'s `dir` is: a test can point this
+ * at a fixture under a temp directory rather than at tracked source. A
+ * package with no `test` directory yet contributes nothing -- the same
+ * treatment `checkCredentialColumns` gives an absent tree in
+ * `CREDENTIAL_SRC_DIRS` -- so a package added to the workspace before it has
+ * tests does not fail the build over a missing path.
+ */
+export async function packageTestDirs(root: string = PACKAGES_DIR): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true });
+  const dirs = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry): Promise<string | undefined> => {
+        const dir = join(root, entry.name, 'test');
+        const exists = await stat(dir).then(() => true, () => false);
+        return exists ? dir : undefined;
+      }),
+  );
+  return dirs.filter((dir): dir is string => dir !== undefined).toSorted();
+}
+
+/** Rule 1 across every package's `test` directory (`packageTestDirs`), reported. Resolves `true` when the tree is clean. */
 async function checkDomAssertions(): Promise<boolean> {
-  const files = await sourceFiles(TEST_DIR);
+  const dirs = await packageTestDirs();
+  const files = (await Promise.all(dirs.map((dir) => sourceFiles(dir)))).flat().toSorted();
   const violations: Violation[] = [];
   for (const file of files) {
     // eslint-disable-next-line no-await-in-loop -- a few dozen files in a one-shot check; not a hot path

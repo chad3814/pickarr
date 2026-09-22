@@ -318,8 +318,8 @@ export const DESTINATION_REFUSAL_MESSAGES: Record<
  * unknown token to be "refused, naming it" -- and this screen told the
  * operator, in a shipped sentence, that Pickarr "does not say which one it
  * refused" while the name sat unread in the response. Naming it is the
- * whole point of the second field, and a `{token}` list of seven on the tv
- * row is exactly the case where a code alone leaves an operator comparing
+ * whole point of the second field, and a `{token}` list of seven on the
+ * television row is exactly the case where a code alone leaves an operator comparing
  * strings by eye.
  *
  * **The client still owns every word.** The host sends a datum, not a

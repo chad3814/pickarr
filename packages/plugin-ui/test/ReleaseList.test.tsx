@@ -2,9 +2,14 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent, waitFor, within, act } from '@testing-library/react';
 import type { NzbDownloadSyncRead, RssItemSyncRead, TorrentDownloadSyncRead } from '@pickarr/contract';
-import { ReleaseList, PICK_LABELS } from '../../src/library/ReleaseList.tsx';
-import { PICK_REFUSAL_MESSAGES, type PickOutcome, type PickSubmit } from '../../src/library/postPick.ts';
-import type { GatheredDownload, GatheredRelease } from '../../src/store/gather.ts';
+import { ReleaseList, PICK_LABELS } from '../src/ReleaseList.tsx';
+import {
+  PICK_REFUSAL_MESSAGES,
+  type GatheredDownloadView as GatheredDownload,
+  type GatheredReleaseView as GatheredRelease,
+  type PickOutcome,
+  type PickSubmit,
+} from '../src/types.ts';
 
 afterEach(cleanup);
 

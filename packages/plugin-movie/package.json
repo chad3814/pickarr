@@ -8,14 +8,29 @@
       "development": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./browser": {
+      "development": "./src/browser.tsx",
+      "types": "./dist/browser.d.ts",
+      "default": "./dist/browser.js"
     }
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js && esbuild src/browser.tsx --bundle --platform=browser --format=esm --packages=external --outfile=dist/browser.js",
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@pickarr/contract": "*",
-    "@pickarr/openmetadata": "*"
+    "@pickarr/openmetadata": "*",
+    "@pickarr/plugin-ui": "*"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react-dom": "^19.0.0"
   }
 }

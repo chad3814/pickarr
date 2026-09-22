@@ -6,23 +6,69 @@
  * parent/child relationship -- because no component this stylesheet reaches
  * sets a class, and this file does not become the first exception. Verified
  * against the actual 2.0 markup, not assumed: `<article>`, `<img>` and
- * `ul[aria-label='releases']` each appear exactly once in `packages/web/src`
- * outside `styles/` and `test/`. `<p>` appeared exactly three times when
- * this paragraph was written -- `Category`'s and `Unmatched`'s empty-list
- * states, and `Shell`'s store-failure explanation -- and the feed-settings
- * slice added two more in `Feeds.tsx`: see `section > p`'s own comment
- * below for which of the ten that rule actually reaches now -- the
- * download clients slice added five more in `DownloadClients.tsx`, which
- * is what moved that number from five. 1.x's six deleted component stylesheets (`git show
+ * `ul[aria-label='releases']` each appear exactly once in the browse markup,
+ * outside `styles/` and `test/`. **Some of that markup is no longer in
+ * `packages/web/src`**, and this file reaches it anyway because a stylesheet
+ * is matched against the rendered document rather than against a package.
+ * Counted on the tree as it stands:
+ *
+ * - `<article>` and `<img>`: `library/MediaItemCard.tsx`, one each, and web
+ *   still owns both.
+ * - `ul[aria-label='releases']`: `@pickarr/plugin-ui`'s `ReleaseList.tsx`.
+ * - `<h2>`: **two shapes, across four sites.** Each of the three plugins'
+ *   `browser.tsx` renders one holding the expander button, and
+ *   `MediaItemCard.tsx` renders a plain one on its unknown-plugin fallback
+ *   path -- an item whose `pluginId` the registry has no card for gets a
+ *   title and no expander. So `article h2` below styles both shapes, and
+ *   `article h2 button` reaches only the first.
+ *
+ * That is the coupling to know about before editing either side: a plugin
+ * renaming its heading element silently drops `article h2 button`, and the
+ * fallback path would keep `article h2` looking fine while it did.
+ *
+ * **Two of those cross-package reaches are pinned in a real browser, and
+ * both pins were measured against deletion rather than asserted.**
+ * `packages/e2e/tests/shell.spec.ts`'s `a TV card reads its series and
+ * episode before anyone expands it, under a cropped poster` reads
+ * `text-align: left` off the `article h2 button` that the rendering
+ * plugin's own `browser.tsx` produces, and
+ * `width`/`aspect-ratio`/`object-fit` off the `article img` that web keeps.
+ * Four mutations, each run and each reported in that task's report:
+ *
+ * - `article h2 button` deleted -> the button computes `center`, the UA
+ *   default, and that one spec reds. Nothing else in the suite noticed.
+ * - this whole file emptied -> `center` again, plus five other specs.
+ * - `article img` deleted -> the poster computes `1px`, its seeded image's
+ *   intrinsic width, instead of 96px.
+ * - the `<article>` opened by the plugin instead of by web -> the poster
+ *   falls outside it, so `article img` reaches nothing and the pin reds on
+ *   an element it cannot find. That is the measurement
+ *   `MediaItemCard.tsx`'s own doc argues from, and until that spec existed
+ *   nothing could see it.
+ *
+ * That spec is also the only one in the suite whose poster loads at all.
+ * Every other card's artwork 404s and `MediaItemCard`'s `onError` removes
+ * the `<img>` from the DOM for good, so there is nothing left there to
+ * measure -- which is why the poster went unpinned for as long as it did.
+ *
+ * `<p>` appeared exactly three times when the first version of this
+ * paragraph was written -- `Category`'s and `Unmatched`'s empty-list
+ * states, and `Shell`'s store-failure explanation. There are **18** in
+ * `packages/web/src` now, counted on this tree; the four settings screens
+ * brought the other fifteen, and `section > p`'s own comment below accounts
+ * for the eight that rule reaches and the ten it does not.
+ * 1.x's six deleted component stylesheets (`git show
  * bbce069:packages/web/src/styles/card.css` and its five siblings) were
  * tuned against these same tokens and are worth reading before touching this
  * file again, even though their class-based selectors do not carry over.
  */
 
 /*
- * One media item, collapsed to its title and poster until expanded
- * (`MediaItemCard.tsx`'s own doc). `<article>` is the only one in this app,
- * so this reaches it without a class this task would be the first to add.
+ * One media item: the poster, and beneath it whatever its plugin's card
+ * renders (`MediaItemCard.tsx`'s own doc). `<article>` is the only one in
+ * this app -- one per row, held by web rather than by the plugin for
+ * exactly that reason -- so this reaches it without a class this task
+ * would be the first to add.
  */
 article {
   border: 1px solid var(--color-line);
@@ -33,7 +79,12 @@ article {
 }
 
 /* The poster. `--size-poster` (`tokens.css`) carries the crop reasoning now,
-   since that is where the number lives. The only `<img>` in this app. */
+   since that is where the number lives. The only `<img>` in this app.
+
+   All three of `width`, `aspect-ratio` and `object-fit` are pinned in a
+   browser -- see this file's own header for the spec and for what each
+   mutation computes instead. This is the rule that only reaches the poster
+   while web owns the `<article>`. */
 article img {
   display: block;
   width: var(--size-poster);
@@ -46,11 +97,17 @@ article img {
 
 article h2 { margin: 0; font-size: var(--text-title); font-weight: 600; }
 
-/* The disclosure control that expands a card into its releases
-   (`MediaItemCard.tsx`'s `aria-expanded` button) reads as the card's own
+/* The disclosure control that expands a card into its releases (the
+   `aria-expanded` button in the rendering plugin's own `browser.tsx`; web
+   holds the `<article>` around it) reads as the card's own
    title, not as a bordered form control: `base.css`'s `button` rule is in
    the `base` layer, so this rule beats it regardless of specificity
-   (`styles/index.css`'s own doc on why that bet is off the table). */
+   (`styles/index.css`'s own doc on why that bet is off the table).
+
+   `text-align: left` is the declaration a browser pin reads back, because
+   it is the only `text-align:` declaration anywhere under
+   `packages/web/src/styles/` and a `<button>` computes `center` without it
+   -- see this file's own header. */
 article h2 button {
   display: block;
   width: 100%;
@@ -247,29 +304,55 @@ ul[aria-label='unmatched releases'] li {
 }
 
 /*
- * A short line of prose standing where a list would be: `Category`'s
- * "Nothing here yet.", `Unmatched`'s "Everything has been matched.",
- * `Shell`'s explanation of a replica that would not open, `Feeds`'s own
- * "No feeds yet." (the feed-settings slice) and `DownloadClients`'s "No
- * download clients yet." (the download clients slice). Each of those five
- * is a direct child of its screen's own `<section>`, which is what this
- * selector actually reaches; that was every `<p>` in the app when this
- * paragraph was first written; it no longer is. The other five `<p>`s --
- * a listed feed's url, and a listed client's implementation, address,
- * category and username -- are grandchildren of a section (`<section> ul
- * li p`), not direct children, so this rule reaches none of them, and
- * `settings.css` gives them their own treatment instead. Same
+ * A short line of prose standing where a list would be. Same
  * italic-and-dimmed treatment as `base.css`'s own `.loading`, so a list
  * that has genuinely finished loading with nothing in it reads as a
  * different state from one still in flight, not as an ordinary line of
  * text about to be followed by more.
  *
- * The store-failure paragraph takes the same treatment deliberately: the
- * heading above it is what carries the weight (`Shell.tsx`'s `StoreFailed`,
- * and `CLAUDE.md`'s hazard on asserting a `role` instead of a visible
- * heading), and this line is the remedy rather than the alarm. The two
- * settings empty states are the ordinary case the rule was written for in
- * the first place, the same as `Category`'s and `Unmatched`'s.
+ * **What this rule reaches, audited on this tree rather than inferred.**
+ * `packages/web/src` holds 18 `<p>`, and eight of them are direct children
+ * of a `<section>`:
+ *
+ * - `Category`'s "Nothing here yet." and `Unmatched`'s "Everything has been
+ *   matched." -- the two empty-list states the rule was written for.
+ * - `Shell`'s explanation of a replica that would not open.
+ * - `Feeds`'s "No feeds yet." (the feed-settings slice) and
+ *   `DownloadClients`'s "No download clients yet." (the download clients
+ *   slice) -- the same ordinary case as the first two.
+ * - **three in `Destinations.tsx`**, which are not that case at all: the
+ *   paragraph explaining how a finished download is copied into its
+ *   plugin's library folder, the sentence about braces not being escapable
+ *   in a path shape, and "Reading saved destinations…", the first-read
+ *   still-running line.
+ *
+ * The other ten are not direct children and this rule does not reach them:
+ * a listed feed's url and a listed client's implementation, address,
+ * category and username are `<section> ul li p`; `ClientMappings`'s "No
+ * path mappings for this download client." sits inside its client's `<li>`;
+ * both screens' `Refusal` wraps its message in `div[role='alert']`; and
+ * `Destinations`'s unmatched-folder hint and "Available tokens" label are
+ * inside a row's `<form>`. `settings.css` gives all ten their own
+ * treatment, scoped under `ul[aria-label='feeds'] li`,
+ * `ul[aria-label='download clients'] li` or
+ * `ul[aria-labelledby='destinations-heading'] li`.
+ *
+ * **Those three `Destinations` paragraphs are a divergence, not a
+ * decision.** `section > p` is the only rule that reaches them -- checked:
+ * every `p` selector in `settings.css` is scoped under one of the three
+ * lists above -- so two paragraphs of ordinary explanatory copy and a
+ * *loading* line all render in the treatment this comment reserves for a
+ * list that finished loading empty. The styling predates this stylesheet's
+ * current header (the importer slice added that section); it wants either a
+ * `settings.css` rule of its own or a narrower selector here, and neither
+ * belongs in a task about plugin cards. Recorded here so the next editor of
+ * either file starts from what is true.
+ *
+ * The store-failure paragraph, by contrast, takes this treatment
+ * deliberately: the heading above it is what carries the weight
+ * (`Shell.tsx`'s `StoreFailed`, and `CLAUDE.md`'s hazard on asserting a
+ * `role` instead of a visible heading), and this line is the remedy rather
+ * than the alarm.
  */
 section > p {
   color: var(--color-text-dim);
