@@ -39,3 +39,5 @@ export {
   createLookupPlugin,
   describeUnresolved,
 } from './engine.ts';
+export type { Expectation, Selection, SelectionRefusal, SelectionRefusalCode } from './select.ts';
+export { episodeMarker, isCandidate, select } from './select.ts';
