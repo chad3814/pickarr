@@ -1,4 +1,5 @@
 import { test, afterEach } from 'node:test';
+import { act } from '@testing-library/react';
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
@@ -9,6 +10,7 @@ import { getRows, listByTablePlugin, pluginRowsByMediaItems } from '../../src/st
 import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import { gatherMediaItem } from '../../src/store/gather.ts';
 import { Category, type CategorySource } from '../../src/library/Category.tsx';
+import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
 import type { PickSubmit } from '../../src/library/postPick.ts';
 
 /**
@@ -158,6 +160,68 @@ test('a category lists its items newest first, each as its own card', async () =
   });
 
   db.close();
+});
+
+test('scrolling to the sentinel loads the next page, and the button is still there', async () => {
+  // Infinite scroll, with the control kept. Both halves matter: the scroll
+  // is the feature, and the button is what a keyboard user activates and
+  // what works where `IntersectionObserver` does not -- which includes this
+  // environment, whose observer exists and never fires. So the observer is
+  // replaced with one the test can drive, exactly as
+  // `useInfiniteScroll.test.tsx` does and for the same measured reason.
+  const real = globalThis.IntersectionObserver;
+  const fired: Array<() => void> = [];
+  class Fake {
+    private targets: Element[] = [];
+    // A plain assignment, not a parameter property: `erasableSyntaxOnly` is
+    // on, and a parameter property is syntax that cannot be erased.
+    private readonly callback: IntersectionObserverCallback;
+    constructor(callback: IntersectionObserverCallback) {
+      this.callback = callback;
+      fired.push(() => {
+        const entries = this.targets.map((target) => ({ target, isIntersecting: true } as IntersectionObserverEntry));
+        this.callback(entries, this as unknown as IntersectionObserver);
+      });
+    }
+    observe(element: Element): void { this.targets.push(element); }
+    unobserve(): void {}
+    disconnect(): void { this.targets = []; }
+    takeRecords(): IntersectionObserverEntry[] { return []; }
+  }
+  globalThis.IntersectionObserver = Fake as unknown as typeof IntersectionObserver;
+
+  try {
+    const db = await freshDb();
+    // One more than a page, so there is a second page to reach for.
+    const ops = Array.from({ length: PAGE_SIZE + 1 }, (_, index) =>
+      mediaItem({ id: index + 1, pluginId: 'tv', title: `Show ${String(index + 1)}`, updatedAt: index + 1 }));
+    await seed(db, ops);
+
+    render(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+    await waitFor(() => { assert.equal(titlesShown().length, PAGE_SIZE, 'the first page'); });
+
+    // Sized from `PAGE_SIZE` rather than a literal, deliberately: this test
+    // is about reaching a second page, not about the page being 24, and a
+    // literal would red on a size change that broke nothing.
+    //
+    // Worth knowing while reading that: **the default size is not pinned
+    // anywhere.** `useMediaItems.test.tsx` passes `pageSize={24}` as an
+    // explicit argument, which exercises that size without asserting it is
+    // the default -- so changing `PAGE_SIZE` reds nothing. Recorded rather
+    // than fixed here; it is that hook's gap, not this test's.
+    assert.ok(screen.getByRole('button', { name: 'Load more' }), 'the control is still rendered');
+
+    act(() => { for (const fire of fired) fire(); });
+    await waitFor(() => { assert.equal(titlesShown().length, PAGE_SIZE + 1, 'the sentinel loaded the rest'); });
+
+    // And once there is nothing left, both the sentinel and the button go.
+    await waitFor(() => { assert.ok(!screen.queryByRole('button', { name: 'Load more' }), 'exhausted, so no control'); });
+    assert.ok(!screen.queryByTestId('load-more-sentinel'), 'and nothing left to observe');
+
+    db.close();
+  } finally {
+    globalThis.IntersectionObserver = real;
+  }
 });
 
 test('an empty category says so rather than rendering nothing', async () => {

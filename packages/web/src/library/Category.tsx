@@ -40,6 +40,7 @@ import { useMediaItems, type MediaItemsSource } from './useMediaItems.ts';
 import { MediaItemCard } from './MediaItemCard.tsx';
 import type { GatheredSource } from './useGatheredItem.ts';
 import { usePluginRows, emptyPluginRows, type PluginRowsSource } from './usePluginRows.ts';
+import { useInfiniteScroll } from './useInfiniteScroll.ts';
 import type { PickSubmit } from './postPick.ts';
 
 /** Everything this screen needs from a store: `useMediaItems`'s two members, `MediaItemCard`'s own four (through `useGatheredItem`), and `usePluginRows`' one -- `subscribeInserts` is shared by two of the three. A real `Store` satisfies this by structural assignment. */
@@ -100,6 +101,12 @@ function CategoryList({ store, pluginId, tables, submit }: CategoryListProps): R
   // object has a key per declared table in it.
   const emptyRows = useMemo(() => emptyPluginRows(tables), [tables]);
 
+  // Scrolling loads the next page; the button below still does too. See
+  // `useInfiniteScroll` for why both, and note the order in the markup: the
+  // sentinel sits *above* the button, so reaching the button by keyboard
+  // means the scroll has already had its chance.
+  const sentinel = useInfiniteScroll(loadMore, !done);
+
   // `items.length === 0 && !empty` is the one state `empty` cannot yet
   // distinguish from "still loading" on its own -- see `useMediaItems.ts`'s
   // own doc on `empty`. Rendering nothing here, rather than "Nothing here
@@ -121,9 +128,17 @@ function CategoryList({ store, pluginId, tables, submit }: CategoryListProps): R
         />
       ))}
       {!done && (
-        <button type="button" onClick={loadMore}>
-          Load more
-        </button>
+        <>
+          {/*
+            Not `aria-hidden`: it holds no content and has no role, so it is
+            already nothing to a screen reader, and an empty element with an
+            explicit hidden attribute reads as a mistake to the next person.
+          */}
+          <div ref={sentinel} data-testid="load-more-sentinel" />
+          <button type="button" onClick={loadMore}>
+            Load more
+          </button>
+        </>
       )}
     </div>
   );

@@ -216,6 +216,67 @@ test('after sign-in the counts climb above zero', async ({ page, harness }) => {
   await expect(page.getByTestId('count-xxx')).toHaveText('1', { timeout: 15_000 });
 });
 
+test('a browse list loads the next page on scroll, and the button still works', async ({ page, harness }) => {
+  // **The only place infinite scroll can actually be observed.** The unit
+  // tests drive a substituted `IntersectionObserver`, because happy-dom's
+  // exists and never fires -- measured. So they prove the hook calls
+  // `loadMore` when told the sentinel is visible, and prove nothing about
+  // whether a real browser ever tells it that. Layout, viewport and scroll
+  // are the parts only a browser has.
+  //
+  // 25 items against a page size of 24: the smallest seed where a second
+  // page exists at all, so the first assertion is a real boundary rather
+  // than an arbitrary number.
+  const TOTAL = 25;
+
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+
+  for (let index = 0; index < TOTAL; index++) {
+    harness.seedMediaItem('tv', `Show ${String(index + 1).padStart(2, '0')}`);
+  }
+  // Wait on the count before navigating. Seeding writes to the host's
+  // database; the list reads the *replica*, so the rows have to travel the
+  // real sync path first. Asserting card counts without this waits on
+  // whatever happens to have arrived, which is a race dressed as a test.
+  await expect(page.getByTestId('count-tv')).toHaveText(String(TOTAL), { timeout: 20_000 });
+
+  await page.goto(`${harness.origin}/tv`);
+  const cards = page.getByRole('article');
+  await expect(cards).toHaveCount(24, { timeout: 15_000 });
+
+  // Scroll the sentinel into view the way a reader does, rather than
+  // calling `loadMore` through the button -- which is the next assertion's
+  // job and would prove the opposite of this one.
+  await page.getByTestId('load-more-sentinel').scrollIntoViewIfNeeded();
+  await expect(cards).toHaveCount(TOTAL, { timeout: 15_000 });
+
+  // Exhausted, so both the sentinel and the control are gone.
+  await expect(page.getByTestId('load-more-sentinel')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Load more' })).toHaveCount(0);
+});
+
+test('the Load more button still loads a page without any scrolling', async ({ page, harness }) => {
+  // The fallback, driven on its own. `useInfiniteScroll`'s docblock argues
+  // the button is what a keyboard user activates and what works where the
+  // observer does not -- an argued reason is what this codebase has found
+  // wrong most often, so it is clicked here rather than asserted in prose.
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+
+  for (let index = 0; index < 25; index++) {
+    harness.seedMediaItem('tv', `Show ${String(index + 1).padStart(2, '0')}`);
+  }
+  await expect(page.getByTestId('count-tv')).toHaveText('25', { timeout: 20_000 });
+
+  await page.goto(`${harness.origin}/tv`);
+  const cards = page.getByRole('article');
+  await expect(cards).toHaveCount(24, { timeout: 15_000 });
+
+  await page.getByRole('button', { name: 'Load more' }).click();
+  await expect(cards).toHaveCount(25, { timeout: 15_000 });
+});
+
 test('two tabs: exactly one fetches, and the follower still sees counts climb', async ({ page, context, harness }) => {
   // Node's own `navigator.locks` is per-process, so every test up to this
   // one that claims to cover leader election only modelled a browser's
