@@ -31,7 +31,10 @@
  * host as part of itself, and `place` would copy it.
  *
  * **A rejection is `list-failed`, carrying the `errno` and nothing else**,
- * for the reason the section on `node:fs` errors below gives.
+ * for the reason the section on `node:fs` errors below gives. A root that
+ * is neither a file nor a directory is `list-failed` too, with no errno:
+ * listing it as empty would read as a download imported with nothing in
+ * it.
  *
  * ## The copy
  *
@@ -54,8 +57,9 @@
  * **The source is `entry.path`**, never `file.path`: `file` is the whole
  * download, which may be a directory, and `entry` is the one file of it
  * being copied. `place` refuses an entry that is not inside `file` --
- * `foreign-entry` -- before anything else is looked at, so a plugin cannot
- * hand it an arbitrary path to copy.
+ * `foreign-entry` -- before any destination is built, so a plugin cannot
+ * hand it an arbitrary path to copy. "Inside" is checked on disk too, not
+ * only in the path's spelling: see `ownsOnDisk`.
  *
  * **To a temporary in the destination directory, then a rename.** A rename
  * within a directory is atomic, so a reader never sees a half-copied file
@@ -134,7 +138,7 @@
  * then compared against the root, so a path that somehow reached outside it
  * is refused rather than written.
  */
-import { copyFile as realCopyFile, lstat, mkdir, readdir, rename, stat } from 'node:fs/promises';
+import { copyFile as realCopyFile, lstat, mkdir, readdir, realpath, rename, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type {
@@ -182,7 +186,7 @@ const ERRNO = /^[A-Z][A-Z0-9_]*$/;
  * §7's "a copy that fails part way leaves only the temporary") has to be
  * shown against. It is also the only way to occupy the destination
  * *between* the two `presentAt` checks below. **Five of
- * `test/media/import.test.ts`'s 33 tests inject one**; the other twenty-eight
+ * `test/media/import.test.ts`'s 39 tests inject one**; the other thirty-four
  * run the real `node:fs/promises` copy.
  */
 export type CopyFile = (source: string, destination: string) => Promise<void>;
@@ -307,8 +311,8 @@ function unmatchedDestination(
  * second `stat`: `list` gives a plain-file download exactly one entry, the
  * file itself, and a directory download never lists its own path, so
  * `entry.path === file.path` is the single-file case. Any other entry
- * `isForeign` lets through for a plain file names a path *beneath* a file,
- * which the copy cannot open. A leading dot is not an extension -- `.hidden`
+ * handed in for a plain file names a path *beneath* a file, which
+ * `ownsOnDisk` cannot `lstat` and so refuses. A leading dot is not an extension -- `.hidden`
  * keeps its name -- so the cut is at a dot after the first character.
  */
 function releaseName(file: DownloadedFile, entry: DownloadEntry): string {
@@ -319,15 +323,55 @@ function releaseName(file: DownloadedFile, entry: DownloadEntry): string {
 }
 
 /**
- * Whether `entry` is really a file inside `file` (spec §5): its relative
- * path is plain segments, and joining it to the download gives its path. A
- * plain-file download's only entry is the file itself under its basename.
+ * Whether `entry`'s *spelling* is that of a file inside `file` (spec §5):
+ * its relative path is plain segments, and joining it to the download gives
+ * its path. A plain-file download's only entry is the file itself under its
+ * basename. The first of two checks; `ownsOnDisk` is the second, because a
+ * string cannot see a symlink.
  */
 function isForeign(file: DownloadedFile, entry: DownloadEntry): boolean {
   const segments = entry.relativePath.split('/');
   if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return true;
   if (entry.path === file.path) return segments.length !== 1 || segments[0] !== basename(file.path);
   return resolve(file.path, ...segments) !== resolve(entry.path);
+}
+
+/**
+ * Whether `entry` is, on disk, a regular file inside `file` -- the half of
+ * the `foreign-entry` check a string comparison cannot make.
+ *
+ * A path spelled inside the download can still copy something outside it:
+ * `<dir>/link.mkv` may be a symlink, and `<dir>/linkdir/x` may pass through
+ * one, and `copyFile` follows both. A torrent can create either (BEP 47).
+ * So the entry must `lstat` as a regular file -- not a link -- and its
+ * `realpath` must lie under the download's `realpath`. The download root
+ * itself is still followed, as `list` follows it: both sides are resolved,
+ * so a symlinked download compares as the directory it points at. For a
+ * plain-file download the entry *is* the root, so it is read with `stat`,
+ * following it for the same reason, and must resolve to the same file.
+ *
+ * **A rejection from any of these calls is `false`, and so `foreign-entry`
+ * with no errno**, rather than `copy-failed`: an entry whose ownership
+ * could not be established has not been shown to be inside the download,
+ * which is the whole of what this code means. The `list` just before it
+ * already answered for faults with the download itself, and either refusal
+ * leaves the row for the next tick. Nothing from the error is kept -- its
+ * message quotes the path.
+ *
+ * A check, not a lock: a link swapped in between this and the copy is not
+ * seen. That window is the same shape as the occupied-destination race the
+ * module doc names, and is left open for the same reason.
+ */
+async function ownsOnDisk(file: DownloadedFile, entry: DownloadEntry): Promise<boolean> {
+  try {
+    const plainFile = entry.path === file.path;
+    const found = plainFile ? await stat(entry.path) : await lstat(entry.path);
+    if (!found.isFile()) return false;
+    const [root, real] = await Promise.all([realpath(file.path), realpath(entry.path)]);
+    return plainFile ? real === root : real.startsWith(root + sep);
+  } catch {
+    return false;
+  }
 }
 
 /** Every regular file below `dir`, relative to it. Symlinks are skipped, not followed. */
@@ -389,7 +433,10 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
         // symlinked download, and following it is what the operator meant.
         const top = await stat(file.path);
         if (top.isFile()) return [{ path: file.path, relativePath: basename(file.path), sizeBytes: top.size }];
-        if (!top.isDirectory()) return [];
+        // A FIFO, a socket, a device: nothing a download is, and not an
+        // empty one either -- `[]` would read to the engine as a download
+        // with nothing in it, imported successfully.
+        if (!top.isDirectory()) return { refusal: 'list-failed', errno: null };
         return (await walk(file.path, '')).toSorted(byRelativePath);
       } catch (error) {
         // Every `node:fs` message quotes the path -- see the module doc.
@@ -412,7 +459,7 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
         return refuse(rootProblem === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
       }
 
-      if (isForeign(file, entry)) return refuse('foreign-entry');
+      if (isForeign(file, entry) || !(await ownsOnDisk(file, entry))) return refuse('foreign-entry');
 
       const relative = await relativeDestination(file, entry, destination, resolveTokens);
       if ('refusal' in relative) return relative;

@@ -102,12 +102,16 @@ import type { DownloadedFile } from './plugin.ts';
  *   destroys whichever copy was better with nothing recorded.
  * - `copy-failed` -- the filesystem refused the copy or the rename.
  *   {@link ImportRefusal.errno} carries the `errno` code and nothing else.
- * - `list-failed` -- the filesystem refused the listing of the download.
- *   `errno` carries the code and nothing else, for the reason `copy-failed`
- *   gives.
+ * - `list-failed` -- the filesystem refused the listing of the download,
+ *   or the download is neither a file nor a directory (a FIFO, a socket, a
+ *   device), which has nothing in it to import. `errno` carries the code
+ *   and nothing else, for the reason `copy-failed` gives, and is `null` in
+ *   the second case.
  * - `foreign-entry` -- the entry handed to `place` is not a file inside the
  *   download it was handed with, so a plugin cannot use `place` to copy an
- *   arbitrary file.
+ *   arbitrary file. Checked on disk as well as in the path's spelling: an
+ *   entry that is a symlink, or that reaches its file through one, is
+ *   foreign. `errno` is always `null`.
  */
 export type ImportRefusalCode =
   | 'malformed-shape'
@@ -206,7 +210,8 @@ export interface LibraryImporter {
    * file. The root itself is followed, since a client may hand over a
    * symlinked download. A plain-file download lists as one entry, itself.
    * Sorted by `relativePath` by plain code-unit comparison, so the order is
-   * the same on every host. The only refusal is `list-failed`.
+   * the same on every host. The only refusal is `list-failed`, which a
+   * download that is neither a file nor a directory also answers.
    */
   list(file: DownloadedFile): Promise<readonly DownloadEntry[] | ImportRefusal>;
 

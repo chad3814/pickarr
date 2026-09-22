@@ -685,7 +685,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
         // Tokens resolve over the entry, not the download, so `{filename}`
         // and `{ext}` describe the file being copied rather than its folder.
         const entryFile: DownloadedFile = { ...file, path: entry.path, sizeBytes: entry.sizeBytes };
-        // eslint-disable-next-line no-await-in-loop -- one copy at a time, stopping at the first refusal, so a retry resumes in order
+        // eslint-disable-next-line no-await-in-loop -- one copy at a time, stopping at the first refusal
         const outcome = await ctx.library.place(file, entry, async () => resolveTokens(spec.tokens, entryFile, ctx));
         if ('refusal' in outcome) refuseDownload(ctx, spec.id, file, outcome.refusal, outcome.errno);
         copied += 1;

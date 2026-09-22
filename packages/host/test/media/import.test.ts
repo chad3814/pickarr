@@ -10,8 +10,8 @@
  * for the two things a real `copyFile` will not do on demand: fail *part
  * way through*, writing some bytes and then throwing, and occupy the
  * destination in the instant between the copy and the rename. **Five of the
- * 33 tests here inject one** -- the two atomicity tests, the two errno
- * tests, and the clobber-race test; the other twenty-eight run the real
+ * 39 tests here inject one** -- the two atomicity tests, the two errno
+ * tests, and the clobber-race test; the other thirty-four run the real
  * `node:fs/promises` copy, so the default path is exercised rather than
  * mocked away.
  */
@@ -724,8 +724,108 @@ test('spec 4.3: a directory download whose release name is `..` or `.` is refuse
       const path = `${join(h.dir, 'downloads')}/${tail}`;
       const file = h.file({ path, mediaItemId: null });
       const entry: DownloadEntry = { path: join(path, 'x.mkv'), relativePath: 'x.mkv', sizeBytes: 1 };
+      // Really there, so the on-disk ownership check passes as well and
+      // the release-name rule is what is left to refuse it.
+      // eslint-disable-next-line no-await-in-loop -- fixture setup
+      await writeFile(entry.path, 'x');
       // eslint-disable-next-line no-await-in-loop -- each asserts an empty library
       assertRefusal(await h.placeEntry(file, entry, TV_VALUES), 'escapes-root');
+    }
+    assert.deepEqual(await tree(h.root), []);
+  });
+});
+
+test('an entry that is a symlink inside the download is refused foreign-entry, and its target is not copied', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const file = await directoryDownload(h, 'Release', { 'a.mkv': 'a' });
+    // Spelled inside the download, so only an on-disk check can see it.
+    // A torrent can create such a link (BEP 47).
+    await writeFile(join(h.dir, 'secret.mkv'), 'not part of the download');
+    await symlink(join(h.dir, 'secret.mkv'), join(file.path, 'link.mkv'));
+    const entry: DownloadEntry = { path: join(file.path, 'link.mkv'), relativePath: 'link.mkv', sizeBytes: 1 };
+
+    assertRefusal(await h.placeEntry(h.file({ ...file, mediaItemId: null }), entry, TV_VALUES), 'foreign-entry');
+    assert.deepEqual(await tree(h.root), []);
+  });
+});
+
+test('an entry reached through a symlinked subdirectory is refused foreign-entry, and nothing is copied', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const file = await directoryDownload(h, 'Release', { 'a.mkv': 'a' });
+    await mkdir(join(h.dir, 'elsewhere'));
+    await writeFile(join(h.dir, 'elsewhere', 'x.mkv'), 'not part of the download');
+    await symlink(join(h.dir, 'elsewhere'), join(file.path, 'linkdir'));
+    // `lstat` of the entry itself sees a regular file; only its `realpath`
+    // shows it lies outside the download.
+    const entry: DownloadEntry = { path: join(file.path, 'linkdir', 'x.mkv'), relativePath: 'linkdir/x.mkv', sizeBytes: 1 };
+
+    assertRefusal(await h.placeEntry(h.file({ ...file, mediaItemId: null }), entry, TV_VALUES), 'foreign-entry');
+    assert.deepEqual(await tree(h.root), []);
+  });
+});
+
+test('a download root that is a symlink still places normally, directory or single file', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const real = await directoryDownload(h, 'Real', { 'a.mkv': 'a' });
+    const linkedDir = join(h.dir, 'downloads', 'Linked');
+    await symlink(real.path, linkedDir);
+    const dirFile = h.file({ path: linkedDir, mediaItemId: null });
+    const listed = await h.list(dirFile);
+    assert.ok(!('refusal' in listed));
+    const [entry] = listed;
+    assert.ok(entry !== undefined);
+    assert.deepEqual(await h.placeEntry(dirFile, entry, TV_VALUES), { placed: 'unmatched' });
+
+    const linkedFile = join(h.dir, 'downloads', 'Single.mkv');
+    await symlink(h.source, linkedFile);
+    const single = h.file({ path: linkedFile, mediaItemId: null });
+    assert.deepEqual(await h.placeEntry(single, h.entryFor(single), TV_VALUES), { placed: 'unmatched' });
+
+    assert.deepEqual(await tree(h.root), [
+      join('_unmatched', 'Linked', 'a.mkv'),
+      join('_unmatched', 'Single', 'Single.mkv'),
+    ]);
+  });
+});
+
+test('list: a download that is neither a file nor a directory refuses list-failed rather than listing as empty', async () => {
+  await withHarness({}, async (h) => {
+    // `/dev/null` is a character device on every POSIX host: `stat` says
+    // neither file nor directory, which is the branch under test.
+    assert.deepEqual(await h.list(h.file({ path: '/dev/null' })), { refusal: 'list-failed', errno: null });
+  });
+});
+
+test('spec 4.3: an unmatched single file named `.hidden` keeps its whole name for its directory', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const path = join(h.dir, 'downloads', '.hidden');
+    await writeFile(path, 'h');
+    const file = h.file({ path, sizeBytes: 1, mediaItemId: null });
+
+    // A leading dot is not an extension, so the release name is `.hidden`,
+    // not `''` (which would refuse `empty-filename`).
+    assert.deepEqual(await h.placeEntry(file, h.entryFor(file), TV_VALUES), { placed: 'unmatched' });
+    assert.deepEqual(await tree(h.root), [join('_unmatched', '.hidden', '.hidden')]);
+  });
+});
+
+test('an entry that is a link to a sibling, or a directory, is refused foreign-entry even though it resolves inside the download', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const file = await directoryDownload(h, 'Release', { 'a.mkv': 'a', 'Sub/b.srt': 'b' });
+    // Both `realpath` inside the download, so only the `lstat` rule --
+    // a regular file, not a link and not a directory -- refuses them.
+    await symlink(join(file.path, 'a.mkv'), join(file.path, 'alias.mkv'));
+    const alias: DownloadEntry = { path: join(file.path, 'alias.mkv'), relativePath: 'alias.mkv', sizeBytes: 1 };
+    const directory: DownloadEntry = { path: join(file.path, 'Sub'), relativePath: 'Sub', sizeBytes: 1 };
+    const unmatched = h.file({ ...file, mediaItemId: null });
+    for (const entry of [alias, directory]) {
+      // eslint-disable-next-line no-await-in-loop -- each asserts an empty library
+      assertRefusal(await h.placeEntry(unmatched, entry, TV_VALUES), 'foreign-entry');
     }
     assert.deepEqual(await tree(h.root), []);
   });
