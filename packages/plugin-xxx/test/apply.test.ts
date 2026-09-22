@@ -163,3 +163,13 @@ test('the pre-flight refuses what a scene cannot be, before the engine writes an
   assert.throws(() => { checkXxx({ ...scene('tpdb:scene:7', SITE), kind: 'movie' }); }, /movie/);
   checkXxx(scene('tpdb:scene:7', SITE));
 });
+
+test('migration 3 creates the placement table the engine records imports in', () => {
+  const harness = createTestHarness();
+  for (const migration of XXX_MIGRATIONS) migration.up(harness.raw);
+  assert.deepEqual(XXX_MIGRATIONS.map((migration) => migration.version), [2, 3]);
+  const found = harness.raw
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'xxx_placement'")
+    .get();
+  assert.ok(found !== undefined, 'xxx_placement was not created');
+});

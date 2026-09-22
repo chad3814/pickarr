@@ -1,14 +1,19 @@
 /**
- * Two tables: the producing site, and the scene itself.
+ * Version 2, two tables: the producing site, and the scene itself. Version 3
+ * is the placement table `placementTableMigration` generates, recording
+ * which entries of a download this plugin has already put in its library.
  *
  * The site is its own table because scenes from one site share it -- a scene's
  * `details` names the site every time, and a row per scene would store the
  * same name a thousand times and still have nowhere to hang a site's own
  * artwork or url later.
  *
- * Version 2, because version 1 is the engine's state table.
+ * Version 2, because version 1 is the engine's state table. The literal
+ * `'xxx'` is repeated here rather than imported from `index.ts`, which
+ * imports this file.
  */
 import type { Migration } from '@pickarr/contract';
+import { placementTableMigration } from '@pickarr/openmetadata';
 
 export const XXX_MIGRATIONS: readonly Migration[] = [{
   version: 2,
@@ -35,4 +40,4 @@ CREATE TABLE xxx_scene (
 );
 CREATE UNIQUE INDEX xxx_scene_media_item ON xxx_scene (media_item_id);
 `),
-}];
+}, placementTableMigration('xxx', 3)];

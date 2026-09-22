@@ -130,3 +130,13 @@ test('the pre-flight refuses what a film cannot be, before the engine writes any
   assert.throws(() => { checkMovie({ ...movie({}), kind: 'episode' }); }, /episode/);
   checkMovie(movie({}));
 });
+
+test('migration 3 creates the placement table the engine records imports in', () => {
+  const harness = createTestHarness();
+  for (const migration of MOVIE_MIGRATIONS) migration.up(harness.raw);
+  assert.deepEqual(MOVIE_MIGRATIONS.map((migration) => migration.version), [2, 3]);
+  const row = harness.raw
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'movie_placement'")
+    .get();
+  assert.ok(row !== undefined, 'movie_placement was not created');
+});

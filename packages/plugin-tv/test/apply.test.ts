@@ -214,3 +214,13 @@ test('a series parent carrying no date does not erase the date a fuller answer t
     'COALESCE keeps it, exactly as it keeps the overview one line below',
   );
 });
+
+test('migration 3 creates the placement table the engine records imports in', () => {
+  const harness = createTestHarness();
+  for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
+  assert.deepEqual(TV_MIGRATIONS.map((migration) => migration.version), [2, 3]);
+  const row = harness.raw
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tv_placement'")
+    .get();
+  assert.ok(row !== undefined, 'tv_placement was not created');
+});
