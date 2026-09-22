@@ -58,7 +58,9 @@ function sourceFor(db: IDBDatabase): CategorySource {
   return {
     listByTablePlugin: (table, pluginId, opts) => listByTablePlugin(db, table, pluginId, opts),
     subscribeInserts,
-    gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
+    // No plugin table is under test in this file; MediaItemCard.test.tsx is
+    // where a card's own table list is driven.
+    gatherMediaItem: (mediaItemId, tables) => gatherMediaItem(db, mediaItemId, tables),
     subscribe,
     getRows: (table, ids) => getRows(db, table, ids),
   };

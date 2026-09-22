@@ -129,6 +129,10 @@ function gathered({
       logo: `/api/artwork/logo/${String(id)}`,
     },
     feedIds: [...new Set(mappedReleases.map((release) => release.row.feedId))].toSorted((a, b) => a - b),
+    // No plugin table is under test in this file: MediaItemCard itself
+    // does not yet read `rows`/`pluginRows` (that is a later task's
+    // rewrite), so this stub's tables list is empty.
+    pluginRows: {},
   };
 }
 

@@ -10,6 +10,11 @@
  * out. A plugin's own `compose.ts` reads the rows this one ignores. That
  * split is what makes a new plugin a new directory rather than an edit here.
  *
+ * **`pluginRows` does not add a seventh name to that list.** `gatherMediaItem`'s
+ * `tables` parameter is the caller's declared table list, threaded straight
+ * through to a partition of the same `byMediaItem` read -- this module still
+ * spells no plugin table of its own anywhere in its source.
+ *
  * **No artwork rows.** Artwork is not replicated (design spec §1.2, #79); the
  * three urls below are the whole of what this gatherer can say about it.
  *
@@ -35,7 +40,7 @@ import type {
   RssItemSyncRead,
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
-import type { GatheredItemView } from '@pickarr/plugin-ui';
+import type { GatheredItemView, PluginRows } from '@pickarr/plugin-ui';
 import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
 
 /**
@@ -161,6 +166,18 @@ export interface GatheredItem {
   readonly artwork: ArtworkUrls;
   /** The distinct `feedId`s across `releases`, for a caller that wants the set without walking them. */
   readonly feedIds: readonly number[];
+  /**
+   * The rows a caller's `tables` named, partitioned out of the same
+   * `byMediaItem` read `releases` and `roles` come from -- see
+   * {@link gatherMediaItem}'s own doc for why this is not a second query.
+   *
+   * Every table `tables` named is a key here, always, even when this item
+   * has no rows in it: an absent key would read as "not fetched", and a
+   * card cannot tell that from "fetched, and empty" unless this gatherer
+   * keeps the two apart itself (`@pickarr/plugin-ui`'s `PluginRows` own
+   * doc says the same).
+   */
+  readonly pluginRows: PluginRows;
 }
 
 /**
@@ -212,11 +229,25 @@ function gatherRole(
  * arrived yet (`getRow`'s own doc on why those two are, and must stay, the
  * same answer).
  *
- * One `byMediaItem` query supplies the item's releases and roles together;
- * only the downloads under each release need a query of their own, one per
- * release, over `byRssItem`.
+ * One `byMediaItem` query supplies the item's releases, roles and `tables`'
+ * plugin rows together; only the downloads under each release need a query
+ * of their own, one per release, over `byRssItem`.
+ *
+ * **`tables` costs no second query.** `byMediaItem` already hands back
+ * every row belonging to this item across every synced table, plugin ones
+ * included, and this function used to discard whatever it did not
+ * recognise -- `rows` below is exactly that same read; the loop that builds
+ * `pluginRows` partitions it by table instead of throwing the rest away.
+ * `tables` never names `rss_item`, `role`, `person` or any of this module's
+ * other five host tables in practice, but nothing here assumes that: a row
+ * whose table is not in `tables` simply is not collected, the same way a
+ * row whose table this gatherer never heard of never was.
  */
-export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Promise<GatheredItem | undefined> {
+export async function gatherMediaItem(
+  db: IDBDatabase,
+  mediaItemId: number,
+  tables: readonly string[],
+): Promise<GatheredItem | undefined> {
   const mediaItemValue = await getRow(db, 'media_item', mediaItemId);
   if (mediaItemValue === undefined) return undefined;
   // A media item that does not match its contract shape is answered the same
@@ -230,6 +261,20 @@ export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Pro
   const releaseRows = rows.filter((row) => row.table === 'rss_item');
   const roleRows = rows.filter((row) => row.table === 'role');
 
+  // Every table `tables` named is seeded to an empty array before anything
+  // is pushed onto it, so a table with no rows for this item is a key with
+  // `[]`, never an absent key -- `GatheredItem.pluginRows`'s own doc on why
+  // a card needs that distinction. `pluginRows[row.table]` is `undefined`
+  // for every row whose table nobody named, so `?.push` is this loop's
+  // whole filter: a row this gatherer was not asked for is left out exactly
+  // the way `releaseRows`/`roleRows` above leave out everything but their
+  // own table.
+  const pluginRows: Record<string, unknown[]> = {};
+  for (const table of tables) pluginRows[table] = [];
+  for (const row of rows) {
+    pluginRows[row.table]?.push(row.value);
+  }
+
   const personIds = [...new Set(
     roleRows.flatMap((row) => (isRole(row.value) ? [row.value.personId] : [])),
   )];
@@ -242,7 +287,15 @@ export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Pro
     .filter((role): role is GatheredRole => role !== undefined);
   const feedIds = [...new Set(releases.map((release) => release.row.feedId))].toSorted((a, b) => a - b);
 
-  return { mediaItem, pluginId: mediaItem.pluginId, releases, roles, artwork: artworkUrls(mediaItemId), feedIds };
+  return {
+    mediaItem,
+    pluginId: mediaItem.pluginId,
+    releases,
+    roles,
+    artwork: artworkUrls(mediaItemId),
+    feedIds,
+    pluginRows,
+  };
 }
 
 /**

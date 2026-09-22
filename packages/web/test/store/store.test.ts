@@ -155,8 +155,9 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
   const listed = await store.listByTable('media_item', { direction: 'next', limit: 10 });
   assert.deepEqual(listed.map((row) => row.id), [7]);
 
-  // gatherMediaItem assembles one media item from all of the above.
-  const gathered = await store.gatherMediaItem(7);
+  // gatherMediaItem assembles one media item from all of the above. No
+  // plugin table is under test here, so an empty table list.
+  const gathered = await store.gatherMediaItem(7, []);
   assert.ok(gathered !== undefined);
   assert.deepEqual(gathered.mediaItem, mediaItem);
   assert.equal(gathered.pluginId, 'demo');

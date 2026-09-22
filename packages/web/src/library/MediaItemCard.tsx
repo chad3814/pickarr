@@ -21,6 +21,19 @@ import { useGatheredItem, type GatheredSource } from './useGatheredItem.ts';
 import { ReleaseList } from '@pickarr/plugin-ui';
 import type { PickSubmit } from './postPick.ts';
 
+/**
+ * This card does not yet render a plugin's own body -- that is
+ * `packages/web/src/plugins/registry.ts` and the rewrite of this component
+ * that consumes it, both later tasks in this slice -- so there is no
+ * `BrowserPlugin.tables` to pass `useGatheredItem` yet. A stable
+ * module-level empty array rather than a `[]` literal at the call site:
+ * `useGatheredItem`'s own doc says a fresh literal there is a new
+ * dependency every render, tearing its subscriptions down and rebuilding
+ * them on every render this component makes for reasons unrelated to
+ * `tables`.
+ */
+const NO_TABLES: readonly string[] = [];
+
 export interface MediaItemCardProps {
   source: GatheredSource;
   item: MediaItemSyncRead;
@@ -37,7 +50,7 @@ export interface MediaItemCardProps {
 export function MediaItemCard({ source, item, submit }: MediaItemCardProps): ReactElement {
   const [expanded, setExpanded] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
-  const gathered = useGatheredItem(source, item.id, expanded);
+  const gathered = useGatheredItem(source, item.id, expanded, NO_TABLES);
 
   return (
     <article>

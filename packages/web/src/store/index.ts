@@ -96,7 +96,7 @@ export interface Store {
   subscribe(table: string, id: number, cb: () => void): () => void;
   subscribeInserts(table: string, cb: (ids: readonly number[]) => void): () => void;
   subscribeReset(cb: () => void): () => void;
-  gatherMediaItem(mediaItemId: number): Promise<GatheredItem | undefined>;
+  gatherMediaItem(mediaItemId: number, tables: readonly string[]): Promise<GatheredItem | undefined>;
   /**
    * Cancels both sync loops, releases this store's Web Lock lease if it
    * holds one, stops relaying other tabs' messages, and closes this store's
@@ -152,7 +152,7 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     subscribe,
     subscribeInserts,
     subscribeReset,
-    gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
+    gatherMediaItem: (mediaItemId, tables) => gatherMediaItem(db, mediaItemId, tables),
     stop(): void {
       handle.stop();
       db.close();

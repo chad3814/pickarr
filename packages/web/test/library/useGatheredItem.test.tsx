@@ -110,19 +110,32 @@ function stubItem(id: number, title: string, releases: readonly GatheredRelease[
     roles: [],
     artwork: { poster: '', background: '', logo: '' },
     feedIds: [],
+    pluginRows: {},
   };
 }
+
+/**
+ * No test in this file cares what `tables` is, so every call to `Harness`
+ * below omits it -- but `useGatheredItem`'s own doc says a caller must hand
+ * it a stable reference, not a fresh literal, so the default here is a
+ * module-level constant rather than `tables = []` in the destructuring,
+ * which would build a new array on every render this component makes for
+ * reasons that have nothing to do with `tables`.
+ */
+const NO_TABLES: readonly string[] = [];
 
 function Harness({
   source,
   mediaItemId,
   enabled,
+  tables = NO_TABLES,
 }: {
   source: GatheredSource;
   mediaItemId: number;
   enabled: boolean;
+  tables?: readonly string[];
 }): ReactElement {
-  const gathered = useGatheredItem(source, mediaItemId, enabled);
+  const gathered = useGatheredItem(source, mediaItemId, enabled, tables);
   return (
     <>
       <div data-testid="result">{gathered === undefined ? 'none' : gathered.mediaItem.title}</div>
