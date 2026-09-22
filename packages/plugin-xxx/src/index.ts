@@ -19,6 +19,8 @@ export function createXxxPlugin(deps: LookupPluginDeps): MediaPlugin {
     apply: applyXxx,
     synced: XXX_SYNCED,
     tokens: XXX_TOKENS,
+    // A scene is one file; spec 2026-09-22 §4.1.
+    expects: async () => ({ kind: 'single' }),
   }, deps);
 }
 

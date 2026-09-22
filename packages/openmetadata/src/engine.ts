@@ -25,6 +25,9 @@ import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
 import { MAX_BATCH, createLookupClient } from './client.ts';
 import { lookupTable, lookupTableMigration } from './table.ts';
+import { isPlaced, recordPlacement } from './placement.ts';
+import { select } from './select.ts';
+import type { Expectation } from './select.ts';
 
 export const LOOKUP_JOB = 'lookup';
 export const POLL_JOB = 'poll';
@@ -290,6 +293,19 @@ export interface LookupPluginSpec {
   check(media: Media): void;
   /** The plugin's own rows for one resolved answer. Must be idempotent. */
   apply(args: ApplyArgs): Promise<void>;
+  /**
+   * What a finished download of this matched media item should hold
+   * (design spec 2026-09-22 §6): one video file, or a pack of episodes.
+   * Asked only for a matched release -- an unmatched one is copied whole.
+   * A throw leaves the row `completed` for the next tick, like a resolver's.
+   *
+   * **Required, not optional**, for the reason `check` is: a default would
+   * be a guess, and either guess is wrong for someone. Defaulting to
+   * `single` refuses every season pack `too-many-video-files` forever;
+   * defaulting to episodes refuses every film `episode-marker-missing`. The
+   * plugin is the only party that knows which it asked for.
+   */
+  expects(file: DownloadedFile, ctx: PluginContext): Promise<Expectation>;
   /**
    * The tables this plugin contributes to a client's replica (design spec
    * §6). Optional and defaulting to none below -- a plugin built on this
@@ -664,30 +680,50 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     },
 
     async onDownloadedFile(file, ctx) {
-      // The whole of importing: list the download, resolve this plugin's
-      // declared tokens from its own tables for each entry, and hand both
-      // to the host, which owns `plugin_destination` and the copy. See
-      // `contract/src/library.ts` for why the copy is not here.
-      //
-      // For now every entry is placed; choosing which ones is the download
-      // file selection design's next step.
+      // The whole of importing: list the download, choose which entries
+      // belong in the library, resolve this plugin's declared tokens from
+      // its own tables for each, and hand both to the host, which owns
+      // `plugin_destination` and the copy. See `contract/src/library.ts`
+      // for why the copy is not here.
       //
       // `resolveTokens` is passed rather than called: the host takes the
       // unmatched branch for a release nothing matched, where there is no
       // title to shape a path from and every query below would ask this
       // plugin's tables for rows that do not exist.
+      const { raw } = ownTables(ctx);
       const listing = await ctx.library.list(file);
       if ('refusal' in listing) refuseDownload(ctx, spec.id, file, listing.refusal, listing.errno);
 
+      // Spec §4.3: nothing matched, so there is nothing to ask the plugin
+      // and nothing to judge the download against -- it is copied whole.
+      const expectation = file.mediaItemId === null ? 'unmatched' : await spec.expects(file, ctx);
+      // Copied whole is still something: an unmatched download that lists
+      // nothing would otherwise return with no copy made, and
+      // `deliverCompleted` would mark the row delivered with no file
+      // anywhere. A matched one already refuses this through `select`.
+      if (expectation === 'unmatched' && listing.length === 0) {
+        refuseDownload(ctx, spec.id, file, 'no-video-file', null);
+      }
+      const selection = select(listing, expectation);
+      if ('refusal' in selection) refuseDownload(ctx, spec.id, file, selection.refusal, null);
+
       let copied = 0;
+      let alreadyPlaced = 0;
       let placed: ImportPlacement['placed'] | null = null;
-      for (const entry of listing) {
+      for (const entry of selection.chosen) {
+        // Spec §7: a retry skips what an earlier attempt placed, so a pack
+        // that stopped at ENOSPC resumes instead of refusing its own copies.
+        if (isPlaced(raw, spec.id, file.rssItemId, entry.relativePath)) {
+          alreadyPlaced += 1;
+          continue;
+        }
         // Tokens resolve over the entry, not the download, so `{filename}`
         // and `{ext}` describe the file being copied rather than its folder.
         const entryFile: DownloadedFile = { ...file, path: entry.path, sizeBytes: entry.sizeBytes };
-        // eslint-disable-next-line no-await-in-loop -- one copy at a time, stopping at the first refusal
+        // eslint-disable-next-line no-await-in-loop -- one copy at a time, stopping at the first refusal, so a retry resumes in order
         const outcome = await ctx.library.place(file, entry, async () => resolveTokens(spec.tokens, entryFile, ctx));
         if ('refusal' in outcome) refuseDownload(ctx, spec.id, file, outcome.refusal, outcome.errno);
+        recordPlacement(raw, spec.id, file.rssItemId, entry.relativePath, deps.now());
         copied += 1;
         placed = outcome.placed;
       }
@@ -696,7 +732,9 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
         rssItemId: file.rssItemId,
         mediaItemId: file.mediaItemId,
         listed: listing.length,
+        chosen: selection.chosen.length,
         copied,
+        alreadyPlaced,
         placed,
       });
     },

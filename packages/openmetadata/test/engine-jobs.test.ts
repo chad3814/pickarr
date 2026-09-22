@@ -9,9 +9,12 @@ import {
   resolvedEnvelope,
 } from '../src/testing.ts';
 import { MAX_BATCH } from '../src/client.ts';
+import { placementTableMigration } from '../src/placement.ts';
+import type { Expectation } from '../src/select.ts';
 import type { ApplyArgs } from '../src/engine.ts';
 import type { LookupEnvelope, Media } from '../src/types.ts';
 import type {
+  DownloadEntry,
   DownloadSubmission,
   DownloadedFile,
   HostFetch,
@@ -53,13 +56,13 @@ function sceneMedia(providerRef: string): Media {
 }
 
 /** The plugin under test: the engine, with an `apply` that only records. */
-function build(service?: { fetch: HostFetch }) {
+function build(service?: { fetch: HostFetch }, expectation: Expectation = { kind: 'single' }) {
   const applied: ApplyArgs[] = [];
   const plugin = createLookupPlugin({
     id: 'xxx',
     mediaType: 'xxx',
     category: 'xxx',
-    migrations: [],
+    migrations: [placementTableMigration('xxx', 2)],
     // A scene is all this spec is ever handed, so the pre-flight has nothing
     // to refuse -- these tests are about jobs, not about what a plugin accepts.
     check: (): void => {},
@@ -70,6 +73,7 @@ function build(service?: { fetch: HostFetch }) {
     // resolver answers a value derived from its argument so a test can tell
     // which token produced which string.
     tokens: NAMED_TOKENS,
+    expects: async () => expectation,
   }, {
     now: () => NOW,
     baseUrl: 'https://openmetadata.test',
@@ -92,6 +96,7 @@ test('carries the engine state table as migration 1, before the spec migrations'
     check: (): void => {},
     apply: async () => {},
     tokens: NAMED_TOKENS,
+    expects: async () => ({ kind: 'single' }),
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
   assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2]);
@@ -109,6 +114,7 @@ test("carries the spec's tokens through to the plugin, unchanged and unmerged", 
     check: (): void => {},
     apply: async () => {},
     tokens: { site: siteToken, title: titleToken, ext: extToken },
+    expects: async () => ({ kind: 'single' }),
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
   // The exact map, in order, and identical resolvers. The engine adds
@@ -132,6 +138,7 @@ test('keeps a spec job handler alongside its own two', () => {
     check: (): void => {},
     apply: async () => {},
     tokens: NAMED_TOKENS,
+    expects: async () => ({ kind: 'single' }),
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
   assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [LOOKUP_JOB, POLL_JOB, 'sweep']);
@@ -353,7 +360,7 @@ test('the line it logs names the two ids, says where the file went, and carries 
 
   const line = harness.logs[0];
   assert.ok(line !== undefined, 'onDownloadedFile logged nothing');
-  assert.deepEqual(line.detail, { rssItemId: 7, mediaItemId: 42, listed: 1, copied: 1, placed: 'library' });
+  assert.deepEqual(line.detail, { rssItemId: 7, mediaItemId: 42, listed: 1, chosen: 1, copied: 1, alreadyPlaced: 0, placed: 'library' });
   assert.ok(!serialisedLogs(harness).includes(PATH_MARKER), 'the log line carries the path');
   assert.ok(!serialisedLogs(harness).includes('/downloads/'), 'the log line carries a path fragment');
 });
@@ -368,7 +375,7 @@ test('the line it logs says so when nothing matched the release', async () => {
   // "nothing matched". `placed` says which of §6's two destinations took it.
   assert.deepEqual(
     harness.logs[0]?.detail,
-    { rssItemId: 7, mediaItemId: null, listed: 1, copied: 1, placed: 'unmatched' },
+    { rssItemId: 7, mediaItemId: null, listed: 1, chosen: 1, copied: 1, alreadyPlaced: 0, placed: 'unmatched' },
   );
 });
 
@@ -428,12 +435,14 @@ test('each entry resolves its tokens over its own path, not the download directo
     id: 'xxx',
     mediaType: 'xxx',
     category: 'xxx',
-    migrations: [],
+    migrations: [placementTableMigration('xxx', 2)],
     check: (): void => {},
     apply: async () => {},
     tokens: { ext: extToken },
+    expects: async () => ({ kind: 'single' }),
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
   const harness = createTestHarness();
+  for (const migration of plugin.migrations) migration.up(harness.raw);
   const dir = `/downloads/${PATH_MARKER}`;
   harness.answerList([{ path: `${dir}/Show.S01E01.mkv`, relativePath: 'Show.S01E01.mkv', sizeBytes: 5 }]);
 
@@ -442,6 +451,116 @@ test('each entry resolves its tokens over its own path, not the download directo
   assert.equal(harness.imports[0]?.file.path, dir, 'place is handed the whole download');
   assert.equal(harness.imports[0]?.entry.relativePath, 'Show.S01E01.mkv');
   assert.deepEqual(harness.imports[0]?.values, { ext: 'mkv' });
+});
+
+const DIR = `/downloads/${PATH_MARKER}`;
+function listing(...relativePaths: string[]): DownloadEntry[] {
+  return relativePaths.map((relativePath) => ({ path: `${DIR}/${relativePath}`, relativePath, sizeBytes: 1 }));
+}
+
+test('single: the one video file is placed and the sidecar is not', async () => {
+  const { plugin, harness } = build();
+  harness.answerList(listing('film.iso', 'film.mds.mds'));
+
+  await plugin.onDownloadedFile(downloaded({ path: DIR }), harness.ctx);
+
+  assert.deepEqual(harness.imports.map((recorded) => recorded.entry.relativePath), ['film.iso']);
+});
+
+test('a selection refusal is logged and thrown, and nothing is placed', async () => {
+  const { plugin, harness } = build();
+  harness.answerList(listing('a.mkv', 'b.mkv'));
+
+  await assert.rejects(() => plugin.onDownloadedFile(downloaded({ path: DIR }), harness.ctx), /too-many-video-files/);
+  assert.equal(harness.imports.length, 0);
+  assert.deepEqual(harness.logs[0]?.detail, {
+    rssItemId: 7, mediaItemId: 42, refusal: 'too-many-video-files', errno: null,
+  });
+  assert.ok(!serialisedLogs(harness).includes(PATH_MARKER));
+  assert.ok(!serialisedLogs(harness).includes('a.mkv'), 'a relative path reached the log');
+});
+
+test('episodes: the plugin\'s season is what the pack is checked against', async () => {
+  const { plugin, harness } = build(undefined, { kind: 'episodes', season: 1 });
+  harness.answerList(listing('Show.S01E01.mkv', 'Show.S02E01.mkv'));
+
+  await assert.rejects(() => plugin.onDownloadedFile(downloaded({ path: DIR }), harness.ctx), /too-many-video-files/);
+});
+
+test('unmatched: every entry is placed, and expects is not asked', async () => {
+  let asked = 0;
+  const plugin = createLookupPlugin({
+    id: 'xxx', mediaType: 'xxx', category: 'xxx', migrations: [placementTableMigration('xxx', 2)],
+    check: (): void => {}, apply: async () => {}, tokens: NAMED_TOKENS,
+    expects: async () => { asked += 1; return { kind: 'single' }; },
+  }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
+  const harness = createTestHarness();
+  for (const migration of plugin.migrations) migration.up(harness.raw);
+  harness.answerList(listing('a.mkv', 'b.nfo', 'Sample/s.mkv'));
+
+  await plugin.onDownloadedFile(downloaded({ path: DIR, mediaItemId: null }), harness.ctx);
+
+  assert.equal(asked, 0, 'an unmatched release has no media item to ask about');
+  assert.deepEqual(harness.imports.map((recorded) => recorded.entry.relativePath), ['a.mkv', 'b.nfo', 'Sample/s.mkv']);
+});
+
+test('unmatched: an empty download is refused no-video-file rather than delivered with nothing copied', async () => {
+  const { plugin, harness } = build();
+  harness.answerList([]);
+
+  // Returning would mark the row delivered with no file anywhere; a matched
+  // release with nothing in it already refuses through `select`, and an
+  // unmatched one must not be the way round that.
+  await assert.rejects(
+    () => plugin.onDownloadedFile(downloaded({ path: DIR, mediaItemId: null }), harness.ctx),
+    /no-video-file/,
+  );
+  assert.equal(harness.imports.length, 0);
+  assert.deepEqual(harness.logs[0]?.detail, {
+    rssItemId: 7, mediaItemId: null, refusal: 'no-video-file', errno: null,
+  });
+});
+
+test('a pack that failed part way resumes on the next tick without meeting its own copies', async () => {
+  const { plugin, harness } = build(undefined, { kind: 'episodes', season: 1 });
+  const pack = listing('S.S01E01.mkv', 'S.S01E02.mkv', 'S.S01E03.mkv');
+  harness.answerList(pack);
+  harness.answerImports([undefined, { refusal: 'copy-failed', errno: 'ENOSPC' }]);
+
+  await assert.rejects(() => plugin.onDownloadedFile(downloaded({ path: DIR }), harness.ctx), /copy-failed/);
+  assert.deepEqual(harness.imports.map((recorded) => recorded.entry.relativePath), ['S.S01E01.mkv', 'S.S01E02.mkv']);
+
+  harness.answerList(pack);
+  await plugin.onDownloadedFile(downloaded({ path: DIR }), harness.ctx);
+
+  // E01 was recorded and is not asked for again; E02 failed and is retried.
+  assert.deepEqual(
+    harness.imports.slice(2).map((recorded) => recorded.entry.relativePath),
+    ['S.S01E02.mkv', 'S.S01E03.mkv'],
+  );
+  assert.deepEqual(harness.logs.at(-1)?.detail, {
+    rssItemId: 7, mediaItemId: 42, listed: 3, chosen: 3, copied: 2, alreadyPlaced: 1, placed: 'library',
+  });
+});
+
+test('an unrecorded entry that answers destination-exists is still refused', async () => {
+  const { plugin, harness } = build();
+  harness.answerImport({ refusal: 'destination-exists', errno: null });
+
+  await assert.rejects(() => plugin.onDownloadedFile(downloaded(), harness.ctx), /destination-exists/);
+  const rows = harness.raw.prepare('SELECT COUNT(*) AS n FROM xxx_placement').get()?.['n'];
+  assert.equal(rows, 0, 'a refused entry was recorded as placed');
+});
+
+test('a download whose every entry was already placed copies nothing and says so', async () => {
+  const { plugin, harness } = build();
+  await plugin.onDownloadedFile(downloaded(), harness.ctx);
+  await plugin.onDownloadedFile(downloaded(), harness.ctx);
+
+  assert.equal(harness.imports.length, 1);
+  assert.deepEqual(harness.logs.at(-1)?.detail, {
+    rssItemId: 7, mediaItemId: 42, listed: 1, chosen: 1, copied: 0, alreadyPlaced: 1, placed: null,
+  });
 });
 
 /**

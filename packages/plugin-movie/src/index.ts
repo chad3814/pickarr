@@ -26,6 +26,8 @@ export function createMoviePlugin(deps: LookupPluginDeps): MediaPlugin {
     apply: applyMovie,
     synced: MOVIE_SYNCED,
     tokens: MOVIE_TOKENS,
+    // A film is one file; spec 2026-09-22 §4.1.
+    expects: async () => ({ kind: 'single' }),
   }, deps);
 }
 

@@ -400,6 +400,35 @@ test('spec 8.2: an identified episode lands at exactly the path its shape names,
   }
 });
 
+test('spec 2026-09-22 §4.1: an episode delivered as a directory places its one video and nothing else', async () => {
+  const result = fixture();
+  const { raw, host } = result;
+  const { rssItemId, mediaItemId } = await identifiedEpisode(result);
+
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-import-'));
+  try {
+    const root = join(dir, 'tv');
+    await mkdir(root);
+    const download = join(dir, 'downloads', 'The.Bear.S03E01.1080p-GRP');
+    await mkdir(join(download, 'Sample'), { recursive: true });
+    await writeFile(join(download, 'The.Bear.S03E01.1080p-GRP.mkv'), 'the episode');
+    await writeFile(join(download, 'The.Bear.S03E01.1080p-GRP.nfo'), 'info');
+    await writeFile(join(download, 'Sample', 'sample.mkv'), 'sample');
+    destinationFor(raw, 'tv', root, '{series}/Season {season}/{series} - S{season}E{episode}.{ext}');
+
+    await host.deliverToPlugin('tv', { path: download, sizeBytes: 4096, downloadClientId: 1, rssItemId, mediaItemId });
+
+    assert.equal(
+      await readFile(join(root, 'The Bear', 'Season 03', 'The Bear - S03E01.mkv'), 'utf8'),
+      'the episode',
+    );
+    const placed = raw.prepare('SELECT relative_path AS p FROM tv_placement').all().map((row) => row['p']);
+    assert.deepEqual(placed, ['The.Bear.S03E01.1080p-GRP.mkv']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('spec 5: a destination that already exists leaves the plugin rejecting, so the row stays completed', async () => {
   const result = fixture();
   const { raw, host } = result;

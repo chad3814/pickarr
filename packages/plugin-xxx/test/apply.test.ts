@@ -5,6 +5,7 @@ import type { Media } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyXxx, checkXxx } from '../src/apply.ts';
 import { XXX_MIGRATIONS } from '../src/migrations.ts';
+import { createXxxPlugin } from '../src/index.ts';
 
 const NOW = 1_700_000_000_000;
 
@@ -172,4 +173,19 @@ test('migration 3 creates the placement table the engine records imports in', ()
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'xxx_placement'")
     .get();
   assert.ok(found !== undefined, 'xxx_placement was not created');
+});
+
+test('a scene expects a single file', async () => {
+  const plugin = createXxxPlugin({ now: () => 1, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'k' });
+  // `expects` is not on MediaPlugin; exercise it through a download instead.
+  const harness = createTestHarness();
+  for (const migration of plugin.migrations) migration.up(harness.raw);
+  harness.answerList([
+    { path: '/d/r/a.mkv', relativePath: 'a.mkv', sizeBytes: 1 },
+    { path: '/d/r/b.mkv', relativePath: 'b.mkv', sizeBytes: 1 },
+  ]);
+  await assert.rejects(
+    () => plugin.onDownloadedFile({ path: '/d/r', sizeBytes: 1, downloadClientId: 1, rssItemId: 7, mediaItemId: 1 }, harness.ctx),
+    /too-many-video-files/,
+  );
 });
