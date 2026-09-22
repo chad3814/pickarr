@@ -157,22 +157,35 @@ test("web's src imports each plugin's /browser subpath, never its package root",
   // but `plugins/registry.ts` is the one file that scan skips and the one
   // file that legitimately imports plugins, and there the three evading
   // forms cleared every test in this file. The build caught them; nothing
-  // in `npm run check` did. A quoted string that *is* the package root
-  // cannot be written in any import form without matching this, and a
-  // subpath cannot match it at all -- `/` is outside the character class,
-  // so `'@pickarr/plugin-tv/browser'` is not a hit.
+  // in `npm run check` did.
   //
-  // The cost is that prose quoting a root specifier is a hit too. Nothing
-  // under `src` does, and a comment that spells the forbidden import
-  // exactly is better reworded than exempted -- the same call the id scan's
-  // seven rewordings made.
+  // **All three quote characters, including the backtick.** The first fix
+  // for the above matched `['"]` only, so `await import(`@pickarr/plugin-tv`)`
+  // -- a template literal with no substitution, which is a legal dynamic
+  // specifier -- still cleared all seven tests inside `registry.ts`. The
+  // scoped re-review found that by injection, and the comment here had
+  // claimed "every import form" while missing one character. A quoted
+  // string that *is* the package root now cannot be written in any import
+  // form without matching this, and a subpath cannot match it at all --
+  // `/` is outside the character class, so `'@pickarr/plugin-tv/browser'`
+  // is not a hit.
+  //
+  // The cost is that prose quoting a root specifier is a hit too, and with
+  // the backtick in the class that includes ordinary docblock prose, which
+  // is how this repo writes every code reference. Checked before widening:
+  // the only backtick-wrapped plugin root anywhere under `src` is
+  // `@pickarr/plugin-ui`, nine times, and that one is exempt by name below
+  // -- so this introduces no false positive on this tree. If a future
+  // comment needs to name another plugin's root, reword it rather than
+  // exempting the file, which is the call the id scan's seven rewordings
+  // made.
   //
   // **`@pickarr/plugin-ui` is exempt, by name and deliberately.** It is the
   // seam package itself: it has no `index.ts` reaching a lookup service, no
   // `node:` import anywhere in its graph, and no `/browser` subpath to
   // prefer -- `packages/plugin-ui/package.json` exports its root and
   // nothing else. Task 1 pinned that its root import bundles clean.
-  const ROOT_IMPORT = /['"](@pickarr\/plugin-[a-z0-9-]+)['"]/g;
+  const ROOT_IMPORT = /['"`](@pickarr\/plugin-[a-z0-9-]+)['"`]/g;
   const offenders: string[] = [];
   for (const [file, text] of await sources()) {
     for (const [, specifier] of text.matchAll(ROOT_IMPORT)) {
