@@ -277,6 +277,34 @@ test('the Load more button still loads a page without any scrolling', async ({ p
   await expect(cards).toHaveCount(25, { timeout: 15_000 });
 });
 
+test('a feed that produced nothing is removed outright, in a real browser', async ({ page, harness }) => {
+  // The end of the chain the unit tests each cover a link of: the DELETE,
+  // the host's delete-or-disable rule, the sync trigger, the tail, and the
+  // replica read that makes the row leave the list. Nothing below stubs a
+  // fetch -- the feed really goes.
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  // Wait for the claim to land before navigating: `claimInstall` only
+  // clicks, and a `goto` fired while the POST is still in flight cancels
+  // it, leaving the sign-in form up and every locator below unfindable.
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await page.goto(`${harness.origin}/settings`);
+
+  await page.getByLabel('Name', { exact: true }).fill('Movies HD');
+  await page.getByLabel('Feed url').fill(`${harness.origin}/fixtures/movies.xml`);
+  await page.getByRole('button', { name: 'Add feed' }).click();
+  await expect(page.getByRole('heading', { name: 'Movies HD' })).toBeVisible({ timeout: 20_000 });
+
+  // Never polled, so it produced no releases and deleting it is safe.
+  await page.getByRole('button', { name: 'Remove Movies HD' }).click();
+
+  await expect(page.getByText('Feed removed.')).toBeVisible({ timeout: 20_000 });
+  // The row leaves the list by the same replica round trip that put it
+  // there -- the delete trigger, the tail, and `useFeeds` re-reading.
+  await expect(page.getByRole('heading', { name: 'Movies HD' })).toHaveCount(0, { timeout: 20_000 });
+});
+
 test('two tabs: exactly one fetches, and the follower still sees counts climb', async ({ page, context, harness }) => {
   // Node's own `navigator.locks` is per-process, so every test up to this
   // one that claims to cover leader election only modelled a browser's

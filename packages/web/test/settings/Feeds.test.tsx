@@ -6,7 +6,8 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
-import { subscribeInserts } from '../../src/store/notify.ts';
+import { subscribeTable } from '../../src/store/notify.ts';
+import type { FeedRemovalSubmit } from '../../src/settings/postFeedRemoval.ts';
 import { Feeds, type FeedsSource } from '../../src/settings/Feeds.tsx';
 import type { AddFeedInput, AddFeedOutcome } from '../../src/settings/AddFeed.tsx';
 
@@ -16,6 +17,17 @@ import type { AddFeedInput, AddFeedOutcome } from '../../src/settings/AddFeed.ts
  * still subscribed through `notify.ts`'s module-level registry.
  */
 afterEach(cleanup);
+
+/** No listing test removes anything; these fail the test if one reaches them. */
+function neverSubmitFeed(): Promise<never> {
+  return assert.fail('a removal test must not add a feed');
+}
+
+const neverRemoves: FeedRemovalSubmit = {
+  remove: () => assert.fail('a listing test must not remove a feed'),
+  setDisabled: () => assert.fail('a listing test must not pause or resume a feed'),
+};
+
 
 /** Seeds `ops` into `db` in one batch -- the cursor value has no bearing on these tests. */
 async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
@@ -32,7 +44,7 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
  * 1, review-found: an earlier version of this comment claimed one that is
  * not there), so that choice is not a precedent this helper follows.
  */
-function feedOp({ id, name, url = 'https://tracker.example/rss?apikey=***' }: { id: number; name: string; url?: string }): SyncOp {
+function feedOp({ id, name, url = 'https://tracker.example/rss?apikey=*****', disabledAt = null }: { id: number; name: string; url?: string; disabledAt?: number | null }): SyncOp {
   return {
     op: 'upsert',
     table: 'rss_feed',
@@ -47,6 +59,7 @@ function feedOp({ id, name, url = 'https://tracker.example/rss?apikey=***' }: { 
       createdAt: id,
       updatedAt: id,
       url,
+      disabledAt,
     },
   };
 }
@@ -55,13 +68,13 @@ function feedOp({ id, name, url = 'https://tracker.example/rss?apikey=***' }: { 
 function sourceFor(db: IDBDatabase): FeedsSource {
   return {
     listByTable: (table, opts) => listByTable(db, table, opts),
-    subscribeInserts,
+    subscribeTable,
   };
 }
 
 /**
  * A `submit` that fails the test if it is ever called. Task 5's ruling: the
- * brief's own first test renders `<Feeds source={...} />` with no `submit`
+ * brief's own first test renders `<Feeds source={...} removal={neverRemoves} />` with no `submit`
  * at all, which does not typecheck against a *required* prop -- `submit` is
  * required deliberately (a defaulted one that quietly posted to `/api/feeds`
  * would make a test that forgot the prop hang under jsdom instead of
@@ -84,7 +97,7 @@ function fillFeedForm({ name, url }: { name: string; url: string }): void {
 test('the list shows a feed by name and host, from the replica', async () => {
   const db = await freshDb();
   await seed(db, [feedOp({ id: 1, name: 'Movies HD', url: 'https://tracker.example/rss?apikey=***' })]);
-  render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
+  render(<Feeds source={sourceFor(db)} submit={neverSubmit} removal={neverRemoves} />);
   await waitFor(() => {
     // A length check, not `assert.ok(getByRole(...))`: the latter can only
     // ever pass once the query stops throwing, which proves nothing beyond
@@ -116,6 +129,7 @@ test('clicking Add feed calls submit, and the row appears through the replica\'s
         submitCalls += 1;
         return Promise.resolve({ id: 1 });
       }}
+      removal={neverRemoves}
     />,
   );
   fillFeedForm({ name: 'Movies HD', url: 'https://tracker.example/rss' });
@@ -146,7 +160,7 @@ test('each refusal reads as its own sentence, and offline is not a refusal', asy
   ] as const) {
     // eslint-disable-next-line no-await-in-loop -- each iteration renders, asserts and calls its own `cleanup()` before the next; the three outcomes cannot run concurrently against the one shared `screen` (`library/Unmatched.tsx`'s own walk takes the identical exception for the identical reason).
     const db = await freshDb();
-    render(<Feeds source={sourceFor(db)} submit={submitFor(outcome)} />);
+    render(<Feeds source={sourceFor(db)} submit={submitFor(outcome)} removal={neverRemoves} />);
     fillFeedForm({ name: 'X', url: 'https://tracker.example/rss' });
     fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
     // eslint-disable-next-line no-await-in-loop -- see above
@@ -171,7 +185,7 @@ test('the error is a visible heading, not only an announced one', async () => {
   // an `aria-label` never populates `textContent`, so the mutant now reads
   // an empty string here and reds.
   const db = await freshDb();
-  render(<Feeds source={sourceFor(db)} submit={submitFor('duplicate-url')} />);
+  render(<Feeds source={sourceFor(db)} submit={submitFor('duplicate-url')} removal={neverRemoves} />);
   fillFeedForm({ name: 'X', url: 'https://tracker.example/rss' });
   fireEvent.click(screen.getByRole('button', { name: 'Add feed' }));
   const heading = await screen.findByRole('heading', { name: /already/i });
@@ -181,7 +195,7 @@ test('the error is a visible heading, not only an announced one', async () => {
 
 test('an empty replica reads as "no feeds yet", not as still loading forever', async () => {
   const db = await freshDb();
-  render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
+  render(<Feeds source={sourceFor(db)} submit={neverSubmit} removal={neverRemoves} />);
   await waitFor(() => {
     assert.equal(screen.getByText(/no feeds yet/i).tagName, 'P', 'rendered as its own line of text, not merely present in the tree');
   });
@@ -197,7 +211,7 @@ test('the list never falls back to the network when the replica is empty', async
     return Promise.resolve(new Response('{}', { status: 200 }));
   };
   try {
-    render(<Feeds source={sourceFor(db)} submit={neverSubmit} />);
+    render(<Feeds source={sourceFor(db)} submit={neverSubmit} removal={neverRemoves} />);
     await waitFor(() => {
       assert.equal(screen.getByText(/no feeds yet/i).tagName, 'P');
     });
@@ -205,4 +219,103 @@ test('the list never falls back to the network when the replica is empty', async
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('removing a feed that produced nothing says it was removed', async () => {
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
+  const asked: number[] = [];
+  render(
+    <Feeds
+      source={sourceFor(db)}
+      submit={neverSubmitFeed}
+      removal={{
+        remove: async (id) => { asked.push(id); return { outcome: 'deleted' }; },
+        setDisabled: () => assert.fail('this test removes, it does not pause'),
+      }}
+    />,
+  );
+  await waitFor(() => { assert.ok(screen.getByRole('button', { name: 'Remove Movies HD' })); });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remove Movies HD' }));
+
+  await waitFor(() => { assert.ok(screen.getByText('Feed removed.')); });
+  assert.deepEqual(asked, [1], 'the id it was asked to remove, not another row\u2019s');
+  db.close();
+});
+
+test('removing a feed that produced releases says it was disabled, and why', async () => {
+  // The sentence carries the count because "disabled" is not what the
+  // operator asked for, and the number of kept releases is the reason.
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
+  render(
+    <Feeds
+      source={sourceFor(db)}
+      submit={neverSubmitFeed}
+      removal={{
+        remove: async () => ({ outcome: 'disabled', items: 3 }),
+        setDisabled: () => assert.fail('not this test'),
+      }}
+    />,
+  );
+  await waitFor(() => { assert.ok(screen.getByRole('button', { name: 'Remove Movies HD' })); });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remove Movies HD' }));
+
+  await waitFor(() => {
+    assert.ok(screen.getByText(/3 releases were kept, so the feed was disabled rather than deleted/));
+  });
+  db.close();
+});
+
+test('a disabled feed says so and offers to be enabled, not removed', async () => {
+  // `disabledAt` comes from the replica, so the row knows its own state
+  // without this page asking. Both halves: the control that appears and
+  // the one that does not.
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD', disabledAt: 500 })]);
+  const asked: Array<{ id: number; disabled: boolean }> = [];
+  render(
+    <Feeds
+      source={sourceFor(db)}
+      submit={neverSubmitFeed}
+      removal={{
+        remove: () => assert.fail('a disabled feed offers Enable, not Remove'),
+        setDisabled: async (id, disabled) => { asked.push({ id, disabled }); return { outcome: 'enabled' }; },
+      }}
+    />,
+  );
+  await waitFor(() => { assert.ok(screen.getByRole('button', { name: 'Enable Movies HD' })); });
+  assert.ok(!screen.queryByRole('button', { name: 'Remove Movies HD' }), 'no Remove on a disabled feed');
+  assert.ok(screen.getByText(/no longer polled/));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Enable Movies HD' }));
+  await waitFor(() => { assert.deepEqual(asked, [{ id: 1, disabled: false }]); });
+  db.close();
+});
+
+test('a refused removal says so and leaves the control usable', async () => {
+  // The wedge `postFeed` and `postMapping` both record: a control that
+  // stays pending forever after a failure. The button must come back.
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
+  render(
+    <Feeds
+      source={sourceFor(db)}
+      submit={neverSubmitFeed}
+      removal={{
+        remove: async () => ({ outcome: 'refused', refusal: 'unreachable' }),
+        setDisabled: () => assert.fail('not this test'),
+      }}
+    />,
+  );
+  await waitFor(() => { assert.ok(screen.getByRole('button', { name: 'Remove Movies HD' })); });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remove Movies HD' }));
+
+  await waitFor(() => { assert.ok(screen.getByText(/Could not reach Pickarr/)); });
+  const button = screen.getByRole('button', { name: 'Remove Movies HD' });
+  assert.equal(button.hasAttribute('disabled'), false, 'still clickable, so a retry is possible');
+  db.close();
 });

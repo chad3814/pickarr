@@ -1,8 +1,17 @@
 /**
  * The settings screen's whole relationship with the replica: every
- * configured feed, kept current by `subscribeInserts` -- the same shape
+ * configured feed, kept current by `subscribeTable` -- the same shape
  * `shell/useCounts.ts` and `library/useMediaItems.ts` already use for their
- * own reads (design spec §4).
+ * own reads (design spec §4), with the one difference that earned its own
+ * subscription kind.
+ *
+ * **`subscribeTable`, not `subscribeInserts`, because this list shrinks.**
+ * The other two readers only ever grow -- media items arrive and stay --
+ * so an inserts-only wake serves them. A feed can be removed and it can be
+ * disabled, and neither is an insert, so this hook slept through both: the
+ * host deleted the row, the tombstone reached the replica, and the screen
+ * went on showing the feed until a reload. Found in a real browser, not
+ * here; every unit test in this hook's file drove the read directly.
  *
  * **One page, not a paged window.** Unlike `useMediaItems` (media items
  * arrive from lookups, unbounded) this hook reads the whole `rss_feed`
@@ -16,7 +25,7 @@
  *
  * **Lists come from the replica only. There is no remote fallback**
  * (Global Constraint). This hook never calls `fetch`; `listByTable` and
- * `subscribeInserts` are the whole of what it is built on.
+ * `subscribeTable` are the whole of what it is built on.
  */
 import { useEffect, useState } from 'react';
 import type { RssFeedSyncRead } from '@pickarr/contract';
@@ -34,12 +43,12 @@ const FEEDS_LIMIT = 500;
 /**
  * The two `Store` members this hook needs, and nothing else -- narrower
  * than `Store` itself so a test can hand it a bare database's `listByTable`
- * and `subscribeInserts` directly, the way `useCounts.test.tsx`'s
- * `sourceFor` does. A real `Store` satisfies this by structural assignment.
+ * and `subscribeTable` directly, the way `useCounts.test.tsx`'s `sourceFor`
+ * does. A real `Store` satisfies this by structural assignment.
  */
 export interface FeedsSource {
   listByTable: Store['listByTable'];
-  subscribeInserts: Store['subscribeInserts'];
+  subscribeTable: Store['subscribeTable'];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -84,8 +93,9 @@ function isStoreClosed(err: unknown): boolean {
 }
 
 /**
- * Every configured feed, newest first, re-read whenever one is added or
- * revived. `undefined` until the first read resolves -- distinct from an
+ * Every configured feed, newest first, re-read whenever any of them
+ * changes -- added, edited, disabled or removed. `undefined` until the
+ * first read resolves -- distinct from an
  * empty array, which means "loaded, and there are none" (Global Constraint:
  * zero is an answer, and the two must not render the same way), matching
  * `library/Unmatched.tsx`'s own `rows` state.
@@ -110,7 +120,7 @@ export function useFeeds(source: FeedsSource): readonly RssFeedSyncRead[] | unde
     }
 
     safeRefresh();
-    const unsubscribe = source.subscribeInserts(TABLE, safeRefresh);
+    const unsubscribe = source.subscribeTable(TABLE, safeRefresh);
     return () => {
       cancelled = true;
       unsubscribe();

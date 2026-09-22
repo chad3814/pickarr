@@ -56,6 +56,7 @@ import { BROWSER_PLUGINS } from '../plugins/registry.ts';
 import { postFeed } from '../settings/AddFeed.tsx';
 import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
 import { mappingSubmit } from '../settings/postMapping.ts';
+import { feedRemovalSubmit } from '../settings/postFeedRemoval.ts';
 import { destinationSubmit } from '../settings/postDestination.ts';
 import { postPick } from '../library/postPick.ts';
 
@@ -260,6 +261,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
               <Settings
                 source={store}
                 submitFeed={postFeed}
+                feedRemoval={feedRemovalSubmit}
                 submitDownloadClient={postDownloadClient}
                 submitMapping={mappingSubmit}
                 submitDestination={destinationSubmit}

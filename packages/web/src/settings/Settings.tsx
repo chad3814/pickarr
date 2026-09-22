@@ -41,6 +41,7 @@ import type { DownloadClientsListSource } from './DownloadClients.tsx';
 import type { AddFeedInput, AddFeedOutcome } from './AddFeed.tsx';
 import type { AddDownloadClientInput, AddDownloadClientOutcome } from './AddDownloadClient.tsx';
 import type { MappingSubmit } from './postMapping.ts';
+import type { FeedRemovalSubmit } from './postFeedRemoval.ts';
 import type { DestinationsSource } from './useDestinations.ts';
 import type { DestinationSubmit } from './postDestination.ts';
 import { TOKEN_NAMES_BY_PLUGIN } from '@pickarr/contract';
@@ -91,6 +92,8 @@ export interface SettingsProps {
   source: SettingsSource;
   /** Posts a new feed. Required, not defaulted -- see `AddFeed.tsx`'s own docblock on why neither of these has a default that performs network I/O. */
   submitFeed: (input: AddFeedInput) => Promise<AddFeedOutcome>;
+  /** Removes, pauses and resumes a feed. Required for the same reason. */
+  feedRemoval: FeedRemovalSubmit;
   /** Posts a new download client. Required for the same reason. */
   submitDownloadClient: (input: AddDownloadClientInput) => Promise<AddDownloadClientOutcome>;
   /** Adds, edits and removes a path mapping inside a download client's row. Required for the same reason -- `postMapping.ts`'s `MappingSubmit` has it at length. */
@@ -103,13 +106,14 @@ export function Settings({
   source,
   submitFeed,
   submitDownloadClient,
+  feedRemoval,
   submitMapping,
   submitDestination,
 }: SettingsProps): ReactElement {
   return (
     <section aria-labelledby="settings-heading" data-testid="settings">
       <h1 id="settings-heading">Settings</h1>
-      <Feeds source={source} submit={submitFeed} />
+      <Feeds source={source} submit={submitFeed} removal={feedRemoval} />
       <DownloadClients source={source} submit={submitDownloadClient} submitMapping={submitMapping} />
       <Destinations source={source} plugins={PLUGINS} submit={submitDestination} />
     </section>

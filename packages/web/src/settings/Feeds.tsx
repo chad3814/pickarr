@@ -27,9 +27,15 @@
  * so could only either fail on a redacted value or quietly undo whatever
  * the host already stripped.
  */
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
+import type { RssFeedSyncRead } from '@pickarr/contract';
 import { useFeeds, type FeedsSource } from './useFeeds.ts';
 import { AddFeed, type AddFeedInput, type AddFeedOutcome } from './AddFeed.tsx';
+import {
+  removalMessage,
+  FEED_REFUSAL_MESSAGES,
+  type FeedRemovalSubmit,
+} from './postFeedRemoval.ts';
 
 /** Re-exported so a caller of this section (`Settings.tsx`, this file's own tests) needs one import, not two -- `useFeeds.ts` is where it is declared, since that hook is what actually needs it narrowed. */
 export type { FeedsSource };
@@ -38,9 +44,75 @@ export interface FeedsProps {
   source: FeedsSource;
   /** Posts a new feed. Required, not defaulted -- see `AddFeed.tsx`'s own docblock. */
   submit: (input: AddFeedInput) => Promise<AddFeedOutcome>;
+  /** Removes, pauses and resumes a feed. Required for the same reason -- see `postFeedRemoval.ts`. */
+  removal: FeedRemovalSubmit;
 }
 
-export function Feeds({ source, submit }: FeedsProps): ReactElement {
+/**
+ * One feed, with the control that removes it or puts it back.
+ *
+ * **Its own component so each row owns its pending state and its own
+ * sentence.** Held on `Feeds` they would be one map keyed by feed id, and
+ * every click would have to be careful not to clear another row's message.
+ *
+ * **Removing says what happened rather than "done".** A feed that produced
+ * releases is disabled and keeps them, because `rss_item.feed_id` is
+ * `NOT NULL` and those items own the rows that record where a library file
+ * came from. An operator who asked to remove something and got "disabled"
+ * is owed the reason, and the count is it.
+ */
+function FeedRow({ feed, removal }: { feed: RssFeedSyncRead; removal: FeedRemovalSubmit }): ReactElement {
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState<string | undefined>(undefined);
+  const disabled = feed.disabledAt !== null;
+
+  function run(work: () => Promise<string | undefined>): void {
+    setPending(true);
+    work()
+      .then((next) => { setMessage(next); })
+      .finally(() => {
+        // Unconditional: a rejection that left this pending forever is the
+        // wedge `postFeed` and `postMapping` both record, and the reason
+        // the submit functions never throw in the first place.
+        setPending(false);
+      });
+  }
+
+  return (
+    <li>
+      <h3>{feed.name}</h3>
+      <p>{feed.url}</p>
+      {disabled && <p>Disabled. Its releases are kept and it is no longer polled.</p>}
+      {disabled ? (
+        <button
+          type="button"
+          disabled={pending}
+          onClick={() => {
+            run(async () => {
+              const outcome = await removal.setDisabled(feed.id, false);
+              return outcome.outcome === 'refused' ? FEED_REFUSAL_MESSAGES[outcome.refusal] : undefined;
+            });
+          }}
+        >
+          {pending ? 'Enabling\u2026' : `Enable ${feed.name}`}
+        </button>
+      ) : (
+        <button
+          type="button"
+          disabled={pending}
+          onClick={() => {
+            run(async () => removalMessage(await removal.remove(feed.id)));
+          }}
+        >
+          {pending ? 'Removing\u2026' : `Remove ${feed.name}`}
+        </button>
+      )}
+      {message !== undefined && <p>{message}</p>}
+    </li>
+  );
+}
+
+export function Feeds({ source, submit, removal }: FeedsProps): ReactElement {
   const feeds = useFeeds(source);
 
   return (
@@ -53,10 +125,7 @@ export function Feeds({ source, submit }: FeedsProps): ReactElement {
         ) : (
           <ul aria-label="feeds">
             {feeds.map((feed) => (
-              <li key={feed.id}>
-                <h3>{feed.name}</h3>
-                <p>{feed.url}</p>
-              </li>
+              <FeedRow key={feed.id} feed={feed} removal={removal} />
             ))}
           </ul>
         ))}

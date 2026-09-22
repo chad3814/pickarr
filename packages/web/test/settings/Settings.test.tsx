@@ -6,13 +6,14 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
-import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts, subscribeTable } from '../../src/store/notify.ts';
 import type { StoredRow } from '../../src/store/db.ts';
 import type { ListByTableOptions } from '../../src/store/rows.ts';
 import { Settings, type SettingsSource } from '../../src/settings/Settings.tsx';
 import type { AddFeedOutcome } from '../../src/settings/AddFeed.tsx';
 import type { AddDownloadClientOutcome } from '../../src/settings/AddDownloadClient.tsx';
 import type { MappingSubmit } from '../../src/settings/postMapping.ts';
+import type { FeedRemovalSubmit } from '../../src/settings/postFeedRemoval.ts';
 import type { DestinationSubmit } from '../../src/settings/postDestination.ts';
 
 /**
@@ -21,6 +22,13 @@ import type { DestinationSubmit } from '../../src/settings/postDestination.ts';
  * still subscribed through `notify.ts`'s module-level registry.
  */
 afterEach(cleanup);
+
+/** Settings tests list; none removes a feed. */
+const neverFeedRemoval: FeedRemovalSubmit = {
+  remove: () => assert.fail('a listing test must not remove a feed'),
+  setDisabled: () => assert.fail('a listing test must not pause or resume a feed'),
+};
+
 
 async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
   await applyBatch(db, ops, { since: 1, before: null });
@@ -69,6 +77,7 @@ function sourceFor(db: IDBDatabase): SettingsSource {
     listByTable: (table, opts) => listByTable(db, table, opts),
     subscribe,
     subscribeInserts,
+    subscribeTable,
   };
 }
 
@@ -95,6 +104,7 @@ function renderSettings(source: SettingsSource): void {
     <Settings
       source={source}
       submitFeed={neverSubmitFeed}
+      feedRemoval={neverFeedRemoval}
       submitDownloadClient={neverSubmitClient}
       submitMapping={neverSubmitMapping}
       submitDestination={neverSubmitDestination}
@@ -206,11 +216,13 @@ test('a download client list that never resolves leaves the feeds list rendered'
       table === 'download_client' ? new Promise<readonly StoredRow[]>(() => {}) : listByTable(db, table, opts),
     subscribe,
     subscribeInserts,
+    subscribeTable,
   };
   render(
     <Settings
       source={stalled}
       submitFeed={neverSubmitFeed}
+      feedRemoval={neverFeedRemoval}
       submitDownloadClient={neverSubmitClient}
       submitMapping={neverSubmitMapping}
       submitDestination={neverSubmitDestination}

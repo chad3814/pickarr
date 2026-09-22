@@ -7,7 +7,7 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
-import { subscribeInserts } from '../../src/store/notify.ts';
+import { subscribeTable } from '../../src/store/notify.ts';
 import { useFeeds, type FeedsSource } from '../../src/settings/useFeeds.ts';
 
 /**
@@ -46,7 +46,7 @@ function feedOp({ id, name, url = 'https://tracker.example/rss' }: { id: number;
 function sourceFor(db: IDBDatabase): FeedsSource {
   return {
     listByTable: (table, opts) => listByTable(db, table, opts),
-    subscribeInserts,
+    subscribeTable,
   };
 }
 
@@ -126,6 +126,48 @@ test('a tombstoned feed is not listed', async () => {
 
   await waitFor(() => {
     assert.deepEqual(namesShown(), [], 'a tombstoned feed is excluded, same as any other synced table');
+  });
+});
+
+test('a feed deleted while the list is on screen leaves it', async () => {
+  // **The test above cannot see this and did not.** It deletes before
+  // rendering, so the hook's *read* excludes the tombstone and nothing
+  // about the hook's *subscription* is exercised. With the hook on
+  // `subscribeInserts`, a delete woke nobody -- the row had already been
+  // counted as inserted, and a tombstone inserts nothing -- so the screen
+  // went on showing a feed the host had deleted until a reload. It reached
+  // a real browser before anything failed.
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
+  render(<FeedNames source={sourceFor(db)} />);
+  await waitFor(() => {
+    assert.deepEqual(namesShown(), ['Movies HD']);
+  });
+
+  await seed(db, [{ op: 'delete', table: 'rss_feed', id: 1 }]);
+
+  await waitFor(() => {
+    assert.deepEqual(namesShown(), [], 'the delete woke the list, not just the next reload');
+  });
+});
+
+test('a feed edited while the list is on screen shows its new name', async () => {
+  // The delete's other half: an update is not an insert either, so the
+  // same blind spot hid every in-place change -- which is how a disabled
+  // feed would have gone on rendering as enabled. Asserted through the
+  // name because that is the field this harness renders; `Feeds.test.tsx`
+  // drives the disabled badge itself.
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
+  render(<FeedNames source={sourceFor(db)} />);
+  await waitFor(() => {
+    assert.deepEqual(namesShown(), ['Movies HD']);
+  });
+
+  await seed(db, [feedOp({ id: 1, name: 'Movies UHD' })]);
+
+  await waitFor(() => {
+    assert.deepEqual(namesShown(), ['Movies UHD']);
   });
 });
 
