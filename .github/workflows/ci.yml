@@ -149,10 +149,23 @@ jobs:
       # plus the full build, is repeated every run.
       - uses: docker/setup-buildx-action@v3
 
+      # `load: true`, unlike the `false` this used to be, so the image
+      # lands in the local daemon and the step below can actually run it.
+      # That costs an export of the runtime layers and buys the only
+      # coverage `docker-entrypoint.sh` can have.
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: false
-          load: false
+          load: true
+          tags: pickarr:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Building the image proves it builds. It does not prove it runs as
+      # the right user -- and running as root is the whole failure this
+      # entrypoint exists to prevent, visible only as ownership on files
+      # outside the container. The script boots no host and needs no port:
+      # each case overrides `CMD` and reads back a uid.
+      - name: Container runs as PUID:PGID
+        run: scripts/test-container-user.sh pickarr:test

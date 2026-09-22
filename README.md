@@ -79,6 +79,54 @@ never opened. `rss_feed.url` is `UNIQUE`: re-seeding a url already on file fails
 naming the existing row rather than silently overwriting it. Each script's docblock has
 the full argument list.
 
+### Which user the container runs as
+
+Set `PUID` and `PGID` and the container runs as that user instead of root:
+
+```yaml
+services:
+  pickarr:
+    environment:
+      PUID: 1000
+      PGID: 1000
+```
+
+Without them it runs as root, exactly as it always has — so this changes nothing for an
+existing install until you ask for it. `id -u` and `id -g` on the host print the pair
+you want.
+
+The reason to bother is what ends up in your `./config` directory. A container running
+as root writes root-owned files there, and you then cannot read, back up or delete your
+own database without `sudo`. Set these and the files belong to you. The names are
+`PUID`/`PGID` rather than `UID`/`GID` because `UID` is a readonly builtin in `bash` and
+`zsh`, so `UID=1000 docker compose up` fails in your own shell — this is the same reason
+every other *arr image spells them this way, and the values are interchangeable with
+theirs.
+
+Two limits worth knowing:
+
+- Only the config directory is taken over, and only when its ownership does not already
+  match, so a restart against a directory that is already right costs nothing. If
+  `database.path` points **outside** that directory, create that location with the right
+  owner yourself — the entrypoint does not read the config file to find it.
+- Library destinations are never chowned. They hold media you already own, and an
+  entrypoint that recursively rewrites ownership of someone's library is a worse bug
+  than the one it fixes. `PUID`/`PGID` is what makes *new* files Pickarr copies there
+  land with the right owner.
+
+A `PUID` that is not a number, or one set without a `PGID`, stops the container with a
+message rather than quietly falling back to root — a typo that boots anyway would show
+up days later as a directory of root-owned files.
+
+One thing `PUID` does **not** cover: `docker exec` runs straight from the image and
+never passes through the entrypoint, so it lands you a root shell even when the server
+itself is running as you. Anything you do by hand in there writes root-owned files —
+the exact problem you set `PUID` to avoid. Pass the user explicitly:
+
+```bash
+docker exec -u 1000:1000 pickarr sh
+```
+
 ## Configuration
 
 Two sources, and the environment always wins. Neither has to exist: a host with no
@@ -130,6 +178,14 @@ unbootable install.
 | `PICKARR_OPENMETADATA_URL` | Where the lookup service lives (default `https://openmetadata.nexus`). An origin, and it may carry no username or password. |
 | `BETTER_AUTH_SECRET` | The session signing secret. Generated and persisted on first boot if unset, so it only needs setting to share one across replicas. |
 | `PICKARR_SECRET_<NAME>` | One credential — see [Secrets](#secrets). |
+
+Two more are read by the container's entrypoint rather than by the host, so they do
+nothing outside Docker:
+
+| Variable | Meaning |
+|---|---|
+| `PUID` | The user id to run as. Unset means root, which is what the image did before this existed. |
+| `PGID` | The group id to run as. Required whenever `PUID` is set. |
 
 Deliberately **not** `PICKARR_PORT`: 1.x reads that for its own port, and a machine
 running both would have one variable meaning two things.

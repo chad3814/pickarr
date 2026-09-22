@@ -55,6 +55,12 @@ FROM node:24-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# `su-exec` is how `docker-entrypoint.sh` drops from root to PUID:PGID --
+# about 10KB from alpine's main repository, and it takes numeric ids
+# directly, so nothing here has to create a user. `gosu` does the same job
+# and is an order of magnitude larger for no gain on alpine.
+RUN apk add --no-cache su-exec
+
 COPY package.json package-lock.json ./
 COPY packages/contract/package.json      packages/contract/
 # Not installed as a workspace below and its `dist` is never copied: nothing
@@ -98,5 +104,22 @@ EXPOSE 7676
 # config-set port unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["node", "packages/host/dist/healthcheck.js"]
+
+# Every `docker run` goes through the entrypoint, not just the default
+# `CMD`, so `docker run pickarr node some-script.js` gets the same
+# privilege drop the server does.
+#
+# **`docker exec` does not, and neither does `HEALTHCHECK`.** Both run
+# straight from the image, which has no `USER`, so both are root --
+# measured, not assumed. That is a real edge: `docker exec pickarr sh`
+# writing into `/config` by hand produces exactly the root-owned files
+# this entrypoint exists to prevent, so `README.md` tells operators to
+# pass `docker exec -u`. It cannot be fixed with a `USER` line here,
+# because the entrypoint needs root to `chown` before it drops.
+#
+# The healthcheck being root is harmless by comparison: it opens an HTTP
+# connection and writes nothing.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 CMD ["node", "packages/host/dist/bin.js"]

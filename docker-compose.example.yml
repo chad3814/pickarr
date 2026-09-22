@@ -5,6 +5,13 @@ services:
       - "7676:7676"
     volumes:
       - ./config:/config
+    environment:
+      # The user the container runs as, so everything it writes into
+      # ./config belongs to you rather than to root. `id -u` and `id -g`
+      # print the pair you want. Remove both to run as root, which is what
+      # this image did before these existed.
+      PUID: 1000
+      PGID: 1000
     secrets:
       - openmetadata-api-key
     restart: unless-stopped
