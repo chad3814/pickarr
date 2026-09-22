@@ -5,7 +5,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import { getRow } from '../../src/store/rows.ts';
 import type { Changed } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { subscribe, subscribeInserts, subscribeReset, emit, emitReset } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts, subscribeTable, subscribeReset, emit, emitReset } from '../../src/store/notify.ts';
 
 /**
  * A `Changed` naming one touched row, optionally inserted -- most tests here
@@ -117,6 +117,62 @@ test('subscribeInserts does not fire for a batch that only updates a row already
   unsubscribe();
   db.close();
   assert.deepEqual(insertedIds, [], 'updating a row already visible to readers is not an insert');
+});
+
+test('subscribeTable fires for an update and a delete, which subscribeInserts does not', async () => {
+  // The two are registered side by side on purpose: the assertion is the
+  // *difference* between them, and either count alone would pass with the
+  // wrong subscription kind wired up. This is the gap that shipped -- a
+  // whole-table reader on `subscribeInserts` never heard a row change or
+  // leave, so `useFeeds` showed a deleted feed until a reload.
+  const db = await freshDb();
+  await applyBatch(db, [{ op: 'upsert', table: 'person', id: 1, value: { name: 'first' } }], { since: 1, before: null });
+
+  let tableWakes = 0;
+  const insertWakes: (readonly number[])[] = [];
+  const unTable = subscribeTable('person', () => {
+    tableWakes += 1;
+  });
+  const unInserts = subscribeInserts('person', (ids) => {
+    insertWakes.push(ids);
+  });
+
+  await applyBatch(db, [{ op: 'upsert', table: 'person', id: 1, value: { name: 'second' } }], { since: 2, before: null });
+  await applyBatch(db, [{ op: 'delete', table: 'person', id: 1 }], { since: 3, before: null });
+
+  unTable();
+  unInserts();
+  db.close();
+  assert.equal(tableWakes, 2, 'the update and the delete each woke the table subscriber');
+  assert.deepEqual(insertWakes, [], 'and neither is an insert');
+});
+
+test('subscribeTable fires once per batch, not once per row', () => {
+  // A table subscriber re-reads the whole table, so a forty-row batch
+  // waking it forty times would be forty redundant reads. Spelled as an
+  // exact count rather than `>= 1`, which every wrong implementation here
+  // would also satisfy.
+  let wakes = 0;
+  const unsubscribe = subscribeTable('person', () => {
+    wakes += 1;
+  });
+
+  emit({ touched: new Map([['person', [1, 2, 3]]]), inserted: new Map() });
+
+  unsubscribe();
+  assert.equal(wakes, 1);
+});
+
+test('subscribeTable does not fire for a batch that touched only another table', () => {
+  let wakes = 0;
+  const unsubscribe = subscribeTable('person', () => {
+    wakes += 1;
+  });
+
+  emit(changedOf('rss_feed', 1, true));
+
+  unsubscribe();
+  assert.equal(wakes, 0);
 });
 
 test('unsubscribing stops delivery and leaves other subscribers alone', () => {

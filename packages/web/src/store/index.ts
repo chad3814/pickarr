@@ -39,7 +39,7 @@ import {
   type ListByTableOptions,
 } from './rows.ts';
 import type { PluginRows } from '@pickarr/plugin-ui';
-import { subscribe, subscribeInserts, subscribeReset } from './notify.ts';
+import { subscribe, subscribeInserts, subscribeReset, subscribeTable } from './notify.ts';
 import { gatherMediaItem, type GatheredItem } from './gather.ts';
 import { startSync, type Lease, type Schedule, type SyncFetch } from './sync.ts';
 
@@ -104,6 +104,13 @@ export interface Store {
   countByPlugin(table: string, pluginId: string): Promise<number>;
   subscribe(table: string, id: number, cb: () => void): () => void;
   subscribeInserts(table: string, cb: (ids: readonly number[]) => void): () => void;
+  /**
+   * Wakes on any change to `table` -- insert, update or delete. What a
+   * whole-table reader wants; `subscribeInserts` is for a reader that only
+   * grows. See `store/notify.ts`'s own doc for the defect that separated
+   * the two.
+   */
+  subscribeTable(table: string, cb: () => void): () => void;
   subscribeReset(cb: () => void): () => void;
   gatherMediaItem(mediaItemId: number): Promise<GatheredItem | undefined>;
   /**
@@ -161,6 +168,7 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     countByPlugin: (table, pluginId) => countByPlugin(db, table, pluginId),
     subscribe,
     subscribeInserts,
+    subscribeTable,
     subscribeReset,
     gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
     stop(): void {

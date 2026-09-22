@@ -2,10 +2,13 @@
  * The subscription registry, and the first consumer of `applyBatch`'s
  * `Changed` return value (design spec §8).
  *
- * Three registries, because the three subscription kinds key on different
- * things: `subscribe` on one row (`table:id`), `subscribeInserts` on a whole
- * table (a row that did not exist when the caller subscribed has no `id` to
- * key on yet), `subscribeReset` on nothing at all.
+ * Four registries, because the four subscription kinds key on different
+ * things: `subscribe` on one row (`table:id`), `subscribeInserts` and
+ * `subscribeTable` on a whole table (a row that did not exist when the
+ * caller subscribed has no `id` to key on yet), `subscribeReset` on nothing
+ * at all. The two table-wide kinds differ in *which* changes reach them --
+ * inserts only, against every change -- and {@link subscribeTable}'s own
+ * doc has the defect that made the second necessary.
  *
  * `emit` and `emitReset` are the write side, and each has two callers rather
  * than one. `store/apply.ts` emits after its own commit, for the tab that did
@@ -32,6 +35,7 @@ type InsertListener = (ids: readonly number[]) => void;
 
 const rowSubscribers = new Map<string, Set<RowListener>>();
 const insertSubscribers = new Map<string, Set<InsertListener>>();
+const tableSubscribers = new Map<string, Set<RowListener>>();
 const resetSubscribers = new Set<RowListener>();
 
 function rowKey(table: string, id: number): string {
@@ -139,6 +143,30 @@ export function subscribeInserts(table: string, cb: InsertListener): () => void 
   return add(insertSubscribers, table, cb);
 }
 
+/**
+ * Fires once per batch that changed anything in `table`, whatever the
+ * change was: an insert, an update, or a delete.
+ *
+ * **The gap the other two leave between them, and it was a live defect.**
+ * `subscribe` needs an id, so it cannot watch a row that arrives later;
+ * `subscribeInserts` only fires for rows that *became visible*, so an
+ * update and a delete wake nobody. A whole-table reader built on
+ * `subscribeInserts` therefore grows and never shrinks: `useFeeds` removed
+ * a feed, the host deleted the row, the tombstone reached the replica --
+ * and the settings list went on showing it until a reload. Found by the
+ * Playwright spec that removes a feed and waits for it to leave the
+ * screen; every unit test passed, because each drove the hook's read
+ * directly rather than through a delete.
+ *
+ * Handed no ids on purpose. A deleted row's id says nothing a re-read does
+ * not, and a listener that took ids would invite callers to patch state
+ * from the notification instead of re-reading the replica, which is the
+ * one thing this store's readers must not do.
+ */
+export function subscribeTable(table: string, cb: RowListener): () => void {
+  return add(tableSubscribers, table, cb);
+}
+
 /** Fires after a generation-mismatch reset commits (spec §6, §8). */
 export function subscribeReset(cb: RowListener): () => void {
   resetSubscribers.add(cb);
@@ -158,6 +186,11 @@ export function emit(changed: Changed): void {
     for (const id of ids) {
       fireRow(rowSubscribers.get(rowKey(table, id)));
     }
+    // Once per table, not once per row: a table subscriber re-reads the
+    // whole table, so firing it per id would re-read a 40-row batch forty
+    // times over. `changed.touched` only carries a table when that table
+    // changed, so an empty `ids` cannot reach here.
+    fireRow(tableSubscribers.get(table));
   }
   for (const [table, ids] of changed.inserted) {
     fireInsert(insertSubscribers.get(table), ids);
