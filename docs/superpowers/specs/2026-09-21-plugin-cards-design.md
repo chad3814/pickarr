@@ -81,10 +81,11 @@ told that web's stylesheet is what styles their markup.
 @pickarr/contract      data shapes only. No React. Unchanged by this work
                        except where noted.
 
-@pickarr/plugin-ui     NEW. The UI seam: the BrowserPlugin interface, and
-                       the shared presentational components a card composes
-                       (ReleaseList, the expander, the pick button).
-                       Depends on react.
+@pickarr/plugin-ui     NEW. The UI seam: the BrowserPlugin and CardProps
+                       interfaces, the view types a card is handed, and the
+                       shared presentational component a card composes --
+                       ReleaseList, which carries the pick button inside it.
+                       react is a peerDependency.
 
 @pickarr/plugin-tv     gains src/browser.tsx, exporting one BrowserPlugin.
 @pickarr/plugin-movie  same.
@@ -107,6 +108,25 @@ legible" entry describes a component that shipped with correct roles, ten
 passing tests, and no stylesheet rule, and was reported as broken by its
 first user. That hazard is paid once per component, so the components are
 shared and each plugin composes them.
+
+**How far that got, amended after the whole-branch review.** The release
+list and the pick button are shared exactly once, in `ReleaseList.tsx`. The
+**expander is not**: each of the three cards writes its own
+`<h2><button aria-expanded={expanded}>`, one site per plugin
+(`plugin-tv/src/browser.tsx`, `plugin-movie/src/browser.tsx`,
+`plugin-xxx/src/browser.tsx`), along with its own `useState` and its own
+`onExpandedChange` call. So one set of accessibility decisions — the
+disclosure pattern — is written three times rather than once, and a fourth
+card would write it a fourth time.
+
+That is deliberate as far as `aria-expanded` goes (Ruling 13: the card owns
+its own disclosure semantics, because the attribute belongs to the element
+the plugin renders), and it is a real cost the paragraph above does not
+charge: the duplicated part includes the `onExpandedChange`-on-every-
+transition obligation that §4.1 explains, which is the one a plugin can get
+wrong alone. A shared expander taking `expanded`, `onExpandedChange` and
+children would pay it once; it was not built, and is the change to make if a
+fourth card repeats it again.
 
 ## 4. The `BrowserPlugin` contract
 
@@ -135,14 +155,17 @@ export interface CardProps {
    * Values are `unknown`: the plugin narrows them, because the store does
    * not know what shape any table holds.
    */
-  readonly rows: Readonly<Record<string, readonly unknown[]>>;
+  readonly rows: PluginRows;
   /**
    * Releases and their downloads, or undefined until gathered. A card
    * renders its collapsed state without this.
    */
-  readonly gathered: GatheredItem | undefined;
-  /** Called when the card expands, so web gathers lazily as it does now. */
-  readonly onExpand: () => void;
+  readonly gathered: GatheredItemView | undefined;
+  /**
+   * Tells web this card's expanded state changed, with the state the card
+   * is moving *to*. Called on every transition, closing included.
+   */
+  readonly onExpandedChange: (expanded: boolean) => void;
   readonly submit: PickSubmit;
 }
 ```
@@ -151,33 +174,128 @@ export interface CardProps {
 `unknown`: the row-level surface does not know what any table holds, and
 that knowledge belongs to the plugin. Each plugin narrows with the same
 `in`-guard style the codebase already uses, never a cast — the "no cast to
-silence a type error" rule applies here as everywhere.
+silence a type error" rule applies here as everywhere. `PluginRows` is the
+name that alias ended up with, and it is exactly
+`Readonly<Record<string, readonly unknown[]>>`.
+
+### 4.1 Two members changed during implementation (amended after the whole-branch review)
+
+The block above is the shipped interface,
+`packages/plugin-ui/src/plugin.ts:21-63`. Two members are not what the first
+version of this section declared, and the first version is what this document
+carried until now — a spec describing an interface the code did not have,
+while every test passed. What it said, and why the code says otherwise:
+
+**`onExpand: () => void` became
+`onExpandedChange: (expanded: boolean) => void`** (`plugin.ts:61`), under
+Ruling 12.
+
+`onExpand` gave web no way to learn that a card had *closed*, so web's only
+possible state was a latch — "has this card ever been opened" — which kept
+`useGatheredItem` enabled for the life of the list and moved the subscription
+fan-out from "cards currently open" to "cards ever opened", which is unbounded
+in a paging list. Measured on 24 cards opened and then closed again: **72 live
+subscriptions, and 24 IndexedDB transactions for a single `torrent_download`
+insert with nothing expanded on screen.** The same scenario now holds 0 and
+costs 0.
+
+**One callback carrying the new value, not an `onExpand`/`onCollapse` pair.**
+A pair would have fixed the fan-out and left a worse hazard: a plugin may call
+one and forget the other, which silently reinstates the latch for that plugin
+alone and is invisible to every test of the other two cards. One callback
+taking the new value cannot be half-implemented — there is one call site per
+card and the value is the whole message. This is recorded here, and not only
+in the code, because it is exactly the kind of thing a later reader
+"simplifies" back into a pair.
+
+What it costs: the card owns its `expanded` state and web mirrors it, so the
+same fact lives in two places (Ruling 13 parked that deliberately — the
+duplication is what lets the card own its own `aria-expanded` while web owns
+the fetch gate), and a card that never calls the callback renders an expander
+that reveals nothing. That is a loud failure rather than a quiet one, which is
+the trade taken.
+
+**`gathered: GatheredItem | undefined` became
+`GatheredItemView | undefined`** (`plugin.ts:31`,
+`packages/plugin-ui/src/types.ts:50`).
+
+`GatheredItem` is web's own type (`web/src/store/gather.ts:166`) and
+`@pickarr/plugin-ui` must not import web — §3's dependency direction. So the
+seam declares the narrower view it actually needs, and web proves its own type
+satisfies it through `gatherSatisfiesView` (`gather.ts:275`), cast-free per
+Ruling 3. Renaming a field on `GatheredRelease` produces
+`error TS2322: Type 'GatheredItem' is not assignable to type
+'GatheredItemView'` at that function, so the two cannot drift silently.
+
+The same rename runs through `GatheredRelease`/`GatheredReleaseView` and
+`GatheredDownload`/`GatheredDownloadView`.
 
 ## 5. How a card gets its data
 
-Web keeps owning the store, and no new query is added.
+Web keeps owning the store, and no plugin touches it.
 
-`useGatheredItem` already issues **one** `byMediaItem` query that returns
-every row for a media item across every synced table, plugin tables
-included, and discards what it does not recognise (`gather.ts`). That
-discard becomes a partition: rows whose table appears in the rendering
-plugin's `tables` go to `rows`, the six host tables go on composing
-`gathered` exactly as now.
+**A page's plugin rows are read once, for every card on the page, before any
+of them expand.** `store/rows.ts`'s `pluginRowsByMediaItems(db, mediaItemIds,
+tables)` (`rows.ts:304`) opens **one** transaction and issues one
+`by_media_item` `getAll` per id on it, answering a map from media item id to
+`PluginRows`. Every table in `tables` is a key for every id, always, with an
+empty array where that id has no rows — an absent key would read as "not
+fetched", which a caller cannot tell from "fetched, and empty".
+`library/usePluginRows.ts`'s `usePluginRows` (`usePluginRows.ts:232`) is the
+hook, and `Category` hands each card its own entry.
+
+`usePluginRows` also **subscribes to inserts on each declared table**,
+because `/api/sync` is a `sync_log` walk applied in batches and does not
+promise to deliver a plugin row in the same batch as its `media_item`
+(`@pickarr/contract`'s `TvSeasonRead` doc states the non-ordering outright).
+Without that subscription the late-arrival case was permanent: the effect is
+keyed on `[source, mediaItemIds, tables]`, a plugin row arriving for an id
+already on screen changes none of the three, and this screen does not poll —
+so the card rendered `item.title` and nothing ever woke it until a remount.
+Mid-backfill is 2.0's *normal first-run condition*, so the likeliest time to
+meet a plugin's card was the one time it silently did not work. The
+subscription is filtered to the ids on the page, so one insert elsewhere does
+not refetch every mounted browse screen.
 
 Consequences, which are the point:
 
 - No plugin imports IndexedDB, `store/rows.ts`, or anything async.
 - A card is a pure function of its props and is testable by rendering it
   with literals.
-- The collapsed row costs nothing new. `rows` for the collapsed state needs
-  only the plugin's own tables, which is one `by_media_item` read.
+- The collapsed row is served. It costs one transaction for the whole page,
+  paid once alongside the list read it already does.
 
-**Open question deferred to the plan, not to implementation:** whether the
-collapsed card's `rows` is fetched eagerly for every row on the page or
-per-card. The list already holds every `MediaItemSyncRead`; it does not hold
-plugin rows. Fetching per card is simplest and matches today's per-card
-poster request; fetching once per page is fewer round trips. Either
-satisfies this spec. Measure before choosing.
+### 5.1 This replaced a gather-level partition (amended after the whole-branch review)
+
+The first version of this section said the `byMediaItem` read inside
+`useGatheredItem` "discards what it does not recognise" and that "that
+discard becomes a partition: rows whose table appears in the rendering
+plugin's `tables` go to `rows`". **That was built, and reverted under
+Ruling 7**, and this document described the reverted design until now — which
+matters because the plan argues from this document.
+
+Why it cannot work: `useGatheredItem` returns `undefined` unless the card is
+expanded, and `gatherMediaItem` under it only runs then. So routing `rows`
+through the gather means a **collapsed** card has no plugin rows — and the
+collapsed headline is the entire point of the branch (§4, acceptance 1). The
+contradiction was inside this section: its own third bullet claimed "the
+collapsed row costs nothing new … one `by_media_item` read", which the
+opening paragraph's design could not deliver. Ruling 7 resolved it in favour
+of §4, and `store/gather.ts:13-22` carries the same note on the code side.
+
+**The open question is closed.** It asked whether the collapsed card's `rows`
+is fetched per page or per card, and said "measure before choosing".
+Measured: `packages/web/test/store/rows.test.ts:133-167` counts real
+`db.transaction` calls for a page of 50 ids and asserts **1**, where a
+per-card fetch opens **50** — `rowsStore` opens a transaction per call. And
+per-card cannot serve a collapsed card at all, for the reason above, so the
+measurement decided a question that had already been settled by correctness.
+Per page it is.
+
+What it costs, so it is not discovered later: "load more" refetches the whole
+accumulated id list per page, so the `getAll` count is quadratic in pages
+(50, then 100, then 150 …) while staying one transaction. Filed rather than
+fixed.
 
 ## 6. The registry, and what derives from it
 
@@ -192,9 +310,9 @@ Four existing hardcoded lists derive from it and stop being written by hand:
 
 | today | after |
 |---|---|
-| `useCounts.ts`'s `type Category = 'tv' \| 'movie' \| 'xxx'` | derived from the registry |
-| `useCounts.ts`'s `CATEGORIES` | `BROWSER_PLUGINS.map(p => p.id)` |
-| `Shell.tsx`'s three literal `<Route>`s | one `.map` over the registry |
+| `useCounts.ts`'s `type Category = 'tv' \| 'movie' \| 'xxx'` | **deleted**; the ids are plain `string` |
+| `useCounts.ts`'s `CATEGORIES` | `BROWSER_PLUGINS.map(p => p.id)` (`useCounts.ts:41`) |
+| `Shell.tsx`'s three literal `<Route>`s | one `.map` over the registry (`Shell.tsx:222-230`) |
 | `web/src/pluginLabels.ts` | `p.label`; the file is deleted |
 
 `pluginLabels.ts` was added days ago with a documented `Object.hasOwn` guard
@@ -202,7 +320,24 @@ against prototype keys, because an unmapped id reached a heading. A registry
 of objects has no prototype-key hazard, so that guard and its tests retire
 with the file — deliberately, not by oversight.
 
-Adding a plugin becomes: a new directory, plus one import line here.
+### 6.1 What adding a plugin actually takes (amended after the whole-branch review)
+
+This section said "adding a plugin becomes: a new directory, plus one import
+line here." That undercounts, and it missed two lists outside
+`packages/web/src` that the registry does not and cannot drive. Enumerated on
+the tree:
+
+| edit | why the registry cannot cover it |
+|---|---|
+| `registry.ts`: one import, one array entry | the seam itself |
+| `@pickarr/contract`'s `TOKEN_NAMES_BY_PLUGIN` (`contract/src/tokens.ts:152-156`) | another package's list, which `Settings.tsx` maps over to build the Library-destinations rows. A plugin absent from it gets a row headed by its raw id and offering no path tokens (`Destinations.tsx:261`). |
+| `packages/e2e/src/harness-2.ts`'s `Category` union (`:145`) and `PLUGIN_SCHEMA` (`:168`) | `packages/e2e` cannot import web — its dependencies are `contract`, `host` and `plugin-tv` — so this literal is necessary and nothing cross-checks it against `CATEGORIES`. |
+| a `library.css` rule, **if** the card needs one | web owns the styling (§2.1) |
+
+Today the two id lists agree — `Object.keys(TOKEN_NAMES_BY_PLUGIN)` is `tv,
+movie, xxx` — so nothing is broken, and none of these is a defect. The
+original sentence was, because a plan arguing "one import line" from this
+document would have budgeted one edit for four.
 
 **What stays hardcoded and why.** Route *paths* still equal plugin ids, and
 `/unmatched` and `/settings` are not categories. The registry drives which
