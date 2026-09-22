@@ -262,11 +262,17 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
 });
 
 /** Inserts one `rss_feed` row (id 1) with sensible defaults, so a test names only the column it is testing. */
-function seedFeed(raw: ReturnType<typeof openTestDatabase>['raw'], overrides: { url?: string }): void {
+function seedFeed(
+  raw: ReturnType<typeof openTestDatabase>['raw'],
+  overrides: { url?: string; id?: number },
+): void {
+  // `id` is an override so one test can seed two feeds and compare them --
+  // a redacted url against an untouched one in the same read, which is what
+  // shows the rule discriminates rather than masks everything.
   raw.prepare(`
     INSERT INTO rss_feed (id, plugin_id, name, url, created_at, updated_at)
-    VALUES (1, 'tv', 'a feed', ?, 10, 20)
-  `).run(overrides.url ?? 'https://tracker.example/rss');
+    VALUES (?, 'tv', 'a feed', ?, 10, 20)
+  `).run(overrides.id ?? 1, overrides.url ?? 'https://tracker.example/rss');
 }
 
 /**
@@ -291,22 +297,48 @@ test('a feed reaches a client with its apikey redacted', () => {
   assert.equal(rowUrl(rows[1]), 'https://tracker.example/rss?apikey=***');
 });
 
-test('a passkey-bearing url is NOT redacted today, and this pins that', () => {
-  // Deliberate, and the most important test in this task. `redactUrl` knows
-  // one parameter name. Issue #78 broadens it, and when it does this test
-  // fails -- which is the point: the gap closing must be observable rather
-  // than silent. Do not "fix" this by changing the expectation; change it
-  // when #78 changes the behaviour, and say so there.
+test('a passkey-bearing url IS redacted now, which is issue #78 closing', () => {
+  // This test used to assert the opposite, and said so: "when #78 broadens
+  // `redactUrl` this test fails -- which is the point: the gap closing must
+  // be observable rather than silent. Do not 'fix' this by changing the
+  // expectation; change it when #78 changes the behaviour, and say so
+  // there." This is that change.
+  //
+  // **It did not fail, and that is worth recording.** Its fixture was
+  // `passkey=SECRET` -- six characters. #78 closed by matching what a
+  // credential *looks like* (8+ hex, or 8+ alphanumerics with two of each
+  // class), and `SECRET` trips neither, so the gap closed underneath a test
+  // written to observe it and nothing went red. A placeholder short enough
+  // to be obviously fake was also short enough to be invisible to the rule.
+  // The fixture below is a realistic 32-hex passkey for that reason.
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const registry = createSyncRegistry(raw, []);
-  seedFeed(raw, { url: 'https://tracker.example/rss?passkey=SECRET' });
+  seedFeed(raw, { url: 'https://tracker.example/rss?passkey=9f8e7d6c5b4a39281706f5e4d3c2b1a0' });
   const rows = registry.readRows(raw, 'rss_feed', [1]);
   assert.equal(
     rowUrl(rows[1]),
-    'https://tracker.example/rss?passkey=SECRET',
-    'redactUrl does not know `passkey`; issue #78 tracks it',
+    'https://tracker.example/rss?passkey=*****',
+    'the value is masked; the parameter name and the url around it survive',
   );
+});
+
+test('a passkey embedded in the path is redacted too, which no parameter list could reach', () => {
+  // The case #78 called the reason it "is not a one-line fix": there is no
+  // parameter to strip. The module doc used to argue this was undetectable
+  // in principle -- "nothing about a string distinguishes a secret segment
+  // from a category slug" -- which is true of a *name* rule and not of a
+  // shape rule. The second assertion is the other half: an ordinary slug is
+  // left alone, so the shape rule is doing discrimination rather than
+  // blanket masking.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const registry = createSyncRegistry(raw, []);
+  seedFeed(raw, { url: 'https://tr.example/announce/9f8e7d6c5b4a39281706f5e4d3c2b1a0/rss' });
+  seedFeed(raw, { url: 'https://tr.example/category/tv-shows/rss', id: 2 });
+  const rows = registry.readRows(raw, 'rss_feed', [1, 2]);
+  assert.equal(rowUrl(rows[1]), 'https://tr.example/announce/*****/rss');
+  assert.equal(rowUrl(rows[2]), 'https://tr.example/category/tv-shows/rss', 'a slug is not a secret');
 });
 
 test('the projection carries no column the client has no business holding', () => {

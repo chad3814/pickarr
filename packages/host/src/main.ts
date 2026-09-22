@@ -24,6 +24,7 @@ import { createTvPlugin } from '@pickarr/plugin-tv';
 import { createXxxPlugin } from '@pickarr/plugin-xxx';
 import type { ReadServer, ReadServerDeps } from './api/server.ts';
 import { createReadServer } from './api/server.ts';
+import { redactSecrets } from './clients/redact.ts';
 import { warnIfWebRootMissing } from './api/static-route.ts';
 import { ensureClaimToken, isClaimed } from './auth/claim.ts';
 import { createAuth } from './auth/instance.ts';
@@ -76,7 +77,12 @@ export function formatLogDetail(detail: Readonly<Record<string, unknown>>): stri
 /** The process's own log line, and the `log` the read server is given. */
 function log(message: string, detail?: Readonly<Record<string, unknown>>): void {
   const suffix = detail === undefined ? '' : ` ${formatLogDetail(detail)}`;
-  console.log(`[host] ${message}${suffix}`);
+  // Redacted at the sink rather than trusted to every caller (issue #78).
+  // Most messages that could carry a credential already went through
+  // `redactUrl` on the way here; this is the net for the ones that did not,
+  // and for a detail value composed somewhere that never considered it. The
+  // `[host]` prefix stays outside, being ours and constant.
+  console.log(`[host] ${redactSecrets(`${message}${suffix}`)}`);
 }
 
 /**

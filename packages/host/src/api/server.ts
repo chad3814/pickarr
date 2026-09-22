@@ -57,10 +57,11 @@
  * top docblock is where that rule was deliberately amended, and the value
  * here is `redactUrl`'s output, not the raw column, composed by
  * `sync-route.ts` and `readHostRows` rather than by anything in this file.
- * The redaction is narrower than a raw url deserves -- it catches `?apikey=`
- * and nothing else, so a `?passkey=` or path-segment passkey reaches this
- * body unchanged today (issue #78) -- which is why this is recorded as an
- * exception rather than folded silently into the sentence above.
+ * The redaction is narrower than a raw url deserves -- it catches the
+ * `?apikey=` name, plus anything credential-shaped since issue #78, but a
+ * secret shorter than eight characters or carrying neither hex shape nor
+ * case mixture still reaches this body -- which is why this stays recorded
+ * as an exception rather than folded silently into the sentence above.
  *
  * **The auth dispatch's bodies are not this file's, and two of them do carry
  * urls.** That sentence was once unqualified, and `handle` now forwards
