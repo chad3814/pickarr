@@ -22,9 +22,8 @@
  * **It subscribes to inserts on each declared table, because replication
  * does not promise to deliver a plugin row in the same batch as its media
  * item.** The host writes both atomically -- each lookup plugin's own
- * `apply.ts` does -- and that is not the guarantee that matters:
- * `/api/sync` is a
- * `sync_log` walk applied to the replica in batches, and
+ * `apply.ts` does -- and that is not the guarantee that matters: `/api/sync`
+ * is a `sync_log` walk applied to the replica in batches, and
  * `@pickarr/contract`'s `TvSeasonRead` doc states outright that ordering is
  * not preserved across it -- a client can hold a season whose `seriesId`
  * names a series it has not received yet, with the referent arriving
@@ -41,11 +40,17 @@
  * most likely time to meet a plugin's card was the one time it silently did
  * not work.
  *
- * **Inserts are the right channel.** `store/apply.ts`'s `Changed` doc:
- * `inserted` means "became visible to a reader", so it covers a row
- * arriving for the first time *and* an upsert reviving a tombstone, and
- * excludes an upsert over a row that already carried a value (that is
- * `touched`). A plugin row landing late is the first case.
+ * **Inserts are the right channel for a row arriving late.** `inserted` is a
+ * *subset* of `touched`, not its complement -- `store/apply.ts`'s `Changed`
+ * doc is "which rows a batch touched, and which of those it inserted" --
+ * and membership is decided in `applyBatch` by
+ * `existing === undefined || existing.value === undefined`, which the
+ * comment beside it glosses as `"Inserted" means *became visible to a
+ * reader*, not "had no record"`. So `inserted` covers a row arriving for the
+ * first time *and* an upsert reviving a tombstone (a tombstone is a record,
+ * and is invisible to every read), while an upsert over a row that already
+ * carried a value lands in `touched` alone. A plugin row landing late is the
+ * first case.
  *
  * **Filtered to this page, because an insert subscription is table-wide.**
  * A `subscribeInserts('tv_release', …)` wake carries ids and nothing else,
@@ -57,6 +62,56 @@
  * `regatherIfOurs` measured at 4 transactions before and 1 after, and the
  * reason a per-id `getRow` must not come back here.
  *
+ * **What it does not wake for: an update to a plugin row already on
+ * screen.** That op lands in `touched` and not in `inserted`, and this hook
+ * watches only `inserted`.
+ *
+ * **It is reachable by the one shipped plugin that declares a table, and an
+ * earlier version of this paragraph said it was not.** That version's reason
+ * was that these rows "are written once per media item", which is false.
+ * The television plugin's own `apply.ts:116` is
+ * `ON CONFLICT (media_item_id) DO UPDATE SET kind, series_id, season_id,
+ * episode_number, details_json, updated_at`, and its
+ * `test/apply.test.ts:100` is a first-party test named `re-applying the same
+ * answer updates the row rather than adding one`.
+ * `@pickarr/openmetadata`'s `engine.ts:290` requires a plugin's `apply` to
+ * be idempotent, and `engine.ts:167` calls it against `claim.kept` -- which
+ * `host/src/media/writer.ts`'s `claimProviderRef` answers as the *existing*
+ * holder of that provider reference, dropping the freshly created row. So
+ * the update path is not a rare race: it runs every time a second release
+ * resolves to something already on file, which is the ordinary case for a
+ * product whose whole job is collating versions of the same thing. The
+ * comment at that call site calls the re-apply "a no-op rather than a
+ * duplicate", and that is true of the row count and not of the row -- the
+ * statement is an `UPDATE`, so the trigger fires and an op is produced
+ * whether or not a single column's value changed.
+ *
+ * **What the operator sees, and only in the narrower case where the answer
+ * itself moved.** Most re-applies write the same values back and the missed
+ * wake costs nothing visible. Where the new answer differs -- a series title
+ * since corrected, a season number that was null and is now known -- the
+ * replica is still correct: the host's `AFTER UPDATE` trigger
+ * (`sync/log.ts`) logs a changed row exactly as an inserted one, so the new
+ * value reaches this tab and is stored. What does not happen is this screen
+ * re-reading it, so the headline stays as it first rendered until the list
+ * remounts or the page is reloaded.
+ *
+ * **Why it is not guarded here.** Closing it needs a table-wide *update*
+ * notification, and `store/notify.ts` offers none: `subscribe` fires on
+ * every change to one row but takes an id, and this hook has no ids to give
+ * -- `@pickarr/plugin-ui`'s `PluginRows` is
+ * `Readonly<Record<string, readonly unknown[]>>`, row values without their
+ * keys, and deliberately so, because the sync op carries the key and the
+ * plugin read shapes omit it. So this is a change to the store's
+ * subscription surface rather than to this hook, and it is filed as an issue
+ * rather than done here.
+ *
+ * A second thing it does not wake for, and this one has no caller at all: a
+ * declared table whose read shape carries no `mediaItemId`. The filter would
+ * have nothing to match on -- and `pluginRowsByMediaItems` reads through
+ * `by_media_item`, so such a row would never reach the page in the first
+ * place.
+ *
  * **What the subscription costs: one listener per declared table per
  * mounted screen.** Not per card -- this hook runs once in
  * `library/Category.tsx`, above the list, which is the same reason the
@@ -66,16 +121,6 @@
  * a browse screen holds at most one. `useGatheredItem`'s channel is the one
  * that scales with cards, and task 6's fix round is where that was
  * measured.
- *
- * **What it still does not wake for.** An *update* to a plugin row already
- * on screen -- a corrected episode number, say -- is `touched` rather than
- * `inserted` and is not noticed; nor is a row in a table whose read shape
- * carries no `mediaItemId` at all, since the filter has nothing to match
- * and `pluginRowsByMediaItems` reads through `by_media_item` and would not
- * return it either. Neither has a caller today: all three shipped plugins
- * declare either no tables or `tv_release` alone, whose rows are written
- * once per media item and carry `mediaItemId`. Both are stated rather than
- * guarded so a plugin declaring something else knows what it is getting.
  */
 import { useEffect, useState } from 'react';
 import type { PluginRows } from '@pickarr/plugin-ui';
