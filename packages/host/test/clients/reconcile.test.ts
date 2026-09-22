@@ -190,7 +190,48 @@ test('a failed history entry fails the row with the client\'s message, redacted'
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'failed');
   assert.equal(
     readColumn(raw, 'torrent_download', id, 'last_error'),
-    'fetch failed for https://sab.example.com/api?apikey=***&mode=queue',
+    'fetch failed for https://sab.example.com/api?apikey=*****&mode=queue',
+  );
+});
+
+test('a passkey in the client\'s message is masked before it reaches last_error (#78)', () => {
+  // The acceptance for issue #78, driven through the real path rather than
+  // against `redactSecrets` alone: `CLAUDE.md` records that pinning a pure
+  // function does not pin that anyone calls it, and the sibling test above
+  // pins only the `?apikey=` *name* rule.
+  //
+  // `last_error` is what #78 is about -- `/api/downloads` serves it through
+  // `DOWNLOAD_COLUMNS`, so an unredacted passkey here reaches any caller
+  // with a session, and is stored unredacted besides. Both spellings the
+  // issue names are here: a `passkey=` parameter, which a name list could
+  // have covered, and a path-embedded secret, which it could not.
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'downloading' });
+
+  walkSnapshot(deps(raw, clientId, {
+    snapshot: {
+      ...emptySnapshot,
+      history: [historyEntry({
+        ref: 'ref-1', outcome: 'failed',
+        failMessage:
+          'announce https://tr.example/announce/9f8e7d6c5b4a39281706f5e4d3c2b1a0/x failed, ' +
+          'retry https://tr.example/rss?passkey=0a1b2c3d4e5f60718293a4b5c6d7e8f9',
+      })],
+    },
+  }));
+
+  const stored = readColumn(raw, 'torrent_download', id, 'last_error');
+  assert.equal(
+    stored,
+    'announce https://tr.example/announce/*****/x failed, retry https://tr.example/rss?passkey=*****',
+  );
+  // Spelled as an absence too, because the assertion above would still hold
+  // if the mask were applied to the wrong span.
+  assert.ok(
+    typeof stored === 'string' && !stored.includes('9f8e7d6c') && !stored.includes('0a1b2c3d'),
+    'no fragment of either secret survives',
   );
 });
 

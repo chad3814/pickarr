@@ -5,6 +5,7 @@ import type { HostDb } from './db/open.ts';
 import { migratePlugin } from './db/migrate.ts';
 import { createMediaWriter } from './media/writer.ts';
 import { createMediaReader } from './media/reader.ts';
+import { redactDetail, redactSecrets } from './clients/redact.ts';
 import { createLibraryImporter } from './media/import.ts';
 import { createRunner } from './jobs/runner.ts';
 import type { Runner } from './jobs/runner.ts';
@@ -353,7 +354,10 @@ export interface Host {
  * inside would rebuild the same closure on every call for no reason.
  */
 function hostLog(message: string, detail?: Readonly<Record<string, unknown>>): void {
-  console.log(`[${HOST_PLUGIN_ID}] ${message}`, detail ?? {});
+  // Both halves, because `detail` is a second `console.log` argument rather
+  // than part of the formatted string -- so a credential in a detail value
+  // would print untouched if only `message` were redacted (issue #78).
+  console.log(`[${HOST_PLUGIN_ID}] ${redactSecrets(message)}`, redactDetail(detail ?? {}));
 }
 
 export function createHost(deps: {
@@ -535,7 +539,10 @@ export function createHost(deps: {
       // nothing to invalidate.
       library: createLibraryImporter({ raw: deps.raw, pluginId }),
       log: (message, detail) => {
-        console.log(`[${pluginId}] ${message}`, detail ?? {});
+        // A plugin's own log line, redacted the same way `hostLog` is: this
+        // is the sink a plugin author never sees, and the one `media/shape.ts`
+        // routes a refusal through (issue #78).
+        console.log(`[${pluginId}] ${redactSecrets(message)}`, redactDetail(detail ?? {}));
       },
     };
   }

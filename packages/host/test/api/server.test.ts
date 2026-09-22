@@ -875,7 +875,7 @@ test('a read that throws answers 500 with no url, path or query in the body', as
     assert.equal(line.message, 'read failed');
     assert.deepEqual(line.detail, {
       route: '/api/media',
-      error: 'https://sab.test/api?apikey=***&mode=queue&file=/media/movies/Recognisable.mkv',
+      error: 'https://sab.test/api?apikey=*****&mode=queue&file=/media/movies/Recognisable.mkv',
     }, 'the credential is redacted, and the route logged is the path with no query string');
   } finally {
     await server.close();

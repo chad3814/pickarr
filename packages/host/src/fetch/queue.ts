@@ -25,7 +25,7 @@ export interface QueuedFetch extends HostFetch {
  * `status` alongside the message. Without this, telling a 401 or 403 apart
  * from any other failure meant pattern-matching this class's own message
  * text (`failed: 401 Unauthorized`) -- which breaks the moment that text is
- * reworded, and it already was once this slice, when `redactUrl` went in.
+ * reworded, and it already was once this slice, when `redactText` went in.
  * Subclassing `Error` rather than a plain object keeps every existing
  * `instanceof Error`/message-matching test passing unchanged.
  */

@@ -46,24 +46,33 @@ import { redactUrl } from '../clients/redact.ts';
  * the raw url. What changed is that the operator needs to tell two feeds
  * apart in a settings screen that a name alone cannot always do, so the url
  * now travels **redacted**: `readHostRows` calls `clients/redact.ts`'s
- * `redactUrl` on it, after the `SELECT` runs and before the row is handed
+ * `redactText` on it, after the `SELECT` runs and before the row is handed
  * back. That makes `rss_feed` the first synced table whose projection is not
  * purely SQL -- every other `case` below is the whole of that table's
  * transformation, and this one is not.
  *
- * **The redaction is narrower than the rule it replaces, and the gap is
- * recorded rather than hidden.** `redactUrl` knows exactly one credential
- * shape, a `?apikey=` query parameter -- the only one anything in this
- * codebase has ever had to send. `?passkey=`, `?token=` and a passkey
- * embedded as a path segment (`/announce/SECRET/`) all pass through
- * **unchanged**, and the path-segment case is undetectable in principle:
- * nothing about a string distinguishes a secret segment from a category
- * slug. So a private tracker's passkey can reach the replica today, and a
- * replica is permanent storage on every device that ever syncs, unlike a
- * response body reachable only for the life of a request. Issue #78 tracks
- * broadening `redactUrl`; `test/sync/tables.test.ts` pins the gap itself
- * with a `?passkey=` url asserted, deliberately, to survive unredacted --
- * so #78 closing it is a test failure there, not a silent change.
+ * **The redaction is narrower than a raw url deserves, and what it now
+ * reaches is recorded rather than assumed (issue #78, closed).** It ran on
+ * one credential *name*, `?apikey=`, and `?passkey=`, `?token=` and a
+ * path-embedded passkey all passed through unchanged. `redactSecrets` adds
+ * two rules about what a credential *looks like* -- a run of 8+ hex in one
+ * case, or 8+ alphanumerics carrying two uppercase, two lowercase and two
+ * digits -- and both reach the path case, which no list of names could.
+ * Measured on a realistic 32-hex passkey:
+ * `?passkey=9f8e…` and `/announce/9f8e…/` both mask to `*****`, while
+ * `/category/tv-shows/` is untouched.
+ *
+ * **This paragraph used to argue the path case was undetectable in
+ * principle** -- "nothing about a string distinguishes a secret segment
+ * from a category slug". That is true of a name rule and false of a shape
+ * rule, and the two feeds asserted side by side in
+ * `test/sync/tables.test.ts` are what show the difference is real
+ * discrimination rather than blanket masking.
+ *
+ * **What still passes.** A credential under eight characters, and one with
+ * neither hex shape nor case mixture -- the userinfo case two paragraphs
+ * down is exactly that. A shape rule is a filter, and a filter has a far
+ * side.
  *
  * **`download_client` was out on the credential rule until this slice, and
  * that clause is amended rather than struck.** The "out" list above used to
@@ -83,20 +92,30 @@ import { redactUrl } from '../clients/redact.ts';
  *   *structurally*: nothing recognises and removes them, they are simply
  *   not among the two parts the projected value is assembled from.
  *
- * **That second guarantee is stronger than `rss_feed`'s, and the difference
- * is the whole reason this table could join the list when that clause said
- * it never would.** `redactUrl`, two paragraphs up, knows one credential
- * shape. It does not touch userinfo at all: `http://user:hunter2@qbit:8080`
- * -- a download client behind basic auth, which is an ordinary way to run
- * one -- passes through `redactUrl` **unchanged**, credential included.
- * `test/sync/tables.test.ts` constructs that call rather than trusting this
- * sentence. The same url reaches the replica from here as
- * `http://qbit:8080/`. A closed door, not a pattern match. #78 stays open
- * for feeds because a tracker's passkey is genuinely part of the path or
- * query it is sent in, so dropping those would leave a url that no longer
- * reaches the feed; a download client's address is host, port and base path,
- * and nothing else is part of its identity, so nothing is lost by keeping
- * only those.
+ * **That second guarantee is still stronger than `rss_feed`'s, and the
+ * difference is the whole reason this table could join the list when that
+ * clause said it never would -- but the gap between them narrowed when #78
+ * closed, so the old contrast is restated rather than repeated.** This
+ * paragraph used to say `redactUrl` "does not touch userinfo at all", and
+ * that `http://user:hunter2@qbit:8080` reached the replica credential
+ * included. It no longer does: `redactUrl` parses the url and masks
+ * `password`, so that address arrives as `http://user:*****@qbit:8080`.
+ * `test/clients/redact-url.test.ts` constructs it rather than trusting
+ * this sentence.
+ *
+ * **What keeps the two guarantees different is the kind of thing they
+ * are.** `rss_feed.url` is *filtered*: three rules run over it, and a
+ * credential that matches none of them survives -- `hunter2` in a query
+ * parameter named `q` would. `download_client.url` is *rebuilt* from
+ * origin and pathname, so anything that is not host, port and base path is
+ * absent structurally, with nothing to recognise and nothing to miss. A
+ * closed door still beats a good filter.
+ *
+ * The reason feeds get the filter and clients get the door is unchanged: a
+ * tracker's passkey is genuinely part of the path or query it is sent in,
+ * so dropping those would leave a url that no longer reaches the feed; a
+ * download client's address is host, port and base path, and nothing else
+ * is part of its identity, so nothing is lost by keeping only those.
  *
  * **A url that is not an http(s) address projects as `''`, and the row
  * reaches the replica anyway.** A deliberate choice between three
@@ -110,8 +129,8 @@ import { redactUrl } from '../clients/redact.ts';
  * every unrelated table's rows in that page with it, on that request and on
  * every retry, since the row does not change: a client stuck at its cursor
  * with no way to pass the row and nothing telling it which row. And that
- * handler logs `redactUrl(messageOf(error))` -- so a thrown message quoting
- * the url would put a userinfo credential in a log line, since `redactUrl`
+ * handler logs `redactText(messageOf(error))` -- so a thrown message quoting
+ * the url would put a userinfo credential in a log line, since `redactText`
  * is exactly the function that does not catch that shape. Throwing here
  * would reopen, in the log, the hole this projection closes on the wire.
  *
@@ -304,8 +323,8 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  *   `link`*, under a different name. Excluding `link` and keeping `guid`
  *   would have reopened exactly the hole this module doc otherwise closes.
  * - **`torrent_download.last_error` / `nzb_download.last_error`** -- free
- *   text from qBittorrent or SABnzbd, redacted only for the one shape
- *   `clients/redact.ts`'s `redactUrl` knows: a `?apikey=` query parameter.
+ *   text from qBittorrent or SABnzbd, redacted for the `?apikey=` name and
+ *   -- since issue #78 -- for anything credential-*shaped* anywhere in it.
  *   It strips a credential's *value* and leaves the url around it --
  *   `clients/downloads.ts` and `clients/reconcile.ts` both write through it
  *   before this column, so what lands here is redacted-of-credential, not
@@ -321,9 +340,9 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * bar and stays out entirely; these two fail the same bar and are let
  * through anyway, because each is transformed after this `SELECT` runs --
  * the feed's redacted, the client's rebuilt from its origin and path. See
- * this file's top docblock for why each was judged to clear the bar, for the
- * gap between what `redactUrl` actually redacts and what a passkey can look
- * like, and for why the two are not the same guarantee.
+ * this file's top docblock for why each was judged to clear the bar, for
+ * what `redactText` reaches now that #78 has closed and what it still does
+ * not, and for why the two are not the same guarantee.
  *
  * **`download_client`'s two secret-name columns are a fifth and sixth
  * omission, and they are omitted for a different reason from the four
@@ -466,14 +485,14 @@ function clientAddress(url: string): string {
  *
  * **Two tables get one extra step after the row comes back, and the other
  * seven get none.** `rss_feed`'s `url` is redacted by `clients/redact.ts`'s
- * `redactUrl`; `download_client`'s is rebuilt from its origin and path by
+ * `redactText`; `download_client`'s is rebuilt from its origin and path by
  * `clientAddress`. Both happen on the spread copy this function already
  * makes -- not in `selectSql`, which cannot run JavaScript, and not in
  * storage, which would make the raw url unrecoverable, for a future slice
  * that redacts better in the feed's case and for the adapter that has to
  * dial the thing in the client's. These are the only two places the wire's
  * content is not simply what the `SELECT` returned; see this file's top
- * docblock for why each was judged acceptable, what `redactUrl` does not yet
+ * docblock for why each was judged acceptable, what `redactText` does not yet
  * catch, and why the two are deliberately not the same transformation.
  */
 export function readHostRows(

@@ -2,7 +2,7 @@ import type { SabnzbdConfig } from './config.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
 import { normalizeClientCategory } from './snapshot.ts';
-import { redactUrl } from './redact.ts';
+import { redactText, redactUrl } from './redact.ts';
 import type { SubmitResult } from './types.ts';
 
 /**
@@ -23,13 +23,13 @@ interface SabnzbdRefusal {
  * none.
  *
  * `error` routinely quotes back the request it rejected -- a request whose
- * query string is ours, api key included -- so it goes through `redactUrl`
+ * query string is ours, api key included -- so it goes through `redactText`
  * exactly like a url would. Every caller that builds a message from a
  * refusal goes through here rather than reaching for `body.error`, so the
  * redaction cannot be forgotten at one call site and remembered at another.
  */
 function refusalReason(body: SabnzbdRefusal): string {
-  return body.error === undefined || body.error === '' ? 'no reason given' : redactUrl(body.error);
+  return body.error === undefined || body.error === '' ? 'no reason given' : redactText(body.error);
 }
 
 /**
@@ -59,7 +59,7 @@ interface AddUrlResponse extends SabnzbdRefusal {
  *
  * The api key travels here, in the query, exactly as SABnzbd requires --
  * and every caller of this function that might let the built url reach an
- * error message must run it through `redactUrl` first. This function does
+ * error message must run it through `redactText` first. This function does
  * not redact its own output: it is called once per submission and its
  * result is handed straight to `fetch.json`, which redacts on its own
  * error paths already (see `queue.ts`); only code in *this* module that
