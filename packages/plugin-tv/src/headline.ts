@@ -2,7 +2,7 @@
  * The line a TV card's expander button reads before anyone expands it:
  * series title, `SxxEyy` where either number is present, then the media
  * item's own title -- unless that title just repeats the series title
- * (design spec §4, acceptance 1).
+ * (design spec §7.1, acceptance 2).
  *
  * **No branch on `kind`.** `TvRead.kind` is `'series' | 'season' |
  * 'episode'`, and the three differ from each other only in which of
