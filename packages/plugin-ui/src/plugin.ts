@@ -73,5 +73,28 @@ export interface BrowserPlugin {
    * the store.
    */
   readonly tables: readonly string[];
+  /**
+   * The card body, rendered into the `<article>` web holds
+   * (`web/src/library/MediaItemCard.tsx`).
+   *
+   * **A card ships markup and behaviour, not CSS** (design spec §2, as
+   * amended by §2.1). Its styling comes from web's own stylesheet,
+   * `packages/web/src/styles/library.css`, which is keyed on structure
+   * rather than on any class: `article h2` and `article h2 button` style
+   * the title line and its expander, and rules under
+   * `ul[aria-label='releases']` style the release list this package's own
+   * `ReleaseList.tsx` renders. There is no mechanism for a plugin to ship a
+   * stylesheet, and none is planned until a card needs one.
+   *
+   * **So a card whose markup web has no rule for renders unstyled, and
+   * every test still passes.** `getByRole` and `getByText` read the
+   * accessibility tree, which a missing stylesheet rule does not touch, and
+   * Playwright's `toBeVisible()` is satisfied by an unstyled block of text
+   * — this repo has already shipped that exact failure once (`CLAUDE.md`'s
+   * `IdentityChangeConfirm` entry: correct roles, ten passing tests, no
+   * stylesheet rule, reported broken by its first user). Reuse the markup
+   * the three shipped cards use, or add the rule to web's stylesheet in the
+   * same change; a green suite is not evidence that the card is legible.
+   */
   readonly Card: ComponentType<CardProps>;
 }

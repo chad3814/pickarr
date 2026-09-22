@@ -31,13 +31,49 @@ This spec builds the seam, and the TV headline is its first consumer.
 ## 2. Scope
 
 **A plugin owns its card body** — everything below the poster: the title
-line, the expander, the release list, the pick button, and their
-accessibility and styling.
+line, the expander, the release list, the pick button, and their markup,
+behaviour and accessibility.
 
-Web keeps the poster, routing, paging, the replica, and the shell.
+**Web owns that body's styling**, along with the poster, routing, paging,
+the replica, and the shell. A plugin ships markup and behaviour, not CSS.
 
 This is the widest of the three options considered, chosen deliberately. §9
 records what it costs and what contains the cost.
+
+### 2.1 Why styling stayed in web (amended after the whole-branch review)
+
+The first version of this section gave the plugin "their accessibility and
+styling". The implementation delivered the accessibility half and not the
+styling half, and nothing recorded the divergence: every rule that reaches a
+plugin's card markup lives in `packages/web/src/styles/library.css` —
+`article h2`, `article h2 button`, and seven rules selecting under
+`ul[aria-label='releases']`, counted on the tree — no plugin package ships
+a stylesheet, and no mechanism exists for one to. The Global Constraint "no raw values outside `tokens.css`" points
+the same way.
+
+The boundary is therefore drawn where the code drew it, rather than left as
+a promise the seam does not keep. **Web keeps the styling for now.**
+
+What that costs, stated so it is not discovered later:
+
+- A plugin whose card needs a rule of its own needs a second edit, in
+  another package's stylesheet, and nothing detects the omission. The card
+  renders unstyled while every `getByRole` still passes — which is
+  `CLAUDE.md`'s longest testing hazard (`IdentityChangeConfirm`: correct
+  roles, ten passing tests, no stylesheet rule, reported broken by its first
+  user) reproduced at this seam.
+- A plugin author outside this repo — the audience §11 puts out of scope
+  anyway — cannot style a card at all.
+- Web's stylesheet is now the likely shape of a per-plugin rule, which is
+  why acceptance 7's scan was widened to read `.css` files under
+  `packages/web/src`: a `.category-<id>` rule is the same "second place
+  naming a plugin" that acceptance 7 exists to forbid.
+
+A mechanism for plugin-shipped CSS — a scoped stylesheet per plugin, or a
+documented class contract web guarantees — is deliberately **not** built
+here, and is the change to make when a plugin first needs one. Until then
+`@pickarr/plugin-ui`'s `BrowserPlugin` docblock is where a card author is
+told that web's stylesheet is what styles their markup.
 
 ## 3. Packages and their boundaries
 
