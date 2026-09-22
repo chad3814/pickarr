@@ -6,20 +6,27 @@ downloads without a click. `README.md` has the operator's view.
 
 ## Layout
 
-Two implementations live here side by side.
-
-- **2.0** — `packages/host` (the host: boot, config, secrets, auth, jobs, the read and
-  sync APIs), `packages/contract` (what a plugin is), `packages/openmetadata` (the
-  lookup-service plugin base), `packages/plugin-tv`, `packages/plugin-movie`,
-  and `packages/plugin-xxx`. This is where new work goes, and the specs are
-  `docs/superpowers/specs/2026-09-*`.
-- **`packages/web`** — 2.0's browser client, built against 2.0's sync API. The 2.0 host
-  serves it directly, alongside the JSON and artwork routes: a static route answers the
-  built bundle, and falls back to `index.html` on any path it does not recognise, so a
+- `packages/host` — boot, config, secrets, auth, jobs, the read and sync APIs.
+- `packages/contract` — what a plugin is.
+- `packages/openmetadata` — the lookup-service plugin base.
+- `packages/plugin-tv`, `packages/plugin-movie`, `packages/plugin-xxx` — the shipped
+  plugins. Each also exports a `./browser` subpath: a browser-safe module holding its
+  card, which `packages/web`'s registry imports. The package root reaches `node:sqlite`
+  and must never be imported from `packages/web/src`.
+- `packages/plugin-ui` — the browser seam: the `BrowserPlugin` contract and the
+  components a card composes.
+- `packages/web` — the browser client, built against the sync API. The host serves it
+  directly, alongside the JSON and artwork routes: a static route answers the built
+  bundle, and falls back to `index.html` on any path it does not recognise, so a
   client-side route survives a refresh.
-- **1.x** — `packages/core` and `packages/plugin-scenes`. Frozen, and no longer what
-  `Dockerfile` builds — 2.0 is. 2.0 is greenfield: it starts on an empty database and
-  rebuilds from feeds, so nothing migrates and the two share no schema.
+- `packages/e2e` — Playwright, driving a real host.
+
+**1.x is gone.** `packages/core`, `packages/plugin-scenes` and `packages/plugin-api`
+were removed once 2.0 became `main`; nothing imported them and `Dockerfile` had already
+stopped building them. 2.0 was always greenfield — it starts on an empty database and
+rebuilds from feeds — so nothing migrated and the two never shared a schema. The
+testing-hazards section below still cites files from that code; the lesson outlives the
+example, so the citations stay.
 
 `docs/database-migrations.md` is required reading before you write a migration — a
 migration that rebuilds a table silently stops that table replicating to every client.
@@ -29,8 +36,9 @@ migration that rebuilds a table silently stops that table replicating to every c
 These are not product defects. They are ways this repo's tests have been green while
 proving less than they appeared to, each found by mutating the source and watching
 nothing fail. Every one of them has already recurred at least once, which is why they
-are written down here rather than left to be rediscovered. Several name files the 2.0
-rewrite has since deleted; the lesson outlives the example, so the citation stays.
+are written down here rather than left to be rediscovered. Several name files that no longer exist -- the 2.0
+rewrite deleted some, and removing 1.x took the rest; the lesson outlives the example,
+so the citation stays.
 
 **Handing a live DOM element to `node:assert` kills the web test run — now enforced,
 not remembered.** `node:assert`'s equality helpers format *both* operands into the

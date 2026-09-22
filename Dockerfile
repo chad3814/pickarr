@@ -23,10 +23,12 @@ COPY . .
 # neither builds nor ships and whose dependencies it had no reason to install.
 # An image build should fail when the image cannot be built.
 #
-# Targeted, not `npm run build`: the root script also names `plugin-api`,
-# `plugin-scenes` and `core` — 1.x's workspaces, whose manifests this image
-# never copied above — so the root script would fail on a missing workspace
-# rather than building the 2.0 image this Dockerfile ships.
+# Targeted, not `npm run build`: the root script also builds `plugin-ui` and
+# the browser subpaths, whose manifests this image does copy — but listing
+# the workspaces here keeps the image's contents a decision this file makes
+# rather than one it inherits. It named 1.x's workspaces as the reason until
+# they were deleted; the reason is now simply that an image should say what
+# it ships.
 RUN npm run build \
       -w @pickarr/contract \
       -w @pickarr/openmetadata \
