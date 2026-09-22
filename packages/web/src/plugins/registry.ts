@@ -31,12 +31,23 @@ export const BROWSER_PLUGINS: readonly BrowserPlugin[] = [tvBrowser, movieBrowse
  * The plugin registered under `id`, or `undefined` for one this build does
  * not carry.
  *
- * `undefined` is a state callers must render rather than assume away: a
- * `media_item` row's `pluginId` comes from the replica, which persists
- * across client builds and is written by whatever plugins the *host* has
- * registered -- a set this array does not control. `MediaItemCard` renders
- * the poster and `item.title` for one it cannot place, and
- * `settings/Destinations.tsx` heads the row with the raw id.
+ * `undefined` is a state callers must render rather than assume away, and
+ * the two callers reach it differently -- worth separating, because an
+ * earlier version of this paragraph gave both of them the replica's
+ * argument and only one of them earns it:
+ *
+ * - `settings/Destinations.tsx` is where `undefined` genuinely arrives. Its
+ *   plugin list comes from `@pickarr/contract`'s `TOKEN_NAMES_BY_PLUGIN`, an
+ *   independent list in another package that this array does not drive, so
+ *   an id absent from here really can turn up and the row is headed by the
+ *   raw id.
+ * - `MediaItemCard`'s fallback is defensive. Its items are filtered through
+ *   a key range scoped to an id that came from this array, so no
+ *   unregistered id can reach it on any screen this build has; the branch
+ *   exists because a `media_item` row's `pluginId` comes from the replica,
+ *   which persists across client builds and was written by whatever plugins
+ *   the *host* had registered -- a set this array does not control. That
+ *   card's own comment carries the call graph.
  */
 export function pluginFor(id: string): BrowserPlugin | undefined {
   return BROWSER_PLUGINS.find((plugin) => plugin.id === id);

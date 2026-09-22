@@ -293,11 +293,20 @@ test("a TV item's card is the tv plugin's, and its headline names the series and
 });
 
 test('an item whose plugin this build does not carry still shows its poster and its title', () => {
-  // Not a defensive branch: the replica persists across client builds and
-  // its rows were written by whatever plugins the *host* registered, so a
-  // build that drops a plugin -- or one that meets a host carrying an extra
-  // -- reads a `pluginId` the registry has no card for. Throwing would take
-  // the whole paged list down with it; rendering nothing would leave a
+  // **A defensive branch, pinned as one**, and the fixture below says so:
+  // `pluginId: 'book'` is a value no screen in this build can deliver.
+  // `Category` gets its `pluginId` from the registry and `useMediaItems`
+  // lists through a key range scoped to that one id, so every item reaching
+  // `MediaItemCard` in the app carries a registered id -- `MediaItemCard`'s
+  // own comment on the branch has the full call graph. An earlier version
+  // of this comment claimed the branch was reachable; it is not.
+  //
+  // What it is worth pinning anyway is that rendering a card stays a total
+  // function over replica data. A `media_item` row's `pluginId` comes from
+  // IndexedDB, which persists across client builds and was written by
+  // whatever plugins the host had registered, so the value is of open range
+  // even though no current caller can widen it past the registry. Throwing
+  // would take the whole paged list down; rendering nothing would leave a
   // poster with no name under it.
   const item: MediaItemSyncRead = { ...summary({ id: 7, title: 'The Thing' }), pluginId: 'book' };
   render(<MediaItemCard source={stubSource} item={item} rows={NO_ROWS} submit={acceptsPick} />);

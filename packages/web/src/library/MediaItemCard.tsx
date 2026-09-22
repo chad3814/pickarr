@@ -126,13 +126,36 @@ export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps
       )}
       {/*
         An item whose `pluginId` no plugin in the registry claims renders
-        its title and nothing else. This is reachable, not defensive: the
-        replica persists across client builds and its rows were written by
-        whatever plugins the *host* had registered, so a build that drops a
-        plugin -- or one that meets a host carrying an extra -- reads rows
-        it cannot place. Rendering the title keeps the row identifiable and
-        the page usable; throwing would take the whole list down, and
-        rendering nothing would leave a poster with no name under it.
+        its title and nothing else.
+
+        **This is defensive, and no screen in this build can reach it.** An
+        earlier version of this comment claimed the opposite; the
+        whole-branch review tried to construct the case and found the call
+        graph closed. This component is rendered from one site,
+        `Category.tsx`; `Category` is rendered from one site, `Shell.tsx`,
+        once per `BROWSER_PLUGINS` entry with `pluginId={plugin.id}`; and
+        `useMediaItems` lists through `listByTablePlugin('media_item',
+        pluginId, ...)`, a key range scoped to that one id. So `item.pluginId`
+        here is always an id the registry holds, and `pluginFor` never
+        answers `undefined` at this line. A plugin dropped from the registry
+        does not produce fallback cards -- it loses its route, its nav entry
+        and its count, so its items become invisible instead, which is
+        design spec acceptance 8 working as specified.
+
+        **What justifies keeping the branch is the replica, not a reachable
+        screen.** A `media_item` row's `pluginId` comes from IndexedDB,
+        which persists across client builds and was written by whatever
+        plugins the *host* had registered -- a set this client does not
+        control -- so the value genuinely is unvalidated data of open range,
+        and `pluginFor`'s signature says so by returning `undefined`. The
+        branch is what keeps rendering a card a total function over that
+        data, and what defends the first caller that lists media items
+        outside a category route, where the key-range filter above is the
+        only thing making the id safe today.
+
+        Rendering the title keeps such a row identifiable and the page
+        usable; throwing would take the whole list down, and rendering
+        nothing would leave a poster with no name under it.
       */}
       {plugin === undefined ? (
         <h2>{item.title}</h2>
