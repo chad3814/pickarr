@@ -109,6 +109,12 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     editMapping: () => {
       throw new Error('editMapping not stubbed in this test');
     },
+    removeFeed: () => {
+      throw new Error('removeFeed not stubbed in this test');
+    },
+    setFeedDisabled: () => {
+      throw new Error('setFeedDisabled not stubbed in this test');
+    },
     removeMapping: () => {
       throw new Error('removeMapping not stubbed in this test');
     },

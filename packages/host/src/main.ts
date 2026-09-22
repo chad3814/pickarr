@@ -209,7 +209,11 @@ export function defaultWebRoot(moduleUrl: string): string {
  * so.
  */
 export function scheduleKnownFeeds(host: Host, raw: DatabaseSync): readonly number[] {
-  const feedIds = raw.prepare('SELECT id FROM rss_feed').all()
+  // `disabled_at IS NULL`: a disabled feed keeps its row and its releases
+  // and stops polling, which is the whole of what disabling means
+  // (`feeds/remove.ts`). Without this clause it would keep polling and
+  // "disabled" would be a badge in the UI and nothing else.
+  const feedIds = raw.prepare('SELECT id FROM rss_feed WHERE disabled_at IS NULL').all()
     .map((row) => Number((row as { id: unknown }).id));
   for (const feedId of feedIds) host.schedulePoll(feedId);
   return feedIds;
@@ -966,6 +970,8 @@ export async function main(
     addMapping: (input) => host.addMapping(input),
     editMapping: (id, input) => host.editMapping(id, input),
     removeMapping: (id) => host.removeMapping(id),
+    removeFeed: (id) => host.removeFeed(id),
+    setFeedDisabled: (id, disabled) => host.setFeedDisabled(id, disabled),
     // `PUT /api/destinations/:pluginId`'s one operation, wired the same way
     // again. `host.saveDestination` and not the rule in
     // `media/destinations.ts` directly: that rule needs the declaring

@@ -13,6 +13,14 @@ import { createDispatcher } from './jobs/dispatcher.ts';
 import type { Timers } from './jobs/dispatcher.ts';
 import { createFeedReader } from './feeds/reader.ts';
 import { addFeed as addFeedRule } from './feeds/add.ts';
+import {
+  disableFeed as disableFeedRule,
+  enableFeed as enableFeedRule,
+  removeFeed as removeFeedRule,
+  type EnableFeedOutcome,
+  type FeedRefusal,
+  type RemoveFeedOutcome,
+} from './feeds/remove.ts';
 import type { AddFeedInput, AddFeedRefusal } from './feeds/add.ts';
 import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from './clients/add.ts';
@@ -263,6 +271,13 @@ export interface Host {
    * method (design spec §5).
    */
   removeMapping(id: number): Promise<{ id: number } | MappingRefusal>;
+  /**
+   * Removes a feed: deletes it when it produced no releases, disables it
+   * when it did. See `feeds/remove.ts` for why the two cases differ.
+   */
+  removeFeed(id: number): Promise<RemoveFeedOutcome>;
+  /** Stops or resumes polling without removing anything. */
+  setFeedDisabled(id: number, disabled: boolean): Promise<EnableFeedOutcome | { readonly outcome: 'disabled' } | FeedRefusal>;
   /**
    * Writes `pluginId`'s library destination -- root, path shape and
    * unmatched directory -- answering `{ id }` or one of
@@ -868,6 +883,19 @@ export function createHost(deps: {
     async removeMapping(id) {
       // No `now`, because a delete writes no column. See `removeMapping`.
       return removeMappingRule({ raw: deps.raw }, id);
+    },
+
+    async removeFeed(id) {
+      // `now` here, unlike `removeMapping` above: this one *can* write a
+      // column. A feed with releases is disabled rather than deleted, and
+      // `disabled_at` records when.
+      return removeFeedRule({ raw: deps.raw, now: deps.now }, id);
+    },
+
+    async setFeedDisabled(id, disabled) {
+      return disabled
+        ? disableFeedRule({ raw: deps.raw, now: deps.now }, id)
+        : enableFeedRule({ raw: deps.raw, now: deps.now }, id);
     },
 
     async saveDestination(pluginId, input) {

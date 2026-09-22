@@ -354,7 +354,7 @@ test('the projection carries no column the client has no business holding', () =
   }
   assert.deepEqual(
     Object.keys(row).toSorted(),
-    ['createdAt', 'downloadClientId', 'downloadType', 'id', 'name', 'pluginId', 'pollIntervalS', 'updatedAt', 'url'],
+    ['createdAt', 'disabledAt', 'downloadClientId', 'downloadType', 'id', 'name', 'pluginId', 'pollIntervalS', 'updatedAt', 'url'],
   );
 });
 
@@ -819,7 +819,7 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
   } satisfies Record<keyof RoleSyncRead, true>,
   rss_feed: {
     id: true, pluginId: true, name: true, downloadType: true, pollIntervalS: true,
-    downloadClientId: true, createdAt: true, updatedAt: true, url: true,
+    downloadClientId: true, createdAt: true, updatedAt: true, url: true, disabledAt: true,
   } satisfies Record<keyof RssFeedSyncRead, true>,
   download_client: {
     id: true, name: true, type: true, implementation: true, url: true,

@@ -147,6 +147,7 @@ import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from '
 import type { StaticResponse } from './static-route.ts';
 import { isApiPath, staticAnswer } from './static-route.ts';
 import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
+import type { EnableFeedOutcome, FeedRefusal, RemoveFeedOutcome } from '../feeds/remove.ts';
 
 /**
  * The port the shipped process listens on when `PICKARR_READ_API_PORT` says nothing.
@@ -374,6 +375,13 @@ export interface ReadServerDeps {
    * body to put it in.
    */
   removeMapping: (id: number) => Promise<{ id: number } | MappingRefusal>;
+  /** `Host.removeFeed` -- deletes a feed with no releases, disables one with. */
+  removeFeed: (id: number) => Promise<RemoveFeedOutcome>;
+  /** `Host.setFeedDisabled` -- pauses or resumes polling, removing nothing. */
+  setFeedDisabled: (
+    id: number,
+    disabled: boolean,
+  ) => Promise<EnableFeedOutcome | { readonly outcome: 'disabled' } | FeedRefusal>;
   /**
    * Writes one plugin's library destination -- `Host.saveDestination`,
    * handed in as one function rather than the whole `Host`, for the reason
@@ -1057,6 +1065,20 @@ function isMappingBody(value: unknown): value is AddMappingInput {
 }
 
 /**
+ * Whether `value` has the shape `PATCH /api/feeds/:id` needs: exactly one
+ * boolean, `disabled`.
+ *
+ * Strict about extra keys for the reason the config schemas are: a body
+ * carrying a misspelled field would otherwise be accepted and do something
+ * other than what it says.
+ */
+function isSetFeedDisabledBody(value: unknown): value is { disabled: boolean } {
+  if (typeof value !== 'object' || value === null) return false;
+  if (!('disabled' in value) || typeof value.disabled !== 'boolean') return false;
+  return Object.keys(value).length === 1;
+}
+
+/**
  * Whether `value` has the shape `PATCH /api/mappings/:id` needs: the two
  * paths, both present.
  *
@@ -1172,6 +1194,16 @@ function statusForMappingRefusal(refusal: MappingRefusal['refusal']): number {
  * route gets, so an unparseable id tells a caller nothing a missing row
  * would not have.
  */
+/**
+ * The feed id in `/api/feeds/:id`, or `undefined` for a segment that cannot
+ * be one. Identical rules to {@link mappingIdFrom}, and a separate function
+ * rather than a shared one only so each route's 404 keeps naming its own
+ * resource in the reader's head; if a third arrives, share it.
+ */
+function feedIdFrom(pathname: string): number | undefined {
+  return mappingIdFrom(pathname);
+}
+
 function mappingIdFrom(pathname: string): number | undefined {
   const segments = pathname.split('/');
   if (segments.length !== 4) return undefined;
@@ -1616,6 +1648,36 @@ export const ROUTES: readonly Route[] = [
         return json(statusForMappingRefusal(result.refusal), { refusal: result.refusal });
       }
       return json(201, { id: result.id });
+    },
+  },
+  {
+    path: '/api/feeds/:id',
+    // `DELETE` and `PATCH`, on `/api/mappings/:id`'s pattern above -- one
+    // entry with a `methods` array, because `routeFor` is a `.find` and a
+    // second entry for the same path would never be reached.
+    //
+    // **Why `DELETE` answers 200 with a body and the mapping route answers
+    // 204.** Deleting a mapping has one outcome and nothing to describe.
+    // Removing a feed has two: a feed that produced no releases is deleted,
+    // and one that produced some is disabled and keeps them
+    // (`feeds/remove.ts`). A caller that cannot tell which happened cannot
+    // tell the operator, so the outcome is the body.
+    methods: ['DELETE', 'PATCH'],
+    open: false,
+    answer: async ({ deps, request, pathname, body }) => {
+      const id = feedIdFrom(pathname);
+      if (id === undefined) return UNKNOWN_ROUTE;
+
+      if (request.method === 'DELETE') {
+        const removed = await deps.removeFeed(id);
+        if ('refusal' in removed) return json(404, { refusal: removed.refusal });
+        return json(200, removed);
+      }
+
+      if (!isSetFeedDisabledBody(body)) return json(400, { refusal: 'bad-body' });
+      const changed = await deps.setFeedDisabled(id, body.disabled);
+      if ('refusal' in changed) return json(404, { refusal: changed.refusal });
+      return json(200, changed);
     },
   },
   {

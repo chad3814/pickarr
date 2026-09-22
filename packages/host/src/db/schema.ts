@@ -111,6 +111,8 @@ export const rssFeed = sqliteTable('rss_feed', {
   pollIntervalS: integer('poll_interval_s').notNull().default(900),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  /** When polling stopped, or null while it has not. See `feeds/remove.ts`. */
+  disabledAt: integer('disabled_at'),
 }, (t) => [
   uniqueIndex('rss_feed_url').on(t.url),
 ]);

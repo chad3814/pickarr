@@ -631,6 +631,8 @@ async function boot(): Promise<Booted> {
     addMapping: (input) => host.addMapping(input),
     editMapping: (id, input) => host.editMapping(id, input),
     removeMapping: (id) => host.removeMapping(id),
+    removeFeed: (id) => host.removeFeed(id),
+    setFeedDisabled: (id, disabled) => host.setFeedDisabled(id, disabled),
     saveDestination: (pluginId, input) => host.saveDestination(pluginId, input),
     registry,
     generation,

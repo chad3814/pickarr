@@ -394,7 +394,8 @@ function selectSql(table: string, placeholders: string): string | undefined {
       // this file's top docblock and the "odd one out" note above.
       return `SELECT id, plugin_id AS pluginId, name, download_type AS downloadType,
                       poll_interval_s AS pollIntervalS, download_client_id AS downloadClientId,
-                      created_at AS createdAt, updated_at AS updatedAt, url
+                      created_at AS createdAt, updated_at AS updatedAt, url,
+                      disabled_at AS disabledAt
                  FROM rss_feed WHERE id IN (${placeholders})`;
     case 'filepath_mapping':
       // Two filesystem paths, projected on purpose -- the one place in this

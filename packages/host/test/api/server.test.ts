@@ -205,6 +205,8 @@ async function start(
     // test that means to observe a removal overrides this and would fail
     // loudly against it if it forgot.
     removeMapping: async () => ({ refusal: 'unknown-mapping' }),
+    removeFeed: async () => ({ refusal: 'unknown-feed' }),
+    setFeedDisabled: async () => ({ refusal: 'unknown-feed' }),
     // A throwing stub, for `addMapping`'s reason -- a stub that *resolved*
     // would make a test pass for the wrong reason -- but **not** for
     // `addMapping`'s mechanism, which this comment used to claim.
@@ -2234,6 +2236,79 @@ test('an edit answers 200 with the id from the path, and the host is told which 
       [{ id: 7, input: { fromPath: 'D:\\Downloads', toPath: '/mnt/media' } }],
       'the id comes off the path and the paths come out of the body, with neither read from the other',
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test('removing a feed answers the outcome, because deleted and disabled are different news', async () => {
+  // `/api/mappings/:id` answers 204 and no body -- one outcome, nothing to
+  // describe. A feed has two: one that produced no releases is deleted, one
+  // that produced some is disabled and keeps them. A caller that cannot
+  // tell which happened cannot tell the operator, so the body carries it.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    removeFeed: async (id) => (id === 1 ? { outcome: 'deleted' } : { outcome: 'disabled', items: 3 }),
+  });
+  try {
+    const deleted = await sendBodiless(server, 'DELETE', '/api/feeds/1', cookie);
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(JSON.parse(deleted.text), { outcome: 'deleted' });
+
+    const disabled = await sendBodiless(server, 'DELETE', '/api/feeds/2', cookie);
+    assert.equal(disabled.status, 200);
+    assert.deepEqual(JSON.parse(disabled.text), { outcome: 'disabled', items: 3 });
+  } finally {
+    await server.close();
+  }
+});
+
+test('removing a feed that does not exist answers 404', async () => {
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    removeFeed: async () => ({ refusal: 'unknown-feed' }),
+  });
+  try {
+    const answer = await sendBodiless(server, 'DELETE', '/api/feeds/404', cookie);
+    assert.equal(answer.status, 404);
+    assert.deepEqual(JSON.parse(answer.text), { refusal: 'unknown-feed' });
+  } finally {
+    await server.close();
+  }
+});
+
+test('a feed is paused and resumed through PATCH, and a bad body is refused', async () => {
+  const seen: Array<{ id: number; disabled: boolean }> = [];
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    setFeedDisabled: async (id, disabled) => {
+      seen.push({ id, disabled });
+      return disabled ? { outcome: 'disabled' } : { outcome: 'enabled' };
+    },
+  });
+  try {
+    assert.equal((await send(server, 'PATCH', '/api/feeds/7', cookie, { disabled: true })).status, 200);
+    assert.equal((await send(server, 'PATCH', '/api/feeds/7', cookie, { disabled: false })).status, 200);
+    assert.deepEqual(seen, [{ id: 7, disabled: true }, { id: 7, disabled: false }]);
+
+    // Strict about the body for the reason the config schemas are: a
+    // misspelled field that parsed would do something other than it says.
+    assert.equal((await send(server, 'PATCH', '/api/feeds/7', cookie, { disable: true })).status, 400);
+    assert.equal((await send(server, 'PATCH', '/api/feeds/7', cookie, { disabled: 'yes' })).status, 400);
+    assert.equal((await send(server, 'PATCH', '/api/feeds/7', cookie, { disabled: true, extra: 1 })).status, 400);
+    assert.deepEqual(seen.length, 2, 'a refused body reaches no handler');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a feed id that is not digits is the same 404 an unknown path gets', async () => {
+  // The same reasoning `/api/mappings/:id` records: saying which of two
+  // mistakes a caller made would tell them a real path from an invented one.
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {});
+  try {
+    assert.equal((await sendBodiless(server, 'DELETE', '/api/feeds/abc', cookie)).status, 404);
   } finally {
     await server.close();
   }

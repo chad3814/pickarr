@@ -1265,6 +1265,24 @@ CREATE UNIQUE INDEX plugin_destination_plugin ON plugin_destination (plugin_id);
 `;
 
 /**
+ * `rss_feed.disabled_at`: when polling stopped, or `NULL` while it has not.
+ *
+ * **A nullable timestamp, not a boolean.** `NULL` is unambiguously "still
+ * polling" with no default to argue about, and the non-null case records
+ * *when* -- which is what an operator looking at a quiet feed wants to
+ * know. It matches the `*_at` columns the rest of this schema already uses.
+ *
+ * `ALTER TABLE ... ADD COLUMN` and no rebuild, which is what keeps this
+ * safe on a synced table: `docs/database-migrations.md` records that a
+ * create-copy-drop-rename would take `rss_feed`'s three sync triggers with
+ * it and silently stop the table replicating. Adding a column in place
+ * leaves them attached.
+ */
+const MIGRATION_21 = `
+ALTER TABLE rss_feed ADD COLUMN disabled_at INTEGER;
+`;
+
+/**
  * The DDL above, then the one call replication needs.
  *
  * **`installSyncTriggers` and no `seedSyncLog`**, where migrations 16, 17 and
@@ -1308,6 +1326,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 18, up: (db) => db.exec(MIGRATION_18) },
   { version: 19, up: (db) => migration19(db) },
   { version: 20, up: (db) => migration20(db) },
+  { version: 21, up: (db) => db.exec(MIGRATION_21) },
 ];
 
 /**

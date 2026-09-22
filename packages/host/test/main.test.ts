@@ -90,6 +90,8 @@ function fakeHost(overrides: Partial<Host>): Host {
     addMapping: async () => { throw new Error('addMapping: not used by this test'); },
     editMapping: async () => { throw new Error('editMapping: not used by this test'); },
     removeMapping: async () => { throw new Error('removeMapping: not used by this test'); },
+    removeFeed: async () => { throw new Error('removeFeed: not used by this test'); },
+    setFeedDisabled: async () => { throw new Error('setFeedDisabled: not used by this test'); },
     saveDestination: async () => { throw new Error('saveDestination: not used by this test'); },
     // Throwing, not a no-op: a no-op default here would let a test pass
     // while `main`'s real `start()`/`stop()` calls go unexercised -- see

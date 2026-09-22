@@ -371,6 +371,15 @@ export interface RssFeedSyncRead {
   pluginId: string;
   name: string;
   /**
+   * When polling stopped, or `null` while it has not.
+   *
+   * A feed that produced releases cannot be deleted -- `rss_item.feed_id`
+   * is `NOT NULL` and those items own download rows -- so removing one
+   * disables it instead and keeps the history (`host/src/feeds/remove.ts`).
+   * A client shows the difference; it does not decide it.
+   */
+  disabledAt: number | null;
+  /**
    * `'torrent'` or `'nzb'`, typed `string` for the reason
    * `RssItemSyncRead.downloadType` gives: the column is unconstrained TEXT
    * and nothing narrows it between the `SELECT` and the wire.
