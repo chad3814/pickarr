@@ -335,6 +335,15 @@ export interface LookupPluginSpec {
    * `media/destinations.ts` validates a saved shape against `Object.keys`
    * of it, so the set the host accepts and the set the plugin answers
    * cannot differ.
+   *
+   * **Called once per placed entry during an import.** A download may be a
+   * directory, and `onDownloadedFile` resolves every token again for each
+   * entry it places, with `file.path` (and `sizeBytes`) set to *that
+   * entry's* rather than the download's. So anything that differs from one
+   * file to the next -- the filename, the extension, which episode of a pack
+   * this file is -- must be derived from `file.path`; a value read only from
+   * the plugin's tables is the same for every entry, and every entry of a
+   * pack would resolve to one destination.
    */
   readonly tokens: PluginTokens;
 }

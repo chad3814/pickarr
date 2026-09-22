@@ -16,7 +16,8 @@ const VIDEO_EXTENSIONS: ReadonlySet<string> = new Set([
 
 /**
  * `S` + one or two digits, `E` + one to three digits, then any further
- * `E<digits>` or `-E<digits>` groups (spec §4.2).
+ * `E<digits>` or `-E<digits>` groups (spec §4.2). For example
+ * `Show.S01E01-E02.mkv` names season 1, episodes [1, 2].
  */
 const MARKER = /s(\d{1,2})e(\d{1,3})((?:-?e\d{1,3})*)/i;
 const FURTHER_EPISODE = /e(\d{1,3})/gi;

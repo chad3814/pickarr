@@ -185,9 +185,9 @@ const ERRNO = /^[A-Z][A-Z0-9_]*$/;
  * which is the one thing the atomicity requirement (design spec §4, with
  * §7's "a copy that fails part way leaves only the temporary") has to be
  * shown against. It is also the only way to occupy the destination
- * *between* the two `presentAt` checks below. **Five of
- * `test/media/import.test.ts`'s 39 tests inject one**; the other thirty-four
- * run the real `node:fs/promises` copy.
+ * *between* the two `presentAt` checks below. **Only the atomicity, errno
+ * and clobber-race tests in `test/media/import.test.ts` inject one**; every
+ * other test there runs the real `node:fs/promises` copy.
  */
 export type CopyFile = (source: string, destination: string) => Promise<void>;
 

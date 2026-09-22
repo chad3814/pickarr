@@ -9,11 +9,11 @@
  * **The copy is injectable and the default is not.** `copyFile` is a seam
  * for the two things a real `copyFile` will not do on demand: fail *part
  * way through*, writing some bytes and then throwing, and occupy the
- * destination in the instant between the copy and the rename. **Five of the
- * 39 tests here inject one** -- the two atomicity tests, the two errno
- * tests, and the clobber-race test; the other thirty-four run the real
- * `node:fs/promises` copy, so the default path is exercised rather than
- * mocked away.
+ * destination in the instant between the copy and the rename. **Only the
+ * two atomicity tests, the two errno tests and the clobber-race test inject
+ * one**; every other test here runs the real `node:fs/promises` copy, so the
+ * default path is exercised rather than mocked away. No count is given: a
+ * total rots with every test added.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

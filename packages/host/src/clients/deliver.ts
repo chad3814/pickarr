@@ -9,9 +9,9 @@
  * finished file into place itself. Here the host does none of that; it maps
  * the client's own path, `stat`s it, and hands both to the plugin that owns
  * it -- `path` may be a file or a directory (`DownloadedFile`'s own doc
- * comment), and it is the plugin, through `LibraryImporter.list` and
- * `.place`, that looks inside it. What the plugin does with them is the
- * plugin's business.
+ * comment), and it is the plugin that looks inside it, through
+ * `LibraryImporter.list`; `.place` then copies one entry the plugin chose,
+ * once per entry. What the plugin does with them is the plugin's business.
  *
  * **Ordering, and why each step is where it is.** For every `completed` row
  * with a `storage_path` and no `delivered_at` (one without a path is
