@@ -75,7 +75,7 @@
  * `test/apply.test.ts:100` is a first-party test named `re-applying the same
  * answer updates the row rather than adding one`.
  * `@pickarr/openmetadata`'s `engine.ts:290` requires a plugin's `apply` to
- * be idempotent, and `engine.ts:167` calls it against `claim.kept` -- which
+ * be idempotent, and `engine.ts:169` calls it against `claim.kept` -- which
  * `host/src/media/writer.ts`'s `claimProviderRef` answers as the *existing*
  * holder of that provider reference, dropping the freshly created row. So
  * the update path is not a rare race: it runs every time a second release
